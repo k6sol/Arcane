@@ -1,0 +1,435 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Arcane data-only custom assembly asset input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "template": {
+      "const": "custom-assembly"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$",
+      "maxLength": 48
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "triangleBudget": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 50000,
+      "default": 15000
+    },
+    "renderResolution": {
+      "type": "integer",
+      "minimum": 128,
+      "maximum": 1024,
+      "default": 384
+    },
+    "renderSamples": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 64,
+      "default": 16
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "materials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,47}$",
+                "maxLength": 48
+              },
+              "color": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "metallic": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0
+              },
+              "roughness": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.5
+              },
+              "emission": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "minItems": 3,
+                    "maxItems": 3
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  }
+                },
+                "required": [
+                  "color",
+                  "strength"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "color"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,47}$",
+                "maxLength": 48
+              },
+              "role": {
+                "enum": [
+                  "render",
+                  "collision",
+                  "lod1"
+                ]
+              },
+              "geometry": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "box"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "cylinder",
+                          "cone"
+                        ]
+                      },
+                      "segments": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 64,
+                        "multipleOf": 4,
+                        "default": 24
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "sphere"
+                      },
+                      "segments": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 64,
+                        "multipleOf": 4,
+                        "default": 24
+                      },
+                      "rings": {
+                        "type": "integer",
+                        "minimum": 4,
+                        "maximum": 32,
+                        "default": 12
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "mesh"
+                      },
+                      "vertices": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "number",
+                            "minimum": -0.5,
+                            "maximum": 0.5
+                          },
+                          "minItems": 3,
+                          "maxItems": 3
+                        },
+                        "minItems": 4,
+                        "maxItems": 4096
+                      },
+                      "indices": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 4095
+                        },
+                        "minItems": 12,
+                        "maxItems": 24576
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "vertices",
+                      "indices"
+                    ]
+                  }
+                ]
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": 0.01,
+                  "maximum": 20
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "position": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -40,
+                  "maximum": 40
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rotationDegrees": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -360,
+                  "maximum": 360
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "material": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,47}$",
+                "maxLength": 48
+              },
+              "bevel": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "width": {
+                    "type": "number",
+                    "minimum": 0.00001,
+                    "maximum": 2
+                  },
+                  "segments": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "default": 1
+                  }
+                },
+                "required": [
+                  "width"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "role",
+              "geometry",
+              "dimensions",
+              "position"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "role": {
+                      "const": "collision"
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "material"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "bevel"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "else": {
+                  "required": [
+                    "material"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "geometry": {
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "mesh",
+                            "sphere"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "bevel"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 96
+        },
+        "sockets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,47}$",
+                "maxLength": 48
+              },
+              "kind": {
+                "enum": [
+                  "socket",
+                  "attachment"
+                ]
+              },
+              "part": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,47}$",
+                "maxLength": 48
+              },
+              "position": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -20,
+                  "maximum": 20
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rotationDegrees": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -360,
+                  "maximum": 360
+                },
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "part",
+              "position"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "collisionTriangleBudget": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 4096,
+          "default": 2048
+        },
+        "lodTriangleBudget": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 50000
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "materials",
+        "parts"
+      ]
+    }
+  },
+  "required": [
+    "template",
+    "name",
+    "recipe"
+  ],
+  "$comment": "Host normalization additionally checks device names, unique/reference IDs, material use, closed/manifold outward mesh topology, counts, bevel width relative to dimensions, grounding, world extents, aggregate vertex and conservative triangle budgets. No code, URLs or paths are accepted."
+}

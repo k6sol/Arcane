@@ -1,0 +1,12 @@
+# Disposable test workspaces.
+/tests/skills/.tmp/
+/tests/.tmp/
+
+# Build and local connection-lab state; never commit credentials or generated caches.
+/node_modules/
+/dist/
+/runtime/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example

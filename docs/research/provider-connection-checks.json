@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "kind": "provider-connection-foundation-verification",
+  "recordedAtUtc": "2026-10-11T21:23:18.680Z",
+  "environment": {
+    "platform": "win32",
+    "node": "v24.21.0"
+  },
+  "testedContentSha256": {
+    "package.json": "55cdeefc3d9772cbe14ce4e31e34f0d53aa095d36f940063990f550d8327d1ff",
+    "package-lock.json": "42f77f3b3b6446495f5ecb0b97a9422d0cd16f36e4cf90a4a11cd68d6cc39791",
+    "tsconfig.json": "675d8375503302de88c8c6e6829b09157607b69e996fbbcf7e9ec7d4bbfd01e7",
+    ".github/workflows/verify.yml": "0a69e92f52a878eca3a343acabdc2d701c1a66afe607be2616a6ba89c23c78cb",
+    "skills/registry.json": "75e73c08b3f14a144207f77085ed2bd80a9a0d1a5929d6d710f3457a4bd6c0be",
+    "scripts/skill-pack.mjs": "98504b354cf0f17dcbc826eefbb6e4bc92b716a742a14a1af930b20d53bb29ca",
+    "tests/skills/evaluations.json": "4a0d815de70f0f74327cf27d709646bdaf0acd5c65c345a1e9c7bf5b4bad5f27",
+    "tests/skills/skill-pack.test.mjs": "c71e770858e9cbfdc62c02c76b5e20799aad5ee3fa6cd20af96a7dc1c66166fc",
+    "tests/skills/evaluation-catalog.test.mjs": "46e63e353a079973a8f11adcd4a03fff80f1c3ba63750c3b7cc3d37e4544f59d",
+    "docs/PROVIDER_NATIVE_FEATURES.md": "7c929c3ce344d2a8d9d4bc83ebffe18f332bf18cc1e815ede3846910da532f90",
+    "docs/SUBSCRIPTION_WORKFLOW.md": "8499b5ed797cf1e539062b483308f440ab528e65ec3491a5de3f8a202b49fa58",
+    "apps/daemon/src/lab-server.ts": "eec3723f4a42f480ee66805f783bfc0f11a33dd2cbe48a98a2f94b39b6603202",
+    "apps/daemon/src/main.ts": "01f827a538f3c12b1deaaf9ae9b46cc73f9feda87396d5080be68987c075908c",
+    "apps/daemon/src/probe.ts": "348b5460b54227b2daa155303d8405c6d3d854ba102401fd98d1035492838c1f",
+    "apps/desktop/public/index.html": "2c4a777ba1cce8c40684fdd8d5400015f39258b7ec48c5562866f291a3d0a0c6",
+    "apps/desktop/public/lab.css": "54a30e81324098ef4115577bb0bddb629ed4e586e4b27e59e3ea074be0a19fdf",
+    "apps/desktop/src/lab.ts": "fe72e109a47691be716675e80d1ab9a1986852f0fe0666690fffcf245b1bdae6",
+    "packages/core/src/selection.ts": "a292821cbdf1ba1906c619c386558fff968ae093639e510e82bfe7fcd521aff2",
+    "packages/model-adapters/src/catalogue.ts": "c3487b5530b6197e04de0d57a8e4b20eff1584cb4fad6858ca683dba8cefb527",
+    "packages/model-adapters/src/codex-rpc.ts": "7531fd1c58418ce6009d4d4e2c59b6e5bf8a1be5ce27e505a2766e170470eae0",
+    "packages/model-adapters/src/discovery.ts": "d26278385f01a449848edb02cfff7e9e87272333e43a9ac93b340b1b2b65a062",
+    "packages/model-adapters/src/process.ts": "2e776a7a6b7aee6805392a0411bcf6745027ba48fc58968e2a25c0f828b69f66",
+    "packages/protocol/src/providers.ts": "d824860d5fd1b8889765aa3e5de7d385f59cf42aa12f4513146f4f0e9a6a93d7",
+    "tests/unit/providers.test.ts": "4d643294b9624ccd23ab355dd332b1a8734f22cbb1a3e256531d2698355c0b3e"
+  },
+  "nativeObservation": {
+    "observedAtUtc": "2026-10-11T21:16:52.674Z",
+    "command": "npm run probe:providers",
+    "exitCode": 0,
+    "requiresNativeRuntimeAccess": true,
+    "codex": {
+      "version": "0.162.0-alpha.17.2",
+      "auth": "subscription",
+      "nativePlanLabel": "prolite",
+      "catalogueModels": 7,
+      "exactRequestedModel": "gpt-6.1-sol",
+      "reportedEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "entitlement": "unverified"
+    },
+    "claude": {
+      "version": "2.1.177",
+      "auth": "subscription",
+      "nativePlanLabel": "max",
+      "reportedNativeAliases": [
+        "fable",
+        "opus",
+        "sonnet"
+      ],
+      "reportedCliEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "perModelEntitlementAndAppliedEffort": "unverified"
+    }
+  },
+  "checks": [
+    {
+      "command": "npm run typecheck",
+      "exitCode": 0
+    },
+    {
+      "command": "npm test",
+      "executionScope": "local tests with loopback access; fixture processes, not provider inference",
+      "exitCode": 0,
+      "total": 64,
+      "passed": 64,
+      "failed": 0,
+      "skipped": 0,
+      "providerUnitAndHttpTests": 32,
+      "offlineSkillTests": 32
+    },
+    {
+      "check": "Clean temporary source copy, without node_modules, dist, runtime or .git",
+      "commands": [
+        "npm ci --ignore-scripts --offline --no-audit --no-fund",
+        "npm run typecheck",
+        "npm test",
+        "node scripts/skill-pack.mjs validate"
+      ],
+      "exitCode": 0,
+      "testsPassed": 64,
+      "networkPackagesDownloaded": false
+    },
+    {
+      "command": "node scripts/skill-pack.mjs validate",
+      "exitCode": 0,
+      "skills": 50,
+      "references": 15,
+      "bytes": 89376,
+      "approved": 0,
+      "behaviorRuns": 0
+    },
+    {
+      "check": "CSV feature scan",
+      "total": 222,
+      "duplicateIds": 0,
+      "implementedLabOnly": 2
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0,
+      "scope": "tracked changes only; most new implementation files are still untracked"
+    },
+    {
+      "check": "Markdown local-link scan",
+      "markdownFiles": 75,
+      "localLinks": 50,
+      "missing": 0
+    }
+  ],
+  "uiVerification": {
+    "kind": "manual actual browser checks, not automated E2E suite",
+    "savedPreference": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "ultra",
+      "applied": false
+    },
+    "checks": [
+      "Saved exact pair through the local panel",
+      "Switched to Claude native aliases and separate design/image statuses",
+      "Page reload retained tab-scoped local session and saved preference",
+      "Narrow browser view rendered stacked controls without a model substitution"
+    ],
+    "screenshot": "docs/research/provider-selection-preview.jpg",
+    "screenshotSha256": "fa6f6b2a1f66caf3682fb73ba05f4c27ab8c18cdaa2a3969a4d3673b9a8d201a"
+  },
+  "ci": {
+    "state": "authored-not-run-remotely",
+    "matrix": [
+      "ubuntu-latest",
+      "windows-latest"
+    ],
+    "providerCredentialsRequired": false
+  },
+  "sideEffectCounts": {
+    "inferenceRuns": 0,
+    "newProviderLogins": 0,
+    "credentialFilesCopied": 0,
+    "studioOperations": 0,
+    "imageGeneration": 0,
+    "claudeDesignExecution": 0,
+    "clientConfigInstalls": 0,
+    "gitCommits": 0,
+    "gitPushes": 0
+  },
+  "remaining": [
+    "Actual Studio plugin and external-client MCP bridge",
+    "Inference execution and requested/applied model proof",
+    "Verified native image artifact adapter and Claude Design handoff",
+    "Electron/React packaging and persistent task engine",
+    "Real Roblox playtests and behavior skill evaluation"
+  ],
+  "failureNotes": [
+    "Sandbox-only loopback EACCES required the local HTTP test run to use normal loopback access.",
+    "Host-header test now uses node:http because fetch normalizes that header.",
+    "Body-deadline cleanup regression fixed and tested; malformed/oversized requests retain their own errors.",
+    "An initial clean-copy attempt under the sandbox-private TEMP path could not be opened outside the sandbox; the explicit allowed Local Temp copy completed all checks."
+  ]
+}

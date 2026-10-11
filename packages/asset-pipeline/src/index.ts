@@ -1,0 +1,237 @@
+import { isDeepStrictEqual as same } from 'node:util';
+import { jsonSnapshot, preflightRecipe, CUSTOM_REQUEST_BYTES, JOB_JOURNAL_BYTES } from './recipe.js';
+import { randomUUID } from 'node:crypto';
+import { copyFile, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
+import { discoverExecutables } from './discovery.js';
+import { artifactPath, noLinks, prepareOutputRoot, regularFile, readRegularFile, within } from './paths.js';
+import { runBounded, workerEnvironment } from './process.js';
+import { normalizeRequest, readJson, record, sha256, validateAudit, validateManifestFiles } from './validation.js';
+import { AssetError } from './types.js';
+import type { Artifact, AssetInput, AssetJob, AssetJobEvent, AssetJobResult, AssetManifest, AssetProbe, AssetRequest, JobOptions, OperationOptions, PipelineOptions, RuntimeEvidence } from './types.js';
+export * from './types.js';
+export { discoverExecutables } from './discovery.js';
+export { normalizeRecipe, preflightRecipe, RECIPE_LIMITS, CUSTOM_REQUEST_BYTES } from './recipe.js';
+export { normalizeRequest } from './validation.js';
+
+// One supervised Blender operation per Node worker, including across pipeline instances.
+let busy = false;
+const activeDirectories = new Set<string>();
+const directoryKey = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+function claim(): () => void {
+  if (busy) throw new AssetError('BUSY', 'A Blender operation is already running in this worker.');
+  busy = true; return () => { busy = false; };
+}
+function deadline(options: OperationOptions, fallback: number): number {
+  const ms = options.deadlineMs ?? fallback;
+  if (!Number.isSafeInteger(ms) || ms < 1 || ms > 600000) throw new AssetError('INPUT', 'Deadline must be 1..600000 milliseconds.');
+  return Date.now() + ms;
+}
+function remaining(end: number, signal?: AbortSignal): number {
+  if (signal?.aborted) throw new AssetError('CANCELLED', 'Operation cancelled.');
+  const ms = end - Date.now();
+  if (ms < 1) throw new AssetError('DEADLINE', 'Asset operation exceeded its deadline.');
+  return Math.min(ms, 600000);
+}
+function resultLine(stdout: string): Record<string, unknown> {
+  const lines = stdout.split(/\r?\n/).filter(line => line.startsWith('ARCANE_RESULT '));
+  if (lines.length !== 1) throw new AssetError('WORKER_PROTOCOL', 'Worker did not return exactly one result.');
+  try { return record(JSON.parse(lines[0]!.slice(14)), 'worker result'); }
+  catch { throw new AssetError('WORKER_PROTOCOL', 'Worker result is not valid JSON.'); }
+}
+async function atomicJson(directory: string, filename: string, value: unknown): Promise<void> {
+  await noLinks(directory);
+  const temporary = artifactPath(directory, 'state-' + randomUUID() + '.tmp');
+  await writeFile(temporary, (filename === 'job.json' ? JSON.stringify(value) : JSON.stringify(value, null, 2)) + '\n', { flag: 'wx' });
+  const target = artifactPath(directory, filename);
+  try { await noLinks(target); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  await rename(temporary, target);
+}
+
+export class AssetPipeline {
+  private readonly root: string;
+  private readonly outputRoot: string;
+  private readonly workerRoot: string;
+  constructor(private readonly config: PipelineOptions) {
+    if (!isAbsolute(config.workspaceRoot) || !isAbsolute(config.outputRoot) || (config.workerRoot !== undefined && !isAbsolute(config.workerRoot))) throw new AssetError('OUTPUT_PATH', 'Pipeline configuration requires absolute paths.');
+    this.root = resolve(config.workspaceRoot); this.outputRoot = resolve(config.outputRoot);
+    this.workerRoot = config.workerRoot ?? join(this.root, 'workers', 'blender');
+  }
+  private async script(name: string): Promise<string> {
+    const path = artifactPath(this.workerRoot, name); await regularFile(path, 256 * 1024); return realpath(path);
+  }
+  private discoveryOptions() {
+    return { ...(this.config.blenderExecutable ? { blenderExecutable: this.config.blenderExecutable } : {}),
+      ...(this.config.pythonExecutable ? { pythonExecutable: this.config.pythonExecutable } : {}) };
+  }
+  private async probeIn(directory: string, end: number, signal?: AbortSignal): Promise<AssetProbe> {
+    const installed = await discoverExecutables(this.discoveryOptions());
+    const evidence: AssetProbe = { observedAt: new Date().toISOString(), available: false, blender: null, python: null, attempts: [] };
+    const probeScript = await this.script('probe.py');
+    for (const executable of installed.blender) {
+      try {
+        const process = await runBounded({ executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', probeScript], cwd: directory, env: workerEnvironment(directory) },
+          { ...(signal ? { signal } : {}), deadlineMs: Math.min(15000, remaining(end, signal)) });
+        if (process.exitCode !== 0) throw new AssetError('BLENDER_PROBE', 'Installed Blender failed its runtime probe.');
+        const result = resultLine(process.stdout), capabilities = record(result.capabilities, 'Blender capabilities');
+        if (typeof result.version !== 'string' || !/^\d+\.\d+/.test(result.version) || typeof result.pythonVersion !== 'string' || result.background !== true) throw new AssetError('BLENDER_PROBE', 'Invalid native runtime evidence.');
+        if (['glbExport', 'glbImport', 'fbxExport', 'fbxImport', 'cycles'].some(key => capabilities[key] !== true)) throw new AssetError('BLENDER_CAPABILITY', 'Installed Blender is missing required template capabilities.');
+        evidence.blender = { ...result, executable } as unknown as RuntimeEvidence; evidence.available = true; break;
+      } catch (error) {
+        if (error instanceof AssetError && (error.code === 'CANCELLED' || error.code === 'DEADLINE')) throw error;
+        evidence.attempts.push({ executable, code: error instanceof AssetError ? error.code : 'BLENDER_PROBE' });
+      }
+    }
+    const pythonCode = 'import json,platform; print("ARCANE_RESULT "+json.dumps({"version":platform.python_version()}))';
+    for (const executable of installed.python) {
+      try {
+        const process = await runBounded({ executable, args: ['-I', '-B', '-c', pythonCode], cwd: directory, env: workerEnvironment(directory) },
+          { ...(signal ? { signal } : {}), deadlineMs: Math.min(5000, remaining(end, signal)) });
+        if (process.exitCode !== 0) throw new AssetError('PYTHON_PROBE', 'Python runtime probe failed.');
+        const result = resultLine(process.stdout);
+        if (typeof result.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(result.version)) throw new AssetError('PYTHON_PROBE', 'Python did not return a runtime version.');
+        evidence.python = { executable, version: result.version }; break;
+      } catch (error) {
+        if (error instanceof AssetError && (error.code === 'CANCELLED' || error.code === 'DEADLINE')) throw error;
+        evidence.attempts.push({ executable, code: error instanceof AssetError ? error.code : 'PYTHON_PROBE' });
+      }
+    }
+    remaining(end, signal); return evidence;
+  }
+  async probe(options: OperationOptions = {}): Promise<AssetProbe> {
+    const end = deadline(options, 30000), release = claim(); let directory: string | undefined;
+    try {
+      directory = await mkdtemp(join(await realpath(tmpdir()), 'arcane-blender-probe-'));
+      return await this.probeIn(directory, end, options.signal);
+    } finally {
+      try { if (directory && within(await realpath(tmpdir()), directory)) { await noLinks(directory); await rm(directory, { recursive: true, force: true }); } }
+      finally { release(); }
+    }
+  }
+  start(input: AssetInput, options: JobOptions = {}): AssetJob {
+    const sourceInput = jsonSnapshot(input), request = normalizeRequest(sourceInput), end = deadline(options, 180000), release = claim();
+    const id = randomUUID(), directory = join(this.outputRoot, request.name + '-' + id), controller = new AbortController();
+    const abort = () => controller.abort(); options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
+    const emit = (stage: string, state: AssetJobEvent['state'] = 'running') => {
+      try { options.onEvent?.({ jobId: id, at: new Date().toISOString(), stage, state }); } catch { /* telemetry observer only */ }
+    };
+    activeDirectories.add(directoryKey(directory));
+    const completion = this.generate(id, directory, request, sourceInput, end, controller.signal, emit).finally(() => {
+      options.signal?.removeEventListener('abort', abort); activeDirectories.delete(directoryKey(directory)); release();
+    });
+    return { id, directory, completion, cancel: abort };
+  }
+  private async generate(id: string, directory: string, request: AssetRequest, sourceInput: unknown, end: number, signal: AbortSignal, emit: (stage: string, state?: AssetJobEvent['state']) => void): Promise<AssetJobResult> {
+    let created = false;
+    const startedAt = new Date().toISOString();
+    const base = { jobId: id, directory, manifestPath: null, error: null };
+    try {
+      await prepareOutputRoot(this.root, this.outputRoot); await mkdir(directory); created = true; await noLinks(directory);
+      await mkdir(join(directory, '.worker')); const environmentDirectory = join(directory, '.worker');
+      await atomicJson(directory, 'job.json', { schemaVersion: 1, ...base, state: 'running', request, startedAt });
+      await writeFile(artifactPath(directory, 'input.json'), JSON.stringify(sourceInput) + '\n', { flag: 'wx' });
+      remaining(end, signal); emit('probe');
+      const evidence = await this.probeIn(environmentDirectory, end, signal);
+      if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.');
+      for (const name of ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : [])]) await copyFile(await this.script(name), artifactPath(directory, name), 1);
+      const requestText = JSON.stringify(request, null, request.recipe ? undefined : 2) + '\n';
+      await writeFile(artifactPath(directory, 'request.json'), requestText, { flag: 'wx' });
+      const recipeArguments = request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(request.recipe, request.triangleBudget).estimatedTriangles)] : [];
+      emit('generate');
+      const process = await runBounded({ executable: evidence.blender.executable,
+        args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', artifactPath(directory, 'asset_worker.py'), '--', '--mode', 'generate', '--directory', directory, '--request-sha256', sha256(Buffer.from(requestText)), ...recipeArguments],
+        cwd: directory, env: workerEnvironment(environmentDirectory) }, { signal, deadlineMs: remaining(end, signal), onLine: line => {
+          if (!line.startsWith('ARCANE_EVENT ')) return;
+          try { const e = JSON.parse(line.slice(13)) as { stage?: unknown }; if (typeof e.stage === 'string' && /^[a-z-]{1,48}$/.test(e.stage)) emit(e.stage); } catch { /* progress line is optional */ }
+        } });
+      if (process.exitCode !== 0) throw new AssetError('BLENDER_FAILED', 'Blender worker failed. Partial files and any checkpoint remain in the job directory; inspect the audit there.');
+      if (resultLine(process.stdout).audit !== 'audit.json') throw new AssetError('WORKER_PROTOCOL', 'Worker did not return its audit artifact.');
+      emit('host-validation'); remaining(end, signal);
+      const audit = validateAudit(await readJson(artifactPath(directory, 'audit.json')), request);
+      const artifacts: Artifact[] = [];
+      const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
+      files.push(['input.json', 'request']);
+      if (request.recipe) files.push(['assembly.py', 'worker'], ['assembly.json', 'audit']);
+      if (audit.totals.lod1Triangles) files.push(['asset-lod1.glb', 'export']);
+      for (const [name, role] of files) {
+        remaining(end, signal); const path = artifactPath(directory, name), size = await regularFile(path, 128 * 1024 * 1024);
+        artifacts.push({ path: name, role, bytes: size, sha256: sha256(await readRegularFile(path, 128 * 1024 * 1024)) });
+      }
+      const manifest: AssetManifest = { schemaVersion: 1, jobId: id, createdAt: new Date().toISOString(), request, runtime: evidence.blender,
+        templateSha256: sha256(Buffer.from(['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : [])].map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
+        sourceRequestSha256: artifacts.find(a => a.path === 'input.json')!.sha256, ...(audit.assembly ? { assembly: audit.assembly } : {}),
+        coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false },
+        validation: audit, artifacts, limitations: ['Supervised native process; not a sandbox for arbitrary Python.', 'Artistic fidelity, UV overlap/texel density and inter-object intersections require review.', 'No Roblox import, scale/collision verification, upload, install or publication has run.'] };
+      await validateManifestFiles(directory, manifest); remaining(end, signal);
+      await atomicJson(directory, 'manifest.json', manifest);
+      const result: AssetJobResult = { ...base, state: 'succeeded', manifestPath: artifactPath(directory, 'manifest.json') };
+      await atomicJson(directory, 'job.json', { schemaVersion: 1, ...result, request, startedAt, finishedAt: new Date().toISOString() });
+      emit('complete', 'succeeded'); return result;
+    } catch (error) {
+      const code = error instanceof AssetError ? error.code : 'ASSET_FAILED';
+      const state = code === 'CANCELLED' ? 'cancelled' : code === 'DEADLINE' ? 'timed_out' : 'failed';
+      const result: AssetJobResult = { ...base, state, error: { code, message: error instanceof AssetError ? error.message : 'Asset operation failed; partial output is preserved.' } };
+      if (created) {
+        try { await atomicJson(directory, 'job.json', { schemaVersion: 1, ...result, request, startedAt, finishedAt: new Date().toISOString() }); }
+        catch { result.error = { code: 'RECOVERY_STATE', message: 'Asset operation failed and its terminal journal could not be saved; inspect the job directory.' }; }
+      }
+      emit('complete', state); return result;
+    }
+  }
+  private async jobDirectory(directory: string): Promise<string> {
+    const root = await realpath(this.outputRoot), target = resolve(directory);
+    if (!isAbsolute(directory) || directoryKey(dirname(target)) !== directoryKey(root)) throw new AssetError('OUTPUT_PATH', 'Only direct job directories under this pipeline output root are accepted.');
+    await noLinks(target); return realpath(target);
+  }
+  /** Hash/GLB/PNG validation always runs. Deep mode rereads the saved scene in Blender. */
+  async validate(manifestPath: string, options: OperationOptions & { deep?: boolean } = {}): Promise<AssetManifest> {
+    const end = deadline(options, 60000);
+    if (!isAbsolute(manifestPath) || basename(manifestPath) !== 'manifest.json') throw new AssetError('OUTPUT_PATH', 'Pass an absolute job manifest.json path.');
+    const directory = await this.jobDirectory(dirname(manifestPath)); remaining(end, options.signal);
+    const manifest = await validateManifestFiles(directory, await readJson(manifestPath, 4 * 1024 * 1024)); remaining(end, options.signal);
+    if (options.deep) {
+      const release = claim();
+      try {
+        const probe = await this.probeIn(directory, end, options.signal);
+        if (!probe.blender) throw new AssetError('BLENDER_UNAVAILABLE', 'Deep validation requires an installed Blender runtime.');
+        const process = await runBounded({ executable: probe.blender.executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', await this.script('asset_worker.py'), '--', '--mode', 'audit', '--directory', directory, '--request-sha256', manifest.artifacts.find(a => a.path === 'request.json')!.sha256, ...(manifest.request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(manifest.request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(manifest.request.recipe, manifest.request.triangleBudget).estimatedTriangles)] : [])], cwd: directory, env: workerEnvironment(directory) },
+          { ...(options.signal ? { signal: options.signal } : {}), deadlineMs: remaining(end, options.signal) });
+        if (process.exitCode !== 0) throw new AssetError('MESH', 'Saved scene failed the native Blender audit.');
+        const audit = resultLine(process.stdout);
+        if (manifest.request.recipe && !same(audit.assembly, manifest.assembly)) throw new AssetError('MESH', 'Saved custom recipe/socket evidence changed.');
+        if (!Array.isArray(audit.errors) || audit.errors.length || !isDeepStrictEqual(audit.totals, manifest.validation.totals) || !Array.isArray(audit.meshes) || audit.meshes.length !== manifest.validation.meshes.length) throw new AssetError('MESH', 'Saved scene disagrees with manifest metrics.');
+        const actualMeshes = new Map(audit.meshes.map(raw => { const m = record(raw, 'native mesh audit'); return [m.name, m]; }));
+        for (const mesh of manifest.validation.meshes) if (!isDeepStrictEqual(actualMeshes.get(mesh.name), mesh)) throw new AssetError('MESH', 'Saved mesh changed since the original audit.');
+      } finally { release(); }
+    }
+    return manifest;
+  }
+  /** Read/mark a lost job; never auto-replay generation or claim a worker has stopped. */
+  async recover(directory: string): Promise<{ result: AssetJobResult; checkpointPath: string | null }> {
+    const target = await this.jobDirectory(directory);
+    if (activeDirectories.has(directoryKey(target))) throw new AssetError('BUSY', 'This job is still supervised.');
+    const journal = record(await readJson(artifactPath(target, 'job.json'), JOB_JOURNAL_BYTES), 'job journal');
+    if (journal.schemaVersion !== 1 || typeof journal.jobId !== 'string' || !['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(String(journal.state))) throw new AssetError('RECOVERY', 'Invalid recovery journal.');
+    if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(journal.jobId)) throw new AssetError('RECOVERY', 'Invalid recovery job identity.');
+    const state = journal.state === 'running' ? 'interrupted' : journal.state as AssetJobResult['state'];
+    let savedError: AssetJobResult['error'] = null;
+    if (journal.error !== null && journal.error !== undefined) {
+      const error = record(journal.error, 'journal error');
+      if (typeof error.code !== 'string' || !/^[A-Z_]{1,64}$/.test(error.code) || typeof error.message !== 'string' || error.message.length > 1024) throw new AssetError('RECOVERY', 'Invalid terminal journal error.');
+      savedError = { code: error.code, message: error.message };
+    }
+    if (state === 'succeeded' && savedError) throw new AssetError('RECOVERY', 'A succeeded journal cannot carry a failure.');
+    const result: AssetJobResult = { jobId: journal.jobId, directory: target, state, manifestPath: null,
+      error: state === 'interrupted' ? { code: 'SUPERVISION_LOST', message: 'Previous supervision ended. The old worker may still be alive; no automatic retry or overwrite is permitted.' } : savedError };
+    if (state === 'succeeded') { const manifest = await this.validate(artifactPath(target, 'manifest.json')); if (manifest.jobId !== journal.jobId) throw new AssetError('RECOVERY', 'Manifest job identity differs from the journal.'); result.manifestPath = artifactPath(target, 'manifest.json'); }
+    if (journal.state === 'running') await atomicJson(target, 'job.json', { ...journal, schemaVersion: 1, ...result, recoveredAt: new Date().toISOString() });
+    let checkpointPath: string | null = null;
+    try { await regularFile(artifactPath(target, 'blockout.blend'), 128 * 1024 * 1024); checkpointPath = artifactPath(target, 'blockout.blend'); } catch { /* no valid checkpoint */ }
+    return { result, checkpointPath };
+  }
+}
+
+export const createAssetPipeline = (options: PipelineOptions): AssetPipeline => new AssetPipeline(options);

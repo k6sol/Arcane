@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "kind": "offline-tooling-verification",
+  "observedAtUtc": "2026-10-11T20:37:21.6990400Z",
+  "environment": {
+    "platform": "Windows",
+    "node": "v24.21.0"
+  },
+  "testedContentSha256": {
+    "tests/skills/skill-pack.test.mjs": "c71e770858e9cbfdc62c02c76b5e20799aad5ee3fa6cd20af96a7dc1c66166fc",
+    "skills/registry.json": "781c71d041b8007f726b4e68e7383c701db3b8eb1228c224e1135e9485110f5a",
+    "tests/skills/evaluations.json": "4a0d815de70f0f74327cf27d709646bdaf0acd5c65c345a1e9c7bf5b4bad5f27",
+    "tests/skills/evaluation-catalog.test.mjs": "46e63e353a079973a8f11adcd4a03fff80f1c3ba63750c3b7cc3d37e4544f59d",
+    "scripts/skill-pack.mjs": "98504b354cf0f17dcbc826eefbb6e4bc92b716a742a14a1af930b20d53bb29ca"
+  },
+  "checks": [
+    {
+      "command": "node --test tests/skills/skill-pack.test.mjs tests/skills/evaluation-catalog.test.mjs",
+      "exitCode": 0,
+      "total": 32,
+      "passed": 31,
+      "failed": 0,
+      "skipped": 1,
+      "skipReason": "Platform denied creation of the directory symlink/junction fixture."
+    },
+    {
+      "command": "node scripts/skill-pack.mjs validate",
+      "exitCode": 0,
+      "skills": 50,
+      "references": 15,
+      "approved": 0,
+      "behaviorRuns": 0,
+      "bytes": 88718
+    },
+    {
+      "command": "node scripts/skill-pack.mjs search \"combat hitbox\"",
+      "exitCode": 0,
+      "resultIds": [
+        "arcane-combat"
+      ],
+      "candidateOnly": true
+    },
+    {
+      "command": "node scripts/skill-pack.mjs pack --ids arcane-combat,arcane-remote-security --byte-budget 12000 --allow-experimental --json",
+      "exitCode": 0,
+      "bytes": 3274,
+      "budget": 12000,
+      "tokenCount": null,
+      "approvalChanged": false
+    },
+    {
+      "command": "node scripts/skill-pack.mjs pack --ids arcane-genre-adaptation --reference arcane-genre-adaptation:obby --byte-budget 7000 --allow-experimental --json",
+      "exitCode": 0,
+      "bytes": 2376,
+      "budget": 7000,
+      "tokenCount": null,
+      "approvalChanged": false
+    },
+    {
+      "check": "PowerShell JSON, Markdown local-link and CSV scan before adding this report",
+      "exitCode": 0,
+      "jsonFiles": 4,
+      "markdownFiles": 74,
+      "localLinks": 40,
+      "missingLocalLinks": 0,
+      "featureCount": 216,
+      "duplicateFeatureIds": 0
+    }
+  ],
+  "behavioralEvaluations": {
+    "definitions": 50,
+    "guardDefinitions": 10,
+    "executed": 0
+  },
+  "limits": [
+    "File integrity, selection and catalogue checks only; no evidence of better model outputs, gameplay fun or quota savings.",
+    "Symlink rejection implementation exists, but its integration fixture was skipped in this environment; run on a permitted platform before claiming that test passed.",
+    "No Studio, Blender, plugin, daemon, model inference, OAuth or client installation tested.",
+    "No production skill approval, commit, push or game/asset publication performed."
+  ]
+}

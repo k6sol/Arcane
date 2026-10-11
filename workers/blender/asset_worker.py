@@ -1,0 +1,338 @@
+"""Deterministic static starter assets. Fixed templates only; no arbitrary Python input.
+
+Generation runs only in a new job directory. Audit mode opens our saved scene with
+autoexec disabled and writes nothing. This process is supervised, not sandboxed.
+"""
+import argparse
+import hashlib
+import json
+import math
+import random
+import sys
+from pathlib import Path
+import bpy
+import bmesh
+from mathutils import Vector
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from audit import audit_scene, render_metrics
+
+
+def event(stage):
+    print("ARCANE_EVENT " + json.dumps({"stage": stage}), flush=True)
+
+
+def select(objects):
+    for obj in list(bpy.context.selected_objects):
+        obj.select_set(False)
+    for obj in objects:
+        obj.select_set(True)
+    if objects:
+        bpy.context.view_layer.objects.active = objects[0]
+
+
+def material(name, color, metallic, roughness):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    shader = mat.node_tree.nodes.get("Principled BSDF")
+    shader.inputs["Base Color"].default_value = (*color, 1)
+    shader.inputs["Metallic"].default_value = metallic
+    shader.inputs["Roughness"].default_value = roughness
+    mat.diffuse_color = (*color, 1)
+    return mat
+
+
+def box(collection, name, dimensions, center, mat=None, bevel=0.0, role="render"):
+    mesh = bpy.data.meshes.new(name + "_Mesh")
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=1)
+    for vert in bm.verts:
+        vert.co.x *= dimensions[0]
+        vert.co.y *= dimensions[1]
+        vert.co.z *= dimensions[2]
+    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    collection.objects.link(obj)
+    # Bake centers into mesh coordinates: each component's pivot remains at floor.
+    for vert in mesh.vertices:
+        vert.co += Vector(center)
+    obj["arcane_role"] = role
+    if mat:
+        mesh.materials.append(mat)
+    if bevel:
+        mod = obj.modifiers.new("Edge bevel", "BEVEL")
+        mod.width = bevel
+        mod.segments = 2
+        select([obj])
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    return obj
+
+
+def unwrap(obj):
+    select([obj])
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.025, scale_to_bounds=True)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+
+def finalize(obj):
+    # Bake triangulation for identical source/export triangle counts.
+    select([obj])
+    mod = obj.modifiers.new("Game triangulation", "TRIANGULATE")
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    if obj.data.validate(verbose=False):
+        raise ValueError(obj.name + " mesh required repair")
+    if obj["arcane_role"] != "collision":
+        unwrap(obj)
+
+
+def collection(name):
+    result = bpy.data.collections.new(name)
+    bpy.context.scene.collection.children.link(result)
+    return result
+
+
+def hero(request, mats):
+    x, y, z = request["sizeMeters"]
+    group = collection("COL_HeroProp")
+    rng = random.Random(request["seed"])
+    main = [box(group, "SM_" + request["name"] + "_body", (x, y, z * 0.8), (0, 0, z * 0.4), mats[0], min(x, y, z) * 0.035)]
+    # Raised lid, protected corner posts, inset plaque and a carrying handle.
+    main.append(box(group, "SM_" + request["name"] + "_lid", (x * 1.035, y * 1.035, z * 0.12), (0, 0, z * 0.85), mats[1], min(x, y, z) * 0.02))
+    for i, (sx, sy) in enumerate([(-1, -1), (-1, 1), (1, -1), (1, 1)]):
+        main.append(box(group, "SM_" + request["name"] + "_post" + str(i), (x * 0.07, y * 0.07, z * 0.82), (sx * x * 0.47, sy * y * 0.47, z * 0.41), mats[1], min(x, y, z) * 0.008))
+    main.append(box(group, "SM_" + request["name"] + "_plaque", (x * 0.45, y * 0.035, z * 0.19), (0, -y * 0.508, z * (0.47 + rng.uniform(-0.025, 0.025))), mats[2], min(x, y, z) * 0.006))
+    main.append(box(group, "SM_" + request["name"] + "_handle", (x * 0.42, y * 0.08, z * 0.055), (0, 0, z * 0.973), mats[1], min(x, y, z) * 0.012))
+    for i, sx in enumerate([-1, 1]):
+        main.append(box(group, "SM_" + request["name"] + "_handle_support" + str(i), (x * 0.05, y * 0.08, z * 0.08), (sx * x * 0.18, 0, z * 0.925), mats[1], min(x, y, z) * 0.006))
+    lod_group = collection("COL_LOD1")
+    lods = []
+    for obj in main:
+        copy = obj.copy()
+        copy.data = obj.data.copy()
+        copy.name = obj.name + "_LOD1"
+        copy["arcane_role"] = "lod1"
+        lod_group.objects.link(copy)
+        select([copy])
+        mod = copy.modifiers.new("LOD reduction", "DECIMATE")
+        mod.ratio = 0.45
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        lods.append(copy)
+    collisions = collection("COL_Collision")
+    proxy = box(collisions, "COL_" + request["name"], (x * 1.035, y * 1.035, z), (0, 0, z / 2), role="collision")
+    return main, lods, [proxy]
+
+
+def environment(request, mats):
+    x, y, z = request["sizeMeters"]
+    group = collection("COL_EnvironmentKit")
+    # Four independently named modules on a deterministic demonstration grid.
+    parts = [
+        ("floor", (x, y, z * 0.07), (0, 0, z * 0.035), 0),
+        ("wall", (x, y * 0.08, z), (0, y * 0.46, z / 2), 0),
+        ("pillar", (x * 0.14, y * 0.14, z * 1.04), (-x * 0.43, y * 0.40, z * 0.52), 1),
+        ("step", (x * 0.58, y * 0.28, z * 0.16), (x * 0.1, -y * 0.25, z * 0.08), 2),
+    ]
+    main, proxies = [], []
+    collisions = collection("COL_Collision")
+    for name, dimensions, center, index in parts:
+        main.append(box(group, "SM_" + request["name"] + "_" + name, dimensions, center, mats[index], min(dimensions) * 0.08))
+        proxies.append(box(collisions, "COL_" + request["name"] + "_" + name, dimensions, center, role="collision"))
+    return main, [], proxies
+
+
+def lookdev(main, request):
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    scene.cycles.samples = request["renderSamples"]
+    scene.cycles.seed = request["seed"]
+    scene.cycles.use_denoising = True
+    scene.render.resolution_x = request["renderResolution"]
+    scene.render.resolution_y = request["renderResolution"]
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = "PNG"
+    scene.view_settings.view_transform = "AgX"
+    scene.world.use_nodes = True
+    scene.world.node_tree.nodes["Background"].inputs[0].default_value = (0.055, 0.07, 0.10, 1)
+    scene.world.node_tree.nodes["Background"].inputs[1].default_value = 0.4
+    bpy.context.view_layer.update()
+    coordinates = [obj.matrix_world @ v.co for obj in main for v in obj.data.vertices]
+    low = Vector(tuple(min(v[k] for v in coordinates) for k in range(3)))
+    high = Vector(tuple(max(v[k] for v in coordinates) for k in range(3)))
+    x, y, z = high - low
+    target = (low + high) / 2
+    span = max(x, y, z)
+    group = collection("COL_Preview")
+    backdrop = box(group, "PreviewGround", (span * 200, span * 200, span * 0.04), (target.x, target.y, low.z - span * 0.0205), material("PreviewGroundMaterial", (0.08, 0.10, 0.14), 0, 0.7))
+    # Preview helpers excluded from all mesh budgets and exports.
+    backdrop["arcane_role"] = "preview"
+    for name, position, power, color in [
+        ("Key", (span * 2, -span * 3, span * 4), 700, (1, 0.86, 0.7)),
+        ("Fill", (-span * 2, -span, span * 2), 400, (0.62, 0.78, 1)),
+        ("Rim", (span, span * 3, span * 3), 850, (0.7, 0.86, 1)),
+    ]:
+        data = bpy.data.lights.new("LGT_" + name, "AREA")
+        data.energy = power * span ** 2
+        data.color = color
+        data.shape = "DISK"
+        data.size = span * 2
+        obj = bpy.data.objects.new("LGT_" + name, data)
+        group.objects.link(obj)
+        obj.location = target + Vector(position)
+        obj.rotation_euler = (target - obj.location).to_track_quat('-Z', 'Y').to_euler()
+    data = bpy.data.cameras.new("CAM_Review")
+    camera = bpy.data.objects.new("CAM_Review", data)
+    group.objects.link(camera)
+    scene.camera = camera
+    data.type = 'ORTHO'
+    data.ortho_scale = span * 1.8
+    return camera, target, span
+
+
+def export_glb(path, objects, with_materials=True):
+    select(objects)
+    bpy.ops.export_scene.gltf(filepath=str(path), export_format="GLB", use_selection=True,
+                              export_yup=True, export_extras=True, export_materials="EXPORT" if with_materials else "NONE")
+
+
+def export_metrics(path, expected, recipe=None):
+    # Reimport actual exported bytes into a temporary scene. Original scene stays intact.
+    old = bpy.context.scene
+    temp = bpy.data.scenes.new("ExportAudit")
+    bpy.context.window.scene = temp
+    try:
+        if path.suffix == ".glb":
+            bpy.ops.import_scene.gltf(filepath=str(path))
+        else:
+            bpy.ops.import_scene.fbx(filepath=str(path), use_anim=False, use_custom_props=True, use_image_search=False)
+        bpy.context.view_layer.update()
+        objects = [obj for obj in temp.objects if obj.type == "MESH"]
+        triangles = 0
+        finite = True
+        mats = set()
+        for obj in objects:
+            obj.data.calc_loop_triangles()
+            triangles += len(obj.data.loop_triangles)
+            finite = finite and all(math.isfinite(c) for v in obj.data.vertices for c in v.co)
+            mats.update(m.name for m in obj.data.materials if m)
+        if not objects or triangles != expected or not finite:
+            raise ValueError(path.name + " export round trip failed")
+        report = {"path": path.name, "objects": len(objects), "triangles": triangles, "materials": len(mats), "finitePositions": finite}
+        if recipe is not None:
+            from assembly import socket_metrics
+            report["sockets"] = socket_metrics(temp)
+        return report
+    finally:
+        bpy.context.window.scene = old
+        for obj in list(temp.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.scenes.remove(temp)
+
+
+def write_json(path, value):
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["generate", "audit"], required=True)
+    parser.add_argument("--directory", required=True)
+    parser.add_argument("--request-sha256", required=True)
+    parser.add_argument("--recipe-sha256")
+    parser.add_argument("--estimated-triangles")
+    args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
+    directory = Path(args.directory).resolve(strict=True)
+    request_bytes = (directory / "request.json").read_bytes()
+    if len(request_bytes) > 256 * 1024 or hashlib.sha256(request_bytes).hexdigest() != args.request_sha256:
+        raise ValueError("Request byte provenance gate failed")
+    request = json.loads(request_bytes)
+    if request["template"] == "custom-assembly":
+        request["_recipeSha256"] = args.recipe_sha256
+        request["_estimatedTriangles"] = json.loads(args.estimated_triangles)
+        from assembly import build_assembly, assembly_evidence
+    if args.mode == "audit":
+        bpy.ops.wm.open_mainfile(filepath=str(directory / "asset.blend"), use_scripts=False)
+        objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
+        meshes, totals, errors = audit_scene(objects, request)
+        report = {"meshes": meshes, "totals": totals, "errors": errors}
+        if request["template"] == "custom-assembly":
+            report["assembly"] = assembly_evidence(request)
+        print("ARCANE_RESULT " + json.dumps(report, allow_nan=False), flush=True)
+        if errors:
+            raise ValueError("Saved scene failed structural audit")
+        return
+    event("blockout")
+    # Factory startup in a separate worker process; only that worker's default scene is cleared.
+    bpy.data.objects.remove(bpy.data.objects["Cube"], do_unlink=True)
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    scene = bpy.context.scene
+    scene.unit_settings.system = "METRIC"
+    scene.unit_settings.scale_length = 1
+    sockets = []
+    if request["template"] == "custom-assembly":
+        main_objects, lods, collision, sockets = build_assembly(request, material, collection, select)
+    else:
+        mats = [material("MAT_Body", request["color"], 0.15, 0.42),
+                material("MAT_Frame", (0.12, 0.15, 0.18), 0.8, 0.3),
+                material("MAT_Accent", (0.8, 0.43, 0.11), 0.45, 0.36)]
+        main_objects, lods, collision = hero(request, mats) if request["template"] == "hero-prop" else environment(request, mats)
+    bpy.ops.wm.save_as_mainfile(filepath=str(directory / "blockout.blend"), check_existing=False)
+    event("mesh-validation")
+    for obj in main_objects + lods + collision:
+        finalize(obj)
+    meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
+    if errors:
+        write_json(directory / "audit.json", {"errors": errors, "meshes": meshes, "totals": totals})
+        raise ValueError("Asset mesh gate failed: " + "; ".join(errors))
+    event("review-render")
+    for obj in lods + collision:
+        obj.hide_render = True
+    camera, target, span = lookdev(main_objects, request)
+    renders = []
+    for name, offset in [("preview-hero.png", (2.6, -3.5, 2.3)), ("preview-side.png", (-4.0, 0, 0.5))]:
+        camera.location = target + Vector(offset) * span
+        camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
+        scene.render.filepath = str(directory / name)
+        bpy.ops.render.render(write_still=True)
+        renders.append(render_metrics(directory / name))
+    bpy.ops.wm.save_as_mainfile(filepath=str(directory / "asset.blend"), check_existing=False)
+    event("export")
+    export_glb(directory / "asset.glb", main_objects + sockets)
+    select(main_objects + sockets)
+    bpy.ops.export_scene.fbx(filepath=str(directory / "asset.fbx"), use_selection=True, object_types={'MESH', 'EMPTY'}, use_custom_props=True,
+                              apply_unit_scale=True, apply_scale_options='FBX_SCALE_ALL', axis_forward='-Z', axis_up='Y',
+                              bake_anim=False, add_leaf_bones=False)
+    export_glb(directory / "collision.glb", collision, False)
+    if lods:
+        export_glb(directory / "asset-lod1.glb", lods)
+    event("export-roundtrip")
+    exports = [export_metrics(directory / "asset.glb", totals["renderTriangles"], request.get("recipe")),
+               export_metrics(directory / "asset.fbx", totals["renderTriangles"], request.get("recipe")),
+               export_metrics(directory / "collision.glb", totals["collisionTriangles"])]
+    if lods:
+        exports.append(export_metrics(directory / "asset-lod1.glb", totals["lod1Triangles"]))
+    event("scene-reopen")
+    bpy.ops.wm.open_mainfile(filepath=str(directory / "asset.blend"), use_scripts=False)
+    reopened = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
+    again, again_totals, again_errors = audit_scene(reopened, request)
+    if again_errors or again_totals != totals or again != meshes:
+        raise ValueError("Saved scene failed reopen validation")
+    report = {"schemaVersion": 1, "template": request["template"], "meshes": meshes, "totals": totals,
+              "renders": renders, "exports": exports, "savedSceneReopened": True, "errors": [],
+              "warnings": ["UV overlap/texel density, inter-object intersections and visual quality require human review.",
+                           "Roblox import, scale mapping and collision behavior are unverified."]}
+    if request["template"] == "custom-assembly":
+        report["assembly"] = assembly_evidence(request)
+        write_json(directory / "assembly.json", report["assembly"])
+    write_json(directory / "audit.json", report)
+    print("ARCANE_RESULT " + json.dumps({"audit": "audit.json"}), flush=True)
+
+
+if __name__ == "__main__":
+    main()

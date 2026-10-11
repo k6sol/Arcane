@@ -1,0 +1,41 @@
+name: Verify local foundation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arcane-verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-contracts:
+    name: Local contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out source without persistent Git credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install pinned dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Strict type checking
+        run: npm run typecheck
+      - name: Build and test metadata, HTTP and offline skill contracts
+        run: npm test
+      - name: Validate actual skill file integrity
+        run: node scripts/skill-pack.mjs validate
+      # No CLI login, provider inference, real Studio, or live project operations.

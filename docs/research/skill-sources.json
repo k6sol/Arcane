@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Research shortlist, not an installed/trusted registry or import authorization",
+  "researchDate": "2026-10-11",
+  "pinCaveat": "HEAD refs observed; content mostly reviewed on current branch pages. Fetch and review exact pinned files before adapting or vendoring.",
+  "sources": [
+    {
+      "repository": "Roblox/creator-docs",
+      "kind": "official_documentation",
+      "licences": [
+        {
+          "scope": "documentation",
+          "spdx": "CC-BY-4.0"
+        },
+        {
+          "scope": "code_samples",
+          "spdx": "MIT"
+        }
+      ],
+      "review": "Repository licence distinction and relevant live API documentation reviewed; exact pinned content not vendored",
+      "skills": [
+        "studio-context",
+        "safe-script-edit",
+        "remote-security",
+        "playtest-qa"
+      ],
+      "url": "https://github.com/Roblox/creator-docs",
+      "observedHead": "af5f853c78b58c4ea86d62ac2345f881ac11fcec",
+      "observedOn": "2026-10-11",
+      "contentHashes": null,
+      "vendored": false,
+      "installed": false,
+      "approved": false,
+      "evaluationRuns": [],
+      "state": "candidate"
+    },
+    {
+      "repository": "luau-lang/luau",
+      "kind": "official_language_and_tooling",
+      "licences": [
+        {
+          "scope": "repository",
+          "spdx": "MIT"
+        }
+      ],
+      "review": "Repository and licence inspected; tooling compatibility and runtime integration pending",
+      "skills": [
+        "luau-architecture"
+      ],
+      "url": "https://github.com/luau-lang/luau",
+      "observedHead": "8387cfb461b38ce09e37c1e4c2811538ef1bf5cb",
+      "observedOn": "2026-10-11",
+      "contentHashes": null,
+      "vendored": false,
+      "installed": false,
+      "approved": false,
+      "evaluationRuns": [],
+      "state": "candidate"
+    },
+    {
+      "repository": "rojo-rbx/rojo",
+      "kind": "build_and_sync_tool",
+      "licences": [
+        {
+          "scope": "repository",
+          "spdx": "MPL-2.0"
+        }
+      ],
+      "review": "Repository workflow and licence identified; no binary/helper audit or integration test",
+      "skills": [
+        "rojo-and-git"
+      ],
+      "url": "https://github.com/rojo-rbx/rojo",
+      "observedHead": "7e60406373faf82887353164543540d054d84d92",
+      "observedOn": "2026-10-11",
+      "contentHashes": null,
+      "vendored": false,
+      "installed": false,
+      "approved": false,
+      "evaluationRuns": [],
+      "state": "candidate"
+    },
+    {
+      "repository": "evaera/roblox-lua-promise",
+      "kind": "library_reference",
+      "licences": [
+        {
+          "scope": "repository",
+          "spdx": "MIT"
+        }
+      ],
+      "review": "Repository purpose and licence inspected; use only for relevant project dependencies",
+      "skills": [
+        "dependency-specific-async"
+      ],
+      "url": "https://github.com/evaera/roblox-lua-promise",
+      "observedHead": "031d429c82ee458a849e79fa523523bd349d7695",
+      "observedOn": "2026-10-11",
+      "contentHashes": null,
+      "vendored": false,
+      "installed": false,
+      "approved": false,
+      "evaluationRuns": [],
+      "state": "candidate"
+    },
+    {
+      "repository": "UpliftGames/wally",
+      "kind": "package_management_tool",
+      "licences": [
+        {
+          "scope": "repository",
+          "spdx": "MPL-2.0"
+        }
+      ],
+      "review": "README and licence identification reviewed; exact pinned licence/helper review pending",
+      "skills": [
+        "rojo-and-git"
+      ],
+      "url": "https://github.com/UpliftGames/wally",
+      "observedHead": "4a9d53ea9d8cddf2065bdf177f8d3e7c75babc9d",
+      "observedOn": "2026-10-11",
+      "contentHashes": null,
+      "vendored": false,
+      "installed": false,
+      "approved": false,
+      "evaluationRuns": [],
+      "state": "candidate"
+    },
+    {
+      "repository": "AshExplained/roblox-skills",
+      "kind": "community_agent_skills",
+      "licences": [
+        {
+          "scope": "repository",
+          "spdx": "MIT"
+        }
+      ],
+      "review": "Four actual skill bodies and licence reviewed; selective adaptation only; no runtime evaluations",
+      "skills": [
+        "luau-architecture",
+        "debugging",
+        "playtest-qa",
+        "studio-context"
+      ],
+      "reviewedFiles": [
+        "roblox-luau-architecture/SKILL.md",
+        "roblox-studio-workflow/SKILL.md",
+        "roblox-debugging-bugfix/SKILL.md",
+        "roblox-playtest-qa/SKILL.md"
+      ],
+      "rejectedRules": [
+        "Blanket Git-is-only-for-planning policy",
+        "Universal marketplace-first generation policy",
+        "Mandatory human approval for every routine completion",
+        "Unverified hard-coded upstream tool sequences"
+      ],
+      "url": "https://github.com/AshExplained/roblox-skills",
+      "observedHead": "a3a7b940f0899d4a69c1a7df625996bdfc917388",
+      "observedOn": "2026-10-11",
+      "contentHashes": null,
+      "vendored": false,
+      "installed": false,
+      "approved": false,
+      "evaluationRuns": [],
+      "state": "candidate"
+    }
+  ]
+}

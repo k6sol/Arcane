@@ -1,0 +1,4 @@
+.test-build/
+.tmp/
+generated/
+*.log

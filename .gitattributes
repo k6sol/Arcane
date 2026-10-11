@@ -1,2 +1,15 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Skill integrity hashes are byte-exact; do not change packaged text on checkout.
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.mjs text eol=lf
+*.csv text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.yml text eol=lf

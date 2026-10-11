@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": ".",
+    "outDir": "dist",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "apps/daemon/src/**/*.ts",
+    "apps/desktop/src/**/*.ts",
+    "apps/mcp/src/**/*.ts",
+    "packages/**/*.ts",
+    "tests/unit/**/*.ts"
+  ]
+}
+

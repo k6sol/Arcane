@@ -1,0 +1,580 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import { png, audit } from '../../packages/asset-pipeline/testing/fixture.js';
+import type { AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
+import type { AssetManifest, AssetRequest } from '../../packages/asset-pipeline/src/types.js';
+import { join, relative, resolve, isAbsolute } from 'node:path';
+import { tmpdir } from 'node:os';
+import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import { WorkStore, type WorkTask } from '../../packages/storage/src/work-store.js';
+import { nativeRoutes } from '../../apps/daemon/src/native-routes.js';
+import { studioRoutes } from '../../apps/daemon/src/studio-routes.js';
+import { NativeStudioSession } from '../../packages/studio-adapter/src/session.js';
+import { NATIVE_STUDIO_READ_METHODS, NATIVE_STUDIO_LIMITS, parseReadArguments } from '../../packages/studio-adapter/src/policy.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Server as NativeFixtureServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
+import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { pathToFileURL } from 'node:url';
+import { NATIVE_READ_METHODS, NATIVE_HTTP_RESULT_BYTES, NATIVE_DISPLAY_BYTES, readNativeObservation, prepareNativeRead, nativeResultText, sanitizeNativeText, type NativeObservation, type NativeReadInput, prepareStudioKeyGrant, readStudioKeyRecords, readIssuedStudioKey, type StudioKeyRecord, baselineFromReceipt, prepareWorkRun, prepareWorkReview, prepareAssetInput, BUILDER_METHODS, STUDIO_ROOTS, StudioApi, StudioRequestError, prepareCommand, prepareRestore, readReference, takeControlToken, mutationReceipt, type BuilderInput } from '../../apps/desktop/src/studio.js';
+import { ROOTS, READ_METHODS, WRITE_METHODS, type StudioSession, type StudioCommand, type InstanceRef, type Json } from '../../packages/protocol/src/studio.js';
+
+const TOKEN = 'a'.repeat(64);
+function session(writes = false, id = 'session-read'): StudioSession {
+  return { id, clientSessionId: 'client-' + id, placeId: 777, universeId: 888, name: 'Fixture place', pluginVersion: 'fixture-only', protocolVersion: 1, allowedRoots: ['Workspace', 'ServerScriptService'], allowWrites: writes, capabilities: [...READ_METHODS, ...WRITE_METHODS], connectedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), revokedAt: null };
+}
+function ref(s: StudioSession, className = 'Part', id = 'opaque-instance-1'): InstanceRef { return { instanceId: id, sessionId: s.id, root: 'Workspace', pathSegments: ['Duplicate name'], className }; }
+function input(s: StudioSession, overrides: Partial<BuilderInput> = {}): BuilderInput { return { root: 'Workspace', limit: 100, query: 'Spawn', ref: ref(s), browseParent: false, className: 'Part', name: 'New part', properties: {}, source: '', baseline: null, ...overrides }; }
+function command(s: StudioSession, overrides: Partial<StudioCommand> = {}): StudioCommand {
+  return { protocolVersion: 1, id: 'command-1', requestId: 'request-1', sessionId: s.id, clientSessionId: s.clientSessionId, method: 'scene.inspect', args: {}, allowedRoots: s.allowedRoots, allowWrites: s.allowWrites, leaseEpoch: 1, expiresAt: new Date(Date.now() + 120000).toISOString(), state: 'succeeded', createdAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: null, error: null, ...overrides };
+}
+
+test('UI method/root literals match the shared bridge contract, without exposing arbitrary restore payloads', () => {
+  assert.deepEqual(STUDIO_ROOTS, ROOTS);
+  assert.deepEqual([...BUILDER_METHODS].sort(), [...READ_METHODS, ...WRITE_METHODS.filter(m => m !== 'scene.restore')].sort());
+});
+
+test('launcher fragment is removed; only the local bearer persists in tab-scoped lab-compatible storage', () => {
+  const saved = new Map<string, string>(); let replaced = '';
+  const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => { saved.set(key, value); } };
+  const history = { replaceState: (_: unknown, _title: string, url?: string | URL | null) => { replaced = String(url); } };
+  assert.equal(takeControlToken({ hash: '#' + TOKEN, pathname: '/studio', search: '?view=work' }, history, storage), TOKEN);
+  assert.equal(replaced, '/studio?view=work'); assert.deepEqual([...saved], [['arcane-lab-session', TOKEN]]);
+  assert.equal(takeControlToken({ hash: '', pathname: '/studio', search: '' }, history, storage), TOKEN);
+  assert.equal(takeControlToken({ hash: '#bad-token', pathname: '/studio', search: '' }, history, storage), '');
+  assert.equal(takeControlToken({ hash: '#' + TOKEN, pathname: '/studio', search: '' }, history, { getItem: () => { throw new Error(); }, setItem: () => { throw new Error(); } }), TOKEN);
+});
+
+test('builder requires an exact active session, grant and reported method capability', () => {
+  const s = session();
+  assert.throws(() => prepareCommand(undefined, 'selection.read', input(s)), /exact paired/);
+  assert.throws(() => prepareCommand({ ...s, revokedAt: 'revoked' }, 'selection.read', input(s)), /revoked/);
+  assert.throws(() => prepareCommand({ ...s, capabilities: [] }, 'selection.read', input(s)), /does not report support/);
+  assert.throws(() => prepareCommand(s, 'scene.create', input(s)), /read-only/);
+  assert.throws(() => prepareCommand(s, 'scene.restore', input(s)), /Restore must use a recorded receipt/);
+});
+
+test('references retain opaque identity despite duplicate names and refuse another window with the same place ID', () => {
+  const s = session(), other = session(true, 'other-window');
+  const a = ref(s), b = ref(s, 'Part', 'opaque-instance-2'); assert.deepEqual(a.pathSegments, b.pathSegments); assert.notEqual(readReference(a, s).instanceId, readReference(b, s).instanceId);
+  assert.throws(() => readReference(a, other), /exact session/);
+  assert.throws(() => readReference({ ...a, root: 'Lighting' }, s), /root grants/);
+  assert.throws(() => prepareCommand(s, 'scene.inspect', input(s, { ref: ref(other) })), /exact session/);
+});
+
+test('browse/search/select emit contract arguments and enforce bounded scope', () => {
+  const s = session();
+  assert.deepEqual(prepareCommand(s, 'scene.children', input(s)), { method: 'scene.children', args: { root: 'Workspace', limit: 100 } });
+  assert.equal((prepareCommand(s, 'scene.children', input(s, { browseParent: true })).args.ref as unknown as InstanceRef).instanceId, ref(s).instanceId);
+  assert.deepEqual(prepareCommand(s, 'scene.search', input(s, { query: '  Spawn  ' })).args, { root: 'Workspace', query: 'Spawn', limit: 100 });
+  assert.deepEqual(prepareCommand(s, 'selection.read', input(s)).args, {});
+  for (const limit of [0, 201, 1.2]) assert.throws(() => prepareCommand(s, 'scene.search', input(s, { limit })), /integer from 1 to 200/);
+  assert.throws(() => prepareCommand(s, 'scene.search', input(s, { query: ' ' })), /nonempty/);
+  assert.throws(() => prepareCommand(s, 'scene.children', input(s, { root: 'Lighting' })), /granted service/);
+  assert.throws(() => prepareCommand(s, 'scene.children', input(s, { browseParent: true, root: 'ServerScriptService' })), /must match/);
+});
+
+test('property updates carry exactly the inspected expected fields and preserve tagged values', () => {
+  const s = session(true), r = ref(s), baseline = { ref: r, commandId: 'inspect-1', properties: { Name: 'Before', Anchored: false, Size: { type: 'Vector3', value: [4, 1, 2] } } };
+  const properties = { Anchored: true, Size: { type: 'Vector3', value: [8, 2, 4] } };
+  assert.deepEqual(prepareCommand(s, 'scene.update', input(s, { baseline, properties })).args, { ref: r, expected: { Anchored: false, Size: { type: 'Vector3', value: [4, 1, 2] } }, properties });
+  assert.throws(() => prepareCommand(s, 'scene.update', input(s, { properties })), /baseline/);
+  assert.throws(() => prepareCommand(s, 'scene.update', input(s, { baseline: { ...baseline, ref: ref(s, 'Part', 'different') }, properties })), /baseline/);
+  assert.throws(() => prepareCommand(s, 'scene.update', input(s, { baseline, properties: { Transparency: 0.5 } })), /does not contain/);
+  assert.throws(() => prepareCommand(s, 'scene.update', input(s, { baseline, properties: { Source: 'unsafe' } })), /Unsupported writable property/);
+});
+
+test('create forms cannot set arbitrary Source, unsupported classes or invalid property values', () => {
+  const s = session(true);
+  assert.deepEqual(prepareCommand(s, 'scene.create', input(s, { className: 'Script' })).args, { parent: ref(s), className: 'Script', name: 'New part', properties: {} });
+  assert.throws(() => prepareCommand(s, 'scene.create', input(s, { className: 'RemoteEvent' })), /supported creation/);
+  assert.throws(() => prepareCommand(s, 'scene.create', input(s, { properties: { Source: 'arbitrary code' } })), /Unsupported writable/);
+  for (const properties of [{ Color: { type: 'Color3', value: [1, -1, 0] } }, { Position: { type: 'Vector3', value: [0, Infinity, 0] } }, { Size: { type: 'Vector3', value: [0.01, 2, 3] } }, { Transparency: 2 }]) assert.throws(() => prepareCommand(s, 'scene.create', input(s, { properties })), /channels|finite|Transparency/);
+});
+
+test('source update uses the exact editor baseline, supports empty text and measures UTF-8 bytes', () => {
+  const s = session(true), r = ref(s, 'ModuleScript'), baseline = { ref: r, commandId: 'read-1', source: '-- dirty editor\nreturn "café"' };
+  assert.deepEqual(prepareCommand(s, 'script.update', input(s, { ref: r, baseline, source: '' })).args, { ref: r, expectedSource: baseline.source, source: '' });
+  assert.throws(() => prepareCommand(s, 'script.update', input(s, { ref: r, source: 'return 1' })), /baseline/);
+  assert.throws(() => prepareCommand(s, 'script.update', input(s, { ref: r, baseline, source: '🧩'.repeat(26000) })), /100 KiB/);
+  assert.throws(() => prepareCommand(s, 'script.update', input(s, { ref: r, baseline, source: '\0' })), /NUL/);
+});
+
+test('restore sends only receipt command ID and fresh request ID to the guarded endpoint', () => {
+  const s = session(true), receipt = { kind: 'scene.update', ref: ref(s), before: { properties: { Anchored: false } }, after: { properties: { Anchored: true } } };
+  const c = command(s, { method: 'scene.update', result: { mutation: receipt as unknown as Json } });
+  assert.deepEqual(mutationReceipt(c), receipt);
+  assert.deepEqual(prepareRestore(c, s, 'restore-request'), { commandId: c.id, requestId: 'restore-request' });
+  assert.throws(() => prepareRestore(c, session(true, 'other-window'), 'r'), /exact original/);
+  assert.throws(() => prepareRestore(c, { ...s, allowWrites: false }, 'r'), /write permission/);
+  assert.throws(() => prepareRestore({ ...c, state: 'needs_reconciliation' }, s, 'r'), /succeeded mutation/);
+  assert.equal(mutationReceipt({ ...c, result: { mutation: { ...receipt, kind: 'scene.create' } as unknown as Json } }), null);
+});
+
+test('transport is invoked without an instance receiver, as required by browser fetch', async () => {
+  let receiver: unknown = 'not called';
+  const transport: typeof fetch = async function (this: unknown) { receiver = this; if (this !== undefined) throw new TypeError('Illegal invocation'); return Response.json({ sessions: [] }); };
+  assert.deepEqual(await new StudioApi(TOKEN, transport).sessions(), { sessions: [] });
+  assert.equal(receiver, undefined);
+});
+
+test('HTTP fixture transport sets local control auth, uses exact routes and never automatically retries a lost POST', async () => {
+  const calls: { path: string; init: RequestInit | undefined }[] = [];
+  const transport: typeof fetch = async (path, init) => { calls.push({ path: String(path), init }); if (init?.method === 'POST') throw new Error('fixture connection lost'); return Response.json({ sessions: [] }); };
+  const api = new StudioApi(TOKEN, transport);
+  assert.deepEqual(await api.sessions(), { sessions: [] });
+  assert.equal(calls[0]?.path, '/v1/studio/sessions'); assert.equal(new Headers(calls[0]?.init?.headers).get('Authorization'), 'Bearer ' + TOKEN); assert.equal(calls[0]?.init?.redirect, 'error');
+  await assert.rejects(api.request('/v1/studio/commands', { sessionId: 's', requestId: 'stable-key' }), (error: unknown) => error instanceof StudioRequestError && error.outcome === 'unknown');
+  assert.equal(calls.filter(c => c.init?.method === 'POST').length, 1);
+  await assert.rejects(api.request('https://outside.example/v1/studio/sessions'), /Unsupported local/);
+  await assert.rejects(api.request('/v1/studio/../plugin/pair', {}), /Unsupported local/);
+  await assert.rejects(api.request('/v1/studio/commands/%2e%2e', {}), /Unsupported local/);
+  await assert.rejects(new StudioApi('', transport).sessions(), /no valid token/);
+});
+
+test('HTTP fixture errors distinguish rejected writes, unknown server errors, invalid receipts and timeouts', async () => {
+  for (const [response, outcome] of [[Response.json({ error: 'CONFLICT', message: 'Editor source changed.' }, { status: 409 }), 'rejected'], [Response.json({ error: 'SERVER', message: 'fixture server error' }, { status: 500 }), 'unknown'], [new Response('not JSON'), 'unknown']] as const) {
+    const api = new StudioApi(TOKEN, async () => response);
+    await assert.rejects(api.request('/v1/studio/commands', {}), (error: unknown) => error instanceof StudioRequestError && error.outcome === outcome);
+  }
+  const timeout = new StudioApi(TOKEN, async (_path, options) => await new Promise<Response>((_resolve, reject) => { options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); }), 10);
+  await assert.rejects(timeout.request('/v1/studio/restore', {}), (error: unknown) => error instanceof StudioRequestError && error.outcome === 'unknown' && /timed out/.test(error.message));
+});
+
+test('Studio shell is CSP-compatible, has safe defaults and treats untrusted content as text', async () => {
+  const html = await readFile(resolve('apps/desktop/public/studio.html'), 'utf8'), source = await readFile(resolve('apps/desktop/src/studio.ts'), 'utf8');
+  assert.match(html, /src="\/studio.js"/); assert.match(html, /href="\/studio.css"/);
+  assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>|\bstyle=|\bon(?:click|load|error)=/i);
+  assert.doesNotMatch(html, /id="key-writes"[^>]*checked/);
+  assert.doesNotMatch(source, /\.innerHTML|\.outerHTML|\beval\s*\(|new Function\s*\(/);
+  assert.doesNotMatch(html, /id="pair-|id="daemon-url"|daemon URL|pairing code/i); assert.match(html, /Paste the issued Arcane API key/);
+  assert.match(source, /textContent/); assert.match(html, /Authored board/); assert.match(html, /not a live worker runtime/);
+});
+
+test('emitted browser workbench has no Node, store or daemon runtime imports', async () => {
+  const browserSource = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), 'utf8');
+  assert.doesNotMatch(browserSource, /^\s*import\s|\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
+});
+
+test('edit baselines must match the actual succeeded read request and exact client session', () => {
+  const s = session(true), r = ref(s, 'ModuleScript');
+  const receipt = command(s, { method: 'script.read', args: { ref: r as unknown as Json }, result: { ref: r as unknown as Json, source: '' } });
+  assert.deepEqual(baselineFromReceipt(receipt, s), { ref: r, source: '', commandId: receipt.id });
+  assert.throws(() => baselineFromReceipt({ ...receipt, state: 'failed' }, s), /succeeded read/);
+  assert.throws(() => baselineFromReceipt({ ...receipt, clientSessionId: 'different-window' }, s), /exact paired/);
+  assert.throws(() => baselineFromReceipt({ ...receipt, result: { ref: ref(s, 'ModuleScript', 'different-instance') as unknown as Json, source: 'wrong' } }, s), /does not match/);
+  assert.throws(() => baselineFromReceipt({ ...receipt, args: {} }, s), /reference/);
+});
+
+const workDraft = () => ({ title: 'Durable browser delivery', objective: 'Explicit scopes, graph and review', tasks: [{ key: 'first', title: 'First task', instructions: 'Change scoped file', acceptance: 'Evidence passes review', scope: ['src/first.ts'], dependencies: [] as string[] }, { key: 'second', title: 'Dependent task', instructions: 'Wait for acceptance', acceptance: 'First task reviewed complete', scope: ['src/second.ts'], dependencies: ['first'] }] });
+test('work run validation keeps explicit graph and scopes and rejects cycles, missing keys and unsafe paths', () => {
+  assert.deepEqual(prepareWorkRun(workDraft()), workDraft());
+  for (const scope of ['../outside', '/absolute', 'C:/outside', '.git/config', '.env.local', 'src//file.ts']) { const draft = workDraft(); draft.tasks[0]!.scope = [scope]; assert.throws(() => prepareWorkRun(draft), /safe relative/); }
+  const cycle = workDraft(); cycle.tasks[0]!.dependencies = ['second']; assert.throws(() => prepareWorkRun(cycle), /cycle/);
+  const missing = workDraft(); missing.tasks[1]!.dependencies = ['unknown']; assert.throws(() => prepareWorkRun(missing), /missing/);
+  const duplicate = workDraft(); duplicate.tasks[1]!.key = 'first'; assert.throws(() => prepareWorkRun(duplicate), /unique/);
+  assert.throws(() => prepareWorkRun({ ...workDraft(), tasks: [] }), /explicit tasks/);
+});
+
+test('human review payload requires submitted state, evidence for approval and a nonempty decision note', () => {
+  const task = { id: 'actual-task', state: 'needs_review', evidence: [{ path: 'proof.txt' }] } as WorkTask;
+  assert.deepEqual(prepareWorkReview(task, true, ' Checked proof '), { taskId: task.id, approved: true, note: 'Checked proof' });
+  assert.throws(() => prepareWorkReview({ ...task, state: 'pending' }, true, 'yes'), /submitted/);
+  assert.throws(() => prepareWorkReview({ ...task, evidence: [] }, true, 'yes'), /evidence/);
+  assert.throws(() => prepareWorkReview(task, false, ' '), /nonempty/);
+});
+
+test('fixed asset templates reject arbitrary worker, shell and path inputs with template-specific bounds', () => {
+  assert.deepEqual(prepareAssetInput({ template: 'environment-kit', name: 'test-room', sizeMeters: [3, 3, 2.8] }), { template: 'environment-kit', name: 'test-room', sizeMeters: [3, 3, 2.8] });
+  for (const value of [{ template: 'custom', name: 'unsafe' }, { template: 'hero-prop', name: '../unsafe' }, { template: 'hero-prop', name: 'con' }, { template: 'hero-prop', name: 'safe', script: 'shell' }, { template: 'hero-prop', name: 'safe', triangleBudget: 99999 }, { template: 'hero-prop', name: 'safe', color: [0, NaN, 0] }]) assert.throws(() => prepareAssetInput(value));
+});
+
+test('work, scoped-token and asset transport use contract routes with authenticated PNG blobs and plain fetch receiver', async () => {
+  const calls: { path: string; init: RequestInit | undefined }[] = [];
+  const transport: typeof fetch = async function (this: unknown, path, init) {
+    assert.equal(this, undefined); calls.push({ path: String(path), init });
+    if (String(path).includes('/preview?')) return new Response(new Uint8Array([1, 2]), { headers: { 'Content-Type': 'image/png' } });
+    return Response.json({});
+  };
+  const api = new StudioApi(TOKEN, transport);
+  await api.runs(); await api.ready(); await api.createRun(workDraft()); await api.reviewTask({ taskId: 't', approved: false, note: 'Changes' }); await api.agentToken(); await api.assetJobs(); await api.assetProbe(); await api.assetStart({ template: 'hero-prop', name: 'crate' }); await api.assetCancel('job'); await api.assetManifest('job');
+  assert.equal((await api.assetPreview('job', 'preview-hero.png')).size, 2);
+  assert.deepEqual(calls.map(c => c.path), ['/v1/work/runs', '/v1/work/ready', '/v1/work/create', '/v1/work/review', '/v1/product/mcp-token', '/v1/assets/jobs', '/v1/assets/probe', '/v1/assets/start', '/v1/assets/cancel', '/v1/assets/manifest?jobId=job', '/v1/assets/preview?jobId=job&path=preview-hero.png']);
+  assert.ok(calls.every(c => new Headers(c.init?.headers).get('Authorization') === 'Bearer ' + TOKEN));
+  assert.equal(new Headers(calls[3]?.init?.headers).has('Origin'), false); // Native browser fetch supplies Origin on same-origin POST.
+  assert.equal(calls.at(-1)?.init?.credentials, 'omit'); assert.equal(calls.at(-1)?.init?.redirect, 'error');
+  assert.throws(() => api.assetPreview('job', '../file'), /fixed manifest/);
+  await assert.rejects(new StudioApi(TOKEN, async () => new Response('html', { headers: { 'Content-Type': 'text/html' } })).assetPreview('job', 'preview-hero.png'), /not a PNG/);
+});
+
+test('API key grant validation keeps explicit read-only access and rejects missing or invented roots', () => {
+  assert.deepEqual(prepareStudioKeyGrant(['Workspace'], false), { allowedRoots: ['Workspace'], allowWrites: false });
+  for (const roots of [[], ['Workspace', 'Workspace'], ['NotAService'], 'Workspace']) assert.throws(() => prepareStudioKeyGrant(roots, false), /explicit service/);
+  assert.throws(() => prepareStudioKeyGrant(['Workspace'], undefined), /explicit service/);
+});
+
+test('API key issuance validates exact daemon port and grants; key records retain metadata only', () => {
+  const grant = prepareStudioKeyGrant(['Workspace'], false), metadata = { keyId: 'key-1', ...grant, issuedAt: new Date().toISOString(), revokedAt: null, lastUsedAt: null };
+  const apiKey = 'arcane_local_v1_45871_' + 'c'.repeat(64), issued = { ...metadata, apiKey };
+  assert.deepEqual(readStudioKeyRecords([metadata]), [metadata]);
+  assert.equal(readIssuedStudioKey(issued, 'http://127.0.0.1:45871', grant).apiKey, apiKey);
+  for (const key of ['arcane_local_v1_0_' + 'c'.repeat(64), 'arcane_local_v1_045871_' + 'c'.repeat(64), 'arcane_local_v1_65536_' + 'c'.repeat(64), apiKey + '\n', 'https://127.0.0.1:45871/' + apiKey]) assert.throws(() => readIssuedStudioKey({ ...issued, apiKey: key }, 'http://127.0.0.1:45871', grant), /format/);
+  assert.throws(() => readIssuedStudioKey(issued, 'http://127.0.0.1:45872', grant), /exact local/);
+  assert.throws(() => readIssuedStudioKey(issued, 'http://localhost:45871', grant), /exact local/);
+  assert.throws(() => readIssuedStudioKey({ ...issued, allowWrites: true }, 'http://127.0.0.1:45871', grant), /grants/);
+  assert.throws(() => readStudioKeyRecords([issued]), /metadata only/);
+  assert.throws(() => readStudioKeyRecords([{ ...metadata, lastUsedAt: 'invented' }]), /timestamp/);
+});
+
+test('API key transport uses human control routes and never automatically replays lost issuance', async () => {
+  const calls: { path: string; init: RequestInit | undefined }[] = [];
+  const api = new StudioApi(TOKEN, async function (this: unknown, path, init) { assert.equal(this, undefined); calls.push({ path: String(path), init }); return Response.json({}); });
+  await api.keys(); await api.issueKey(prepareStudioKeyGrant(['Workspace'], false)); await api.revokeKey('key-1');
+  assert.deepEqual(calls.map(c => [c.path, c.init?.method]), [['/v1/studio/keys', 'GET'], ['/v1/studio/keys', 'POST'], ['/v1/studio/keys/revoke', 'POST']]);
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { allowedRoots: ['Workspace'], allowWrites: false }); assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), { keyId: 'key-1' });
+  assert.ok(calls.every(c => new Headers(c.init?.headers).get('Authorization') === 'Bearer ' + TOKEN));
+  let sends = 0; const lost = new StudioApi(TOKEN, async () => { sends++; throw new Error('lost key response'); });
+  await assert.rejects(lost.issueKey(prepareStudioKeyGrant(['Workspace'], false)), (error: unknown) => error instanceof StudioRequestError && error.outcome === 'unknown'); assert.equal(sends, 1);
+});
+
+function nativeFixtureObservation(): NativeObservation {
+  const provenance = { kind: 'fixture' as const, label: 'UI unit fixture; no native Studio' };
+  return { native: { kind: 'built-in-studio-mcp', readOnly: true, available: true, requiresExplicitRead: true, provenance, metadata: { connected: false, evidenceKind: 'fixture', observedAt: new Date().toISOString(), sdkVersion: '1.32.1', transport: 'in-memory-fixture', server: { name: 'UI fixture', version: 'fixture' }, serverCapabilities: { tools: {} }, provenance, tools: NATIVE_READ_METHODS.map(name => ({ name, allowed: true, blockedReason: null, annotations: { readOnlyHint: true }, inputSchema: { type: 'object' } })), requestsUsed: 3, limits: { ...NATIVE_STUDIO_LIMITS, timeoutMs: 1000, maxRequests: 16 } } }, studios: [{ id: 'native-a', name: '<img src=x onerror=alert(1)> UI fixture A' }, { id: 'native-b', name: 'UI fixture B' }] };
+}
+const nativeInput = (): NativeReadInput => ({ path: 'game.Workspace.Baseplate', datamodel: 'Edit', query: 'Fixture', instanceType: '', limit: 100, depth: 3, startLine: 1, endLine: 100 });
+
+test('native UI read methods match adapter policy; every request has exact observed ID and bounded documented args', () => {
+  assert.deepEqual(NATIVE_READ_METHODS, NATIVE_STUDIO_READ_METHODS);
+  const observation = nativeFixtureObservation();
+  for (const method of NATIVE_READ_METHODS) { const request = prepareNativeRead(observation, 'native-b', method, nativeInput()); assert.equal(request.args.studio_id, 'native-b'); assert.deepEqual(parseReadArguments(request.method, request.args), request.args); }
+  assert.throws(() => prepareNativeRead(observation, '', 'get_studio_state', nativeInput()), /exact studio_id/);
+  assert.throws(() => prepareNativeRead(observation, 'stale-a', 'get_studio_state', nativeInput()), /exact studio_id/);
+  for (const method of ['selection', 'execute_luau', 'multi_edit', 'start_stop_play']) assert.throws(() => prepareNativeRead(observation, 'native-a', method, nativeInput()), /unavailable/);
+  observation.native.metadata.tools[0]!.allowed = false; assert.throws(() => prepareNativeRead(observation, 'native-a', 'get_studio_state', nativeInput()), /blocked/);
+  for (const [method, input] of [['search_game_tree', { ...nativeInput(), limit: 201 }], ['search_game_tree', { ...nativeInput(), depth: 11 }], ['search_game_tree', { ...nativeInput(), datamodel: 'Live' }], ['inspect_instance', { ...nativeInput(), path: 'x\n' }], ['script_read', { ...nativeInput(), startLine: 5, endLine: 4 }], ['script_read', { ...nativeInput(), endLine: 501 }]] as const) assert.throws(() => prepareNativeRead(observation, 'native-b', method, input));
+});
+
+test('native observations must report closure and preserve bounded exact inventory and actual provenance', () => {
+  const observation = nativeFixtureObservation(); assert.equal(readNativeObservation(observation, true).native.metadata.connected, false);
+  assert.throws(() => readNativeObservation({ ...observation, native: { ...observation.native, metadata: { ...observation.native.metadata, connected: true } } }, true), /closed per-request/);
+  assert.throws(() => readNativeObservation({ ...observation, studios: [observation.studios![0], observation.studios![0]] }, true), /duplicate/);
+  assert.throws(() => readNativeObservation({ ...observation, native: { ...observation.native, readOnly: false } }, true), /read-only/);
+});
+
+test('native text output is safe text, removes credentials and controls, and visibly bounds its UTF-8 display', () => {
+  const raw = '<img src=x onerror=alert(1)>\nBearer abcdef123456 password=secret-value sk-1234567890 ' + TOKEN + '\x1b[31m\0';
+  const result = nativeResultText({ content: [{ type: 'text', text: raw }] }, [TOKEN]);
+  assert.match(result, /<img src=x onerror=alert\(1\)>/); assert.doesNotMatch(result, /abcdef123456|secret-value|sk-1234567890|\x1b|\0/); assert.equal(result.includes(TOKEN), false);
+  assert.match(sanitizeNativeText('🧩'.repeat(NATIVE_DISPLAY_BYTES)), /Display truncated/);
+  assert.throws(() => nativeResultText({ content: [{ type: 'image', data: 'untrusted' }] }), /text read output only/);
+});
+
+test('native transport uses human-only implemented routes, bounds responses and preserves safe error provenance without retry', async () => {
+  const calls: { path: string; init?: RequestInit | undefined }[] = [];
+  const api = new StudioApi(TOKEN, async function (this: unknown, path, init) { assert.equal(this, undefined); calls.push({ path: String(path), init }); return Response.json(nativeFixtureObservation()); });
+  await api.nativeCapabilities(); await api.nativeRead(prepareNativeRead(nativeFixtureObservation(), 'native-a', 'get_studio_state', nativeInput()));
+  assert.deepEqual(calls.map(call => [call.path, call.init?.method]), [['/v1/native/capabilities', 'GET'], ['/v1/native/read', 'POST']]);
+  assert.ok(calls.every(call => new Headers(call.init?.headers).get('Authorization') === 'Bearer ' + TOKEN));
+  await assert.rejects(api.request('/v1/native/read?studio_id=native-a', {}), /Unsupported/);
+  await assert.rejects(new StudioApi(TOKEN, async () => new Response('x'.repeat(NATIVE_HTTP_RESULT_BYTES + 1))).nativeCapabilities(), /512 KiB/);
+  let sent = 0; const denied = new StudioApi(TOKEN, async () => { sent++; return Response.json({ error: 'STUDIO_NOT_FOUND', message: 'Exact target is absent.' }, { status: 404 }); });
+  await assert.rejects(denied.nativeRead(prepareNativeRead(nativeFixtureObservation(), 'native-a', 'get_studio_state', nativeInput())), (error: unknown) => error instanceof StudioRequestError && error.details?.code === 'STUDIO_NOT_FOUND'); assert.equal(sent, 1);
+});
+
+// Optional real-browser check. Its server is an explicitly labelled HTTP fixture,
+// never the native plugin. No extra root dependencies or Studio operations.
+const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
+test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revocation, ambiguity, exact sessions, read/write/conflict/history/restore, unknown recovery and responsive layout', { skip: !browserModule, timeout: 90000 }, async t => {
+  const readonly = session(), writer = session(true, 'session-writer'), sessions = [readonly, writer];
+  let commands: StudioCommand[] = [], sequence = 0, nextState: StudioCommand['state'] = 'succeeded', loseNextResponse = false, conflict = false, failSessions = false;
+  const fixtureKeys: StudioKeyRecord[] = []; let loseNextKeyResponse = false;
+  const fixtureAssetJobs: AssetJobRecord[] = [], fixturePng = png(); let corruptPreview = false;
+  const fixtureRuntime = { executable: 'HTTP-fixture-only-no-Blender', version: 'fixture', pythonVersion: 'fixture', background: true, capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } };
+  const posted: { path: string; body: Record<string, unknown>; authorization: string }[] = [];
+  const assets = new Map(['/studio', '/studio.css', '/studio.js'].map((path, i) => [path, resolve(['apps/desktop/public/studio.html', 'apps/desktop/public/studio.css', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')][i]!) ]));
+  const server = createServer((request, response) => { void (async () => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    const asset = assets.get(url.pathname);
+    if (asset) { response.writeHead(200, { 'Content-Type': url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" }); response.end(await readFile(asset)); return; }
+    const send = (data: unknown, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(data)); };
+    if (request.headers.authorization !== 'Bearer ' + TOKEN) { send({ error: 'AUTH', message: 'Fixture requires control token.' }, 401); return; }
+    if (request.method === 'GET') {
+      if (url.pathname === '/v1/studio/keys') { send({ keys: fixtureKeys }); return; }
+      if (url.pathname === '/v1/work/runs') { send({ runs: [] }); return; }
+      if (url.pathname === '/v1/work/ready') { send({ tasks: [] }); return; }
+      if (url.pathname === '/v1/assets/jobs') { send({ jobs: fixtureAssetJobs }); return; }
+      if (url.pathname === '/v1/assets/manifest') {
+        const job = fixtureAssetJobs.find(j => j.jobId === url.searchParams.get('jobId'))!;
+        const manifest: AssetManifest = { schemaVersion: 1, jobId: job.jobId, createdAt: job.startedAt, request: job.request, runtime: fixtureRuntime, templateSha256: '0'.repeat(64), coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false }, validation: audit(), artifacts: ['preview-hero.png', 'preview-side.png'].map(path => ({ path, role: 'preview', bytes: fixturePng.length, sha256: createHash('sha256').update(fixturePng).digest('hex') })), limitations: ['HTTP contract fixture only; no native Blender or Studio verification.'] }; send({ manifest }); return;
+      }
+      if (url.pathname === '/v1/assets/preview') { const bytes = Buffer.from(fixturePng); if (corruptPreview) bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1; response.writeHead(200, { 'Content-Type': 'image/png' }); response.end(bytes); return; }
+      if (url.pathname === '/v1/studio/sessions') { if (failSessions) { send({ error: 'FIXTURE_DOWN', message: 'Fixture session service unavailable.' }, 503); return; } sessions.forEach(s => { s.lastSeenAt = new Date().toISOString(); }); send({ sessions }); return; }
+      if (url.pathname === '/v1/product/state') { send({ projectPath: 'HTTP fixture project — no native Studio', protocolVersion: 1, studioSessions: sessions, commandCounts: { succeeded: commands.filter(c => c.state === 'succeeded').length }, features: [{ id: 'fixture', state: 'fixture-only' }], buildTasks: [{ id: 'FIXTURE-01', title: 'Authored fixture board', state: 'pending', owner: 'fixture', acceptance: 'Browser UI contract only', evidence: [] }] }); return; }
+      if (url.pathname === '/v1/studio/commands') { send({ commands: commands.filter(c => c.sessionId === url.searchParams.get('sessionId')) }); return; }
+      const c = commands.find(c => '/v1/studio/commands/' + c.id === url.pathname); if (c) { send({ command: c }); return; }
+    }
+    let raw = ''; for await (const chunk of request) raw += String(chunk); const body = JSON.parse(raw) as Record<string, unknown>;
+    posted.push({ path: url.pathname, body, authorization: request.headers.authorization ?? '' });
+    if (url.pathname === '/v1/assets/probe') { send({ probe: { observedAt: new Date().toISOString(), available: true, blender: fixtureRuntime, python: null, attempts: [] } }); return; }
+    if (url.pathname === '/v1/assets/start') {
+      const now = new Date().toISOString(), request = { schemaVersion: 1, ...body } as unknown as AssetRequest;
+      const job: AssetJobRecord = { schemaVersion: 1, jobId: '11111111-1111-4111-8111-' + String(fixtureAssetJobs.length + 1).padStart(12, '0'), request, directory: 'HTTP fixture output only', manifestPath: null, manifestAvailable: false, state: 'running', stage: 'fixture-stage', startedAt: now, updatedAt: now, events: [], error: null }; fixtureAssetJobs.unshift(job); send({ job }, 202); return;
+    }
+    if (url.pathname === '/v1/assets/cancel') { const job = fixtureAssetJobs.find(j => j.jobId === body.jobId)!; job.state = 'cancelled'; send({ job }); return; }
+    if (url.pathname === '/v1/studio/keys') {
+      const key = { keyId: 'fixture-key-' + (fixtureKeys.length + 1), ...prepareStudioKeyGrant(body.allowedRoots, body.allowWrites), issuedAt: new Date().toISOString(), revokedAt: null, lastUsedAt: null }; fixtureKeys.unshift(key);
+      const apiKey = 'arcane_local_v1_' + new URL('http://' + request.headers.host).port + '_' + fixtureKeys.length.toString(16).padStart(64, 'c');
+      if (loseNextKeyResponse) { loseNextKeyResponse = false; response.writeHead(200, { 'Content-Type': 'application/json' }); response.end('{unreadable key receipt'); return; }
+      send({ ...key, apiKey }); return;
+    }
+    if (url.pathname === '/v1/studio/keys/revoke') { fixtureKeys.find(key => key.keyId === body.keyId)!.revokedAt = new Date().toISOString(); send({ revoked: true }); return; }
+    if (url.pathname === '/v1/studio/revoke') { const s = sessions.find(s => s.id === body.sessionId)!; s.revokedAt = new Date().toISOString(); send({ revoked: true }); return; }
+    if (url.pathname === '/v1/studio/commands' || url.pathname === '/v1/studio/restore') {
+      const old = commands.find(c => c.requestId === body.requestId); if (old) { send({ command: old }); return; }
+      if (conflict) { send({ error: 'CONFLICT', message: 'Fixture editor baseline changed.' }, 409); return; }
+      const restored = commands.find(c => c.id === body.commandId), s = sessions.find(s => s.id === (restored?.sessionId ?? body.sessionId))!;
+      const method = url.pathname.endsWith('/restore') ? 'scene.restore' : body.method as StudioCommand['method'], args = (body.args ?? {}) as Record<string, Json>;
+      const r = ref(s), script = ref(s, 'ModuleScript', 'opaque-script');
+      let result: Json = { items: [{ ref: r as unknown as Json, name: '<img src=x onerror=alert(1)>', className: 'Part', childCount: 0 }, { ref: ref(s, 'Part', 'opaque-instance-2') as unknown as Json, name: 'Duplicate name', className: 'Part', childCount: 0 }, { ref: script as unknown as Json, name: 'Module', className: 'ModuleScript', childCount: 0 }], truncated: false };
+      if (method === 'scene.inspect') result = { ref: args.ref!, name: 'Duplicate name', className: 'Part', properties: { Name: 'Duplicate name', Anchored: false, CanCollide: true, Size: { type: 'Vector3', value: [4, 1, 2] } }, childCount: 0 };
+      if (method === 'script.read') result = { ref: args.ref!, source: '-- unsaved fixture editor\nreturn 1' };
+      if (method === 'scene.create') result = { ref: r as unknown as Json, mutation: { kind: method, ref: r as unknown as Json, before: null, after: { properties: { Name: args.name!, Anchored: true } } } };
+      if (method === 'scene.update') result = { ref: args.ref!, mutation: { kind: method, ref: args.ref!, before: { properties: args.expected! }, after: { properties: args.properties! } } };
+      if (method === 'script.update') result = { ref: args.ref!, mutation: { kind: method, ref: args.ref!, before: { source: args.expectedSource! }, after: { source: args.source! } } };
+      if (method === 'scene.restore') result = { restored: true, ref: r as unknown as Json };
+      const c = command(s, { id: 'fixture-' + ++sequence, requestId: String(body.requestId), method, args, state: nextState, result: nextState === 'succeeded' ? result : null, finishedAt: nextState === 'succeeded' ? new Date().toISOString() : null }); commands.unshift(c);
+      if (loseNextResponse) { loseNextResponse = false; response.writeHead(200, { 'Content-Type': 'application/json' }); response.end('{unreadable receipt'); return; } send({ command: c }); return;
+    }
+    send({ error: 'NOT_FOUND', message: 'Unknown fixture route.' }, 404);
+  })().catch(error => { response.writeHead(500); response.end(JSON.stringify({ error: 'FIXTURE', message: String(error) })); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done)); t.after(() => new Promise<void>(done => server.close(() => done())));
+  const address = server.address(); assert.ok(address && typeof address !== 'string'); const origin = 'http://127.0.0.1:' + address.port;
+  const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message)); page.on('console', (message: { type(): string; text(): string }) => { if (message.type() === 'error' && /Content Security Policy|Refused to/.test(message.text())) errors.push(message.text()); });
+  const expectText = async (selector: string, text: string) => { await page.waitForFunction(({ selector, text }: { selector: string; text: string }) => document.querySelector(selector)?.textContent?.includes(text), { selector, text }); };
+  await page.goto(origin + '/studio#' + TOKEN); await expectText('#connection-status', 'Daemon responding'); await page.locator('#auto-refresh').uncheck();
+  assert.equal(new URL(page.url()).hash, ''); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#send').isDisabled(), true);
+  await expectText('#key-status', 'Key service responding');
+  await page.evaluate(() => { let copied = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied = text; }, readText: async () => copied } }); });
+  const fixtureKey = 'arcane_local_v1_' + address.port + '_' + 'c'.repeat(63) + '1';
+  assert.equal(await page.locator('#key-writes').isChecked(), false); await page.locator('#key-issue').click(); await expectText('#key-grants', 'fixture-key-1'); assert.deepEqual(posted.at(-1)?.body, { allowedRoots: ['Workspace'], allowWrites: false });
+  assert.equal((await page.locator('body').textContent()).includes(fixtureKey), false); assert.equal(await page.evaluate(() => navigator.clipboard.readText()), '');
+  if (process.env.ARCANE_UI_SCREENSHOT) {
+    await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.locator('section').filter({ has: page.locator('#key-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.key-masked.png' }); await page.setViewportSize({ width: 1440, height: 1100 });
+  }
+  await page.locator('#key-copy').click(); assert.equal(await page.evaluate(() => navigator.clipboard.readText()), fixtureKey); assert.equal((await page.locator('body').textContent()).includes(fixtureKey), false);
+  await page.locator('#key-reveal').click(); assert.equal(await page.locator('#key-secret').textContent(), fixtureKey); await page.locator('#key-reveal').click(); assert.equal((await page.locator('body').textContent()).includes(fixtureKey), false);
+  assert.equal(await page.evaluate((key: string) => [...Object.values(sessionStorage), ...Object.values(localStorage)].some(value => String(value).includes(key)), fixtureKey), false);
+  await page.locator('#key-dismiss').click(); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await page.waitForFunction(() => !(document.getElementById('key-issue') as HTMLButtonElement).disabled);
+  await page.locator('#key-writes').check(); await page.locator('input[name="key-root"][value="ServerScriptService"]').check(); await page.locator('#key-issue').click(); await expectText('#key-grants', 'fixture-key-2'); assert.deepEqual(posted.at(-1)?.body, { allowedRoots: ['Workspace', 'ServerScriptService'], allowWrites: true });
+  await page.locator('#key-reveal').click(); await page.locator('#go-work').click(); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await page.locator('.key-history-details > summary').click(); await page.locator('#key-history button[data-key-id="fixture-key-1"]').click(); await expectText('#confirm-title', 'Revoke this Arcane API key'); await page.locator('#confirm-cancel').click(); assert.equal(fixtureKeys.find(k => k.keyId === 'fixture-key-1')!.revokedAt, null);
+  await page.locator('#key-history button[data-key-id="fixture-key-1"]').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#key-history', 'Revoked'); assert.deepEqual(posted.at(-1)?.body, { keyId: 'fixture-key-1' });
+  loseNextKeyResponse = true; await page.locator('#key-issue').click(); await expectText('#key-unknown-message', 'outcome unknown'); assert.equal(await page.locator('#key-issue').isDisabled(), true); assert.equal(posted.filter(p => p.path === '/v1/studio/keys').length, 3);
+  await page.locator('#key-refresh').click(); await page.waitForFunction(() => !(document.getElementById('key-acknowledge') as HTMLButtonElement).disabled); await page.locator('#key-acknowledge').click(); assert.equal(fixtureKeys.length, 3); assert.equal(posted.some(p => p.path === '/v1/studio/pairing'), false);
+  let releaseKey: () => void = () => {}, keyAccepted: () => void = () => {};
+  const keyHeld = new Promise<void>(resolve => { releaseKey = resolve; }), keyStored = new Promise<void>(resolve => { keyAccepted = resolve; });
+  await page.route('**/v1/studio/keys', async (route: any) => { if (route.request().method() !== 'POST') { await route.continue(); return; } const response = await route.fetch(); keyAccepted(); await keyHeld; await route.fulfill({ response }); });
+  await page.locator('#key-issue').click(); await keyStored; await page.locator('#go-assets').click(); releaseKey(); await expectText('#key-notice', 'secret was cleared by navigation');
+  assert.equal(await page.locator('#key-secret').textContent(), ''); assert.equal(await page.locator('#key-result').isVisible(), false); await page.unroute('**/v1/studio/keys');
+  await expectText('#build-tasks', 'Authored fixture board'); assert.equal(await page.locator('#providers-link').getAttribute('href'), '/#' + TOKEN);
+  await page.locator('#session-picker').selectOption(readonly.id); await expectText('#session-mode', 'Read-only'); await expectText('#command-status', 'Read ready');
+  await page.locator('#method').selectOption('scene.create'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#command-validation', 'read-only');
+  await page.locator('#method').selectOption('scene.children'); await page.locator('#send').click(); await expectText('#receipt-state', 'succeeded');
+  assert.equal(posted.at(-1)?.body.sessionId, readonly.id); assert.equal(await page.locator('#receipt-nodes img').count(), 0); await expectText('#receipt-nodes', '<img src=x onerror=alert(1)>');
+  await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click(); await expectText('#selected-ref', 'opaque-instance-1');
+  await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await expectText('#command-status', 'Read ready'); assert.equal(await page.locator('#selected-ref').textContent(), 'Choose a returned node in a receipt below.');
+  await page.locator('#send').click(); await expectText('#receipt-state', 'succeeded'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click();
+  await page.locator('#inspect-target').click(); await expectText('#receipt-title', 'scene.inspect'); await page.locator('#use-baseline').click();
+  await page.getByRole('checkbox', { name: 'Change Anchored', exact: true }).check(); await page.getByRole('combobox', { name: 'Anchored value', exact: true }).selectOption('true'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.update');
+  const update = posted.at(-1)!; assert.deepEqual((update.body.args as Record<string, unknown>).expected, { Anchored: false }); assert.deepEqual((update.body.args as Record<string, unknown>).properties, { Anchored: true });
+  await page.locator('#restore').click(); await expectText('#confirm-title', 'Restore this recorded change'); assert.equal(await page.locator('#confirm-action').isDisabled(), true); await page.locator('#confirm-cancel').click(); assert.equal(posted.at(-1)?.path, '/v1/studio/commands');
+  await page.locator('#restore').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#receipt-title', 'scene.restore'); assert.equal(posted.at(-1)?.path, '/v1/studio/restore'); assert.deepEqual(Object.keys(posted.at(-1)!.body).sort(), ['commandId', 'requestId']);
+  await page.locator('#method').selectOption('scene.children'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.children'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).nth(2).click(); await page.locator('#read-source').click(); await expectText('#receipt-title', 'script.read'); await page.locator('#use-baseline').click(); await page.locator('#source').fill('-- edited fixture\nreturn 2');
+  conflict = true; await page.locator('#send').click(); await expectText('#notice', 'CONFLICT'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).expectedSource, '-- unsaved fixture editor\nreturn 1'); assert.equal(await page.locator('#receipt-title').textContent(), 'script.read'); conflict = false;
+  await page.locator('#send').click(); await expectText('#receipt-title', 'script.update');
+  await page.locator('#method').selectOption('selection.read'); nextState = 'queued'; await page.locator('#send').click(); await expectText('#receipt-state', 'queued'); assert.equal(await page.locator('#send').isDisabled(), true);
+  commands[0]!.state = 'dispatched'; await page.locator('#refresh').click(); await expectText('#receipt-state', 'dispatched'); await expectText('#receipt-explanation', 'outcome is not yet known');
+  commands[0]!.state = 'needs_reconciliation'; await page.locator('#refresh').click(); await expectText('#receipt-state', 'needs reconciliation'); assert.equal(await page.locator('#send').isDisabled(), true);
+  commands[0]!.state = 'failed'; commands[0]!.error = 'Fixture failed receipt'; await page.locator('#refresh').click(); await expectText('#receipt-error', 'Fixture failed receipt'); nextState = 'succeeded';
+  loseNextResponse = true; await page.locator('#send').click(); await expectText('#unknown-message', 'Outcome unknown'); assert.equal(await page.locator('#session-picker').isDisabled(), true); const lost = posted.at(-1)!;
+  await page.locator('#retry-request').click(); await expectText('#receipt-state', 'succeeded'); assert.deepEqual(posted.at(-1)?.body, lost.body); assert.equal(commands.filter(c => c.requestId === lost.body.requestId).length, 1);
+  failSessions = true; await page.locator('#refresh').click(); await expectText('#connection-status', 'Refresh unavailable'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#notice', 'outcomes have not been inferred'); failSessions = false; await page.locator('#refresh').click(); await expectText('#connection-status', 'Daemon responding');
+  await page.locator('#method').selectOption('scene.search'); await page.locator('#query').fill('Duplicate'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.search'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).query, 'Duplicate');
+  await page.locator('#method').selectOption('scene.create'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click(); await page.locator('#create-name').fill('Fixture folder'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.create'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).className, 'Folder');
+  await page.locator('#asset-name').fill('fixture-crate'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
+  await page.locator('#asset-probe').click(); await expectText('#asset-runtime', 'HTTP-fixture-only-no-Blender'); await page.waitForFunction(() => !(document.getElementById('asset-start') as HTMLButtonElement).disabled);
+  await page.locator('#asset-start').click(); await expectText('#asset-job-summary', 'running'); assert.equal(posted.at(-1)?.path, '/v1/assets/start'); assert.equal(posted.at(-1)?.body.template, 'hero-prop'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
+  await page.locator('#asset-cancel').click(); await expectText('#asset-job-summary', 'cancelled'); assert.deepEqual(posted.at(-1)?.body, { jobId: fixtureAssetJobs[0]!.jobId });
+  await page.locator('#asset-template').selectOption('environment-kit'); assert.equal(await page.locator('#asset-size').inputValue(), '3, 3, 2.8'); await page.locator('#asset-name').fill('fixture-room'); await page.locator('#asset-start').click(); await expectText('#asset-job-summary', 'fixture-room');
+  fixtureAssetJobs[0]!.state = 'succeeded'; fixtureAssetJobs[0]!.manifestAvailable = true; await page.locator('#refresh').click(); await expectText('#asset-job-summary', 'succeeded');
+  await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'authenticated previews loaded'); assert.equal(await page.locator('#asset-previews canvas').count(), 2); await expectText('#asset-manifest', 'no native Blender or Studio verification');
+  corruptPreview = true; await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'previews failed'); assert.equal(await page.locator('#asset-previews canvas').count(), 0); corruptPreview = false;
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  if (process.env.ARCANE_UI_SCREENSHOT) { await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT, fullPage: true }); await page.locator('section').filter({ has: page.locator('#asset-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.assets-panel.png' }); }
+  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes').isChecked(), false); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await page.locator('#revoke').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#session-mode', 'Revoked'); assert.equal(await page.locator('#send').isDisabled(), true);
+  assert.deepEqual(errors, []); assert.ok(posted.every(p => p.authorization === 'Bearer ' + TOKEN));
+});
+
+
+test('real browser and daemon: human API keys, key connection and revocation, durable WorkStore create, human Origin review, hash conflicts, readiness, scoped token and restart', { skip: !browserModule, timeout: 90000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'arcane-ui-work-'));
+  const evidencePath = join(directory, 'proof.txt'); await writeFile(evidencePath, 'submitted proof');
+  let studioStore = new StudioStore({ directory: join(directory, 'studio') });
+  let workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
+  let app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
+  t.after(async () => {
+    await app.close(); workStore.close(); studioStore.close();
+    const child = relative(resolve(tmpdir()), resolve(directory)); assert.ok(child && child !== '..' && !child.startsWith('..' + (process.platform === 'win32' ? '\\' : '/')) && !isAbsolute(child));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
+  const text = async (selector: string, value: string) => { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }); };
+  const refresh = async () => { await page.locator('#refresh').click(); await page.waitForFunction(() => !(document.getElementById('refresh') as HTMLButtonElement).disabled); };
+  const post = async (path: string, body: unknown, token = app.agentToken, origin?: string) => {
+    const response = await fetch(app.origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) });
+    return { status: response.status, data: await response.json() as any };
+  };
+  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await page.locator('#auto-refresh').uncheck();
+  assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#native-token-result').isVisible(), false);
+  await page.locator('#native-get-token').click(); await text('#native-notice', 'human review disabled');
+  assert.equal(await page.locator('#native-token').textContent(), app.agentToken);
+  assert.equal(await page.evaluate((token: string) => [...Object.values(sessionStorage), ...Object.values(localStorage)].some(value => String(value).includes(token)), app.agentToken), false);
+  assert.equal((await post('/v1/work/review', {}, app.agentToken, app.origin)).status, 403);
+  assert.equal((await post('/v1/work/review', {}, app.token)).status, 403);
+  await text('#key-status', 'Key service responding');
+  assert.equal((await post('/v1/studio/keys', { allowedRoots: ['Workspace'], allowWrites: false }, app.agentToken, app.origin)).status, 403);
+  assert.equal((await fetch(app.origin + '/v1/studio/keys', { headers: { Authorization: 'Bearer ' + app.agentToken } })).status, 403);
+  assert.equal((await post('/v1/studio/keys/revoke', { keyId: 'cannot-revoke' }, app.agentToken, app.origin)).status, 403);
+  const keyResponse = page.waitForResponse((response: any) => response.url() === app.origin + '/v1/studio/keys' && response.request().method() === 'POST');
+  await page.locator('#key-issue').click(); const issued = await (await keyResponse).json(); await text('#key-grants', issued.keyId);
+  assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false); assert.equal(studioStore.keys()[0]?.allowWrites, false);
+  assert.equal(JSON.stringify(studioStore.keys()).includes(issued.apiKey), false);
+  assert.equal(await page.evaluate((key: string) => [...Object.values(sessionStorage), ...Object.values(localStorage)].some(value => String(value).includes(key)), issued.apiKey), false);
+  const pluginResponse = await fetch(app.origin + '/v1/plugin/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: issued.apiKey, protocolVersion: 1, identity: { clientSessionId: 'real-http-key-contract-fixture', placeId: 0, universeId: 0, name: 'HTTP key fixture (not native Studio)', pluginVersion: 'fixture' }, capabilities: [...READ_METHODS, ...WRITE_METHODS] }) });
+  assert.equal(pluginResponse.status, 200); const connected = await pluginResponse.json() as { sessionId: string };
+  await page.locator('#key-dismiss').click(); await refresh(); assert.notEqual(studioStore.keys()[0]?.lastUsedAt, null);
+  await page.locator('#session-picker').selectOption(connected.sessionId); await text('#session-mode', 'Read-only');
+  await page.locator('.key-history-details > summary').click(); await page.locator('#key-history button[data-key-id="' + issued.keyId + '"]').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#key-history', 'Revoked'); await text('#session-mode', 'Revoked');
+  assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await page.locator('#session-picker').selectOption('');
+  await page.locator('.work-create > summary').click(); await page.locator('#work-title').fill('Real durable UI run'); await page.locator('#work-objective').fill('Review hashes and dependencies through actual daemon routes');
+  const fillTask = async (index: number, key: string, dependencies: string) => {
+    const row = page.locator('.work-task-draft').nth(index);
+    for (const [field, value] of Object.entries({ key, title: key + ' task', scope: 'src/' + key + '.ts', dependencies, instructions: 'Check local artifacts for ' + key, acceptance: 'Evidence is reviewed by a human' })) await row.locator('[data-field="' + field + '"]').fill(value);
+  };
+  await fillTask(0, 'first', ''); await page.locator('#work-add-task').click(); await fillTask(1, 'second', 'first');
+  await page.locator('#work-create').click(); await text('#work-notice', 'Run recorded'); await text('#work-tasks', 'Waiting for reviewed dependencies');
+  let run = workStore.runs()[0]!; assert.equal(run.tasks.length, 2); const first = run.tasks[0]!, second = run.tasks[1]!;
+  assert.deepEqual(workStore.ready().map(t => t.key), ['first']);
+  const lease = await post('/v1/work/claim', { taskId: first.id, worker: 'Actual HTTP browser-test worker' }); assert.equal(lease.status, 200);
+  assert.equal((await post('/v1/work/submit', { taskId: first.id, leaseToken: lease.data.leaseToken, evidence: [{ path: 'proof.txt', note: '<img src=x onerror=alert(1)> actual hashed proof' }] })).status, 200);
+  await refresh(); await page.locator('[data-task-id="' + first.id + '"]').click(); await text('#work-task-evidence', 'SHA-256');
+  assert.equal(await page.locator('#work-task-evidence img').count(), 0); assert.equal(await page.locator('#work-approve').isDisabled(), true);
+  await page.locator('#work-review-note').fill('Check changed evidence is rejected'); await writeFile(evidencePath, 'changed after submission');
+  await page.locator('#work-approve').click(); await text('#confirm-title', 'Approve submitted work'); assert.equal(await page.locator('#confirm-action').isDisabled(), true); await page.locator('#confirm-cancel').click(); assert.equal(workStore.task(first.id).state, 'needs_review');
+  await page.locator('#work-approve').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#work-notice', 'EVIDENCE_CHANGED'); assert.equal(workStore.task(first.id).state, 'needs_review'); assert.equal(workStore.ready().some(t => t.id === second.id), false);
+  await page.locator('#work-review-note').fill('Re-submit the changed artifact'); await page.locator('#work-changes').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#work-notice', 'Changes requested'); await text('#work-task-meta', 'pending');
+  const lease2 = await post('/v1/work/claim', { taskId: first.id, worker: 'Resubmitting actual HTTP worker' });
+  assert.equal((await post('/v1/work/submit', { taskId: first.id, leaseToken: lease2.data.leaseToken, evidence: [{ path: 'proof.txt', note: 'Revised proof, actual hash' }] })).status, 200);
+  await refresh(); await page.locator('#work-review-note').fill('Reviewed the revised proof and acceptance criteria'); await page.locator('#work-approve').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#work-task-meta', 'complete');
+  assert.equal(workStore.task(first.id).state, 'complete'); assert.equal(workStore.ready().some(t => t.id === second.id), true);
+  await page.locator('#work-filter').selectOption('ready'); assert.equal(await page.locator('[data-task-id="' + first.id + '"]').count(), 0); assert.equal(await page.locator('[data-task-id="' + second.id + '"]').count(), 1); await page.locator('#work-filter').selectOption('all');
+  let createPosts = 0;
+  await page.route('**/v1/work/create', async (route: any) => { createPosts++; await route.fetch(); await route.abort('failed'); });
+  await page.locator('#work-create').click(); await text('#work-unknown-message', 'Outcome unknown'); assert.equal(await page.locator('#work-create').isDisabled(), true); assert.equal(workStore.runs().length, 2); assert.equal(createPosts, 1);
+  await page.unroute('**/v1/work/create'); await page.locator('#work-refresh').click(); await page.waitForFunction(() => !(document.getElementById('work-acknowledge') as HTMLButtonElement).disabled); await page.locator('#work-acknowledge').click(); assert.equal(workStore.runs().length, 2);
+  await page.reload(); await text('#work-status', 'WorkStore responding'); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
+  await app.close(); workStore.close(); studioStore.close();
+  studioStore = new StudioStore({ directory: join(directory, 'studio') }); workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
+  app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
+  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await page.locator('#auto-refresh').uncheck(); await text('#work-tasks', 'complete');
+  assert.equal(studioStore.keys()[0]?.keyId, issued.keyId); assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
+  assert.equal(workStore.runs().length, 2); assert.equal(workStore.task(first.id).reviewNote, 'Reviewed the revised proof and acceptance criteria');
+  await page.locator('[data-task-id="' + first.id + '"]').click(); await text('#work-task-evidence', 'Revised proof');
+  if (process.env.ARCANE_UI_SCREENSHOT) await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.work-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  if (process.env.ARCANE_UI_SCREENSHOT) { await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.work-mobile.png', fullPage: true }); await page.locator('section').filter({ has: page.locator('#work-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.work-panel.png' }); }
+  assert.deepEqual(errors, []);
+});
+
+
+test('native diagnostics browser with real HTTP routes and SDK fixtures: explicit targets, agent denial, closure, stale reads, late switches and safe output', { skip: !browserModule, timeout: 90000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'arcane-ui-native-'));
+  const studioStore = new StudioStore({ directory: join(directory, 'studio') }), workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
+  const agent = 'b'.repeat(64), alpha = 'native-ui-alpha', beta = 'native-ui-beta';
+  let inventory = [{ id: alpha, name: '<img src=x onerror=alert(1)> SDK fixture A' }, { id: beta, name: 'SDK fixture B' }];
+  let unavailable = false, holdRead = false, toolError = false;
+  let releaseRead: () => void = () => {}, readAccepted: () => void = () => {};
+  let held = Promise.resolve(); let created = 0, closed = 0;
+  const targeted: { method: string; args: Record<string, unknown> }[] = [];
+  const schema = (name: string, required: string[], properties: Record<string, unknown> = {}, allowed = true): Tool => ({ name, annotations: { readOnlyHint: allowed }, inputSchema: { type: 'object', required, properties: { ...(name === 'list_roblox_studios' ? {} : { studio_id: { type: 'string' } }), ...properties } } });
+  const tools = [schema('list_roblox_studios', []), schema('get_studio_state', ['studio_id']), schema('get_console_output', ['studio_id']), schema('inspect_instance', ['studio_id', 'path'], { path: { type: 'string' } }), schema('search_game_tree', ['studio_id', 'datamodel_type'], { datamodel_type: { type: 'string', enum: ['Edit', 'Client', 'Server'] }, path: { type: 'string' }, instance_type: { type: 'string' }, keywords: { type: 'string' }, head_limit: { type: 'number' }, max_depth: { type: 'number' } }), schema('script_read', ['studio_id', 'target_file'], { target_file: { type: 'string' }, should_read_entire_file: { type: 'boolean' }, start_line_one_indexed: { type: 'number' }, end_line_one_indexed_inclusive: { type: 'number' } }), schema('script_search', ['studio_id', 'keywords'], { keywords: { type: 'string' } }), schema('script_grep', ['studio_id', 'query'], { query: { type: 'string' } }, false), schema('execute_luau', ['studio_id'])];
+  const native = nativeRoutes({ connect: async () => {
+    if (unavailable) throw new (await import('../../packages/studio-adapter/src/policy.js')).NativeStudioError('STUDIO_EXECUTABLE', 'raw fixture failure ' + TOKEN);
+    created++; const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const sdkServer = new NativeFixtureServer({ name: 'UI native SDK fixture', version: 'fixture' }, { capabilities: { tools: {} } });
+    sdkServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+    sdkServer.setRequestHandler(CallToolRequestSchema, async request => {
+      const args = request.params.arguments ?? {};
+      if (request.params.name === 'list_roblox_studios') return { content: [{ type: 'text', text: JSON.stringify({ studios: inventory }) }] };
+      targeted.push({ method: request.params.name, args });
+      if (holdRead) { holdRead = false; readAccepted(); await held; }
+      const isError = toolError; toolError = false;
+      return { ...(isError ? { isError: true } : {}), content: [{ type: 'text', text: (isError ? 'Fixture tool error: ' : 'Fixture read: ') + String(args.studio_id) + ' · ' + request.params.name + '\n<img src=x onerror=alert(1)><script>window.nativeInjected=true</script>\nBearer fixture-secret password=fixture-password ' + TOKEN + '\x1b[31m' }] };
+    });
+    await sdkServer.connect(serverTransport);
+    const session = new NativeStudioSession(clientTransport, { kind: 'fixture', label: 'Browser HTTP + SDK fixture only; no live Studio' }, { timeoutMs: 2000, maxRequests: 16 }); await session.initialize();
+    let closing: Promise<void> | undefined;
+    return { metadata: session.metadata.bind(session), listStudios: session.listStudios.bind(session), read: session.read.bind(session), close: () => { closing ??= (async () => { await session.close(); await sdkServer.close(); closed++; })(); return closing; } };
+  } });
+  const controls = studioRoutes(studioStore, resolve('.'), workStore, directory, agent);
+  const assets = new Map([['/studio', resolve('apps/desktop/public/studio.html')], ['/studio.css', resolve('apps/desktop/public/studio.css')], ['/studio.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')]]);
+  let origin = '';
+  const server = createServer((request, response) => { void (async () => {
+    const url = new URL(request.url ?? '/', origin), asset = assets.get(url.pathname);
+    if (asset) { response.writeHead(200, { 'Content-Type': url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" }); response.end(await readFile(asset)); return; }
+    if (await native(request, response, url, TOKEN, origin) || await controls(request, response, url, TOKEN, origin)) return;
+    response.writeHead(404, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ error: 'NOT_FOUND', message: 'Endpoint absent from this explicit HTTP fixture.' }));
+  })().catch(() => { response.destroy(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done)); const address = server.address(); assert.ok(address && typeof address !== 'string'); origin = 'http://127.0.0.1:' + address.port;
+  t.after(async () => { releaseRead(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); workStore.close(); studioStore.close(); const child = relative(resolve(tmpdir()), resolve(directory)); assert.ok(child && !child.startsWith('..') && !isAbsolute(child)); await rm(directory, { recursive: true, force: true }); });
+  const denied = await fetch(origin + '/v1/native/read', { method: 'POST', headers: { Authorization: 'Bearer ' + agent, 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify({ method: 'get_studio_state', args: { studio_id: alpha } }) }); assert.equal(denied.status, 401); assert.equal(created, 0);
+  const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } }); const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
+  const text = async (selector: string, value: string) => { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }); };
+  const waitRead = async () => { await page.waitForFunction(() => document.querySelector('#diagnostics-request-status')?.textContent?.startsWith('Read complete')); };
+  await page.goto(origin + '/studio#' + agent); await page.locator('#auto-refresh').uncheck(); await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, 0); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
+  await page.goto(origin + '/studio#' + TOKEN); await page.locator('#auto-refresh').uncheck(); assert.equal(created, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
+  await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed); assert.equal(targeted.length, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
+  assert.equal(await page.locator('#diagnostics-method option[value="selection"]').isDisabled(), true); assert.equal(await page.locator('#diagnostics-method option[value="script_grep"]').isDisabled(), true); await text('#diagnostics-tools', 'execute_luau'); await text('#diagnostics-tools', 'not_read_allowlisted'); assert.equal(await page.locator('#diagnostics-tools img').count(), 0);
+  await page.locator('#diagnostics-studio').selectOption(alpha); await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', '<img src=x onerror=alert(1)>'); assert.equal(await page.locator('#diagnostics-output img, #diagnostics-output script').count(), 0); assert.equal(await page.evaluate(() => Boolean((window as unknown as { nativeInjected?: boolean }).nativeInjected)), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(TOKEN), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('fixture-password'), false); assert.equal(created, closed);
+  const beforeStale = targeted.length; inventory = [{ id: beta, name: 'SDK fixture B' }]; await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'denied as stale'); assert.equal(targeted.length, beforeStale); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
+  inventory = [{ id: alpha, name: 'SDK fixture A' }, { id: beta, name: 'SDK fixture B' }]; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
+  await page.locator('#diagnostics-studio').selectOption(alpha); holdRead = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const accepted = new Promise<void>(resolve => { readAccepted = resolve; });
+  await page.locator('#diagnostics-read').click(); await accepted; await text('#diagnostics-request-status', 'Read in flight'); assert.equal(created, closed + 1); assert.equal(await page.locator('#diagnostics-probe').isDisabled(), true); await page.locator('#diagnostics-studio').selectOption(beta); releaseRead(); await text('#diagnostics-request-status', 'result discarded'); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(alpha), false); assert.equal(created, closed);
+  await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', beta);
+  await page.locator('#diagnostics-method').selectOption('search_game_tree'); await page.locator('#diagnostics-limit').fill('201'); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); await page.locator('#diagnostics-limit').fill('200'); await page.locator('#diagnostics-depth').fill('2'); await page.locator('#diagnostics-datamodel').selectOption('Edit'); await page.locator('#diagnostics-query').fill('Fixture'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.equal(targeted.at(-1)?.args.head_limit, 200); assert.equal(targeted.at(-1)?.args.max_depth, 2);
+  await page.locator('#diagnostics-limit').fill('999'); await page.locator('#diagnostics-method').selectOption('inspect_instance'); await page.locator('#diagnostics-path').fill('game.Workspace.Baseplate'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.deepEqual(targeted.at(-1)?.args, { studio_id: beta, path: 'game.Workspace.Baseplate' });
+  await page.locator('#diagnostics-method').selectOption('script_read'); await page.locator('#diagnostics-path').fill('game.ServerScriptService.Fixture'); await page.locator('#diagnostics-start').fill('25'); await page.locator('#diagnostics-end').fill('36'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.deepEqual(targeted.at(-1)?.args, { studio_id: beta, target_file: 'game.ServerScriptService.Fixture', should_read_entire_file: false, start_line_one_indexed: 25, end_line_one_indexed_inclusive: 36 });
+  await page.locator('#diagnostics-method').selectOption('script_search'); await page.locator('#diagnostics-query').fill('Fixture'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.equal(targeted.at(-1)?.args.keywords, 'Fixture');
+  await page.locator('#diagnostics-method').selectOption('get_console_output'); toolError = true; await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'Fixture tool error'); await text('#diagnostics-request-status', 'failed'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed);
+  await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', beta);
+  if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('section').filter({ has: page.locator('#diagnostics-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.native-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true); if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('section').filter({ has: page.locator('#diagnostics-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.native-mobile.png' });
+  unavailable = true; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'vetted official Studio MCP executable is unavailable'); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal((await page.locator('#diagnostics-notice').textContent()).includes(TOKEN), false);
+  unavailable = false; inventory = []; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'No native Studio windows'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
+  assert.deepEqual(errors, []); assert.ok(targeted.every(call => (NATIVE_READ_METHODS as readonly string[]).includes(call.method))); assert.ok(targeted.every(call => call.args.studio_id === alpha || call.args.studio_id === beta));
+});

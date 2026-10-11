@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "outDir": "./.test-output",
+    "sourceMap": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../tests/unit/native-studio.test.ts"
+  ]
+}

@@ -1,0 +1,3238 @@
+{
+  "schemaVersion": 1,
+  "officialDocumentation": "https://create.roblox.com/docs/studio/mcp",
+  "runtime": {
+    "evidenceKind": "live-built-in-studio-mcp",
+    "startedAt": "2026-10-11T22:10:39.781Z",
+    "finishedAt": "2026-10-11T22:10:39.800Z",
+    "sdk": {
+      "name": "@modelcontextprotocol/sdk",
+      "version": "1.32.1"
+    },
+    "executable": {
+      "path": "%LOCALAPPDATA%\\Roblox\\Versions\\version-9b554450a0fc4e65\\StudioMCP.exe",
+      "sha256": "e630d65c6a2e22bcd3a65f0c7857bcb2c1c6ba3a6b48b578cb90eacde042d515",
+      "signatureStatus": "Valid",
+      "signer": "CN=Roblox Corporation, O=Roblox Corporation, L=San Mateo, S=California, C=US, SERIALNUMBER=3780902, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, OID.1.3.6.1.4.1.311.60.2.1.3=US",
+      "discoveredFrom": "installed-mcp-launcher"
+    },
+    "launch": {
+      "transport": "stdio",
+      "shell": false,
+      "windowsHide": true,
+      "args": [],
+      "launcherExecuted": false
+    },
+    "capabilityInventory": {
+      "observedAt": "2026-10-11T22:10:39.778Z",
+      "server": {
+        "name": "RobloxStudio",
+        "version": "1.0.0"
+      },
+      "serverCapabilities": {
+        "tools": {
+          "listChanged": true
+        }
+      },
+      "toolCount": 30,
+      "tools": [
+        {
+          "name": "capture_plugin_gui",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "plugin_gui_id": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "plugin_gui_id",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Capture Plugin GUI",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "character_navigation",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "datamodel_type": {
+                "enum": [
+                  "Client"
+                ],
+                "type": "string"
+              },
+              "instance_path": {
+                "type": "string"
+              },
+              "speed_multiplier": {
+                "type": "number"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Character Navigation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "execute_luau",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Edit",
+                  "Client",
+                  "Server"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Execute Luau",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "generate_material",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "async": {
+                "type": "boolean"
+              },
+              "baseMaterial": {
+                "enum": [
+                  "Plastic",
+                  "SmoothPlastic",
+                  "Wood",
+                  "WoodPlanks",
+                  "Marble",
+                  "Basalt",
+                  "Slate",
+                  "CrackedLava",
+                  "Concrete",
+                  "Limestone",
+                  "Granite",
+                  "Pavement",
+                  "Brick",
+                  "Pebble",
+                  "Cobblestone",
+                  "Rock",
+                  "Sandstone",
+                  "CorrodedMetal",
+                  "DiamondPlate",
+                  "Foil",
+                  "Metal",
+                  "Grass",
+                  "LeafyGrass",
+                  "Sand",
+                  "Fabric",
+                  "Snow",
+                  "Mud",
+                  "Ground",
+                  "Asphalt",
+                  "Salt",
+                  "Ice",
+                  "Glacier",
+                  "Cardboard",
+                  "Carpet",
+                  "CeramicTiles",
+                  "ClayRoofTiles",
+                  "RoofShingles",
+                  "Leather",
+                  "Plaster",
+                  "Rubber"
+                ],
+                "type": "string"
+              },
+              "materialDescription": {
+                "type": "string"
+              },
+              "materialId": {
+                "type": "string"
+              },
+              "materialPattern": {
+                "enum": [
+                  "Regular",
+                  "Organic"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "materialPattern",
+              "materialId",
+              "baseMaterial",
+              "materialDescription",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Material Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "generate_mesh",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "async": {
+                "type": "boolean"
+              },
+              "maxTriangles": {
+                "type": "number"
+              },
+              "partNames": {
+                "type": "string"
+              },
+              "segmentation": {
+                "enum": [
+                  "auto",
+                  "none",
+                  "explicit"
+                ],
+                "type": "string"
+              },
+              "size": {
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "z": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "z"
+                ],
+                "type": "object"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "textPrompt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "textPrompt",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Mesh Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "generate_procedural_model",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "async": {
+                "type": "boolean"
+              },
+              "attachedImageUri": {
+                "type": "string"
+              },
+              "partNames": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "segmentation": {
+                "enum": [
+                  "auto",
+                  "none",
+                  "explicit"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Primitive Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "generate_texture",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "hintImage": {
+                "type": "object"
+              },
+              "instance_path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "textPrompt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "textPrompt",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Texture Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_console_output",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Get Console Output",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_studio_state",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Get Studio State",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "http_get",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "context_lines": {
+                "type": "number"
+              },
+              "query": {
+                "type": "string"
+              },
+              "return_full": {
+                "type": "boolean"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "HTTP GET",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "insert_asset",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "assetId": {
+                "type": "string"
+              },
+              "assetName": {
+                "type": "string"
+              },
+              "assetType": {
+                "enum": [
+                  "Model",
+                  "Package",
+                  "Mesh",
+                  "MeshPart",
+                  "Image",
+                  "Decal",
+                  "Audio",
+                  "Video",
+                  "Animation"
+                ],
+                "type": "string"
+              },
+              "parentPath": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "assetId",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Insert Asset",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "inspect_instance",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Inspect Instance",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_plugin_guis",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "List Plugin GUIs",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_roblox_studios",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "title": "List Roblox Studios",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "multi_edit",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "className": {
+                "type": "string"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Edit"
+                ],
+                "type": "string"
+              },
+              "edits": {
+                "items": {
+                  "properties": {
+                    "new_string": {
+                      "type": "string"
+                    },
+                    "old_string": {
+                      "type": "string"
+                    },
+                    "replace_all": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "old_string",
+                    "new_string"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "file_path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path",
+              "edits",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Multi-Edit",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "screen_capture",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "camera_position": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "capture_id": {
+                "type": "string"
+              },
+              "look_at_position": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "capture_id",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Screen Capture",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "script_grep",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Grep Search",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "script_read",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "end_line_one_indexed_inclusive": {
+                "type": "integer"
+              },
+              "should_read_entire_file": {
+                "type": "boolean"
+              },
+              "start_line_one_indexed": {
+                "type": "integer"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "target_file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_file",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Read File",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "script_search",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "keywords": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "keywords",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "File Search",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "search_asset",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "assetType": {
+                "enum": [
+                  "Model",
+                  "Audio",
+                  "Mesh",
+                  "MeshPart",
+                  "Image",
+                  "Decal",
+                  "Video",
+                  "Package"
+                ],
+                "type": "string"
+              },
+              "audioMaxDuration": {
+                "type": "number"
+              },
+              "audioMinDuration": {
+                "type": "number"
+              },
+              "excludeSources": {
+                "items": {
+                  "enum": [
+                    "user",
+                    "group",
+                    "universe",
+                    "creator_store"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "facets": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "groupId": {
+                "type": "string"
+              },
+              "groupName": {
+                "type": "string"
+              },
+              "includeSources": {
+                "items": {
+                  "enum": [
+                    "user",
+                    "group",
+                    "universe",
+                    "creator_store"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "maxPriceCents": {
+                "type": "number"
+              },
+              "maxResults": {
+                "type": "number"
+              },
+              "minPriceCents": {
+                "type": "number"
+              },
+              "priceFilter": {
+                "enum": [
+                  "free",
+                  "paid",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "query": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "auto",
+                  "creator_store",
+                  "user",
+                  "group",
+                  "universe"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "verifiedCreatorsOnly": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Search Asset",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "search_game_tree",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "datamodel_type": {
+                "enum": [
+                  "Edit",
+                  "Client",
+                  "Server"
+                ],
+                "type": "string"
+              },
+              "head_limit": {
+                "type": "number"
+              },
+              "instance_type": {
+                "type": "string"
+              },
+              "keywords": {
+                "type": "string"
+              },
+              "max_depth": {
+                "type": "number"
+              },
+              "path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Game Tree",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "segment_mesh",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "instance_path": {
+                "type": "string"
+              },
+              "parts": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "parts",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Mesh Segmentation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "skill",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "skill_name": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "skill_name",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Skill",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "start_stop_play",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "is_start": {
+                "type": "boolean"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "is_start",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Start/Stop Play",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "store_image",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filePath": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "filePath",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Store Image",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "subagent",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              },
+              "subagent_type": {
+                "type": "string"
+              },
+              "task": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "description",
+              "subagent_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Subagent",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "upload_image",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "imagePaths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "imagePaths",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Upload Image",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "user_keyboard_input",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "actions": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "keyDown",
+                        "keyUp",
+                        "keyPress",
+                        "textInput",
+                        "wait"
+                      ],
+                      "type": "string"
+                    },
+                    "instance_path": {
+                      "type": "string"
+                    },
+                    "key_code": {
+                      "enum": [
+                        "None",
+                        "Backspace",
+                        "Tab",
+                        "Clear",
+                        "Return",
+                        "Pause",
+                        "Escape",
+                        "Space",
+                        "QuotedDouble",
+                        "Hash",
+                        "Dollar",
+                        "Percent",
+                        "Ampersand",
+                        "Quote",
+                        "LeftParenthesis",
+                        "RightParenthesis",
+                        "Asterisk",
+                        "Plus",
+                        "Comma",
+                        "Minus",
+                        "Period",
+                        "Slash",
+                        "Zero",
+                        "One",
+                        "Two",
+                        "Three",
+                        "Four",
+                        "Five",
+                        "Six",
+                        "Seven",
+                        "Eight",
+                        "Nine",
+                        "Colon",
+                        "Semicolon",
+                        "LessThan",
+                        "Equals",
+                        "GreaterThan",
+                        "Question",
+                        "At",
+                        "LeftBracket",
+                        "BackSlash",
+                        "RightBracket",
+                        "Caret",
+                        "Underscore",
+                        "Backquote",
+                        "A",
+                        "B",
+                        "C",
+                        "D",
+                        "E",
+                        "F",
+                        "G",
+                        "H",
+                        "I",
+                        "J",
+                        "K",
+                        "L",
+                        "M",
+                        "N",
+                        "O",
+                        "P",
+                        "Q",
+                        "R",
+                        "S",
+                        "T",
+                        "U",
+                        "V",
+                        "W",
+                        "X",
+                        "Y",
+                        "Z",
+                        "LeftCurly",
+                        "Pipe",
+                        "RightCurly",
+                        "Tilde",
+                        "Delete",
+                        "World0",
+                        "World1",
+                        "World2",
+                        "World3",
+                        "World4",
+                        "World5",
+                        "World6",
+                        "World7",
+                        "World8",
+                        "World9",
+                        "World10",
+                        "World11",
+                        "World12",
+                        "World13",
+                        "World14",
+                        "World15",
+                        "World16",
+                        "World17",
+                        "World18",
+                        "World19",
+                        "World20",
+                        "World21",
+                        "World22",
+                        "World23",
+                        "World24",
+                        "World25",
+                        "World26",
+                        "World27",
+                        "World28",
+                        "World29",
+                        "World30",
+                        "World31",
+                        "World32",
+                        "World33",
+                        "World34",
+                        "World35",
+                        "World36",
+                        "World37",
+                        "World38",
+                        "World39",
+                        "World40",
+                        "World41",
+                        "World42",
+                        "World43",
+                        "World44",
+                        "World45",
+                        "World46",
+                        "World47",
+                        "World48",
+                        "World49",
+                        "World50",
+                        "World51",
+                        "World52",
+                        "World53",
+                        "World54",
+                        "World55",
+                        "World56",
+                        "World57",
+                        "World58",
+                        "World59",
+                        "World60",
+                        "World61",
+                        "World62",
+                        "World63",
+                        "World64",
+                        "World65",
+                        "World66",
+                        "World67",
+                        "World68",
+                        "World69",
+                        "World70",
+                        "World71",
+                        "World72",
+                        "World73",
+                        "World74",
+                        "World75",
+                        "World76",
+                        "World77",
+                        "World78",
+                        "World79",
+                        "World80",
+                        "World81",
+                        "World82",
+                        "World83",
+                        "World84",
+                        "World85",
+                        "World86",
+                        "World87",
+                        "World88",
+                        "World89",
+                        "World90",
+                        "World91",
+                        "World92",
+                        "World93",
+                        "World94",
+                        "World95",
+                        "KeypadZero",
+                        "KeypadOne",
+                        "KeypadTwo",
+                        "KeypadThree",
+                        "KeypadFour",
+                        "KeypadFive",
+                        "KeypadSix",
+                        "KeypadSeven",
+                        "KeypadEight",
+                        "KeypadNine",
+                        "KeypadPeriod",
+                        "KeypadDivide",
+                        "KeypadMultiply",
+                        "KeypadMinus",
+                        "KeypadPlus",
+                        "KeypadEnter",
+                        "KeypadEquals",
+                        "Up",
+                        "Down",
+                        "Right",
+                        "Left",
+                        "Insert",
+                        "Home",
+                        "End",
+                        "PageUp",
+                        "PageDown",
+                        "F1",
+                        "F2",
+                        "F3",
+                        "F4",
+                        "F5",
+                        "F6",
+                        "F7",
+                        "F8",
+                        "F9",
+                        "F10",
+                        "F11",
+                        "F12",
+                        "F13",
+                        "F14",
+                        "F15",
+                        "NumLock",
+                        "CapsLock",
+                        "ScrollLock",
+                        "RightShift",
+                        "LeftShift",
+                        "RightControl",
+                        "LeftControl",
+                        "RightAlt",
+                        "LeftAlt",
+                        "RightMeta",
+                        "LeftMeta",
+                        "LeftSuper",
+                        "RightSuper",
+                        "Mode",
+                        "Compose",
+                        "Help",
+                        "Print",
+                        "SysReq",
+                        "Break",
+                        "Menu",
+                        "Power",
+                        "Euro",
+                        "Undo",
+                        "ButtonX",
+                        "ButtonY",
+                        "ButtonA",
+                        "ButtonB",
+                        "ButtonR1",
+                        "ButtonL1",
+                        "ButtonR2",
+                        "ButtonL2",
+                        "ButtonR3",
+                        "ButtonL3",
+                        "ButtonStart",
+                        "ButtonSelect",
+                        "DPadLeft",
+                        "DPadRight",
+                        "DPadUp",
+                        "DPadDown",
+                        "Thumbstick1",
+                        "Thumbstick2",
+                        "Thumbstick1Up",
+                        "Thumbstick1Down",
+                        "Thumbstick1Left",
+                        "Thumbstick1Right",
+                        "Thumbstick2Up",
+                        "Thumbstick2Down",
+                        "Thumbstick2Left",
+                        "Thumbstick2Right",
+                        "MouseLeftButton",
+                        "MouseRightButton",
+                        "MouseMiddleButton",
+                        "MouseBackButton",
+                        "MouseNoButton",
+                        "MouseX",
+                        "MouseY",
+                        "MousePosition",
+                        "TouchPosition",
+                        "MouseWheel",
+                        "TrackpadPan",
+                        "TrackpadPinch",
+                        "MouseDelta",
+                        "TouchDelta",
+                        "TouchPinch",
+                        "ButtonCenter",
+                        "ButtonBack",
+                        "ButtonUp",
+                        "ButtonDown",
+                        "ButtonLeft",
+                        "ButtonRight"
+                      ],
+                      "type": "string"
+                    },
+                    "text_inputs": {
+                      "type": "string"
+                    },
+                    "wait_time_ms": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Client"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "actions",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "User Keyboard Input",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "user_mouse_input",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "actions": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "moveTo",
+                        "mouseButtonDown",
+                        "mouseButtonUp",
+                        "mouseButtonClick",
+                        "scrollUp",
+                        "scrollDown",
+                        "wait"
+                      ],
+                      "type": "string"
+                    },
+                    "instance_path": {
+                      "type": "string"
+                    },
+                    "mouse_button": {
+                      "enum": [
+                        "left",
+                        "right"
+                      ],
+                      "type": "string"
+                    },
+                    "wait_time_ms": {
+                      "type": "number"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Client"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "actions",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "User Mouse Input",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "wait_job_finished",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "jobId": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "timeout": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "jobId",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Wait Job Finished",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    "observations": {
+      "list_roblox_studios": {
+        "status": "succeeded",
+        "studios": [
+          {
+            "id": "5e20e764-3ac3-497f-8908-39e54a2bfc21",
+            "name": "Place1"
+          }
+        ]
+      },
+      "targetedRead": {
+        "method": "get_studio_state",
+        "studio_id": "43b622a3-4265-42da-92fd-c9980c3022a3",
+        "status": "refused_or_failed",
+        "error": "STUDIO_NOT_FOUND"
+      }
+    },
+    "lifecycle": {
+      "requestsUsed": 4,
+      "limits": {
+        "argumentBytes": 262144,
+        "resultBytes": 524288,
+        "sourceBytes": 102400,
+        "tools": 128,
+        "toolPages": 4,
+        "studios": 64,
+        "defaultTimeoutMs": 10000,
+        "maximumTimeoutMs": 15000,
+        "defaultRequests": 64,
+        "maximumRequests": 256,
+        "timeoutMs": 10000,
+        "maxRequests": 32
+      },
+      "connectedAfterClose": false,
+      "closed": true,
+      "automaticRetries": 0
+    },
+    "mutationCalls": 0,
+    "excludes": [
+      "script source",
+      "instance properties",
+      "attributes",
+      "console logs",
+      "stderr",
+      "provider credentials"
+    ],
+    "fixtureTests": {
+      "status": "not_run_by_this_capture",
+      "evidenceKind": "fixture",
+      "source": "tests/unit/native-studio.test.ts"
+    }
+  },
+  "fixtureValidation": {
+    "evidenceKind": "fixture",
+    "observedAt": "2026-10-11T22:17:05.144Z",
+    "command": "node --test packages/studio-adapter/.test-output/tests/unit/native-studio.test.js",
+    "tests": 18,
+    "passed": 18,
+    "failed": 0,
+    "liveStudioProof": false,
+    "pluginRuntimeProof": false,
+    "reviewedBounds": [
+      "per-request timeout and total timeout",
+      "bounded transport startup",
+      "single in-flight operation",
+      "request budget including discovery and inventory",
+      "256 KiB combined runtime capability inventory",
+      "512 KiB result/wire buffer",
+      "100 KiB UTF-8 script response",
+      "exact target identity with current inventory",
+      "vetted installation cwd"
+    ],
+    "repositoryTypecheck": {
+      "command": "node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
+      "exitCode": 0
+    }
+  },
+  "httpFixtureValidation": {
+    "evidenceKind": "loopback-http-sdk-fixture",
+    "observedAt": "2026-10-11T22:39:30.143Z",
+    "command": "node --test packages/studio-adapter/.test-output/tests/unit/native-http.test.js packages/studio-adapter/.test-output/tests/unit/native-studio.test.js",
+    "httpTests": 16,
+    "adapterTests": 18,
+    "totalTests": 34,
+    "passed": 34,
+    "failed": 0,
+    "liveStudioProof": false,
+    "repositoryTypecheck": {
+      "command": "node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
+      "exitCode": 0
+    }
+  },
+  "nativeHttpRuntime": {
+    "evidenceKind": "live-native-http-capability-probe",
+    "observedAt": "2026-10-11T22:39:30.126Z",
+    "controller": "apps/daemon/src/native-routes.ts",
+    "controllerMode": "fresh isolated loopback controller; production default connector; parent server was not restarted",
+    "controllerSha256": "7e40c50474210488e31020bb30e990406dc897016b2bab72dd8acc467b9d2d3e",
+    "request": {
+      "method": "GET",
+      "path": "/v1/native/capabilities",
+      "authentication": "ephemeral human control bearer",
+      "originHeader": "omitted native local CLI"
+    },
+    "response": {
+      "status": 200,
+      "contentType": "application/json; charset=utf-8",
+      "cacheControl": "no-store",
+      "bytes": 39095,
+      "readOnly": true,
+      "available": true,
+      "requiresExplicitRead": true
+    },
+    "sdk": {
+      "name": "@modelcontextprotocol/sdk",
+      "version": "1.32.1"
+    },
+    "provenance": {
+      "kind": "live",
+      "executable": {
+        "path": "%LOCALAPPDATA%\\Roblox\\Versions\\version-9b554450a0fc4e65\\StudioMCP.exe",
+        "sha256": "e630d65c6a2e22bcd3a65f0c7857bcb2c1c6ba3a6b48b578cb90eacde042d515",
+        "signer": "CN=Roblox Corporation, O=Roblox Corporation, L=San Mateo, S=California, C=US, SERIALNUMBER=3780902, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, OID.1.3.6.1.4.1.311.60.2.1.3=US",
+        "signatureStatus": "Valid",
+        "discoveredFrom": "installed-mcp-launcher"
+      }
+    },
+    "runtimeCapabilities": {
+      "observedAt": "2026-10-11T22:39:30.083Z",
+      "server": {
+        "name": "RobloxStudio",
+        "version": "1.0.0"
+      },
+      "serverCapabilities": {
+        "tools": {
+          "listChanged": true
+        }
+      },
+      "toolCount": 30,
+      "tools": [
+        {
+          "name": "capture_plugin_gui",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "plugin_gui_id": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "plugin_gui_id",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Capture Plugin GUI",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "character_navigation",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "datamodel_type": {
+                "enum": [
+                  "Client"
+                ],
+                "type": "string"
+              },
+              "instance_path": {
+                "type": "string"
+              },
+              "speed_multiplier": {
+                "type": "number"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Character Navigation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "execute_luau",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Edit",
+                  "Client",
+                  "Server"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Execute Luau",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "generate_material",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "async": {
+                "type": "boolean"
+              },
+              "baseMaterial": {
+                "enum": [
+                  "Plastic",
+                  "SmoothPlastic",
+                  "Wood",
+                  "WoodPlanks",
+                  "Marble",
+                  "Basalt",
+                  "Slate",
+                  "CrackedLava",
+                  "Concrete",
+                  "Limestone",
+                  "Granite",
+                  "Pavement",
+                  "Brick",
+                  "Pebble",
+                  "Cobblestone",
+                  "Rock",
+                  "Sandstone",
+                  "CorrodedMetal",
+                  "DiamondPlate",
+                  "Foil",
+                  "Metal",
+                  "Grass",
+                  "LeafyGrass",
+                  "Sand",
+                  "Fabric",
+                  "Snow",
+                  "Mud",
+                  "Ground",
+                  "Asphalt",
+                  "Salt",
+                  "Ice",
+                  "Glacier",
+                  "Cardboard",
+                  "Carpet",
+                  "CeramicTiles",
+                  "ClayRoofTiles",
+                  "RoofShingles",
+                  "Leather",
+                  "Plaster",
+                  "Rubber"
+                ],
+                "type": "string"
+              },
+              "materialDescription": {
+                "type": "string"
+              },
+              "materialId": {
+                "type": "string"
+              },
+              "materialPattern": {
+                "enum": [
+                  "Regular",
+                  "Organic"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "materialPattern",
+              "materialId",
+              "baseMaterial",
+              "materialDescription",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Material Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "generate_mesh",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "async": {
+                "type": "boolean"
+              },
+              "maxTriangles": {
+                "type": "number"
+              },
+              "partNames": {
+                "type": "string"
+              },
+              "segmentation": {
+                "enum": [
+                  "auto",
+                  "none",
+                  "explicit"
+                ],
+                "type": "string"
+              },
+              "size": {
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "z": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "z"
+                ],
+                "type": "object"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "textPrompt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "textPrompt",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Mesh Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "generate_procedural_model",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "async": {
+                "type": "boolean"
+              },
+              "attachedImageUri": {
+                "type": "string"
+              },
+              "partNames": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "segmentation": {
+                "enum": [
+                  "auto",
+                  "none",
+                  "explicit"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Primitive Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "generate_texture",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "hintImage": {
+                "type": "object"
+              },
+              "instance_path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "textPrompt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "textPrompt",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Texture Generation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_console_output",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Get Console Output",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_studio_state",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Get Studio State",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "http_get",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "context_lines": {
+                "type": "number"
+              },
+              "query": {
+                "type": "string"
+              },
+              "return_full": {
+                "type": "boolean"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "HTTP GET",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "insert_asset",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "assetId": {
+                "type": "string"
+              },
+              "assetName": {
+                "type": "string"
+              },
+              "assetType": {
+                "enum": [
+                  "Model",
+                  "Package",
+                  "Mesh",
+                  "MeshPart",
+                  "Image",
+                  "Decal",
+                  "Audio",
+                  "Video",
+                  "Animation"
+                ],
+                "type": "string"
+              },
+              "parentPath": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "assetId",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Insert Asset",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "inspect_instance",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Inspect Instance",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_plugin_guis",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "List Plugin GUIs",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_roblox_studios",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "title": "List Roblox Studios",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "multi_edit",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "className": {
+                "type": "string"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Edit"
+                ],
+                "type": "string"
+              },
+              "edits": {
+                "items": {
+                  "properties": {
+                    "new_string": {
+                      "type": "string"
+                    },
+                    "old_string": {
+                      "type": "string"
+                    },
+                    "replace_all": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "old_string",
+                    "new_string"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "file_path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path",
+              "edits",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Multi-Edit",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "screen_capture",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "camera_position": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "capture_id": {
+                "type": "string"
+              },
+              "look_at_position": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "capture_id",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Screen Capture",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "script_grep",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Grep Search",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "script_read",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "end_line_one_indexed_inclusive": {
+                "type": "integer"
+              },
+              "should_read_entire_file": {
+                "type": "boolean"
+              },
+              "start_line_one_indexed": {
+                "type": "integer"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "target_file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_file",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Read File",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "script_search",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "keywords": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "keywords",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "File Search",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "search_asset",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "assetType": {
+                "enum": [
+                  "Model",
+                  "Audio",
+                  "Mesh",
+                  "MeshPart",
+                  "Image",
+                  "Decal",
+                  "Video",
+                  "Package"
+                ],
+                "type": "string"
+              },
+              "audioMaxDuration": {
+                "type": "number"
+              },
+              "audioMinDuration": {
+                "type": "number"
+              },
+              "excludeSources": {
+                "items": {
+                  "enum": [
+                    "user",
+                    "group",
+                    "universe",
+                    "creator_store"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "facets": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "groupId": {
+                "type": "string"
+              },
+              "groupName": {
+                "type": "string"
+              },
+              "includeSources": {
+                "items": {
+                  "enum": [
+                    "user",
+                    "group",
+                    "universe",
+                    "creator_store"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "maxPriceCents": {
+                "type": "number"
+              },
+              "maxResults": {
+                "type": "number"
+              },
+              "minPriceCents": {
+                "type": "number"
+              },
+              "priceFilter": {
+                "enum": [
+                  "free",
+                  "paid",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "query": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "auto",
+                  "creator_store",
+                  "user",
+                  "group",
+                  "universe"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "verifiedCreatorsOnly": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Search Asset",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "search_game_tree",
+          "allowed": true,
+          "blockedReason": null,
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "datamodel_type": {
+                "enum": [
+                  "Edit",
+                  "Client",
+                  "Server"
+                ],
+                "type": "string"
+              },
+              "head_limit": {
+                "type": "number"
+              },
+              "instance_type": {
+                "type": "string"
+              },
+              "keywords": {
+                "type": "string"
+              },
+              "max_depth": {
+                "type": "number"
+              },
+              "path": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Game Tree",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "segment_mesh",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "instance_path": {
+                "type": "string"
+              },
+              "parts": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "parts",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Mesh Segmentation",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "skill",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "skill_name": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "skill_name",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Skill",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "start_stop_play",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "is_start": {
+                "type": "boolean"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "is_start",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Start/Stop Play",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "store_image",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filePath": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "filePath",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Store Image",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "subagent",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "studio_id": {
+                "type": "string"
+              },
+              "subagent_type": {
+                "type": "string"
+              },
+              "task": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "description",
+              "subagent_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Subagent",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "upload_image",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "imagePaths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "imagePaths",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Upload Image",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "user_keyboard_input",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "actions": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "keyDown",
+                        "keyUp",
+                        "keyPress",
+                        "textInput",
+                        "wait"
+                      ],
+                      "type": "string"
+                    },
+                    "instance_path": {
+                      "type": "string"
+                    },
+                    "key_code": {
+                      "enum": [
+                        "None",
+                        "Backspace",
+                        "Tab",
+                        "Clear",
+                        "Return",
+                        "Pause",
+                        "Escape",
+                        "Space",
+                        "QuotedDouble",
+                        "Hash",
+                        "Dollar",
+                        "Percent",
+                        "Ampersand",
+                        "Quote",
+                        "LeftParenthesis",
+                        "RightParenthesis",
+                        "Asterisk",
+                        "Plus",
+                        "Comma",
+                        "Minus",
+                        "Period",
+                        "Slash",
+                        "Zero",
+                        "One",
+                        "Two",
+                        "Three",
+                        "Four",
+                        "Five",
+                        "Six",
+                        "Seven",
+                        "Eight",
+                        "Nine",
+                        "Colon",
+                        "Semicolon",
+                        "LessThan",
+                        "Equals",
+                        "GreaterThan",
+                        "Question",
+                        "At",
+                        "LeftBracket",
+                        "BackSlash",
+                        "RightBracket",
+                        "Caret",
+                        "Underscore",
+                        "Backquote",
+                        "A",
+                        "B",
+                        "C",
+                        "D",
+                        "E",
+                        "F",
+                        "G",
+                        "H",
+                        "I",
+                        "J",
+                        "K",
+                        "L",
+                        "M",
+                        "N",
+                        "O",
+                        "P",
+                        "Q",
+                        "R",
+                        "S",
+                        "T",
+                        "U",
+                        "V",
+                        "W",
+                        "X",
+                        "Y",
+                        "Z",
+                        "LeftCurly",
+                        "Pipe",
+                        "RightCurly",
+                        "Tilde",
+                        "Delete",
+                        "World0",
+                        "World1",
+                        "World2",
+                        "World3",
+                        "World4",
+                        "World5",
+                        "World6",
+                        "World7",
+                        "World8",
+                        "World9",
+                        "World10",
+                        "World11",
+                        "World12",
+                        "World13",
+                        "World14",
+                        "World15",
+                        "World16",
+                        "World17",
+                        "World18",
+                        "World19",
+                        "World20",
+                        "World21",
+                        "World22",
+                        "World23",
+                        "World24",
+                        "World25",
+                        "World26",
+                        "World27",
+                        "World28",
+                        "World29",
+                        "World30",
+                        "World31",
+                        "World32",
+                        "World33",
+                        "World34",
+                        "World35",
+                        "World36",
+                        "World37",
+                        "World38",
+                        "World39",
+                        "World40",
+                        "World41",
+                        "World42",
+                        "World43",
+                        "World44",
+                        "World45",
+                        "World46",
+                        "World47",
+                        "World48",
+                        "World49",
+                        "World50",
+                        "World51",
+                        "World52",
+                        "World53",
+                        "World54",
+                        "World55",
+                        "World56",
+                        "World57",
+                        "World58",
+                        "World59",
+                        "World60",
+                        "World61",
+                        "World62",
+                        "World63",
+                        "World64",
+                        "World65",
+                        "World66",
+                        "World67",
+                        "World68",
+                        "World69",
+                        "World70",
+                        "World71",
+                        "World72",
+                        "World73",
+                        "World74",
+                        "World75",
+                        "World76",
+                        "World77",
+                        "World78",
+                        "World79",
+                        "World80",
+                        "World81",
+                        "World82",
+                        "World83",
+                        "World84",
+                        "World85",
+                        "World86",
+                        "World87",
+                        "World88",
+                        "World89",
+                        "World90",
+                        "World91",
+                        "World92",
+                        "World93",
+                        "World94",
+                        "World95",
+                        "KeypadZero",
+                        "KeypadOne",
+                        "KeypadTwo",
+                        "KeypadThree",
+                        "KeypadFour",
+                        "KeypadFive",
+                        "KeypadSix",
+                        "KeypadSeven",
+                        "KeypadEight",
+                        "KeypadNine",
+                        "KeypadPeriod",
+                        "KeypadDivide",
+                        "KeypadMultiply",
+                        "KeypadMinus",
+                        "KeypadPlus",
+                        "KeypadEnter",
+                        "KeypadEquals",
+                        "Up",
+                        "Down",
+                        "Right",
+                        "Left",
+                        "Insert",
+                        "Home",
+                        "End",
+                        "PageUp",
+                        "PageDown",
+                        "F1",
+                        "F2",
+                        "F3",
+                        "F4",
+                        "F5",
+                        "F6",
+                        "F7",
+                        "F8",
+                        "F9",
+                        "F10",
+                        "F11",
+                        "F12",
+                        "F13",
+                        "F14",
+                        "F15",
+                        "NumLock",
+                        "CapsLock",
+                        "ScrollLock",
+                        "RightShift",
+                        "LeftShift",
+                        "RightControl",
+                        "LeftControl",
+                        "RightAlt",
+                        "LeftAlt",
+                        "RightMeta",
+                        "LeftMeta",
+                        "LeftSuper",
+                        "RightSuper",
+                        "Mode",
+                        "Compose",
+                        "Help",
+                        "Print",
+                        "SysReq",
+                        "Break",
+                        "Menu",
+                        "Power",
+                        "Euro",
+                        "Undo",
+                        "ButtonX",
+                        "ButtonY",
+                        "ButtonA",
+                        "ButtonB",
+                        "ButtonR1",
+                        "ButtonL1",
+                        "ButtonR2",
+                        "ButtonL2",
+                        "ButtonR3",
+                        "ButtonL3",
+                        "ButtonStart",
+                        "ButtonSelect",
+                        "DPadLeft",
+                        "DPadRight",
+                        "DPadUp",
+                        "DPadDown",
+                        "Thumbstick1",
+                        "Thumbstick2",
+                        "Thumbstick1Up",
+                        "Thumbstick1Down",
+                        "Thumbstick1Left",
+                        "Thumbstick1Right",
+                        "Thumbstick2Up",
+                        "Thumbstick2Down",
+                        "Thumbstick2Left",
+                        "Thumbstick2Right",
+                        "MouseLeftButton",
+                        "MouseRightButton",
+                        "MouseMiddleButton",
+                        "MouseBackButton",
+                        "MouseNoButton",
+                        "MouseX",
+                        "MouseY",
+                        "MousePosition",
+                        "TouchPosition",
+                        "MouseWheel",
+                        "TrackpadPan",
+                        "TrackpadPinch",
+                        "MouseDelta",
+                        "TouchDelta",
+                        "TouchPinch",
+                        "ButtonCenter",
+                        "ButtonBack",
+                        "ButtonUp",
+                        "ButtonDown",
+                        "ButtonLeft",
+                        "ButtonRight"
+                      ],
+                      "type": "string"
+                    },
+                    "text_inputs": {
+                      "type": "string"
+                    },
+                    "wait_time_ms": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Client"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "actions",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "User Keyboard Input",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "user_mouse_input",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "actions": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "moveTo",
+                        "mouseButtonDown",
+                        "mouseButtonUp",
+                        "mouseButtonClick",
+                        "scrollUp",
+                        "scrollDown",
+                        "wait"
+                      ],
+                      "type": "string"
+                    },
+                    "instance_path": {
+                      "type": "string"
+                    },
+                    "mouse_button": {
+                      "enum": [
+                        "left",
+                        "right"
+                      ],
+                      "type": "string"
+                    },
+                    "wait_time_ms": {
+                      "type": "number"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "datamodel_type": {
+                "enum": [
+                  "Client"
+                ],
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "actions",
+              "datamodel_type",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "User Mouse Input",
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "wait_job_finished",
+          "allowed": false,
+          "blockedReason": "not_read_allowlisted",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "jobId": {
+                "type": "string"
+              },
+              "studio_id": {
+                "type": "string"
+              },
+              "timeout": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "jobId",
+              "studio_id"
+            ]
+          },
+          "annotations": {
+            "title": "Wait Job Finished",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    "studios": [
+      {
+        "id": "8f443b3a-38bc-4dba-b7ea-b5fcb47275bb",
+        "name": "Place1"
+      }
+    ],
+    "lifecycle": {
+      "connectedAfterResponse": false,
+      "requestsUsed": 3,
+      "limits": {
+        "argumentBytes": 262144,
+        "resultBytes": 524288,
+        "sourceBytes": 102400,
+        "tools": 128,
+        "toolPages": 4,
+        "capabilityBytes": 262144,
+        "studios": 64,
+        "defaultTimeoutMs": 10000,
+        "maximumTimeoutMs": 15000,
+        "defaultRequests": 64,
+        "maximumRequests": 256,
+        "timeoutMs": 5000,
+        "maxRequests": 16
+      },
+      "freshConnection": true,
+      "closedBeforeResponse": true,
+      "automaticRetries": 0
+    },
+    "targetedReads": 0,
+    "mutationCalls": 0,
+    "connectorInjected": false,
+    "providerCredentialsRead": false
+  }
+}

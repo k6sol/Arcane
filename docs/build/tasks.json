@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "goal": "Complete a verified local Roblox development product",
+  "tasks": [
+    {
+      "id": "CORE-01",
+      "title": "Durable Studio bridge and recovery",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [],
+      "acceptance": "Secure local routes, persistence, scoped delivery, immutable receipts and recovery tests",
+      "evidence": [
+        "tests/unit/studio-store.test.ts",
+        "tests/unit/studio-http.test.ts",
+        "tests/unit/arcane-keys.test.ts",
+        "packages/storage/src/studio-store.ts"
+      ]
+    },
+    {
+      "id": "PLUGIN-01",
+      "title": "Studio plugin and deterministic packaging",
+      "owner": "Gibbs",
+      "agentId": "01a12cfa-753e-7961-80a5-56a00994b951",
+      "state": "in_progress",
+      "dependsOn": [],
+      "acceptance": "Typed engine operations, conflict-aware edits and generated plugin artifact",
+      "evidence": [],
+      "priorAgentId": "01a12ce4-48a7-7b22-a52c-7d98d076cd16",
+      "note": "Updated requirement: compact Arcane branding and persistent key-only Studio connection, no URL/pair-code fields."
+    },
+    {
+      "id": "UI-01",
+      "title": "Local Studio workbench",
+      "owner": "Ptolemy",
+      "agentId": "01a12cfa-659e-7cf2-a5aa-4a294daad823",
+      "state": "in_progress",
+      "dependsOn": [
+        "CORE-01"
+      ],
+      "acceptance": "Genuine pairing/session/command/receipt flows and safe DOM",
+      "evidence": [],
+      "priorAgentId": "01a12ce4-4d46-7273-ba15-080e2622e8f3",
+      "note": "Updated requirement: compact Arcane branding and persistent key-only Studio connection, no URL/pair-code fields."
+    },
+    {
+      "id": "MCP-01",
+      "title": "Native CLI MCP tools",
+      "owner": "Maxwell",
+      "agentId": "01a12cfa-68c0-76a2-b858-caac3ae2c4c3",
+      "state": "verified_component",
+      "dependsOn": [
+        "CORE-01"
+      ],
+      "acceptance": "Actual official SDK client calls with bounded outcomes and explicit write scope",
+      "evidence": [
+        "apps/mcp/.focused-tests.log",
+        "tests/unit/mcp.test.ts"
+      ],
+      "priorAgentId": "01a12ce4-51f1-76c0-b059-63f72952ea23"
+    },
+    {
+      "id": "ASSET-01",
+      "title": "Supervised Blender asset production",
+      "owner": "Tesla",
+      "agentId": "01a12cfa-6be4-7032-8b67-a85f83a9d880",
+      "state": "verified_component",
+      "dependsOn": [],
+      "acceptance": "Actual Blender outputs, manifests, geometry checks, export and preview",
+      "evidence": [
+        "packages/asset-pipeline/.runtime/verification-81e000dc-ca19-4e3b-a7da-24f029bf1dc2/acceptance.json",
+        "tests/unit/asset-http.test.ts"
+      ],
+      "priorAgentId": "01a12ce4-58e5-7123-a8c4-2ea0d168b0c5"
+    },
+    {
+      "id": "NATIVE-01",
+      "title": "Disposable Studio engine verification",
+      "owner": "parent",
+      "state": "in_progress",
+      "dependsOn": [
+        "PLUGIN-01",
+        "CORE-01",
+        "MCP-01"
+      ],
+      "acceptance": "Real plugin pairing/read/write/conflict/restore receipts in disposable place, not Hunted",
+      "evidence": [],
+      "note": "Baseplate Place1 explicitly authorized by user. Actual read engine behavior proved; MCP-hosted library HTTP fails while HttpEnabled=false. Real local-plugin widget transport remains pending reload/connect. No Hunted writes."
+    },
+    {
+      "id": "WORKFLOW-01",
+      "title": "Task orchestration and native workflows",
+      "owner": "parent",
+      "state": "pending",
+      "dependsOn": [
+        "CORE-01",
+        "MCP-01",
+        "ASSET-01"
+      ],
+      "acceptance": "Durable task lifecycle, evidence gates, native CLI config and feature limitations",
+      "evidence": []
+    },
+    {
+      "id": "RELEASE-01",
+      "title": "Installer, regression and security gates",
+      "owner": "parent",
+      "state": "pending",
+      "dependsOn": [
+        "NATIVE-01",
+        "WORKFLOW-01",
+        "UI-01"
+      ],
+      "acceptance": "Clean install/launch, browser functional proof, security review and user documentation",
+      "evidence": []
+    },
+    {
+      "id": "NATIVE-ADAPTER-01",
+      "title": "Official native Studio read-only adapter",
+      "owner": "Hilbert",
+      "agentId": "01a12cfa-7158-7e20-a5f0-780cee8f8367",
+      "state": "verified_component",
+      "dependsOn": [],
+      "acceptance": "Actual native capability/identity reads; no mutations or invented tool routes",
+      "evidence": [
+        "docs/research/native-studio-checks.json",
+        "tests/unit/native-studio.test.ts",
+        "tests/unit/native-http.test.ts"
+      ]
+    }
+  ],
+  "updatedAt": "2026-10-11T22:37:17.014Z",
+  "previousTurnClassification": "progress: protocol, queue, HTTP, workflow store and regression evidence created; prior worker handles now confirmed missing",
+  "requiredCompletionStillOpen": [
+    "native-plugin-key-only-widget-and-http",
+    "dirty-editor-and-selective-restore-native",
+    "Roblox-import-axis-materials-rigs",
+    "general-custom-asset-and-image-workflows",
+    "native-client-feature-and-task-end-to-end",
+    "full-local-release-and-skill-behavior-gates"
+  ]
+}

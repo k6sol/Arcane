@@ -1,0 +1,13 @@
+{
+  "name": "ArcaneLocalBridge",
+  "tree": {
+    "$className": "Script",
+    "$path": "src/Main.server.luau",
+    "Types": { "$path": "src/Types.luau" },
+    "Validation": { "$path": "src/Validation.luau" },
+    "Registry": { "$path": "src/Registry.luau" },
+    "Properties": { "$path": "src/Properties.luau" },
+    "Operations": { "$path": "src/Operations.luau" },
+    "Transport": { "$path": "src/Transport.luau" }
+  }
+}

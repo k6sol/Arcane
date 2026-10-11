@@ -1,0 +1,162 @@
+import { createHash } from 'node:crypto';
+import { readFile, writeFile, readdir, lstat, realpath, mkdir, mkdtemp } from 'node:fs/promises';
+import { resolve, join, relative, dirname, isAbsolute, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT_FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'LICENSE', 'README.md'];
+const SOURCE_ROOTS = ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skills', 'docs', 'tests', 'dist', '.github'];
+const EXCLUDED_DIRECTORIES = new Set(['node_modules', 'runtime', '.runtime', '.tmp', '.git', '.codex', '.agents', 'generated', '__pycache__', '.worker', 'cache']);
+const EXTENSIONS = /\.(?:ts|js|mjs|json|map|html|css|md|csv|py|luau|lua|rbxm|rbxmx|yml|yaml|txt)$/;
+const FORBIDDEN_NAMES = /^(?:\.env(?:\..*)?|auth\.json|credentials\.json|daemon\.json|preferences\.json|.*\.log|.*\.key|.*\.pem|.*\.partial)$/i;
+const MUTABLE_ROOTS = ['node_modules', 'runtime', 'apps/mcp/generated'];
+const MAX_FILES = 4096, MAX_FILE_BYTES = 32 * 1024 * 1024, MAX_BYTES = 128 * 1024 * 1024;
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+export function inside(root, target) {
+  const path = relative(resolve(root), resolve(target));
+  return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith('..' + sep));
+}
+function validPath(path) {
+  if (typeof path !== 'string' || path.length > 512 || !/^[A-Za-z0-9_.\-/]+$/.test(path)) throw new Error('Invalid release path.');
+  const segments = path.split('/');
+  if (segments.some(segment => !segment || segment === '.' || segment === '..' || FORBIDDEN_NAMES.test(segment) || EXCLUDED_DIRECTORIES.has(segment))) throw new Error('Forbidden release path.');
+  if (!(ROOT_FILES.includes(path) || SOURCE_ROOTS.includes(segments[0])) || (!ROOT_FILES.includes(path) && !EXTENSIONS.test(path))) throw new Error('File is outside the release allowlist.');
+  return path;
+}
+async function noLinks(path) {
+  let current = resolve(path);
+  for (;;) {
+    try {
+      if ((await lstat(current)).isSymbolicLink()) throw new Error('Release paths cannot contain symlinks or junctions.');
+      const actual = await realpath(current);
+      const same = process.platform === 'win32' ? actual.toLowerCase() === current.toLowerCase() : actual === current;
+      if (!same) throw new Error('Release path resolves to a different location.');
+    }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const parent = dirname(current); if (parent === current) return; current = parent;
+  }
+}
+async function regularBytes(path) {
+  await noLinks(path);
+  const before = await lstat(path);
+  if (!before.isFile() || before.nlink !== 1 || before.size > MAX_FILE_BYTES) throw new Error('Expected a bounded single-link release file.');
+  const bytes = await readFile(path);
+  const after = await lstat(path);
+  if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== after.size) throw new Error('Release source changed while reading. Try again after writers finish.');
+  return bytes;
+}
+function secretCheck(bytes, name) {
+  // This is defense-in-depth, not a claim that a regex can identify every secret.
+  // Session/provider storage is excluded structurally, irrespective of contents.
+  const text = bytes.toString('utf8');
+  if (/arcane_local_v1_\d+_[a-f0-9]{64}\b/.test(text) || /http:\/\/127\.0\.0\.1:\d+\/(?:studio)?#[a-f0-9]{64}\b/.test(text)) throw new Error('An actual local credential/session link appears in ' + name + '.');
+  if (name.endsWith('.json')) {
+    let value; try { value = JSON.parse(text); } catch { throw new Error('Invalid JSON in release source ' + name + '.'); }
+    const visit = (node, depth = 0) => {
+      if (depth > 64) throw new Error('Overdeep JSON in release source.');
+      if (!node || typeof node !== 'object') return;
+      for (const [key, item] of Object.entries(node)) {
+        if (/^(?:access_token|refresh_token|client_secret|password|authorization|apiKey|token)$/i.test(key) && typeof item === 'string' && item.length > 0) throw new Error('Credential-like JSON field in ' + name + '.');
+        visit(item, depth + 1);
+      }
+    }; visit(value);
+  }
+}
+async function collect(repository) {
+  const files = []; let totalBytes = 0;
+  async function add(path) {
+    validPath(path);
+    const bytes = await regularBytes(join(repository, ...path.split('/'))); secretCheck(bytes, path);
+    totalBytes += bytes.length;
+    if (files.length >= MAX_FILES || totalBytes > MAX_BYTES) throw new Error('Release exceeds the packaging budget.');
+    files.push({ path, bytes, sha256: hash(bytes) });
+  }
+  async function walk(path) {
+    await noLinks(join(repository, path));
+    const entries = (await readdir(join(repository, path), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    for (const entry of entries) {
+      if (EXCLUDED_DIRECTORIES.has(entry.name) || FORBIDDEN_NAMES.test(entry.name) || entry.name.startsWith('.')) continue;
+      const child = path + '/' + entry.name;
+      // Windows directory entries can misclassify OneDrive cloud placeholders.
+      // lstat + canonical path checks remain authoritative; genuine links fail.
+      const kind = await lstat(join(repository, child));
+      if (kind.isSymbolicLink()) throw new Error('Link in release input: ' + child);
+      if (kind.isDirectory()) await walk(child);
+      else if (kind.isFile() && EXTENSIONS.test(entry.name)) await add(child);
+      else if (!kind.isFile()) throw new Error('Special file in release input.');
+    }
+  }
+  for (const path of ROOT_FILES) await add(path);
+  for (const root of SOURCE_ROOTS) await walk(root);
+  return { files, totalBytes };
+}
+export async function createLocalRelease({ repository = REPOSITORY } = {}) {
+  repository = resolve(repository); await noLinks(repository); repository = await realpath(repository);
+  const { files, totalBytes } = await collect(repository);
+  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json']) {
+    if (!files.some(file => file.path === required)) throw new Error('Build the product and plugin before packaging: missing ' + required);
+  }
+  const outputRoot = join(repository, 'runtime', 'releases');
+  if (!inside(repository, outputRoot)) throw new Error('Release output escapes the repository.');
+  await noLinks(outputRoot); await mkdir(outputRoot, { recursive: true });
+  const directory = await mkdtemp(join(outputRoot, 'arcane-local-'));
+  await noLinks(directory);
+  for (const file of files) {
+    const target = join(directory, ...file.path.split('/'));
+    if (!inside(directory, target)) throw new Error('Release target escapes output.');
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, file.bytes, { flag: 'wx' });
+  }
+  // No credentials, provider caches, node_modules, or user data are copied.
+  const manifest = { schemaVersion: 1, kind: 'arcane-local-source-release', createdAt: new Date().toISOString(),
+    version: JSON.parse((files.find(file => file.path === 'package.json')).bytes.toString('utf8')).version,
+    runtime: { nodeMajorMinimum: 24, dependenciesIncluded: false, inferenceStarted: false, installed: false, fullProductVerified: false },
+    fileCount: files.length, totalBytes, files: files.map(({ path, bytes, sha256 }) => ({ path, bytes: bytes.length, sha256 })) };
+  await writeFile(join(directory, 'release-manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
+  for (const file of files) {
+    if (hash(await regularBytes(join(repository, ...file.path.split('/')))) !== file.sha256) throw new Error('Release source changed during packaging; incomplete output retained for diagnosis.');
+  }
+  const proof = await verifyLocalRelease(directory);
+  return { directory, manifestSha256: proof.manifestSha256, files: proof.files, bytes: proof.bytes,
+    dependencyInstallRequired: true, fullProductVerified: false };
+}
+export async function verifyLocalRelease(directory) {
+  directory = resolve(directory); await noLinks(directory); directory = await realpath(directory);
+  const manifestBytes = await regularBytes(join(directory, 'release-manifest.json'));
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  if (manifest.schemaVersion !== 1 || manifest.kind !== 'arcane-local-source-release' || !Array.isArray(manifest.files) || manifest.files.length > MAX_FILES || manifest.fileCount !== manifest.files.length) throw new Error('Invalid release manifest.');
+  const seen = new Set(); let totalBytes = 0;
+  for (const entry of manifest.files) {
+    const path = validPath(entry.path);
+    if (seen.has(path) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || entry.bytes > MAX_FILE_BYTES || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error('Invalid release file descriptor.');
+    seen.add(path);
+    const target = join(directory, ...path.split('/')); if (!inside(directory, target)) throw new Error('Release path escapes package.');
+    const bytes = await regularBytes(target); secretCheck(bytes, path);
+    if (bytes.length !== entry.bytes || hash(bytes) !== entry.sha256) throw new Error('Release checksum mismatch: ' + path);
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_BYTES) throw new Error('Release exceeds verification budget.');
+  }
+  // Reject unlisted payloads, even if all listed hashes still match.
+  async function inventory(path = '') {
+    for (const entry of await readdir(join(directory, path), { withFileTypes: true })) {
+      const child = path ? path + '/' + entry.name : entry.name;
+      if (MUTABLE_ROOTS.includes(child)) continue; // Dependency/user state is explicitly outside the integrity proof.
+      const kind = await lstat(join(directory, child));
+      if (kind.isSymbolicLink()) throw new Error('Link in release output.');
+      if (kind.isDirectory()) { await noLinks(join(directory, child)); await inventory(child); }
+      else if (!kind.isFile() || (child !== 'release-manifest.json' && !seen.has(child))) throw new Error('Unlisted file in release output: ' + child);
+    }
+  }
+  await inventory();
+  if (manifest.totalBytes !== totalBytes) throw new Error('Release byte count mismatch.');
+  return { files: seen.size, bytes: totalBytes, manifestSha256: hash(manifestBytes),
+    integrityOnly: true, signed: false, runtimeVerified: false, mutableRootsNotVerified: MUTABLE_ROOTS };
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  if (!args.length) console.log(JSON.stringify(await createLocalRelease(), null, 2));
+  else if (args.length === 2 && args[0] === '--verify' && isAbsolute(args[1])) console.log(JSON.stringify(await verifyLocalRelease(args[1]), null, 2));
+  else throw new Error('Usage: node scripts/create-local-release.mjs [--verify ABSOLUTE_RELEASE_DIRECTORY]');
+}
+
+

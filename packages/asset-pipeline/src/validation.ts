@@ -1,0 +1,280 @@
+import { isDeepStrictEqual } from 'node:util';
+import { jsonSnapshot, normalizeRecipe, preflightRecipe, checkSockets, CUSTOM_REQUEST_BYTES } from './recipe.js';
+import { inflateSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { AssetError } from './types.js';
+import type { AssetAudit, AssetManifest, AssetRequest } from './types.js';
+import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
+
+export function record(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AssetError('VALIDATION', `${label} must be an object.`);
+  return value as Record<string, unknown>;
+}
+function integer(v: unknown, low: number, high: number, label: string): number {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < low || v > high) throw new AssetError('INPUT', `Invalid ${label}.`);
+  return v;
+}
+function vector(v: unknown, low: number, high: number, label: string): [number, number, number] {
+  if (!Array.isArray(v) || v.length !== 3 || v.some(n => typeof n !== 'number' || !Number.isFinite(n) || n < low || n > high)) throw new AssetError('INPUT', `Invalid ${label}.`);
+  return [...v] as [number, number, number];
+}
+export function normalizeRequest(value: unknown): AssetRequest {
+  const r = record(jsonSnapshot(value), 'asset request');
+  const allowed = ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples', 'recipe'];
+  if (Object.keys(r).some(k => !allowed.includes(k)) || (r.schemaVersion !== undefined && r.schemaVersion !== 1)) throw new AssetError('INPUT', 'Unsupported asset request field.');
+  if (!['hero-prop', 'environment-kit', 'custom-assembly'].includes(String(r.template))) throw new AssetError('INPUT', 'Choose a fixed template or custom-assembly.');
+  const budget = integer(r.triangleBudget ?? (r.template === 'custom-assembly' ? 15000 : 5000), 100, 50000, 'triangle budget');
+  const recipe = r.template === 'custom-assembly' ? normalizeRecipe(r.recipe, budget) : undefined;
+  if (!recipe && r.recipe !== undefined) throw new AssetError('INPUT', 'Only custom-assembly accepts a recipe.');
+  const info = recipe ? preflightRecipe(recipe, budget) : undefined;
+  const size = info ? info.bounds.max.map((n, i) => n - info.bounds.min[i]!) as [number, number, number] : undefined;
+  if (recipe && (r.sizeMeters !== undefined || r.color !== undefined) && (r.schemaVersion !== 1 || !isDeepStrictEqual(r.sizeMeters, size) || !isDeepStrictEqual(r.color, recipe.materials[0]!.color))) throw new AssetError('INPUT', 'Custom geometry size and color come from the recipe.');
+  const request: AssetRequest =
+  { schemaVersion: 1, template: r.template as AssetRequest['template'], name: assetName(r.name), seed: integer(r.seed ?? 1, 0, 2147483647, 'seed'),
+    sizeMeters: vector(size ?? r.sizeMeters ?? (r.template === 'hero-prop' ? [1, 0.65, 0.7] : [3, 3, 2.8]), recipe ? 0.01 : 0.1, recipe ? 40 : 20, 'size in meters'),
+    color: vector(recipe?.materials[0]!.color ?? r.color ?? [0.12, 0.32, 0.27], 0, 1, 'color'), triangleBudget: budget,
+    renderResolution: integer(r.renderResolution ?? 384, 128, 1024, 'render resolution'), renderSamples: integer(r.renderSamples ?? 16, 4, 64, 'render samples'), ...(recipe ? { recipe } : {}) };
+  if (Buffer.byteLength(JSON.stringify(request)) > CUSTOM_REQUEST_BYTES) throw new AssetError('INPUT', 'Normalized recipe exceeds 256 KiB.');
+  return request;
+}
+export async function readJson(path: string, max = 1024 * 1024): Promise<unknown> {
+  await regularFile(path, max);
+  try { return JSON.parse((await readRegularFile(path, max)).toString('utf8')); }
+  catch { throw new AssetError('VALIDATION', 'Artifact contains invalid JSON.'); }
+}
+export const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+
+export function validateAudit(value: unknown, request: AssetRequest): AssetAudit {
+  const audit = record(value, 'asset audit');
+  if (audit.schemaVersion !== 1 || audit.template !== request.template || audit.savedSceneReopened !== true || !Array.isArray(audit.errors) || audit.errors.length || !Array.isArray(audit.warnings)) throw new AssetError('MESH', 'Audit did not pass or saved scene was not reopened.');
+  if (!Array.isArray(audit.meshes) || audit.meshes.length < 1 || audit.meshes.length > 128) throw new AssetError('MESH', 'Missing bounded mesh metrics.');
+  const totals = { renderTriangles: 0, lod1Triangles: 0, collisionTriangles: 0, materials: 0 };
+  const materials = new Set<string>(), names = new Set<string>();
+  for (const raw of audit.meshes) {
+    const m = record(raw, 'mesh');
+    if (typeof m.name !== 'string' || names.has(m.name) || !['render', 'lod1', 'collision'].includes(String(m.role)) || !m.name.startsWith(m.role === 'collision' ? 'COL_' : 'SM_')) throw new AssetError('MESH', 'Invalid or duplicate mesh identity.');
+    names.add(m.name);
+    for (const field of ['vertices', 'edges', 'faces', 'triangles']) integer(m[field], 1, 200000, 'mesh ' + field);
+    for (const field of ['nonManifoldEdges', 'looseVertices', 'looseEdges', 'duplicateVertices', 'duplicateFaces', 'degenerateFaces', 'inconsistentNormals', 'invertedComponents', 'invalidUVs', 'degenerateUVFaces']) {
+      if (m[field] !== 0) throw new AssetError('MESH', `${m.name} failed ${field}.`);
+    }
+    if (m.finitePositions !== true || !Array.isArray(m.errors) || m.errors.length) throw new AssetError('MESH', 'Mesh reported structural errors.');
+    vector(m.dimensions, 1e-6, 100, 'mesh dimensions');
+    if (vector(m.scale, 0, 2, 'mesh scale').some(n => Math.abs(n - 1) > 1e-5) || vector(m.rotation, -7, 7, 'mesh rotation').some(n => Math.abs(n) > 1e-5)) throw new AssetError('MESH', 'Mesh transforms were not applied.');
+    if (!Array.isArray(m.materials) || m.materials.some(s => typeof s !== 'string' || !s.startsWith('MAT_'))) throw new AssetError('MESH', 'Invalid named mesh materials.');
+    for (const mat of m.materials as string[]) materials.add(mat);
+    if (m.role !== 'collision') {
+      integer(m.uvLayers, 1, 8, 'UV layers'); integer(m.uvLoops, Number(m.faces) * 3, 600000, 'UV loops');
+      if (m.materials.length < 1 || m.materials.length > 3) throw new AssetError('MESH', 'Material count exceeded the budget.');
+    } else if (m.materials.length) throw new AssetError('MESH', 'Collision should not carry materials.');
+    const key = m.role === 'render' ? 'renderTriangles' : m.role === 'lod1' ? 'lod1Triangles' : 'collisionTriangles';
+    totals[key] += m.triangles as number;
+  }
+  totals.materials = materials.size;
+  const reported = record(audit.totals, 'audit totals');
+  for (const key of Object.keys(totals) as (keyof typeof totals)[]) if (reported[key] !== totals[key]) throw new AssetError('MESH', 'Mesh metrics disagree with totals.');
+  if (!totals.renderTriangles || totals.renderTriangles > request.triangleBudget || !totals.collisionTriangles || totals.collisionTriangles > (request.recipe?.collisionTriangleBudget ?? 256) || totals.materials > (request.recipe ? 8 : 3)) throw new AssetError('MESH', 'Mesh budget failed.');
+  if (request.template === 'hero-prop' && (!totals.lod1Triangles || totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Hero LOD must reduce geometry.');
+  if (!Array.isArray(audit.renders) || audit.renders.length !== 2) throw new AssetError('RENDER', 'Two review renders are required.');
+  const renderNames = new Set<string>();
+  for (const raw of audit.renders) {
+    const r = record(raw, 'render');
+    if (!['preview-hero.png', 'preview-side.png'].includes(String(r.path)) || r.width !== request.renderResolution || r.height !== request.renderResolution || r.finitePixels !== true) throw new AssetError('RENDER', 'Invalid review render metrics.');
+    if (renderNames.has(String(r.path))) throw new AssetError('RENDER', 'Duplicate review render.'); renderNames.add(String(r.path));
+    for (const field of ['minLuminance', 'maxLuminance', 'meanLuminance', 'standardDeviation']) if (typeof r[field] !== 'number' || !Number.isFinite(r[field])) throw new AssetError('RENDER', 'Nonfinite render measurements.');
+    if (Number(r.maxLuminance) - Number(r.minLuminance) < 0.05 || Number(r.standardDeviation) < 0.005) throw new AssetError('RENDER', 'Review render is uniform or empty.');
+  }
+  const expected = new Map([['asset.glb', totals.renderTriangles], ['asset.fbx', totals.renderTriangles], ['collision.glb', totals.collisionTriangles]]);
+  if (totals.lod1Triangles) expected.set('asset-lod1.glb', totals.lod1Triangles);
+  if (!Array.isArray(audit.exports) || audit.exports.length !== expected.size) throw new AssetError('EXPORT', 'Export round-trip evidence is incomplete.');
+  for (const raw of audit.exports) {
+    const e = record(raw, 'export');
+    if (!expected.has(String(e.path)) || e.triangles !== expected.get(String(e.path)) || e.finitePositions !== true) throw new AssetError('EXPORT', 'Export round-trip triangle count or coordinates failed.');
+    integer(e.objects, 1, 128, 'export objects'); integer(e.materials, 0, request.recipe ? 8 : 3, 'export materials'); expected.delete(String(e.path));
+  }
+  if (request.recipe) {
+    const recipe = request.recipe, expectedParts = new Map(recipe.parts.map(p => [(p.role === 'collision' ? 'COL_' : 'SM_') + p.name, p]));
+    if (audit.meshes.length !== expectedParts.size) throw new AssetError('MESH', 'Recipe part audit is incomplete.');
+    for (const raw of audit.meshes) {
+      const mesh = record(raw, 'recipe mesh'), part = expectedParts.get(String(mesh.name));
+      if (typeof mesh.geometrySha256 !== 'string' || !/^[a-f0-9]{64}$/.test(mesh.geometrySha256)) throw new AssetError('MESH', 'Custom part geometry digest is missing.');
+      const bounds = record(mesh.bounds, 'custom part bounds'); vector(bounds.min, -60, 60, 'part min'); vector(bounds.max, -60, 60, 'part max');
+      if (!part || mesh.role !== part.role || !isDeepStrictEqual(mesh.materials, part.material ? ['MAT_' + part.material] : [])) throw new AssetError('MESH', 'Recipe mesh identity, role or material differs.');
+    }
+    if (totals.lod1Triangles > recipe.lodTriangleBudget! || (totals.lod1Triangles && totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Custom LOD budget/reduction failed.');
+    const evidence = record(audit.assembly, 'assembly evidence'), estimate = preflightRecipe(recipe, request.triangleBudget);
+    if (evidence.recipeSha256 !== sha256(Buffer.from(JSON.stringify(recipe))) || !isDeepStrictEqual(evidence.estimatedTriangles, estimate.estimatedTriangles) || evidence.artisticFidelity !== 'unverified' || evidence.robloxImport !== 'unverified') throw new AssetError('MESH', 'Assembly provenance or preflight evidence differs.');
+    checkSockets(evidence.sockets, recipe);
+    const bounds = record(evidence.bounds, 'assembly bounds'), minimum = vector(bounds.min, -60, 60, 'bounds'), maximum = vector(bounds.max, -60, 60, 'bounds');
+    if (Math.abs(minimum[2]) > 0.0001 || minimum.some((n,i) => n < estimate.bounds.min[i]! - 0.0001) || maximum.some((n,i) => n > estimate.bounds.max[i]! + 0.0001 || n <= minimum[i]!)) throw new AssetError('MESH', 'Measured assembly bounds differ from recipe.');
+    for (const raw of audit.exports) {
+      const exported = record(raw, 'custom export');
+      if (exported.path === 'asset.glb' || exported.path === 'asset.fbx') checkSockets(exported.sockets, recipe);
+    }
+  }
+  return value as AssetAudit;
+}
+
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit++) crc = (crc & 1) ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  return crc >>> 0;
+});
+export function pngCrc(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = crcTable[(crc ^ byte) & 255]! ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+export interface GlbMetrics { triangles: number; primitives: number; vertices: number }
+/** Parse the actual GLB buffers, not just extension or exporter metadata. */
+export function inspectGlb(bytes: Buffer): GlbMetrics {
+  const bad = () => { throw new AssetError('EXPORT', 'GLB contains invalid geometry or external data.'); };
+  if (bytes.length < 28 || bytes.readUInt32LE(0) !== 0x46546c67 || bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length) bad();
+  let offset = 12, json: Record<string, unknown> | undefined, binary: Buffer | undefined;
+  while (offset < bytes.length) {
+    if (offset + 8 > bytes.length) bad();
+    const length = bytes.readUInt32LE(offset), kind = bytes.readUInt32LE(offset + 4); offset += 8;
+    if (!length || length % 4 || offset + length > bytes.length) bad();
+    const chunk = bytes.subarray(offset, offset + length); offset += length;
+    if (kind === 0x4e4f534a && !json && !binary) { try { json = record(JSON.parse(chunk.toString('utf8').trim()), 'GLB JSON'); } catch { bad(); } }
+    else if (kind === 0x004e4942 && json && !binary) binary = chunk;
+    else bad();
+  }
+  if (!json || !binary) bad();
+  const doc = json!, bin = binary!;
+  if (record(doc.asset, 'GLB asset').version !== '2.0' || !Array.isArray(doc.buffers) || doc.buffers.length !== 1) bad();
+  const buffer = record((doc.buffers as unknown[])[0], 'GLB buffer');
+  if (buffer.uri !== undefined || typeof buffer.byteLength !== 'number' || buffer.byteLength > bin.length || bin.length - buffer.byteLength > 3) bad();
+  if (!Array.isArray(doc.accessors) || !Array.isArray(doc.bufferViews) || !Array.isArray(doc.meshes) || doc.meshes.length < 1 || doc.meshes.length > 128) bad();
+  const accessors = doc.accessors as unknown[], views = doc.bufferViews as unknown[];
+  const accessor = (index: unknown, type: 'VEC3' | 'VEC2' | 'SCALAR', allowed: number[]): { count: number; values: number[][] } => {
+    if (!Number.isSafeInteger(index) || Number(index) < 0 || Number(index) >= accessors.length) return bad();
+    const a = record(accessors[Number(index)], 'GLB accessor');
+    if (a.type !== type || a.sparse !== undefined || !allowed.includes(Number(a.componentType)) || a.normalized === true || !Number.isSafeInteger(a.count) || Number(a.count) < 1 || Number(a.count) > 200000) return bad();
+    if (!Number.isSafeInteger(a.bufferView) || Number(a.bufferView) < 0 || Number(a.bufferView) >= views.length) return bad();
+    const view = record(views[Number(a.bufferView)], 'GLB buffer view');
+    if (view.buffer !== 0) return bad();
+    const width = a.componentType === 5126 || a.componentType === 5125 ? 4 : a.componentType === 5123 ? 2 : 1;
+    const components = type === 'SCALAR' ? 1 : type === 'VEC2' ? 2 : 3;
+    const start = Number(view.byteOffset ?? 0) + Number(a.byteOffset ?? 0), stride = Number(view.byteStride ?? width * components);
+    const viewStart = Number(view.byteOffset ?? 0), viewLength = Number(view.byteLength), localStart = Number(a.byteOffset ?? 0), count = Number(a.count);
+    if (![start, stride, viewStart, viewLength, localStart].every(n => Number.isSafeInteger(n) && n >= 0) || stride < width * components || stride > 252 || stride % width || localStart + stride * (count - 1) + width * components > viewLength || viewStart + viewLength > Number(buffer.byteLength)) return bad();
+    const values: number[][] = [];
+    for (let i = 0; i < count; i++) {
+      const row: number[] = [];
+      for (let c = 0; c < components; c++) {
+        const p = start + i * stride + c * width;
+        const n = a.componentType === 5126 ? bin.readFloatLE(p) : width === 4 ? bin.readUInt32LE(p) : width === 2 ? bin.readUInt16LE(p) : bin.readUInt8(p);
+        if (!Number.isFinite(n)) bad(); row.push(n);
+      }
+      values.push(row);
+    }
+    return { count, values };
+  };
+  let triangles = 0, primitives = 0, vertices = 0;
+  for (const raw of doc.meshes as unknown[]) {
+    const mesh = record(raw, 'GLB mesh'); if (!Array.isArray(mesh.primitives) || mesh.primitives.length < 1 || mesh.primitives.length > 16) bad();
+    for (const rawPrimitive of mesh.primitives as unknown[]) {
+      const p = record(rawPrimitive, 'GLB primitive'), attributes = record(p.attributes, 'GLB attributes');
+      if ((p.mode ?? 4) !== 4 || p.extensions !== undefined || p.targets !== undefined) bad();
+      const position = accessor(attributes.POSITION, 'VEC3', [5126]);
+      const normal = accessor(attributes.NORMAL, 'VEC3', [5126]);
+      if (position.count !== normal.count || normal.values.some(n => Math.abs(Math.hypot(...n) - 1) > 0.05)) bad();
+      if (attributes.TEXCOORD_0 !== undefined) {
+        const uv = accessor(attributes.TEXCOORD_0, 'VEC2', [5126]);
+        if (uv.count !== position.count || uv.values.some(row => row.some(n => n < -1e-5 || n > 1.00001))) bad();
+      }
+      const indices = accessor(p.indices, 'SCALAR', [5121, 5123, 5125]);
+      if (indices.count % 3 || indices.values.some(n => n[0]! >= position.count)) bad();
+      for (let i = 0; i < indices.count; i += 3) {
+        const a = position.values[indices.values[i]![0]!]!, b = position.values[indices.values[i + 1]![0]!]!, c = position.values[indices.values[i + 2]![0]!]!;
+        const u = b.map((n, k) => n - a[k]!), v = c.map((n, k) => n - a[k]!);
+        const cross = [u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!];
+        if (Math.hypot(...cross) <= 1e-10) bad();
+      }
+      triangles += indices.count / 3; vertices += position.count; primitives++;
+    }
+  }
+  return { triangles, primitives, vertices };
+}
+
+/** Decode the worker's 8-bit RGB/RGBA PNGs and reject empty/uniform previews. */
+export function inspectPng(bytes: Buffer, expectedResolution: number): void {
+  const bad = () => { throw new AssetError('RENDER', 'Review PNG is malformed, empty or uniform.'); };
+  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) bad();
+  let offset = 8, width = 0, height = 0, channels = 0, ended = false;
+  const chunks: Buffer[] = [];
+  while (offset < bytes.length) {
+    if (offset + 12 > bytes.length) bad();
+    const chunkOffset = offset;
+    const size = bytes.readUInt32BE(offset), kind = bytes.toString('ascii', offset + 4, offset + 8); offset += 8;
+    if (offset + size + 4 > bytes.length) bad();
+    if (pngCrc(bytes.subarray(chunkOffset + 4, offset + size)) !== bytes.readUInt32BE(offset + size)) bad();
+    if (!width && kind !== 'IHDR') bad();
+    const data = bytes.subarray(offset, offset + size); offset += size + 4;
+    if (kind === 'IHDR') {
+      if (width || size !== 13) bad(); width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      if (data[8] !== 8 || ![2, 6].includes(data[9]!) || data[10] !== 0 || data[11] !== 0 || data[12] !== 0) bad();
+      channels = data[9] === 6 ? 4 : 3;
+    } else if (kind === 'IDAT') chunks.push(data);
+    else if (kind === 'IEND') { if (size !== 0) bad(); ended = true; break; }
+    else if (/^[A-Z]/.test(kind) && kind !== 'PLTE') bad();
+  }
+  if (!ended || offset !== bytes.length || width !== expectedResolution || height !== expectedResolution || !channels || !chunks.length) bad();
+  const stride = width * channels;
+  let decoded: Buffer;
+  try { decoded = inflateSync(Buffer.concat(chunks), { maxOutputLength: (stride + 1) * height }); } catch { return bad(); }
+  if (decoded.length !== (stride + 1) * height) bad();
+  let previous = Buffer.alloc(stride), min = 255, max = 0;
+  for (let row = 0; row < height; row++) {
+    const filter = decoded[row * (stride + 1)]!, line = Buffer.from(decoded.subarray(row * (stride + 1) + 1, (row + 1) * (stride + 1)));
+    if (filter > 4) bad();
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? line[i - channels]! : 0, b = previous[i]!, c = i >= channels ? previous[i - channels]! : 0;
+      const paeth = () => { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
+      line[i] = (line[i]! + (filter === 1 ? a : filter === 2 ? b : filter === 3 ? Math.floor((a + b) / 2) : filter === 4 ? paeth() : 0)) & 255;
+    }
+    for (let i = 0; i < stride; i += channels) { const lum = 0.2126 * line[i]! + 0.7152 * line[i + 1]! + 0.0722 * line[i + 2]!; min = Math.min(min, lum); max = Math.max(max, lum); }
+    previous = line;
+  }
+  if (max - min < 12) bad();
+}
+
+export async function validateManifestFiles(directory: string, value: unknown): Promise<AssetManifest> {
+  const m = record(value, 'manifest');
+  if (m.schemaVersion !== 1 || typeof m.jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(m.jobId) || typeof m.templateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.templateSha256)) throw new AssetError('MANIFEST', 'Unsupported manifest or worker digest.');
+  const runtime = record(m.runtime, 'runtime'), capabilities = record(runtime.capabilities, 'runtime capabilities'), coordinates = record(m.coordinateSystem, 'coordinates');
+  if (typeof runtime.executable !== 'string' || runtime.executable.length > 4096 || typeof runtime.version !== 'string' || runtime.version.length > 128 || typeof runtime.pythonVersion !== 'string' || runtime.pythonVersion.length > 128 || runtime.background !== true || ['glbExport', 'glbImport', 'fbxExport', 'fbxImport', 'cycles'].some(key => capabilities[key] !== true)) throw new AssetError('MANIFEST', 'Invalid runtime evidence.');
+  if (coordinates.units !== 'meters' || coordinates.sceneUp !== 'Z' || coordinates.glbUp !== 'Y' || coordinates.fbxUp !== 'Y' || coordinates.pivot !== 'floor' || coordinates.robloxScaleVerified !== false) throw new AssetError('MANIFEST', 'Invalid coordinate-system evidence.');
+  if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
+  const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request);
+  if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 32) throw new AssetError('MANIFEST', 'Invalid artifact list.');
+  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
+  if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
+  const names = new Set<string>(), hashes = new Map<string, string>();
+  let totalBytes = 0;
+  for (const raw of m.artifacts) {
+    const a = record(raw, 'artifact'), path = artifactPath(directory, a.path);
+    if (names.has(String(a.path)) || typeof a.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(a.sha256)) throw new AssetError('MANIFEST', 'Duplicate artifact or invalid hash.');
+    if (roles[String(a.path)] !== a.role || !roles[String(a.path)]) throw new AssetError('MANIFEST', 'Artifact name/role is outside the fixed templates.');
+    names.add(String(a.path));
+    const size = await regularFile(path, 128 * 1024 * 1024); totalBytes += size;
+    if (totalBytes > 256 * 1024 * 1024 || a.bytes !== size) throw new AssetError('MANIFEST', 'Artifact size changed or exceeded total bound.');
+    const bytes = await readRegularFile(path, 128 * 1024 * 1024), hash = sha256(bytes); hashes.set(String(a.path), hash);
+    if (a.sha256 !== hash) throw new AssetError('HASH', 'Artifact hash no longer matches its manifest.');
+    if (String(a.path).endsWith('.glb')) {
+      const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);
+      if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', 'GLB geometry disagrees with export audit.');
+    } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
+  }
+  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : [])]) {
+    if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
+  }
+  if (sha256(Buffer.from(['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : [])].map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
+  if (JSON.stringify(normalizeRequest(await readJson(artifactPath(directory, 'request.json')))) !== JSON.stringify(request) || JSON.stringify(await readJson(artifactPath(directory, 'audit.json'))) !== JSON.stringify(m.validation)) throw new AssetError('MANIFEST', 'Manifest request/audit differs from the original evidence.');
+  if (m.sourceRequestSha256 !== undefined || request.recipe) {
+    if (m.sourceRequestSha256 !== hashes.get('input.json') || !isDeepStrictEqual(normalizeRequest(await readJson(artifactPath(directory, 'input.json'), CUSTOM_REQUEST_BYTES)), request)) throw new AssetError('MANIFEST', 'Original input provenance differs from normalized request.');
+  }
+  if (request.recipe && (!isDeepStrictEqual(m.assembly, audit.assembly) || !isDeepStrictEqual(await readJson(artifactPath(directory, 'assembly.json')), audit.assembly))) throw new AssetError('MANIFEST', 'Assembly evidence disagrees with saved artifacts.');
+  return value as AssetManifest;
+}
