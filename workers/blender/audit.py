@@ -6,6 +6,13 @@ import bmesh
 from mathutils import Vector
 
 
+def material_metrics(mat):
+    shader = next(node for node in mat.node_tree.nodes if node.type == "BSDF_PRINCIPLED")
+    return {"name": mat.name, "color": list(shader.inputs["Base Color"].default_value)[:3],
+            "metallic": float(shader.inputs["Metallic"].default_value), "roughness": float(shader.inputs["Roughness"].default_value),
+            "emission": {"color": list(shader.inputs["Emission Color"].default_value)[:3], "strength": float(shader.inputs["Emission Strength"].default_value)}}
+
+
 def mesh_metrics(obj, role, imported=False):
     evaluated = obj.evaluated_get(__import__("bpy").context.evaluated_depsgraph_get())
     mesh = evaluated.to_mesh()
@@ -66,6 +73,8 @@ def mesh_metrics(obj, role, imported=False):
             world = [obj.matrix_world @ v.co for v in mesh.vertices]
             result["bounds"] = {"min": [min(v[k] for v in world) for k in range(3)], "max": [max(v[k] for v in world) for k in range(3)]}
             geometry = {"vertices": [[round(float(c), 6) for c in v.co] for v in mesh.vertices], "triangles": [list(t.vertices) for t in mesh.loop_triangles]}
+            result["position"] = list(obj.location)
+            result["materialProperties"] = [material_metrics(mat) for mat in mesh.materials if mat]
             result["geometrySha256"] = hashlib.sha256(json.dumps(geometry, separators=(',', ':')).encode()).hexdigest()
         errors = result["errors"]
         if not finite or any(not math.isfinite(d) or d <= 1e-6 for d in obj.dimensions):

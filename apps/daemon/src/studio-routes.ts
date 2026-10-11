@@ -33,11 +33,11 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
           try { const board = JSON.parse(await readFile(join(cwd, 'docs/build/tasks.json'), 'utf8')) as { tasks: unknown[] }; buildTasks = board.tasks; } catch { /* Optional authored board is not a connected task runtime. */ }
           send(200, { projectPath, protocolVersion: 1, studioSessions: store.sessions(), commandCounts: store.counts(), buildTasks,
             features: [
-              { id: 'studio-bridge', state: 'implemented-local', verified: 'automated fixtures pending; native Studio verification pending' },
+              { id: 'studio-bridge', state: 'implemented-local', verified: 'automated bridge/controller fixtures; native installed-plugin acceptance deferred by user' },
               { id: 'native-providers', state: 'metadata-only', verified: 'native CLI metadata probes; inference not enabled' },
               { id: 'skill-pack', state: 'experimental', verified: 'integrity tests; no behavior-approved skills' },
               { id: 'task-workflows', state: work ? 'implemented-local' : 'not-enabled', verified: 'durable graph, cooperative leases and hashed evidence; not an OS sandbox' },
-              { id: 'blender', state: 'in-development', verified: 'worker implementation in progress' }
+              { id: 'blender', state: 'implemented-local-templates', verified: 'real installed Blender generation/export of two starter templates; custom assets/import verification remain open' }
             ] }); return true;
         }
         send(404, { error: 'NOT_FOUND', message: 'Unknown bridge endpoint.' }); return true;
@@ -94,3 +94,4 @@ async function readBridgeJson(request: IncomingMessage): Promise<unknown> {
   } finally { if (!request.socket.destroyed) request.socket.setTimeout(0); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new ArcaneError('JSON', 'Invalid bridge JSON.'); }
 }
+

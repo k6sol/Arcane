@@ -1,4 +1,4 @@
-name: Verify local foundation
+name: Verify Arcane local components
 
 on:
   push:
@@ -36,6 +36,12 @@ jobs:
         run: npm run typecheck
       - name: Build and test metadata, HTTP and offline skill contracts
         run: npm test
+      - name: Build and verify deterministic Studio plugin
+        run: |
+          npm run build:plugin
+          node scripts/build-plugin.mjs --check
+          npm run test:plugin
       - name: Validate actual skill file integrity
         run: node scripts/skill-pack.mjs validate
       # No CLI login, provider inference, real Studio, or live project operations.
+

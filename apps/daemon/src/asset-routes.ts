@@ -19,7 +19,7 @@ async function readAssetJson(request: IncomingMessage, allowRecipe = false): Pro
   if (request.headers['content-encoding'] && request.headers['content-encoding'] !== 'identity') throw new ArcaneError('CONTENT_TYPE', 'Compressed bodies are unsupported.');
   const limit = allowRecipe ? CUSTOM_REQUEST_BYTES : 16384;
   const length = request.headers['content-length'];
-  if (length && (!/^\d+$/.test(length) || Number(length) > limit)) throw new ArcaneError('BODY_LIMIT', 'Asset body exceeds 16 KiB.');
+  if (length && (!/^\d+$/.test(length) || Number(length) > limit)) throw new ArcaneError('BODY_LIMIT', 'Asset body exceeds ' + limit + ' bytes.');
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []; let bytes = 0, done = false;
     const cleanup = () => { clearTimeout(timer); request.off('data', data); request.off('end', end); request.off('error', error); request.off('aborted', aborted); };
@@ -27,7 +27,7 @@ async function readAssetJson(request: IncomingMessage, allowRecipe = false): Pro
       if (done) return; done = true; cleanup();
       if (problem) { request.pause(); reject(problem); } else resolve(result);
     };
-    const data = (raw: Buffer | string) => { const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw); bytes += chunk.length; if (bytes > limit) finish(new ArcaneError('BODY_LIMIT', 'Asset body exceeds 16 KiB.')); else chunks.push(chunk); };
+    const data = (raw: Buffer | string) => { const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw); bytes += chunk.length; if (bytes > limit) finish(new ArcaneError('BODY_LIMIT', 'Asset body exceeds ' + limit + ' bytes.')); else chunks.push(chunk); };
     const end = () => {
       try { const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) as unknown;
         if (bytes > 16384 && (!allowRecipe || !parsed || typeof parsed !== 'object' || Array.isArray(parsed) || (parsed as {template?: unknown}).template !== 'custom-assembly')) { finish(new ArcaneError('BODY_LIMIT', 'Only custom-assembly accepts bodies above 16 KiB.')); return; }
@@ -96,9 +96,15 @@ export function assetRoutes(service: AssetService) {
       const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET']]).get(route);
       if (!method) { await send(404, { error: 'NOT_FOUND', message: 'Unknown asset endpoint.' }); return true; }
       if (request.method !== method) { response.setHeader('Allow', method); await send(405, { error: 'METHOD', message: 'Expected ' + method + '.' }); return true; }
-      const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' ? ['jobId', 'path'] : [];
+      const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' ? ['jobId', 'path'] : route === 'jobs' ? ['limit', 'after'] : [];
       for (const key of url.searchParams.keys()) if (!allowedQuery.includes(key) || url.searchParams.getAll(key).length !== 1) throw new ArcaneError('INPUT', 'Unexpected or duplicate query parameter.');
-      if (route === 'jobs') { await send(200, { jobs: service.jobs() }); return true; }
+      if (route === 'jobs') {
+        const rawLimit = url.searchParams.get('limit');
+        if (rawLimit !== null && !/^[1-9][0-9]?$/.test(rawLimit)) throw new ArcaneError('INPUT', 'History limit must be 1..64.');
+        const after = url.searchParams.get('after');
+        await send(200, service.jobPage({ ...(rawLimit === null ? {} : { limit: Number(rawLimit) }), ...(after === null ? {} : { after }) }));
+        return true;
+      }
       if (route === 'manifest') { await send(200, { manifest: await service.manifest(url.searchParams.get('jobId')) }); return true; }
       if (route === 'preview') {
         const bytes = await service.preview(url.searchParams.get('jobId'), url.searchParams.get('path'));

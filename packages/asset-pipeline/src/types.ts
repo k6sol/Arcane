@@ -35,7 +35,7 @@ export interface MeshMetrics {
   nonManifoldEdges: number; looseVertices: number; looseEdges: number;
   duplicateVertices: number; duplicateFaces: number; degenerateFaces: number;
   inconsistentNormals: number; invertedComponents: number; finitePositions: boolean;
-  geometrySha256?: string; bounds?: { min: Vec3; max: Vec3 };
+  geometrySha256?: string; bounds?: { min: Vec3; max: Vec3 }; position?: Vec3; materialProperties?: MaterialEvidence[];
   uvLayers: number; uvLoops: number; invalidUVs: number; degenerateUVFaces: number;
   dimensions: number[]; scale: number[]; rotation: number[]; materials: string[];
   errors: string[];
@@ -101,6 +101,7 @@ export interface AssemblyRecipe {
   schemaVersion: 1; materials: AssemblyMaterial[]; parts: AssemblyPart[]; sockets?: AssemblySocket[];
   collisionTriangleBudget?: number; lodTriangleBudget?: number;
 }
+export interface MaterialEvidence { name: string; color: Vec3; metallic: number; roughness: number; emission: { color: Vec3; strength: number } }
 export interface SocketEvidence { name: string; kind: 'socket' | 'attachment'; part: string; nodeName: string; matrix: number[] }
 export interface AssemblyEvidence {
   recipeSha256: string; estimatedTriangles: { render: number; collision: number; lod1: number };

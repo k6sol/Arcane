@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { jsonSnapshot, normalizeRecipe, preflightRecipe, checkSockets, CUSTOM_REQUEST_BYTES } from './recipe.js';
+import { jsonSnapshot, normalizeRecipe, preflightRecipe, preflightPart, checkSockets, CUSTOM_REQUEST_BYTES } from './recipe.js';
 import { inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { AssetError } from './types.js';
@@ -98,7 +98,24 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
     for (const raw of audit.meshes) {
       const mesh = record(raw, 'recipe mesh'), part = expectedParts.get(String(mesh.name));
       if (typeof mesh.geometrySha256 !== 'string' || !/^[a-f0-9]{64}$/.test(mesh.geometrySha256)) throw new AssetError('MESH', 'Custom part geometry digest is missing.');
-      const bounds = record(mesh.bounds, 'custom part bounds'); vector(bounds.min, -60, 60, 'part min'); vector(bounds.max, -60, 60, 'part max');
+      const bounds = record(mesh.bounds, 'custom part bounds'), minimum = vector(bounds.min, -60, 60, 'part min'), maximum = vector(bounds.max, -60, 60, 'part max');
+      if (vector(mesh.position, -60, 60, 'part origin').some(n => Math.abs(n) > 0.00001)) throw new AssetError('MESH', 'Custom part origin must remain at the assembly floor pivot.');
+      if (part) {
+        const predicted = preflightPart(part);
+        if (minimum.some((n, i) => n < predicted.bounds.min[i]! - 0.0001) || maximum.some((n, i) => n > predicted.bounds.max[i]! + 0.0001 || n <= minimum[i]!) ||
+            (!part.bevel && (minimum.some((n, i) => Math.abs(n - predicted.bounds.min[i]!) > 0.0001) || maximum.some((n, i) => Math.abs(n - predicted.bounds.max[i]!) > 0.0001))) ||
+            Number(mesh.triangles) > predicted.triangles || (!part.bevel && mesh.triangles !== predicted.triangles)) throw new AssetError('MESH', 'Custom part topology or transformed bounds differ from recipe.');
+        const actualMaterials = mesh.materialProperties;
+        if (!Array.isArray(actualMaterials) || actualMaterials.length !== (part.material ? 1 : 0)) throw new AssetError('MESH', 'Custom PBR evidence is incomplete.');
+        if (part.material) {
+          const wanted = recipe.materials.find(m => m.id === part.material)!, actual = record(actualMaterials[0], 'PBR material'), emission = record(actual.emission, 'PBR emission');
+          const close = (a: number, b: number) => Math.abs(a - b) <= 0.00001;
+          if (actual.name !== 'MAT_' + wanted.id || !vector(actual.color, 0, 1, 'PBR color').every((n, i) => close(n, wanted.color[i]!)) ||
+              typeof actual.metallic !== 'number' || !close(actual.metallic, wanted.metallic!) || typeof actual.roughness !== 'number' || !close(actual.roughness, wanted.roughness!) ||
+              !vector(emission.color, 0, 1, 'PBR emission').every((n, i) => close(n, (wanted.emission?.color ?? [1, 1, 1])[i]!)) ||
+              typeof emission.strength !== 'number' || !close(emission.strength, wanted.emission?.strength ?? 0)) throw new AssetError('MESH', 'Measured custom PBR values differ from recipe.');
+        }
+      }
       if (!part || mesh.role !== part.role || !isDeepStrictEqual(mesh.materials, part.material ? ['MAT_' + part.material] : [])) throw new AssetError('MESH', 'Recipe mesh identity, role or material differs.');
     }
     if (totals.lod1Triangles > recipe.lodTriangleBudget! || (totals.lod1Triangles && totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Custom LOD budget/reduction failed.');

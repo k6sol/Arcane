@@ -76,6 +76,20 @@ function meshCheck(vertices: Vec3[], indices: number[]): void {
     }
   }
   if (used.size !== vertices.length || [...edges.values()].some(e => e.faces.length !== 2)) fail('Custom mesh has loose vertices or open/non-manifold edges.');
+  // Closed edge incidence alone permits two shells touching at a single non-manifold vertex.
+  const vertexFaces = vertices.map(() => new Set<number>());
+  indices.forEach((v, i) => vertexFaces[v]!.add(Math.floor(i / 3)));
+  const vertexAdjacency = vertices.map(() => new Map<number, number[]>());
+  for (const edge of edges.values()) for (const v of [edge.a, edge.b]) {
+    const [a, b] = edge.faces as [number, number], adjacency = vertexAdjacency[v]!;
+    adjacency.set(a, [...(adjacency.get(a) ?? []), b]); adjacency.set(b, [...(adjacency.get(b) ?? []), a]);
+  }
+  for (let v = 0; v < vertices.length; v++) {
+    const remaining = new Set(vertexFaces[v]), stack = [remaining.values().next().value!];
+    remaining.delete(stack[0]!);
+    while (stack.length) for (const next of vertexAdjacency[v]!.get(stack.pop()!) ?? []) if (remaining.delete(next)) stack.push(next);
+    if (remaining.size) fail('Custom mesh has a non-manifold vertex fan.');
+  }
   const adjacency = volumes.map(() => [] as number[]);
   for (const edge of edges.values()) { const [a, b] = edge.faces; adjacency[a!]!.push(b!); adjacency[b!]!.push(a!); }
   const unseen = new Set(volumes.map((_, i) => i));
@@ -170,19 +184,22 @@ function geometryFacts(g: AssemblyGeometry): { points: Vec3[]; vertices: number;
   if (g.kind === 'cone') points.push([0, 0, 0.5]);
   return { points, vertices: points.length, edges: (g.kind === 'cone' ? 2 : 3) * n, triangles: (g.kind === 'cone' ? 2 : 4) * n - (g.kind === 'cone' ? 2 : 4) };
 }
+export function preflightPart(part: AssemblyPart) {
+  const facts = geometryFacts(part.geometry), steps = part.bevel?.segments ?? 1;
+  const triangles = facts.triangles + (part.bevel ? facts.edges * 4 * steps + facts.vertices * 8 * steps * steps : 0);
+  const vertices = facts.vertices + (part.bevel ? facts.edges * 2 * steps + facts.vertices * (steps + 1) ** 2 : 0);
+  const points = facts.points.map(vertex => rotate(vertex.map((v, k) => v * part.dimensions[k]!) as Vec3, part.rotationDegrees ?? [0, 0, 0]).map((v, k) => v + part.position[k]!) as Vec3);
+  return { triangles, vertices, bounds: { min: [0, 1, 2].map(k => Math.min(...points.map(v => v[k]!))) as Vec3, max: [0, 1, 2].map(k => Math.max(...points.map(v => v[k]!))) as Vec3 } };
+}
 export function preflightRecipe(recipe: AssemblyRecipe, triangleBudget: number) {
   const min: Vec3 = [Infinity, Infinity, Infinity], max: Vec3 = [-Infinity, -Infinity, -Infinity];
   const estimatedTriangles = { render: 0, collision: 0, lod1: 0 }; let vertices = 0;
   for (const part of recipe.parts) {
-    const facts = geometryFacts(part.geometry), steps = part.bevel?.segments ?? 1;
+    const facts = preflightPart(part);
     vertices += facts.vertices;
-    const bound = facts.triangles + (part.bevel ? facts.edges * 4 * steps + facts.vertices * 8 * steps * steps : 0);
-    estimatedTriangles[part.role] += bound;
-    for (const vertex of facts.points) {
-      const p = rotate(vertex.map((v, k) => v * part.dimensions[k]!) as Vec3, part.rotationDegrees ?? [0, 0, 0]).map((v, k) => v + part.position[k]!);
-      if (p.some(v => !Number.isFinite(v) || Math.abs(v) > 60)) fail('Assembly geometry exceeds the world bounds.');
-      if (part.role === 'render') for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k]!, p[k]!); max[k] = Math.max(max[k]!, p[k]!); }
-    }
+    estimatedTriangles[part.role] += facts.triangles;
+    if ([...facts.bounds.min, ...facts.bounds.max].some(v => !Number.isFinite(v) || Math.abs(v) > 60)) fail('Assembly geometry exceeds the world bounds.');
+    if (part.role === 'render') for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k]!, facts.bounds.min[k]!); max[k] = Math.max(max[k]!, facts.bounds.max[k]!); }
   }
   if (vertices > RECIPE_LIMITS.totalVertices || estimatedTriangles.render > triangleBudget || estimatedTriangles.collision > recipe.collisionTriangleBudget! || estimatedTriangles.lod1 > recipe.lodTriangleBudget! || (estimatedTriangles.lod1 > 0 && estimatedTriangles.lod1 >= estimatedTriangles.render)) fail('Assembly conservative triangle/vertex budget failed before launch.');
   if (Math.abs(min[2]) > 1e-5 || min[2] < -1e-5 || max.some((v, k) => v - min[k]! > 40)) fail('Render geometry must touch the Z=0 floor and fit a 40-metre assembly.');

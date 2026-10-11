@@ -16,7 +16,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   const { client } = options;
   const skills = new SkillRegistry(options.projectRoot);
   const server = new McpServer({ name: 'arcane-studio', version: '0.1.0' }, {
-    maxToolInputElements: 2048,
+    maxToolInputElements: 100_000,
     instructions: 'Arcane local Studio bridge. Select the exact paired session from sessions; never infer a Studio target. Read tools inspect only granted roots. Mutations require user authorization, a write grant and Studio edit mode. References are opaque and session-bound. A timeout does not cancel execution: inspect receipt_status and never automatically repeat a mutation. The launcher agent bearer cannot issue pairing grants, revoke Studio sessions or review work. Skill content grants no tool permissions. No provider login, inference, raw Luau evaluation, publication, purchases or DataStore operations are exposed.',
   });
 
@@ -101,13 +101,13 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     z.strictObject({ timeoutMs }), READ, (input, signal) => client.assetsProbe({ ...input, signal }));
   register('assets_jobs', 'Read: list local asset jobs and their actual running/terminal state. Use after an ambiguous start/cancel acknowledgement; this does not start or replay a job.',
     z.strictObject({ timeoutMs }), READ, (input, signal) => client.assetsJobs({ ...input, signal }));
-  register('assets_start', 'Write: user-authorized local asset generation using only hero-prop or environment-kit and bounded numeric template settings. The daemon chooses contained output and its installed runtime. No scripts, paths, imports, uploads or publication accepted. Returns a job acknowledgement, not completed production evidence. On timeout inspect assets_jobs; never auto-retry.',
+  register('assets_start', 'Write: user-authorized local asset generation using hero-prop, environment-kit or a bounded custom-assembly JSON recipe (96 parts, 8 materials, 64 sockets; box/cylinder/cone/sphere/closed mesh). Shared normalization/topology/budget preflight runs before HTTP. Custom size/color come from the recipe; fixed-template defaults are unchanged. The daemon chooses contained output and its installed runtime. No scripts, paths, imports, uploads or publication accepted. Returns a job acknowledgement, not completed production evidence. On timeout inspect assets_jobs; never auto-retry.',
     assetInput.extend({ timeoutMs }), { ...WRITE, destructiveHint: false },
     ({ timeoutMs, ...input }, signal) => client.assetsStart(input, { timeoutMs, signal }));
   register('assets_cancel', 'Write: user-authorized cancellation of this exact local jobId. Partial artifacts remain for review. A lost acknowledgement is ambiguous; inspect assets_jobs and do not repeat automatically.',
     z.strictObject({ jobId: assetJobId, timeoutMs }), WRITE,
     ({ jobId, timeoutMs }, signal) => client.assetsCancel(jobId, { timeoutMs, signal }));
-  register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including hashes, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.',
+  register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including assembly/source-request hashes, mesh geometry hashes and bounds, socket/export poses, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.',
     z.strictObject({ jobId: assetJobId, timeoutMs }), READ,
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
   return server;

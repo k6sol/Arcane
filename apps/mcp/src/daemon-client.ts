@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
+import { jsonSnapshot } from '../../../packages/asset-pipeline/src/recipe.js';
 import { jsonObject, methodField, instanceRef } from '../../../packages/protocol/src/studio.js';
 import type { StudioCommand, StudioMethod, StudioSession, Json } from '../../../packages/protocol/src/studio.js';
 import { command, session } from './schemas.js';
@@ -209,7 +210,7 @@ export class DaemonClient {
   }
 
   async assetsStart(input: SafeAssetInput, options: WaitOptions = {}) {
-    const body = safeAssetInput(assetInput.parse(input));
+    const body = safeAssetInput(assetInput.parse(jsonSnapshot(input)));
     return this.postOnce('/v1/assets/start', body, z.object({ job: assetJob }), { jobId: null, name: body.name },
       'Inspect assets_jobs for this asset name and request. The job may have started; do not repeat the start automatically. operationId is diagnostic, not a daemon idempotency key.', options);
   }

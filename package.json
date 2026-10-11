@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/tests/unit/*.test.js && node --test tests/skills/*.test.mjs",
+    "test": "npm run build && node --test dist/tests/unit/*.test.js && node --test tests/skills/*.test.mjs && node --test tests/release/*.test.mjs",
     "start:lab": "node dist/apps/daemon/src/main.js",
     "probe:providers": "node dist/apps/daemon/src/probe.js",
     "start:product": "node dist/apps/daemon/src/product-main.js",

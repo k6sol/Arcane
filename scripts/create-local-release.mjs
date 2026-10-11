@@ -90,9 +90,30 @@ async function collect(repository) {
   for (const root of SOURCE_ROOTS) await walk(root);
   return { files, totalBytes };
 }
+function validateWorkspaceLock(files) {
+  const parse = path => JSON.parse(files.find(file => file.path === path).bytes.toString('utf8'));
+  const pkg = parse('package.json'), lock = parse('package-lock.json');
+  if (lock.lockfileVersion !== 3 || !lock.packages || !lock.packages['']) throw new Error('Expected an npm v3 package lock.');
+  const root = lock.packages[''];
+  for (const category of ['dependencies', 'devDependencies']) {
+    const expected = Object.entries(pkg[category] ?? {}).sort();
+    const recorded = Object.entries(root[category] ?? {}).sort();
+    if (JSON.stringify(expected) !== JSON.stringify(recorded)) throw new Error('Root package dependencies are out of sync with package-lock.json.');
+  }
+  const workspaces = pkg.workspaces ?? [];
+  if (!Array.isArray(workspaces) || workspaces.some(pattern => !['apps/*', 'packages/*'].includes(pattern))) throw new Error('Unsupported release workspace pattern.');
+  for (const file of files) {
+    if (!/^(apps|packages)\/[^/]+\/package.json$/.test(file.path) || !workspaces.includes(file.path.split('/')[0] + '/*')) continue;
+    const workspace = JSON.parse(file.bytes.toString('utf8'));
+    const path = file.path.slice(0, -'/package.json'.length), entry = lock.packages[path];
+    const linked = lock.packages['node_modules/' + workspace.name];
+    if (!entry || entry.name !== workspace.name || entry.version !== workspace.version || !linked || linked.link !== true || linked.resolved !== path) throw new Error('Workspace is missing/stale in package-lock.json: ' + path);
+  }
+}
 export async function createLocalRelease({ repository = REPOSITORY } = {}) {
   repository = resolve(repository); await noLinks(repository); repository = await realpath(repository);
   const { files, totalBytes } = await collect(repository);
+  validateWorkspaceLock(files);
   for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json']) {
     if (!files.some(file => file.path === required)) throw new Error('Build the product and plugin before packaging: missing ' + required);
   }
@@ -158,5 +179,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   else if (args.length === 2 && args[0] === '--verify' && isAbsolute(args[1])) console.log(JSON.stringify(await verifyLocalRelease(args[1]), null, 2));
   else throw new Error('Usage: node scripts/create-local-release.mjs [--verify ABSOLUTE_RELEASE_DIRECTORY]');
 }
+
 
 

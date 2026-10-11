@@ -17,7 +17,8 @@ async function fixture(t) {
   });
   for (const dir of ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skills', 'docs', 'tests', 'dist', '.github']) await mkdir(join(root, dir));
   const write = async (path, value) => { await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), value); };
-  for (const path of ['package.json', 'package-lock.json', 'tsconfig.json']) await write(path, JSON.stringify({ name: 'arcane', version: '0.1.0', type: 'module' }));
+  for (const path of ['package.json', 'tsconfig.json']) await write(path, JSON.stringify({ name: 'arcane', version: '0.1.0', type: 'module' }));
+  await write('package-lock.json', JSON.stringify({ name: 'arcane', version: '0.1.0', lockfileVersion: 3, packages: { '': { name: 'arcane', version: '0.1.0' } } }));
   for (const path of ['README.md', 'LICENSE']) await write(path, 'Fixture content.\n');
   for (const path of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'dist/apps/desktop/src/studio.js', 'apps/desktop/public/studio.html', 'workers/blender/asset_worker.py']) await write(path, '// Test fixture only.\n');
   await write('skills/registry.json', '{}');
@@ -94,4 +95,15 @@ test('build prerequisite failure is explicit and preflight never treats parent d
   assert.equal((await productDoctor({ repository: root })).checks.find(check => check.id === 'plugin-artifact').status, 'fail');
   await rm(join(root, 'dist/apps/daemon/src/product-main.js')); // Single explicitly named fixture file, no recursive deletion.
   await assert.rejects(createLocalRelease({ repository: root }), /Build the product/);
+});
+
+test('packaging fails before emission when workspace lock entries or pinned root dependencies are stale', async t => {
+  const { root, write } = await fixture(t);
+  await write('package.json', JSON.stringify({ name: 'arcane', version: '0.1.0', workspaces: ['packages/*'] }));
+  await write('packages/new-worker/package.json', JSON.stringify({ name: '@arcane/new-worker', version: '0.1.0' }));
+  await assert.rejects(createLocalRelease({ repository: root }), /Workspace is missing/);
+  await write('package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'packages/new-worker': { name: '@arcane/new-worker', version: '0.1.0' }, 'node_modules/@arcane/new-worker': { link: true, resolved: 'packages/new-worker' } } }));
+  assert.equal((await createLocalRelease({ repository: root })).dependencyInstallRequired, true);
+  await write('package.json', JSON.stringify({ name: 'arcane', version: '0.1.0', dependencies: { zod: '4.6.6' } }));
+  await assert.rejects(createLocalRelease({ repository: root }), /out of sync/);
 });

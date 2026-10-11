@@ -21,12 +21,16 @@
       "title": "Studio plugin and deterministic packaging",
       "owner": "Gibbs",
       "agentId": "01a12cfa-753e-7961-80a5-56a00994b951",
-      "state": "in_progress",
+      "state": "verified_component",
       "dependsOn": [],
       "acceptance": "Typed engine operations, conflict-aware edits and generated plugin artifact",
-      "evidence": [],
+      "evidence": [
+        "tests/plugin/package.test.mjs",
+        "tests/plugin/runtime.test.mjs",
+        "plugin/build/manifest.json"
+      ],
       "priorAgentId": "01a12ce4-48a7-7b22-a52c-7d98d076cd16",
-      "note": "Updated requirement: compact Arcane branding and persistent key-only Studio connection, no URL/pair-code fields."
+      "note": "16 package/compiler/VM tests passed, 263 checks on explicit engine doubles per module/bundle path; actual installed-plugin acceptance deferred by user."
     },
     {
       "id": "UI-01",
@@ -76,7 +80,7 @@
       "id": "NATIVE-01",
       "title": "Disposable Studio engine verification",
       "owner": "parent",
-      "state": "in_progress",
+      "state": "deferred_by_user",
       "dependsOn": [
         "PLUGIN-01",
         "CORE-01",
@@ -84,7 +88,7 @@
       ],
       "acceptance": "Real plugin pairing/read/write/conflict/restore receipts in disposable place, not Hunted",
       "evidence": [],
-      "note": "Baseplate Place1 explicitly authorized by user. Actual read engine behavior proved; MCP-hosted library HTTP fails while HttpEnabled=false. Real local-plugin widget transport remains pending reload/connect. No Hunted writes."
+      "note": "User selected Leave Studio testing for later. Installed native plugin HTTP, dirty-editor, writes/restore gates remain unverified. No further native Studio testing is authorized until the user resumes it."
     },
     {
       "id": "WORKFLOW-01",
@@ -127,8 +131,8 @@
       ]
     }
   ],
-  "updatedAt": "2026-10-11T22:37:17.014Z",
-  "previousTurnClassification": "progress: protocol, queue, HTTP, workflow store and regression evidence created; prior worker handles now confirmed missing",
+  "updatedAt": "2026-10-11T23:12:08.9359324Z",
+  "previousTurnClassification": "progress: fresh 182 unit passes/2 browser skips, 32 skill passes and 16 Luau/package passes; local release/source startup and 6 release tests; clean install exposed and repaired missing npm workspace lock entries.",
   "requiredCompletionStillOpen": [
     "native-plugin-key-only-widget-and-http",
     "dirty-editor-and-selective-restore-native",

@@ -35,6 +35,8 @@ export interface AssetJobRecord {
 }
 const ID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const LIMIT = 256;
+export const HISTORY_PAGE_BYTES = 512 * 1024;
+export interface AssetJobPage { schemaVersion: 1; jobs: AssetJobRecord[]; total: number; nextCursor: string | null; byteLimit: number }
 const outputOwners = new Set<string>();
 function id(value: unknown): string {
   if (typeof value !== 'string' || !ID.test(value)) throw new ArcaneError('INPUT', 'Expected a job UUID.');
@@ -59,9 +61,11 @@ export async function createAssetService(options: AssetServiceOptions) {
   const active = new Map<string, { handle: AssetJob; completion: Promise<void> }>();
   let probeActive: AbortController | null = null;
   let pending: Promise<void> = Promise.resolve(), persistenceError = false, closed = false;
-  const snapshot = () => structuredClone([...entries.values()].map(e => e.job).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.jobId.localeCompare(a.jobId)));
+  const ordered = () => [...entries.values()].map(e => e.job).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.jobId.localeCompare(a.jobId));
+  const snapshot = () => structuredClone(ordered());
   const persist = () => {
-    const jobs = [...entries.values()].map(({job}) => ({ ...job, request: { ...job.request, recipe: undefined } }));
+    // The advisory index stores only observed events. Full requests remain in journals/manifests.
+    const jobs = [...entries.values()].map(({ job }) => ({ jobId: job.jobId, events: structuredClone(job.events) }));
     pending = pending.then(async () => {
       const temporary = join(root, 'index-' + randomUUID() + '.tmp'), target = join(root, 'index.json');
       await noLinks(root);
@@ -148,6 +152,28 @@ export async function createAssetService(options: AssetServiceOptions) {
       finally { operation.signal?.removeEventListener('abort', abort); probeActive = null; }
     },
     jobs(): AssetJobRecord[] { return snapshot(); },
+    jobPage(options: { limit?: number; after?: string } = {}): AssetJobPage {
+      ensureOpen();
+      if (Object.keys(options).some(k => k !== 'limit' && k !== 'after')) throw new ArcaneError('INPUT', 'Unexpected history option.');
+      const limit = options.limit ?? 32;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) throw new ArcaneError('INPUT', 'History limit must be 1..64.');
+      const all = ordered(), after = options.after === undefined ? -1 : all.findIndex(job => job.jobId === id(options.after));
+      if (options.after !== undefined && after < 0) throw new ArcaneError('NOT_FOUND', 'Unknown history cursor.');
+      const page: AssetJobPage = { schemaVersion: 1, jobs: [], total: all.length, nextCursor: null, byteLimit: HISTORY_PAGE_BYTES };
+      // Reserve wrapper/cursor space. Bound bytes, including complete recipes and observed events.
+      let bytes = 256;
+      for (const job of all.slice(after + 1, after + 1 + limit)) {
+        const size = Buffer.byteLength(JSON.stringify(job)) + 1;
+        if (bytes + size > HISTORY_PAGE_BYTES) {
+          if (!page.jobs.length) throw new ArcaneError('HISTORY_LIMIT', 'One history record exceeds the response bound; inspect its retained journal.');
+          break;
+        }
+        page.jobs.push(structuredClone(job)); bytes += size;
+      }
+      if (after + 1 + page.jobs.length < all.length) page.nextCursor = page.jobs.at(-1)!.jobId;
+      if (Buffer.byteLength(JSON.stringify(page)) > HISTORY_PAGE_BYTES) throw new ArcaneError('HISTORY_LIMIT', 'History response exceeds its byte bound.');
+      return page;
+    },
     async start(input: AssetInput): Promise<AssetJobRecord> {
       ensureOpen(); await flushed(); ensureOpen();
       if (probeActive || active.size) throw new AssetError('BUSY', 'A Blender operation is already running.');
