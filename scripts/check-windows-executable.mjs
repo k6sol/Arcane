@@ -30,9 +30,23 @@ export async function checkWindowsExecutable(directory) {
   const report = JSON.parse(raw.toString('utf8'));
   if (report.schemaVersion !== 1 || report.kind !== 'arcane-windows-executable-smoke' || report.inferenceStarted !== false || report.studioOperations !== 0 || !report.checks || Object.keys(report.checks).length < 13 || Object.values(report.checks).some(value => value !== true)) throw new Error('Incomplete executable verification.');
   if (digest(await readFile(executable)) !== originalDigest) throw new Error('Executable changed during verification.');
+  
+  // Real parent-loss check on the bundled Node/runtime, not the user's Studio or provider.
+  const lossRoot = join(reportDirectory, 'parent-loss'); await mkdir(lossRoot);
+  const lossProject = join(lossRoot, 'project'); await mkdir(lossProject);
+  const lossEnv = policy.daemonEnvironment(process.env, { productRoot: join(directory,'resources','product'), stateRoot: join(lossRoot,'runtime','product'), projectPath: lossProject });
+  const parentLossExit = await new Promise((resolve, reject) => {
+    const owned = spawn(join(directory,'resources','node','node.exe'), [join(directory,'resources','product','dist','apps','daemon','src','product-main.js')], { cwd: lossRoot, env: lossEnv, shell: false, windowsHide: true, stdio: ['ignore','ignore','ignore','ipc'] });
+    let ready = false;
+    const timer = setTimeout(() => { owned.kill(); reject(new Error('Bundled runtime did not close after private parent loss.')); }, 20000);
+    owned.on('message', message => { try { policy.readyMessage(message); if (!ready) { ready = true; owned.disconnect(); } } catch {} });
+    owned.once('error', () => { clearTimeout(timer); reject(new Error('Bundled runtime parent-loss fixture failed to start.')); });
+    owned.once('close', code => { clearTimeout(timer); if (!ready || code !== 0) reject(new Error('Bundled runtime failed graceful parent-loss shutdown.')); else resolve(code); });
+  });
+
   const after = await verifyWindowsBundle(directory); if (after.manifestSha256 !== before.manifestSha256) throw new Error('Bundle changed during verification.');
   const proof = { schemaVersion: 1, executable, directory, reportDirectory, screenshot: join(reportDirectory,'workspace.png'), manifestSha256: after.manifestSha256,
-    checks: report.checks, elapsed: report.elapsed, inferenceStarted: false, studioOperations: 0, signed: false, fullProductVerified: false };
+    checks: { ...report.checks, parentLossShutdownVerified: parentLossExit === 0 }, elapsed: report.elapsed, inferenceStarted: false, studioOperations: 0, signed: false, fullProductVerified: false };
   await writeFile(join(reportDirectory,'verification.json'), JSON.stringify(proof,null,2)+'\n', { flag: 'wx' }); return proof;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

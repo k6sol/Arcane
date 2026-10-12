@@ -13,17 +13,19 @@ export async function buildDesktopPipeline() {
   const browserExecutable = process.env.ARCANE_UI_BROWSER_EXE ?? join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)','Microsoft','Edge','Application','msedge.exe');
   for (const path of [browserModule,browserExecutable]) if (!(await lstat(path)).isFile()) throw new Error('Desktop release requires installed test-only Playwright and an explicit Chromium/Edge executable; checks cannot be silently skipped.');
   async function run(label,args) {
+    console.log('Arcane verification: '+label);
     const started=Date.now(); let output='',bytes=0;
     const code=await new Promise((resolve,reject)=>{
-      const env={...process.env}; delete env.ELECTRON_RUN_AS_NODE; env.ARCANE_UI_BROWSER_MODULE=pathToFileURL(browserModule).href; env.ARCANE_UI_BROWSER_EXE=browserExecutable;
+      const env={...process.env}; delete env.ELECTRON_RUN_AS_NODE; env.ARCANE_UI_BROWSER_MODULE=browserModule; env.ARCANE_UI_BROWSER_EXE=browserExecutable;
       const child=spawn(process.execPath,args,{cwd:repository,env,shell:false,windowsHide:true,stdio:['ignore','pipe','pipe']});
-      const capture=chunk=>{bytes+=chunk.length;if(bytes>16*1024*1024){child.kill();reject(new Error('Verification log limit exceeded.'));}else{output+=chunk.toString('utf8');process.stdout.write(chunk);}};
+      const capture=chunk=>{bytes+=chunk.length;if(bytes>16*1024*1024){child.kill();reject(new Error('Verification log limit exceeded.'));}else{output+=chunk.toString('utf8');}};
       child.stdout.on('data',capture);child.stderr.on('data',capture);
       const timeout=setTimeout(()=>{child.kill();reject(new Error('Verification stage deadline exceeded.'));},15*60*1000);
       child.once('error',()=>{clearTimeout(timeout);reject(new Error('Verification process could not start.'));});
       child.once('close',code=>{clearTimeout(timeout);resolve(code??1);});
     });
     await writeFile(join(directory,label+'.log'),output,{flag:'wx'});stages.push({label,code,elapsedMs:Date.now()-started});
+    console.log(label+': exit '+code+'; '+(Date.now()-started)+'ms; log '+join(directory,label+'.log'));
     if(code!==0)throw new Error(label+' failed; retained logs: '+directory);
   }
   await run('compile',['scripts/compile-product.mjs']);

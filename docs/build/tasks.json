@@ -252,9 +252,52 @@
         "tests/unit/codex-history.test.ts",
         "docs/build/LEARNING.md",
         "docs/build/NATIVE_HISTORY.md",
-        "docs/research/native-desktop-history-checks.json"
+        "docs/research/native-desktop-history-checks.json",
+        "apps/daemon/src/learning-service.ts",
+        "apps/daemon/src/learning-routes.ts",
+        "apps/desktop/src/learning-panel.ts",
+        "tests/unit/learning-http.test.ts",
+        "tests/unit/learning-panel.test.ts",
+        "scripts/check-project-memory.mjs"
       ],
-      "note": "17learning+30nativehistoryfixtures passed within407wholeproductchecks. Codexdesktopconnectorread original genuineCLI smokethread successfully,0newturns. Foundations are not yet wired into HTTP/MCP/settings/native prompts or a persistent history UI. Claude and concurrent native desktop registration/sync unverified. Nextcriticalpath: humanconsent memoryroutes/UI + scopednative thread/list/read/rehydration; preserve separate native approvals and Studio deferral."
+      "note": "Reviewed opt-in local memory routes and Learn UI are integrated: human-only consent/verified evidence review, disable/erase, bounded untrusted context appended only to a draft. Store17/HTTP12/UI28 focused fixtures passed; current root release checks underway. Native history parser30 fixtures and earlier original Codex desktop record read verified; persistent history UI, auto reviewed collection, Claude synchronization and concurrent dual-client registration remain open. Actual real-daemon/Edge integration10/10 passed: opt-in/propose/verify/approve/context/disable/persistence,0nativeinference,0Studiooperations. Newwholeunit/browser461/461 passes withno skips."
+    },
+    {
+      "id": "DESKTOP-EXE-01",
+      "title": "Branded Windows executable and reproducible release verification",
+      "owner": "parent",
+      "state": "in_progress",
+      "dependsOn": [
+        "UI-REFERENCE-02",
+        "ONBOARDING-PROJECTS-01"
+      ],
+      "acceptance": "Real bundled-runtime exe with isolated sandboxed renderer, per-user/project state, stable key port, guarded native project switching, resource branding, idle default and verified launch/shutdown",
+      "evidence": [
+        "apps/desktop/electron/main.cjs",
+        "apps/desktop/electron/policy.cjs",
+        "scripts/package-windows.mjs",
+        "scripts/check-windows-executable.mjs",
+        "scripts/desktop-pipeline.mjs",
+        "tests/release/desktop-host.test.mjs",
+        "tests/release/windows-package.test.mjs"
+      ],
+      "note": "Initial development host13actualchecks passed, firstshow1574ms. Independent review found and fixed six startup/quiescence/path regressions;19focused fixtures pass. Packaging13tests; source mapping84inputs; actual final exe acceptance pending current pipeline. Unsigned development preview, not fullproduct signoff."
+    },
+    {
+      "id": "WORKFLOW-RECIPES-01",
+      "title": "Deterministic evidence-gated production recipes",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [
+        "CORE-01"
+      ],
+      "acceptance": "Bounded production code/asset/repair DAG with exact provider capabilities and human permission/evidence gates",
+      "evidence": [
+        "packages/core/src/workflow-recipes.ts",
+        "tests/unit/workflow-recipes.test.ts",
+        "docs/build/WORKFLOW_RECIPES.md"
+      ],
+      "note": "14offlinefixtures pass. Pure planning/readiness graph: no automatic model launch, Studio write, publishing or runner completion claim; runner integration remains open."
     }
   ],
   "updatedAt": "2026-10-12",

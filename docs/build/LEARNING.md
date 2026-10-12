@@ -108,3 +108,7 @@ The official [Codex app-server documentation](https://learn.chatgpt.com/docs/app
 ## Offline verification
 
 `tests/unit/learning-store.test.ts` uses Node's test runner, temporary generated project/state directories, synthetic evidence hashes, and a nonserializable fixture human proof. It checks default-deny consent, human-only review and erase, agent proposal restrictions, canonical project isolation, transactional/persistent idempotency, verified deterministic ranking, UTF-8 prompt bounds, injection-as-data handling, secret rejection, evidence limits, capacity rollback, reversible disable, hash-only audit, deletion retry behavior, WAL persistence, corruption/newer-schema refusal, and link rejection. It does not invoke a provider, native history/auth source, HTTP route, live Studio, inference, upload, telemetry, or a full product build.
+
+## Integrated local product panel
+
+The product launcher owns the project-scoped service; [LEARNING_HTTP](LEARNING_HTTP.md) documents human-only routes and [LEARNING_UI](LEARNING_UI.md) documents the Learn panel. Startup does not collect transcripts or enable learning. Only an explicit reviewed note can enter approved context, and only an explicit button appends it to a draft without submission. Known current daemon credentials are rejected before storage. Native-history importing/synchronization and automatic reviewed collection remain open.

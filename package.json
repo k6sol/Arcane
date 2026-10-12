@@ -34,7 +34,8 @@
     "start:desktop": "electron apps/desktop/electron",
     "package:windows": "npm run build && npm run build:plugin && node scripts/package-windows.mjs",
     "release:desktop": "node scripts/desktop-pipeline.mjs",
-    "check:desktop": "node scripts/check-windows-executable.mjs"
+    "check:desktop": "node scripts/check-windows-executable.mjs",
+    "check:memory": "node scripts/check-project-memory.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

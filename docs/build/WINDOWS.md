@@ -150,3 +150,11 @@ The tests inject tiny Electron/Node PE fixtures and a Node metadata probe, while
 using the actual createLocalRelease API. They perform no Electron download,
 application launch, provider/Studio/Blender operation, login or inference.
 
+
+## Repeatable release workflow and desktop operation
+
+`npm run release:desktop` runs the compiled unit/browser inventory and offline release/skill/plugin inventory before packaging and calling `check-windows-executable.mjs`. Browser preflight requires local pinned Playwright and an installed Edge executable (or explicit ARCANE_UI_BROWSER_EXE), preventing silently skipped browser checks. Optional Luau VM/compiler cases need explicit official tools from PLUGIN.md; no Studio or Luau tooling is installed automatically. Failures retain logs and stop delivery; no automatic retries or assertion suppression.
+
+The desktop has native Window controls, a File > Open project folder picker, Ctrl+O, reload/zoom/fullscreen commands, single-instance focus and bounded graceful shutdown. It uses private IPC to a bundled standalone Node daemon, not renderer-controlled processes. The renderer is sandboxed and context isolated with no Node, generic IPC, shell, file or arbitrary external navigation capability. App resources remain separate from per-user state/assets. Per-project ports persist to keep API-key connections stable; an occupied conflicting port fails rather than silently rotating existing keys.
+
+The executable smoke profile starts no model run or Studio operation. It captures the real workspace, verifies memory is off/project-scoped, confirms idle sessions/commands, sandbox/CSP and normal shutdown, then independently tests bundled-daemon parent-loss shutdown. This is executable launch proof, not a claim that every provider, asset workflow or live Studio feature is complete. The hash inventory is a local integrity check, not a cryptographic publisher signature.

@@ -10,6 +10,11 @@ import { createLocalRelease, verifyLocalRelease, inside, REQUIRED_FRONTEND_FILES
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const run = promisify(execFile);
 const MANIFEST = 'windows-manifest.json';
+const deploymentPath = path => !path.startsWith('tests/') && !path.startsWith('dist/tests/');
+function deploymentManifest(source) {
+  const files = source.files.filter(file => deploymentPath(file.path));
+  return { ...source, fileCount: files.length, totalBytes: files.reduce((total, file) => total + file.bytes, 0), files };
+}
 const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs'];
 const PRODUCTION_ROOTS = ['@modelcontextprotocol/sdk', 'zod'];
 const ELECTRON_FILES = new Set([
@@ -26,7 +31,7 @@ const ELECTRON_REQUIRED = [
 ];
 const FORBIDDEN = /^(?:\.env(?:\..*)?|\.npmrc|auth\.json|credentials\.json|daemon\.json|preferences\.json|.*\.(?:log|key|pem|partial))$/i;
 const PRIVATE_DIRECTORIES = new Set(['runtime', '.runtime', '.git', '.codex', '.claude', '.agents', 'cache', '__pycache__', 'generated']);
-const DEPENDENCY_OMISSIONS = new Set(['node_modules', 'test', 'tests', '__tests__', ...PRIVATE_DIRECTORIES]);
+const DEPENDENCY_OMISSIONS = new Set(['node_modules', 'test', 'tests', '__tests__', 'tsconfig.json', 'tsconfig.build.json', 'tsconfig.esm.json', 'tsconfig.cjs.json', 'tsconfig.base.json', ...PRIVATE_DIRECTORIES]);
 const MAX_FILES = 32768, MAX_FILE_BYTES = 512 * 1024 * 1024, MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
@@ -71,12 +76,18 @@ async function json(path) { return JSON.parse((await regularBytes(path)).toStrin
 async function exists(path) {
   try { await lstat(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
+export function hasPrivateKeyMaterial(text) {
+  // Parser/library format markers are not credentials. Encoded bodies, including
+  // escaped source/map newlines and unfinished material, remain refused.
+  const normalized = text.replace(/\\{1,4}[rn]/g, '\n');
+  return /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----\s*[A-Za-z0-9+/=]{32,}/.test(normalized);
+}
 function secretCheck(bytes, path) {
   if (bytes.length > 32 * 1024 * 1024) return; // Binaries are bounded and structurally selected.
   const text = bytes.toString('utf8');
   if (/arcane_local_v1_\d+_[a-f0-9]{64}\b/.test(text) ||
       /http:\/\/127\.0\.0\.1:\d+\/(?:studio)?#[a-f0-9]{64}\b/.test(text) ||
-      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(text)) throw new Error('Credential material in bundle input: ' + path);
+      hasPrivateKeyMaterial(text)) throw new Error('Credential material in bundle input: ' + path);
   if (!path.endsWith('.json')) return;
   const visit = (value, depth = 0) => {
     if (depth > 64) throw new Error('Overdeep bundle JSON.');
@@ -87,7 +98,7 @@ function secretCheck(bytes, path) {
       visit(item, depth + 1);
     }
   };
-  visit(JSON.parse(text));
+  try { visit(JSON.parse(text)); } catch (error) { if (error instanceof SyntaxError) throw new Error('Non-strict JSON packaging input: ' + path); throw error; }
 }
 function windowsX64Exe(bytes, label) {
   if (bytes.length < 256 || bytes.toString('ascii', 0, 2) !== 'MZ') throw new Error(label + ' is not a Windows x64 PE executable.');
@@ -297,8 +308,12 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
   }
   await copy(nodeExecutable, 'resources/node/node.exe');
   await copy(licensePath, 'resources/node/LICENSE');
-  for (const entry of releaseManifest.files) await copy(join(release.directory, entry.path), 'resources/product/' + entry.path);
-  await copy(join(release.directory, 'release-manifest.json'), 'resources/product/release-manifest.json');
+  const deployedManifest = deploymentManifest(releaseManifest);
+  for (const entry of deployedManifest.files) await copy(join(release.directory, entry.path), 'resources/product/' + entry.path);
+  const deployedManifestBytes = Buffer.from(JSON.stringify(deployedManifest, null, 2) + '\n');
+  await add('resources/product/release-manifest.json', deployedManifestBytes);
+  // Retain the complete original integrity metadata, not test/private-key fixture payloads.
+  await copy(join(release.directory, 'release-manifest.json'), 'resources/source-manifest.json');
   for (const dependency of dependencies) {
     await walk(join(repository, dependency.path), (source, path) => copy(source, 'resources/product/' + dependency.path + '/' + path),
       (_path, name) => name.startsWith('.') || DEPENDENCY_OMISSIONS.has(name.toLowerCase()));
@@ -338,7 +353,7 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
     electron: { version: electronVersion, executable: 'Arcane.exe', defaultAppIncluded: false },
     node: { ...node, executable: 'resources/node/node.exe', license: 'resources/node/LICENSE' },
     app: { entry: 'resources/app/main.cjs', productRoot: 'resources/product' },
-    sourceRelease: { manifestSha256: releaseProof.manifestSha256 },
+    sourceRelease: { manifestSha256: hash(deployedManifestBytes), originalManifestSha256: releaseProof.manifestSha256, testPayloadsIncluded: false },
     runtime: { installedNodeRequired: false, dependenciesIncluded: true, applicationLaunchVerified: false, inferenceStarted: false },
     dependencies, fileCount: files.length, totalBytes, files,
   };
@@ -396,6 +411,12 @@ export async function verifyWindowsBundle(directory) {
   const product = join(directory, 'resources/product');
   const releaseProof = await verifyLocalRelease(product);
   if (releaseProof.manifestSha256 !== manifest.sourceRelease?.manifestSha256) throw new Error('Product snapshot manifest mismatch.');
+  const originalManifestBytes = await regularBytes(join(directory, 'resources/source-manifest.json'));
+  if (hash(originalManifestBytes) !== manifest.sourceRelease.originalManifestSha256 || manifest.sourceRelease.testPayloadsIncluded !== false) throw new Error('Original source manifest provenance mismatch.');
+  const originalManifest = JSON.parse(originalManifestBytes.toString('utf8'));
+  if (originalManifest.schemaVersion !== 1 || originalManifest.kind !== 'arcane-local-source-release' || !Array.isArray(originalManifest.files) || originalManifest.fileCount !== originalManifest.files.length || originalManifest.files.length > 4096) throw new Error('Invalid original source manifest.');
+  const derived = deploymentManifest(originalManifest);
+  if (JSON.stringify(await json(join(product, 'release-manifest.json'))) !== JSON.stringify(derived)) throw new Error('Deployment must be an exact test-free projection of the original source manifest.');
   const pkg = await json(join(product, 'package.json')), lock = await json(join(product, 'package-lock.json'));
   if (pkg.version !== manifest.version || pkg.devDependencies?.electron !== manifest.electron.version ||
       lock.packages?.['node_modules/electron']?.version !== manifest.electron.version) throw new Error('Product/Electron version mismatch.');
@@ -421,6 +442,7 @@ export async function verifyWindowsBundle(directory) {
       if (!['package.json', ...HOST_FILES, 'icon.png'].includes(path.slice('resources/app/'.length))) throw new Error('Unexpected host payload.');
     } else if (path.startsWith('resources/node/')) {
       if (!['resources/node/node.exe', 'resources/node/LICENSE'].includes(path)) throw new Error('Unexpected Node payload.');
+    } else if (path === 'resources/source-manifest.json') { /* Its full hash and deployment projection were verified above. */
     } else if (!electronPath(path === 'Arcane.exe' ? 'electron.exe' : path)) throw new Error('Unexpected Electron payload.');
   }
   return { files: seen.size, bytes: totalBytes, manifestSha256: hash(manifestBytes), integrityOnly: true,

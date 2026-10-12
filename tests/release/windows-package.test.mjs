@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, lstat, link, symlink 
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { packageWindows, verifyWindowsBundle } from '../../scripts/package-windows.mjs';
+import { packageWindows, verifyWindowsBundle, hasPrivateKeyMaterial } from '../../scripts/package-windows.mjs';
 import { REQUIRED_FRONTEND_FILES, BRAND_BITMAP_PATH } from '../../scripts/create-local-release.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -279,3 +279,9 @@ test('host code must equal its source snapshot even if an outer file descriptor 
   await assert.rejects(verifyWindowsBundle(result.directory), /Host differs from the verified product snapshot/);
 });
 
+
+test('key-format parser markers are not material, but actual encoded and unfinished private-key bodies are refused', () => {
+ assert.equal(hasPrivateKeyMaterial("pem.includes('-----BEGIN PRIVATE KEY-----')"),false);
+ assert.equal(hasPrivateKeyMaterial('-----BEGIN PRIVATE KEY-----'),false);
+ for(const format of ['','RSA ','EC ','DSA ','ENCRYPTED ','OPENSSH ']) for(const newline of ['\n','\\n','\\\\n']) assert.equal(hasPrivateKeyMaterial('-----BEGIN '+format+'PRIVATE KEY-----'+newline+'A'.repeat(64)),true);
+});
