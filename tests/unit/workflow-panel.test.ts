@@ -462,3 +462,28 @@ test('receipt parser enforces exact bounded metadata and never treats snapshots 
   assert.throws(()=>readWorkflowReceipt({...value,retry:true},p,'owned_key'));
   assert.throws(()=>readWorkflowReceipt({...value,large:'x'.repeat(512*1024)},p,'owned_key'));
 });
+
+
+test('checking a lost reconciliation receipt reconciles only earlier unknown receipts in that same workflow',async()=>{
+  const f=fixture(null),base=f.defaultHandler();let observed:Record<string,unknown>|undefined;
+  f.handler(async call=>{
+    if(call.path.endsWith('/execute')){
+      const p=call.body!.preview as PanelWorkflowPreview;
+      if(p.prepared.kind==='reconcile')observed=await(await base(call)).json() as Record<string,unknown>;
+      return new Response('',{status:202});
+    }
+    if(call.path.endsWith('/receipt'))return Response.json({state:'done',command:{idempotencyKey:call.body!.idempotencyKey,kind:'reconcile',workflowId:'flow_one',result:'reconciled'},association:'bound',snapshot:observed,snapshotStatus:'available',retry:false});
+    return base(call);
+  });
+  await f.panel.start();fill(f.doc);await f.click('recipe');const creation=clone(f.preview());await f.click('confirm');
+  const uncertain=snapshot();uncertain.workflow.creationReceiptHash=creation.receiptHash;uncertain.workflow.state='uncertain';uncertain.assessment=null;
+  uncertain.workflow.operation={key:String(executions(f.calls)[0]!.body!.idempotencyKey),kind:'create-recipe',stepKey:null,submission:null,approved:null};
+  f.state(uncertain);await f.click('refresh');choose(f.doc,'action','reconcile');await f.click('decision');await f.click('confirm');
+  assert.equal(executions(f.calls).length,2);
+  const reconciliationKey=String(executions(f.calls)[1]!.body!.idempotencyKey);
+  const check=f.doc.mount.all().find(e=>e.getAttribute('data-workflow-receipt')===reconciliationKey)!;assert.ok(check);
+  check.emit('click',true);await idle(f.doc);
+  assert.match(f.doc.mount.textContent,/Receipt: recorded \(reconciled\)/);assert.match(f.doc.mount.textContent,/Receipt: reconciled/);
+  assert.doesNotMatch(f.doc.mount.textContent,/Receipt: unknown/);assert.equal(executions(f.calls).length,2);
+  assert.equal(f.doc.button('recipe').disabled,false);f.panel.cleanup();
+});

@@ -1,3 +1,4 @@
+import { workflowNativeModel } from './workflow-native-model.js';
 import { mkdir } from 'node:fs/promises';
 import { createWorkflowHost } from './workflow-host.js';
 import { workflowRoutes } from './workflow-routes.js';
@@ -55,7 +56,7 @@ export async function createConnectionLab(options: Options) {
     arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
-  const nativeChat = codex ? codexRoutes(codex) : null;
+  const nativeChat = codex ? codexRoutes(codex, {workflowModels:true}) : null;
   let associations: ConversationWorkStore | null = null;
   let workflow: ReturnType<typeof createWorkflowHost> | null = null;
   try {
@@ -75,7 +76,11 @@ export async function createConnectionLab(options: Options) {
           const identity = thread?.configured ? thread : state?.nativeHistory;
           return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
         },
-        policyContext: () => ({ connections, capabilities: [] }),
+        modelSelection: () => workflowNativeModel(codex?.state()??null)?.proof.selection??null,
+        policyContext: () => {
+          const current=workflowNativeModel(codex?.state()??null);
+          return {connections:current?[current.connection,...connections.filter(c=>c.provider!=='codex')]:connections.filter(c=>c.provider!=='codex'),capabilities:[]};
+        },
       });
     }
   } catch (error) {

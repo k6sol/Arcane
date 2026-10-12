@@ -77,7 +77,7 @@ test('thread, workspace and optional session mismatch reject before reading cont
   assert.deepEqual(reasons(parseCodexThreadRead(read(), { ...SCOPE, cwd: CWD.toLowerCase() })), ['scope-mismatch']);
 });
 
-test('unknown storage modes fail closed before visiting turn content', () => {
+test('unknown storage modes fail closed before inspecting turns', () => {
   for (const mode of ['future-mode', null, {}]) {
     const fixture = read([], { historyMode: mode });
     Object.defineProperty(fixture.thread, 'turns', { get() { assert.fail('unsupported mode accessed content'); } });
@@ -85,6 +85,31 @@ test('unknown storage modes fail closed before visiting turn content', () => {
     assert.equal(result.completeness, 'rejected');
     assert.deepEqual(reasons(result), ['unsupported-history-mode']);
   }
+});
+
+test('hydrated paginated thread/read preserves exact public IDs and redacts text using the existing bounds', () => {
+  const result = parseCodexThreadRead(read([turn([user(), assistant('answer', 'Public answer. password=fixtureSecret')])], { historyMode: 'paginated' }), SCOPE);
+  assert.equal(result.completeness, 'complete'); assert.equal(result.marker, null);
+  assert.deepEqual(result.entries.map(entry => entry.role), ['user', 'assistant']);
+  assert.deepEqual(result.entries[1]!.ids, { threadId: THREAD, sessionId: SESSION, turnId: TURN, itemId: 'answer' });
+  assert.equal(result.entries[1]!.text, 'Public answer. password=[REDACTED]'); assert.equal(result.redacted, true);
+  const bounded = parseCodexThreadRead(read([turn([user(), assistant()])], { historyMode: 'paginated' }), SCOPE, { maxItems: 1 });
+  assert.equal(bounded.entries.length, 1); assert.equal(bounded.completeness, 'incomplete'); assert.ok(reasons(bounded).includes('item-limit'));
+});
+
+test('each paginated turn requires full items before visiting content and summary responses retain a gap marker', () => {
+  const summary = turn([], TURN + '-summary', { itemsView: 'summary' });
+  const unloaded = turn([], TURN + '-unloaded', { itemsView: undefined });
+  for (const omitted of [summary, unloaded]) Object.defineProperty(omitted, 'items', { get() { assert.fail('summary content was accessed'); } });
+  const result = parseCodexThreadRead(read([turn([assistant()]), summary, unloaded], { historyMode: 'paginated' }), SCOPE);
+  assert.equal(result.completeness, 'incomplete'); assert.equal(result.marker, HISTORY_GAP_MARKER);
+  assert.equal(result.entries.length, 1); assert.deepEqual(reasons(result), ['items-not-full', 'items-not-full']);
+  for (const fixture of [read([], { historyMode: 'paginated' }), read([], { historyMode: 'paginated', turns: undefined })]) {
+    const empty = parseCodexThreadRead(fixture, SCOPE);
+    assert.equal(empty.completeness, 'incomplete'); assert.deepEqual(empty.entries, []); assert.equal(empty.marker, HISTORY_GAP_MARKER);
+  }
+  const page = { ...read([turn([assistant()])], { historyMode: 'paginated' }), nextCursor: 'older' };
+  assert.equal(parseCodexThreadRead(page, SCOPE).completeness, 'rejected');
 });
 
 test('ephemeral threads, missing hydration and summaries cannot report complete history', () => {

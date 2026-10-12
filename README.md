@@ -118,7 +118,7 @@ A CI workflow is authored for the workspace; this refresh does not establish a r
 
 ## Repository and licence
 
-Repository: private [k6sol/Arcane](https://github.com/k6sol/Arcane). Prior Git setup observations are historical and do not establish current synchronization or a push of this refresh. The existing [MIT licence](LICENSE) is retained; third-party components keep their own licence/notice obligations.
+Repository: private [k6sol/Arcane](https://github.com/k6sol/Arcane). First-party materials follow the [Arcane Proprietary Licence](LICENSE). Third-party components retain their own licence and notice obligations.
 
 
 ## First run and your own projects

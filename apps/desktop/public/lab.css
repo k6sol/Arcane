@@ -242,6 +242,15 @@ button[aria-pressed="true"] { background: #492226; border-color: var(--accent-te
     outline-offset: -2px;
   }
 }
+/* Shared red, white and black identity with the conversation workspace. */
+:root{--bg:#080808;--panel:#101010;--raised:#1a1a1a;--line:#303030;--text:#f5f5f5;--muted:#b2b2b2;--accent:#ff3340;--accent-text:#ff6068;--action:#d71b29}
+body{background:var(--bg);color:var(--text)}
+button{background:var(--action);color:#fff}
+.sidebar{background-color:#0b0b0b;background-image:linear-gradient(180deg,#0b0b0b 0%,#0b0b0b99 50%,#0b0b0b 100%),url('/brand/arcane-ridges.png')}
+.sidebar nav a[aria-current="page"]{background:#231012;color:#fff;border-color:#78232c}
+.provider-card,.selection-panel,.setup-panel{background:#111;border-color:#353535}
+.provider-card:focus-within,.selection-panel:focus-within{border-color:var(--accent)}
+button[aria-pressed="true"]{background:#391015;border-color:var(--accent)}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;

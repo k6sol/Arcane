@@ -9,7 +9,7 @@ import {
 import type { IncomingMessage } from 'node:http';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
-import type { HumanGate, WorkflowRecipeRequest, WorkflowSubmission } from '../../../packages/core/src/workflow-recipes.js';
+import type { HumanGate, RequestedModel, WorkflowRecipeRequest, WorkflowSubmission } from '../../../packages/core/src/workflow-recipes.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
 import {
@@ -28,6 +28,7 @@ export interface WorkflowHostOptions {
   /** Trusted observations only. No execution/verifier/authority callback is accepted. */
   policyContext?: WorkflowServiceOptions['policyContext'];
   conversation?: () => NativeConversation | null;
+  modelSelection?: () => RequestedModel | null;
   workAssociations?: ConversationWorkStore;
   verifiers?: WorkflowServiceOptions['verifiers'];
 }
@@ -232,7 +233,7 @@ function representation(command: Readonly<WorkflowHumanCommand>): WorkflowHumanR
 
 /** Lazy, project-bound, human HTTP authority. Owns only coordinator journal and receipt key. */
 export function createWorkflowHost(options: WorkflowHostOptions) {
-  fields(options, ['directory', 'projectPath', 'workStore'], ['policyContext','conversation','workAssociations','verifiers']);
+  fields(options, ['directory', 'projectPath', 'workStore'], ['policyContext','conversation','workAssociations','verifiers','modelSelection']);
   if(options.conversation && !options.workAssociations)fail('WORKFLOW_CONVERSATION');
   const { directory, projectPath, policyContext } = options;
   const borrowed = fields(options.workStore, ['store', 'projectPath']);
@@ -265,6 +266,13 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
     const a=fields(value,['provider','threadId','sessionId']);
     if(!['codex','claude-code'].includes(a.provider as string)||typeof a.threadId!=='string'||! /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(a.threadId)|| (a.sessionId!==null&&(typeof a.sessionId!=='string'||! /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(a.sessionId))))fail('WORKFLOW_CONVERSATION');
     return {provider:a.provider as NativeConversation['provider'],threadId:a.threadId,sessionId:a.sessionId as string|null};
+  }
+  function currentModel(request: WorkflowRecipeRequest): void {
+    if (!options.modelSelection) return;
+    const a=fields(request,['deliverable','engine','title','prompt','scope','model'],['studio','assetBudget','verificationAttempts','reproductionRuns']);
+    if(a.model===null)return;
+    const current = options.modelSelection();
+    if (!current || canonical(request.model) !== canonical(current)) fail('WORKFLOW_MODEL_CURRENT');
   }
   function bound(workflowId:string): boolean {
     if(!options.conversation)return true;const current=currentConversation();const binding=options.workAssociations!.binding('workflow',workflowId);
@@ -311,6 +319,7 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
       switch (a.action) {
         case 'recipe':
           fields(a, ['action', 'request']);
+          currentModel(a.request as WorkflowRecipeRequest);
           result = { prepared: service.prepareCreation(a.request as WorkflowRecipeRequest),
             request: structuredClone(a.request as WorkflowRecipeRequest) }; break;
         case 'gate':
@@ -368,6 +377,7 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
       switch (p.prepared.kind) {
         case 'create-recipe':
           fields(p, ['prepared', 'receiptHash', 'request'],['conversation']);
+          currentModel(p.request!);
           if (canonical(service.prepareCreation(p.request!)) !== canonical(p.prepared)) fail('WORKFLOW_BINDING');
           const result=service.create({ request: p.request, idempotencyKey: key, receiptHash: p.receiptHash });
           if(conversation){try{options.workAssociations!.bind({conversation,kind:'workflow',id:result.workflow.id});}catch{fail('WORKFLOW_ASSOCIATION_UNKNOWN');}}

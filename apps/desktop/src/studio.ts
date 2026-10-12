@@ -1308,15 +1308,15 @@ export class StudioWorkbench {
 export function createWorkflowContextOptions(
   getToken: () => string,
   workbench: Pick<StudioWorkbench, 'historyProjectPath' | 'subscribeProjectChange'>,
-  chat: Pick<CodexChat, 'workflowConversation' | 'subscribeWorkflowContextChange'>,
+  chat: Pick<CodexChat, 'workflowConversation' | 'subscribeWorkflowContextChange'> & Partial<Pick<CodexChat,'workflowModelSelection'>>,
   refresh: () => void,
 ): WorkflowPanelOptions {
-  const signature = () => JSON.stringify([getToken(), workbench.historyProjectPath(), chat.workflowConversation()]);
+  const signature = () => JSON.stringify([getToken(), workbench.historyProjectPath(), chat.workflowConversation(), chat.workflowModelSelection?.()??null]);
   return {
     getToken,
     getProjectPath: () => workbench.historyProjectPath() || null,
     getNativeConversation: () => chat.workflowConversation(),
-    // Native state exposes no server policy catalogue revision. Model stays null.
+    getModelSelection: () => chat.workflowModelSelection?.()??null,
     subscribeContextChange(invalidate) {
       let previous = signature(), active = true, refreshQueued = false;
       const changed = () => {

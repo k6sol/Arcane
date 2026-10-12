@@ -1,3 +1,4 @@
+import { workflowNativeModel } from './workflow-native-model.js';
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { CodexClientError } from '../../../packages/codex-client/src/index.js';
@@ -33,12 +34,13 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
     request.on('data',data);request.once('end',end);request.once('error',failed);request.once('aborted',failed);request.resume();
   });
   if(!reusable){response.setHeader('Connection','close');response.once('finish',()=>setTimeout(()=>request.socket.destroy(),25));}
-}export function codexRoutes(service: CodexService) {
+}export function codexRoutes(service: CodexService, options: { workflowModels?: true } = {}) {
+  const project = (state: CodexProductState): CodexProductState => options.workflowModels ? {...state,workflowModel:workflowNativeModel(state)?.proof??null} : state;
   return async(request: IncomingMessage,response: ServerResponse,url: URL,controlToken: string,origin: string,agentToken: string):Promise<boolean>=>{
     if(!url.pathname.startsWith('/v1/codex/'))return false;
     const compact = (state: CodexProductState): CodexProductState => {
       const strip = (snapshot: CodexProductState['snapshot']) => snapshot ? {...snapshot,approvals:[],events:[],droppedEvents:snapshot.droppedEvents+snapshot.events.length} : null;
-      return {...state,displayLimited:true,snapshot:strip(state.snapshot),lastSnapshot:strip(state.lastSnapshot)};
+      return {...state,...(options.workflowModels?{workflowModel:null}:{}),displayLimited:true,snapshot:strip(state.snapshot),lastSnapshot:strip(state.lastSnapshot)};
     };
     const send=(status:number,value:unknown)=>{
       if(response.destroyed||response.headersSent)return;
@@ -59,7 +61,7 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
       if(url.search)throw new RouteError('QUERY',400);
       if(url.pathname==='/v1/codex/state'){
         if(request.method!=='GET')throw new RouteError('METHOD',405);
-        send(200,{state:service.state()});return true;
+        send(200,{state:project(service.state())});return true;
       }
       if(url.pathname==='/v1/codex/history'){
         if(request.method!=='GET')throw new RouteError('METHOD',405);
@@ -70,7 +72,7 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
       if(request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
       const outcome=await service.action(await body(request));
       const status=outcome.record.state==='unknown'?202:outcome.record.state==='rejected'?409:outcome.record.state==='pending'?202:200;
-      send(status,outcome);
+      send(status,{...outcome,state:project(outcome.state)});
     }catch(error){
       await discard(request,response);
       const known=error instanceof RouteError||error instanceof CodexClientError;

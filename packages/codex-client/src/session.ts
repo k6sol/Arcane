@@ -196,9 +196,24 @@ export class CodexSession {
   selectModel(action: HumanAction & Selection): Selection {
     this.#ensureReady();
     exact(action, ['initiatedBy','model','effort']); human({ initiatedBy: action.initiatedBy });
-    if (this.#thread) fail('STATE', 'Select the exact model and effort before opening a thread.');
+    if (this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown')) {
+      fail('STATE', 'Reconcile the native lifecycle before changing its model or effort.');
+    }
+    const thread = this.#thread;
+    if (thread && (!thread.configured || !['idle','completed','failed','interrupted'].includes(thread.turnStatus))) {
+      fail('STATE', 'Change model or effort only on an idle or terminal configured thread.');
+    }
     const pair = { model: str(action.model), effort: str(action.effort, 64) };
-    this.#validatePair(pair); this.#selection = pair;
+    this.#validatePair(pair); // Also fences catalogue refreshes, including a same-pair action.
+    if (this.#selection?.model === pair.model && this.#selection.effort === pair.effort &&
+        (!thread || thread.selection.model === pair.model && thread.selection.effort === pair.effort)) return structuredClone(pair);
+    if (thread) {
+      thread.writeGranted = false;
+      // Only stale, non-active previews can remain here. Invalidate locally without an RPC.
+      this.#clearApprovals(null);
+      thread.selection = { ...pair };
+    }
+    this.#selection = { ...pair };
     return structuredClone(pair);
   }
   async startThread(action: HumanAction): Promise<ThreadState> {
@@ -244,7 +259,8 @@ export class CodexSession {
   async startTurn(action: HumanAction & { threadId: string; text: string }): Promise<ThreadState> {
     exact(action, ['initiatedBy','threadId','text']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId);
-    if (!['idle','completed','failed','interrupted'].includes(thread.turnStatus)) fail('BUSY', 'The previous turn must be reconciled before starting another.');
+    if (this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
+        !['idle','completed','failed','interrupted'].includes(thread.turnStatus)) fail('BUSY', 'The previous turn must be reconciled before starting another.');
     const text = str(action.text, this.bounds.maxInputBytes);
     this.#validatePair(thread.selection);
     const operation = this.#newOperation('turn/start', thread.threadId, null);
@@ -641,3 +657,5 @@ export class CodexSession {
     this.#events.push({ value, bytes }); this.#eventBytes += bytes;
   }
 }
+
+

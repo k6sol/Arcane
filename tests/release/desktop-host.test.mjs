@@ -239,7 +239,7 @@ test('regression: an already failed owned child cannot count as clean quiescence
 
 test('regression: post-idle shutdown fences fresh requests before awaiting child cleanup', async () => {
   // Source boundary fixture: neither a real listener nor a native service runs.
-  const begin = labSource.lastIndexOf('async close() {');
+  const begin = labSource.lastIndexOf('close(): Promise<void> {');
   const end = labSource.indexOf('\n    }', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the connection lab lifecycle boundary.');
   const member = labSource.slice(begin, end + '\n    }'.length);
@@ -251,8 +251,8 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     close(callback) { this.accepting = false; callback?.(); return this; },
     closeIdleConnections() {},
   };
-  const cleanup = vm.runInNewContext(stripTypeScriptTypes('const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
-    server, codex: { close: () => childCleanup },
+  const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
+    server, workflow: null, associations: null, ArcaneError: Error, codex: { close: () => childCleanup },
   });
   const closing = cleanup();
   try {

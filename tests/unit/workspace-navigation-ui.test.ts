@@ -1,0 +1,115 @@
+/// <reference lib="dom" />
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { readFile, mkdir } from 'node:fs/promises';
+import { resolve, join, dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
+
+test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, responsive layout and reference palette',
+  { skip: !browserModule, timeout: 60000 }, async t => {
+    const files = new Map([
+      ['/studio', ['apps/desktop/public/studio.html', 'text/html']],
+      ['/studio.css', ['apps/desktop/public/studio.css', 'text/css']],
+      ['/workspace-shell.js', [join(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
+      ['/brand/arcane-ridges.png', ['apps/desktop/public/brand/arcane-ridges.png', 'image/png']],
+    ]);
+    // Exercise the real markup and compiled shell in isolation. No native controller
+    // is mounted, so every navigation action can be checked for zero API traffic.
+    const server = createServer((request, response) => {
+      void (async () => {
+        if (request.url === '/navigation-fixture.js') {
+          response.writeHead(200, { 'content-type': 'text/javascript' });
+          response.end('import {startWorkspaceShell} from "/workspace-shell.js"; startWorkspaceShell(document);');
+          return;
+        }
+        const file = files.get(request.url ?? '');
+        if (!file) { response.writeHead(404); response.end(); return; }
+        let bytes = await readFile(resolve(file[0]!));
+        if (request.url === '/studio') bytes = Buffer.from(bytes.toString('utf8').replace('src="/studio.js"', 'src="/navigation-fixture.js"'));
+        response.writeHead(200, { 'content-type': file[1]!, 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'" });
+        response.end(bytes);
+      })().catch(() => { response.writeHead(500); response.end(); });
+    });
+    await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+    t.after(() => new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done())));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const origin = 'http://127.0.0.1:' + address.port;
+    const playwright = await import(pathToFileURL(browserModule!).href);
+    const browser = await playwright.chromium.launch({ headless: true, args: ['--disable-gpu'],
+      ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) });
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 1586, height: 992 } });
+    const errors: string[] = [], apiRequests: string[] = [];
+    page.on('pageerror', (error: Error) => errors.push(error.message));
+    page.on('request', (request: { url(): string }) => { if (new URL(request.url()).pathname.startsWith('/v1/')) apiRequests.push(request.url()); });
+    await page.goto(origin + '/studio');
+    await page.waitForFunction(() => document.getElementById('workspace-search')?.getAttribute('role') === 'combobox');
+    const screenshotRoot = process.env.ARCANE_UI_SCREENSHOT ? dirname(resolve(process.env.ARCANE_UI_SCREENSHOT)) : null;
+    const capture = async (name: string) => {
+      if (screenshotRoot) { await mkdir(screenshotRoot, { recursive: true }); await page.screenshot({ path: join(screenshotRoot, name + '.png') }); }
+    };
+    const search = page.locator('#workspace-search'), results = page.locator('#workspace-search-results');
+    const draft = 'Keep the original project request.\nAnd its whitespace.  ';
+    await page.locator('#codex-composer').fill(draft);
+    await page.locator('#codex-notice').click();
+    await page.keyboard.press('Control+k');
+    assert.equal(await search.getAttribute('aria-expanded'), 'true');
+    assert.ok(await results.getByRole('option').count() >= 10);
+    await search.fill('textures models');
+    assert.equal(await results.getByRole('option').count(), 1);
+    assert.equal(await results.getByRole('option').textContent(), 'Blender');
+    await search.press('Enter');
+    assert.equal(await page.locator('#workspace-stage').getAttribute('data-workspace-tool'), 'blender');
+    assert.equal(await page.locator('#workspace-settings').getAttribute('open'), null);
+    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    await search.fill('');
+    assert.equal(await results.getByRole('option').first().textContent(), 'Blender');
+    await search.press('ArrowDown');
+    const active = await search.getAttribute('aria-activedescendant');
+    assert.ok(active);
+    assert.equal(await page.locator('#' + active).getAttribute('aria-selected'), 'true');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'workspace-search');
+    await capture('workspace-search-desktop');
+    await search.fill('export files');
+    await search.press('Enter');
+    assert.equal(await page.locator('#workspace-settings').getAttribute('open'), '');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'asset-heading');
+    assert.equal(await page.locator('#asset-heading').isVisible(), true);
+    assert.equal(await results.isVisible(), false);
+    await page.locator('#new-chat').click();
+    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    // Capture the main workspace with its advanced settings folded away.
+    await page.locator('#workspace-settings > summary').click();
+    await capture('workspace-desktop');
+    const palette = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement);
+      return ['--bg', '--text', '--accent'].map(name => style.getPropertyValue(name).trim());
+    });
+    assert.deepEqual(palette, ['#080808', '#f5f5f5', '#ff3340']);
+    for (const viewport of [{ width: 945, height: 618 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await page.locator('#new-chat').click();
+      const layout = await page.evaluate(() => {
+        const composer = document.getElementById('codex-compose')!.getBoundingClientRect();
+        return { width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, composerTop: composer.top, composerBottom: composer.bottom };
+      });
+      assert.ok(layout.scrollWidth <= layout.width, JSON.stringify(layout));
+      assert.ok(layout.composerTop >= 0 && layout.composerBottom <= layout.height, JSON.stringify(layout));
+      await capture('workspace-' + viewport.width);
+      await search.fill('');
+      const popup = await results.boundingBox(); assert.ok(popup);
+      assert.ok(popup.x >= 0 && popup.x + popup.width <= viewport.width + 1, JSON.stringify(popup));
+      assert.ok(popup.y + popup.height <= viewport.height + 1, JSON.stringify(popup));
+      await capture('workspace-search-' + viewport.width);
+      await search.press('Escape');
+    }
+    await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+    await search.fill('textures');
+    assert.equal(await results.getByRole('option').evaluate((row: HTMLElement) => getComputedStyle(row).outlineStyle), 'solid');
+    await search.press('Tab'); assert.equal(await results.isVisible(), false);
+    assert.deepEqual(errors, []); assert.deepEqual(apiRequests, []);
+    t.diagnostic('Installed Edge ' + browser.version() + '; three viewports; real compiled shell; zero API requests.');
+  });

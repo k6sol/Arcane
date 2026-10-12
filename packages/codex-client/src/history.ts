@@ -237,7 +237,7 @@ export function parseCodexThreadRead(
       if (seenTurns.has(turnId)) { gap('duplicate-turn', turnId); continue; }
       seenTurns.add(turnId);
       const view = field(turn, 'itemsView');
-      if ((paginated && view !== 'full') || (view !== undefined && view !== 'full')) { gap('items-not-full', turnId); continue; }
+      if (view !== 'full' && (paginated || view !== undefined)) { gap('items-not-full', turnId); continue; }
       const status = field(turn, 'status');
       if (status === 'inProgress') gap('unfinished-turn', turnId);
       else if (status === 'failed' || status === 'interrupted') gap('failed-turn', turnId);

@@ -631,6 +631,9 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       if (result.command) receipt.workflowId = result.command.workflowId;
       if (result.state === 'done' && result.association === 'bound' && result.snapshot && result.command?.result) {
         receipt.state = 'recorded'; receipt.result = result.command.result;
+        if (result.command.result === 'reconciled') {
+          for (const previous of receipts) if (previous !== receipt && previous.owner === op.ctx.owner && previous.state === 'unknown' && previous.workflowId === result.snapshot.workflow.id) previous.state = 'reconciled';
+        }
         ownedFlows.set(result.snapshot.workflow.id, op.ctx.owner);
         current = result.snapshot; showFlow();
         announce('Original command receipt confirmed: ' + result.command.result + '. No command was retried.');

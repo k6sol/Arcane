@@ -273,12 +273,12 @@ only explicit confirmation executes it under a new key. Successful reconciliatio
 marks matching earlier unknown receipts reconciled. The interrupted mutation is
 never repeated. A definitive 4xx refusal is shown as refused, not successful.
 
-Contract limitation: the API has no GET command-receipt lookup. If execute's response
-is lost after the server completed a command and the workflow is active, a snapshot
-alone cannot prove the exact command receipt for every action. The UI conservatively
-keeps that receipt unknown; the existing reconcile route accepts only uncertain
-operations. Resolving this case across all actions requires parent/host support for
-an authenticated exact key/receipt lookup. No unsupported endpoint is called here.
+For each unknown receipt, Check original receipt performs one explicit read-only
+POST with its exact signed original preview and idempotency key. Only a validated
+done command, bound conversation, available exact snapshot and matching result
+clear uncertainty. Missing/running/uncertain/unbound/unavailable receipts stay
+unknown. This check never executes a command, assigns a missing association,
+retries a mutation, or treats an unrelated current workflow as receipt proof.
 Receipts are memory-only (up to 32 retained); teardown/reload requires durable host
 inspection. No token, preview, receipt, or native identifier uses localStorage.
 

@@ -82,7 +82,7 @@ This example describes future human actions. No real thread or turn was run duri
 | `snapshot()` | Defensive copy of metadata, approvals, operations and bounded events; no RPC |
 | `readAccount()` | Only `account/read` with `refreshToken: false`; auth classification, recognized plan or null, provider-auth requirement |
 | `listModels()` | Visible paginated native catalogue; reject duplicates, repeated cursors and caps |
-| `selectModel({initiatedBy,model,effort})` | Exact reported model string and effort; no alias, picker-ID, default or fallback substitution |
+| `selectModel({initiatedBy,model,effort})` | Human exact reported pair before a thread or on its idle/terminal configured lifecycle; local only, changed pair revokes grants and stale previews |
 | `startThread({initiatedBy})` | One human thread lifecycle per connection; explicit model/OpenAI provider/cwd/read-only/human review |
 | `resumeThread({initiatedBy,threadId})` | Exact saved ID with the same safe overrides; no path/history resume |
 | `grantThreadWrites({initiatedBy,threadId})` | In-memory grant for this exact configured thread; no automatic approval |
@@ -105,6 +105,65 @@ The adapter never opens credential files, copies OAuth tokens, logs in/out, asks
 Thread acknowledgement must confirm exact model, OpenAI provider, canonical cwd, on-request policy, human reviewer and readOnly sandbox with network disabled. Mismatches preserve IDs and fail closed. Stable thread creation has no dedicated effort field. The selected effort is sent explicitly on every `turn/start`; the saved pair and acknowledgement do not establish completed inference, applied-effort telemetry, entitlement or quota.
 
 Writes require an explicit human grant for the exact thread. Subsequent turns use `workspaceWrite` with only its workspace writable, network disabled and temporary-directory allowances excluded. Grants do not survive reconnect or interruption. Granting writes never automatically answers an existing prompt.
+
+## Changing model or effort in the same conversation
+
+`selectModel({initiatedBy:'human', model, effort})` accepts only an exact pair in
+this connection's current reported catalogue. It may change the pair before
+opening a thread or on the same configured thread in idle, completed, failed or
+interrupted state. No alias, picker ID, saved preference, default or fallback is
+substituted. The human assertion must still come from the parent's authenticated
+human action; it is not a browser-granted capability.
+
+Selection is refused during catalogue loading, thread/start or thread/resume,
+turn/start or pending interruption, and for active, cancelling, starting, unknown
+or unconfigured threads. Any recorded pending/unknown lifecycle operation blocks
+it even if a later notification shows a terminal turn. These guards also apply
+to same-pair actions. A ready idle same-pair action is a defensive no-op and may
+retain an already deliberate write grant.
+
+A changed pair updates both Snapshot.selection and ThreadState.selection in one
+synchronous local action. It revokes the exact thread's write grant and invalidates
+cached approval handles/file previews without sending an RPC or approval answer.
+Thread ID, session ID, turn ID/status, history identity, operation journal and
+native event history are preserved. An old approval handle cannot be accepted.
+The next human turn uses readOnly unless the human separately grants writes again.
+
+The [official app-server contract](https://learn.chatgpt.com/docs/app-server)
+allows model/effort overrides on turn/start and makes supplied overrides defaults
+for later turns of that same thread. This adapter explicitly sends the selected
+pair on every next human startTurn. Selection itself never invokes thread/start,
+thread/resume, turn/start, config mutation, auth refresh or MCP setup. Workspace
+cwd, on-request approval policy, user reviewer, network restrictions and existing
+MCP isolation remain fixed. The existing subscription check still gates native
+execution; no API billing credentials or alternative provider are introduced.
+
+Terminal notifications do not override unknown or pending acknowledgements.
+startTurn also checks the operation journal before dispatch, preventing a terminal
+notification from permitting a second turn while its earlier start/interrupt ACK
+is pending or unknown. Lost/malformed native ACKs keep their existing unknown
+records, IDs and selected pair; no selection action repairs, retries or reconnects
+them. Definite not-sent or unobserved remote rejection does not invent uncertainty.
+
+The parent service's existing receipt path was inspected without modification:
+on acknowledgement it records snapshot.selection.model/effort, and on a newly
+unknown lifecycle it retains that same snapshot pair with the observed IDs.
+Keeping global and thread selections equal means these records identify the
+pair actually selected for the sent turn. A rejected selection still records
+its rejected intent, not successful model application. Neither a local selection
+nor a native turn ACK proves completed inference or model entitlement.
+
+Validation for this change compiles only tests/unit/codex-client.test.ts and its
+import dependency closure to a unique Temp directory under the repository's strict
+ES2023/NodeNext options. Targeted spawned-node-fixture tests cover model/effort
+switches, same-pair no-op, grant reset, preserved conversation/history, exact next
+turn parameters, catalogue refresh, pending start/resume, terminal/ACK races,
+unknown operation fences, stale approval denial, and existing MCP isolation.
+Current isolated result: **34/34 targeted tests passed**, including 15 new
+same-thread selection regressions and existing ACK/isolation guards. The emitted
+client dependency tree was compiled into a unique Temp directory, not shared dist.
+No installed CLI, Studio, live model, provider credential, shared build or package
+command is run. Parent owns idle selector UI and server-side model-proof wiring.
 
 ## Manual approvals and review data
 
@@ -176,3 +235,5 @@ On 12 October 2026, the human explicitly authorized one small native test using 
 The native preflight exposed a genuine isolation limitation: clearing root MCP/plugin tables did not remove all inherited server metadata. Child-only disabled entries and per-plugin settings were verified against the actual thread runtime before inference: Arcane connected with only work_runs; every other reported server was disabled. The installed CLI treats quoted dotted-key components literally, so simple safe server/plugin keys were passed unquoted. Unsupported key characters abort the test. These test-specific isolation overrides are not yet the general embedded-controller policy; inherited tools and native sandbox/MCP permission boundaries remain required product hardening.
 
 Evidence: docs/research/native-codex-smoke-checks.json includes exact thread/turn IDs, completed MCP item, reported model catalogue, runtime server states, actual daemon request and source fingerprints. scripts/check-native-codex-smoke.mjs is manual-only and now refuses to replay a consumed one-turn approval. It is never included in ordinary npm test. This verifies one personal-local read-only native workflow, not writes/approvals, image/design, all models, complete native features, all child-process cleanup or Studio/import/game quality.
+
+

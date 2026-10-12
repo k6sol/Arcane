@@ -1,3 +1,4 @@
+import type { NativeWorkflowModelProof } from '../../../packages/protocol/src/workflow-model.js';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { mkdirSync, lstatSync, realpathSync } from 'node:fs';
@@ -69,7 +70,7 @@ function sanitizeHistory(value: unknown, binding: Pick<CodexHistoryState,'thread
 export interface CodexProductState {
   provider: 'codex'; use: 'personal-local'; projectPath: string;
   connecting: boolean; closing: boolean; busy: boolean; snapshot: Snapshot | null; lastSnapshot: Snapshot | null;
-  actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
+  workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
 export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readThreadHistory'>>;

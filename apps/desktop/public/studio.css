@@ -144,6 +144,41 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
   .arcane-app :where(button,a,input,select,textarea,summary,[role=button]):focus-visible,.workspace-search:focus-within,.artifact-stage .asset-previews figure[role="button"]:focus-visible{outline-color:Highlight}
 }
 
+/* Arcane's reference palette: black surfaces, white type, and a red action edge. */
+:root{--bg:#080808;--panel:#101010;--raised:#1a1a1a;--line:#303030;--text:#f5f5f5;--muted:#b2b2b2;--accent:#ff3340;--action:#d71b29;--focus-ring:#ff4d57}
+button{background:var(--action)}
+.app-sidebar{background:linear-gradient(180deg,#101010 0%,#101010 58%,#101010eb 82%,#101010d9 100%),url('/brand/arcane-ridges.png') center bottom/auto 65% no-repeat}
+.wordmark .arcane-logo,.welcome-logo .arcane-logo{filter:drop-shadow(0 0 14px #ff33404d)}
+.new-chat{background:linear-gradient(120deg,#3b1014,#1b1011);border-color:#a52b33;color:#fff;box-shadow:inset 0 1px #ffffff0d}
+.nav-link[aria-pressed=true]{background:#241012;border-color:#632228;box-shadow:inset 2px 0 var(--accent)}
+.workspace-topbar{background:#0b0b0b}
+.workspace-tab[aria-pressed=true]{background:linear-gradient(180deg,#1c1c1c,#161011);color:#fff;box-shadow:inset 0 -2px var(--accent)}
+.workspace-search{background:#111;border-color:#353535}
+.workspace-search-results{width:380px;max-height:none;overflow:hidden;padding:0;background:#111;border-color:#393939;border-top:2px solid var(--accent);box-shadow:0 18px 48px #000c}
+.workspace-search-results .workspace-search-title{padding:14px 16px 10px;color:#fff;font-size:13px;font-weight:600}
+.workspace-search-options{padding:4px 8px 8px;max-height:min(340px,50svh);overflow:auto;scrollbar-width:thin}
+.workspace-search-options button{border:1px solid transparent;border-radius:5px;padding:11px 12px;color:var(--muted);line-height:1.4}
+.workspace-search-options button[aria-selected=true]{background:#281114;color:#fff;border-color:#632228;border-left:3px solid var(--accent);padding-left:10px}
+.workspace-search-results .workspace-search-status{padding:11px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;line-height:1.5}
+.chat-avatar{border-color:#82232b;background:#160c0d}
+.codex-panel .badge{background:#171717}
+.welcome-connect,.settings-link{color:#fff;border-color:#76262d}
+.workspace-stage .codex-message{background:linear-gradient(145deg,#171717,#101010);border-color:#303030}
+.workspace-stage .codex-message.human{background:linear-gradient(120deg,#321013,#1c1011);border-color:#72232b}
+.workspace-stage .composer{background:linear-gradient(130deg,#1c1c1c,#111);border-color:#414141;box-shadow:inset 0 1px #ffffff0a}
+.workspace-stage .composer:focus-within{border-color:var(--accent)}
+.workspace-stage .composer textarea:focus-visible{outline:none}
+.workspace-stage #codex-submit{background:var(--action);border-color:#f13c49;color:#fff;box-shadow:0 0 18px #ff334026}
+.workspace-stage #codex-submit:disabled{background:#2a1719;border-color:#573035;color:#b2b2b2;box-shadow:none}
+.artifact-panel{background:linear-gradient(135deg,#151515,#0d0d0d);border-color:#383838}
+.artifact-toolbar nav button.is-active{background:#211012;color:#ff4d57;border-bottom-color:var(--accent)}
+.artifact-stage .asset-previews figure.is-selected,.artifact-stage .asset-previews figure[aria-pressed="true"]{border-color:var(--accent);background:#211012}
+.artifact-stage .asset-previews canvas{background:#0b0b0b}
+.artifact-file{background:#151515;border-color:#424242}
+.workspace-tools{background:#101010}.settings-group .panel{background:#151515}
+@media(hover:hover) and (pointer:fine){.workspace-search-options button:hover:not([aria-selected=true]){background:#202020;color:#fff}.new-chat:hover{border-color:var(--accent)}}
+@media(forced-colors:active){.workspace-search-options button[aria-selected=true]{outline:2px solid Highlight;outline-offset:-2px}.workspace-search:focus-within{outline-color:Highlight}.workspace-stage .composer:focus-within{outline:2px solid Highlight;outline-offset:2px}}
+
 /* Inline conversation workflow controls */
 
 #workflow-panel .arcane-workflow{background:#202020;color:#ededed;font:inherit;border-top:1px solid #414141;padding:18px 0;min-width:0}

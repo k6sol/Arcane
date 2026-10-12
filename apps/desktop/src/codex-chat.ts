@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import type { CodexAction, CodexActionOutcome, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
+import type { RequestedModel } from '../../../packages/core/src/workflow-recipes.js';
 import type { NativeWorkflowConversation } from './workflow-panel.js';
 import type { Approval, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 
@@ -66,6 +67,17 @@ export function readCodexState(value: unknown): ChatState {
         !(binding.sessionId === null || historyId(binding.sessionId)) || !(binding.recorded === null || object(binding.recorded))) {
       throw new Error('Invalid exact recorded native conversation binding.');
     }
+  }
+  if (value.workflowModel !== undefined && value.workflowModel !== null) {
+    const proof=value.workflowModel, snapshot=value.snapshot as ChatSnapshot|null, thread=snapshot?.thread;
+    const keys=['version','source','projectPath','connectionId','threadId','sessionId','provenance','selection','entitlement'];
+    const selected=object(proof)&&object(proof.selection)?proof.selection:null;
+    if (!object(proof)||Object.keys(proof).length!==keys.length||keys.some(k=>!Object.hasOwn(proof,k))||proof.version!==1||proof.source!=='active-native-thread-catalogue'||
+        proof.projectPath!==value.projectPath||value.displayLimited===true||value.connecting||value.closing||!snapshot?.connected||!snapshot.ready||!thread?.configured||proof.connectionId!==snapshot.connectionId||proof.threadId!==thread.threadId||proof.sessionId!==thread.sessionId||
+        proof.provenance!==snapshot.provenance||proof.entitlement!=='unverified'||!selected||Object.keys(selected).sort().join(',')!=='connectionRevision,effort,model,provider'||selected.provider!=='codex'||
+        typeof selected.connectionRevision!=='string'||!/^[a-f0-9]{64}$/.test(selected.connectionRevision)||selected.model!==thread.selection.model||selected.effort!==thread.selection.effort||
+        !text(selected.model,160)||!['none','minimal','low','medium','high','xhigh','max','ultra'].includes(String(selected.effort))||
+        !snapshot.models.some(m=>m.model===selected.model&&m.efforts.includes(selected.effort as string)))throw new Error('Invalid host-attested active native model.');
   }
   const ids = new Set<string>();
   for (const action of value.actions) { const r = readActionRecord(action); if (ids.has(r.requestId)) throw new Error('Duplicate native action receipt.'); ids.add(r.requestId); }
@@ -193,6 +205,10 @@ export class CodexChat {
     const binding = thread?.configured ? thread : state?.nativeHistory;
     return binding && state ? { provider: 'codex', threadId: binding.threadId, sessionId: binding.sessionId, projectPath: state.projectPath } : null;
   }
+  workflowModelSelection(): RequestedModel | null {
+    const proof=this.state?.workflowModel;
+    return proof ? {...proof.selection} : null;
+  }
   private snapshot(){return this.state?.snapshot;}
   private scope(){const s=this.snapshot();return JSON.stringify([s?.connectionId,s?.thread?.threadId,s?.thread?.turnId,this.state?.projectPath]);}
   private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
@@ -248,9 +264,9 @@ export class CodexChat {
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
     if(before!==after){this.generation++;this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.closeConfirmation();}
     if(state.snapshot)this.transcript.consume(state.snapshot);
-    const contextBefore = JSON.stringify([this.state?.projectPath ?? null, this.workflowConversation()]);
+    const contextBefore = JSON.stringify([this.state?.projectPath ?? null, this.workflowConversation(), this.workflowModelSelection()]);
     this.state = state;
-    if (contextBefore !== JSON.stringify([state.projectPath, this.workflowConversation()])) {
+    if (contextBefore !== JSON.stringify([state.projectPath, this.workflowConversation(), this.workflowModelSelection()])) {
       for (const listener of this.workflowContextListeners) listener();
     }
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
@@ -352,8 +368,8 @@ export class CodexChat {
     const pending=(action:string)=>[...this.pending.values()].some(p=>p.action===action);
     disable('codex-connect',!this.fresh||this.stopped||connected||!!this.pending.size||!!this.uncertain.size||!!this.state?.connecting||!!this.state?.closing);
     disable('codex-disconnect',this.stopped||!connected||pending('disconnect'));
-    disable('codex-select',!normal||!!t||pair||!this.value('codex-model')||!this.value('codex-effort'));
-    disable('codex-model',!normal||!!t);disable('codex-effort',!normal||!!t);
+    disable('codex-select',!normal||(!!t&&(!t.configured||!IDLE.includes(t.turnStatus)))||pair||!this.value('codex-model')||!this.value('codex-effort'));
+    disable('codex-model',!normal||(!!t&&(!t.configured||!IDLE.includes(t.turnStatus))));disable('codex-effort',!normal||(!!t&&(!t.configured||!IDLE.includes(t.turnStatus))));
     const subscription=s?.account?.auth==='subscription'&&s.account.requiresOpenaiAuth;
     disable('codex-thread-start',!normal||!!t||!pair||!subscription);disable('codex-thread-resume',!normal||!!t||!pair||!subscription||!text(this.value('codex-resume-id')));
     disable('codex-grant',!normal||!t?.configured||t.writeGranted||!IDLE.includes(t.turnStatus));

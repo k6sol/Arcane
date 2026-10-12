@@ -137,7 +137,9 @@ test('thread defaults to native human review/read-only; turn sends the selected 
   assert.deepEqual(turn?.input,[{type:'text',text:INPUT.text,text_elements:[]}]);
   assert.equal(turn?.approvalsReviewer,'user');
   assert.ok(!Object.hasOwn(turn!,'config'));
-  assert.throws(()=>session.selectModel({...HUMAN,...PAIR}),code('STATE'));
+  assert.throws(()=>session.selectModel({...HUMAN,...PAIR}),code('STATE')); // Active turn, including same-pair actions.
+  assert.throws(()=>session.selectModel({...HUMAN,model:'fixture-other',effort:'low'}),code('STATE'));
+  assert.deepEqual(session.snapshot().selection,PAIR);
   await assert.rejects(()=>session.startTurn(INPUT),code('BUSY'));
 });
 
@@ -871,4 +873,201 @@ test('Arcane-only native thread is configured only after the actual scoped MCP i
 });
 test('unexpected inherited MCP server fences the thread before any native turn can start',async t=>{
  const {session,receipts}=await fixture(t,'inherited-mcp-active',{},true,undefined,'arcane-only');session.selectModel({...HUMAN,...PAIR});await assert.rejects(()=>session.startThread(HUMAN),code('MCP_ISOLATION'));assert.equal(session.snapshot().connected,false);assert.equal(session.snapshot().thread?.configured,false);assert.equal(session.snapshot().operations.at(-1)?.state,'unknown');await assert.rejects(()=>session.startTurn(INPUT),code('DISCONNECTED'));assert.equal(inputs(await receipts()).filter(m=>m.method==='turn/start').length,0);
+});
+
+
+test('same-thread model switch is local, revokes grants and sends the exact pair only on the next human turn', async t => {
+  const { session, receipts } = await fixture(t, 'normal', {}, true, undefined, 'arcane-only');
+  session.selectModel({ ...HUMAN, ...PAIR }); await session.startThread(HUMAN);
+  const before = session.snapshot(); session.grantThreadWrites({ ...HUMAN, threadId: THREAD });
+  const log = inputs(await receipts()), next = { model: 'fixture-other', effort: 'low' };
+  const selected = session.selectModel({ ...HUMAN, ...next }); selected.model = 'mutated-copy';
+  const switched = session.snapshot();
+  assert.deepEqual(switched.selection, next); assert.deepEqual(switched.thread!.selection, next);
+  assert.equal(switched.thread!.threadId, before.thread!.threadId); assert.equal(switched.thread!.sessionId, before.thread!.sessionId);
+  assert.equal(switched.thread!.turnId, before.thread!.turnId); assert.equal(switched.thread!.turnStatus, 'idle');
+  assert.equal(switched.thread!.writeGranted, false); assert.equal(switched.mcpIsolation, 'arcane-only-verified');
+  assert.deepEqual(switched.operations, before.operations); assert.deepEqual(switched.events, before.events);
+  await delay(10); assert.deepEqual(inputs(await receipts()), log, 'selection sends no native method or callback answer');
+  await session.startTurn(INPUT);
+  const calls = inputs(await receipts()), turn = calls.find(m => m.method === 'turn/start')!.params!;
+  assert.equal(turn.threadId, THREAD); assert.equal(turn.model, next.model); assert.equal(turn.effort, next.effort);
+  assert.equal(turn.cwd, ROOT); assert.equal(turn.approvalPolicy, 'on-request'); assert.equal(turn.approvalsReviewer, 'user');
+  assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false });
+  assert.ok(!Object.hasOwn(turn, 'config')); assert.ok(!Object.hasOwn(turn, 'apiKey'));
+  assert.equal(calls.filter(m => m.method === 'thread/start').length, 1); assert.equal(calls.filter(m => m.method === 'thread/resume').length, 0);
+  assert.equal(calls.filter(m => m.method === 'mcpServerStatus/list').length, 1);
+});
+
+test('same-thread effort-only switch resets grants; idle same-pair selection is a defensive no-op', async t => {
+  const { session, receipts } = await open(t); session.grantThreadWrites({ ...HUMAN, threadId: THREAD });
+  const before = session.snapshot(), unchanged = session.selectModel({ ...HUMAN, ...PAIR }); unchanged.effort = 'mutated-copy';
+  assert.deepEqual(session.snapshot(), before, 'same pair does not revoke an existing deliberate grant');
+  for (const invalid of [
+    { ...HUMAN, model: 'picker-fixture-other', effort: 'low' }, { ...HUMAN, ...PAIR, effort: 'high' },
+    { ...PAIR, initiatedBy: 'agent' }, { ...HUMAN, ...PAIR, cwd: ROOT }, { ...HUMAN, ...PAIR, config: {} },
+  ]) assert.throws(() => session.selectModel(invalid as never));
+  assert.deepEqual(session.snapshot(), before, 'refused selection never changes grant or selected pair');
+  const next = { model: PAIR.model, effort: 'low' }; session.selectModel({ ...HUMAN, ...next });
+  assert.equal(session.snapshot().thread!.writeGranted, false); assert.deepEqual(session.snapshot().thread!.selection, next);
+  await session.startTurn(INPUT); const turn = inputs(await receipts()).find(m => m.method === 'turn/start')!.params!;
+  assert.equal(turn.model, next.model); assert.equal(turn.effort, next.effort); assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false });
+});
+
+test('same-thread selection waits for the complete current catalogue even for an idle same pair', async t => {
+  const { session } = await open(t); const before = session.snapshot(); const pending = session.listModels();
+  assert.throws(() => session.selectModel({ ...HUMAN, ...PAIR }), code('BUSY'));
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('BUSY'));
+  assert.deepEqual(session.snapshot().selection, before.selection); await pending;
+  assert.deepEqual(session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), { model: 'fixture-other', effort: 'low' });
+});
+
+// Local programmable stdio peer, owned by this test file. Modes control ACK
+// races via a harmless account/read, never an installed CLI or live model.
+async function switchPeer(t: test.TestContext, mode: string, deadline = 5000) {
+  await mkdir(TEMP, { recursive: true }); const dir = await mkdtemp(join(TEMP, 'session-switch-'));
+  const peer = join(dir, 'peer.mjs'), audit = join(dir, 'audit.jsonl');
+  await writeFile(peer, `
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const [mode, audit] = process.argv.slice(2), threadId = 'fixture-thread';
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const notify = (method, params) => send({ method, params });
+let held = null, count = 0;
+const threadReply = message => {
+  notify('thread/started', { thread: { id: threadId, sessionId: 'fixture-session-root' } });
+  send({ id: message.id, result: { thread: { id: threadId, sessionId: 'fixture-session-root', status: { type: 'idle' }, turns: [] }, model: message.params.model, modelProvider: 'openai', cwd: process.cwd(), approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } } });
+};
+createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line); appendFileSync(audit, JSON.stringify({ type: 'input', message }) + '\\n');
+  const { id, method, params = {} } = message;
+  if (method === 'initialize') { send({ id, result: {} }); return; }
+  if (method === 'initialized') return;
+  if (method === 'account/read') {
+    send({ id, result: { account: { type: 'chatgpt', planType: 'pro' }, requiresOpenaiAuth: true } });
+    if (held && mode !== 'unknown-terminal') { const old = held; held = null; if (old.method.startsWith('thread/')) threadReply(old); else send({ id: old.id, result: old.method === 'turn/start' ? { turn: { id: 'fixture-turn-' + count, status: 'inProgress' } } : {} }); }
+    return;
+  }
+  if (method === 'model/list') { send({ id, result: { data: ['fixture-sol','fixture-other'].map(model => ({ id: 'picker-' + model, model, displayName: model, supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'ultra' }] })), nextCursor: null } }); return; }
+  if (method === 'thread/start' || method === 'thread/resume') {
+    if (mode === 'pending-open') { held = message; return; }
+    threadReply(message); return;
+  }
+  if (method === 'turn/start') {
+    const turnId = 'fixture-turn-' + (++count);
+    if (mode === 'reject-first' && count === 1) { send({ id, error: { code: -32000, message: 'fixture rejection' } }); return; }
+    notify('turn/started', { threadId, turn: { id: turnId, status: 'inProgress' } });
+    if (mode === 'unknown-rejection-terminal') { send({ id, error: { code: -32000, message: 'fixture observed rejection' } }); notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } }); return; }
+    if (['pending-terminal','unknown-terminal'].includes(mode)) { held = message; notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } }); return; }
+    send({ id, result: { turn: { id: turnId, status: 'inProgress' } } });
+    if (mode.startsWith('terminal-')) notify('turn/completed', { threadId, turn: { id: turnId, status: mode.slice(9) } });
+    return;
+  }
+  if (method === 'turn/interrupt') {
+    if (mode === 'pending-interrupt') { held = message; notify('turn/completed', { threadId, turn: { id: params.turnId, status: 'interrupted' } }); return; }
+    send({ id, result: {} }); notify('turn/completed', { threadId, turn: { id: params.turnId, status: 'interrupted' } }); return;
+  }
+});
+`, 'utf8');
+  const bounds = limits({ requestTimeoutMs: 5000 });
+  const session = new CodexSession({ command: process.execPath, args: [peer, mode, audit], cwd: ROOT, env: nativeEnvironment() }, bounds, 'spawned-node-fixture');
+  t.after(async () => { await session.close(); const child = relative(TEMP, dir); assert.ok(child.startsWith('session-switch-') && !child.includes(sep) && !child.includes('..')); await rm(dir, { recursive: true, force: true }); });
+  await session.initialize(); Object.assign(bounds, { requestTimeoutMs: deadline });
+  session.selectModel({ ...HUMAN, ...PAIR });
+  const receipts = async (): Promise<Receipt[]> => (await readFile(audit, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Receipt);
+  return { session, receipts };
+}
+
+for (const method of ['start', 'resume'] as const) test('same-thread selection refuses pending thread ' + method + ' before any notification', async t => {
+  const { session, receipts } = await switchPeer(t, 'pending-open');
+  const opening = method === 'start' ? session.startThread(HUMAN) : session.resumeThread({ ...HUMAN, threadId: THREAD });
+  await until(async () => inputs(await receipts()).some(m => m.method === 'thread/' + method));
+  assert.equal(session.snapshot().thread, null);
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
+  assert.throws(() => session.selectModel({ ...HUMAN, ...PAIR }), code('STATE'));
+  assert.deepEqual(session.snapshot().selection, PAIR); await session.readAccount(); await opening;
+  assert.deepEqual(session.snapshot().thread!.selection, PAIR);
+});
+
+for (const terminal of ['completed', 'failed', 'interrupted']) test('same-thread selection preserves history and identity after terminal ' + terminal, async t => {
+  const { session, receipts } = await switchPeer(t, 'terminal-' + terminal); await session.startThread(HUMAN); await session.startTurn(INPUT);
+  await until(() => session.snapshot().thread?.turnStatus === terminal); const before = session.snapshot();
+  session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }); const after = session.snapshot();
+  assert.equal(after.thread!.threadId, before.thread!.threadId); assert.equal(after.thread!.sessionId, before.thread!.sessionId);
+  assert.equal(after.thread!.turnId, before.thread!.turnId); assert.equal(after.thread!.turnStatus, terminal);
+  assert.deepEqual(after.events, before.events); assert.deepEqual(after.operations, before.operations);
+  await session.startTurn(INPUT); const turns = inputs(await receipts()).filter(m => m.method === 'turn/start');
+  assert.equal(turns.length, 2); assert.equal(turns[1]!.params!.model, 'fixture-other'); assert.equal(turns[1]!.params!.effort, 'low');
+});
+
+test('same-thread selection refuses a terminal notification while its turn ACK is still pending', async t => {
+  const { session } = await switchPeer(t, 'pending-terminal'); await session.startThread(HUMAN); const turn = session.startTurn(INPUT);
+  await until(() => session.snapshot().thread?.turnStatus === 'completed');
+  assert.equal(session.snapshot().operations.at(-1)!.state, 'pending');
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
+  await assert.rejects(() => session.startTurn(INPUT), code('BUSY'));
+  await session.readAccount(); await turn; assert.equal(session.snapshot().thread!.turnStatus, 'completed');
+  assert.doesNotThrow(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }));
+});
+
+test('same-thread selection refuses terminal interruption while its interrupt ACK is still pending', async t => {
+  const { session } = await switchPeer(t, 'pending-interrupt'); await session.startThread(HUMAN); await session.startTurn(INPUT);
+  const interrupt = session.interruptTurn({ ...HUMAN, threadId: THREAD, turnId: 'fixture-turn-1' });
+  assert.throws(() => session.selectModel({ ...HUMAN, ...PAIR }), code('STATE'));
+  await until(() => session.snapshot().thread?.turnStatus === 'interrupted');
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
+  await session.readAccount(); await interrupt; assert.doesNotThrow(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }));
+});
+
+test('same-thread selection cannot turn a terminal lost acknowledgement into a safe new model action', async t => {
+  const { session, receipts } = await switchPeer(t, 'unknown-terminal', 50); await session.startThread(HUMAN);
+  await assert.rejects(() => session.startTurn(INPUT), code('TIMEOUT')); const before = session.snapshot();
+  assert.equal(before.thread!.turnStatus, 'completed'); assert.equal(before.operations.at(-1)!.state, 'unknown');
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('DISCONNECTED'));
+  assert.deepEqual(session.snapshot().selection, PAIR); assert.deepEqual(session.snapshot().thread!.selection, PAIR);
+  assert.equal(inputs(await receipts()).filter(m => m.method === 'turn/start').length, 1);
+});
+
+test('same-thread selection is safe after a definite unsent or unobserved rejected turn', async t => {
+  const { session } = await switchPeer(t, 'reject-first'); await session.startThread(HUMAN);
+  await assert.rejects(() => session.startTurn(INPUT), code('REMOTE_REJECTED'));
+  assert.equal(session.snapshot().operations.at(-1)!.state, 'rejected');
+  assert.deepEqual(session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), { model: 'fixture-other', effort: 'low' });
+  const limited = await open(t, 'normal', { maxQueuedBytes: 1024 });
+  await assert.rejects(() => limited.session.startTurn({ ...INPUT, text: 'x'.repeat(1000) }), code('QUEUE_LIMIT'));
+  assert.equal(limited.session.snapshot().operations.at(-1)!.state, 'not-sent');
+  assert.doesNotThrow(() => limited.session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }));
+});
+
+
+test('same-thread selection invalidates old approval acceptance and does not answer or reopen native work', async t => {
+  const { session, receipts } = await open(t, 'approvals'); session.grantThreadWrites({ ...HUMAN, threadId: THREAD }); await session.startTurn(INPUT);
+  await until(() => session.snapshot().approvals.length === 2); const approvals = session.snapshot().approvals;
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
+  assert.equal(session.snapshot().thread!.writeGranted, true);
+  await session.interruptTurn({ ...HUMAN, threadId: THREAD, turnId: 'fixture-turn-1' }); await until(() => session.snapshot().thread!.turnStatus === 'interrupted');
+  session.grantThreadWrites({ ...HUMAN, threadId: THREAD }); const before = inputs(await receipts());
+  session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' });
+  assert.equal(session.snapshot().thread!.writeGranted, false); assert.deepEqual(session.snapshot().approvals, []);
+  for (const approval of approvals) assert.throws(() => session.respondApproval(answer(approval)), code('STALE_APPROVAL'));
+  await delay(10); assert.deepEqual(inputs(await receipts()), before);
+});
+
+test('same-thread selection blocks recorded unknown operation even if a later notification is terminal', async t => {
+  const { session, receipts } = await switchPeer(t, 'unknown-rejection-terminal'); await session.startThread(HUMAN);
+  await assert.rejects(() => session.startTurn(INPUT), code('REMOTE_REJECTED'));
+  await until(() => session.snapshot().thread!.turnStatus === 'completed'); const before = session.snapshot();
+  assert.equal(before.connected, true); assert.equal(before.operations.at(-1)!.state, 'unknown');
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
+  assert.throws(() => session.selectModel({ ...HUMAN, ...PAIR }), code('STATE'));
+  await assert.rejects(() => session.startTurn(INPUT), code('BUSY'));
+  assert.deepEqual(session.snapshot().selection, PAIR); assert.deepEqual(session.snapshot().thread!.selection, PAIR);
+  assert.equal(inputs(await receipts()).filter(m => m.method === 'turn/start').length, 1);
+});
+
+test('same-thread selection refuses an active resumed thread whose exact turn is unknown', async t => {
+  const { session } = await fixture(t, 'resume-active-unknown'); session.selectModel({ ...HUMAN, ...PAIR }); await session.resumeThread({ ...HUMAN, threadId: THREAD });
+  assert.equal(session.snapshot().thread!.configured, true); assert.equal(session.snapshot().thread!.turnStatus, 'unknown');
+  assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
+  assert.deepEqual(session.snapshot().selection, PAIR);
 });
