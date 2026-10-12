@@ -12,9 +12,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/tests/unit/*.test.js && node --test tests/skills/*.test.mjs && node --test tests/release/*.test.mjs",
+    "build": "node scripts/compile-product.mjs",
+    "typecheck": "node scripts/compile-product.mjs --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 dist/tests/unit/*.test.js && node --test tests/skills/*.test.mjs && node --test tests/release/*.test.mjs",
     "start:lab": "node dist/apps/daemon/src/main.js",
     "probe:providers": "node dist/apps/daemon/src/probe.js",
     "start:product": "node dist/apps/daemon/src/product-main.js",
@@ -27,11 +27,16 @@
     "native:plan": "node scripts/launch-native.mjs --dry-run",
     "doctor": "node scripts/product-doctor.mjs",
     "start:arcane": "node scripts/start-product.mjs",
+    "open:project": "node scripts/open-project.mjs",
+    "setup:arcane": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File scripts/setup-arcane.ps1",
     "release:local": "npm run build && npm run build:plugin && node scripts/create-local-release.mjs",
-    "test:release": "node --test tests/release/*.test.mjs"
+    "test:release": "node --test tests/release/*.test.mjs",
+    "start:desktop": "electron apps/desktop/electron",
+    "package:windows": "npm run build && npm run build:plugin && node scripts/package-windows.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "electron": "44.7.0",
     "typescript": "7.0.2"
   },
   "dependencies": {

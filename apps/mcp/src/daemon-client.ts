@@ -8,7 +8,7 @@ import type { StudioCommand, StudioMethod, StudioSession, Json } from '../../../
 import { command, session } from './schemas.js';
 import { workTask, workRun, workDefinition, leaseToken } from './work-schemas.js';
 import type { WorkTask, WorkRun } from '../../../packages/storage/src/work-store.js';
-import { assetInput, assetProbe, assetJob, assetManifest, assetJobId, safeAssetInput, type SafeAssetInput } from './asset-schemas.js';
+import { assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, type SafeAssetInput } from './asset-schemas.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -205,8 +205,12 @@ export class DaemonClient {
       'The fixed local runtime probe may still be running. Inspect daemon availability before requesting another probe.', options);
   }
 
-  async assetsJobs(options: WaitOptions = {}) {
-    return this.readRecord('/v1/assets/jobs', z.object({ jobs: z.array(assetJob).max(1000) }), options);
+  async assetsJobs(options: WaitOptions & z.output<typeof assetHistoryInput> = {}) {
+    const { timeoutMs: _timeout, signal: _signal, ...history } = options;
+    const input = assetHistoryInput.parse(history), query = new URLSearchParams();
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    if (input.after !== undefined) query.set('after', input.after);
+    return this.readRecord('/v1/assets/jobs' + (query.size ? '?' + query.toString() : ''), assetJobPage, options);
   }
 
   async assetsStart(input: SafeAssetInput, options: WaitOptions = {}) {

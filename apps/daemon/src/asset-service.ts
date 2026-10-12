@@ -1,11 +1,12 @@
 import { JOB_JOURNAL_BYTES, CUSTOM_REQUEST_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import { randomUUID } from 'node:crypto';
-import { opendir, rename, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { lstat, opendir, rename, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { AssetError, createAssetPipeline, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
 import type { AssetInput, AssetJob, AssetJobEvent, AssetJobState, AssetManifest, AssetProbe, AssetRequest, OperationOptions } from '../../../packages/asset-pipeline/src/index.js';
-import { artifactPath, noLinks, prepareOutputRoot, readRegularFile } from '../../../packages/asset-pipeline/src/paths.js';
+import { artifactPath, noLinks, prepareOutputRoot, readRegularFile, regularFile } from '../../../packages/asset-pipeline/src/paths.js';
 import { inspectPng, readJson, record, sha256 } from '../../../packages/asset-pipeline/src/validation.js';
 
 export interface AssetServiceOptions {
@@ -36,6 +37,22 @@ export interface AssetJobRecord {
 const ID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const LIMIT = 256;
 export const HISTORY_PAGE_BYTES = 512 * 1024;
+export const ARTIFACT_DOWNLOAD_BYTES = 64 * 1024 * 1024;
+export const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 30000;
+const DOWNLOADS = new Map([
+  ['asset.glb', { role: 'export', contentType: 'model/gltf-binary' }],
+  ['collision.glb', { role: 'export', contentType: 'model/gltf-binary' }],
+  ['asset-lod1.glb', { role: 'export', contentType: 'model/gltf-binary' }],
+  ['asset.fbx', { role: 'export', contentType: 'application/octet-stream' }],
+  ['asset.blend', { role: 'scene', contentType: 'application/octet-stream' }]
+]);
+async function unchangedFile(path: string, before: Stats): Promise<void> {
+  await noLinks(path);
+  const after = await lstat(path);
+  if (!after.isFile() || after.nlink !== 1 || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+    throw new AssetError('ARTIFACT', 'Artifact or manifest changed during download verification.');
+  }
+}
 export interface AssetJobPage { schemaVersion: 1; jobs: AssetJobRecord[]; total: number; nextCursor: string | null; byteLimit: number }
 const outputOwners = new Set<string>();
 function id(value: unknown): string {
@@ -60,6 +77,7 @@ export async function createAssetService(options: AssetServiceOptions) {
   const entries = new Map<string, { directory: string; job: AssetJobRecord }>();
   const active = new Map<string, { handle: AssetJob; completion: Promise<void> }>();
   let probeActive: AbortController | null = null;
+  let artifactReadActive = false;
   let pending: Promise<void> = Promise.resolve(), persistenceError = false, closed = false;
   const ordered = () => [...entries.values()].map(e => e.job).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.jobId.localeCompare(a.jobId));
   const snapshot = () => structuredClone(ordered());
@@ -235,6 +253,60 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (bytes.length !== artifact.bytes || sha256(bytes) !== artifact.sha256) throw new AssetError('HASH', 'Preview changed since manifest verification.');
       inspectPng(bytes, manifest.request.renderResolution);
       return bytes;
+    },
+    async artifact(jobId: unknown, path: unknown): Promise<{ bytes: Buffer; filename: string; contentType: string }> {
+      ensureOpen();
+      const e = entry(jobId), download = typeof path === 'string' ? DOWNLOADS.get(path) : undefined;
+      if (!download) throw new ArcaneError('INPUT', 'Only the fixed GLB, FBX and completed Blender scene artifacts may be downloaded.');
+      if (!e.job.manifestAvailable || e.job.state !== 'succeeded') throw new ArcaneError('JOB_STATE', 'Artifact downloads require a verified completed job.');
+      if (artifactReadActive) throw new AssetError('BUSY', 'An artifact download is already being verified.');
+      artifactReadActive = true;
+      const end = Date.now() + ARTIFACT_DOWNLOAD_TIMEOUT_MS;
+      const checkDeadline = () => {
+        if (Date.now() >= end) throw new ArcaneError('ARTIFACT_TIMEOUT', 'Artifact verification exceeded its 30 second deadline.');
+        ensureOpen();
+      };
+      try {
+        const target = artifactPath(e.directory, path), manifestPath = join(e.directory, 'manifest.json');
+        let before: Stats;
+        try { await noLinks(target); before = await lstat(target); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            const manifest = await this.manifest(e.job.jobId);
+            checkDeadline();
+            if (!manifest.artifacts.some(a => a.path === path)) throw new ArcaneError('NOT_FOUND', 'Artifact is not approved by the completed manifest.');
+          }
+          throw error;
+        }
+        if (!before.isFile() || before.nlink !== 1 || before.size < 1) throw new AssetError('ARTIFACT', 'Download must be a nonempty regular file without links.');
+        if (before.size > ARTIFACT_DOWNLOAD_BYTES) throw new ArcaneError('ARTIFACT_LIMIT', 'Artifact download exceeds 64 MiB.');
+        await regularFile(target, ARTIFACT_DOWNLOAD_BYTES);
+        await regularFile(manifestPath, 4 * 1024 * 1024);
+        const manifestBefore = await lstat(manifestPath), manifestBytes = await readRegularFile(manifestPath, 4 * 1024 * 1024);
+        checkDeadline();
+        // Reuse the complete job/manifest proof; this is structural validation only, never deep Blender validation.
+        const manifest = await this.manifest(e.job.jobId);
+        checkDeadline();
+        if (JSON.stringify(JSON.parse(manifestBytes.toString('utf8'))) !== JSON.stringify(manifest) || JSON.stringify(manifest.request) !== JSON.stringify(e.job.request)) {
+          throw new AssetError('MANIFEST', 'Download manifest differs from the pinned manifest or indexed request.');
+        }
+        const artifact = manifest.artifacts.find(a => a.path === path);
+        if (!artifact) throw new ArcaneError('NOT_FOUND', 'Artifact is not approved by the completed manifest.');
+        if (artifact.role !== download.role) throw new AssetError('MANIFEST', 'Artifact role is not approved for download.');
+        if (artifact.bytes > ARTIFACT_DOWNLOAD_BYTES) throw new ArcaneError('ARTIFACT_LIMIT', 'Artifact download exceeds 64 MiB.');
+        await unchangedFile(target, before);
+        const bytes = await readRegularFile(target, ARTIFACT_DOWNLOAD_BYTES);
+        if (bytes.length !== artifact.bytes || sha256(bytes) !== artifact.sha256) throw new AssetError('HASH', 'Download bytes changed since manifest verification.');
+        const manifestAfter = await readRegularFile(manifestPath, 4 * 1024 * 1024);
+        if (sha256(manifestAfter) !== sha256(manifestBytes)) throw new AssetError('MANIFEST', 'Manifest changed during download verification.');
+        await unchangedFile(manifestPath, manifestBefore);
+        await unchangedFile(target, before);
+        checkDeadline();
+        return { bytes, filename: String(path).replace(/[^a-zA-Z0-9._-]/g, '_'), contentType: download.contentType };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new AssetError('ARTIFACT', 'Completed artifact or manifest disappeared during download verification.');
+        throw error;
+      } finally { artifactReadActive = false; }
     },
     async close(): Promise<void> {
       if (closed) return;

@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-12T01:45:52.188Z",
+  "kind": "human-authorized-installed-cli-one-turn",
+  "workspace": "C:\\Users\\alexk\\AppData\\Local\\Temp\\arcane-native-smoke-KQHLRV\\workspace",
+  "model": "gpt-6.1-sol",
+  "effort": "ultra",
+  "stage": "completed",
+  "passed": true,
+  "requestedTurns": 1,
+  "studioCalls": 0,
+  "httpCalls": [
+    {
+      "method": "GET",
+      "path": "/v1/work/runs"
+    }
+  ],
+  "limitations": [
+    "A one-turn read-only smoke test does not prove writes, image/design, all native features or Studio integration.",
+    "CLI-owned conversation persistence is normal; provider tokens are never read/copied by this harness."
+  ],
+  "provenance": "installed-cli",
+  "account": {
+    "auth": "subscription",
+    "plan": null,
+    "requiresOpenaiAuth": true
+  },
+  "reportedModelNames": [
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna"
+  ],
+  "mcpInventory": [
+    {
+      "name": "Roblox_Studio",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "arcane",
+      "runtimeStatus": "connected",
+      "toolNames": [
+        "work_runs"
+      ],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "code-review",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": true,
+      "pluginId": "code-review@openai-bundled"
+    },
+    {
+      "name": "codex_app",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": true,
+      "pluginId": "codex-app-tools@openai-bundled"
+    },
+    {
+      "name": "codex_apps",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "cua_repl",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": true,
+      "pluginId": "unified-computer-use@openai-bundled"
+    },
+    {
+      "name": "node_repl",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "ropilot",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    }
+  ],
+  "preflightInheritedServers": [
+    {
+      "name": "Roblox_Studio",
+      "pluginId": null
+    },
+    {
+      "name": "code-review",
+      "pluginId": "code-review@openai-bundled"
+    },
+    {
+      "name": "codex_app",
+      "pluginId": "codex-app-tools@openai-bundled"
+    },
+    {
+      "name": "codex_apps",
+      "pluginId": null
+    },
+    {
+      "name": "cua_repl",
+      "pluginId": "unified-computer-use@openai-bundled"
+    },
+    {
+      "name": "node_repl",
+      "pluginId": null
+    },
+    {
+      "name": "ropilot",
+      "pluginId": null
+    }
+  ],
+  "threadId": "01a12dc9-c3de-7ba2-bff7-677013eb6059",
+  "threadSettingsVerified": true,
+  "turnId": "01a12dc9-c9a0-7181-883e-743f352fff97",
+  "turnStatus": "completed",
+  "publicText": "I’ll call the arcane work_runs tool once with timeoutMs 5000.\nARCANE_SMOKE_OK runs=0",
+  "mcpItems": [
+    {
+      "type": "item",
+      "threadId": "01a12dc9-c3de-7ba2-bff7-677013eb6059",
+      "turnId": "01a12dc9-c9a0-7181-883e-743f352fff97",
+      "itemId": "exec-a497b18a-4072-4678-ba71-adb8e7648cb3",
+      "itemType": "mcpToolCall",
+      "status": "inProgress",
+      "seq": 25
+    },
+    {
+      "type": "item",
+      "threadId": "01a12dc9-c3de-7ba2-bff7-677013eb6059",
+      "turnId": "01a12dc9-c9a0-7181-883e-743f352fff97",
+      "itemId": "exec-a497b18a-4072-4678-ba71-adb8e7648cb3",
+      "itemType": "mcpToolCall",
+      "status": "completed",
+      "seq": 26
+    }
+  ],
+  "nativeInferenceVerified": true,
+  "arcaneMcpRoundTripVerified": true,
+  "clientClosed": true,
+  "executedHarnessSha256": "23d69d87b7c7dbe4525b88bf7e6318c06797350c4fa42c34abd841be32f354af",
+  "sourceHashes": {
+    "packages/codex-client/src/session.ts": "4ed592aff25deea9184a4a4469599073f3237a45a8c71278c0673f77de96d665",
+    "packages/codex-client/src/mcp-profile.ts": "3623154783ed5ceb1ca2663d881ce73f3fdddda596d69ec6e781c42966a22805",
+    "packages/codex-client/src/transport.ts": "124848eaf07e7bd517acdcc428fdf1f7a4a764d92c8aa1dea1e17f08380999a5",
+    "apps/mcp/src/server.ts": "dde218cd0c16a3a9e0434926374055a825d56513844f56f23433b9b42944e243"
+  }
+}

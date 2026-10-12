@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { open, mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ArcaneError, boundedString, efforts, object, type Connection, type Selection } from '../../protocol/src/providers.js';
 
 export function validateSelection(value: unknown, connections: Connection[]): Selection {
@@ -17,9 +18,21 @@ export function validateSelection(value: unknown, connections: Connection[]): Se
   if (connection.auth !== 'subscription') throw new ArcaneError('BILLING_MODE', 'This subscription-first lab requires a native subscription status. API/cloud use is separate explicit future work.');
   return { provider: input.provider, model, effort, connectionRevision: revision, savedAt: new Date().toISOString(), applied: false };
 }
+/** Atomic rename only: never unlink the previous preference to work around locks. */
+export async function atomicPreferenceReplace(source: string, target: string, move: typeof rename = rename, platform: NodeJS.Platform = process.platform, wait: (ms:number)=>Promise<void> = delay): Promise<void> {
+  const backoff=[25,50,100,200,400,800];
+  for(let attempt=0;;attempt++) {
+    try { await move(source,target); return; }
+    catch(error) {
+      const code=(error as NodeJS.ErrnoException).code;
+      if(platform!=='win32' || !['EPERM','EACCES','EBUSY'].includes(code??'') || attempt>=backoff.length) throw error;
+      await wait(backoff[attempt]!);
+    }
+  }
+}
 export class SelectionStore {
   private queue: Promise<void> = Promise.resolve();
-  constructor(private directory: string) {}
+  constructor(private directory: string, private replaceFile: typeof atomicPreferenceReplace = atomicPreferenceReplace) {}
   async read(): Promise<Selection | null> {
     try {
       const target = join(this.directory, 'selection.json');
@@ -36,6 +49,7 @@ export class SelectionStore {
     }
   }
   async save(selection: Selection): Promise<void> {
+    const payload = JSON.stringify(selection, null, 2) + '\n';
     const operation = this.queue.then(async () => {
       await mkdir(this.directory, { recursive: true });
       const target = join(this.directory, 'selection.json');
@@ -43,8 +57,8 @@ export class SelectionStore {
       let ownsTemporary = false;
       try {
         const handle = await open(temporary, 'wx', 0o600); ownsTemporary = true;
-        try { await handle.writeFile(JSON.stringify(selection, null, 2) + '\n'); } finally { await handle.close(); }
-        await rename(temporary, target);
+        try { await handle.writeFile(payload); await handle.sync(); } finally { await handle.close(); }
+        await this.replaceFile(temporary, target);
       } finally { if (ownsTemporary) await rm(temporary, { force: true }); }
     });
     this.queue = operation.catch(() => {});

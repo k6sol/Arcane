@@ -1,0 +1,109 @@
+{
+  "observedAt": "2026-10-12T01:57:20.543Z",
+  "kind": "actual-native-factory-readonly-thread-zero-inference",
+  "workspace": "C:\\Users\\alexk\\AppData\\Local\\Temp\\arcane-native-policy-GvLCGX\\workspace",
+  "passed": true,
+  "nativeInferenceRuns": 0,
+  "studioToolCalls": 0,
+  "httpCalls": [],
+  "limitations": [
+    "No model turn or tool call is made; actual one-turn proof is separate.",
+    "No image/design, workspace write, Studio, import or process-tree proof."
+  ],
+  "initialPolicy": "arcane-only-pending",
+  "threadId": "01a12dd4-4474-7622-9ec3-e02216c4c908",
+  "threadConfigured": true,
+  "finalPolicy": "arcane-only-verified",
+  "mcpInventory": [
+    {
+      "name": "Roblox_Studio",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "arcane",
+      "runtimeStatus": "connected",
+      "toolNames": [
+        "work_ready",
+        "receipt_status",
+        "scene_search",
+        "skills_get",
+        "assets_cancel",
+        "work_create",
+        "skills_list",
+        "work_submit",
+        "assets_start",
+        "work_claim",
+        "scene_children",
+        "work_runs",
+        "assets_probe",
+        "scene_update",
+        "assets_manifest",
+        "work_progress",
+        "assets_jobs",
+        "sessions",
+        "receipt_restore",
+        "script_read",
+        "scene_create",
+        "scene_inspect",
+        "selection_read",
+        "script_update"
+      ],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "code-review",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": true,
+      "pluginId": "code-review@openai-bundled"
+    },
+    {
+      "name": "codex_app",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": true,
+      "pluginId": "codex-app-tools@openai-bundled"
+    },
+    {
+      "name": "codex_apps",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "cua_repl",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": true,
+      "pluginId": "unified-computer-use@openai-bundled"
+    },
+    {
+      "name": "node_repl",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    },
+    {
+      "name": "ropilot",
+      "runtimeStatus": "disabled",
+      "toolNames": [],
+      "toolsError": false,
+      "plugin": false,
+      "pluginId": null
+    }
+  ],
+  "clientClosed": true
+}

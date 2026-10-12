@@ -11,6 +11,8 @@ import type { WorkStore } from '../../../packages/storage/src/work-store.js';
 import type { AssetService } from './asset-service.js';
 import { assetRoutes } from './asset-routes.js';
 import { nativeRoutes } from './native-routes.js';
+import { createCodexService, type CodexService } from './codex-service.js';
+import { codexRoutes } from './codex-routes.js';
 
 interface Options {
   cwd: string;
@@ -21,6 +23,8 @@ interface Options {
   projectPath?: string;
   port?: number;
   assetService?: AssetService;
+  /** Test-only service seam. Production creates the trusted personal-local service. */
+  codexService?: CodexService;
 }
 export async function createConnectionLab(options: Options) {
   const token = randomBytes(32).toString('hex');
@@ -36,6 +40,12 @@ export async function createConnectionLab(options: Options) {
   try { selection = await store.read(); } catch { savedStateFailed = true; stateWarnings.push('Saved preference unreadable; original file has not been overwritten. Repair or back it up before saving a new preference.'); }
   let busy = false;
   let origin = '';
+  const codex = options.codexService ?? (options.studioStore ? createCodexService({
+    directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
+    arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),
+      projectRoot: options.cwd, daemonUrl: origin, agentToken }),
+  }) : null);
+  const nativeChat = codex ? codexRoutes(codex) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     response.end(JSON.stringify(payload));
@@ -53,15 +63,20 @@ export async function createConnectionLab(options: Options) {
         ...(bridge ? [
           ['/studio', [join(options.cwd, 'apps/desktop/public/studio.html'), 'text/html']],
           ['/studio.css', [join(options.cwd, 'apps/desktop/public/studio.css'), 'text/css']],
-          ['/studio.js', [join(options.cwd, 'dist/apps/desktop/src/studio.js'), 'text/javascript']]
+          ['/studio.js', [join(options.cwd, 'dist/apps/desktop/src/studio.js'), 'text/javascript']],
+          ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
+          ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
+          ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
+          ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']]
         ] as [string, [string, string]][] : [])
       ]);
       const asset = publicRoutes.get(url.pathname);
       if (asset && request.method === 'GET') {
         const data = await readFile(asset[0]);
-        response.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        response.writeHead(200, { 'Content-Type': asset[1] + (asset[1].startsWith('image/') ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(data); return;
       }
+      if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
       if (native && await native(request,response,url,token,origin)) return;
       if (assets && await assets(request, response, url, token, origin, agentToken)) return;
       if (bridge && await bridge(request, response, url, token, origin)) return;
@@ -71,7 +86,7 @@ export async function createConnectionLab(options: Options) {
       }
       if (request.headers.origin && request.headers.origin !== origin) throw new ArcaneError('ORIGIN', 'Cross-origin access refused.');
       if (request.method === 'GET' && url.pathname === '/v1/state') {
-        send(response, 200, { connections, selection, busy, warnings: stateWarnings, inferenceRuns: 0 }); return;
+        send(response, 200, { connections, selection, busy, warnings: stateWarnings, inferenceRuns: 0, inferenceScope: 'metadata-lab-only' }); return;
       }
       if (request.method !== 'POST' || !['/v1/probe', '/v1/selection'].includes(url.pathname)) { send(response, 404, { error: 'NOT_FOUND' }); return; }
       if (request.headers.origin !== origin) throw new ArcaneError('ORIGIN', 'Writes require the local panel origin.');
@@ -81,7 +96,7 @@ export async function createConnectionLab(options: Options) {
         busy = true;
         try { connections = await (options.probe ?? discoverProviders)(options.cwd); }
         finally { busy = false; }
-        send(response, 200, { connections, selection, busy, warnings: stateWarnings, inferenceRuns: 0 }); return;
+        send(response, 200, { connections, selection, busy, warnings: stateWarnings, inferenceRuns: 0, inferenceScope: 'metadata-lab-only' }); return;
       }
       if (savedStateFailed) throw new ArcaneError('STATE', 'Saved preference needs manual repair; refusing to overwrite it.');
       const validated = validateSelection(input, connections);
@@ -95,7 +110,8 @@ export async function createConnectionLab(options: Options) {
     }
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 32;
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); });
+  try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
+  catch (error) { await codex?.close(); throw error; }
   const address = server.address();
   if (!address || typeof address === 'string') throw new ArcaneError('SERVER', 'Local server did not bind.');
   origin = 'http://127.0.0.1:' + address.port;
@@ -103,6 +119,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + '/#' + token,
     async close() {
       server.closeAllConnections();
+      await codex?.close();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }
   };
@@ -126,4 +143,5 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw new ArcaneError('JSON', 'Invalid JSON request.'); }
 }
+
 

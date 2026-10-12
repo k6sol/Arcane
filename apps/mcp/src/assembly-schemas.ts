@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { RECIPE_LIMITS } from '../../../packages/asset-pipeline/src/recipe.js';
-import type { AssemblyEvidence, SocketEvidence } from '../../../packages/asset-pipeline/src/types.js';
+import type { AssemblyEvidence, SocketEvidence, MaterialEvidence } from '../../../packages/asset-pipeline/src/types.js';
 import { boundedText } from './schemas.js';
 
 export const assetSlug = z.string().min(1).max(48).regex(/^[a-z][a-z0-9-]*$/)
@@ -42,6 +42,10 @@ export const geometryBounds = z.strictObject({ min: boundedVector(-60, 60), max:
 export const socketEvidence: z.ZodType<SocketEvidence> = z.strictObject({
   name: assetSlug, kind: z.enum(['socket', 'attachment']), part: assetSlug,
   nodeName: boundedText(96), matrix: z.array(z.number().finite()).length(16),
+});
+export const materialEvidence: z.ZodType<MaterialEvidence> = z.strictObject({
+  name: boundedText(256), color: boundedVector(0, 1), metallic: z.number().min(0).max(1), roughness: z.number().min(0).max(1),
+  emission: z.strictObject({ color: boundedVector(0, 1), strength: z.number().min(0).max(10) }),
 });
 export const assemblyEvidence: z.ZodType<AssemblyEvidence> = z.strictObject({
   recipeSha256: hash,

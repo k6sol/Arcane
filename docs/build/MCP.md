@@ -13,7 +13,7 @@ The parent launcher generates distinct browser control, native agent and per-plu
 
 The human product panel can obtain the native bearer with `POST /v1/product/mcp-token`, using the browser control bearer and the exact local `Origin`. Its response contains the agent token, scope descriptions, `canReview: false`, and daemon-lifetime expiry. This is a human UI handoff, not an MCP tool. Keep the agent token in process memory/environment; daemon restart invalidates it.
 
-The agent bearer can inspect Studio sessions and receipts, submit commands within existing pairing grants, restore immutable receipts, coordinate durable work and use fixed asset templates. It cannot issue Studio pairing grants, revoke Studio sessions, approve/reject work, or request another token handoff. Browser human review requires the exact local Origin. Native requests omit Origin; an Origin supplied by any client must still match exactly.
+The agent bearer can inspect Studio sessions and receipts, submit commands within existing pairing grants, restore immutable receipts, coordinate durable work and use fixed templates or validated data-only custom assemblies. It cannot issue Studio pairing grants, revoke Studio sessions, approve/reject work, or request another token handoff. Browser human review requires the exact local Origin. Native requests omit Origin; an Origin supplied by any client must still match exactly.
 
 Generate project-local connection templates after the parent workspace build:
 
@@ -27,7 +27,7 @@ The generator never reads or writes provider credentials or home client settings
 
 ## Fixed Studio and skill tools
 
-Every advertised input object rejects unknown fields. Tool annotations distinguish reads from writes and mark mutation calls as non-idempotent hints. The SDK bounds aggregate input elements to 2048; HTTP JSON responses are bounded to 1 MiB even when Content-Length is absent.
+Every advertised input object rejects unknown fields. Tool annotations distinguish reads from writes and mark mutation calls as non-idempotent hints. The SDK bounds aggregate input elements to 100000 to accommodate supported mesh recipes; custom requests also enforce the shared 256-KiB, 100000-node and depth-12 JSON bounds before HTTP; HTTP JSON responses are bounded to 1 MiB even when Content-Length is absent.
 
 | Tool | Operation | Daemon method or local reader |
 | --- | --- | --- |
@@ -72,23 +72,48 @@ The workflow is `work_create` → `work_ready` → `work_claim` → `work_progre
 
 Work POSTs are sent once. They have no daemon request-id idempotency guarantee. An interrupted/timeout response reports diagnostic `operationId`, affected task ID or run title, unknown state and ambiguity; `operationId` is not sent to the daemon and cannot be used for replay. Inspect `work_runs` before acting. A lost claim acknowledgement cannot recover the lease token through these tools; wait for expiry or reconcile through the human panel.
 
-## Fixed asset tools
+## Asset tools
 
 | Tool | Endpoint | Behavior |
 | --- | --- | --- |
 | `assets_probe` | `POST /v1/assets/probe` with `{}` | Observe installed Blender/Python through fixed runtime probes |
-| `assets_jobs` | `GET /v1/assets/jobs` | Read durable job records, stages, events and actual state |
-| `assets_start` | `POST /v1/assets/start` with `AssetInput` | Start one authorized fixed-template local job |
+| `assets_jobs` | `GET /v1/assets/jobs?limit=...&after=...` | Read one bounded history page, full requests and observed job state |
+| `assets_start` | `POST /v1/assets/start` with `AssetInput` | Start one authorized fixed-template or data-only custom-assembly job |
 | `assets_cancel` | `POST /v1/assets/cancel` with `{jobId}` | Cancel one exact job; preserve partial output |
 | `assets_manifest` | `GET /v1/assets/manifest?jobId=...` | Read a daemon-validated manifest for one exact job |
 
-`AssetInput` permits only `template`, `name`, `seed`, `sizeMeters`, `color`, `triangleBudget`, `renderResolution`, and `renderSamples`. Templates are `hero-prop` or `environment-kit`. Names are safe lowercase slugs of at most 48 characters, excluding reserved Windows device names. Seed is 0–2147483647; three size components are each 0.1–20 meters; three color channels are each 0–1; triangle budget is 100–50000; render resolution is 128–1024; samples are 4–64. Omitted options remain omitted in the POST and are normalized by the daemon. Job IDs must be exact lowercase UUIDs.
+`AssetInput` permits only `template`, `name`, `seed`, `sizeMeters`, `color`, `triangleBudget`, `renderResolution`, `renderSamples` and `recipe`. Templates are `hero-prop`, `environment-kit` or `custom-assembly`. Names are safe lowercase slugs of at most 48 characters, excluding reserved Windows device names. Seed is 0–2147483647; triangle budget is 100–50000; render resolution is 128–1024; samples are 4–64. Fixed templates retain their original 5000-triangle default, size/color defaults and optional-input behavior. Fixed-template size components are 0.1–20 meters, and color channels are 0–1. Omitted settings remain omitted in the POST.
 
-Inputs cannot select executable paths, Python/Luau scripts, worker/output roots, external imports, uploads or publication. Runtime/output configuration belongs to the parent host. The response schema matches the daemon's `AssetJobRecord`, preserving bounded events, normalized request, stage, timestamps, manifest availability and errors. Cancel and manifest responses must match the requested job; event IDs must match their job.
+Custom assemblies require `recipe`; fixed templates reject it. Custom size/color come from recipe preflight and cannot be caller overrides. The default custom render budget is 15000 triangles. The client calls the actual shared `normalizeRequest`, which snapshots bounded plain JSON, normalizes the recipe and runs topology, transform, socket and budget preflight **before any HTTP**. It submits the original validated recipe/settings, preserving omitted defaults and source-request provenance. Response requests must match shared normalization, including derived custom dimensions (0.01–40 meters) and first-material color.
 
-Start's HTTP 202 response is a job acknowledgement, not finished generation or verification. Call `assets_jobs` to inspect subsequent progress. Every asset POST is sent once, including probe and cancellation. A lost start acknowledgement returns `jobId: null`, the requested asset name, diagnostic `operationId`, unknown state, `terminal: false` and `ambiguous: true`. Inspect job history and its normalized requests before deciding what happened. Timeout/cancellation of an MCP wait does not promise that native generation stopped. Cancellation acknowledgement can also be ambiguous. Never automatically restart/re-cancel an interrupted operation.
+A recipe is version 1 with 1–8 PBR materials, 2–96 parts and optionally 0–64 sockets/attachments. Render and collision parts are required; LOD1 is optional. Every nested advertised object is strict. Geometry kinds are `box`, `cylinder`, `cone`, `sphere` and `mesh`. A mesh has 4–4096 unit-cube vertices and at most 8192 indexed triangles; it must be closed, outward-wound, nondegenerate and free of loose/duplicate vertices/faces. Primitive segments are 8–64 in multiples of four; sphere rings are 4–32.
 
-Manifest schema checks include runtime capabilities, mesh/render/export measurements, artifact hashes and declared limitations. Artifact-byte verification belongs to the daemon pipeline. No MCP operation imports an asset into Studio or claims native Roblox scale/collision verification.
+Part dimensions are 0.01–20 meters, positions are within ±40 meters and rotations within ±360 degrees. Bevels are supported only on render/LOD boxes, cylinders and cones, with 1–3 segments and width at most one tenth of the smallest dimension. Materials have bounded RGB, metallic/roughness and optional emission (strength 0–10); render/LOD parts reference declared materials, while collision parts have none. Sockets reference render parts, with positions within ±20 meters and bounded rotations. Shared preflight requires floor contact at Z=0, a render extent of at most 40 meters, transformed world/socket coordinates within ±60 meters, conservative role triangle budgets and at most 20000 total estimated vertices including bevels. Collision budget is 12–4096 (default 2048); LOD budget is bounded by the render budget, and nonempty LOD must reduce render geometry.
+
+A minimal `assets_start` input is:
+
+```json
+{
+  "template": "custom-assembly",
+  "name": "assembled-crate",
+  "recipe": {
+    "schemaVersion": 1,
+    "materials": [{"id":"paint","color":[0.2,0.3,0.4]}],
+    "parts": [
+      {"name":"body","role":"render","geometry":{"kind":"box"},"dimensions":[1,1,1],"position":[0,0,0.5],"material":"paint"},
+      {"name":"body-collision","role":"collision","geometry":{"kind":"box"},"dimensions":[1,1,1],"position":[0,0,0.5]}
+    ]
+  }
+}
+```
+
+Inputs cannot select executable paths, Python/Luau scripts, material-node code, worker/output roots, external imports, URLs, uploads or publication. Runtime/output configuration belongs to the parent host. This integration executes no user-supplied code. The native worker remains a supervised process, not an OS sandbox.
+
+Job IDs and history cursors are exact lowercase UUIDs. The response schema matches `AssetJobRecord` and retains its normalized recipe, bounded events, stage, timestamps, manifest availability and errors. `assets_jobs` accepts optional `limit` (1–64; daemon default 32) and `after`. Its `AssetJobPage` retains `schemaVersion`, `jobs`, `total`, `nextCursor` and `byteLimit` (512 KiB). Follow a non-null `nextCursor` with an explicit subsequent call using `after`; MCP never automatically fetches further pages. Records and recipes are not truncated to fit a page. Page/cursor consistency and response bytes are checked.
+
+Start's HTTP 202 response acknowledges a job; it does not prove completed generation or native validation. Every asset POST is sent once, including probe and cancellation. A lost start acknowledgement returns `jobId: null`, requested name, diagnostic `operationId`, unknown state, `terminal: false` and `ambiguous: true`. Inspect history and normalized requests before deciding what happened. Timeout/cancellation of an MCP wait does not promise that native generation stopped. Never automatically restart or re-cancel an interrupted operation.
+
+Manifest parsing preserves `sourceRequestSha256`, top-level/audit `assembly` evidence (recipe digest, estimated triangles, bounds, sockets and verification limits), per-mesh `geometrySha256`/`bounds`/floor `position`/measured `materialProperties`, and export socket/attachment matrices. Custom manifests require this evidence, matching top-level/audit assembly, an input-artifact source digest, normalized requests and the actual shared `validateAudit` checks, including transforms, PBR values and export poses. Malformed/missing evidence is a protocol error rather than silently removed metadata. Raw artifact-byte/hash verification still belongs to the daemon pipeline. `artisticFidelity` and `robloxImport` remain `unverified`; no MCP operation imports into Studio, uploads or publishes.
 
 ## Focused validation
 
@@ -100,6 +125,6 @@ node node_modules/typescript/bin/tsc -p apps/mcp/tsconfig.json
 node --test --test-reporter=tap --test-timeout=20000 apps/mcp/.test-build/tests/unit/mcp.test.js
 ```
 
-`tests/unit/mcp.test.ts` uses real SDK Client/McpServer connections, an actual spawned stdio child, bounded loopback HTTP fixtures, the actual daemon Studio/work routes with SQLite stores, and the actual asset routes with an explicitly non-native service fixture. It verifies exact tool names/permissions; agent-vs-human token scope; pairing/current-source/update/restore and readonly refusals; exact request-id idempotency; durable lease/evidence/review gates; config output without secret persistence; safe fixed asset inputs; record identity; and cancellation, redirect, lost-ack, malformed-response and timeout behavior without mutation retries.
+`tests/unit/mcp.test.ts` uses real SDK Client/McpServer connections, an actual spawned stdio child, bounded loopback HTTP fixtures, the actual daemon Studio/work routes with SQLite stores, and the actual asset routes with an explicitly non-native service fixture. It verifies exact tool names/permissions; agent-vs-human token scope; pairing/current-source/update/restore and readonly refusals; exact request-id idempotency; durable lease/evidence/review gates; config output without secret persistence; fixed-template compatibility; custom recipe/topology/budget rejection before HTTP; large closed-mesh and maximum recipe bounds; full provenance/geometry/PBR/socket evidence; explicit bounded pagination; record identity; and cancellation, redirect, lost-ack, malformed-response and timeout behavior without mutation retries.
 
 Temporary directories and compiled output remain inside `apps/mcp/`; fixture cleanup closes resources in reverse order before deleting SQLite files and attempts all releases. This coverage simulates the Studio plugin and asset service. Native Studio/Blender acceptance and the repository-wide suite remain parent-owned; these tests do not claim those runtime gates passed.

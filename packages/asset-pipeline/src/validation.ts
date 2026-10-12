@@ -127,6 +127,9 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
     for (const raw of audit.exports) {
       const exported = record(raw, 'custom export');
       if (exported.path === 'asset.glb' || exported.path === 'asset.fbx') checkSockets(exported.sockets, recipe);
+      const role = exported.path === 'collision.glb' ? 'collision' : exported.path === 'asset-lod1.glb' ? 'lod1' : 'render';
+      const parts = recipe.parts.filter(p => p.role === role);
+      if (exported.objects !== parts.length || exported.materials !== new Set(parts.flatMap(p => p.material ? [p.material] : [])).size) throw new AssetError('EXPORT', 'Custom export part/material counts differ from recipe.');
     }
   }
   return value as AssetAudit;

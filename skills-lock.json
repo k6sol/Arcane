@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "frontend-design": {
+      "source": "ilm-alan/frontend-design",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "417387f5da3283e006b55bb20ee5811e86ee5c1ed3262127c0e0cd5372c43eaf"
+    }
+  }
+}

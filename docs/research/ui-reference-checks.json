@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-12",
+  "sourceScope": "current77explicitTypeScriptproductinputs",
+  "unit": {
+    "passed": 407,
+    "failed": 0,
+    "skipped": 0,
+    "log": "runtime/verification/ui-reference/full-final-unit.log"
+  },
+  "offline": {
+    "passed": 88,
+    "failed": 0,
+    "skipped": 0,
+    "log": "runtime/verification/ui-reference/final-offline-rerun.log"
+  },
+  "focusedUi": {
+    "passed": 50,
+    "failed": 0,
+    "skipped": 0,
+    "log": "runtime/verification/ui-reference/current-browser.log"
+  },
+  "realNativeInferenceTurnsThisTurn": 0,
+  "liveStudioActions": 0,
+  "learningHistoryUiIntegrated": false,
+  "fullProductComplete": false
+}

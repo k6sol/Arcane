@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, rename, readdir } from 'node:fs/promises';
 import { join, resolve, relative, sep } from 'node:path';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { ReadonlyCodexRpc } from '../../packages/model-adapters/src/codex-rpc.js';
 import { boundedCommand, spawnNative } from '../../packages/model-adapters/src/process.js';
 import { normalizeCodexModels, normalizeCodexAuth, normalizeClaudeAuth, claudeModelsFromHelp, emptyConnection, featuresFor, reconcileFeatureStates } from '../../packages/model-adapters/src/catalogue.js';
-import { SelectionStore, validateSelection } from '../../packages/core/src/selection.js';
+import { SelectionStore, validateSelection, atomicPreferenceReplace } from '../../packages/core/src/selection.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import type { Connection } from '../../packages/protocol/src/providers.js';
 
@@ -219,3 +219,23 @@ test('completed request body deadline does not interrupt native metadata discove
   finish([connection()]);assert.equal((await pending).status,200);
 });
 
+
+
+test('Windows preference replacement retries transient locks with bounded backoff and keeps atomic rename',async t=>{
+  const dir=await directory(t),target=join(dir,'selection.json');let attempts=0;const waits:number[]=[];
+  const move:typeof rename=async(source,dest)=>{assert.equal(await readFile(target,'utf8'),'original');if(attempts++<2)throw Object.assign(new Error('Fixture sharing lock'),{code:'EPERM'});await rename(source,dest);};
+  await writeFile(target,'original');const store=new SelectionStore(dir,(source,dest)=>atomicPreferenceReplace(source,dest,move,'win32',async ms=>{waits.push(ms);}));
+  const next=validateSelection(request,[connection()]);await store.save(next);assert.deepEqual(await store.read(),next);assert.equal(attempts,3);assert.deepEqual(waits,[25,50]);assert.deepEqual(await readdir(dir),['selection.json']);
+});
+
+test('persistent replacement lock preserves original and later queued writes recover without deleting it',async t=>{
+  const dir=await directory(t),target=join(dir,'selection.json'),original=validateSelection(request,[connection()]);await new SelectionStore(dir).save(original);
+  let locked=true,attempts=0;const waits:number[]=[];const move:typeof rename=async(source,dest)=>{attempts++;if(locked)throw Object.assign(new Error('Fixture lock'),{code:'EACCES'});await rename(source,dest);};
+  const store=new SelectionStore(dir,(source,dest)=>atomicPreferenceReplace(source,dest,move,'win32',async ms=>{waits.push(ms);})),next={...original,effort:'low' as const};
+  await assert.rejects(store.save(next),{code:'EACCES'});assert.deepEqual(await store.read(),original);assert.equal(attempts,7);assert.deepEqual(waits,[25,50,100,200,400,800]);assert.deepEqual(await readdir(dir),['selection.json']);
+  locked=false;await store.save(next);assert.deepEqual(await store.read(),next);
+});
+
+test('preference replacement never retries unrelated errors or changes non-Windows permission semantics',async()=>{
+  for(const [platform,errorCode] of [['win32','ENOENT'],['linux','EPERM']] as const){let attempts=0;await assert.rejects(atomicPreferenceReplace('fixture-source','fixture-target',async()=>{attempts++;throw Object.assign(new Error('Fixture refusal'),{code:errorCode});},platform,async()=>assert.fail('Should not back off')),{code:errorCode});assert.equal(attempts,1);}
+});

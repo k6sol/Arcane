@@ -2,7 +2,7 @@
 
 An independent Roblox development platform: a desktop app, first-party Studio plugin, local MCP tools and Blender asset production.
 
-**Current status: implemented local components with partial native verification; the full product is unfinished.** The repository contains a loopback daemon, SQLite Studio/work history, a browser workbench, a compact key-only Luau plugin, 24 fixed MCP tools, a native Studio read adapter, exact provider/model/effort preferences and an interactive native CLI handoff. The Arcane plugin has been installed in the current development setup; its genuine native HTTP connection, safe writes, dirty-buffer conflicts and selective restore acceptance are deferred at the user's request to leave Studio testing for later. This is not a failed test or a pause of the full build. Two static Blender templates have real generation/export evidence. General custom composition is being built and is not accepted as complete. Inference completion, real gameplay tests, Roblox asset imports and a packaged Electron product remain open.
+**Current status: implemented local components with partial native verification; the full product is unfinished.** The repository contains a loopback daemon, SQLite Studio/work history, a browser workbench, a compact key-only Luau plugin, 24 fixed MCP tools, a native Studio read adapter, exact provider/model/effort preferences, an interactive native CLI handoff, and a personal-local native Codex conversation panel with human-controlled threads/turns, scoped approvals and durable action receipts. The Arcane plugin has been installed in the current development setup; its genuine native HTTP connection, safe writes, dirty-buffer conflicts and selective restore acceptance are deferred at the user's request to leave Studio testing for later. This is not a failed test or a pause of the full build. Both static templates and bounded custom multipart recipes now have real Blender generation/export/reopen evidence, including materials, collision/LOD roles and socket metadata. Artistic fidelity, animation and Roblox import remain unverified. Inference completion, real gameplay tests, Roblox asset imports and a packaged Electron product remain open.
 
 ## Start here
 
@@ -32,7 +32,7 @@ An independent Roblox development platform: a desktop app, first-party Studio pl
 | Native Studio adapter | Vetted installed StudioMCP executable, actual tool discovery, exact-ID read allowlist, human-only HTTP routes | Real native discovery/inventory and safe missing-target refusal; this surface provides no plugin write grants |
 | Work coordination | Durable dependency graph, cooperative file scopes/leases, hashed evidence submissions and human acceptance | Store/HTTP/SDK/browser tests; creating a graph does not dispatch agents |
 | Assets | Supervised Blender `hero-prop` and `environment-kit`, checkpoints, audits, BLEND/GLB/FBX, collision/LOD and two review PNGs | Native Blender 4.5.3 LTS outputs, export reimports, cancellation/failure and restart evidence; no Roblox import proof |
-| Providers | Sanitized native metadata, exact preference saving, reviewed launch argv for Codex/Claude | Metadata and launch-plan tests; requested settings have `applied: false`, with no completed inference |
+| Providers | Sanitized native metadata, exact preference saving, reviewed launch argv for Codex/Claude, human-only Codex conversation controller/UI | Metadata and launch-plan tests; requested settings have `applied: false`, with one separately authorized native Codex smoke turn completed; other provider feature coverage remains unverified |
 
 Custom asset composition is active work. Reference-driven arbitrary modelling, images/design artifact return, upload/reimport, rig/animation conversion and full workflow automation remain required. The complete product definition in the plan and roadmap is unchanged by these starter components.
 
@@ -119,3 +119,12 @@ A CI workflow is authored for the workspace; this refresh does not establish a r
 ## Repository and licence
 
 Repository: private [k6sol/Arcane](https://github.com/k6sol/Arcane). Prior Git setup observations are historical and do not establish current synchronization or a push of this refresh. The existing [MIT licence](LICENSE) is retained; third-party components keep their own licence/notice obligations.
+
+
+## First run and your own projects
+
+For the Windows first-run bootstrap and fixed launcher, see [FIRST_RUN](docs/build/FIRST_RUN.md). No developer account or credentials are included. Each user connects their own supported native CLI login. To launch an existing game project with isolated local state, run npm run open:project -- followed by its quoted absolute directory; see [PROJECTS](docs/build/PROJECTS.md). Studio connection/testing remains a separate explicit step.
+
+## Learning and native history
+
+[Project learning](docs/build/LEARNING.md) and [native history](docs/build/NATIVE_HISTORY.md) have offline foundations. They are not yet integrated end to end into the product UI or provider prompts. Learning is reviewed, opt-in local context and evidence, not model-weight training or automatic training-data upload. A read-only desktop connector check did read the existing genuine native Codex smoke conversation using its original ID, without a new model turn. Claude sync, sidebar registration and concurrent live history still require their own implementation and acceptance.

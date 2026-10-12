@@ -166,3 +166,102 @@ test('normalized input vectors are snapshots and recovery refuses forged termina
   const p=createAssetPipeline({workspaceRoot:ROOT,outputRoot:output});
   await assert.rejects(()=>p.recover(jobDir),code('RECOVERY'));
 });
+
+import { readFileSync } from 'node:fs';
+import { preflightRecipe, preflightPart, expectedSockets, checkSockets } from '../../packages/asset-pipeline/src/recipe.js';
+
+const customInput = () => JSON.parse(readFileSync(join(ROOT, 'workers/blender/custom-machine.json'), 'utf8'));
+test('custom recipe preserves named geometry, transforms, PBR, roles, sockets and caller snapshot', () => {
+  const input=customInput(), normalized=normalizeRequest(input);
+  assert.equal(normalized.template,'custom-assembly');assert.equal(normalized.recipe!.parts.length,19);
+  assert.equal(normalized.recipe!.parts.find(p=>p.name==='wedge-guard')!.geometry.kind,'mesh');
+  assert.deepEqual(normalized.recipe!.materials.find(m=>m.id==='brushed-steel'),{id:'brushed-steel',color:[.65,.7,.76],metallic:.9,roughness:.21});
+  assert.deepEqual(normalizeRequest(normalized),normalized);
+  input.recipe.parts[0].dimensions[0]=19;
+  assert.equal(normalized.recipe!.parts[0]!.dimensions[0],1.6);
+  assert.equal(preflightRecipe(normalized.recipe!,normalized.triangleBudget).bounds.min[2],0);
+  const sockets=expectedSockets(normalized.recipe!);checkSockets(sockets,normalized.recipe!);
+  assert.ok(sockets.some(s=>s.kind==='attachment'&&Math.abs(s.matrix[7]! + .42)<1e-5));
+  sockets[0]!.matrix[3]!+=.2;
+  assert.throws(()=>checkSockets(sockets,normalized.recipe!),code('MESH'));
+});
+test('custom JSON rejects executable fields, non-data objects and accessors without invoking them', () => {
+  for(const field of ['python','eval','script','path','url','shell','command']){
+    const input=customInput();input.recipe.parts[0][field]='https://example.invalid/x.py';
+    assert.throws(()=>normalizeRequest(input),code('INPUT'));
+  }
+  let invoked=false;const input=customInput();Object.defineProperty(input,'recipe',{enumerable:true,get(){invoked=true;throw Error('getter executed');}});
+  assert.throws(()=>normalizeRequest(input),code('INPUT'));assert.equal(invoked,false);
+  const other=customInput();other.recipe.parts[0].geometry={kind:'box',toJSON(){invoked=true;return {kind:'box'};}};
+  assert.throws(()=>normalizeRequest(other),code('INPUT'));assert.equal(invoked,false);
+  for(const value of [new Date(),{...customInput(),seed:Infinity},{...customInput(),recipe:undefined}])assert.throws(()=>normalizeRequest(value),code('INPUT'));
+});
+test('custom preflight rejects counts, aggregate budgets, roles, references, materials and transforms before a native job', async t => {
+  const changes: ((v: ReturnType<typeof customInput>)=>void)[]=[
+    v=>v.recipe.parts.push(...Array.from({length:96},()=>v.recipe.parts[0])),
+    v=>v.recipe.materials.push(...Array.from({length:8},()=>v.recipe.materials[0])),
+    v=>v.recipe.sockets.push(...Array.from({length:64},()=>v.recipe.sockets[0])),
+    v=>v.recipe.parts[1].name=v.recipe.parts[0].name,
+    v=>v.recipe.parts[1].role='python',
+    v=>v.recipe.parts=v.recipe.parts.filter((p: {role:string})=>p.role!=='collision'),
+    v=>v.recipe.parts[0].material='absent',
+    v=>v.recipe.parts.find((p: {role:string})=>p.role==='collision').material='brushed-steel',
+    v=>v.recipe.materials[0].roughness=1.1,
+    v=>v.recipe.materials[3].emission.strength=11,
+    v=>v.recipe.sockets[0].part='main-proxy',
+    v=>v.recipe.sockets[0].name=v.recipe.sockets[1].name,
+    v=>v.recipe.parts[0].position[2]=.3,
+    v=>v.recipe.parts[0].position[0]=61,
+    v=>v.recipe.parts[0].dimensions[1]=0,
+    v=>v.recipe.parts[0].rotationDegrees=[361,0,0],
+    v=>v.recipe.parts[0].bevel.width=.1,
+    v=>v.recipe.parts[3].geometry.segments=65,
+    v=>v.triangleBudget=100,
+    v=>v.recipe.lodTriangleBudget=12,
+    v=>v.recipe.collisionTriangleBudget=12
+  ];
+  const dir=await temporary(t), output=join(dir,'never-created'),pipeline=createAssetPipeline({workspaceRoot:ROOT,outputRoot:output});
+  for(const change of changes){const v=customInput();change(v);assert.throws(()=>pipeline.start(v),code('INPUT'));}
+  await assert.rejects(()=>readFile(join(output,'index.json')));
+});
+test('custom mesh preflight gates indexing, winding, manifold vertex fans and degeneracy', () => {
+  const changes: ((g: {vertices:number[][];indices:number[]})=>void)[]=[
+    g=>g.indices[0]=999,g=>g.indices.pop(),g=>g.indices.splice(0,3),g=>g.indices.push(...g.indices.slice(0,3)),
+    g=>{[g.indices[0],g.indices[1]]=[g.indices[1]!,g.indices[0]!];},
+    g=>g.vertices.push(g.vertices[0]!),g=>g.vertices[0]![0]=NaN,
+    g=>{g.indices=g.indices.flatMap((_,i,a)=>i%3===0?[a[i]!,a[i+2]!,a[i+1]!]:[]);},
+    g=>{g.vertices[1]=g.vertices[0]!.map((n,i)=>n+(i===0?1e-12:0));}
+  ];
+  for(const change of changes){const v=customInput(),g=v.recipe.parts.find((p: {name:string})=>p.name==='wedge-guard').geometry;change(g);assert.throws(()=>normalizeRequest(v),code('INPUT'));}
+  const fan=customInput();
+  fan.recipe.parts.find((p: {name:string})=>p.name==='wedge-guard').geometry={kind:'mesh',vertices:[[0,0,0],[.5,0,0],[0,.5,0],[0,0,.5],[-.5,0,0],[0,-.5,0],[0,0,-.5]],
+    indices:[0,2,1,0,1,3,1,2,3,2,0,3,0,4,5,0,6,4,4,6,5,5,6,0]};
+  assert.throws(()=>normalizeRequest(fan),code('INPUT'));
+});
+function customAuditFixture() {
+  const source=customInput();source.renderResolution=128;
+  source.recipe.parts=source.recipe.parts.filter((p: {name:string})=>['base-plinth','drive-housing','main-proxy','base-lod'].includes(p.name));
+  for(const p of source.recipe.parts)delete p.bevel;
+  source.recipe.materials=source.recipe.materials.filter((m: {id:string})=>m.id==='petrol-enamel');
+  source.recipe.sockets=[{name:'housing-port',kind:'socket',part:'drive-housing',position:[.1,0,.2]}];
+  const request=normalizeRequest(source),recipe=request.recipe!,a=audit();a.template='custom-assembly';
+  a.meshes=recipe.parts.map(p=>({...structuredClone(a.meshes[0]!),name:(p.role==='collision'?'COL_':'SM_')+p.name,role:p.role,vertices:8,edges:18,faces:12,triangles:12,
+    uvLoops:p.role==='collision'?0:36,uvLayers:p.role==='collision'?0:1,dimensions:preflightPart(p).bounds.max.map((n,i)=>n-preflightPart(p).bounds.min[i]!),position:[0,0,0] as [number,number,number],
+    materials:p.material?['MAT_'+p.material]:[],materialProperties:p.material?[{name:'MAT_'+p.material,color:recipe.materials[0]!.color,metallic:.3,roughness:.36,emission:{color:[1,1,1] as [number,number,number],strength:0}}]:[],
+    bounds:preflightPart(p).bounds,geometrySha256:'a'.repeat(64)}));
+  a.totals={renderTriangles:24,lod1Triangles:12,collisionTriangles:12,materials:1};
+  const sockets=expectedSockets(recipe);
+  a.assembly={recipeSha256:sha256(Buffer.from(JSON.stringify(recipe))),...preflightRecipe(recipe,request.triangleBudget),sockets,artisticFidelity:'unverified',robloxImport:'unverified'};
+  a.exports=[{path:'asset.glb',objects:2,triangles:24,materials:1,finitePositions:true,sockets},{path:'asset.fbx',objects:2,triangles:24,materials:1,finitePositions:true,sockets},
+    {path:'collision.glb',objects:1,triangles:12,materials:0,finitePositions:true},{path:'asset-lod1.glb',objects:1,triangles:12,materials:1,finitePositions:true}];
+  return {a,request};
+}
+test('custom audit cross-checks measured PBR, transformed bounds, roles, pivots, export counts and sockets', () => {
+  const {a,request}=customAuditFixture();assert.equal(validateAudit(a,request).assembly!.sockets.length,1);
+  const mutations: ((a:ReturnType<typeof customAuditFixture>['a'])=>void)[]=[
+    a=>a.meshes[0]!.bounds!.min[0]-=.1,a=>a.meshes[0]!.position![0]=1,a=>a.meshes[0]!.materialProperties![0]!.metallic=0,
+    a=>a.meshes[0]!.materialProperties=[],a=>a.meshes[0]!.role='lod1',a=>a.assembly!.sockets[0]!.matrix[3]!+=.2,
+    a=>a.exports[0]!.objects=1,a=>a.exports[1]!.sockets=[],a=>a.assembly!.recipeSha256='b'.repeat(64)
+  ];
+  for(const mutate of mutations){const broken=structuredClone(a);mutate(broken);assert.throws(()=>validateAudit(broken,request));}
+});

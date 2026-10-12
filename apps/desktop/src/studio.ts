@@ -1,4 +1,7 @@
 /// <reference lib="dom" />
+import { CodexChat, CodexChatApi } from './codex-chat.js';
+import { startWorkspaceShell } from './workspace-shell.js';
+import { ArtifactDownloads } from './asset-downloads.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
 import type { AssetInput, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
@@ -241,7 +244,7 @@ export function sanitizeNativeText(value: string, secrets: readonly string[] = [
     .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '');
   const bytes = new TextEncoder().encode(text);
-  return bytes.length <= maximum ? text : new TextDecoder().decode(bytes.slice(0, maximum)) + '\n[Display truncated to ' + maximum + ' UTF-8 bytes; request a smaller range.]';
+  return bytes.length <= maximum ? text : new TextDecoder().decode(bytes.slice(0, maximum), { stream: true }) + '\n[Display truncated to ' + maximum + ' UTF-8 bytes; request a smaller range.]';
 }
 export function readNativeObservation(value: unknown, inventory = false): NativeObservation {
   if (!record(value) || !record(value.native) || value.native.kind !== 'built-in-studio-mcp' || value.native.readOnly !== true || value.native.available !== true || value.native.requiresExplicitRead !== true || !record(value.native.metadata)) throw new Error('Native response did not identify a bounded read-only observation.');
@@ -249,6 +252,7 @@ export function readNativeObservation(value: unknown, inventory = false): Native
   if (metadata.connected !== false) throw new Error('Native response did not report a closed per-request connection.');
   if (!record(metadata.provenance) || !['live', 'fixture'].includes(String(metadata.provenance.kind)) || metadata.evidenceKind !== metadata.provenance.kind || !record(value.native.provenance) || value.native.provenance.kind !== metadata.evidenceKind || typeof metadata.observedAt !== 'string' || !Number.isFinite(Date.parse(metadata.observedAt)) || !Array.isArray(metadata.tools) || metadata.tools.length > 128 || !record(metadata.limits) || typeof metadata.requestsUsed !== 'number' || !Number.isSafeInteger(metadata.requestsUsed) || metadata.requestsUsed < 0) throw new Error('Native capability or connection metadata is invalid.');
   for (const [key, maximum] of [['timeoutMs', 15000], ['maxRequests', 256], ['resultBytes', NATIVE_HTTP_RESULT_BYTES]] as const) { const number = metadata.limits[key]; if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 1 || number > maximum) throw new Error('Native connection limits are invalid.'); }
+  if (metadata.requestsUsed > (metadata.limits.maxRequests as number) || (metadata.limits.maxRequests as number) < 3 || metadata.sdkVersion !== '1.32.1' || metadata.transport !== (metadata.evidenceKind === 'fixture' ? 'in-memory-fixture' : 'stdio') || json(value.native.provenance) !== json(metadata.provenance) || (metadata.evidenceKind === 'fixture' && (typeof metadata.provenance.label !== 'string' || !metadata.provenance.label.trim()))) throw new Error('Native response provenance or request budget is inconsistent.');
   const toolIds = new Set<string>();
   for (const tool of metadata.tools) {
     if (!record(tool) || typeof tool.name !== 'string' || !/^[a-z0-9_]{1,100}$/.test(tool.name) || toolIds.has(tool.name) || typeof tool.allowed !== 'boolean' || !(tool.blockedReason === null || typeof tool.blockedReason === 'string') || !record(tool.inputSchema)) throw new Error('Native observed tool inventory is invalid.');
@@ -263,6 +267,12 @@ export function readNativeObservation(value: unknown, inventory = false): Native
     }
   }
   return value as unknown as NativeObservation;
+}
+export function readNativeReceipt(value: unknown, request: NativeReadRequest, toolError = false): NativeObservation {
+  const observation = readNativeObservation(value);
+  if (observation.studio_id !== request.args.studio_id || observation.method !== request.method) throw new Error('Native response did not match the exact requested Studio ID and method.');
+  if (!record(observation.result) || (observation.result.isError !== undefined && typeof observation.result.isError !== 'boolean') || (observation.result.isError === true) !== toolError) throw new Error('Native read receipt has an inconsistent tool-error state.');
+  return observation;
 }
 export function nativeMethodAvailable(observation: NativeObservation, method: string): boolean {
   const tool = observation.native.metadata.tools.find(tool => tool.name === method);
@@ -412,7 +422,9 @@ export class StudioWorkbench {
   private nativeObserverBusy = false;
   private nativeStudioId = '';
   private nativeViewEpoch = 0;
+  private nativeRequestEpoch = 0;
   private nativeToken = '';
+  private nativeSecretEpoch = 0;
   private nativeBusy = false;
   private assetJobs: AssetJobRecord[] = [];
   private assetJobId = '';
@@ -454,7 +466,8 @@ export class StudioWorkbench {
   private keyReadAfterUnknown = false;
   private keySecretEpoch = 0;
   private confirmation: (() => Promise<void>) | null = null;
-  constructor(private readonly doc: Document, private readonly api: StudioApi, private readonly origin: string, private readonly token: string) {}
+  private readonly assetDownloads: ArtifactDownloads;
+  constructor(private readonly doc: Document, private readonly api: StudioApi, private readonly origin: string, private readonly token: string) { this.assetDownloads = new ArtifactDownloads(doc, token); }
   private el<T extends HTMLElement = HTMLElement>(id: string): T {
     const element = this.doc.getElementById(id);
     if (!element) throw new Error('Missing Studio UI element: ' + id);
@@ -483,6 +496,7 @@ export class StudioWorkbench {
     this.text('native-setup', "$env:ARCANE_DAEMON_URL = '" + this.origin + "'\n$env:ARCANE_LOCAL_TOKEN = '<SCOPED_AGENT_TOKEN>'\nnpm run launch:native");
     this.on('go-work', 'click', () => { this.clearStudioKey(); this.el('work-heading').scrollIntoView({ block: 'start' }); this.el('work-heading').focus(); });
     this.on('go-assets', 'click', () => { this.clearStudioKey(); this.el('asset-heading').scrollIntoView({ block: 'start' }); this.el('asset-heading').focus(); });
+    this.on('go-codex', 'click', () => { this.clearStudioKey(); this.el<HTMLDetailsElement>('codex-panel').open = true; this.el('codex-heading').scrollIntoView({ block: 'start' }); this.el('codex-heading').focus(); });
     this.on('go-native', 'click', () => { this.clearStudioKey(); this.el('diagnostics-heading').scrollIntoView({ block: 'start' }); this.el('diagnostics-heading').focus(); });
     this.on('diagnostics-probe', 'click', () => { void this.observeNative(); });
     this.on('diagnostics-studio', 'change', () => this.selectNativeStudio());
@@ -555,8 +569,23 @@ export class StudioWorkbench {
     await this.refresh();
     this.schedule();
   }
-  resume() { this.stopped = false; void this.refresh().finally(() => this.schedule()); }
-  stop() { this.nativeViewEpoch++; this.clearStudioKey(); this.nativeToken = ''; this.text('native-token', ''); this.assetPreviewEpoch++; this.stopped = true; if (this.timer) clearTimeout(this.timer); }
+  resume() { this.stopped = false; this.renderNativeControls(); void this.refresh().finally(() => this.schedule()); }
+  dismissConnectionSecrets(): void {
+    this.clearStudioKey(); this.nativeSecretEpoch++; this.nativeToken = '';
+    this.text('native-token', ''); this.text('native-scopes', '');
+    this.el('native-token-result').hidden = true;
+    this.el<HTMLButtonElement>('native-copy-token').disabled = true;
+  }
+  stop() {
+    this.nativeViewEpoch++; this.nativeRequestEpoch++; this.nativeObserverBusy = false;
+    this.nativeInventoryReady = false; this.nativeObservation = null; this.nativeStudioId = '';
+    const picker = this.el<HTMLSelectElement>('diagnostics-studio'); picker.replaceChildren(); this.option(picker, '', 'Observe Studio choices first');
+    this.el('diagnostics-tools').replaceChildren(); this.clearNativeReceipt('Native view cleared after page exit. Observe capabilities again.');
+    this.text('diagnostics-request-status', 'Previous request discarded after page exit'); this.text('diagnostics-connection', 'No current request receipt');
+    this.dismissConnectionSecrets(); this.assetDownloads.clear(); this.assetPreviewEpoch++; this.stopped = true;
+    if (this.timer) clearTimeout(this.timer); this.renderNativeControls();
+  }
+
   private schedule() {
     if (this.stopped) return;
     this.timer = setTimeout(() => { if (!this.doc.hidden && this.checked('auto-refresh')) void this.refresh().finally(() => this.schedule()); else this.schedule(); }, Math.min(30000, 3000 * 2 ** Math.min(this.refreshFailures, 3)));
@@ -1116,10 +1145,10 @@ export class StudioWorkbench {
     catch (error) { this.assetFailure(error, 'Cancel job ' + job.jobId); }
     finally { this.assetBusy = false; await this.refreshAssets(); this.renderAssetControls(); }
   }
-  private clearAssetPreview() { this.assetPreviewEpoch++; this.el('asset-previews').replaceChildren(); this.text('asset-manifest', 'Load a verified completed manifest for this exact job.'); }
+  private clearAssetPreview() { this.assetDownloads.clear(); this.assetPreviewEpoch++; this.el('asset-previews').replaceChildren(); this.text('asset-manifest', 'Load a verified completed manifest for this exact job.'); }
   private async loadAssetManifest() {
     const job = this.currentAssetJob(); if (!job || job.state !== 'succeeded' || !job.manifestAvailable || !this.assetAvailable || this.assetBusy) return;
-    this.assetBusy = true; const epoch = ++this.assetPreviewEpoch; this.renderAssetControls(); this.el('asset-previews').replaceChildren();
+    this.assetBusy = true; this.assetDownloads.clear(); const epoch = ++this.assetPreviewEpoch; this.renderAssetControls(); this.el('asset-previews').replaceChildren();
     try {
       const { manifest } = await this.api.assetManifest(job.jobId);
       if (manifest.jobId !== job.jobId || manifest.request.template !== job.request.template || manifest.request.name !== job.request.name) throw new Error('Manifest identity does not match the selected job.');
@@ -1146,9 +1175,14 @@ export class StudioWorkbench {
   private nativeSecrets() { return [this.token, this.nativeToken, this.issuedKey?.apiKey ?? '']; }
   private nativeText(value: unknown, maximum = NATIVE_DISPLAY_BYTES) { return sanitizeNativeText(typeof value === 'string' ? value : json(value) ?? 'Not reported', this.nativeSecrets(), maximum); }
   private nativeInput(): NativeReadInput { return { path: this.value('diagnostics-path'), datamodel: this.value('diagnostics-datamodel'), query: this.value('diagnostics-query'), instanceType: this.value('diagnostics-type'), limit: Number(this.value('diagnostics-limit')), depth: Number(this.value('diagnostics-depth')), startLine: Number(this.value('diagnostics-start')), endLine: Number(this.value('diagnostics-end')) }; }
+  private clearNativeReceipt(message: string) {
+    this.text('diagnostics-output', message); this.text('diagnostics-result-target', this.nativeStudioId || 'No target selected');
+    this.el('diagnostics-provenance').replaceChildren(); this.text('diagnostics-metadata', 'No metadata for this request.');
+    this.badge('diagnostics-status', 'No current receipt', 'neutral');
+  }
   private selectNativeStudio() {
     this.nativeStudioId = this.value('diagnostics-studio'); this.nativeViewEpoch++;
-    this.text('diagnostics-output', 'No read result for this exact target.'); this.text('diagnostics-result-target', this.nativeStudioId || 'No target selected');
+    this.clearNativeReceipt('No read result for this exact target.'); this.text('diagnostics-connection', 'No receipt for the selected target');
     this.text('diagnostics-notice', this.nativeObserverBusy ? 'Target changed while a request is in flight. Its result will not be attached to this target.' : this.nativeStudioId ? 'Exact native studio_id selected: ' + this.nativeStudioId + '. Choose a read explicitly.' : 'Choose an exact Studio ID. No first window is selected automatically.');
     this.renderNativeControls();
   }
@@ -1160,7 +1194,7 @@ export class StudioWorkbench {
     this.renderNativeControls();
   }
   private renderNativeControls() {
-    this.el<HTMLButtonElement>('diagnostics-probe').disabled = !this.token || this.nativeObserverBusy;
+    this.el<HTMLButtonElement>('diagnostics-probe').disabled = this.stopped || !this.token || this.nativeObserverBusy;
     this.el<HTMLSelectElement>('diagnostics-studio').disabled = !this.nativeObservation?.studios?.length;
     const method = this.value('diagnostics-method'), tree = method === 'search_game_tree', source = method === 'script_read';
     for (const [id, used] of [['diagnostics-method', true], ['diagnostics-path', tree || source || method === 'inspect_instance'], ['diagnostics-query', tree || method === 'script_search' || method === 'script_grep'], ['diagnostics-datamodel', tree], ['diagnostics-limit', tree], ['diagnostics-depth', tree], ['diagnostics-type', tree], ['diagnostics-start', source], ['diagnostics-end', source]] as const) this.el<HTMLInputElement>(id).disabled = this.nativeObserverBusy || !used;
@@ -1171,12 +1205,12 @@ export class StudioWorkbench {
       if (!this.nativeInventoryReady) throw new Error('Observe current native tools and Studio choices before reading.');
       const request = prepareNativeRead(this.nativeObservation, this.nativeStudioId, this.value('diagnostics-method'), this.nativeInput()); this.text('diagnostics-preview', json(request)); ready = true; message = this.nativeObserverBusy ? 'A native request is in flight. The selected target may be changed; no second request is sent.' : 'Read-only request for exact studio_id ' + this.nativeStudioId + '. The adapter rechecks the current inventory.';
     } catch (error) { message = error instanceof Error ? error.message : String(error); this.text('diagnostics-preview', message); }
-    this.text('diagnostics-validation', message); this.el<HTMLButtonElement>('diagnostics-read').disabled = !this.token || !ready || this.nativeObserverBusy;
+    this.text('diagnostics-validation', message); this.el<HTMLButtonElement>('diagnostics-read').disabled = this.stopped || !this.token || !ready || this.nativeObserverBusy;
   }
   private renderNativeObservation(observation: NativeObservation) {
     const metadata = observation.native.metadata;
     this.text('diagnostics-connection', 'Closed after this request');
-    this.identity('diagnostics-provenance', [['Evidence', this.nativeText(metadata.evidenceKind)], ['Observed', this.nativeText(metadata.observedAt)], ['Transport', this.nativeText(metadata.transport)], ['Server', this.nativeText(metadata.server)], ['Requests used / budget', metadata.requestsUsed + ' / ' + metadata.limits.maxRequests], ['Timeout / result bound', metadata.limits.timeoutMs + ' ms / ' + metadata.limits.resultBytes + ' bytes']]);
+    this.identity('diagnostics-provenance', [['Request', observation.method ? 'Explicit native read' : 'Capability inventory · no targeted read'], ['Exact Studio ID', observation.studio_id ?? 'No targeted read'], ['Method', observation.method ?? 'list_roblox_studios'], ['Evidence', this.nativeText(metadata.evidenceKind)], ['Observed', this.nativeText(metadata.observedAt)], ['Transport', this.nativeText(metadata.transport)], ['Server', this.nativeText(metadata.server)], ['Requests used / budget', metadata.requestsUsed + ' / ' + metadata.limits.maxRequests], ['Timeout / result bound', metadata.limits.timeoutMs + ' ms / ' + metadata.limits.resultBytes + ' bytes']]);
     this.text('diagnostics-metadata', this.nativeText(metadata, 24 * 1024));
     const tools = this.el('diagnostics-tools'); tools.replaceChildren();
     for (const tool of metadata.tools) {
@@ -1185,22 +1219,25 @@ export class StudioWorkbench {
     this.badge('diagnostics-status', metadata.evidenceKind === 'fixture' ? 'Fixture observation' : 'Native observation', metadata.evidenceKind === 'fixture' ? 'warning' : 'neutral');
   }
   private async observeNative() {
-    if (!this.token || this.nativeObserverBusy) return;
+    if (this.stopped || !this.token || this.nativeObserverBusy) return;
+    const requestEpoch = ++this.nativeRequestEpoch;
+    this.clearNativeReceipt('Capability observation requested; no targeted read result.'); this.text('diagnostics-result-target', 'Capability inventory · no targeted read');
     this.nativeObserverBusy = true; this.nativeInventoryReady = false; this.text('diagnostics-request-status', 'Capability observation in flight'); this.text('diagnostics-connection', 'Connection lifecycle pending'); this.text('diagnostics-notice', 'Observing native tools and Studio choices. No targeted read is sent.'); this.renderNativeControls();
     const epoch = this.nativeViewEpoch;
     try {
       const observation = readNativeObservation(await this.api.nativeCapabilities(), true);
-      if (this.stopped) return;
+      if (this.stopped || requestEpoch !== this.nativeRequestEpoch) return;
+      if (epoch !== this.nativeViewEpoch) { this.text('diagnostics-request-status', 'Previous capability observation completed · result discarded'); this.text('diagnostics-connection', 'Previous request reported closed'); return; }
       this.nativeObservation = observation; this.nativeInventoryReady = true; this.renderNativeObservation(observation);
       const picker = this.el<HTMLSelectElement>('diagnostics-studio'); picker.replaceChildren(); this.option(picker, '', 'Choose an exact native studio_id');
       for (const studio of observation.studios!) this.option(picker, studio.id, this.nativeText(studio.name, 512) + ' · ' + studio.id);
       if (this.nativeStudioId && !observation.studios!.some(studio => studio.id === this.nativeStudioId)) { this.nativeStudioId = ''; this.nativeViewEpoch++; this.text('diagnostics-output', 'The previous exact Studio ID is absent. Choose a target explicitly.'); }
       picker.value = this.nativeStudioId;
       this.text('diagnostics-request-status', 'Capability observation complete'); this.text('diagnostics-notice', observation.studios!.length ? observation.studios!.length + ' native Studio choices observed. Select an exact ID; each read opens and closes its own connection.' : 'No native Studio windows were reported. No target was selected.');
-    } catch (error) { if (!this.stopped) this.nativeFailure(error, epoch, 'Capability observation'); }
-    finally { this.nativeObserverBusy = false; this.renderNativeControls(); }
+    } catch (error) { if (!this.stopped && requestEpoch === this.nativeRequestEpoch) this.nativeFailure(error, epoch, 'Capability observation'); }
+    finally { if (requestEpoch === this.nativeRequestEpoch) { this.nativeObserverBusy = false; this.renderNativeControls(); } }
   }
-  private nativeFailure(error: unknown, epoch: number, action: string) {
+  private nativeFailure(error: unknown, epoch: number, action: string, request?: NativeReadRequest) {
     this.text('diagnostics-request-status', action + ' failed'); this.text('diagnostics-connection', 'Connection closure not reported in this response');
     if (epoch !== this.nativeViewEpoch) { this.text('diagnostics-notice', 'Previous native request failed. Its response was discarded after the target changed.'); return; }
     const details = error instanceof StudioRequestError ? error.details : undefined;
@@ -1208,34 +1245,39 @@ export class StudioWorkbench {
     this.badge('diagnostics-status', details?.code === 'AUTH' ? 'Human control required' : 'Read unavailable', 'warning');
     if (details?.code === 'STUDIO_NOT_FOUND') { this.nativeInventoryReady = false; this.nativeStudioId = ''; this.nativeViewEpoch++; this.el<HTMLSelectElement>('diagnostics-studio').value = ''; this.text('diagnostics-output', 'Exact target was denied as stale. No other Studio was substituted.'); }
     else if (details?.code === 'STUDIO_TOOL_ERROR') {
-      try { const observation = readNativeObservation(details.payload); this.renderNativeObservation(observation); this.text('diagnostics-output', nativeResultText(observation.result, this.nativeSecrets())); } catch { this.text('diagnostics-output', 'Native tool error contained no valid bounded text receipt.'); }
+      try {
+        if (!request) throw new Error('Tool error has no explicit read request.');
+        const observation = readNativeReceipt(details.payload, request, true), output = nativeResultText(observation.result, this.nativeSecrets());
+        this.renderNativeObservation(observation); this.text('diagnostics-output', output);
+      } catch { this.nativeInventoryReady = false; this.text('diagnostics-output', 'Native tool error contained no valid bounded text receipt for this exact request.'); }
     } else this.nativeInventoryReady = false;
   }
   private async readNative() {
-    if (!this.token || !this.nativeInventoryReady || this.nativeObserverBusy) return;
+    if (this.stopped || !this.token || !this.nativeInventoryReady || this.nativeObserverBusy) return;
     let request: NativeReadRequest; try { request = prepareNativeRead(this.nativeObservation, this.nativeStudioId, this.value('diagnostics-method'), this.nativeInput()); } catch (error) { this.text('diagnostics-notice', this.nativeText(String(error))); return; }
-    const epoch = this.nativeViewEpoch; this.nativeObserverBusy = true; this.text('diagnostics-output', 'Waiting for a read receipt from ' + request.args.studio_id + '.'); this.text('diagnostics-result-target', request.args.studio_id + ' · ' + request.method); this.text('diagnostics-request-status', 'Read in flight · ' + request.args.studio_id); this.text('diagnostics-connection', 'Connection lifecycle pending'); this.renderNativeControls();
+    const epoch = this.nativeViewEpoch, requestEpoch = ++this.nativeRequestEpoch; this.clearNativeReceipt('No read receipt yet.'); this.nativeObserverBusy = true; this.text('diagnostics-output', 'Waiting for a read receipt from ' + request.args.studio_id + '.'); this.text('diagnostics-result-target', request.args.studio_id + ' · ' + request.method); this.text('diagnostics-request-status', 'Read in flight · ' + request.args.studio_id); this.text('diagnostics-connection', 'Connection lifecycle pending'); this.renderNativeControls();
     try {
-      const observation = readNativeObservation(await this.api.nativeRead(request));
-      if (observation.studio_id !== request.args.studio_id || observation.method !== request.method) throw new Error('Native response did not match the exact requested Studio ID and method.');
-      if (this.stopped) return;
+      const observation = readNativeReceipt(await this.api.nativeRead(request), request);
+      if (this.stopped || requestEpoch !== this.nativeRequestEpoch) return;
       if (epoch !== this.nativeViewEpoch || this.nativeStudioId !== request.args.studio_id) { this.text('diagnostics-request-status', 'Previous read completed · result discarded'); this.text('diagnostics-connection', 'Previous request reported closed'); this.text('diagnostics-notice', 'Previous read finished for ' + request.args.studio_id + '. Its result was discarded because the selected target changed.'); return; }
-      this.renderNativeObservation(observation); this.text('diagnostics-output', nativeResultText(observation.result, this.nativeSecrets())); this.text('diagnostics-request-status', 'Read complete · ' + request.args.studio_id); this.text('diagnostics-notice', 'Read receipt observed for ' + request.args.studio_id + '. Output is sanitized text; this is not a persistent connection.');
-    } catch (error) { if (!this.stopped) this.nativeFailure(error, epoch, 'Native read'); }
-    finally { this.nativeObserverBusy = false; this.renderNativeControls(); }
+      const output = nativeResultText(observation.result, this.nativeSecrets());
+      this.renderNativeObservation(observation); this.text('diagnostics-output', output); this.text('diagnostics-request-status', 'Read complete · ' + request.args.studio_id); this.text('diagnostics-notice', 'Read receipt observed for ' + request.args.studio_id + '. Output is sanitized text; this is not a persistent connection.');
+    } catch (error) { if (!this.stopped && requestEpoch === this.nativeRequestEpoch) this.nativeFailure(error, epoch, 'Native read', request); }
+    finally { if (requestEpoch === this.nativeRequestEpoch) { this.nativeObserverBusy = false; this.renderNativeControls(); } }
   }
 
   private async getNativeToken() {
     if (!this.token || this.nativeBusy) return;
+    const epoch = ++this.nativeSecretEpoch;
     this.nativeBusy = true; this.nativeToken = ''; this.text('native-token', ''); this.el('native-token-result').hidden = true; this.el<HTMLButtonElement>('native-copy-token').disabled = true; this.el<HTMLButtonElement>('native-get-token').disabled = true;
     try {
       const data = await this.api.agentToken();
       if (!/^[a-f0-9]{64}$/.test(data.token) || data.token === this.token || data.canReview !== false || data.expires !== 'daemon lifetime') throw new Error('Daemon did not return a distinct scoped agent token with human review disabled.');
-      if (this.stopped) return;
+      if (this.stopped || epoch !== this.nativeSecretEpoch) return;
       this.nativeToken = data.token; this.text('native-token', data.token); this.text('native-scopes', json(data.scopes));
       this.text('native-notice', 'Scoped agent token · expires at daemon shutdown · human review disabled.');
       this.el('native-token-result').hidden = false; this.el<HTMLButtonElement>('native-copy-token').disabled = false;
-    } catch (error) { this.text('native-notice', error instanceof Error ? error.message : String(error)); }
+    } catch (error) { if (!this.stopped && epoch === this.nativeSecretEpoch) this.text('native-notice', error instanceof Error ? error.message : String(error)); }
     finally { this.nativeBusy = false; this.el<HTMLButtonElement>('native-get-token').disabled = !this.token; }
   }
 
@@ -1250,7 +1292,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
   const token = takeControlToken(window.location, window.history, storage);
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token);
-  window.addEventListener('pagehide', () => workbench.stop());
-  window.addEventListener('pageshow', event => { if (event.persisted) workbench.resume(); });
+  const codexChat = new CodexChat(document, new CodexChatApi(token));
+  const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
+  let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
+  window.addEventListener('pagehide', () => { workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); } });
+  void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

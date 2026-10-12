@@ -1,0 +1,88 @@
+{
+  "observedAt": "2026-10-11T23:56:54.022Z",
+  "kind": "codex-client-event-mcp-sidecar",
+  "writeScope": [
+    "packages/codex-client/**",
+    "tests/unit/codex-client.test.ts",
+    "docs/build/CODEX_CLIENT.md"
+  ],
+  "publicContract": {
+    "SessionEventValue": "existing event union without sequence",
+    "SessionEvent": "SessionEventValue & { seq: number }",
+    "Snapshot": {
+      "lastEventSeq": "highest assigned sequence including drops",
+      "droppedEvents": "cumulative byte/count drops"
+    },
+    "deduplicationKey": [
+      "connectionId",
+      "seq"
+    ],
+    "ConnectOptions": {
+      "arcaneMcp": "optional host-code-only ArcaneMcpLaunchProfile"
+    },
+    "ArcaneMcpLaunchProfile": {
+      "nodeExecutable": "absolute direct Node matching process.execPath",
+      "serverEntry": "absolute canonical main.js from same compiled Arcane bundle",
+      "projectRoot": "absolute existing directory",
+      "daemonUrl": "literal http://127.0.0.1:PORT; 1-65535",
+      "agentToken": "64 hex, exact bytes, child environment only"
+    },
+    "customArgvOrEnvOrConfig": false
+  },
+  "fixtureValidation": {
+    "provenance": "spawned-node-fixture",
+    "command": "node --test packages/codex-client/.test-output/tests/unit/codex-client.test.js",
+    "exitCode": 0,
+    "tests": 67,
+    "passed": 67,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "baselineTests": 53,
+    "addedTests": 14,
+    "durationMs": 20202.6482,
+    "fixtureStartupTimeoutMs": 5000,
+    "shortLostAckDeadlinesUnchanged": true,
+    "arcaneProfileReceipts": "fixed argv, environment key names and synthetic bearer digest only",
+    "actualMcpServerInvoked": false
+  },
+  "typecheck": {
+    "command": "node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
+    "exitCode": 0
+  },
+  "nativeValidation": {
+    "thisTurnInstalledCliConnections": 0,
+    "thisTurnInferenceRuns": 0,
+    "thisTurnStudioActions": 0,
+    "thisTurnHomeOrMcpConfigWrites": 0,
+    "priorEvidenceFile": "native-metadata.json",
+    "priorEvidenceObservedAt": "2026-10-11T23:35:36.371Z",
+    "priorEvidenceModelCount": 7,
+    "priorEvidenceCurrentSource": false,
+    "nativeArcaneMcpProfileExecution": "not-tested"
+  },
+  "sourceSha256": {
+    "packages/codex-client/src/index.ts": "04495b6b4e69fb7fd4e3d8eb67014d171249ea9b963432f5f087aa244b72e23f",
+    "packages/codex-client/src/mcp-profile.ts": "3623154783ed5ceb1ca2663d881ce73f3fdddda596d69ec6e781c42966a22805",
+    "packages/codex-client/src/session.ts": "8cad4cbc62c51668b9f3ba689546ac8428cc5664307a980d26c64b8833afacb8",
+    "packages/codex-client/src/types.ts": "f180b561941b046067d1dd831ccc8c21bf597467c50774f20bd15bc39357d532",
+    "packages/codex-client/src/transport.ts": "7b1bb3327c793e245d01f419466df25860d0419f0cee907be54edb53bfa6758a",
+    "packages/codex-client/src/validation.ts": "1f530e41d0b9d1ecc963ee7bf1dd50b9d32feec80a6bf228ab8702f0458d1db7",
+    "packages/codex-client/fixtures/protocol.mjs": "d3e26691939ecf74c48e253db8b4062a117b2fef4774e888abb282f6388a15cb",
+    "packages/codex-client/package.json": "6443c12ccf202643d8240a91f95fce77a79275e52943b8cd015db992c20232d7",
+    "tests/unit/codex-client.test.ts": "406af318c43aba68280b675408cf208d2b4c037820290b4a4ec0bb3a5222d780",
+    "docs/build/CODEX_CLIENT.md": "f46775bfb48c8fdd812197626b82372cc4c8af9a060d648a7fb482ccbb6b9074"
+  },
+  "unchangedReadonlyAdapterSha256": {
+    "packages/model-adapters/src/codex-rpc.ts": "7531fd1c58418ce6009d4d4e2c59b6e5bf8a1be5ce27e505a2766e170470eae0",
+    "packages/model-adapters/src/catalogue.ts": "c3487b5530b6197e04de0d57a8e4b20eff1584cb4fad6858ca683dba8cefb527"
+  },
+  "packageVersion": "0.1.0",
+  "addedDependencies": [],
+  "remainingParentWork": [
+    "human-only HTTP/UI and durable journal integration",
+    "root build and current package provenance",
+    "future authorized native MCP/tool acceptance",
+    "full local product gates"
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "observedAt": "2026-10-11T23:35:36.371Z",
+  "cliVersion": "0.162.0-alpha.17.2",
+  "command": "C:/Users/alexk/AppData/Local/OpenAI/Codex/bin/2e5e00daee91c61d/codex.exe",
+  "cliSha256": "d13914ced6c7af174d8d638db938284231227312104b06a25e9608c632a7daec",
+  "sourceSha256": {
+    "packages/codex-client/src/index.ts": "d551697ac08040c18663d19b4e9a5af7bccd0e245717d561b5c97277f206ddb8",
+    "packages/codex-client/src/session.ts": "27462dec0bf5e2a1cc49812919ee4f3beb926c1f9935dd7187cd3a8f8efa2cbf",
+    "packages/codex-client/src/transport.ts": "7b1bb3327c793e245d01f419466df25860d0419f0cee907be54edb53bfa6758a",
+    "packages/codex-client/src/types.ts": "a9d0d4a8c68a7b14dce29e4726914c13d05bdb5e298d8a62511e9af0d407a16b",
+    "packages/codex-client/src/validation.ts": "1f530e41d0b9d1ecc963ee7bf1dd50b9d32feec80a6bf228ab8702f0458d1db7"
+  },
+  "provenance": "installed-cli",
+  "stableApi": true,
+  "transport": "stdio-jsonl",
+  "requestMethods": [
+    "initialize",
+    "account/read",
+    "model/list"
+  ],
+  "initializedNotification": true,
+  "accountRefreshToken": false,
+  "ready": true,
+  "account": {
+    "auth": "subscription",
+    "plan": null,
+    "requiresOpenaiAuth": true
+  },
+  "models": [
+    {
+      "model": "gpt-6.1-sol",
+      "id": "gpt-6.1-sol",
+      "displayName": "GPT-6.1-Sol",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "low",
+      "entitlement": "unverified"
+    },
+    {
+      "model": "gpt-6-astra",
+      "id": "gpt-6-astra",
+      "displayName": "GPT-6-Astra",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "medium",
+      "entitlement": "unverified"
+    },
+    {
+      "model": "gpt-6-sol",
+      "id": "gpt-6-sol",
+      "displayName": "GPT-6-Sol",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "medium",
+      "entitlement": "unverified"
+    },
+    {
+      "model": "gpt-6-luna",
+      "id": "gpt-6-luna",
+      "displayName": "GPT-6-Luna",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultEffort": "medium",
+      "entitlement": "unverified"
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "id": "gpt-5.6-sol",
+      "displayName": "GPT-5.6-Sol",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "low",
+      "entitlement": "unverified"
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "id": "gpt-5.6-terra",
+      "displayName": "GPT-5.6-Terra",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "medium",
+      "entitlement": "unverified"
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "id": "gpt-5.6-luna",
+      "displayName": "GPT-5.6-Luna",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultEffort": "medium",
+      "entitlement": "unverified"
+    }
+  ],
+  "thread": null,
+  "operationCount": 0,
+  "inferenceRun": false,
+  "nativeThreadTurnApprovalAcceptance": "not-tested"
+}

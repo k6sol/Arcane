@@ -4,8 +4,8 @@ import { normalizeRequest, validateAudit } from '../../../packages/asset-pipelin
 import { jsonSnapshot } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { AssetInput, AssetRequest, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
 import { id, boundedText } from './schemas.js';
-import type { AssetJobRecord } from '../../daemon/src/asset-service.js';
-import { assetSlug, assemblyRecipe, assemblyEvidence, geometryBounds, socketEvidence, boundedVector } from './assembly-schemas.js';
+import { HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetJobPage } from '../../daemon/src/asset-service.js';
+import { assetSlug, assemblyRecipe, assemblyEvidence, geometryBounds, socketEvidence, materialEvidence, boundedVector } from './assembly-schemas.js';
 
 const count = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const finite = z.number().finite();
@@ -57,13 +57,21 @@ export const assetJob: z.ZodType<AssetJobRecord> = z.object({
 }).transform(({ finishedAt, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }) }))
   .refine(job => job.events.every(event => event.jobId === job.jobId), 'Events must belong to this exact asset job.');
 
+export const assetHistoryInput = z.strictObject({ limit: z.number().int().min(1).max(64).optional(), after: assetJobId.optional() });
+export const assetJobPage: z.ZodType<AssetJobPage> = z.object({ schemaVersion: z.literal(1), jobs: z.array(assetJob).max(64),
+  total: z.number().int().min(0).max(256), nextCursor: assetJobId.nullable(), byteLimit: z.literal(HISTORY_PAGE_BYTES),
+}).refine(page => page.total >= page.jobs.length && new Set(page.jobs.map(job => job.jobId)).size === page.jobs.length
+  && (page.nextCursor === null || page.nextCursor === page.jobs.at(-1)?.jobId)
+  && Buffer.byteLength(JSON.stringify(page)) <= HISTORY_PAGE_BYTES, 'Invalid bounded asset history page.');
+
 const mesh = z.object({ name: id, role: z.enum(['render', 'lod1', 'collision']), vertices: count, edges: count, faces: count, triangles: count,
   nonManifoldEdges: count, looseVertices: count, looseEdges: count, duplicateVertices: count, duplicateFaces: count, degenerateFaces: count,
   inconsistentNormals: count, invertedComponents: count, finitePositions: z.boolean(), uvLayers: count, uvLoops: count, invalidUVs: count,
   degenerateUVFaces: count, dimensions: vector, scale: vector, rotation: vector, materials: z.array(id).max(32), errors: z.array(text).max(128),
-  geometrySha256: hash.optional(), bounds: geometryBounds.optional(),
-}).transform(({ geometrySha256, bounds, ...value }) => ({ ...value,
-  ...(geometrySha256 === undefined ? {} : { geometrySha256 }), ...(bounds === undefined ? {} : { bounds }) }));
+  geometrySha256: hash.optional(), bounds: geometryBounds.optional(), position: boundedVector(-60, 60).optional(), materialProperties: z.array(materialEvidence).max(8).optional(),
+}).transform(({ geometrySha256, bounds, position, materialProperties, ...value }) => ({ ...value,
+  ...(geometrySha256 === undefined ? {} : { geometrySha256 }), ...(bounds === undefined ? {} : { bounds }),
+  ...(position === undefined ? {} : { position }), ...(materialProperties === undefined ? {} : { materialProperties }) }));
 const exported = z.object({ path: artifactName, objects: count, triangles: count, materials: count, finitePositions: z.boolean(),
   sockets: z.array(socketEvidence).max(64).optional(),
 }).transform(({ sockets, ...value }) => ({ ...value, ...(sockets === undefined ? {} : { sockets }) }));
@@ -84,6 +92,7 @@ export const assetManifest: z.ZodType<AssetManifest> = z.object({
   ...(sourceRequestSha256 === undefined ? {} : { sourceRequestSha256 }), ...(assembly === undefined ? {} : { assembly }) }))
   .superRefine((value, context) => {
     if (value.validation.template !== value.request.template) context.addIssue({ code: 'custom', message: 'Manifest audit template differs from its request.' });
+    if (value.sourceRequestSha256 !== undefined && value.artifacts.find(artifact => artifact.path === 'input.json')?.sha256 !== value.sourceRequestSha256) context.addIssue({ code:'custom',message:'Source request digest differs from its input artifact.' });
     if (value.request.template !== 'custom-assembly') return;
     try {
       if (!value.sourceRequestSha256 || !value.assembly || !isDeepStrictEqual(value.assembly, value.validation.assembly)) throw new Error('Missing/mismatched provenance.');

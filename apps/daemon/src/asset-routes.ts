@@ -4,7 +4,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { AssetError, normalizeRequest, type AssetInput } from '../../../packages/asset-pipeline/src/index.js';
-import type { AssetService } from './asset-service.js';
+import { ARTIFACT_DOWNLOAD_TIMEOUT_MS, type AssetService } from './asset-service.js';
 
 function object(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ArcaneError('INPUT', 'Expected a JSON object.');
@@ -45,8 +45,8 @@ async function readAssetJson(request: IncomingMessage, allowRecipe = false): Pro
  * At most 64 KiB and 200 ms: stalled/large uploads still get Connection: close.
  */
 async function discardRejectedAssetBody(request: IncomingMessage): Promise<boolean> {
-  if (request.destroyed || request.aborted) return false;
   if (request.readableEnded || (request.complete && request.readableLength === 0)) return true;
+  if (request.destroyed || request.aborted) return false;
   if (!request.headers['transfer-encoding'] && Number(request.headers['content-length'] ?? '0') === 0) return true;
   return new Promise<boolean>(resolve => {
     let remaining = 64 * 1024, done = false;
@@ -74,6 +74,8 @@ async function discardRejectedAssetBody(request: IncomingMessage): Promise<boole
   });
 }
 export function assetRoutes(service: AssetService) {
+  // Keep admission until verification AND socket delivery settle, including after a timeout.
+  let downloading = false;
   return async (request: IncomingMessage, response: ServerResponse, url: URL, controlToken: string, origin: string, agentToken?: string): Promise<boolean> => {
     if (!url.pathname.startsWith('/v1/assets/')) return false;
     const send = async (status: number, payload: unknown) => {
@@ -89,14 +91,26 @@ export function assetRoutes(service: AssetService) {
       const remote = request.socket.remoteAddress;
       if (remote && !(isIP(remote) === 4 && remote === '127.0.0.1') && remote !== '::ffff:127.0.0.1') throw new ArcaneError('HOST', 'Asset routes require a loopback peer.');
       const bearer = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : '';
-      const accepted = [controlToken, agentToken].some(token => typeof token === 'string' && token.length > 0 && Buffer.byteLength(bearer) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(token)));
-      if (!accepted) throw new ArcaneError('AUTH', 'Supply the local launcher control or agent bearer.');
+      const matches = (token: string | undefined) => typeof token === 'string' && token.length > 0 && Buffer.byteLength(bearer) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(token));
+      const human = matches(controlToken), agent = matches(agentToken);
+      if (!human && !agent) throw new ArcaneError('AUTH', 'Supply the local launcher control or agent bearer.');
       if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new ArcaneError('ORIGIN', 'Cross-origin asset access refused.');
       const route = url.pathname.slice('/v1/assets/'.length);
-      const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET']]).get(route);
+      if (route === 'artifact') {
+        if (!human || agent) throw new ArcaneError('AUTH', 'Artifact downloads require the distinct human launcher control bearer.');
+        const site = request.headers['sec-fetch-site'];
+        if (site !== undefined && site !== 'same-origin' && site !== 'none') throw new ArcaneError('ORIGIN', 'Cross-site artifact downloads refused.');
+        const referrer = request.headers.referer;
+        if (referrer !== undefined) {
+          let referrerUrl: URL;
+          try { referrerUrl = new URL(referrer); } catch { throw new ArcaneError('ORIGIN', 'Invalid artifact referrer.'); }
+          if (referrerUrl.origin !== origin || referrerUrl.username || referrerUrl.password) throw new ArcaneError('ORIGIN', 'Cross-site artifact referrer refused.');
+        }
+      }
+      const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET'], ['artifact', 'GET']]).get(route);
       if (!method) { await send(404, { error: 'NOT_FOUND', message: 'Unknown asset endpoint.' }); return true; }
       if (request.method !== method) { response.setHeader('Allow', method); await send(405, { error: 'METHOD', message: 'Expected ' + method + '.' }); return true; }
-      const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' ? ['jobId', 'path'] : route === 'jobs' ? ['limit', 'after'] : [];
+      const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' || route === 'artifact' ? ['jobId', 'path'] : route === 'jobs' ? ['limit', 'after'] : [];
       for (const key of url.searchParams.keys()) if (!allowedQuery.includes(key) || url.searchParams.getAll(key).length !== 1) throw new ArcaneError('INPUT', 'Unexpected or duplicate query parameter.');
       if (route === 'jobs') {
         const rawLimit = url.searchParams.get('limit');
@@ -106,6 +120,42 @@ export function assetRoutes(service: AssetService) {
         return true;
       }
       if (route === 'manifest') { await send(200, { manifest: await service.manifest(url.searchParams.get('jobId')) }); return true; }
+      if (route === 'artifact') {
+        if (request.headers['transfer-encoding'] !== undefined || (request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0')) throw new ArcaneError('INPUT', 'Artifact GET requests cannot contain a body.');
+        if (downloading) throw new AssetError('BUSY', 'An artifact download is already in progress.');
+        downloading = true;
+        let expired = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const operation = (async () => {
+          const download = await service.artifact(url.searchParams.get('jobId'), url.searchParams.get('path'));
+          if (expired || response.destroyed || response.writableEnded) return;
+          await new Promise<void>((resolve, reject) => {
+            const cleanup = () => { response.off('finish', finish); response.off('close', close); response.off('error', error); };
+            const finish = () => { cleanup(); resolve(); };
+            const close = () => { cleanup(); reject(new ArcaneError('ARTIFACT', 'Artifact response closed before delivery completed.')); };
+            const error = () => { cleanup(); reject(new ArcaneError('ARTIFACT', 'Artifact response could not be delivered.')); };
+            response.once('finish', finish); response.once('close', close); response.once('error', error);
+            response.writeHead(200, { 'Content-Type': download.contentType, 'Content-Length': download.bytes.length,
+              'Content-Disposition': 'attachment; filename="' + download.filename + '"',
+              'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+              'Content-Security-Policy': "default-src 'none'; sandbox", 'Cross-Origin-Resource-Policy': 'same-origin' });
+            response.end(download.bytes);
+          });
+        })();
+        try {
+          await Promise.race([operation, new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              expired = true;
+              if (response.headersSent) response.destroy();
+              reject(new ArcaneError('ARTIFACT_TIMEOUT', 'Artifact download exceeded its 30 second deadline.'));
+            }, ARTIFACT_DOWNLOAD_TIMEOUT_MS);
+          })]);
+        } finally {
+          clearTimeout(timer);
+          void operation.then(() => { downloading = false; }, () => { downloading = false; });
+        }
+        return true;
+      }
       if (route === 'preview') {
         const bytes = await service.preview(url.searchParams.get('jobId'), url.searchParams.get('path'));
         response.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'" });
@@ -117,7 +167,7 @@ export function assetRoutes(service: AssetService) {
       else { exactKeys(input, ['jobId']); await send(200, { job: await service.cancel(input.jobId) }); }
     } catch (error) {
       const known = error instanceof AssetError || error instanceof ArcaneError, code = known ? error.code : 'INTERNAL';
-      const status = code === 'AUTH' ? 401 : ['HOST', 'ORIGIN'].includes(code) ? 403 : code === 'NOT_FOUND' ? 404 : code === 'BUSY' ? 409 : ['JOB_STATE', 'RECONCILIATION', 'HISTORY_LIMIT', 'CLOSED'].includes(code) ? 409 : code === 'BODY_LIMIT' ? 413 : code === 'BODY_TIMEOUT' ? 408 : ['HASH', 'MANIFEST', 'ARTIFACT', 'RECOVERY', 'PERSISTENCE'].includes(code) ? 422 : known ? 400 : 500;
+      const status = code === 'AUTH' ? 401 : ['HOST', 'ORIGIN'].includes(code) ? 403 : code === 'NOT_FOUND' ? 404 : code === 'BUSY' ? 409 : ['JOB_STATE', 'RECONCILIATION', 'HISTORY_LIMIT', 'CLOSED'].includes(code) ? 409 : ['BODY_LIMIT', 'ARTIFACT_LIMIT'].includes(code) ? 413 : ['BODY_TIMEOUT', 'ARTIFACT_TIMEOUT'].includes(code) ? 408 : ['HASH', 'MANIFEST', 'ARTIFACT', 'RECOVERY', 'PERSISTENCE'].includes(code) ? 422 : known ? 400 : 500;
       if (!response.headersSent && !response.destroyed) { await send(status, { error: code, message: known ? error.message : 'Local asset operation failed; inspect retained job evidence.' }); }
     }
     return true;

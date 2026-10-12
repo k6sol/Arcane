@@ -1,0 +1,71 @@
+{
+  "observedAt": "2026-10-11T23:36:30.849Z",
+  "writeScope": [
+    "packages/codex-client/**",
+    "tests/unit/codex-client.test.ts",
+    "docs/build/CODEX_CLIENT.md"
+  ],
+  "fixtureValidation": {
+    "provenance": "spawned-node-fixture",
+    "command": "node --test packages/codex-client/.test-output/tests/unit/codex-client.test.js",
+    "exitCode": 0,
+    "tests": 53,
+    "passed": 53,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "durationMs": 17681.493,
+    "fixtureReceipts": "isolated package .test-output/fixtures; exact directories removed after tests"
+  },
+  "typecheck": {
+    "command": "node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
+    "exitCode": 0
+  },
+  "nativeMetadataValidation": {
+    "evidenceFile": "native-metadata.json",
+    "observedAt": "2026-10-11T23:35:36.371Z",
+    "provenance": "installed-cli",
+    "ready": true,
+    "modelCount": 7,
+    "methods": [
+      "initialize",
+      "account/read",
+      "model/list"
+    ],
+    "refreshToken": false,
+    "thread": null,
+    "operationCount": 0,
+    "inferenceRun": false,
+    "nativeThreadTurnApprovalAcceptance": "not-tested"
+  },
+  "parentReportedEarlierChecks": {
+    "source": "user update",
+    "fullNpmTest": "passed before final two item-invalidation cases",
+    "luauAndPackageChecks": 16,
+    "cleanPackageLifecycle": "passed per parent; not rerun by this worker",
+    "studioTesting": "user-deferred"
+  },
+  "remainingParentGates": [
+    "human HTTP/UI integration",
+    "durable unknown-outcome storage",
+    "future explicitly authorized native execution acceptance",
+    "full local-product delivery gates"
+  ],
+  "sourceSha256": {
+    "packages/codex-client/src/index.ts": "d551697ac08040c18663d19b4e9a5af7bccd0e245717d561b5c97277f206ddb8",
+    "packages/codex-client/src/session.ts": "27462dec0bf5e2a1cc49812919ee4f3beb926c1f9935dd7187cd3a8f8efa2cbf",
+    "packages/codex-client/src/transport.ts": "7b1bb3327c793e245d01f419466df25860d0419f0cee907be54edb53bfa6758a",
+    "packages/codex-client/src/types.ts": "a9d0d4a8c68a7b14dce29e4726914c13d05bdb5e298d8a62511e9af0d407a16b",
+    "packages/codex-client/src/validation.ts": "1f530e41d0b9d1ecc963ee7bf1dd50b9d32feec80a6bf228ab8702f0458d1db7",
+    "packages/codex-client/fixtures/protocol.mjs": "c398f7dff462c86049ac85f63f45defe971eeae156b16464de5f11631ffbbb1f",
+    "tests/unit/codex-client.test.ts": "69a4be5397b2eec62936dc2a1d980fcac65cd04bcf9d25a467c6bea5af80461d",
+    "docs/build/CODEX_CLIENT.md": "2e65fe4c68b3ca4bba501233ecc365d9f69d16aec2427a5ff00c69defdb033e5",
+    "packages/codex-client/package.json": "6443c12ccf202643d8240a91f95fce77a79275e52943b8cd015db992c20232d7"
+  },
+  "unchangedReadonlyAdapterSha256": {
+    "packages/model-adapters/src/codex-rpc.ts": "7531fd1c58418ce6009d4d4e2c59b6e5bf8a1be5ce27e505a2766e170470eae0",
+    "packages/model-adapters/src/catalogue.ts": "c3487b5530b6197e04de0d57a8e4b20eff1584cb4fad6858ca683dba8cefb527"
+  },
+  "packageVersion": "0.1.0",
+  "addedDependencies": []
+}

@@ -10,8 +10,15 @@ if (!report.readyToLaunch) {
   process.exitCode = 1;
 } else {
   console.log('Arcane local product. Native runtime verification remains separate from startup.');
-  const child = spawn(process.execPath, [join(repository, 'dist/apps/daemon/src/product-main.js')], { cwd: repository, env: process.env, shell: false, windowsHide: true, stdio: 'inherit' });
+  const child = spawn(process.execPath, [join(repository, 'dist/apps/daemon/src/product-main.js')], { cwd: repository, env: process.env, shell: false, windowsHide: true, stdio: ['inherit', 'inherit', 'inherit', 'ipc'] });
   child.once('error', () => { console.error('Arcane daemon could not start. No login, installation, or fallback was attempted.'); process.exitCode = 1; });
   child.once('close', code => { process.exitCode = code ?? 1; });
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { if (child.exitCode === null) child.kill(signal); });
+  let stopping = false;
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
+    if (stopping || child.exitCode !== null) return; stopping = true;
+    if (child.connected) child.send({ type: 'arcane-shutdown', protocolVersion: 1 }, error => { if (error && child.exitCode === null) child.kill(); });
+    else child.kill();
+    const timer = setTimeout(() => { if (child.exitCode === null) child.kill(); }, 15000); timer.unref();
+    child.once('close', () => clearTimeout(timer));
+  });
 }

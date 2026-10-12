@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { Agent, createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile, rm, symlink, link, rename } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, writeFile, rm, symlink, link, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createAssetService } from '../../apps/daemon/src/asset-service.js';
+import { ARTIFACT_DOWNLOAD_BYTES, ARTIFACT_DOWNLOAD_TIMEOUT_MS, createAssetService } from '../../apps/daemon/src/asset-service.js';
 import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
 import { createAssetPipeline, AssetError, normalizeRequest } from '../../packages/asset-pipeline/src/index.js';
-import { manifestFixture } from '../../packages/asset-pipeline/testing/fixture.js';
+import { glb, manifestFixture } from '../../packages/asset-pipeline/testing/fixture.js';
 import { noLinks, readRegularFile, within } from '../../packages/asset-pipeline/src/paths.js';
+import { sha256 } from '../../packages/asset-pipeline/src/validation.js';
 
 const ROOT = resolve(process.cwd()), TEMP = join(ROOT, 'packages', 'asset-pipeline', '.runtime', 'http-tests');
 const TOKEN = 'synthetic-control-token-for-unit-tests';
@@ -265,4 +266,268 @@ test('bounded regular reader rejects directories, excess size and hardlinks', as
   await assert.rejects(() => readRegularFile(file, 9));
   await assert.rejects(() => readRegularFile(dir, 100));
   await link(file, linked); await assert.rejects(() => readRegularFile(file, 100));
+});
+
+test('custom HTTP input retains recipe authority, rejects code and enforces custom byte bounds', async t => {
+  const h=await harness(t);
+  const input=JSON.parse(await readFile(join(ROOT,'workers/blender/custom-machine.json'),'utf8'));
+  for(const field of ['python','path','url','shell']){
+    const bad=structuredClone(input);bad.recipe.parts[0][field]='arbitrary';
+    assert.equal((await h.post('/v1/assets/start',bad)).status,400);
+  }
+  const tooLarge=await new Promise<number>((resolve,reject)=>{
+    const req=httpRequest(h.origin+'/v1/assets/start',{method:'POST',headers:{Authorization:'Bearer '+TOKEN,'Content-Type':'application/json','Content-Length':String(256*1024+1)}},res=>{res.resume();resolve(res.statusCode!);});
+    req.on('error',reject);req.flushHeaders();
+  });assert.equal(tooLarge,413);
+  assert.equal(h.service.jobs().length,0);
+  const response=await h.post('/v1/assets/start',input);assert.equal(response.status,202);
+  const {job}=await response.json() as {job:{jobId:string;request:unknown}};
+  assert.deepEqual(job.request,normalizeRequest(input));
+  await h.service.cancel(job.jobId);
+  const page=await (await h.call('/v1/assets/jobs?limit=1')).json() as {jobs:{request:unknown}[];nextCursor:null;total:number};
+  assert.deepEqual(page.jobs[0]!.request,normalizeRequest(input));assert.equal(page.nextCursor,null);assert.equal(page.total,1);
+  await h.service.close();
+  const next=await createAssetService({cwd:ROOT,outputRoot:h.outputRoot,...missing(h.dir)});
+  try{
+    assert.deepEqual(next.jobPage().jobs[0]!.request,normalizeRequest(input));
+    const index=JSON.parse(await readFile(join(h.outputRoot,'index.json'),'utf8'));
+    assert.deepEqual(Object.keys(index.jobs[0]).sort(),['events','jobId']);
+  }finally{await next.close();}
+});
+test('recipe history paginates by byte and count without dropping recipe or event evidence', async t => {
+  const h=await harness(t), input=JSON.parse(await readFile(join(ROOT,'workers/blender/custom-machine.json'),'utf8'));
+  // Long decimal spellings produce a large, valid data-only closed mesh recipe.
+  input.recipe.parts= input.recipe.parts.filter((p:{role:string})=>p.role==='render'||p.role==='collision');
+  input.recipe.parts[0].bevel=undefined;delete input.recipe.parts[0].bevel;
+  const guard=input.recipe.parts.find((p:{name:string})=>p.name==='wedge-guard');
+  const original=structuredClone(guard.geometry);
+  guard.geometry.vertices=[];guard.geometry.indices=[];
+  for(let i=0;i<1000;i++){
+    const offset=guard.geometry.vertices.length, x=(i%40)/50-.4, y=Math.floor(i/40)/40-.3, d=.007123456789012345;
+    guard.geometry.vertices.push([x,y,0],[x+d,y,0],[x,y+d,0],[x,y,d]);
+    guard.geometry.indices.push(...[0,2,1,0,1,3,1,2,3,2,0,3].map(n=>n+offset));
+  }
+  guard.geometry.vertices.push(...original.vertices.map((v:number[])=>v.map(n=>n*.01+.47)));
+  guard.geometry.indices.push(...original.indices.map((n:number)=>n+4000));
+  input.triangleBudget=50000;
+  assert.ok(Buffer.byteLength(JSON.stringify(input))>16384);
+  const ids:string[]=[];
+  for(let i=0;i<5;i++){
+    input.name='large-recipe-'+i;const response=await h.post('/v1/assets/start',input);assert.equal(response.status,202);
+    const {job}=await response.json() as {job:{jobId:string}};ids.push(job.jobId);await h.service.cancel(job.jobId);
+  }
+  let after:string|null=null, seen:string[]=[], pages=0;
+  do{
+    const response=await h.call('/v1/assets/jobs?limit=64'+(after?'&after='+after:''));
+    assert.equal(response.status,200);const text=await response.text();assert.ok(Buffer.byteLength(text)<=512*1024);
+    const page=JSON.parse(text) as {jobs:{jobId:string;request:{recipe:unknown};events:unknown[]}[];nextCursor:string|null;total:number};
+    assert.equal(page.total,5);assert.ok(page.jobs.every(j=>j.request.recipe&&Array.isArray(j.events)));
+    for(const job of page.jobs) assert.deepEqual(job.request.recipe,normalizeRequest({...input,name:'large-recipe-0'}).recipe);
+    seen.push(...page.jobs.map(j=>j.jobId));after=page.nextCursor;pages++;
+  }while(after);
+  assert.deepEqual(seen.sort(),ids.sort());assert.ok(pages>=2,'The byte cap must force continuation before the count cap.');
+  const first=await (await h.call('/v1/assets/jobs?limit=2')).json() as {jobs:unknown[];nextCursor:string};
+  assert.equal(first.jobs.length,2);assert.ok(first.nextCursor);
+  for(const query of ['limit=0','limit=65','limit=1.5','limit=2&limit=3','after=../x','after='+randomUUID()]){
+    const response=await h.call('/v1/assets/jobs?'+query);assert.ok([400,404].includes(response.status));
+  }
+});
+
+const artifactUrl = (jobId: string, path = 'asset.glb') => '/v1/assets/artifact?jobId=' + jobId + '&path=' + encodeURIComponent(path);
+
+test('artifact GET delivers exact verified GLB, collision, FBX and completed scene bytes as attachments', async t => {
+  const h = await harness(t, true), f = h.fixture!, before = h.service.jobs();
+  h.service.start = async () => { throw new Error('Download must never start Blender.'); };
+  h.service.probe = async () => { throw new Error('Download must never probe Blender.'); };
+  for (const [path, contentType] of [['asset.glb', 'model/gltf-binary'], ['collision.glb', 'model/gltf-binary'], ['asset.fbx', 'application/octet-stream'], ['asset.blend', 'application/octet-stream']]) {
+    const response = await h.call(artifactUrl(f.jobId, path));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), contentType);
+    assert.equal(response.headers.get('content-disposition'), 'attachment; filename="' + path + '"');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(response.headers.get('cross-origin-resource-policy'), 'same-origin');
+    assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox");
+    assert.equal(response.headers.get('access-control-allow-origin'), null);
+    const bytes = Buffer.from(await response.arrayBuffer()), artifact = f.manifest.artifacts.find(a => a.path === path)!;
+    assert.equal(Number(response.headers.get('content-length')), artifact.bytes);
+    assert.equal(sha256(bytes), artifact.sha256);
+    assert.deepEqual(bytes, await readFile(join(f.directory, path!)));
+  }
+  assert.deepEqual(h.service.jobs(), before, 'GET cannot mutate job state or generate replacement assets.');
+});
+
+test('artifact GET requires optional LOD manifest proof and never substitutes an unlisted file', async t => {
+  const h = await harness(t, true), f = h.fixture!, path = 'asset-lod1.glb', bytes = glb();
+  assert.equal((await h.call(artifactUrl(f.jobId, path))).status, 404);
+  await writeFile(join(f.directory, path), bytes);
+  assert.equal((await h.call(artifactUrl(f.jobId, path))).status, 404, 'A current filesystem file is insufficient without manifest evidence.');
+  const manifest = structuredClone(f.manifest);
+  manifest.validation.meshes.push({ ...structuredClone(manifest.validation.meshes[0]!), name: 'SM_Test_LOD1', role: 'lod1' });
+  manifest.validation.totals.lod1Triangles = 4;
+  manifest.validation.exports.push({ path, objects: 1, triangles: 4, materials: 1, finitePositions: true });
+  manifest.artifacts.push({ path, role: 'export', bytes: bytes.length, sha256: sha256(bytes) });
+  const auditBytes = Buffer.from(JSON.stringify(manifest.validation)), audit = manifest.artifacts.find(a => a.path === 'audit.json')!;
+  audit.bytes = auditBytes.length; audit.sha256 = sha256(auditBytes);
+  await writeFile(join(f.directory, 'audit.json'), auditBytes);
+  await writeFile(join(f.directory, 'manifest.json'), JSON.stringify(manifest));
+  const response = await h.call(artifactUrl(f.jobId, path));
+  assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'model/gltf-binary');
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+});
+
+test('artifact GET accepts only human bearer and exact loopback browser context', async t => {
+  const h = await harness(t, true), url = artifactUrl(h.fixture!.jobId);
+  assert.equal((await fetch(h.origin + url)).status, 401);
+  for (const authorization of ['Bearer ' + AGENT_TOKEN, 'Bearer wrong', 'Basic ' + TOKEN, 'Bearer ' + TOKEN + 'x']) {
+    assert.equal((await h.call(url, { headers: { Authorization: authorization } })).status, 401);
+  }
+  for (const headers of [
+    { Origin: 'null' }, { Origin: 'https://evil.invalid' }, { Origin: h.origin + '/' },
+    { Referer: 'https://evil.invalid/' }, { Referer: h.origin.replace('127.0.0.1', 'localhost') + '/' },
+    { Referer: 'invalid-url' }, { Referer: h.origin.replace('http://', 'http://user@') + '/' },
+    { 'Sec-Fetch-Site': 'cross-site' }, { 'Sec-Fetch-Site': 'same-site' }
+  ]) assert.equal((await h.call(url, { headers: headers as Record<string, string> })).status, 403);
+  for (const host of ['evil.invalid', new URL(h.origin).host.replace('127.0.0.1', 'localhost'), '127.0.0.1:1']) {
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = httpRequest(h.origin + url, { headers: { Host: host, Authorization: 'Bearer ' + TOKEN } }, response => { response.resume(); resolve(response.statusCode!); });
+      request.on('error', reject); request.end();
+    });
+    assert.equal(status, 403);
+  }
+  assert.equal((await h.call(url, { headers: { Origin: h.origin, Referer: h.origin + '/workspace', 'Sec-Fetch-Site': 'same-origin' } })).status, 200);
+  assert.equal((await h.call(url, { headers: { 'Sec-Fetch-Site': 'none' } })).status, 200);
+  assert.equal((await h.call('/v1/assets/manifest?jobId=' + h.fixture!.jobId, { headers: { Authorization: 'Bearer ' + AGENT_TOKEN } })).status, 200);
+});
+
+test('artifact GET rejects traversal, arbitrary formats, extra queries, unknown jobs and incorrect methods', async t => {
+  const h = await harness(t, true), f = h.fixture!;
+  for (const path of ['../asset.glb', '/asset.glb', 'C:\\asset.glb', 'asset.glb:stream', 'asset.glb\u0000', 'ASSET.GLB', 'asset.glb\r\nX-Test: injected', 'asset.obj', 'asset.mtl', 'asset.html', 'asset.js', 'blockout.blend', 'preview-hero.png', 'manifest.json', 'audit.json', 'request.json', 'asset_worker.py', 'https://evil.invalid/asset.glb', 'constructor', '__proto__']) {
+    assert.equal((await h.call(artifactUrl(f.jobId, path))).status, 400, path);
+  }
+  for (const query of ['jobId=' + f.jobId, 'path=asset.glb', 'jobId=' + f.jobId + '&path=asset.glb&path=asset.fbx', 'jobId=' + f.jobId + '&jobId=' + f.jobId + '&path=asset.glb', 'jobId=' + f.jobId + '&path=asset.glb&token=' + TOKEN, 'jobId=../escape&path=asset.glb']) {
+    assert.equal((await h.call('/v1/assets/artifact?' + query)).status, 400);
+  }
+  assert.equal((await h.call(artifactUrl('AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'))).status, 400);
+  assert.equal((await h.call(artifactUrl(randomUUID()))).status, 404);
+  const method = await h.post(artifactUrl(f.jobId), {});
+  assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET');
+  const withBody = await new Promise<number>((resolve, reject) => {
+    const request = httpRequest(h.origin + artifactUrl(f.jobId), { method: 'GET', headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Length': '2' } }, response => { response.resume(); resolve(response.statusCode!); });
+    request.on('error', reject); request.end('{}');
+  });
+  assert.equal(withBody, 400);
+});
+
+test('artifact GET rejects terminal failure even when unapproved export bytes exist', async t => {
+  const h = await harness(t);
+  const job = await h.service.start({ template: 'hero-prop', name: 'pending-export' });
+  assert.equal((await h.call(artifactUrl(job.jobId))).status, 409);
+  await h.service.cancel(job.jobId);
+  await writeFile(join(job.directory, 'asset.glb'), 'unapproved pending bytes');
+  assert.equal((await h.call(artifactUrl(job.jobId))).status, 409);
+});
+
+test('artifact GET rejects manifest role, identity, hash and byte-count tampering without a filesystem fallback', async t => {
+  const h = await harness(t, true), f = h.fixture!, original = JSON.stringify(f.manifest);
+  const mutations = [
+    (m: typeof f.manifest) => { m.artifacts.find(a => a.path === 'asset.glb')!.role = 'preview'; },
+    (m: typeof f.manifest) => { m.artifacts.find(a => a.path === 'asset.glb')!.bytes++; },
+    (m: typeof f.manifest) => { m.artifacts.find(a => a.path === 'asset.glb')!.sha256 = '0'.repeat(64); },
+    (m: typeof f.manifest) => { m.jobId = randomUUID(); },
+    (m: typeof f.manifest) => { m.artifacts = m.artifacts.filter(a => a.path !== 'asset.glb'); }
+  ];
+  for (const mutate of mutations) {
+    const manifest = structuredClone(f.manifest); mutate(manifest);
+    await writeFile(join(f.directory, 'manifest.json'), JSON.stringify(manifest));
+    const response = await h.call(artifactUrl(f.jobId));
+    assert.equal(response.status, 422); assert.equal(response.headers.get('content-disposition'), null);
+    await writeFile(join(f.directory, 'manifest.json'), original);
+  }
+  const bytes = await readFile(join(f.directory, 'asset.glb'));
+  const changed = Buffer.from(bytes); changed[changed.length - 1] = changed[changed.length - 1]! ^ 1;
+  await writeFile(join(f.directory, 'asset.glb'), changed);
+  const hash = await h.call(artifactUrl(f.jobId));
+  assert.equal(hash.status, 422); assert.equal((await hash.json() as { error: string }).error, 'HASH');
+  await writeFile(join(f.directory, 'asset.glb'), bytes.subarray(0, bytes.length - 1));
+  const size = await h.call(artifactUrl(f.jobId));
+  assert.equal(size.status, 422); assert.equal((await size.json() as { error: string }).error, 'MANIFEST');
+  await rm(join(f.directory, 'asset.glb'));
+  assert.equal((await h.call(artifactUrl(f.jobId))).status, 422);
+});
+
+test('artifact GET binds the full completed request even if changed request evidence has matching hashes', async t => {
+  const h = await harness(t, true), f = h.fixture!, manifest = structuredClone(f.manifest);
+  manifest.request.seed++;
+  const bytes = Buffer.from(JSON.stringify(manifest.request)), request = manifest.artifacts.find(a => a.path === 'request.json')!;
+  request.bytes = bytes.length; request.sha256 = sha256(bytes);
+  await writeFile(join(f.directory, 'request.json'), bytes);
+  await writeFile(join(f.directory, 'manifest.json'), JSON.stringify(manifest));
+  // The existing complete file validator passes; download also binds the original indexed request.
+  assert.equal((await h.call('/v1/assets/manifest?jobId=' + f.jobId)).status, 200);
+  const response = await h.call(artifactUrl(f.jobId));
+  assert.equal(response.status, 422); assert.equal((await response.json() as { error: string }).error, 'MANIFEST');
+});
+
+test('artifact GET rejects hardlinks and symlinked job ancestors', async t => {
+  const h = await harness(t, true), f = h.fixture!, target = join(f.directory, 'asset.glb'), saved = join(h.dir, 'saved.glb');
+  await rename(target, saved); await link(saved, target);
+  assert.equal((await h.call(artifactUrl(f.jobId))).status, 422);
+  await rm(target); await rename(saved, target);
+  const moved = join(h.dir, 'moved-download-job');
+  await rename(f.directory, moved); await symlink(moved, f.directory, process.platform === 'win32' ? 'junction' : 'dir');
+  try { assert.equal((await h.call(artifactUrl(f.jobId))).status, 400); }
+  finally { await rm(f.directory); await rename(moved, f.directory); }
+});
+
+test('artifact GET detects artifact and manifest replacement after real validation, even with identical bytes', async t => {
+  const h = await harness(t, true), f = h.fixture!, validate = h.service.manifest.bind(h.service);
+  for (const path of ['asset.glb', 'manifest.json']) {
+    h.service.manifest = async jobId => {
+      const manifest = await validate(jobId), target = join(f.directory, path), replacement = join(f.directory, 'replacement.tmp');
+      await writeFile(replacement, await readFile(target)); await rename(replacement, target);
+      return manifest;
+    };
+    const response = await h.call(artifactUrl(f.jobId));
+    assert.equal(response.status, 422); assert.equal((await response.json() as { error: string }).error, 'ARTIFACT');
+    assert.equal(response.headers.get('content-disposition'), null);
+  }
+  h.service.manifest = validate;
+  assert.equal((await h.call(artifactUrl(f.jobId))).status, 200);
+});
+
+test('artifact GET refuses oversized regular files before manifest validation or allocation', async t => {
+  const h = await harness(t, true), f = h.fixture!, target = join(f.directory, 'asset.blend'), handle = await open(target, 'r+');
+  try { await handle.truncate(ARTIFACT_DOWNLOAD_BYTES + 1); } finally { await handle.close(); }
+  h.service.manifest = async () => { throw new Error('Oversized files must fail before the full manifest read.'); };
+  const response = await h.call(artifactUrl(f.jobId, 'asset.blend'));
+  assert.equal(response.status, 413); assert.equal((await response.json() as { error: string }).error, 'ARTIFACT_LIMIT');
+  assert.equal(response.headers.get('content-disposition'), null);
+});
+
+test('artifact GET bounds concurrent verification and keeps timeout admission until verification settles', async t => {
+  const h = await harness(t, true), f = h.fixture!, validate = h.service.manifest.bind(h.service);
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  h.service.manifest = async jobId => { entered(); await gate; return validate(jobId); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = h.call(artifactUrl(f.jobId));
+  await reached;
+  try {
+    assert.equal((await h.call(artifactUrl(f.jobId))).status, 409);
+    t.mock.timers.tick(ARTIFACT_DOWNLOAD_TIMEOUT_MS);
+    const timeout = await pending;
+    assert.equal(timeout.status, 408); assert.equal((await timeout.json() as { error: string }).error, 'ARTIFACT_TIMEOUT');
+    assert.equal((await h.call(artifactUrl(f.jobId))).status, 409, 'Timeout cannot admit more allocations while a read still runs.');
+  } finally { release(); t.mock.timers.reset(); }
+  h.service.manifest = validate;
+  // The timed-out validation still owns admission until its final identity checks finish.
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const response = await h.call(artifactUrl(f.jobId));
+    if (response.status === 200) return;
+    assert.equal(response.status, 409);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail('Artifact admission was not released after timed-out verification settled.');
 });

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "actual-clean-package-loopback-daemon",
+  "observedAt": "2026-10-12T03:26:02.235Z",
+  "directory": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\releases\\arcane-local-xXCvSN",
+  "manifestSha256": "59a0007bb0dc49da76840180c9a349e3f77d6387bd7908cb228a6ebc945bf34d",
+  "checks": [
+    {
+      "label": "private-loopback-launch",
+      "passed": true
+    },
+    {
+      "label": "actual-workbench-static-route-and-csp",
+      "passed": true
+    },
+    {
+      "label": "workspace-shell-public-module-and-safe-headers",
+      "passed": true
+    },
+    {
+      "label": "brand-png-public-bytes-and-safe-headers",
+      "passed": true
+    },
+    {
+      "label": "workspace-static-routes-are-exact",
+      "passed": true
+    },
+    {
+      "label": "isolated-sqlite-product-state",
+      "passed": true
+    },
+    {
+      "label": "cross-origin-refused",
+      "passed": true
+    },
+    {
+      "label": "actual-readonly-key-issue-and-redacted-list",
+      "passed": true
+    },
+    {
+      "label": "agent-cannot-grant-access",
+      "passed": true
+    },
+    {
+      "label": "actual-local-key-revocation",
+      "passed": true
+    },
+    {
+      "label": "native-chat-compiled-static-module",
+      "passed": true
+    },
+    {
+      "label": "native-chat-inert-default-and-exact-project",
+      "passed": true
+    },
+    {
+      "label": "native-chat-agent-and-cross-origin-denied-before-launch",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "studioCalls": 0,
+  "providerInferenceRuns": 0,
+  "blenderRuns": 0,
+  "limitations": [
+    "No installed Studio plugin, native model turn, asset import or signed-desktop verification.",
+    "Static UI route checks do not prove browser rendering or interactions."
+  ],
+  "shutdown": {
+    "code": 0,
+    "signal": null
+  }
+}

@@ -1,0 +1,80 @@
+import { timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { CodexClientError } from '../../../packages/codex-client/src/index.js';
+import type { CodexService, CodexProductState } from './codex-service.js';
+const MAX_BODY = 160 * 1024, MAX_RESPONSE = 4 * 1024 * 1024;
+const byteLength = (text: string) => Buffer.byteLength(text,'utf8');
+function matches(supplied: string, expected: string): boolean { return expected.length > 0 && byteLength(supplied)===byteLength(expected) && timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)); }
+class RouteError extends Error { constructor(public code: string, public status: number) { super(code); } }
+async function body(request: IncomingMessage): Promise<unknown> {
+  if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/json' || request.headers['content-encoding']) throw new RouteError('CONTENT_TYPE',415);
+  const length = request.headers['content-length'];
+  if (length && (!/^\d+$/.test(length) || Number(length)>MAX_BODY)) throw new RouteError('BODY_LIMIT',413);
+  const chunks: Buffer[]=[]; let bytes=0;
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<never>((_,reject)=>{ timer=setTimeout(()=>{ request.destroy(); reject(new RouteError('BODY_TIMEOUT',408)); },8000); });
+  try {
+    await Promise.race([deadline,(async()=>{
+      for await(const raw of request) {const chunk=Buffer.isBuffer(raw)?raw:Buffer.from(raw as string);bytes+=chunk.length;if(bytes>MAX_BODY)throw new RouteError('BODY_LIMIT',413);chunks.push(chunk);}
+    })()]);
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new RouteError('JSON',400); }
+  } finally { clearTimeout(timer!); }
+}
+async function discard(request: IncomingMessage,response: ServerResponse): Promise<void> {
+  if (request.complete || request.destroyed) return;
+  // Drain only a small rejected body before answering; stalled/unbounded bodies
+  // close after the response. Do not parse it or leave it on a reusable socket.
+  const reusable = await new Promise<boolean>(resolve => {
+    let bytes=0, done=false;
+    const finish=(value:boolean)=>{if(done)return;done=true;clearTimeout(timer);request.off('data',data);request.off('end',end);request.off('error',failed);request.off('aborted',failed);resolve(value);};
+    const data=(chunk:Buffer)=>{bytes+=chunk.length;if(bytes>65536)finish(false);};
+    const end=()=>finish(true), failed=()=>finish(false);
+    const timer=setTimeout(()=>finish(false),200);
+    request.on('data',data);request.once('end',end);request.once('error',failed);request.once('aborted',failed);request.resume();
+  });
+  if(!reusable){response.setHeader('Connection','close');response.once('finish',()=>setTimeout(()=>request.socket.destroy(),25));}
+}export function codexRoutes(service: CodexService) {
+  return async(request: IncomingMessage,response: ServerResponse,url: URL,controlToken: string,origin: string,agentToken: string):Promise<boolean>=>{
+    if(!url.pathname.startsWith('/v1/codex/'))return false;
+    const compact = (state: CodexProductState): CodexProductState => {
+      const strip = (snapshot: CodexProductState['snapshot']) => snapshot ? {...snapshot,approvals:[],events:[],droppedEvents:snapshot.droppedEvents+snapshot.events.length} : null;
+      return {...state,displayLimited:true,snapshot:strip(state.snapshot),lastSnapshot:strip(state.lastSnapshot)};
+    };
+    const send=(status:number,value:unknown)=>{
+      if(response.destroyed||response.headersSent)return;
+      let text=JSON.stringify(value);for(const secret of [controlToken,agentToken])if(secret)text=text.replaceAll(secret,'[REDACTED]');
+      if(byteLength(text)>MAX_RESPONSE && typeof value==='object' && value!==null && 'state' in value) {
+        const state=(value as {state:CodexProductState}).state;
+        text=JSON.stringify({...value,state:compact(state)});
+        for(const secret of [controlToken,agentToken])if(secret)text=text.replaceAll(secret,'[REDACTED]');
+      }
+      if(byteLength(text)>MAX_RESPONSE) {status=500;text=JSON.stringify({error:'STATE_LIMIT',message:'Native state cannot be displayed. This does not mean an action failed or was not accepted; inspect its request ID in the native client. Do not replay it.'});}
+      response.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});response.end(text);
+    };
+    try{
+      if(request.headers.host!==new URL(origin).host)throw new RouteError('HOST',403);
+      const supplied=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
+      if(!matches(supplied,controlToken))throw new RouteError(matches(supplied,agentToken)?'HUMAN_ONLY':'AUTH',matches(supplied,agentToken)?403:401);
+      if(request.headers.origin&&request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
+      if(url.search)throw new RouteError('QUERY',400);
+      if(url.pathname==='/v1/codex/state'){
+        if(request.method!=='GET')throw new RouteError('METHOD',405);
+        send(200,{state:service.state()});return true;
+      }
+      if(url.pathname!=='/v1/codex/action')throw new RouteError('NOT_FOUND',404);
+      if(request.method!=='POST')throw new RouteError('METHOD',405);
+      if(request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
+      const outcome=await service.action(await body(request));
+      const status=outcome.record.state==='unknown'?202:outcome.record.state==='rejected'?409:outcome.record.state==='pending'?202:200;
+      send(status,outcome);
+    }catch(error){
+      await discard(request,response);
+      const known=error instanceof RouteError||error instanceof CodexClientError;
+      const code=known?error.code:'NATIVE_ERROR';
+      const status=error instanceof RouteError?error.status:code==='IDEMPOTENCY'?409:code==='JOURNAL_LIMIT'?429:known?400:500;
+      send(status,{error:code,message:'Native request was refused or failed. Inspect its recorded request ID before retrying; native account/process output is not exposed.'});
+    }
+    return true;
+  };
+}
+

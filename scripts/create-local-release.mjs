@@ -7,7 +7,21 @@ const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT_FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'LICENSE', 'README.md'];
 const SOURCE_ROOTS = ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skills', 'docs', 'tests', 'dist', '.github'];
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', 'runtime', '.runtime', '.tmp', '.git', '.codex', '.agents', 'generated', '__pycache__', '.worker', 'cache']);
-const EXTENSIONS = /\.(?:ts|js|mjs|json|map|html|css|md|csv|py|luau|lua|rbxm|rbxmx|yml|yaml|txt)$/;
+const EXTENSIONS = /\.(?:ts|js|mjs|cjs|json|map|html|css|md|csv|py|luau|lua|rbxm|rbxmx|yml|yaml|txt)$/;
+export const BRAND_BITMAP_PATH = 'apps/desktop/public/brand/arcane-ridges.png';
+export const REQUIRED_FRONTEND_FILES = [
+  'apps/desktop/public/studio.html', 'apps/desktop/public/studio.css',
+  'dist/apps/desktop/src/studio.js', 'dist/apps/desktop/src/codex-chat.js',
+  'apps/desktop/src/workspace-shell.ts', 'dist/apps/desktop/src/workspace-shell.js',
+  'dist/apps/desktop/src/workspace-shell.js.map', 'apps/desktop/src/asset-downloads.ts',
+  'dist/apps/desktop/src/asset-downloads.js', 'dist/apps/desktop/src/asset-downloads.js.map', BRAND_BITMAP_PATH,
+];
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd']);
+const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
+const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
+export function validateBrandBitmap(bytes) {
+  if (bytes.length <= 8 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Invalid PNG signature in ' + BRAND_BITMAP_PATH + '.');
+}
 const FORBIDDEN_NAMES = /^(?:\.env(?:\..*)?|auth\.json|credentials\.json|daemon\.json|preferences\.json|.*\.log|.*\.key|.*\.pem|.*\.partial)$/i;
 const MUTABLE_ROOTS = ['node_modules', 'runtime', 'apps/mcp/generated'];
 const MAX_FILES = 4096, MAX_FILE_BYTES = 32 * 1024 * 1024, MAX_BYTES = 128 * 1024 * 1024;
@@ -20,7 +34,7 @@ function validPath(path) {
   if (typeof path !== 'string' || path.length > 512 || !/^[A-Za-z0-9_.\-/]+$/.test(path)) throw new Error('Invalid release path.');
   const segments = path.split('/');
   if (segments.some(segment => !segment || segment === '.' || segment === '..' || FORBIDDEN_NAMES.test(segment) || EXCLUDED_DIRECTORIES.has(segment))) throw new Error('Forbidden release path.');
-  if (!(ROOT_FILES.includes(path) || SOURCE_ROOTS.includes(segments[0])) || (!ROOT_FILES.includes(path) && !EXTENSIONS.test(path))) throw new Error('File is outside the release allowlist.');
+  if (!(ROOT_FILES.includes(path) || SOURCE_ROOTS.includes(segments[0])) || (!ROOT_FILES.includes(path) && !allowedFile(path))) throw new Error('File is outside the release allowlist.');
   return path;
 }
 async function noLinks(path) {
@@ -46,6 +60,7 @@ async function regularBytes(path) {
   return bytes;
 }
 function secretCheck(bytes, name) {
+  if (name === BRAND_BITMAP_PATH) validateBrandBitmap(bytes);
   // This is defense-in-depth, not a claim that a regex can identify every secret.
   // Session/provider storage is excluded structurally, irrespective of contents.
   const text = bytes.toString('utf8');
@@ -82,13 +97,32 @@ async function collect(repository) {
       const kind = await lstat(join(repository, child));
       if (kind.isSymbolicLink()) throw new Error('Link in release input: ' + child);
       if (kind.isDirectory()) await walk(child);
-      else if (kind.isFile() && EXTENSIONS.test(entry.name)) await add(child);
+      else if (kind.isFile() && allowedFile(child)) await add(child);
       else if (!kind.isFile()) throw new Error('Special file in release input.');
     }
   }
   for (const path of ROOT_FILES) await add(path);
   for (const root of SOURCE_ROOTS) await walk(root);
   return { files, totalBytes };
+}
+function validateCompiledSources(files) {
+  const sources = new Map(files.map(file => [file.path, file]));
+  const covered = new Set();
+  for (const file of files.filter(file => file.path.startsWith('dist/') && file.path.endsWith('.js.map'))) {
+    const map = JSON.parse(file.bytes.toString('utf8'));
+    if (map.version !== 3 || (map.sourceRoot && map.sourceRoot !== '') || !Array.isArray(map.sources) || !Array.isArray(map.sourcesContent) || map.sources.length !== map.sourcesContent.length) throw new Error('Rebuild with inlineSources: missing compiled source provenance in ' + file.path);
+    for (let index = 0; index < map.sources.length; index++) {
+      const source = map.sources[index];
+      if (typeof source !== 'string' || isAbsolute(source)) throw new Error('Invalid compiled source provenance path.');
+      const path = relative('/', resolve('/', dirname(file.path), source)).split(sep).join('/');
+      const original = sources.get(path);
+      if (!original || typeof map.sourcesContent[index] !== 'string' || map.sourcesContent[index].replace(/^\uFEFF/, '') !== original.bytes.toString('utf8').replace(/^\uFEFF/, '')) throw new Error('Compiled source is stale/missing: ' + path);
+      covered.add(path);
+    }
+  }
+  for (const file of files) {
+    if (/^(?:apps\/(?:daemon|desktop|mcp)\/src\/.*|packages\/.*|tests\/unit\/.*)\.ts$/.test(file.path) && !file.path.endsWith('.d.ts') && !covered.has(file.path)) throw new Error('Source has no current compiled map: ' + file.path);
+  }
 }
 function validateWorkspaceLock(files) {
   const parse = path => JSON.parse(files.find(file => file.path === path).bytes.toString('utf8'));
@@ -114,9 +148,12 @@ export async function createLocalRelease({ repository = REPOSITORY } = {}) {
   repository = resolve(repository); await noLinks(repository); repository = await realpath(repository);
   const { files, totalBytes } = await collect(repository);
   validateWorkspaceLock(files);
-  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json']) {
+  const packageJson = JSON.parse(files.find(file => file.path === 'package.json').bytes.toString('utf8'));
+  const firstRunDeclared = packageJson.scripts?.['setup:arcane'] !== undefined || files.some(file => FIRST_RUN_FILES.includes(file.path));
+  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json', ...REQUIRED_FRONTEND_FILES, ...(firstRunDeclared ? FIRST_RUN_FILES : [])]) {
     if (!files.some(file => file.path === required)) throw new Error('Build the product and plugin before packaging: missing ' + required);
   }
+  validateCompiledSources(files);
   const outputRoot = join(repository, 'runtime', 'releases');
   if (!inside(repository, outputRoot)) throw new Error('Release output escapes the repository.');
   await noLinks(outputRoot); await mkdir(outputRoot, { recursive: true });
@@ -179,6 +216,3 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   else if (args.length === 2 && args[0] === '--verify' && isAbsolute(args[1])) console.log(JSON.stringify(await verifyLocalRelease(args[1]), null, 2));
   else throw new Error('Usage: node scripts/create-local-release.mjs [--verify ABSOLUTE_RELEASE_DIRECTORY]');
 }
-
-
-

@@ -15,11 +15,12 @@ import { DaemonClient, validateDaemonUrl } from '../../apps/mcp/src/daemon-clien
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
-import type { AssetService } from '../../apps/daemon/src/asset-service.js';
+import { HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord, type AssetJobPage } from '../../apps/daemon/src/asset-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
-import type { AssetManifest, AssetProbe } from '../../packages/asset-pipeline/src/types.js';
-import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
+import type { AssetInput, AssetManifest, AssetProbe, AssemblyRecipe, AssemblyGeometry, MeshMetrics, Vec3 } from '../../packages/asset-pipeline/src/types.js';
+import { normalizeRequest, validateAudit, sha256 } from '../../packages/asset-pipeline/src/validation.js';
+import { preflightRecipe, preflightPart, expectedSockets, rotate, CUSTOM_REQUEST_BYTES } from '../../packages/asset-pipeline/src/recipe.js';
 import { READ_METHODS, WRITE_METHODS } from '../../packages/protocol/src/studio.js';
 import type { StudioCommand, StudioSession, InstanceRef, Json } from '../../packages/protocol/src/studio.js';
 
@@ -544,11 +545,17 @@ function jobFixture(jobId = ASSET_JOB_ID, state: 'running' | 'cancelled' = 'runn
     events:[{jobId,at:'2026-10-11T00:00:01Z',stage:'generate',state:'running' as const}] };
 }
 
+function historyFixture(all: AssetJobRecord[], options: { limit?: number; after?: string } = {}): AssetJobPage {
+  const start = options.after === undefined ? 0 : all.findIndex(job => job.jobId === options.after) + 1;
+  const jobs = structuredClone(all.slice(start, start + (options.limit ?? 32)));
+  return { schemaVersion:1, jobs, total:all.length, nextCursor:start + jobs.length < all.length ? jobs.at(-1)!.jobId : null, byteLimit:HISTORY_PAGE_BYTES };
+}
+
 test('fixture SDK: fixed asset tools use exact GET/POST endpoints and preserve typed evidence', async t => {
   const job = { ...jobFixture(), directory: 'C:/fixture/' + 'segment/'.repeat(40) + ASSET_JOB_ID };
   const f = await recordFixture(t, (url, body, response) => {
     if (url.pathname === '/v1/assets/probe') { assert.deepEqual(body, {}); send(response, 200, { probe: ASSET_PROBE }); }
-    else if (url.pathname === '/v1/assets/jobs') send(response, 200, { jobs: [job] });
+    else if (url.pathname === '/v1/assets/jobs') send(response, 200, historyFixture([job]));
     else if (url.pathname === '/v1/assets/start') { assert.deepEqual(body, { template: 'hero-prop', name: 'fixture-crate', seed: 7, color: [0.1, 0.2, 0.3] }); send(response, 200, { job }); }
     else if (url.pathname === '/v1/assets/cancel') { assert.deepEqual(body, { jobId: job.jobId }); send(response, 200, { job: jobFixture(job.jobId, 'cancelled') }); }
     else if (url.pathname === '/v1/assets/manifest') { assert.equal(url.searchParams.get('jobId'), job.jobId); send(response, 200, { manifest: manifestFixture(job.jobId) }); }
@@ -583,7 +590,7 @@ test('fixture SDK: asset tools reject arbitrary code, host paths, publication an
 for (const behavior of ['lost-ack', 'hang', 'server-error', 'invalid-record'] as const) test('fixture SDK: asset start ' + behavior + ' returns ambiguity with exactly one POST', async t => {
   let starts = 0;
   const f = await recordFixture(t, (url, _body, response, request) => {
-    if (url.pathname === '/v1/assets/jobs') { send(response, 200, { jobs: starts ? [jobFixture()] : [] }); return; }
+    if (url.pathname === '/v1/assets/jobs') { send(response, 200, historyFixture(starts ? [jobFixture()] : [])); return; }
     assert.equal(url.pathname, '/v1/assets/start'); starts++;
     if (behavior === 'lost-ack') request.socket.destroy();
     else if (behavior === 'hang') return;
@@ -623,9 +630,11 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
   const service: AssetService = {
     outputRoot: 'C:/fixture/assets', projectPath: ROOT,
     async probe() { return ASSET_PROBE; }, jobs() { return started ? [current] : []; },
+    jobPage(options = {}) { return historyFixture(started ? [current] : [], options); },
     async start(input) { started++; current = { ...jobFixture(), request: normalizeRequest(input) }; return current; },
     async cancel(jobId) { assert.equal(jobId, ASSET_JOB_ID); current = { ...current, state: 'cancelled', stage: 'complete' }; return current; },
     async manifest(jobId) { assert.equal(jobId, ASSET_JOB_ID); return manifestFixture(ASSET_JOB_ID); },
+    async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
     async preview() { throw new Error('MCP exposes no asset preview path endpoint.'); }, async close() {},
   };
   const route = assetRoutes(service);
@@ -651,4 +660,243 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
   assert.equal(started,1); assert.ok(requests.every(request=>request.origin===undefined));
   const csrf = await fetch(origin + '/v1/assets/start',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer ' + TOKEN,Origin:'https://untrusted.invalid'},body:JSON.stringify({template:'hero-prop',name:'csrf'})});
   assert.equal(csrf.status,403); assert.equal((await csrf.json() as any).error,'ORIGIN'); assert.equal(started,1);
+});
+
+function customRecipeFixture(): AssemblyRecipe {
+  return { schemaVersion:1,
+    materials:[{id:'alloy',color:[0.2,0.3,0.4],metallic:0.6,roughness:0.25,emission:{color:[0.05,0.1,0.2],strength:0.5}}],
+    parts:[
+      {name:'body',role:'render',geometry:{kind:'box'},dimensions:[1,1,1],position:[0,0,0.5],rotationDegrees:[0,0,45],material:'alloy',bevel:{width:0.02,segments:2}},
+      {name:'detail',role:'render',geometry:{kind:'mesh',vertices:[[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[-0.5,-0.5,0.5]],indices:[0,2,1,0,1,3,1,2,3,2,0,3]},dimensions:[1,1,1],position:[2,0,0.5],material:'alloy'},
+      {name:'collision',role:'collision',geometry:{kind:'box'},dimensions:[3.5,1.5,1],position:[1,0,0.5]},
+      {name:'lod',role:'lod1',geometry:{kind:'box'},dimensions:[1,1,1],position:[0,0,0.5],material:'alloy'},
+    ],
+    sockets:[{name:'grip',kind:'socket',part:'body',position:[0,0,0.5],rotationDegrees:[0,30,0]},
+      {name:'light',kind:'attachment',part:'detail',position:[0.1,0.1,0],rotationDegrees:[10,0,0]}],
+    collisionTriangleBudget:128,lodTriangleBudget:1000,
+  };
+}
+function customInputFixture(): AssetInput { return {template:'custom-assembly',name:'sdk-assembly',recipe:customRecipeFixture()}; }
+function customManifestFixture(input: AssetInput, jobId = ASSET_JOB_ID): AssetManifest {
+  const request = normalizeRequest(input), recipe = request.recipe!;
+  const preflight = preflightRecipe(recipe,request.triangleBudget), sockets = expectedSockets(recipe);
+  const assembly = {recipeSha256:sha256(Buffer.from(JSON.stringify(recipe))),...preflight,sockets,artisticFidelity:'unverified' as const,robloxImport:'unverified' as const};
+  const meshes: MeshMetrics[] = recipe.parts.map(part => {
+    const base = manifestFixture(jobId).validation.meshes[0]!;
+    let points: Vec3[];
+    if (part.geometry.kind === 'mesh') points = part.geometry.vertices;
+    else { points = []; for (const x of [-0.5,0.5]) for (const y of [-0.5,0.5]) for (const z of [-0.5,0.5]) points.push([x,y,z]); }
+    const positions = points.map(point => rotate(point.map((n,k)=>n * part.dimensions[k]!) as Vec3,part.rotationDegrees ?? [0,0,0]).map((n,k)=>n + part.position[k]!) as Vec3);
+    const minimum = [0,1,2].map(k=>Math.min(...positions.map(p=>p[k]!))) as Vec3, maximum = [0,1,2].map(k=>Math.max(...positions.map(p=>p[k]!))) as Vec3;
+    const triangles = part.geometry.kind === 'mesh' ? part.geometry.indices.length / 3 : part.bevel ? 12 : preflightPart(part).triangles;
+    const material = recipe.materials.find(material=>material.id === part.material);
+    return {...base,name:(part.role === 'collision' ? 'COL_' : 'SM_') + part.name,role:part.role,triangles,
+      vertices:points.length,faces:triangles,uvLoops:part.role === 'collision' ? 0 : triangles * 3,uvLayers:part.role === 'collision' ? 0 : 1,
+      materials:part.material ? ['MAT_' + part.material] : [],dimensions:maximum.map((n,k)=>n - minimum[k]!),
+      geometrySha256:sha256(Buffer.from('synthetic fixture geometry: ' + part.name)),bounds:preflightPart(part).bounds,position:[0,0,0],
+      materialProperties:material ? [{name:'MAT_' + material.id,color:material.color,metallic:material.metallic!,roughness:material.roughness!,emission:material.emission ?? {color:[1,1,1],strength:0}}] : []};
+  });
+  const triangles = (role: MeshMetrics['role']) => meshes.filter(mesh=>mesh.role === role).reduce((n,mesh)=>n + mesh.triangles,0);
+  const manifest = manifestFixture(jobId);
+  const exports = [
+    {path:'asset.glb',objects:meshes.filter(mesh=>mesh.role === 'render').length,triangles:triangles('render'),materials:recipe.materials.length,finitePositions:true,sockets},
+    {path:'asset.fbx',objects:meshes.filter(mesh=>mesh.role === 'render').length,triangles:triangles('render'),materials:recipe.materials.length,finitePositions:true,sockets},
+    {path:'collision.glb',objects:meshes.filter(mesh=>mesh.role === 'collision').length,triangles:triangles('collision'),materials:0,finitePositions:true},
+    ...(triangles('lod1') ? [{path:'asset-lod1.glb',objects:meshes.filter(mesh=>mesh.role === 'lod1').length,triangles:triangles('lod1'),materials:recipe.materials.length,finitePositions:true}] : []),
+  ];
+  const sourceRequestSha256 = sha256(Buffer.from(JSON.stringify(input) + '\n'));
+  const result: AssetManifest = {...manifest,request,assembly,sourceRequestSha256,
+    validation:{...manifest.validation,template:'custom-assembly',meshes,assembly,exports,
+      totals:{renderTriangles:triangles('render'),collisionTriangles:triangles('collision'),lod1Triangles:triangles('lod1'),materials:recipe.materials.length},
+      renders:['preview-hero.png','preview-side.png'].map(path=>({path,width:request.renderResolution,height:request.renderResolution,finitePixels:true,minLuminance:0,maxLuminance:1,meanLuminance:0.5,standardDeviation:0.2})),
+      warnings:['Synthetic metrics only; no native worker or Blender invoked.']},
+    artifacts:[...manifest.artifacts,{path:'input.json',role:'request',bytes:Buffer.byteLength(JSON.stringify(input) + '\n'),sha256:sourceRequestSha256},
+      {path:'assembly.json',role:'audit',bytes:200,sha256:'c'.repeat(64)},{path:'assembly.py',role:'worker',bytes:100,sha256:'d'.repeat(64)}],
+  };
+  // This tests the real shared evidence contract, not byte/native-artifact validation.
+  validateAudit(result.validation,result.request);
+  return result;
+}
+async function customAssetLabFixture(t: test.TestContext) {
+  const directoryPath = await directory(t), inputs: AssetInput[] = [], jobs: AssetJobRecord[] = [];
+  let deliveredManifest: AssetManifest | null = null;
+  const state = {starts:0,statuses:[] as {method:string;path:string;status:number}[]};
+  const service: AssetService = {
+    outputRoot:join(directoryPath,'not-generated'),projectPath:ROOT,
+    async probe() { return ASSET_PROBE; }, jobs() { return structuredClone(jobs); },
+    jobPage(options = {}) { return historyFixture(jobs,options); },
+    async start(input) {
+      inputs.push(structuredClone(input));state.starts++;
+      const job = {...jobFixture(state.starts === 1 ? ASSET_JOB_ID : OTHER_ASSET_JOB_ID),request:normalizeRequest(input)};
+      jobs.push(job);return structuredClone(job);
+    },
+    async cancel(jobId) { const job = jobs.find(job=>job.jobId === jobId)!;job.state = 'cancelled';return structuredClone(job); },
+    async manifest(jobId) { return deliveredManifest ?? customManifestFixture(inputs[jobs.findIndex(job=>job.jobId === jobId)]!,String(jobId)); },
+    async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
+    async preview() { throw new Error('No native preview bytes in this fixture.'); }, async close() {},
+  };
+  const lab = await createConnectionLab({cwd:ROOT,stateDirectory:join(directoryPath,'lab'),assetService:service});
+  lab.server.on('request',(request,response)=>response.once('finish',()=>state.statuses.push({method:request.method ?? '',path:request.url ?? '',status:response.statusCode})));
+  after(t,()=>lab.close());
+  return {lab,inputs,jobs,state,setManifest(value: AssetManifest) { deliveredManifest = value; }};
+}
+function closedMeshGrid(copies = 1000): Extract<AssemblyGeometry,{kind:'mesh'}> {
+  const vertices: Vec3[] = [],indices: number[] = [];
+  for (let i = 0;i < copies;i++) {
+    const origin = [-0.5 + (i % 10) * 0.09,-0.5 + (Math.floor(i / 10) % 10) * 0.09,-0.5 + Math.floor(i / 100) * 0.09] as Vec3;
+    const first = vertices.length;
+    for (const offset of [[0,0,0],[0.04,0,0],[0,0.04,0],[0,0,0.04]]) vertices.push(origin.map((n,k)=>Math.round((n + offset[k]!) * 10000) / 10000) as Vec3);
+    indices.push(...[0,2,1,0,1,3,1,2,3,2,0,3].map(index=>index + first));
+  }
+  return {kind:'mesh',vertices,indices};
+}
+
+test('custom assembly SDK: advertised strict recipe schema exposes every safe geometry and bound', async t => {
+  const f = await fixture(t),client = await linked(t,f);
+  const schema = (await client.listTools()).tools.find(tool=>tool.name === 'assets_start')!.inputSchema as any;
+  assert.deepEqual(schema.properties.template.enum,['hero-prop','environment-kit','custom-assembly']);
+  const recipe = schema.properties.recipe;
+  assert.equal(recipe.additionalProperties,false);assert.equal(recipe.properties.parts.maxItems,96);assert.equal(recipe.properties.materials.maxItems,8);assert.equal(recipe.properties.sockets.maxItems,64);
+  assert.equal(recipe.properties.parts.items.additionalProperties,false);assert.equal(recipe.properties.materials.items.additionalProperties,false);assert.equal(recipe.properties.sockets.items.additionalProperties,false);
+  const geometry = recipe.properties.parts.items.properties.geometry;
+  const kinds = (geometry.oneOf ?? geometry.anyOf).map((variant:any)=>{assert.equal(variant.additionalProperties,false);return variant.properties.kind.const;});
+  assert.deepEqual(kinds.sort(),['box','cone','cylinder','mesh','sphere']);
+  assert.equal(f.requests.length,0);
+});
+
+test('custom assembly SDK + real daemon: 202 preserves raw recipe and normalized assembly/provenance/geometry/socket evidence', async t => {
+  const f = await customAssetLabFixture(t),client = await linked(t,{url:f.lab.origin},ROOT,f.lab.agentToken),input = customInputFixture();
+  const started = await call(client,'assets_start',input as unknown as Record<string,unknown>);
+  assert.notEqual(started.result.isError,true,JSON.stringify(started.data));assert.equal(started.data.job.state,'running');assert.equal(f.state.starts,1);
+  assert.deepEqual(f.inputs[0],input);assert.deepEqual(started.data.job.request,normalizeRequest(input));
+  assert.equal(started.data.job.request.triangleBudget,15000);assert.deepEqual(started.data.job.request.color,input.recipe!.materials[0]!.color);
+  assert.equal(f.inputs[0]!.triangleBudget,undefined);assert.equal(f.inputs[0]!.recipe!.materials[0]!.roughness,0.25);
+  assert.equal(f.state.statuses.find(response=>response.path === '/v1/assets/start')!.status,202);
+  const page = await call(client,'assets_jobs');
+  assert.deepEqual(page.data.jobs[0].request.recipe,normalizeRequest(input).recipe);assert.equal(page.data.total,1);assert.equal(page.data.nextCursor,null);assert.equal(page.data.byteLimit,HISTORY_PAGE_BYTES);
+  const expected = customManifestFixture(input),manifest = await call(client,'assets_manifest',{jobId:ASSET_JOB_ID});
+  assert.notEqual(manifest.result.isError,true,JSON.stringify(manifest.data));assert.deepEqual(manifest.data.manifest,expected);
+  assert.deepEqual(manifest.result.structuredContent?.manifest,expected);
+  const observed = manifest.data.manifest,assembly = observed.assembly,mesh = observed.validation.meshes[0],attachment = assembly?.sockets[1],exportSocket = observed.validation.exports[0]?.sockets?.[0];
+  assert.ok(assembly && mesh && attachment && exportSocket);
+  assert.equal(assembly.artisticFidelity,'unverified');assert.equal(assembly.robloxImport,'unverified');
+  assert.equal(attachment.nodeName,'ATT_light');assert.equal(exportSocket.matrix.length,16);
+  assert.equal(mesh.geometrySha256,expected.validation.meshes[0]!.geometrySha256);
+  assert.deepEqual(mesh.bounds,expected.validation.meshes[0]!.bounds);
+});
+
+test('custom assembly SDK + real daemon: all primitive kinds and maximum part/material/socket counts pass shared preflight', async t => {
+  const f = await customAssetLabFixture(t),client = await linked(t,{url:f.lab.origin},ROOT,f.lab.agentToken);
+  const input = customInputFixture(),recipe = input.recipe!;
+  for (const [index,geometry] of [{kind:'cylinder',segments:16},{kind:'cone',segments:12},{kind:'sphere',segments:8,rings:4}].entries()) {
+    recipe.parts.push({name:'shape-' + index,role:'render',geometry:geometry as AssemblyGeometry,dimensions:[1,1,1],position:[4 + index * 2,0,0.5],material:'alloy'});
+  }
+  assert.notEqual((await call(client,'assets_start',input as unknown as Record<string,unknown>)).result.isError,true);
+  const maximum: AssetInput = {template:'custom-assembly',name:'bounded-assembly',recipe:{schemaVersion:1,
+    materials:Array.from({length:8},(_,index)=>({id:'mat-' + index,color:[0.2,0.3,0.4] as Vec3})),
+    parts:[...Array.from({length:95},(_,index)=>({name:'part-' + index,role:'render' as const,geometry:{kind:'box' as const},dimensions:[1,1,1] as Vec3,position:[0,0,0.5] as Vec3,material:'mat-' + index % 8})),
+      {name:'collision',role:'collision',geometry:{kind:'box'},dimensions:[1,1,1],position:[0,0,0.5]}],
+    sockets:Array.from({length:64},(_,index)=>({name:'socket-' + index,kind:'socket' as const,part:'part-0',position:[0,0,0] as Vec3})),
+  }};
+  const outcome = await call(client,'assets_start',maximum as unknown as Record<string,unknown>);
+  assert.notEqual(outcome.result.isError,true,JSON.stringify(outcome.data));assert.equal(outcome.data.job.request.recipe.parts.length,96);
+  assert.equal(outcome.data.job.request.recipe.materials.length,8);assert.equal(outcome.data.job.request.recipe.sockets.length,64);assert.deepEqual(f.inputs[1],maximum);
+});
+
+test('custom assembly SDK + real daemon: large closed mesh exceeds the old SDK/16-KiB bounds and is accepted without code execution', async t => {
+  const f = await customAssetLabFixture(t),client = await linked(t,{url:f.lab.origin},ROOT,f.lab.agentToken);
+  const recipe = customRecipeFixture();recipe.parts = [
+    {name:'grid',role:'render',geometry:closedMeshGrid(),dimensions:[1,1,1],position:[0,0,0.5],material:'alloy'},
+    {name:'collision',role:'collision',geometry:{kind:'box'},dimensions:[1,1,1],position:[0,0,0.5]},
+  ];recipe.sockets = [];
+  const input: AssetInput = {template:'custom-assembly',name:'closed-grid',recipe};
+  const bytes = Buffer.byteLength(JSON.stringify(input));assert.ok(bytes > 16384 && bytes < CUSTOM_REQUEST_BYTES);
+  const outcome = await call(client,'assets_start',input as unknown as Record<string,unknown>);
+  assert.notEqual(outcome.result.isError,true,JSON.stringify(outcome.data));assert.equal(f.state.starts,1);
+  assert.equal(outcome.data.job.request.recipe.parts[0].geometry.vertices.length,4000);assert.deepEqual(f.inputs[0],input);
+  assert.equal(f.state.statuses[0]!.status,202);
+});
+
+test('custom assembly SDK: invalid topology, budgets, references, bounds and nested executable fields fail before any HTTP', async t => {
+  const f = await recordFixture(t,(_url,_body,response)=>send(response,500,{error:'UNEXPECTED',message:'Invalid input must never reach HTTP.'})),client = await linked(t,f);
+  const cases: [string,(input:any)=>void][] = [
+    ['missing recipe',input=>{delete input.recipe;}],['fixed template recipe',input=>{input.template = 'hero-prop';}],
+    ['size override',input=>{input.sizeMeters = [1,1,1];}],['color override',input=>{input.color = [0,0,0];}],
+    ['97 parts',input=>{input.recipe.parts = Array.from({length:97},(_,index)=>({...input.recipe.parts[0],name:'part-' + index}));}],
+    ['9 materials',input=>{input.recipe.materials = Array.from({length:9},(_,index)=>({...input.recipe.materials[0],id:'mat-' + index}));}],
+    ['65 sockets',input=>{input.recipe.sockets = Array.from({length:65},(_,index)=>({...input.recipe.sockets[0],name:'socket-' + index}));}],
+    ['duplicate part IDs',input=>{input.recipe.parts[1].name = 'body';}],['unknown material',input=>{input.recipe.parts[0].material = 'undeclared';}],
+    ['collision material',input=>{input.recipe.parts[2].material = 'alloy';}],['collision bevel',input=>{input.recipe.parts[2].bevel = {width:0.01};}],
+    ['oversized bevel',input=>{input.recipe.parts[0].bevel.width = 0.2;}],['segments divisibility',input=>{input.recipe.parts[0].geometry = {kind:'cylinder',segments:10};}],
+    ['open mesh',input=>{input.recipe.parts[1].geometry = {kind:'mesh',vertices:[[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5],[0,0,0.5]],indices:[0,1,4,1,2,4,2,3,4,3,0,4]};}],
+    ['inconsistent winding',input=>{input.recipe.parts[1].geometry.indices.splice(0,3,0,1,2);}],
+    ['duplicate face',input=>{input.recipe.parts[1].geometry.indices.splice(3,3,0,2,1);}],
+    ['loose vertex',input=>{input.recipe.parts[1].geometry.vertices.push([0.5,0.5,0.5]);}],
+    ['duplicate vertex',input=>{input.recipe.parts[1].geometry.vertices[1] = input.recipe.parts[1].geometry.vertices[0];}],
+    ['index outside vertices',input=>{input.recipe.parts[1].geometry.indices[0] = 7;}],['vertex bound',input=>{input.recipe.parts[1].geometry.vertices[0][0] = 1;}],
+    ['preflight render budget',input=>{input.triangleBudget = 100;}],['preflight collision budget',input=>{input.recipe.parts[2].geometry = {kind:'sphere',segments:64,rings:32};}],
+    ['LOD budget/reduction',input=>{input.recipe.parts[3].geometry = {kind:'sphere',segments:64,rings:32};}],
+    ['floor placement',input=>{for (const part of input.recipe.parts) part.position[2] = 2;}],
+    ['40m assembly extent',input=>{input.recipe.parts[0].position[0] = -30;input.recipe.parts[1].position[0] = 30;}],
+    ['socket part',input=>{input.recipe.sockets[0].part = 'collision';}],['socket world bounds',input=>{input.recipe.parts[0].position[0] = 40;input.recipe.parts[1].position[0] = 38;input.recipe.sockets[0].position = [20,-20,0];}],
+    ['top-level script',input=>{input.python = 'print(1)';}],['recipe URL',input=>{input.recipe.url = 'https://untrusted.invalid/model';}],
+    ['part output path',input=>{input.recipe.parts[0].path = 'C:/outside';}],['geometry code',input=>{input.recipe.parts[1].geometry.script = 'print(1)';}],
+    ['material node code',input=>{input.recipe.materials[0].nodes = 'exec(code)';}],['socket executable',input=>{input.recipe.sockets[0].executable = 'C:/outside.exe';}],
+  ];
+  for (const [label,mutate] of cases) {const input = structuredClone(customInputFixture());mutate(input);assert.equal((await call(client,'assets_start',input as unknown as Record<string,unknown>)).result.isError,true,label);}
+  const oversized = customInputFixture();const geometry = closedMeshGrid();
+  geometry.vertices = geometry.vertices.map(vertex=>vertex.map(n=>n * 0.999999987654321) as Vec3);
+  oversized.recipe!.parts[1]!.geometry = geometry;
+  assert.ok(Buffer.byteLength(JSON.stringify(oversized)) > CUSTOM_REQUEST_BYTES,'Fixture really exceeds the shared byte budget.');
+  assert.equal((await call(client,'assets_start',oversized as unknown as Record<string,unknown>)).result.isError,true);
+  assert.equal(f.requests.length,0);
+});
+
+for (const behavior of ['lost-ack','hang'] as const) test('custom assembly SDK + real daemon: ' + behavior + ' keeps accepted job ambiguous and never replays', async t => {
+  const f = await customAssetLabFixture(t),input = customInputFixture();
+  const proxy = await recordFixture(t,async (url,body,response,request)=>{
+    const upstream = await fetch(f.lab.origin + url.pathname + url.search,{method:request.method ?? 'GET',headers:{Authorization:'Bearer ' + f.lab.agentToken,...(body ? {'Content-Type':'application/json'} : {})},...(body ? {body:JSON.stringify(body)} : {})});
+    const payload = await upstream.json();
+    if (url.pathname === '/v1/assets/start') {assert.equal(upstream.status,202);if (behavior === 'lost-ack') request.socket.destroy();return;}
+    send(response,upstream.status,payload);
+  });
+  const client = await linked(t,proxy),outcome = await call(client,'assets_start',{...input,timeoutMs:120});
+  assert.notEqual(outcome.result.isError,true);assert.equal(outcome.data.ambiguous,true);assert.equal(outcome.data.jobId,null);assert.equal(outcome.data.terminal,false);
+  assert.equal(outcome.data.wait,behavior === 'hang' ? 'timeout' : 'interrupted');assert.deepEqual(f.inputs[0],input);assert.equal(f.state.starts,1);
+  const recovered = await call(client,'assets_jobs');assert.deepEqual(recovered.data.jobs[0].request,normalizeRequest(input));
+  assert.equal(proxy.requests.filter(request=>request.method === 'POST').length,1);assert.equal(f.state.starts,1);
+});
+
+test('custom assembly SDK: malformed or incomplete current manifest evidence is refused instead of stripped', async t => {
+  const f = await customAssetLabFixture(t),client = await linked(t,{url:f.lab.origin},ROOT,f.lab.agentToken),input = customInputFixture();
+  await call(client,'assets_start',input as unknown as Record<string,unknown>);
+  const cases: [string,(manifest:any)=>void][] = [
+    ['missing source digest',manifest=>{delete manifest.sourceRequestSha256;}],['missing assembly',manifest=>{delete manifest.assembly;}],
+    ['missing audit assembly',manifest=>{delete manifest.validation.assembly;}],['mismatched assembly',manifest=>{manifest.assembly.bounds.max[0] += 1;}],
+    ['missing geometry hash',manifest=>{delete manifest.validation.meshes[0].geometrySha256;}],['invalid geometry hash',manifest=>{manifest.validation.meshes[0].geometrySha256 = 'invalid';}],
+    ['missing part origin',manifest=>{delete manifest.validation.meshes[0].position;}],['non-floor origin',manifest=>{manifest.validation.meshes[0].position = [0,0,1];}],
+    ['missing PBR evidence',manifest=>{delete manifest.validation.meshes[0].materialProperties;}],['different PBR roughness',manifest=>{manifest.validation.meshes[0].materialProperties[0].roughness = 0.99;}],
+    ['missing geometry bounds',manifest=>{delete manifest.validation.meshes[0].bounds;}],['negative extent',manifest=>{manifest.validation.meshes[0].bounds.max[0] = -60;}],
+    ['wrong socket matrix length',manifest=>{manifest.assembly.sockets[0].matrix = [1,2];}],['wrong export socket pose',manifest=>{manifest.validation.exports[0].sockets[0].matrix[3] += 1;}],
+    ['missing export sockets',manifest=>{delete manifest.validation.exports[0].sockets;}],['changed source digest',manifest=>{manifest.sourceRequestSha256 = 'e'.repeat(64);}],
+    ['incorrect normalized size',manifest=>{manifest.request.sizeMeters = [1,1,1];}],['recipe omitted',manifest=>{delete manifest.request.recipe;}],
+    ['false import verification',manifest=>{manifest.assembly.robloxImport = 'verified';}],
+  ];
+  for (const [label,mutate] of cases) {const manifest = structuredClone(customManifestFixture(input));mutate(manifest);f.setManifest(manifest);const result = await call(client,'assets_manifest',{jobId:ASSET_JOB_ID});assert.equal(result.result.isError,true,label);assert.equal(result.data.error.code,'PROTOCOL',label);}
+  assert.equal(f.state.starts,1);
+});
+
+test('custom assembly SDK + real daemon: explicit history pagination preserves recipes and bounded page metadata without auto-fetching', async t => {
+  const f = await customAssetLabFixture(t),client = await linked(t,{url:f.lab.origin},ROOT,f.lab.agentToken);
+  const firstInput = customInputFixture(),secondInput = {...customInputFixture(),name:'second-assembly'};
+  await call(client,'assets_start',firstInput as unknown as Record<string,unknown>);await call(client,'assets_start',secondInput as unknown as Record<string,unknown>);
+  const first = await call(client,'assets_jobs',{limit:1});assert.equal(first.data.jobs.length,1);assert.equal(first.data.total,2);assert.equal(first.data.nextCursor,ASSET_JOB_ID);assert.equal(first.data.byteLimit,HISTORY_PAGE_BYTES);
+  assert.deepEqual(first.data.jobs[0].request.recipe,normalizeRequest(firstInput).recipe);
+  assert.equal(f.state.statuses.filter(request=>request.path.startsWith('/v1/assets/jobs')).length,1);
+  const second = await call(client,'assets_jobs',{limit:1,after:first.data.nextCursor});assert.equal(second.data.jobs[0].jobId,OTHER_ASSET_JOB_ID);assert.equal(second.data.nextCursor,null);assert.equal(second.data.total,2);
+  assert.deepEqual(second.data.jobs[0].request.recipe,normalizeRequest(secondInput).recipe);
+  assert.equal(f.state.statuses.at(-1)!.path,'/v1/assets/jobs?limit=1&after=' + ASSET_JOB_ID);
+  const before = f.state.statuses.length;
+  for (const input of [{limit:0},{limit:65},{after:'../outside'},{cursor:ASSET_JOB_ID}]) assert.equal((await call(client,'assets_jobs',input)).result.isError,true);
+  assert.equal(f.state.statuses.length,before);
 });

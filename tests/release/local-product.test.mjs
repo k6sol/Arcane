@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, link, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { createLocalRelease, verifyLocalRelease } from '../../scripts/create-local-release.mjs';
+import { createLocalRelease, verifyLocalRelease, REQUIRED_FRONTEND_FILES, BRAND_BITMAP_PATH } from '../../scripts/create-local-release.mjs';
 import { productDoctor } from '../../scripts/product-doctor.mjs';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t) {
@@ -21,6 +23,12 @@ async function fixture(t) {
   await write('package-lock.json', JSON.stringify({ name: 'arcane', version: '0.1.0', lockfileVersion: 3, packages: { '': { name: 'arcane', version: '0.1.0' } } }));
   for (const path of ['README.md', 'LICENSE']) await write(path, 'Fixture content.\n');
   for (const path of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'dist/apps/desktop/src/studio.js', 'apps/desktop/public/studio.html', 'workers/blender/asset_worker.py']) await write(path, '// Test fixture only.\n');
+  const shellSource = 'export const fixtureShell = true;\n';
+  const bitmap = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWooAAAAASUVORK5CYII=', 'base64');
+  for (const path of REQUIRED_FRONTEND_FILES) {
+    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : '// Test fixture only.\n';
+    await write(path, bytes);
+  }
   await write('skills/registry.json', '{}');
   const pluginSource = '--!strict\nlocal __arcaneFactories = {}\n';
   await write('plugin/src/Main.server.luau', pluginSource);
@@ -106,4 +114,32 @@ test('packaging fails before emission when workspace lock entries or pinned root
   assert.equal((await createLocalRelease({ repository: root })).dependencyInstallRequired, true);
   await write('package.json', JSON.stringify({ name: 'arcane', version: '0.1.0', dependencies: { zod: '4.6.6' } }));
   await assert.rejects(createLocalRelease({ repository: root }), /out of sync/);
+});
+
+test('compiled-source provenance rejects stale, missing and external source-map inputs', async t => {
+  const { root, write } = await fixture(t);
+  const text = 'export const policy = 1;\n';
+  await write('apps/daemon/src/policy.ts', text);
+  await assert.rejects(createLocalRelease({ repository: root }), /no current compiled map/);
+  await write('dist/apps/daemon/src/policy.js', 'export const policy = 1;\n');
+  const map = { version: 3, sources: ['../../../../apps/daemon/src/policy.ts'], sourcesContent: [text] };
+  await write('dist/apps/daemon/src/policy.js.map', JSON.stringify(map));
+  await createLocalRelease({ repository: root });
+  await write('apps/daemon/src/policy.ts', 'export const policy = 2;\n');
+  await assert.rejects(createLocalRelease({ repository: root }), /Compiled source is stale/);
+  map.sources[0] = '/outside/private.ts'; await write('dist/apps/daemon/src/policy.js.map', JSON.stringify(map));
+  await assert.rejects(createLocalRelease({ repository: root }), /Invalid compiled/);
+});
+
+
+test('Windows compiler wrapper scopes memory settings to its child, preserves host overrides and rejects extra flags',async t=>{
+  const {root,write}=await fixture(t);await write('scripts/compile-product.mjs',await readFile(new URL('../../scripts/compile-product.mjs',import.meta.url)));await write('tsconfig.json',JSON.stringify({include:['apps/desktop/src/**/*.ts']}));
+  // Synthetic compiler only: the real installed compiler is separately tested by product builds.
+  await write('node_modules/typescript/bin/tsc',"const fs=require('fs');console.log(JSON.stringify({args:process.argv.slice(2),config:JSON.parse(fs.readFileSync(process.argv[3],'utf8')),cwd:process.cwd(),gomax:process.env.GOMAXPROCS??null,gomem:process.env.GOMEMLIMIT??null}));");
+  const env={...process.env};delete env.GOMAXPROCS;delete env.GOMEMLIMIT;
+  const run=(args=[],variables=env)=>spawnSync(process.execPath,[join(root,'scripts/compile-product.mjs'),...args],{cwd:root,env:variables,shell:false,windowsHide:true,encoding:'utf8',timeout:10000,maxBuffer:8192});
+  const plain=run();assert.equal(plain.status,0);const observed=JSON.parse(plain.stdout.trim().split(/\r?\n/)[0]);assert.equal(observed.args[0],'-p');assert.ok(observed.args[1].startsWith(join(root,'runtime','build','compile-')));assert.equal(observed.args.length,2);assert.equal(observed.config.extends,join(root,'tsconfig.json'));assert.deepEqual(observed.config.files,[join(root,'apps','desktop','src','asset-downloads.ts'),join(root,'apps','desktop','src','workspace-shell.ts')]);assert.equal(observed.cwd,root);await assert.rejects(readFile(observed.args[1]),{code:'ENOENT'});
+  if(process.platform==='win32'){assert.equal(observed.gomax,'1');assert.equal(observed.gomem,'256MiB');}else{assert.equal(observed.gomax,null);assert.equal(observed.gomem,null);}
+  const overridden=run(['--noEmit'],{...env,GOMAXPROCS:'2',GOMEMLIMIT:'512MiB'});assert.equal(overridden.status,0);const meta=JSON.parse(overridden.stdout.trim().split(/\r?\n/)[0]);assert.equal(meta.gomax,'2');assert.equal(meta.gomem,'512MiB');assert.equal(meta.args.at(-1),'--noEmit');
+  const refused=run(['--outDir','outside']);assert.equal(refused.status,2);assert.equal(refused.stdout,'');assert.match(refused.stderr,/Usage:/);assert.equal(Object.hasOwn(env,'GOMAXPROCS'),false);
 });

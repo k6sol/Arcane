@@ -19,7 +19,7 @@ import { Server as NativeFixtureServer } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { pathToFileURL } from 'node:url';
-import { NATIVE_READ_METHODS, NATIVE_HTTP_RESULT_BYTES, NATIVE_DISPLAY_BYTES, readNativeObservation, prepareNativeRead, nativeResultText, sanitizeNativeText, type NativeObservation, type NativeReadInput, prepareStudioKeyGrant, readStudioKeyRecords, readIssuedStudioKey, type StudioKeyRecord, baselineFromReceipt, prepareWorkRun, prepareWorkReview, prepareAssetInput, BUILDER_METHODS, STUDIO_ROOTS, StudioApi, StudioRequestError, prepareCommand, prepareRestore, readReference, takeControlToken, mutationReceipt, type BuilderInput } from '../../apps/desktop/src/studio.js';
+import { NATIVE_READ_METHODS, NATIVE_HTTP_RESULT_BYTES, NATIVE_DISPLAY_BYTES, readNativeObservation, readNativeReceipt, prepareNativeRead, nativeResultText, sanitizeNativeText, type NativeObservation, type NativeReadInput, prepareStudioKeyGrant, readStudioKeyRecords, readIssuedStudioKey, type StudioKeyRecord, baselineFromReceipt, prepareWorkRun, prepareWorkReview, prepareAssetInput, BUILDER_METHODS, STUDIO_ROOTS, StudioApi, StudioRequestError, prepareCommand, prepareRestore, readReference, takeControlToken, mutationReceipt, type BuilderInput } from '../../apps/desktop/src/studio.js';
 import { ROOTS, READ_METHODS, WRITE_METHODS, type StudioSession, type StudioCommand, type InstanceRef, type Json } from '../../packages/protocol/src/studio.js';
 
 const TOKEN = 'a'.repeat(64);
@@ -156,7 +156,8 @@ test('Studio shell is CSP-compatible, has safe defaults and treats untrusted con
 
 test('emitted browser workbench has no Node, store or daemon runtime imports', async () => {
   const browserSource = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), 'utf8');
-  assert.doesNotMatch(browserSource, /^\s*import\s|\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
+  assert.match(browserSource, /from ['"]\.\/codex-chat\.js['"]/);
+  assert.doesNotMatch(browserSource, /\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
 });
 
 test('edit baselines must match the actual succeeded read request and exact client session', () => {
@@ -264,11 +265,51 @@ test('native observations must report closure and preserve bounded exact invento
   assert.throws(() => readNativeObservation({ ...observation, native: { ...observation.native, readOnly: false } }, true), /read-only/);
 });
 
+test('native success and tool-error receipts bind exact request identity, closure and error state', () => {
+  const request = prepareNativeRead(nativeFixtureObservation(), 'native-b', 'get_studio_state', nativeInput());
+  const success = { ...nativeFixtureObservation(), method: request.method, studio_id: request.args.studio_id, result: { content: [{ type: 'text', text: 'Fixture-only output' }] } };
+  assert.equal(readNativeReceipt(success, request).studio_id, 'native-b');
+  const error = { ...success, result: { ...success.result, isError: true } };
+  assert.equal(readNativeReceipt(error, request, true).result, error.result);
+  for (const toolError of [false, true]) {
+    const receipt = toolError ? error : success;
+    assert.throws(() => readNativeReceipt({ ...receipt, studio_id: 'native-a' }, request, toolError), /exact requested/);
+    assert.throws(() => readNativeReceipt({ ...receipt, method: 'get_console_output' }, request, toolError), /exact requested/);
+    assert.throws(() => readNativeReceipt({ ...receipt, native: { ...receipt.native, metadata: { ...receipt.native.metadata, connected: true } } }, request, toolError), /closed per-request/);
+  }
+  assert.throws(() => readNativeReceipt(error, request), /tool-error/);
+  assert.throws(() => readNativeReceipt(success, request, true), /tool-error/);
+  assert.throws(() => readNativeReceipt({ ...success, result: { ...success.result, isError: 'false' } }, request), /tool-error/);
+});
+
+test('native metadata rejects inconsistent evidence, request budgets and oversized inventories', () => {
+  const observation = nativeFixtureObservation(), metadata = observation.native.metadata;
+  for (const patch of [{ requestsUsed: 17 }, { transport: 'stdio' }, { limits: { ...metadata.limits, maxRequests: 2 } }, { tools: Array.from({ length: 129 }, () => metadata.tools[0]) }]) {
+    assert.throws(() => readNativeObservation({ ...observation, native: { ...observation.native, metadata: { ...metadata, ...patch } } }, true));
+  }
+  assert.throws(() => readNativeObservation({ ...observation, native: { ...observation.native, provenance: { kind: 'fixture', label: 'Different request evidence' } } }, true), /provenance/);
+  assert.throws(() => readNativeObservation({ ...observation, studios: Array.from({ length: 65 }, (_, i) => ({ id: 'id-' + i, name: 'fixture' })) }, true), /64/);
+});
+
+test('native argument boundaries cover inclusive ranges, text lengths, fractional and non-finite numbers', () => {
+  const observation = nativeFixtureObservation();
+  for (const limit of [1, 200]) for (const depth of [1, 10]) assert.equal(prepareNativeRead(observation, 'native-b', 'search_game_tree', { ...nativeInput(), limit, depth }).args.max_depth, depth);
+  assert.equal(prepareNativeRead(observation, 'native-b', 'script_read', { ...nativeInput(), startLine: 999501, endLine: 1000000 }).args.end_line_one_indexed_inclusive, 1000000);
+  for (const number of [0, -1, 1.2, NaN, Infinity, 201]) assert.throws(() => prepareNativeRead(observation, 'native-b', 'search_game_tree', { ...nativeInput(), limit: number }));
+  for (const patch of [{ startLine: 0 }, { endLine: 1000001 }, { endLine: 501 }, { startLine: 2, endLine: 1 }]) assert.throws(() => prepareNativeRead(observation, 'native-b', 'script_read', { ...nativeInput(), ...patch }));
+  for (const [method, patch] of [['inspect_instance', { path: 'x'.repeat(1025) }], ['script_search', { query: 'x'.repeat(257) }], ['script_grep', { query: 'x\0' }], ['search_game_tree', { instanceType: 'x'.repeat(101) }]] as const) assert.throws(() => prepareNativeRead(observation, 'native-b', method, { ...nativeInput(), ...patch }));
+  const tool = observation.native.metadata.tools[0]!;
+  tool.annotations = { readOnlyHint: false }; assert.throws(() => prepareNativeRead(observation, 'native-b', 'get_studio_state', nativeInput()), /blocked/);
+  tool.annotations = { readOnlyHint: true, destructiveHint: true }; assert.throws(() => prepareNativeRead(observation, 'native-b', 'get_studio_state', nativeInput()), /blocked/);
+});
+
 test('native text output is safe text, removes credentials and controls, and visibly bounds its UTF-8 display', () => {
   const raw = '<img src=x onerror=alert(1)>\nBearer abcdef123456 password=secret-value sk-1234567890 ' + TOKEN + '\x1b[31m\0';
   const result = nativeResultText({ content: [{ type: 'text', text: raw }] }, [TOKEN]);
   assert.match(result, /<img src=x onerror=alert\(1\)>/); assert.doesNotMatch(result, /abcdef123456|secret-value|sk-1234567890|\x1b|\0/); assert.equal(result.includes(TOKEN), false);
+  const truncated = sanitizeNativeText('🧩'.repeat(NATIVE_DISPLAY_BYTES), [], 7); assert.match(truncated, /Display truncated/); assert.equal(truncated.split('\n')[0], '🧩'); assert.doesNotMatch(truncated, /\ufffd/);
   assert.match(sanitizeNativeText('🧩'.repeat(NATIVE_DISPLAY_BYTES)), /Display truncated/);
+  assert.equal(nativeResultText({ content: [], structuredContent: { password: 'fixture-secret', html: '<img src=x>' } }).includes('fixture-secret'), false);
   assert.throws(() => nativeResultText({ content: [{ type: 'image', data: 'untrusted' }] }), /text read output only/);
 });
 
@@ -284,6 +325,20 @@ test('native transport uses human-only implemented routes, bounds responses and 
   await assert.rejects(denied.nativeRead(prepareNativeRead(nativeFixtureObservation(), 'native-a', 'get_studio_state', nativeInput())), (error: unknown) => error instanceof StudioRequestError && error.details?.code === 'STUDIO_NOT_FOUND'); assert.equal(sent, 1);
 });
 
+test('native streaming response bound cancels oversized bodies, rejects invalid UTF-8 and never retries lost reads', async () => {
+  const encoded = JSON.stringify(nativeFixtureObservation()), length = Buffer.byteLength(encoded);
+  assert.equal((await new StudioApi(TOKEN, async () => new Response(encoded + ' '.repeat(NATIVE_HTTP_RESULT_BYTES - length))).nativeCapabilities()).native.metadata.evidenceKind, 'fixture');
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(300000)); controller.enqueue(new Uint8Array(300000)); }, cancel() { cancelled = true; } });
+  await assert.rejects(new StudioApi(TOKEN, async () => new Response(body)).nativeCapabilities(), /512 KiB/); assert.equal(cancelled, true);
+  await assert.rejects(new StudioApi(TOKEN, async () => new Response(new Uint8Array([0xc3, 0x28]))).nativeCapabilities(), /UTF-8/);
+  const request = prepareNativeRead(nativeFixtureObservation(), 'native-b', 'get_studio_state', nativeInput());
+  let sent = 0; const lost = new StudioApi(TOKEN, async () => { sent++; throw new Error('Fixture disconnect'); });
+  await assert.rejects(lost.nativeRead(request), (error: unknown) => error instanceof StudioRequestError && error.outcome === 'unknown'); assert.equal(sent, 1);
+  const timeout = new StudioApi(TOKEN, async (_path, options) => await new Promise<Response>((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })));
+  await assert.rejects(timeout.request('/v1/native/read', request, 'json', 10), /timed out/);
+});
+
 // Optional real-browser check. Its server is an explicitly labelled HTTP fixture,
 // never the native plugin. No extra root dependencies or Studio operations.
 const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
@@ -294,11 +349,11 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const fixtureAssetJobs: AssetJobRecord[] = [], fixturePng = png(); let corruptPreview = false;
   const fixtureRuntime = { executable: 'HTTP-fixture-only-no-Blender', version: 'fixture', pythonVersion: 'fixture', background: true, capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } };
   const posted: { path: string; body: Record<string, unknown>; authorization: string }[] = [];
-  const assets = new Map(['/studio', '/studio.css', '/studio.js'].map((path, i) => [path, resolve(['apps/desktop/public/studio.html', 'apps/desktop/public/studio.css', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')][i]!) ]));
+  const assets = new Map(['/studio', '/studio.css', '/studio.js', '/codex-chat.js', '/workspace-shell.js', '/asset-downloads.js', '/brand/arcane-ridges.png'].map((path, i) => [path, resolve(['apps/desktop/public/studio.html', 'apps/desktop/public/studio.css', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js'), 'apps/desktop/public/brand/arcane-ridges.png'][i]!) ]));
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const asset = assets.get(url.pathname);
-    if (asset) { response.writeHead(200, { 'Content-Type': url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" }); response.end(await readFile(asset)); return; }
+    if (asset) { response.writeHead(200, { 'Content-Type': url.pathname.endsWith('.png') ? 'image/png' : url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" }); response.end(await readFile(asset)); return; }
     const send = (data: unknown, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(data)); };
     if (request.headers.authorization !== 'Bearer ' + TOKEN) { send({ error: 'AUTH', message: 'Fixture requires control token.' }, 401); return; }
     if (request.method === 'GET') {
@@ -353,10 +408,10 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done)); t.after(() => new Promise<void>(done => server.close(() => done())));
   const address = server.address(); assert.ok(address && typeof address !== 'string'); const origin = 'http://127.0.0.1:' + address.port;
   const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
-  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
+  const browser = await playwright.chromium.launch({ headless: true, args: ["--disable-gpu"], ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message)); page.on('console', (message: { type(): string; text(): string }) => { if (message.type() === 'error' && /Content Security Policy|Refused to/.test(message.text())) errors.push(message.text()); });
-  const expectText = async (selector: string, text: string) => { await page.waitForFunction(({ selector, text }: { selector: string; text: string }) => document.querySelector(selector)?.textContent?.includes(text), { selector, text }); };
+  const expectText = async (selector: string, text: string) => { try { await page.waitForFunction(({ selector, text }: { selector: string; text: string }) => document.querySelector(selector)?.textContent?.includes(text), { selector, text }); } catch (error) { t.diagnostic('Mount/action diagnostic '+JSON.stringify(await page.evaluate(()=>({main:document.getElementById('notice')?.textContent,codex:document.getElementById('codex-notice')?.textContent})))+' errors '+errors.join(';'));throw error; } };
   await page.goto(origin + '/studio#' + TOKEN); await expectText('#connection-status', 'Daemon responding'); await page.locator('#auto-refresh').uncheck();
   assert.equal(new URL(page.url()).hash, ''); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#send').isDisabled(), true);
   await expectText('#key-status', 'Key service responding');
@@ -437,8 +492,10 @@ test('real browser and daemon: human API keys, key connection and revocation, du
     await rm(directory, { recursive: true, force: true });
   });
   const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
-  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
+  const browser = await playwright.chromium.launch({ headless: true, args: ["--disable-gpu"], ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/studio.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/studio.js'), 'utf8') }); });
+  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/codex-chat.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/codex-chat.js'), 'utf8') }); });
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
   const text = async (selector: string, value: string) => { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }); };
   const refresh = async () => { await page.locator('#refresh').click(); await page.waitForFunction(() => !(document.getElementById('refresh') as HTMLButtonElement).disabled); };
@@ -515,7 +572,8 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   const studioStore = new StudioStore({ directory: join(directory, 'studio') }), workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   const agent = 'b'.repeat(64), alpha = 'native-ui-alpha', beta = 'native-ui-beta';
   let inventory = [{ id: alpha, name: '<img src=x onerror=alert(1)> SDK fixture A' }, { id: beta, name: 'SDK fixture B' }];
-  let unavailable = false, holdRead = false, toolError = false;
+  let unavailable = false, holdRead = false, holdInventory = false, toolError = false, closeFailure = false, largeOutput = false;
+  let inventoryAccepted: () => void = () => {};
   let releaseRead: () => void = () => {}, readAccepted: () => void = () => {};
   let held = Promise.resolve(); let created = 0, closed = 0;
   const targeted: { method: string; args: Record<string, unknown> }[] = [];
@@ -528,53 +586,119 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
     sdkServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
     sdkServer.setRequestHandler(CallToolRequestSchema, async request => {
       const args = request.params.arguments ?? {};
-      if (request.params.name === 'list_roblox_studios') return { content: [{ type: 'text', text: JSON.stringify({ studios: inventory }) }] };
+      if (request.params.name === 'list_roblox_studios') { if (holdInventory) { holdInventory = false; inventoryAccepted(); await held; } return { content: [{ type: 'text', text: JSON.stringify({ studios: inventory }) }] }; }
       targeted.push({ method: request.params.name, args });
       if (holdRead) { holdRead = false; readAccepted(); await held; }
       const isError = toolError; toolError = false;
+      if (largeOutput) { largeOutput = false; return { content: [{ type: 'text', text: '🧩'.repeat(20000) }] }; }
       return { ...(isError ? { isError: true } : {}), content: [{ type: 'text', text: (isError ? 'Fixture tool error: ' : 'Fixture read: ') + String(args.studio_id) + ' · ' + request.params.name + '\n<img src=x onerror=alert(1)><script>window.nativeInjected=true</script>\nBearer fixture-secret password=fixture-password ' + TOKEN + '\x1b[31m' }] };
     });
     await sdkServer.connect(serverTransport);
     const session = new NativeStudioSession(clientTransport, { kind: 'fixture', label: 'Browser HTTP + SDK fixture only; no live Studio' }, { timeoutMs: 2000, maxRequests: 16 }); await session.initialize();
     let closing: Promise<void> | undefined;
-    return { metadata: session.metadata.bind(session), listStudios: session.listStudios.bind(session), read: session.read.bind(session), close: () => { closing ??= (async () => { await session.close(); await sdkServer.close(); closed++; })(); return closing; } };
+    return { metadata: session.metadata.bind(session), listStudios: session.listStudios.bind(session), read: session.read.bind(session), close: () => { closing ??= (async () => { await session.close(); await sdkServer.close(); closed++; if (closeFailure) { closeFailure = false; throw new Error('Fixture close failure'); } })(); return closing; } };
   } });
   const controls = studioRoutes(studioStore, resolve('.'), workStore, directory, agent);
-  const assets = new Map([['/studio', resolve('apps/desktop/public/studio.html')], ['/studio.css', resolve('apps/desktop/public/studio.css')], ['/studio.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')]]);
+  const assets = new Map([['/studio', resolve('apps/desktop/public/studio.html')], ['/studio.css', resolve('apps/desktop/public/studio.css')], ['/studio.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')], ['/codex-chat.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js')], ['/workspace-shell.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js')], ['/brand/arcane-ridges.png', resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
   let origin = '';
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', origin), asset = assets.get(url.pathname);
-    if (asset) { response.writeHead(200, { 'Content-Type': url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" }); response.end(await readFile(asset)); return; }
+    if (asset) { response.writeHead(200, { 'Content-Type': url.pathname.endsWith('.png') ? 'image/png' : url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" }); response.end(await readFile(asset)); return; }
     if (await native(request, response, url, TOKEN, origin) || await controls(request, response, url, TOKEN, origin)) return;
     response.writeHead(404, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ error: 'NOT_FOUND', message: 'Endpoint absent from this explicit HTTP fixture.' }));
   })().catch(() => { response.destroy(); }); });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done)); const address = server.address(); assert.ok(address && typeof address !== 'string'); origin = 'http://127.0.0.1:' + address.port;
   t.after(async () => { releaseRead(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); workStore.close(); studioStore.close(); const child = relative(resolve(tmpdir()), resolve(directory)); assert.ok(child && !child.startsWith('..') && !isAbsolute(child)); await rm(directory, { recursive: true, force: true }); });
   const denied = await fetch(origin + '/v1/native/read', { method: 'POST', headers: { Authorization: 'Bearer ' + agent, 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify({ method: 'get_studio_state', args: { studio_id: alpha } }) }); assert.equal(denied.status, 401); assert.equal(created, 0);
+  for (const [endpoint, method, body, headers, status] of [
+    ['/v1/native/capabilities', 'GET', undefined, { Authorization: 'Bearer ' + agent }, 401],
+    ['/v1/native/read', 'POST', { method: 'execute_luau', args: { studio_id: alpha } }, { Authorization: 'Bearer ' + TOKEN, Origin: origin }, 403],
+    ['/v1/native/read', 'POST', { method: 'get_studio_state', args: {} }, { Authorization: 'Bearer ' + TOKEN, Origin: origin }, 400],
+    ['/v1/native/read', 'POST', { method: 'get_studio_state', args: { studio_id: alpha } }, { Authorization: 'Bearer ' + TOKEN, Origin: 'http://example.invalid' }, 403],
+  ] as const) {
+    const response = await fetch(origin + endpoint, { method, headers: { 'Content-Type': 'application/json', ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    assert.equal(response.status, status); assert.equal(created, 0);
+  }
+  const humanProbe = await fetch(origin + '/v1/native/capabilities', { headers: { Authorization: 'Bearer ' + TOKEN } });
+  const humanObservation = await humanProbe.json(); assert.equal(humanProbe.status, 200, JSON.stringify(humanObservation)); readNativeObservation(humanObservation, true); assert.equal(created, closed); const beforeBrowser = created;
   const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
-  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
+  const browser = await playwright.chromium.launch({ headless: true, args: ["--disable-gpu"], ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } }); const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
-  const text = async (selector: string, value: string) => { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }); };
-  const waitRead = async () => { await page.waitForFunction(() => document.querySelector('#diagnostics-request-status')?.textContent?.startsWith('Read complete')); };
-  await page.goto(origin + '/studio#' + agent); await page.locator('#auto-refresh').uncheck(); await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, 0); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
-  await page.goto(origin + '/studio#' + TOKEN); await page.locator('#auto-refresh').uncheck(); assert.equal(created, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
+  const text = async (selector: string, value: string) => { try { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }, { timeout: 5000 }); } catch (error) { throw new Error('Expected ' + selector + ' to include ' + value + '; request=' + await page.locator('#diagnostics-request-status').textContent() + '; notice=' + await page.locator('#diagnostics-notice').textContent(), { cause: error }); } };
+  const waitRead = async () => { await text('#diagnostics-request-status', 'Read complete'); };
+  t.diagnostic('Browser executable: ' + (process.env.ARCANE_UI_BROWSER_EXE ?? 'Playwright Chromium') + '; version=' + browser.version() + '; fixture-only native controller');
+  await page.goto(origin + '/studio#' + agent); await page.locator('#auto-refresh').uncheck(); await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
+  await page.goto(origin + '/studio#' + TOKEN); await page.reload(); await page.locator('#auto-refresh').uncheck(); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
   await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed); assert.equal(targeted.length, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
-  assert.equal(await page.locator('#diagnostics-method option[value="selection"]').isDisabled(), true); assert.equal(await page.locator('#diagnostics-method option[value="script_grep"]').isDisabled(), true); await text('#diagnostics-tools', 'execute_luau'); await text('#diagnostics-tools', 'not_read_allowlisted'); assert.equal(await page.locator('#diagnostics-tools img').count(), 0);
+  assert.equal(await page.locator('#diagnostics-method option[value="selection"]').getAttribute('disabled') !== null, true); assert.equal(await page.locator('#diagnostics-method option[value="script_grep"]').getAttribute('disabled') !== null, true); await text('#diagnostics-tools', 'execute_luau'); await text('#diagnostics-tools', 'not_read_allowlisted'); assert.equal(await page.locator('#diagnostics-tools img').count(), 0);
   await page.locator('#diagnostics-studio').selectOption(alpha); await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', '<img src=x onerror=alert(1)>'); assert.equal(await page.locator('#diagnostics-output img, #diagnostics-output script').count(), 0); assert.equal(await page.evaluate(() => Boolean((window as unknown as { nativeInjected?: boolean }).nativeInjected)), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(TOKEN), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('fixture-password'), false); assert.equal(created, closed);
+  await text('#diagnostics-provenance', alpha); await text('#diagnostics-provenance', 'get_studio_state'); await text('#diagnostics-metadata', 'Browser HTTP + SDK fixture only; no live Studio');
+  const beforeRefreshRead = targeted.length; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(targeted.length, beforeRefreshRead); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('Fixture read'), false); await text('#diagnostics-provenance', 'no targeted read');
   const beforeStale = targeted.length; inventory = [{ id: beta, name: 'SDK fixture B' }]; await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'denied as stale'); assert.equal(targeted.length, beforeStale); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
+  await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio option').count(), 2); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
   inventory = [{ id: alpha, name: 'SDK fixture A' }, { id: beta, name: 'SDK fixture B' }]; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
   await page.locator('#diagnostics-studio').selectOption(alpha); holdRead = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const accepted = new Promise<void>(resolve => { readAccepted = resolve; });
   await page.locator('#diagnostics-read').click(); await accepted; await text('#diagnostics-request-status', 'Read in flight'); assert.equal(created, closed + 1); assert.equal(await page.locator('#diagnostics-probe').isDisabled(), true); await page.locator('#diagnostics-studio').selectOption(beta); releaseRead(); await text('#diagnostics-request-status', 'result discarded'); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(alpha), false); assert.equal(created, closed);
   await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', beta);
+  // Returning to the original target still invalidates the old request epoch.
+  holdRead = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const roundTripAccepted = new Promise<void>(resolve => { readAccepted = resolve; });
+  await page.locator('#diagnostics-read').click(); await roundTripAccepted; await page.locator('#diagnostics-studio').selectOption(alpha); await page.locator('#diagnostics-studio').selectOption(beta); releaseRead(); await text('#diagnostics-request-status', 'result discarded'); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('Fixture read'), false); assert.equal(await page.locator('#diagnostics-provenance dd').count(), 0); assert.equal(created, closed);
+  holdRead = true; toolError = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const lateErrorAccepted = new Promise<void>(resolve => { readAccepted = resolve; });
+  await page.locator('#diagnostics-read').click(); await lateErrorAccepted; await page.locator('#diagnostics-studio').selectOption(alpha); releaseRead(); await text('#diagnostics-notice', 'response was discarded'); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('Fixture tool error'), false); assert.equal(created, closed);
+  await page.locator('#diagnostics-studio').selectOption(beta);
   await page.locator('#diagnostics-method').selectOption('search_game_tree'); await page.locator('#diagnostics-limit').fill('201'); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); await page.locator('#diagnostics-limit').fill('200'); await page.locator('#diagnostics-depth').fill('2'); await page.locator('#diagnostics-datamodel').selectOption('Edit'); await page.locator('#diagnostics-query').fill('Fixture'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.equal(targeted.at(-1)?.args.head_limit, 200); assert.equal(targeted.at(-1)?.args.max_depth, 2);
   await page.locator('#diagnostics-limit').fill('999'); await page.locator('#diagnostics-method').selectOption('inspect_instance'); await page.locator('#diagnostics-path').fill('game.Workspace.Baseplate'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.deepEqual(targeted.at(-1)?.args, { studio_id: beta, path: 'game.Workspace.Baseplate' });
   await page.locator('#diagnostics-method').selectOption('script_read'); await page.locator('#diagnostics-path').fill('game.ServerScriptService.Fixture'); await page.locator('#diagnostics-start').fill('25'); await page.locator('#diagnostics-end').fill('36'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.deepEqual(targeted.at(-1)?.args, { studio_id: beta, target_file: 'game.ServerScriptService.Fixture', should_read_entire_file: false, start_line_one_indexed: 25, end_line_one_indexed_inclusive: 36 });
   await page.locator('#diagnostics-method').selectOption('script_search'); await page.locator('#diagnostics-query').fill('Fixture'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.equal(targeted.at(-1)?.args.keywords, 'Fixture');
-  await page.locator('#diagnostics-method').selectOption('get_console_output'); toolError = true; await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'Fixture tool error'); await text('#diagnostics-request-status', 'failed'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed);
+  await page.locator('#diagnostics-method').selectOption('get_console_output');
+  const probeAgain = async () => { await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); };
+  // Tampered HTTP receipts exercise UI checks after the real fixture controller closes.
+  for (const mismatch of ['target', 'method', 'closure', 'provenance']) {
+    await page.route('**/v1/native/read', async (route: any) => {
+      const response = await route.fetch(), receipt = await response.json();
+      if (mismatch === 'target') receipt.studio_id = alpha;
+      if (mismatch === 'method') receipt.method = 'get_studio_state';
+      if (mismatch === 'closure') receipt.native.metadata.connected = true;
+      if (mismatch === 'provenance') receipt.native.provenance.label = 'Other request fixture';
+      await route.fulfill({ response, json: receipt });
+    }, { times: 1 });
+    await page.locator('#diagnostics-read').click(); await text('#diagnostics-request-status', 'failed'); assert.equal(created, closed); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('Fixture read'), false); assert.equal(await page.locator('#diagnostics-provenance dd').count(), 0); await text('#diagnostics-connection', 'closure not reported'); await probeAgain();
+  }
+  toolError = true;
+  await page.route('**/v1/native/read', async (route: any) => { const response = await route.fetch(), receipt = await response.json(); receipt.studio_id = alpha; await route.fulfill({ response, json: receipt }); }, { times: 1 });
+  await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'no valid bounded text receipt for this exact request'); assert.equal(created, closed); assert.equal(await page.locator('#diagnostics-provenance dd').count(), 0); await text('#diagnostics-connection', 'closure not reported'); await probeAgain();
+  closeFailure = true; await page.locator('#diagnostics-read').click(); await text('#diagnostics-notice', 'STUDIO_CLOSE_FAILED'); await text('#diagnostics-connection', 'closure not reported'); assert.equal(created, closed); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); await probeAgain();
+  largeOutput = true; await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', 'Display truncated'); assert.equal(Buffer.byteLength((await page.locator('#diagnostics-output').textContent()).split('\n')[0]), NATIVE_DISPLAY_BYTES); assert.equal(created, closed);
+  // Dispatch the page lifecycle events in Edge while the controller holds a request.
+  holdRead = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const exitReadAccepted = new Promise<void>(resolve => { readAccepted = resolve; });
+  await page.locator('#diagnostics-read').click(); await exitReadAccepted;
+  await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent('pagehide')); window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
+  const readResponse = page.waitForResponse('**/v1/native/read'); releaseRead(); await readResponse; await text('#diagnostics-request-status', 'discarded after page exit'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(await page.locator('#diagnostics-provenance dd').count(), 0); assert.equal(created, closed); await probeAgain();
+  holdInventory = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const exitInventoryAccepted = new Promise<void>(resolve => { inventoryAccepted = resolve; });
+  await page.locator('#diagnostics-probe').click(); await exitInventoryAccepted;
+  await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent('pagehide')); window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
+  const inventoryResponse = page.waitForResponse('**/v1/native/capabilities'); releaseRead(); await inventoryResponse; await text('#diagnostics-request-status', 'discarded after page exit'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed); await probeAgain();
+  // Hold an old HTTP response after its controller closes, then deliver it during a newer request.
+  let releaseOldResponse: () => void = () => {}, oldResponseReady: () => void = () => {};
+  const oldResponseHeld = new Promise<void>(resolve => { releaseOldResponse = resolve; });
+  const oldResponseAccepted = new Promise<void>(resolve => { oldResponseReady = resolve; });
+  await page.route('**/v1/native/capabilities', async (route: any) => { const response = await route.fetch(); oldResponseReady(); await oldResponseHeld; await route.fulfill({ response }); }, { times: 1 });
+  await page.locator('#diagnostics-probe').click(); await oldResponseAccepted; assert.equal(created, closed);
+  await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent('pagehide')); window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
+  holdInventory = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const newInventoryAccepted = new Promise<void>(resolve => { inventoryAccepted = resolve; });
+  await page.locator('#diagnostics-probe').click(); await newInventoryAccepted;
+  const oldResponse = page.waitForResponse('**/v1/native/capabilities'); releaseOldResponse(); await (await oldResponse).finished();
+  await page.evaluate(() => new Promise<void>(resolve => setTimeout(resolve, 0)));
+  await text('#diagnostics-request-status', 'Capability observation in flight'); assert.equal(await page.locator('#diagnostics-probe').isDisabled(), true); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed + 1);
+  releaseRead(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(created, closed);
+  await page.locator('#diagnostics-studio').selectOption(beta);
+  toolError = true; await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'Fixture tool error'); await text('#diagnostics-request-status', 'failed'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed);
   await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', beta);
   if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('section').filter({ has: page.locator('#diagnostics-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.native-desktop.png' });
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true); if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('section').filter({ has: page.locator('#diagnostics-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.native-mobile.png' });
   unavailable = true; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'vetted official Studio MCP executable is unavailable'); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal((await page.locator('#diagnostics-notice').textContent()).includes(TOKEN), false);
   unavailable = false; inventory = []; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'No native Studio windows'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
+  t.diagnostic('Fixture native connections created=' + created + ', closed=' + closed + '; targeted reads=' + targeted.length + '; no live Studio calls');
   assert.deepEqual(errors, []); assert.ok(targeted.every(call => (NATIVE_READ_METHODS as readonly string[]).includes(call.method))); assert.ok(targeted.every(call => call.args.studio_id === alpha || call.args.studio_id === beta));
 });
+

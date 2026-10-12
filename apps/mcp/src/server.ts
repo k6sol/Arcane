@@ -6,7 +6,7 @@ import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
-import { assetInput, assetJobId } from './asset-schemas.js';
+import { assetInput, assetJobId, assetHistoryInput } from './asset-schemas.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -99,15 +99,15 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     ({timeoutMs,...input},signal)=>client.workSubmit(input,{timeoutMs,signal}));
   register('assets_probe', 'Read: probe installed local Blender/Python using the daemon’s fixed bundled runtime checks. Returns observed capabilities or unavailable; no arbitrary scripts, executable paths or uploads. A timeout may leave the probe running.',
     z.strictObject({ timeoutMs }), READ, (input, signal) => client.assetsProbe({ ...input, signal }));
-  register('assets_jobs', 'Read: list local asset jobs and their actual running/terminal state. Use after an ambiguous start/cancel acknowledgement; this does not start or replay a job.',
-    z.strictObject({ timeoutMs }), READ, (input, signal) => client.assetsJobs({ ...input, signal }));
+  register('assets_jobs', 'Read: fetch one bounded local asset history page, preserving full recipes and observed state. limit is 1–64 (daemon default 32); use nextCursor as after for the next explicit page. No automatic pagination, start or replay. Use after an ambiguous acknowledgement.',
+    assetHistoryInput.extend({ timeoutMs }), READ, (input, signal) => client.assetsJobs({ ...input, signal }));
   register('assets_start', 'Write: user-authorized local asset generation using hero-prop, environment-kit or a bounded custom-assembly JSON recipe (96 parts, 8 materials, 64 sockets; box/cylinder/cone/sphere/closed mesh). Shared normalization/topology/budget preflight runs before HTTP. Custom size/color come from the recipe; fixed-template defaults are unchanged. The daemon chooses contained output and its installed runtime. No scripts, paths, imports, uploads or publication accepted. Returns a job acknowledgement, not completed production evidence. On timeout inspect assets_jobs; never auto-retry.',
     assetInput.extend({ timeoutMs }), { ...WRITE, destructiveHint: false },
     ({ timeoutMs, ...input }, signal) => client.assetsStart(input, { timeoutMs, signal }));
   register('assets_cancel', 'Write: user-authorized cancellation of this exact local jobId. Partial artifacts remain for review. A lost acknowledgement is ambiguous; inspect assets_jobs and do not repeat automatically.',
     z.strictObject({ jobId: assetJobId, timeoutMs }), WRITE,
     ({ jobId, timeoutMs }, signal) => client.assetsCancel(jobId, { timeoutMs, signal }));
-  register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including assembly/source-request hashes, mesh geometry hashes and bounds, socket/export poses, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.',
+  register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including assembly/source-request hashes, mesh geometry hashes, bounds, floor origins and measured PBR values, socket/export poses, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.',
     z.strictObject({ jobId: assetJobId, timeoutMs }), READ,
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
   return server;

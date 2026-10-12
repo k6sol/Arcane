@@ -35,16 +35,20 @@
     {
       "id": "UI-01",
       "title": "Local Studio workbench",
-      "owner": "Ptolemy",
-      "agentId": "01a12cfa-659e-7cf2-a5aa-4a294daad823",
-      "state": "in_progress",
+      "owner": "Pauli",
+      "agentId": "01a12d3b-1067-7062-959c-65efb2c61d89",
+      "state": "verified_component",
       "dependsOn": [
         "CORE-01"
       ],
       "acceptance": "Genuine pairing/session/command/receipt flows and safe DOM",
-      "evidence": [],
+      "evidence": [
+        "tests/unit/studio-ui.test.ts",
+        "docs/build/UI.md",
+        "C:/Users/alexk/AppData/Local/Temp/arcane-ui-native-finish-13539eee3a4a461390fc7a6eb04f2641/studio-ui-proof.txt"
+      ],
       "priorAgentId": "01a12ce4-4d46-7273-ba15-080e2622e8f3",
-      "note": "Updated requirement: compact Arcane branding and persistent key-only Studio connection, no URL/pair-code fields."
+      "note": "33 real-Edge UI fixture checks and 16 controller fixtures passed; 37 fixture connections opened/closed. No live Studio calls."
     },
     {
       "id": "MCP-01",
@@ -58,9 +62,11 @@
       "acceptance": "Actual official SDK client calls with bounded outcomes and explicit write scope",
       "evidence": [
         "apps/mcp/.focused-tests.log",
-        "tests/unit/mcp.test.ts"
+        "tests/unit/mcp.test.ts",
+        "apps/mcp/src/assembly-schemas.ts"
       ],
-      "priorAgentId": "01a12ce4-51f1-76c0-b059-63f72952ea23"
+      "priorAgentId": "01a12ce4-51f1-76c0-b059-63f72952ea23",
+      "note": "46 scoped SDK/HTTP fixtures passed; custom recipe/evidence and bounded history preserved. Actual native Blender manifest independently matches these schemas."
     },
     {
       "id": "ASSET-01",
@@ -129,16 +135,137 @@
         "tests/unit/native-studio.test.ts",
         "tests/unit/native-http.test.ts"
       ]
+    },
+    {
+      "note": "Historical arcane-local-OYBydj passed 10 clean-package daemon checks with graceful shutdown; the previously recorded 317 regression passes predate the new UI. Exact brand PNG and named first-run script collection and required UI payload checks are implemented; 20/20 focused offline UI packaging tests passed, including synthetic thirteen-check HTTP acceptance and credential redaction. The out-of-scope legacy release fixture needs the required frontend files. Current UI/first-run clean-package and regression acceptance awaits the parent's fresh serial build. Package is unsigned and the full product remains incomplete.",
+      "id": "RELEASE-SOURCE-01",
+      "evidence": [
+        "scripts/create-local-release.mjs",
+        "scripts/product-doctor.mjs",
+        "scripts/start-product.mjs",
+        "tests/release/local-product.test.mjs",
+        "tests/release/ui-assets.test.mjs",
+        "scripts/check-local-release.mjs",
+        "docs/build/RELEASE.md",
+        "docs/research/local-release-checks.json"
+      ],
+      "dependsOn": [
+        "CORE-01",
+        "MCP-01"
+      ],
+      "title": "Clean source package, startup checker and lifecycle acceptance",
+      "state": "in_progress",
+      "owner": "parent",
+      "acceptance": "No credentials/runtime data; required UI module/brand PNG and first-run files in the integrity manifest; npm ci and build in an independent package; isolated daemon startup, exact public UI routes/safe headers, security and shutdown"
+    },
+    {
+      "dependsOn": [
+        "ASSET-01"
+      ],
+      "acceptance": "Boundedmultipartrecipes/transforms/materials/roles/socketpreflight, actual Blender generation/deepaudit/export and currentMCPintegration",
+      "id": "CUSTOM-ASSET-01",
+      "owner": "Huygens",
+      "state": "verified_component",
+      "agentId": "01a12d3b-0799-72e1-a2b7-3ebe487ba8e2",
+      "note": "41 scoped fixtures plus real Blender generation/reopen/export/deep audit. 19 parts, 4 materials, 1102 render /116 LOD/56 collision triangles and two sockets. Technical pipeline proof only; production art and Roblox import remain unverified.",
+      "title": "Data-only bespoke Blender assemblies",
+      "evidence": [
+        "packages/asset-pipeline/.runtime/custom-verification-6ee38b20-5cd5-4f8e-bef4-1b4cd923f178/acceptance.json",
+        "workers/blender/verify-custom.mjs",
+        "tests/unit/assets.test.ts",
+        "tests/unit/asset-http.test.ts"
+      ]
+    },
+    {
+      "dependsOn": [
+        "WORKFLOW-01"
+      ],
+      "acceptance": "Bounded genuineappserver lifecycle selectedmodel/effort humanapprovals and richnativeevents; realinferenceaccessverifiedseparately",
+      "id": "CODEX-CLIENT-01",
+      "owner": "parent",
+      "state": "in_progress",
+      "note": "HumanHTTP/UI and native protocol fixtures pass. Full regression317/317, skill/release40/40 and Luau16/16. Afterward3MCPinventoryfixtures pass; explicitly authorized actualgpt-6.1-sol/ultra readonlyturn +singleArcaneMCPwork_runsroundtrip succeeded withallotherthreadMCPserversdisabled. GeneralproductionMCPisolation/nativefeaturecoverage remainopen.",
+      "title": "Personal-local native Codex conversation integration",
+      "evidence": [
+        "packages/codex-client/src",
+        "tests/unit/codex-client.test.ts",
+        "tests/unit/codex-http.test.ts",
+        "tests/unit/codex-chat-ui.test.ts",
+        "runtime/verification/codex-ui/codex-chat-test.log",
+        "docs/research/native-codex-smoke-checks.json",
+        "scripts/check-native-codex-smoke.mjs"
+      ],
+      "priorAgentId": "01a12d9d-5304-7872-8472-7cbc3d5aef0b"
+    },
+    {
+      "id": "UI-REFERENCE-02",
+      "title": "Reference-led Arcane workspace and real artifact delivery",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [
+        "UI-01"
+      ],
+      "acceptance": "Faithful charcoal/red split workspace, no hardcoded house, inert draft/navigation, all existing scopes/confirmations retained, verified export downloads",
+      "evidence": [
+        "apps/desktop/public/studio.html",
+        "apps/desktop/src/workspace-shell.ts",
+        "apps/desktop/src/asset-downloads.ts",
+        "tests/unit/workspace-shell.test.ts",
+        "tests/unit/asset-downloads.test.ts",
+        "docs/build/UI.md"
+      ],
+      "note": "Current fresh-source root regression: 407/407; focused UI/download checks:50/50; real Edge fixtures. No native Studio or additional model turn. OneDrive compiler glob repaired with explicit source inputs."
+    },
+    {
+      "id": "ONBOARDING-PROJECTS-01",
+      "title": "First-run setup and isolated user project launches",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [
+        "UI-REFERENCE-02"
+      ],
+      "acceptance": "No developer credentials, fixed safe bootstrap, explicit install/build/launch, canonical perproject state/assets/native journals, accessible guidance",
+      "evidence": [
+        "scripts/setup-arcane.ps1",
+        "scripts/open-project.mjs",
+        "docs/build/FIRST_RUN.md",
+        "docs/build/PROJECTS.md",
+        "tests/release/setup.test.mjs",
+        "tests/release/projects.test.mjs"
+      ],
+      "note": "88/88 combined release+skill fixtures passed. Independent xXCvSN package installed108lockeddependencies, built77explicit TSsources, doctorpassed and13actualdaemonchecks passed/shutdown0. Source snapshot hash59a0007bb0dc49da76840180c9a349e3f77d6387bd7908cb228a6ebc945bf34d; later documentation/fixture corrections do not retroactively alter that snapshot. Signed Windows installer remains open."
+    },
+    {
+      "id": "LEARNING-HISTORY-01",
+      "title": "Reviewed learning and shared native conversation history",
+      "owner": "parent",
+      "state": "in_progress",
+      "dependsOn": [
+        "CODEX-CLIENT-01",
+        "ONBOARDING-PROJECTS-01"
+      ],
+      "acceptance": "Useroptin, editable/provenmemory reused as lowerauthoritycontext, samepersistentnativehistoryIDs, Codex+Claudehistory UI/promptintegration; no coverttraining upload/modelweightclaim",
+      "evidence": [
+        "packages/storage/src/learning-store.ts",
+        "packages/codex-client/src/history.ts",
+        "tests/unit/learning-store.test.ts",
+        "tests/unit/codex-history.test.ts",
+        "docs/build/LEARNING.md",
+        "docs/build/NATIVE_HISTORY.md",
+        "docs/research/native-desktop-history-checks.json"
+      ],
+      "note": "17learning+30nativehistoryfixtures passed within407wholeproductchecks. Codexdesktopconnectorread original genuineCLI smokethread successfully,0newturns. Foundations are not yet wired into HTTP/MCP/settings/native prompts or a persistent history UI. Claude and concurrent native desktop registration/sync unverified. Nextcriticalpath: humanconsent memoryroutes/UI + scopednative thread/list/read/rehydration; preserve separate native approvals and Studio deferral."
     }
   ],
-  "updatedAt": "2026-10-11T23:12:08.9359324Z",
-  "previousTurnClassification": "progress: fresh 182 unit passes/2 browser skips, 32 skill passes and 16 Luau/package passes; local release/source startup and 6 release tests; clean install exposed and repaired missing npm workspace lock entries.",
+  "updatedAt": "2026-10-12",
+  "previousTurnClassification": "progress: human native conversation/security integration;317fullbrowser/unit +40skills/release +16Luaufixtures;realcleancopy10checks;actualauthorizedsingleSol6.1Ultra readonlyturn/ArcaneMCProundtrip. NativeStudio userdeferred; productioninheritedMCPisolation/fullfeatures/imports/skills/game-quality remainopen.",
   "requiredCompletionStillOpen": [
     "native-plugin-key-only-widget-and-http",
     "dirty-editor-and-selective-restore-native",
     "Roblox-import-axis-materials-rigs",
     "general-custom-asset-and-image-workflows",
     "native-client-feature-and-task-end-to-end",
-    "full-local-release-and-skill-behavior-gates"
+    "full-local-release-and-skill-behavior-gates",
+    "embedded-native-inherited-MCP-isolation-and-explicit-opt-in"
   ]
 }

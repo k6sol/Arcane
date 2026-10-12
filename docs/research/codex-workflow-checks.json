@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-12T01:10:37.261Z",
+  "evidenceKind": "local-human-http-sqlite-and-spawned-node-protocol-fixtures",
+  "tests": 93,
+  "passed": 93,
+  "failed": 0,
+  "skipped": 0,
+  "componentCounts": {
+    "nativeProtocol": 81,
+    "humanHttp": 12
+  },
+  "log": "runtime/verification/codex-hardening.log",
+  "logSha256": "1cdff0765a4c4f3ebef20dbf2024f60ec22b703819865182d8615def141f20db",
+  "sourceHashes": {
+    "apps/daemon/src/codex-service.ts": "849ef49c0f971a2461ef3293f04cc33b59f30af166149a5064d774c1cbc79199",
+    "apps/daemon/src/codex-routes.ts": "9957903a912865a11fcdd03324a416da772a824c0492ae44269bf41ae2b30f3c",
+    "apps/daemon/src/lab-server.ts": "37169a8bacd24b808dd47db8a7f9b3d4558990c433d66d74f0823cb366f4d30c",
+    "packages/codex-client/src/session.ts": "7a18da47ff709c7ba1164b3b2104109ffd7fd2e2f04dc72cafa10559b4386eb5",
+    "packages/codex-client/src/transport.ts": "7b1bb3327c793e245d01f419466df25860d0419f0cee907be54edb53bfa6758a",
+    "packages/codex-client/src/mcp-profile.ts": "3623154783ed5ceb1ca2663d881ce73f3fdddda596d69ec6e781c42966a22805",
+    "packages/codex-client/fixtures/protocol.mjs": "6618a9237ad4f63ee8e04d0072f07587d2a00aca421672ad599bdbb59c30c93d",
+    "tests/unit/codex-client.test.ts": "cd631b31a9fbec43ec436352f2d44399cacb6d68bfca6c84570af05199c79638",
+    "tests/unit/codex-http.test.ts": "057bff1287e502e708962418f27caad82fa986231127eb39df32576fc7d8e1ae"
+  },
+  "reviewFixes": [
+    "early-start write revocation without known turn ID",
+    "previous-turn approval adoption refused",
+    "malformed success acknowledgements remain dispatched unknown",
+    "journal exhaustion fences every active writer safety request",
+    "pre-dispatch failures preserve their own requested scope"
+  ],
+  "nativeInferenceRuns": 0,
+  "studioCalls": 0,
+  "limitations": [
+    "No installed CLI model turn, sandbox/process-tree acceptance, actual Arcane MCP status/tool acceptance or live Studio test.",
+    "Fixture proofs do not establish entitlement or complete native feature support."
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "actual-desktop-connector-read-of-existing-native-cli-thread",
+  "threadId": "01a12dc9-c3de-7ba2-bff7-677013eb6059",
+  "hostId": "local",
+  "projectKind": "disposable-native-smoke",
+  "turns": [
+    {
+      "id": "01a12dc9-c9a0-7181-883e-743f352fff97",
+      "status": "completed",
+      "publicItemTypes": [
+        "userMessage",
+        "agentMessage",
+        "mcpToolCall",
+        "agentMessage"
+      ]
+    }
+  ],
+  "newInferenceTurns": 0,
+  "newThreadsCreated": 0,
+  "desktopReadPassed": true,
+  "sidebarVisibilityVerified": false,
+  "arcaneHistoryUiIntegrated": false,
+  "claudeVerified": false
+}

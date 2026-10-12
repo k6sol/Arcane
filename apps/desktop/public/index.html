@@ -1,15 +1,124 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Arcane · Connection lab</title><link rel="stylesheet" href="/lab.css"><script type="module" src="/lab.js"></script></head>
-<body><div class="shell"><aside><div class="brand"><span class="mark">A</span>ARCANE</div><p class="eyebrow">CREATOR WORKSPACE</p><div class="nav active">01 <span>Connections</span></div><div class="nav">02 <span>Studio bridge · pending</span></div><div class="nav">03 <span>Asset pipeline · pending</span></div><div class="side-note">Your provider. Your model.<br>Your project.<p>Development foundation<br>Not a finished platform</p></div></aside>
-<main><header><div><p class="eyebrow">LOCAL FOUNDATION / PROVIDER LAB</p><h1>Bring your best tools.</h1><p class="subtitle">Choose deliberately. Keep native capabilities visible. Never disguise API charges as subscription usage.</p></div><span class="badge">NO INFERENCE RUNNING</span></header>
-<div class="toolbar"><div id="status" role="status" aria-live="polite">Checking local session…</div><button id="refresh" class="secondary">Refresh native status</button></div>
-<section id="connections" class="connections" aria-label="Provider connections"></section>
-<section class="selection-panel"><div class="section-head"><div><p class="eyebrow">EXPLICIT MODEL CONTROL</p><h2>Pick the exact model and effort.</h2></div><span class="small-label">No automatic downgrade</span></div>
-<form id="selection"><div class="fields"><label>Platform<select id="provider"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label><label>Model<select id="model" required><option value="">Refresh to discover models</option></select></label><label>Reasoning effort<select id="effort" required><option value="">Choose a model first</option></select></label><button type="submit" id="save">Save preference</button></div></form>
-<p id="saved" class="hint">A saved preference is not proof that inference ran with it.</p><p class="hint">Catalogue ≠ entitlement. Claude aliases ≠ per-model support. The future task runtime must confirm requested versus applied settings.</p></section>
-<div class="section-head feature-heading"><div><p class="eyebrow">PROVIDER-NATIVE WORKFLOWS</p><h2>See what is actually connected.</h2></div><span class="small-label">No fake “all features enabled” switch</span></div>
-<section id="features" class="features" aria-label="Native feature availability"></section>
-<section class="notes"><div><h3>Connect through the native CLI</h3><p>For a new login, use the provider’s own browser sign-in. Arcane does not read or copy its credential files.</p><code id="login-command">codex login</code></div><div><h3>Quality before convenience</h3><p>Image generation, design canvases, plugins, browser tools and voice each need a real supported route. Native handoff means documented workflow—not embedded execution.</p></div></section>
-<details><summary>Connection warnings & limitations</summary><ul id="warnings"></ul><p class="hint">This lab does not run coding tasks, tools, media generation or publishing. Studio pairing, Electron packaging and feature-specific adapters remain pending.</p></details>
-</main></div></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Arcane - Provider connections</title>
+  <link rel="stylesheet" href="/lab.css">
+  <script type="module" src="/lab.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to provider settings</a>
+  <div class="shell">
+    <div class="brand-rail" aria-hidden="true">
+      <svg class="arcane-logo" viewBox="0 0 64 64"><path d="M32 4 4 57h13L32 28l15 29h13L32 4Z" fill="currentColor"/><path d="m27 40 19 13-6-13H27Z" fill="currentColor"/><path d="m19 21 7 5 6-12-5-8-8 15Z" fill="currentColor" opacity=".8"/></svg>
+      <span class="rail-copy">IDEAS<br>INTO<br>WORLDS</span>
+    </div>
+    <aside class="sidebar" aria-label="Provider settings navigation">
+      <div class="brand">ARCANE<small>BUILD WORLDS FASTER</small></div>
+      <div class="sidebar-context">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 3-1 3-3 1-2 4 2 2v4l4 3 3-1 3 1 4-3v-4l2-2-2-4-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span>Provider settings</span>
+      </div>
+      <nav aria-label="On this page">
+        <a href="#setup-heading">Getting started</a>
+        <a href="#connections-heading">Native status</a>
+        <a href="#selection-heading">Model preference</a>
+        <a href="#features-heading">Feature availability</a>
+        <a href="#limitations">Warnings &amp; limitations</a>
+      </nav>
+      <div class="side-note">
+        <h2>Your provider.<br>Your choice.</h2>
+        <p>Sign-in stays with the native CLI. This lab checks metadata and saves a requested model preference.</p>
+      </div>
+      <p class="sidebar-footer">Arcane connection lab</p>
+    </aside>
+    <div class="workspace">
+      <div class="topbar"><span class="page-tab">Provider connections</span><span class="topbar-note">Local settings</span></div>
+      <main id="main" tabindex="-1">
+        <header class="page-heading">
+          <div>
+            <p class="eyebrow">Settings / Providers</p>
+            <h1>Connect your provider.</h1>
+            <p class="subtitle">Use your own Codex or Claude Code sign-in. Check what the native CLI reports, then choose the model and effort you want.</p>
+          </div>
+          <span class="badge">Metadata only</span>
+        </header>
 
+        <section class="setup-panel" aria-labelledby="setup-heading">
+          <div class="section-head"><h2 id="setup-heading" tabindex="-1">Get started</h2><span class="small-label">Already signed in? Refresh native status below.</span></div>
+          <ol class="setup-steps">
+            <li>
+              <h3>Install a provider CLI</h3>
+              <p>A CLI is the provider's terminal app. Install Codex or Claude Code on the same computer and user account as Arcane.</p>
+              <details class="install-help">
+                <summary>Install with npm</summary>
+                <p>With Node.js 24 or later and npm installed, open a terminal (PowerShell on Windows). Run the command for your chosen provider. Installation needs internet access.</p>
+                <div class="command-line"><span>Codex</span><code>npm install -g @openai/codex@latest</code></div>
+                <div class="command-line"><span>Claude Code</span><code>npm install -g @anthropic-ai/claude-code</code></div>
+                <p>Open a new terminal and check <code>codex --version</code> or <code>claude --version</code>. If Arcane still cannot find it, restart Arcane to pick up the new installation.</p>
+              </details>
+            </li>
+            <li>
+              <h3>Sign in from your terminal</h3>
+              <p>Run the command for your provider and finish its browser sign-in. Use your subscription account to save a preference in this lab.</p>
+              <div class="command-line"><span>Codex</span><code>codex login</code></div>
+              <div class="command-line"><span>Claude Code</span><code>claude auth login</code></div>
+            </li>
+            <li>
+              <h3>Check and choose</h3>
+              <p>Return here and select <strong>Refresh native status</strong>. Choose a provider, a reported model and reasoning effort, then select <strong>Save preference</strong>.</p>
+              <p class="hint">Saving records your request. It does not start a task or apply the choice to a running conversation.</p>
+            </li>
+          </ol>
+        </section>
+
+        <section class="connection-section" aria-labelledby="connections-heading">
+          <div class="section-head"><h2 id="connections-heading" tabindex="-1">Native provider status</h2><span class="small-label">Reported sign-in and catalogue metadata</span></div>
+          <div class="toolbar">
+            <div id="status" role="status" aria-live="polite" aria-atomic="true">Checking local session.</div>
+            <button id="refresh" type="button" class="secondary" aria-describedby="status">Refresh native status</button>
+          </div>
+          <div id="connections" class="connections"><p class="empty">No provider metadata yet. Refresh native status to check installation and sign-in.</p></div>
+        </section>
+
+        <section class="selection-panel" aria-labelledby="selection-heading">
+          <div class="section-head"><div><p class="eyebrow">Model settings</p><h2 id="selection-heading" tabindex="-1">Choose your exact model.</h2></div><span class="small-label">No automatic fallback</span></div>
+          <form id="selection" aria-labelledby="selection-heading">
+            <div class="fields">
+              <div class="field"><label for="provider">Provider</label><select id="provider" aria-describedby="selection-help"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></div>
+              <div class="field"><label for="model">Model</label><select id="model" required disabled aria-describedby="model-help selection-help"><option value="">Refresh to discover models</option></select></div>
+              <div class="field"><label for="effort">Reasoning effort</label><select id="effort" required disabled aria-describedby="selection-help"><option value="">Choose a model first</option></select></div>
+              <button type="submit" id="save" disabled aria-describedby="selection-help saved">Save preference</button>
+            </div>
+          </form>
+          <p id="selection-help" class="hint">Refresh native status to discover model and effort choices.</p>
+          <p id="saved" class="saved-preference" role="status" aria-live="polite" aria-atomic="true">No preference saved in this view. Saving a preference does not run inference.</p>
+          <p id="model-help" class="hint">A listed model does not confirm your account can use it. Claude Code reports aliases; support for each model and effort still needs verification. API and cloud sign-in are reported separately and cannot be used to save a subscription preference here.</p>
+        </section>
+
+        <section class="feature-section" aria-labelledby="features-heading">
+          <div class="section-head feature-heading"><div><p class="eyebrow">Provider capabilities</p><h2 id="features-heading" tabindex="-1">What is available, and where.</h2></div><span class="small-label">For the provider selected above</span></div>
+          <p class="section-description">Availability describes a reported route. Features marked &ldquo;Use native client&rdquo; stay in that provider's app; sign-in alone does not enable them in this lab.</p>
+          <div id="features" class="features"><p class="empty">Feature metadata will appear after a native status check.</p></div>
+        </section>
+
+        <section class="notes" aria-label="Sign-in and capability guidance">
+          <div><h3>Sign-in stays with your provider</h3><p>For the provider selected above, run this in a terminal and complete its sign-in. Then refresh native status here. Arcane does not read or copy provider credential files.</p><code id="login-command">codex login</code></div>
+          <div><h3>A preference is a request</h3><p>This lab reads metadata and saves your choice. It does not launch coding, image generation, browser tools or publishing. Usage, remaining allowance and billing are not checked here.</p></div>
+        </section>
+
+        <details id="limitations" class="limitations">
+          <summary>Connection warnings &amp; limitations</summary>
+          <ul id="warnings"></ul>
+          <p class="hint">Missing CLI: check its version in a new terminal, then restart Arcane if needed. Signed out: finish the native login and refresh. No models: review any provider warnings and refresh again.</p>
+          <p class="hint">The lab does not validate model access by running a task. Requested settings need confirmation from the runtime that will actually use them.</p>
+        </details>
+        <noscript><p class="notice">JavaScript is required to read native metadata and save a preference. The installation and sign-in steps above can still be read here.</p></noscript>
+        <footer><span>ARCANE</span><span>Provider connection lab · Local metadata and preferences</span></footer>
+      </main>
+    </div>
+  </div>
+</body>
+</html>
