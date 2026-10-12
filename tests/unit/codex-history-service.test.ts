@@ -25,18 +25,30 @@ log({method:'fixture/spawn',cwd:process.cwd()});
 const send = value => process.stdout.write(JSON.stringify(value)+'\n');
 const item = (id='answer',text='Recorded assistant answer.') => ({type:'agentMessage',id,text,phase:'final_answer'});
 const turn = (items,id='fixture-turn') => ({id,items,itemsView:'full',status:'completed'});
-const history = mode => ({thread:{id:mode==='wrong-thread'?'foreign-thread':mode==='new-thread'?'fixture-new-thread':'fixture-thread',
-  sessionId:mode==='wrong-session'?'foreign-session':'fixture-session',cwd:mode==='wrong-cwd'?process.cwd()+'/other':process.cwd(),
-  ephemeral:mode==='ephemeral',historyMode:mode==='paginated'?'paginated':'legacy',path:'PRIVATE_TRANSCRIPT_PATH',
-  turns:mode==='missing-turns'?undefined:mode==='turn-limit'?Array.from({length:65},(_,n)=>turn([item('i-'+n)],'t-'+n)):
-    mode==='item-limit'?[turn(Array.from({length:257},(_,n)=>item('i-'+n)))]:mode==='empty'?[]:
-    [turn([{type:'userMessage',id:'question',content:[{type:'text',text:'Inspect this fixture.'}]},
-      item('answer','Recorded assistant answer. api_key=sk-proj-syntheticHistorySecret12345678'),
-      {type:'reasoning',id:'private',summary:[{text:'PRIVATE_REASONING'}],content:'PRIVATE_REASONING'},
-      {type:'commandExecution',id:'tool',command:'PRIVATE_COMMAND',aggregatedOutput:'password=fixturePassword123',status:'completed'},
-      {type:'mcpToolCall',id:'mcp',arguments:{secret:'PRIVATE_ARGUMENTS'},result:{content:[{type:'text',text:'Public tool output.'}],structuredContent:{secret:'PRIVATE_STRUCTURED'}}},
-      ...(mode==='unsupported-item'?[{type:'futureItem',id:'future',text:'PRIVATE_UNKNOWN'}]:[])])]
-}});
+const history = mode => {
+  const question={type:'userMessage',id:'question',content:[{type:'text',text:'Inspect this fixture.'}]};
+  const answer=item('answer','Recorded assistant answer. api_key=sk-proj-syntheticHistorySecret12345678');
+  const reasoning={type:'reasoning',id:'private',summary:[{text:'PRIVATE_REASONING'}],content:'PRIVATE_REASONING'};
+  const mcp={type:'mcpToolCall',id:'mcp',arguments:{secret:'PRIVATE_ARGUMENTS'},result:{content:[{type:'text',text:'Public tool output. password=fixturePassword123'}],structuredContent:{secret:'PRIVATE_STRUCTURED'}}};
+  const publicItems=[question,answer,reasoning,{type:'commandExecution',id:'tool',command:'PRIVATE_COMMAND',aggregatedOutput:'password=fixturePassword123',status:'completed'},mcp,
+    ...(mode==='unsupported-item'?[{type:'futureItem',id:'future',text:'PRIVATE_UNKNOWN'}]:[])];
+  // Public metadata shape reported by the parent: one completed full turn, five native item kinds.
+  const paginatedItems=[question,item('progress','Public assistant progress.'),mcp,reasoning,answer];
+  let turns=mode==='missing-turns'||mode==='paginated-missing-turns'?undefined:
+    mode==='turn-limit'?Array.from({length:65},(_,n)=>turn([item('i-'+n)],'t-'+n)):
+    mode==='item-limit'?[turn(Array.from({length:257},(_,n)=>item('i-'+n)))]:
+    mode==='empty'||mode==='paginated-empty'?[]:[turn(mode.startsWith('paginated')?paginatedItems:publicItems)];
+  if(mode==='paginated-summary')turns=[{...turn(paginatedItems),itemsView:'summary'}];
+  if(mode==='paginated-missing-view')turns=[{...turn(paginatedItems),itemsView:undefined}];
+  if(mode==='paginated-mixed-views')turns=[turn(paginatedItems),
+    {...turn([item('summary','PRIVATE_SUMMARY_OUTPUT')],'fixture-summary'),itemsView:'summary'},
+    {...turn([item('missing','PRIVATE_MISSING_VIEW_OUTPUT')],'fixture-missing'),itemsView:undefined}];
+  const result={thread:{id:mode.endsWith('wrong-thread')?'foreign-thread':mode==='new-thread'?'fixture-new-thread':'fixture-thread',
+    sessionId:mode.endsWith('wrong-session')?'foreign-session':'fixture-session',cwd:mode.endsWith('wrong-cwd')?process.cwd()+'/other':process.cwd(),
+    ephemeral:mode==='ephemeral',historyMode:mode==='unknown-mode'?'future-mode':mode.startsWith('paginated')?'paginated':'legacy',path:'PRIVATE_TRANSCRIPT_PATH',turns}};
+  if(mode==='paginated-envelope')result.nextCursor='older';
+  return result;
+};
 createInterface({input:process.stdin}).on('line',line=>{
   const message=JSON.parse(line);log(message);const mode=readFileSync(modeFile,'utf8').trim();
   if(message.method==='initialize')send({id:message.id,result:{userAgent:'synthetic-history-fixture'}});
@@ -150,6 +162,53 @@ test('explicit load sends only public read in its bounded child, preserves IDs, 
   recorded.result.entries[0]!.text='mutated';assert.equal(f.service.state().nativeHistory!.recorded!.result.entries[0]!.text,'Inspect this fixture.');
 });
 
+test('full hydrated paginated thread/read persists redacted exact-scoped IDs and survives offline restart',async t=>{
+  const f=await fixture(t,'paginated'),scope=await f.bind(f.service),before=f.sessions[0]!.snapshot(),requestId=randomUUID();
+  const loaded=await f.load(f.service,scope.connectionId,scope.threadId,requestId),binding=loaded.state.nativeHistory!,recorded=binding.recorded!,result=recorded.result;
+  assert.equal(loaded.record.state,'acknowledged');assert.equal(binding.projectPath,f.projectPath);assert.equal(binding.threadId,THREAD);assert.equal(binding.sessionId,SESSION);
+  assert.equal(recorded.requestId,requestId);assert.equal(recorded.connectionId,scope.connectionId);assert.equal(recorded.provenance,'spawned-node-fixture');
+  assert.equal(result.completeness,'complete');assert.equal(result.marker,null);assert.deepEqual(result.gaps,[]);assert.equal(result.truncated,false);assert.equal(result.excludedItems,1);assert.equal(result.redacted,true);
+  assert.deepEqual(result.entries.map(entry=>({role:entry.role,ids:entry.ids})),[
+    {role:'user',ids:{threadId:THREAD,sessionId:SESSION,turnId:'fixture-turn',itemId:'question'}},
+    {role:'assistant',ids:{threadId:THREAD,sessionId:SESSION,turnId:'fixture-turn',itemId:'progress'}},
+    {role:'tool',ids:{threadId:THREAD,sessionId:SESSION,turnId:'fixture-turn',itemId:'mcp'}},
+    {role:'assistant',ids:{threadId:THREAD,sessionId:SESSION,turnId:'fixture-turn',itemId:'answer'}},
+  ]);
+  assert.equal(result.entries[2]!.text,'Public tool output. password=[REDACTED]');
+  assert.equal(result.entries[3]!.text,'Recorded assistant answer. api_key=[REDACTED]');assert.deepEqual(f.sessions[0]!.snapshot(),before);
+  const db=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));
+  try{
+    const row=db.prepare('SELECT project_path,thread_id,session_id,payload FROM native_history').get() as {project_path:string;thread_id:string;session_id:string;payload:string};
+    assert.equal(row.project_path,f.projectPath);assert.equal(row.thread_id,THREAD);assert.equal(row.session_id,SESSION);assert.deepEqual(JSON.parse(row.payload),recorded);
+    for(const secret of [SECRET,'fixturePassword123','PRIVATE_REASONING','PRIVATE_ARGUMENTS','PRIVATE_STRUCTURED','PRIVATE_TRANSCRIPT_PATH'])assert.ok(!row.payload.includes(secret));
+  }finally{db.close();}
+  const rows=await f.logs(),readPid=rows.find(row=>row.message.method==='thread/read')!.pid;
+  assert.deepEqual(rows.filter(row=>row.pid===readPid).map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read']);
+  assert.deepEqual(rows.find(row=>row.message.method==='thread/read')!.message.params,{threadId:THREAD,includeTurns:true});
+  await f.service.close();const restarted=f.open(f.projectPath,false),h=await http(t,restarted),count=(await f.logs()).length;
+  assert.deepEqual(restarted.state().nativeHistory,binding);assert.equal(restarted.state().snapshot,null);
+  const cached=await h.call('/v1/codex/history');assert.equal(cached.status,200);assert.deepEqual(JSON.parse(cached.text).nativeHistory,binding);
+  const replay=await f.load(restarted,scope.connectionId,scope.threadId,requestId);assert.equal(replay.replayed,true);assert.deepEqual(replay.state.nativeHistory,binding);
+  assert.equal(f.starts(),1);assert.equal((await f.logs()).length,count);
+  await restarted.close();const other=f.open(await realpath(f.other),false);assert.equal(other.state().nativeHistory,null);assert.equal(f.starts(),1);assert.equal((await f.logs()).length,count);
+});
+
+for(const mode of ['paginated-summary','paginated-missing-view','paginated-empty','paginated-missing-turns'])test(mode+' is recorded with an incomplete marker and cannot pretend to be hydrated',async t=>{
+  const f=await fixture(t,mode),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId),binding=loaded.state.nativeHistory!,result=binding.recorded!.result;
+  assert.equal(loaded.record.state,'acknowledged');assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);assert.ok(result.gaps.length>0);assert.deepEqual(result.entries,[]);
+  if(mode==='paginated-summary'||mode==='paginated-missing-view')assert.ok(result.gaps.some(gap=>gap.reason==='items-not-full'));
+  assert.ok(!JSON.stringify(binding).includes(SECRET));assert.ok(!JSON.stringify(binding).includes('PRIVATE_'));
+  await f.service.close();const restarted=f.open(f.projectPath,false);assert.deepEqual(restarted.state().nativeHistory,binding);assert.equal(restarted.state().snapshot,null);assert.equal(f.starts(),1);
+});
+
+test('paginated turns each require explicit full itemsView while valid hydrated turns retain their IDs',async t=>{
+  const f=await fixture(t,'paginated-mixed-views'),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId),result=loaded.state.nativeHistory!.recorded!.result;
+  assert.equal(loaded.record.state,'acknowledged');assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);
+  assert.deepEqual(result.gaps.filter(gap=>gap.reason==='items-not-full').map(gap=>gap.turnId),['fixture-summary','fixture-missing']);
+  assert.deepEqual(result.entries.map(entry=>entry.ids.itemId),['question','progress','mcp','answer']);assert.ok(result.entries.every(entry=>entry.ids.threadId===THREAD&&entry.ids.sessionId===SESSION&&entry.ids.turnId==='fixture-turn'));
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_SUMMARY_OUTPUT'));assert.ok(!JSON.stringify(result).includes('PRIVATE_MISSING_VIEW_OUTPUT'));assert.ok(!JSON.stringify(result).includes(SECRET));
+});
+
 test('recorded history survives restart and GET/replayed load remains offline without restoring grants',async t=>{
   const f=await fixture(t),scope=await f.bind(f.service),requestId=randomUUID(),loaded=await f.load(f.service,scope.connectionId,THREAD,requestId);
   await f.service.close();const restarted=f.open(f.projectPath,false),h=await http(t,restarted),count=(await f.logs()).length;
@@ -179,7 +238,7 @@ test('unknown/foreign/stale bindings are refused before native read; request ide
   assert.equal((await f.logs()).filter(row=>row.message.method==='thread/read').length,1);
 });
 
-for(const mode of ['wrong-thread','wrong-session','wrong-cwd','paginated','ephemeral','remote-error','invalid-json','frame-limit'])test('history '+mode+' refuses unsafe replacement and retains the last verified recording',async t=>{
+for(const mode of ['wrong-thread','wrong-session','wrong-cwd','unknown-mode','paginated-wrong-thread','paginated-wrong-session','paginated-wrong-cwd','paginated-envelope','ephemeral','remote-error','invalid-json','frame-limit'])test('history '+mode+' refuses unsafe replacement and retains the last verified recording',async t=>{
   const f=await fixture(t),scope=await f.bind(f.service),first=await f.load(f.service,scope.connectionId);
   await f.setMode(mode);const refused=await f.load(f.service,scope.connectionId);
   assert.equal(refused.record.state,'rejected');assert.deepEqual(refused.state.nativeHistory,first.state.nativeHistory);

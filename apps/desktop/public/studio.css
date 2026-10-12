@@ -58,7 +58,7 @@
 .tool-context-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px;border-bottom:1px solid var(--line)}.tool-context-header h2{font-size:14px;letter-spacing:0;margin-bottom:6px}.tool-context-header p{font-size:12px;color:var(--muted);max-width:310px}.tool-context-header button{padding:8px 10px;font-size:12px;flex-shrink:0}
 .artifact-toolbar{display:flex;align-items:center;gap:12px;padding:0 12px 0 4px;border-bottom:1px solid var(--line);min-height:52px}.artifact-toolbar nav{display:flex;flex:1;min-width:0}.artifact-toolbar nav button{padding:16px;background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--muted);font-size:13px;font-weight:500}.artifact-toolbar nav button.is-active{border-bottom-color:var(--accent);color:#ff999f;background:#21171a}
 .artifact-stage{position:relative;display:flex;flex:1;min-height:220px;flex-direction:column;overflow:auto;padding:20px}.artifact-empty{display:flex;flex:1;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:20px 16px}.preview-cube{width:110px;height:128px;margin-bottom:20px;opacity:.8}.artifact-empty h2{font-size:20px;margin-bottom:10px;font-weight:500}.artifact-empty p{font-size:13px;color:var(--muted);max-width:280px}.artifact-empty button{display:inline-flex;gap:7px;align-items:center;margin-top:24px;background:transparent;font-size:13px}
-.artifact-stage:has(.asset-previews canvas) .artifact-empty{display:none}.artifact-stage .asset-previews{margin:0}.artifact-stage .asset-previews:empty{display:none}.artifact-stage .asset-previews figure{border:1px solid transparent;padding:4px;border-radius:8px;cursor:pointer}.artifact-stage .asset-previews figure.is-selected{grid-column:1/-1;order:-1;border-color:#a6515a;background:#21171a}.artifact-stage .asset-previews canvas{display:block;width:100%;height:auto;max-height:480px;object-fit:contain;background:#0c0c0e}.artifact-stage .asset-previews figure:not(.is-selected) canvas{max-height:110px}.artifact-stage .asset-previews figcaption{font-size:12px;color:var(--muted)}
+.artifact-stage:has(.asset-previews canvas) .artifact-empty{display:none}.artifact-stage .asset-previews{margin:0}.artifact-stage .asset-previews:empty{display:none}.artifact-stage .asset-previews figure{border:1px solid transparent;padding:4px;border-radius:8px;cursor:pointer}.artifact-stage .asset-previews figure.is-selected,.artifact-stage .asset-previews figure[aria-pressed="true"]{grid-column:1/-1;order:-1;border-color:#a6515a;background:#21171a}.artifact-stage .asset-previews canvas{display:block;width:100%;height:auto;max-height:480px;object-fit:contain;background:#0c0c0e}.artifact-stage .asset-previews figure:not(.is-selected) canvas{max-height:110px}.artifact-stage .asset-previews figcaption{font-size:12px;color:var(--muted)}
 .artifact-view-options{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 18px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.artifact-view-options button{display:flex;align-items:center;gap:6px;background:transparent;color:var(--text);padding:6px 0;font-size:12px;font-weight:400}.preview-guide{padding:0 18px 14px}.preview-guide p{color:var(--muted);font-size:12px;line-height:1.6}
 .artifact-files{padding:14px 18px;max-height:200px;overflow:auto;border-top:1px solid var(--line)}.artifact-file{display:inline-block;padding:10px;border:1px solid #644047;border-radius:6px;margin:4px 6px 4px 0;font-size:12px;background:#25171b;color:var(--text)}
 .workspace-tools{margin-top:24px;border:1px solid var(--line);border-radius:10px;background:#121214;scroll-margin-top:16px}.settings-summary{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:18px;color:var(--text);font-size:14px}.settings-summary::before{content:"";width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);margin-right:4px}.workspace-tools[open]>.settings-summary::before{transform:rotate(45deg)}.settings-summary span{color:var(--muted);font-size:12px}.settings-summary::-webkit-details-marker{display:none}.settings-content{padding:0 20px 20px}
@@ -73,13 +73,11 @@
 .arcane-app :where(button,a,input,select,textarea,summary,[role=button]):focus-visible{outline:2px solid var(--focus-ring);outline-offset:3px}.arcane-app :where(.workspace-tab,.artifact-toolbar button):focus-visible{outline-offset:-3px}
 html{scrollbar-color:#55555d #111113}:where(.app-sidebar,.codex-messages,.artifact-stage,.artifact-files,pre){scrollbar-width:thin}
 @media(hover:hover) and (pointer:fine){.nav-link:hover,.workspace-tab:hover,.workspace-search-results button:hover{background:#232327;color:var(--text)}.artifact-file:hover{border-color:var(--accent)}}
-@media(prefers-reduced-motion:no-preference){:where(button,a,summary){transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease}}
+@media(prefers-reduced-motion:no-preference){:where(button:enabled,a,summary){transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease}.artifact-stage .asset-previews figure[role="button"]{transition:background-color 120ms ease,border-color 120ms ease}}
 @media(max-width:1180px){.app-sidebar{width:190px;padding-inline:12px}.app-main{margin-left:190px}.workspace-topbar{padding-inline:16px;gap:12px}.workspace-search{width:205px}.workspace-search kbd{display:none}.app-content{padding:18px}.workspace-stage{gap:18px;grid-template-columns:minmax(300px,1fr) minmax(280px,1fr)}.wordmark{font-size:18px}.new-chat kbd{display:none}}
 @media(max-width:960px){.app-sidebar{position:relative;width:100%;flex-direction:row;align-items:center;padding:12px 16px;gap:12px;border-right:0;border-bottom:1px solid var(--line);flex-wrap:wrap}.wordmark small,.sidebar-label,.sidebar-note,.nav-link small{display:none}.app-sidebar .wordmark{margin-right:auto}.new-chat{width:auto}.sidebar-links,.sidebar-secondary{flex-direction:row;margin:0;padding:0;border:0;gap:4px}.nav-link{width:auto}.app-main{margin-left:0}.workspace-topbar{flex-wrap:wrap}.workspace-stage{height:calc(100svh - 210px);min-height:560px}.tool-context-header{flex-wrap:wrap}}
 @media(max-width:700px){.workspace-stage{height:auto;grid-template-columns:minmax(0,1fr)}.workspace-stage>.codex-panel{min-height:610px;height:calc(100svh - 130px)}.artifact-panel{min-height:520px}.artifact-stage{min-height:260px}.workspace-tabs{order:2;flex:1 0 100%;overflow-x:auto;padding-top:4px}.workspace-tab{flex-shrink:0}.workspace-search{flex:1}.sidebar-links{flex:1 0 100%}.sidebar-links .nav-link{flex:1}.sidebar-secondary .nav-link{font-size:12px;padding:10px}.sidebar-secondary .icon{display:none}.app-content{padding:14px}.workspace-welcome{padding:24px 14px}.settings-content{padding:0 14px 14px}.tools-heading{align-items:flex-start;flex-direction:column}.tools-heading .refresh-tools{flex-direction:row;flex-wrap:wrap;align-items:center}.composer-controls{gap:8px}.workspace-stage .codex-messages{max-height:65svh}.settings-summary span{display:block}}
 @media(max-height:740px) and (min-width:701px){.workspace-welcome{padding-block:18px}.welcome-logo{margin-bottom:12px}.welcome-logo .arcane-logo{width:36px;height:36px}}
-@media(forced-colors:active){.workspace-tab[aria-pressed=true],.nav-link[aria-pressed=true],.asset-previews figure.is-selected{outline:2px solid Highlight;outline-offset:-2px}:where(button,a,input,select,textarea,summary,[role=button]):focus-visible{outline-color:Highlight}}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 /* Use the actual available viewport, keeping the composer outside scrolling content. */
 body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden}
@@ -90,7 +88,7 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
 .workspace-tools{flex-shrink:0;margin-top:16px}
 .workspace-welcome{min-height:0;overflow:auto;margin:0 auto;padding:18px 12px;justify-content:flex-start}
 .workspace-welcome h2{font-size:26px}.welcome-logo{margin-bottom:14px}
-.chat-topline{flex-shrink:0;padding:8px 0}.chat-topline p{max-height:64px;overflow:auto;overflow-wrap:anywhere}
+.chat-topline{flex-shrink:0;padding:8px 0}.chat-topline p{min-width:0;max-height:64px;overflow:auto;white-space:normal;overflow-wrap:anywhere}
 .workspace-stage .codex-conversation{overflow:hidden}
 .workspace-stage .composer textarea{min-height:48px;max-height:120px}
 .workspace-stage .codex-approval-section,.workspace-stage #codex-unknown{flex-shrink:1;min-height:64px;max-height:30svh;overflow:auto}
@@ -107,7 +105,8 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
 .arcane-app .eyebrow{letter-spacing:0;font-size:12px;font-weight:500}
 
 /* Override inherited small native-control typography without changing its function. */
-.arcane-app :is(button,input,select,textarea,summary,label,legend,.badge,.status-text,.hint,.empty,.eyebrow,.small-label,pre,code,.identity,.history-meta,.history-title,.node-meta,.baseline,.task-id,footer,.root-checks label,.property-row label,.instructions,.evidence details,.build-task p,.build-task pre,.evidence-artifact p,.node-row p){font-size:max(12px,1em)}
+.arcane-app :is(button,input,select,textarea,summary,label,legend,.badge,.status-text,.hint,.empty,.eyebrow,.small-label,pre,code,.identity,.history-meta,.history-title,.node-meta,.baseline,.task-id,footer,.root-checks label,.property-row label,.instructions,.evidence details,.build-task p,.build-task pre,.evidence-artifact p,.node-row p,.diagnostics-table,.diagnostics-table th,.diagnostics-table td,.key-record h3){font-size:max(12px,1em)}
+#codex-scope,#selected-ref{font-size:12px}
 @media(max-width:700px){.workspace-stage{display:contents}.workspace-stage>.codex-panel{flex:0 0 100%;height:auto;min-height:320px}.workspace-stage>.artifact-panel{flex:0 0 480px;margin-top:18px}}
 
 /* Keep every live warning in a scrollable conversation region above the composer. */
@@ -116,3 +115,34 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
 .artifact-stage{min-height:0}
 .tool-context-header,.artifact-toolbar,.preview-guide,.artifact-files{flex-shrink:0}
 @media(max-height:760px) and (min-width:701px){.preview-cube{display:none}.artifact-empty{padding:12px}.artifact-empty h2{font-size:18px}.artifact-empty button{margin-top:12px}}
+
+/* Verified preview controls keep immediate focus, press and selection feedback. */
+.artifact-stage .asset-previews figure[role="button"]:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.artifact-stage .asset-previews figure[role="button"]:active{border-color:var(--accent);background:#2b181b}
+@media(hover:hover) and (pointer:fine){.artifact-stage .asset-previews figure[role="button"]:hover:not(:active){border-color:var(--accent)}}
+
+/* Quiet scrollbars remain discoverable with a pointer or keyboard. */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:#111113}
+::-webkit-scrollbar-thumb{background:#55555d;border:3px solid #111113;border-radius:10px}
+::-webkit-scrollbar-thumb:hover{background:#7b7b85}
+.app-sidebar{scrollbar-width:thin;scrollbar-color:rgba(177,177,185,.28) transparent;scrollbar-gutter:stable}
+.app-sidebar:hover,.app-sidebar:focus-within{scrollbar-color:rgba(177,177,185,.65) transparent}
+@supports selector(::-webkit-scrollbar){
+  html{scrollbar-color:auto}
+  .app-sidebar,.app-sidebar:hover,.app-sidebar:focus-within{scrollbar-color:auto;scrollbar-width:auto}
+}
+.app-sidebar::-webkit-scrollbar{width:6px;height:6px}
+.app-sidebar::-webkit-scrollbar-track,.app-sidebar::-webkit-scrollbar-corner{background:transparent}
+.app-sidebar::-webkit-scrollbar-thumb{background:rgba(177,177,185,.28);border:0;border-radius:3px}
+.app-sidebar:hover::-webkit-scrollbar-thumb,.app-sidebar:focus-within::-webkit-scrollbar-thumb,.app-sidebar::-webkit-scrollbar-thumb:hover{background:rgba(177,177,185,.65)}
+@media(forced-colors:active){
+  html,.app-sidebar,.app-sidebar:hover,.app-sidebar:focus-within,.codex-messages,.conversation-scroll,.artifact-stage,.artifact-files,pre{scrollbar-color:auto;scrollbar-width:auto}
+  ::-webkit-scrollbar-thumb,::-webkit-scrollbar-thumb:hover{background:ButtonText;border-color:Canvas}
+  .app-sidebar::-webkit-scrollbar-thumb,.app-sidebar:hover::-webkit-scrollbar-thumb,.app-sidebar:focus-within::-webkit-scrollbar-thumb,.app-sidebar::-webkit-scrollbar-thumb:hover{background:ButtonText}
+  .workspace-tab[aria-pressed=true],.nav-link[aria-pressed=true],.artifact-stage .asset-previews figure.is-selected,.artifact-stage .asset-previews figure[aria-pressed="true"]{outline:2px solid Highlight;outline-offset:-2px}
+  .arcane-app :where(button,a,input,select,textarea,summary,[role=button]):focus-visible,.workspace-search:focus-within,.artifact-stage .asset-previews figure[role="button"]:focus-visible{outline-color:Highlight}
+}
+
+/* Keep this universal preference reset last, after every responsive override. */
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
