@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import type { CodexAction, CodexActionOutcome, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
+import type { NativeWorkflowConversation } from './workflow-panel.js';
 import type { Approval, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
@@ -34,7 +35,7 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
   }
   const pair = (p: unknown) => object(p) && text(p.model) && text(p.effort,64) && models.some((m: Model) => m.model === p.model && m.efforts.includes(p.effort as string));
   if (value.selection !== null && !pair(value.selection)) throw new Error('The native selection is absent from the reported catalogue.');
-  if (value.thread !== null && (!object(value.thread) || !text(value.thread.threadId) || !pair(value.thread.selection) || typeof value.thread.configured !== 'boolean' || typeof value.thread.writeGranted !== 'boolean' || !(value.thread.turnId === null || text(value.thread.turnId)) || ![...IDLE,'starting','inProgress','cancelling','unknown'].includes(String(value.thread.turnStatus)))) throw new Error('Invalid exact native thread scope.');
+  if (value.thread !== null && (!object(value.thread) || !text(value.thread.threadId) || !(value.thread.sessionId === null || text(value.thread.sessionId)) || !pair(value.thread.selection) || typeof value.thread.configured !== 'boolean' || typeof value.thread.writeGranted !== 'boolean' || !(value.thread.turnId === null || text(value.thread.turnId)) || ![...IDLE,'starting','inProgress','cancelling','unknown'].includes(String(value.thread.turnStatus)))) throw new Error('Invalid exact native thread scope.');
   for (const a of value.approvals) {
     if (!object(a) || !text(a.handle) || !uuid(a.connectionId) || !text(a.threadId) || !text(a.turnId) || !text(a.itemId) || !['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(String(a.method)) || !(text(a.serverRequestId) || typeof a.serverRequestId === 'number' && Number.isSafeInteger(a.serverRequestId)) || !(a.reason === null || typeof a.reason === 'string' && utf8(a.reason) <= 4096) || typeof a.canAccept !== 'boolean' || !integer(a.expiresAt) || !(a.command === null || typeof a.command === 'string' && utf8(a.command) <= 32768) || !(a.cwd === null || text(a.cwd,4096)) || !(a.changes === null || Array.isArray(a.changes) && a.changes.length <= 32)) throw new Error('Invalid bounded native approval.');
     if (Array.isArray(a.changes)) for (const c of a.changes) if (!object(c) || !text(c.path,4096) || !['add','delete','update'].includes(String(c.kind)) || !(c.movePath === null || text(c.movePath,4096)) || typeof c.diff !== 'string' || utf8(c.diff) > 65536) throw new Error('A full file preview exceeded its bound.');
@@ -58,6 +59,14 @@ function readActionRecord(value: unknown): CodexActionRecord {
 export function readCodexState(value: unknown): ChatState {
   if (!object(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !object(value.nativeTools) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
   readSnapshot(value.snapshot); readSnapshot(value.lastSnapshot);
+  if (value.nativeHistory !== undefined && value.nativeHistory !== null) {
+    const binding = value.nativeHistory;
+    const historyId = (id: unknown) => text(id) && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id);
+    if (!object(binding) || binding.projectPath !== value.projectPath || !historyId(binding.threadId) ||
+        !(binding.sessionId === null || historyId(binding.sessionId)) || !(binding.recorded === null || object(binding.recorded))) {
+      throw new Error('Invalid exact recorded native conversation binding.');
+    }
+  }
   const ids = new Set<string>();
   for (const action of value.actions) { const r = readActionRecord(action); if (ids.has(r.requestId)) throw new Error('Duplicate native action receipt.'); ids.add(r.requestId); }
   return value as unknown as ChatState;
@@ -173,6 +182,17 @@ export class CodexChat {
   private text(id:string,value:string){this.el(id).textContent=this.api.safe(value);}
   private value(id:string){return this.el<HTMLInputElement>(id).value;}
   private on(id:string,event:string,fn:(e:Event)=>void){this.el(id).addEventListener(event,fn);}
+  private readonly workflowContextListeners = new Set<() => void>();
+  subscribeWorkflowContextChange(listener: () => void): () => void {
+    this.workflowContextListeners.add(listener);
+    return () => { this.workflowContextListeners.delete(listener); };
+  }
+  workflowConversation(): NativeWorkflowConversation | null {
+    const state = this.state, thread = state?.snapshot?.thread;
+    // Match the host's configured-thread precedence and durable history fallback.
+    const binding = thread?.configured ? thread : state?.nativeHistory;
+    return binding && state ? { provider: 'codex', threadId: binding.threadId, sessionId: binding.sessionId, projectPath: state.projectPath } : null;
+  }
   private snapshot(){return this.state?.snapshot;}
   private scope(){const s=this.snapshot();return JSON.stringify([s?.connectionId,s?.thread?.threadId,s?.thread?.turnId,this.state?.projectPath]);}
   private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
@@ -226,9 +246,13 @@ export class CodexChat {
   }
   private applyState(state:ChatState) {
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
-    if(before!==after){this.generation++;this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.closeConfirmation();this.el<HTMLTextAreaElement>('codex-composer').value='';}
+    if(before!==after){this.generation++;this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.closeConfirmation();}
     if(state.snapshot)this.transcript.consume(state.snapshot);
-    this.state=state;
+    const contextBefore = JSON.stringify([this.state?.projectPath ?? null, this.workflowConversation()]);
+    this.state = state;
+    if (contextBefore !== JSON.stringify([state.projectPath, this.workflowConversation()])) {
+      for (const listener of this.workflowContextListeners) listener();
+    }
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
     for(const r of state.actions) if(['pending','unknown'].includes(r.state)&&!this.pending.has(r.requestId)&&!this.uncertain.has(r.requestId)&&(r.connectionId===state.snapshot?.connectionId||r.action==='connect'&&state.connecting)) {
       this.uncertain.set(r.requestId,{input:{requestId:r.requestId,connectionId:r.action==='connect'?null:r.connectionId,action:r.action} as CodexAction,read:true});
@@ -299,7 +323,7 @@ export class CodexChat {
     this.messageSignature=messageSignature;
     const messages=this.el('codex-messages'),bottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<80;messages.replaceChildren();
     if(!this.transcript.messages.length)messages.append(this.make('p','Connect, choose a reported model and effort, then start or resume an exact thread.','empty'));
-    for(const message of this.transcript.messages){const card=this.make('article',undefined,'codex-message '+message.role);card.append(this.make('p',message.role==='human'?'YOU':'CODEX · PUBLIC MESSAGE','eyebrow'),this.make('pre',message.text),this.make('p',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));messages.append(card);}
+    for(const message of this.transcript.messages){const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');card.append(this.make('pre',message.text),this.make('p',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));messages.append(card);}
     if(bottom)messages.scrollTop=messages.scrollHeight;
     }
     this.text('codex-events-note','Event sequence '+this.transcript.cursor+' · native dropped '+this.transcript.dropped+' · missing sequences '+this.transcript.gaps+(this.transcript.truncated?' · public display truncated; earlier text may be missing.':' · bounded public message stream.'));
@@ -369,6 +393,7 @@ export class CodexChat {
     this.closeConfirmation();await this.dispatch(c.action,c.fields);
   }
 }
+
 
 
 

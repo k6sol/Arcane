@@ -12,7 +12,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { CodexClientError, type Approval, type Snapshot, type ThreadState } from '../../packages/codex-client/src/types.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
-import { CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
+import { CodexChat, CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
 
 const HUMAN='a'.repeat(64), AGENT='b'.repeat(64), PROJECT=resolve('.');
 function snapshot():Snapshot {
@@ -316,3 +316,113 @@ async function openAdvancedSettings(page:any) {
     if(!await summary.evaluate((el:HTMLElement)=>(el.parentElement as HTMLDetailsElement).open))await summary.click();
   }
 }
+
+
+// Private document fixture; incoming state is decoded through the real API.
+// No browser, socket, provider process or native action is used by these tests.
+class ContextElement extends EventTarget {
+  children: ContextElement[] = []; value = ''; checked = false; disabled = false;
+  hidden = false; open = false; className = ''; type = ''; dataset: Record<string, string> = {};
+  scrollHeight = 0; scrollTop = 0; clientHeight = 0;
+  private content = ''; private attributes = new Map<string, string>();
+  get textContent(): string { return this.content + this.children.map(e => e.textContent).join(''); }
+  set textContent(value: string) { this.children = []; this.content = value; }
+  get innerHTML(): never { throw new Error('HTML sink forbidden'); }
+  set innerHTML(_value: string) { throw new Error('HTML sink forbidden'); }
+  append(...children: ContextElement[]): void { this.children.push(...children); }
+  replaceChildren(...children: ContextElement[]): void { this.content = ''; this.children = children; }
+  setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+  getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
+  querySelectorAll(): ContextElement[] { return []; }
+  close(): void { this.open = false; }
+}
+class ContextDocument extends EventTarget {
+  private elements = new Map<string, ContextElement>();
+  getElementById(id: string): ContextElement {
+    let element = this.elements.get(id);
+    if (!element) { element = new ContextElement(); this.elements.set(id, element); }
+    return element;
+  }
+  createElement(): ContextElement { return new ContextElement(); }
+  asDocument(): Document { return this as unknown as Document; }
+}
+function contextChat(initial: ChatState) {
+  const doc = new ContextDocument(), calls: { path: string; method: string }[] = [];
+  let observed = structuredClone(initial), failed = false;
+  const api = new CodexChatApi(HUMAN, async (input, init) => {
+    calls.push({ path: String(input), method: init?.method ?? 'GET' });
+    assert.equal(init?.method, 'GET', 'Context reads must never dispatch native actions');
+    if (failed) throw new Error('Synthetic unavailable state');
+    return Response.json({ state: observed });
+  });
+  const chat = new CodexChat(doc.asDocument(), api);
+  return { doc, calls, chat, set(value: ChatState) { observed = structuredClone(value); }, fail(value: boolean) { failed = value; } };
+}
+function cacheBinding(projectPath = PROJECT, threadId = 'cached-thread', sessionId: string | null = null): NonNullable<ChatState['nativeHistory']> {
+  return { projectPath, threadId, sessionId, recorded: null };
+}
+
+test('synthetic workflow identity mirrors host configured-thread precedence and cached history fallback', async () => {
+  const initial = state(null); initial.nativeHistory = cacheBinding();
+  initial.lastSnapshot = { ...snapshot(), thread: { ...thread(), threadId: 'stale-last-thread' } };
+  const f = contextChat(initial); let changes = 0; const unsubscribe = f.chat.subscribeWorkflowContextChange(() => changes++);
+  await f.chat.refresh();
+  assert.deepEqual(f.chat.workflowConversation(), { provider: 'codex', threadId: 'cached-thread', sessionId: null, projectPath: PROJECT });
+  assert.equal(changes, 1);
+  const same = state(snapshot()); same.nativeHistory = cacheBinding(); same.snapshot!.thread = { ...thread(), threadId: 'cached-thread', sessionId: null };
+  f.set(same); await f.chat.refresh(); assert.equal(changes, 1, 'same durable identity is unchanged when a live handle arrives');
+  same.snapshot!.thread = thread(); f.set(same); await f.chat.refresh(); assert.equal(changes, 2);
+  assert.equal(f.chat.workflowConversation()!.threadId, 'fixture-thread', 'configured thread takes precedence over cache');
+  same.snapshot!.thread!.configured = false; f.set(same); await f.chat.refresh(); assert.equal(changes, 3);
+  assert.equal(f.chat.workflowConversation()!.threadId, 'cached-thread', 'unconfigured thread falls back to cache exactly as host does');
+  same.snapshot = null; f.set(same); await f.chat.refresh(); assert.equal(changes, 3);
+  unsubscribe(); same.nativeHistory = cacheBinding(PROJECT, 'new-cached-thread', 'new-session'); f.set(same); await f.chat.refresh(); assert.equal(changes, 3);
+  assert.ok(f.calls.every(c => c.path === '/v1/codex/state' && c.method === 'GET'));
+});
+
+test('synthetic unrelated native polling never publishes context changes or clears the unsent draft', async () => {
+  const initial = state(); initial.snapshot!.thread = thread(); initial.nativeHistory = cacheBinding(PROJECT, 'fixture-thread', 'fixture-session');
+  const f = contextChat(initial), draft = 'Unsent draft 🧩\nKeep trailing spaces.  '; f.doc.getElementById('codex-composer').value = draft;
+  let changes = 0; f.chat.subscribeWorkflowContextChange(() => changes++); await f.chat.refresh();
+  const next = structuredClone(initial);
+  next.snapshot!.thread!.turnId = 'new-turn'; next.snapshot!.thread!.turnStatus = 'inProgress'; next.snapshot!.thread!.writeGranted = true;
+  next.snapshot!.thread!.selection.effort = 'low'; next.snapshot!.selection = { model: 'fixture-sol', effort: 'low' };
+  next.snapshot!.models[0]!.displayName = 'Updated catalogue label'; next.busy = true;
+  next.snapshot!.events = [{ type: 'delta', seq: 1, threadId: 'fixture-thread', turnId: 'new-turn', itemId: 'item', text: 'Actual public fixture text' }]; next.snapshot!.lastEventSeq = 1;
+  for (let i = 0; i < 5; i++) { f.set(next); await f.chat.refresh(); }
+  assert.equal(changes, 1); assert.equal(f.doc.getElementById('codex-composer').value, draft);
+  assert.match(f.doc.getElementById('codex-messages').textContent, /Actual public fixture text/);
+  next.snapshot = { ...snapshot(), thread: thread() }; f.set(next); await f.chat.refresh();
+  assert.equal(changes, 1, 'new live connection handle is not a new canonical conversation');
+  assert.equal(f.doc.getElementById('codex-composer').value, draft);
+  f.fail(true); await f.chat.refresh(); assert.equal(changes, 1); assert.equal(f.doc.getElementById('codex-composer').value, draft);
+});
+
+test('synthetic canonical thread, session and project changes each publish once', async () => {
+  const initial = state(null); initial.nativeHistory = cacheBinding(); const f = contextChat(initial);
+  let changes = 0; f.chat.subscribeWorkflowContextChange(() => changes++); await f.chat.refresh();
+  const next = structuredClone(initial); next.nativeHistory!.threadId = 'other-thread'; f.set(next); await f.chat.refresh(); assert.equal(changes, 2);
+  next.nativeHistory!.sessionId = 'observed-session'; f.set(next); await f.chat.refresh(); assert.equal(changes, 3);
+  next.nativeHistory!.sessionId = null; f.set(next); await f.chat.refresh(); assert.equal(changes, 4);
+  next.projectPath = PROJECT + '-other'; next.nativeHistory!.projectPath = next.projectPath; f.set(next); await f.chat.refresh(); assert.equal(changes, 5);
+  f.set(next); await f.chat.refresh(); assert.equal(changes, 5);
+  next.nativeHistory = null; f.set(next); await f.chat.refresh(); assert.equal(changes, 6); assert.equal(f.chat.workflowConversation(), null);
+});
+
+test('synthetic recorded-history content refresh retains the same exact canonical identity', async () => {
+  const initial = state(null); initial.nativeHistory = cacheBinding(); const f = contextChat(initial);
+  let changes = 0; f.chat.subscribeWorkflowContextChange(() => changes++); await f.chat.refresh();
+  initial.nativeHistory!.recorded = { requestId: randomUUID(), connectionId: randomUUID(), provenance: 'spawned-node-fixture', loadedAt: new Date().toISOString(),
+    result: { entries: [], completeness: 'complete', gaps: [], truncated: false, marker: null, excludedItems: 0, droppedGaps: 0, redacted: false } };
+  f.set(initial); await f.chat.refresh();
+  initial.nativeHistory!.recorded!.loadedAt = new Date().toISOString(); f.set(initial); await f.chat.refresh(); assert.equal(changes, 1);
+});
+
+test('synthetic native context decoder rejects missing sessions and cross-project cached bindings', async () => {
+  const initial = state(null); initial.nativeHistory = cacheBinding();
+  for (const nativeHistory of [{ ...initial.nativeHistory, projectPath: PROJECT + '-other' }, { ...initial.nativeHistory, sessionId: undefined }, { ...initial.nativeHistory, threadId: '../browser-input' }, { ...initial.nativeHistory, recorded: [] }]) assert.throws(() => readCodexState({ ...initial, nativeHistory }));
+  const live = snapshot(); live.thread = thread(); assert.throws(() => readCodexState({ ...state(live), snapshot: { ...live, thread: { ...live.thread, sessionId: undefined } } }));
+  const f = contextChat(initial); let changes = 0; f.chat.subscribeWorkflowContextChange(() => changes++); await f.chat.refresh();
+  const invalid = structuredClone(initial); invalid.nativeHistory!.projectPath += '-other'; f.set(invalid); await f.chat.refresh();
+  assert.equal(changes, 1); assert.equal(f.chat.workflowConversation()!.threadId, 'cached-thread', 'invalid read cannot replace the last trusted identity');
+});

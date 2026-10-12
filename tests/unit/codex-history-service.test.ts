@@ -164,8 +164,9 @@ test('explicit load sends only public read in its bounded child, preserves IDs, 
 
 test('full hydrated paginated thread/read persists redacted exact-scoped IDs and survives offline restart',async t=>{
   const f=await fixture(t,'paginated'),scope=await f.bind(f.service),before=f.sessions[0]!.snapshot(),requestId=randomUUID();
-  const loaded=await f.load(f.service,scope.connectionId,scope.threadId,requestId),binding=loaded.state.nativeHistory!,recorded=binding.recorded!,result=recorded.result;
-  assert.equal(loaded.record.state,'acknowledged');assert.equal(binding.projectPath,f.projectPath);assert.equal(binding.threadId,THREAD);assert.equal(binding.sessionId,SESSION);
+  const loaded=await f.load(f.service,scope.connectionId,scope.threadId,requestId);
+  assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
+  const binding=loaded.state.nativeHistory!,recorded=binding.recorded!,result=recorded.result;assert.equal(binding.projectPath,f.projectPath);assert.equal(binding.threadId,THREAD);assert.equal(binding.sessionId,SESSION);
   assert.equal(recorded.requestId,requestId);assert.equal(recorded.connectionId,scope.connectionId);assert.equal(recorded.provenance,'spawned-node-fixture');
   assert.equal(result.completeness,'complete');assert.equal(result.marker,null);assert.deepEqual(result.gaps,[]);assert.equal(result.truncated,false);assert.equal(result.excludedItems,1);assert.equal(result.redacted,true);
   assert.deepEqual(result.entries.map(entry=>({role:entry.role,ids:entry.ids})),[
@@ -194,16 +195,18 @@ test('full hydrated paginated thread/read persists redacted exact-scoped IDs and
 });
 
 for(const mode of ['paginated-summary','paginated-missing-view','paginated-empty','paginated-missing-turns'])test(mode+' is recorded with an incomplete marker and cannot pretend to be hydrated',async t=>{
-  const f=await fixture(t,mode),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId),binding=loaded.state.nativeHistory!,result=binding.recorded!.result;
-  assert.equal(loaded.record.state,'acknowledged');assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);assert.ok(result.gaps.length>0);assert.deepEqual(result.entries,[]);
+  const f=await fixture(t,mode),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId);
+  assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
+  const binding=loaded.state.nativeHistory!,result=binding.recorded!.result;assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);assert.ok(result.gaps.length>0);assert.deepEqual(result.entries,[]);
   if(mode==='paginated-summary'||mode==='paginated-missing-view')assert.ok(result.gaps.some(gap=>gap.reason==='items-not-full'));
   assert.ok(!JSON.stringify(binding).includes(SECRET));assert.ok(!JSON.stringify(binding).includes('PRIVATE_'));
   await f.service.close();const restarted=f.open(f.projectPath,false);assert.deepEqual(restarted.state().nativeHistory,binding);assert.equal(restarted.state().snapshot,null);assert.equal(f.starts(),1);
 });
 
 test('paginated turns each require explicit full itemsView while valid hydrated turns retain their IDs',async t=>{
-  const f=await fixture(t,'paginated-mixed-views'),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId),result=loaded.state.nativeHistory!.recorded!.result;
-  assert.equal(loaded.record.state,'acknowledged');assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);
+  const f=await fixture(t,'paginated-mixed-views'),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId);
+  assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
+  const result=loaded.state.nativeHistory!.recorded!.result;assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);
   assert.deepEqual(result.gaps.filter(gap=>gap.reason==='items-not-full').map(gap=>gap.turnId),['fixture-summary','fixture-missing']);
   assert.deepEqual(result.entries.map(entry=>entry.ids.itemId),['question','progress','mcp','answer']);assert.ok(result.entries.every(entry=>entry.ids.threadId===THREAD&&entry.ids.sessionId===SESSION&&entry.ids.turnId==='fixture-turn'));
   assert.ok(!JSON.stringify(result).includes('PRIVATE_SUMMARY_OUTPUT'));assert.ok(!JSON.stringify(result).includes('PRIVATE_MISSING_VIEW_OUTPUT'));assert.ok(!JSON.stringify(result).includes(SECRET));

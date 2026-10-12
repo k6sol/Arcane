@@ -6,6 +6,8 @@ import { WORKFLOW_HTTP_LIMITS, type WorkflowHost } from './workflow-host.js';
 
 const PREFIX = '/v1/workflows';
 const STATUS: Record<string, number> = {
+  WORKFLOW_CONVERSATION:403,WORKFLOW_ASSOCIATION_UNKNOWN:202,
+  WORKFLOW_RECEIPT_CORRUPT: 503,
   WORKFLOW_INPUT: 400, WORKFLOW_SECRET: 400, WORKFLOW_HUMAN_REQUIRED: 403,
   WORKFLOW_RECORD: 404, WORKFLOW_BINDING: 409, WORKFLOW_EVIDENCE: 409,
   WORKFLOW_STATE: 409, WORKFLOW_BLOCKED: 409, WORKFLOW_MAPPING: 409,
@@ -167,10 +169,11 @@ export function workflowRoutes(host: WorkflowHost) {
       if (request.url !== url.pathname || url.pathname.length > 160) throw new LearningHttpError('TARGET', 400);
       const endpoint = url.pathname === PREFIX ? '' : url.pathname.slice(PREFIX.length + 1);
       const authority = { controlToken, origin, agentToken };
-      if (endpoint === 'preview' || endpoint === 'execute') {
+      if (endpoint === 'preview' || endpoint === 'execute' || endpoint === 'receipt') {
         if (request.method !== 'POST') throw new LearningHttpError('METHOD', 405);
         const input = await body(request);
-        const result = endpoint === 'preview' ? host.preview(input, request, authority) : host.execute(input, request, authority);
+        const result = endpoint === 'preview' ? host.preview(input, request, authority) :
+          endpoint === 'receipt' ? host.receipt(input, request, authority) : host.execute(input, request, authority);
         send(200, result); return true;
       }
       if (endpoint !== '' && endpoint !== 'current-flow' && !/^[a-zA-Z0-9_-]{1,64}$/.test(endpoint)) {

@@ -3,6 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { createWorkflowContextOptions, StudioApi, StudioWorkbench } from '../../apps/desktop/src/studio.js';
+import type { NativeWorkflowConversation } from '../../apps/desktop/src/workflow-panel.js';
 import { startWorkspaceShell } from '../../apps/desktop/src/workspace-shell.js';
 
 // Small DOM fixture with bubbling and button/form defaults. No browser, host,
@@ -298,9 +300,103 @@ test('markup has one composer, closed advanced settings, live review notices and
   assert.ok(html.indexOf('id="codex-model"') > settingsAt); assert.ok(html.indexOf('id="codex-select"') > settingsAt);
   assert.doesNotMatch(html, /medieval|house|Download All|Model generated/);
   assert.doesNotMatch(html, /class="eyebrow"|class="badge /);
+  assert.doesNotMatch(html, /LOCAL STUDIO BRIDGE v1|Session grants · editor baselines/);
   assert.match(html, /id="codex-status" class="status-text neutral"/);
   assert.ok(html.indexOf('class="conversation-scroll"') < html.indexOf('id="codex-unknown"'));
   assert.ok(html.indexOf('id="codex-approval-section"') < html.indexOf('id="codex-compose"'));
   const shell = await readFile(resolve('apps/desktop/src/workspace-shell.ts'), 'utf8');
   assert.doesNotMatch(shell, /\.innerHTML|\.outerHTML|\bfetch\s*\(|localStorage|sessionStorage|\.requestSubmit\s*\(|\.submit\s*\(/);
+  const chat = await readFile(resolve('apps/desktop/src/codex-chat.ts'), 'utf8');
+  assert.doesNotMatch(chat, /CODEX · PUBLIC MESSAGE|'eyebrow'/);
+  assert.match(chat, /card\.setAttribute\('aria-label',message\.role==='human'\?'Your message':'Assistant message'\)/);
+  const workbench = await readFile(resolve('apps/desktop/src/studio.ts'), 'utf8');
+  assert.doesNotMatch(workbench, /item\.className = 'badge '/);
+});
+
+
+function workflowContextFixture() {
+  const f = fixture();
+  for (const id of ['project-path', 'command-counts', 'product-evidence', 'build-tasks']) {
+    const element = f.doc.createElement('div'); element.id = id; f.doc.body.append(element);
+  }
+  let requests = 0;
+  const workbench = new StudioWorkbench(f.doc.document, new StudioApi('a'.repeat(64), async () => {
+    requests++; throw new Error('Context projection must not send Studio requests');
+  }), 'http://offline.invalid', 'a'.repeat(64));
+  const nativeListeners = new Set<() => void>();
+  let native: NativeWorkflowConversation | null = null;
+  const chat = {
+    workflowConversation: () => native,
+    subscribeWorkflowContextChange(listener: () => void) { nativeListeners.add(listener); return () => { nativeListeners.delete(listener); }; },
+  };
+  const project = (projectPath: unknown, protocolVersion = 1) => {
+    // Exercise the real incoming product projection without launching the workbench.
+    (workbench as unknown as { renderProduct(value: unknown): void }).renderProduct({
+      projectPath, protocolVersion, studioSessions: [], commandCounts: { succeeded: 0 }, features: [], buildTasks: [],
+    });
+  };
+  const pollNative = () => { for (const listener of nativeListeners) listener(); };
+  return { ...f, workbench, chat, project, pollNative, nativeListeners,
+    native(value: NativeWorkflowConversation | null) { native = value; pollNative(); },
+    get requests() { return requests; } };
+}
+
+test('workflow initial canonical product arrival invalidates and refreshes once without replacing the native draft', async () => {
+  const f = workflowContextFixture(), draft = 'Keep my current unsent draft 🧩\n  ';
+  f.composer.value = draft;
+  let invalidations = 0, refreshes = 0;
+  const options = createWorkflowContextOptions(() => 'a'.repeat(64), f.workbench, f.chat, () => { refreshes++; });
+  const unsubscribe = options.subscribeContextChange!(() => { invalidations++; });
+  assert.equal(options.getProjectPath(), null); assert.equal(options.getNativeConversation!(), null);
+  assert.equal(options.getModelSelection, undefined, 'no catalogue revision is fabricated from a saved preference');
+  f.project('C:/trusted/project'); assert.equal(invalidations, 1); await Promise.resolve(); assert.equal(refreshes, 1);
+  assert.equal(options.getProjectPath(), 'C:/trusted/project');
+  for (let i = 0; i < 5; i++) f.project('C:/trusted/project');
+  await Promise.resolve(); assert.equal(invalidations, 1); assert.equal(refreshes, 1);
+  assert.equal(f.composer.value, draft); assert.equal(f.requests, 0); f.untouched(); unsubscribe();
+});
+
+test('workflow controller refresh coalesces canonical changes and ignores duplicate polling and DOM context events', async () => {
+  const f = workflowContextFixture(); f.composer.value = 'Existing one-conversation draft';
+  let invalidations = 0, refreshes = 0, previewValid = true;
+  const options = createWorkflowContextOptions(() => 'a'.repeat(64), f.workbench, f.chat, () => { refreshes++; });
+  const unsubscribe = options.subscribeContextChange!(() => { invalidations++; previewValid = false; });
+  f.project('C:/trusted/project'); f.native({ provider: 'codex', threadId: 'observed-thread', sessionId: null, projectPath: 'C:/trusted/project' });
+  assert.equal(invalidations, 2, 'every actual change stales previews synchronously');
+  await Promise.resolve(); assert.equal(refreshes, 1, 'one read refresh for the same observation turn');
+  previewValid = true;
+  for (let i = 0; i < 8; i++) { f.project('C:/trusted/project'); f.pollNative(); }
+  f.doc.getElementById('project-path')!.textContent = 'C:/untrusted/browser-label';
+  f.doc.dispatchEvent(new Event('arcane:contextchange')); f.doc.dispatchEvent(new Event('workspace:toolchange'));
+  await Promise.resolve(); assert.equal(invalidations, 2); assert.equal(refreshes, 1); assert.equal(previewValid, true);
+  assert.equal(options.getProjectPath(), 'C:/trusted/project'); assert.equal(options.getNativeConversation!()!.threadId, 'observed-thread');
+  f.native({ provider: 'codex', threadId: 'observed-thread', sessionId: 'new-observed-session', projectPath: 'C:/trusted/project' });
+  assert.equal(previewValid, false); await Promise.resolve(); assert.equal(invalidations, 3); assert.equal(refreshes, 2);
+  assert.equal(f.composer.value, 'Existing one-conversation draft'); assert.equal(f.requests, 0); f.untouched(); unsubscribe();
+});
+
+test('workflow subscriptions ignore invalid project observations and cancel queued refreshes on cleanup', async () => {
+  const f = workflowContextFixture(); let invalidations = 0, refreshes = 0;
+  f.project('C:/trusted/project');
+  const options = createWorkflowContextOptions(() => 'a'.repeat(64), f.workbench, f.chat, () => { refreshes++; });
+  const unsubscribe = options.subscribeContextChange!(() => { invalidations++; });
+  for (const value of [undefined, null, '', '\0', 'x'.repeat(4097)]) f.project(value);
+  f.project('C:/untrusted/protocol', 2); await Promise.resolve();
+  assert.equal(options.getProjectPath(), 'C:/trusted/project'); assert.equal(invalidations, 0); assert.equal(refreshes, 0);
+  f.project('C:/trusted/other'); assert.equal(invalidations, 1); unsubscribe(); await Promise.resolve(); assert.equal(refreshes, 0);
+  assert.equal(f.nativeListeners.size, 0);
+  f.project('C:/trusted/third'); f.native({ provider: 'codex', threadId: 'another-thread', sessionId: null });
+  await Promise.resolve(); assert.equal(invalidations, 1); assert.equal(refreshes, 0); assert.equal(f.requests, 0);
+});
+
+test('workflow boot retains optional dynamic loading and wires only trusted context sources', async () => {
+  const source = await readFile(resolve('apps/desktop/src/studio.ts'), 'utf8');
+  assert.match(source, /void import\('\.\/workflow-panel\.js'\)\.then/);
+  assert.doesNotMatch(source, /^import\s+(?!type\b)[^\n]+from '\.\/workflow-panel\.js'/m);
+  assert.match(source, /createWorkflowContextOptions\(\(\) => token, workbench, codexChat, refreshWorkflowContext\)/);
+  assert.match(source, /if \(!workflowsStopped\) return workflows\.start\(\)/);
+  assert.match(source, /Restart Arcane to load the workflow tools\./);
+  assert.doesNotMatch(source, /addEventListener\('arcane:contextchange'/);
+  const wiring = source.slice(source.indexOf('export function createWorkflowContextOptions'), source.indexOf("if (typeof window !== 'undefined'"));
+  assert.doesNotMatch(wiring, /getModelSelection\s*:|connectionRevision\s*:|localStorage|sessionStorage|dispatch\(|turn-start|thread-start|thread-resume|grant-writes/);
 });

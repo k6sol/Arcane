@@ -1,17 +1,20 @@
+import { homedir } from 'node:os';
+import { ConversationWorkStore, type NativeConversation } from '../../../packages/storage/src/conversation-work-store.js';
+import { privateWorkflowReceiptStorage } from './workflow-private-storage.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
   openSync, readSync, realpathSync, writeSync, type Stats,
 } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
-import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import type { HumanGate, WorkflowRecipeRequest, WorkflowSubmission } from '../../../packages/core/src/workflow-recipes.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
 import {
   WorkflowService, type WorkflowHumanCommand, type WorkflowHumanRequest,
-  type WorkflowServiceOptions,
+  type WorkflowServiceOptions, type WorkflowJournalReceipt, type WorkflowSnapshot, WORKFLOW_RECEIPT_LIMITS,
 } from './workflow-service.js';
 
 export const WORKFLOW_HTTP_LIMITS = Object.freeze({
@@ -24,6 +27,9 @@ export interface WorkflowHostOptions {
   workStore: NonNullable<WorkflowServiceOptions['workStore']>;
   /** Trusted observations only. No execution/verifier/authority callback is accepted. */
   policyContext?: WorkflowServiceOptions['policyContext'];
+  conversation?: () => NativeConversation | null;
+  workAssociations?: ConversationWorkStore;
+  verifiers?: WorkflowServiceOptions['verifiers'];
 }
 export interface WorkflowHttpAuthority { controlToken: string; origin: string; agentToken: string }
 export type WorkflowPreviewInput =
@@ -36,11 +42,19 @@ export type WorkflowPreviewInput =
 export interface WorkflowPreview {
   prepared: WorkflowHumanRequest;
   receiptHash: string;
+  conversation?: NativeConversation;
   request?: WorkflowRecipeRequest;
   resolution?: 'halt' | 'accept-observed';
   observedRun?: { runId: string; taskIds: Record<string, string> };
 }
 export interface WorkflowExecuteInput { preview: WorkflowPreview; idempotencyKey: string }
+export type WorkflowHostSnapshot = WorkflowSnapshot & { conversation?: NativeConversation };
+export interface WorkflowReceiptResponse extends WorkflowJournalReceipt {
+  association: 'bound' | 'unknown' | 'unscoped' | null;
+  snapshot: WorkflowHostSnapshot | null;
+  snapshotStatus: 'available' | 'not-recorded' | 'unbound' | 'unavailable' | 'too-large';
+  retry: false;
+}
 
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -121,19 +135,32 @@ function sameFile(a: Stats, b: Stats): boolean {
     a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }
 
+/** Fixed app-owned location avoids cloud/package ACL exceptions; checks stay strict. */
+export function workflowReceiptParent(directory: string, projectId: string): string {
+  if(process.platform !== 'win32')return directPath(directory);
+  const home=directPath(homedir());
+  const base=join(home,'.arcane-private-receipts-v1');
+  directPath(base);mkdirSync(base,{recursive:true,mode:0o700});directPath(base);
+  const scope=createHash('sha256').update(projectId).update('\0').update(directPath(directory).toLowerCase()).digest('hex');
+  const parent=join(base,scope);directPath(parent);mkdirSync(parent,{mode:0o700,recursive:true});directPath(parent);return parent;
+}
+
 /** Only its direct, fixed child key file is ever read. No generic key-file path exists. */
 class ReceiptKey {
   private readonly directory: string;
   private readonly file: string;
   private readonly key: Buffer;
-  constructor(parent: string) {
-    parent = directPath(parent);
+  constructor(parent: string, projectId: string) {
+    parent = workflowReceiptParent(directPath(parent), projectId);
     if (!lstatSync(parent).isDirectory()) fail('WORKFLOW_RECEIPT_STORAGE');
     this.directory = join(parent, 'workflow-human-receipts');
     this.file = join(this.directory, 'key-v1');
     directPath(this.directory);
     const existing = existsSync(this.directory);
-    if (!existing) mkdirSync(this.directory, { mode: 0o700 });
+    if (process.platform === 'win32') {
+      const protection = privateWorkflowReceiptStorage(parent, !existing, false);
+      if (!existing && protection?.created !== true) fail('WORKFLOW_RECEIPT_STORAGE');
+    } else if (!existing) mkdirSync(this.directory, { mode: 0o700 });
     privateMode(lstatSync(this.directory), true);
     if (!existing) {
       const fd = openSync(this.file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
@@ -153,6 +180,7 @@ class ReceiptKey {
     this.key = this.read();
   }
   private read(): Buffer {
+    privateWorkflowReceiptStorage(dirname(this.directory), false, true);
     directPath(this.file);
     privateMode(lstatSync(this.directory), true);
     const selected = lstatSync(this.file);
@@ -178,20 +206,20 @@ class ReceiptKey {
       return Buffer.from(bytes.subarray(0, 32));
     } finally { bytes.fill(0); closeSync(fd); }
   }
-  private tag(prepared: WorkflowHumanRequest, nonce: string): string {
+  private tag(prepared: WorkflowHumanRequest, nonce: string, conversation?: NativeConversation): string {
     const current = this.read();
     try { if (!timingSafeEqual(current, this.key)) fail('WORKFLOW_RECEIPT_STORAGE'); }
     finally { current.fill(0); }
     return createHmac('sha256', this.key).update(DOMAIN).update(nonce).update('\0')
-      .update(canonical(prepared)).digest('hex').slice(0, 48);
+      .update(canonical(conversation === undefined ? prepared : {prepared,conversation})).digest('hex').slice(0, 48);
   }
-  sign(prepared: WorkflowHumanRequest): string {
+  sign(prepared: WorkflowHumanRequest, conversation?: NativeConversation): string {
     const nonce = randomBytes(8).toString('hex');
-    return nonce + this.tag(prepared, nonce);
+    return nonce + this.tag(prepared, nonce, conversation);
   }
-  verify(prepared: WorkflowHumanRequest, receipt: unknown): boolean {
+  verify(prepared: WorkflowHumanRequest, receipt: unknown, conversation?: NativeConversation): boolean {
     if (typeof receipt !== 'string' || !HASH.test(receipt)) return false;
-    return timingSafeEqual(Buffer.from(this.tag(prepared, receipt.slice(0, 16)), 'hex'), Buffer.from(receipt.slice(16), 'hex'));
+    return timingSafeEqual(Buffer.from(this.tag(prepared, receipt.slice(0, 16), conversation), 'hex'), Buffer.from(receipt.slice(16), 'hex'));
   }
   close(): void { this.key.fill(0); }
 }
@@ -204,7 +232,8 @@ function representation(command: Readonly<WorkflowHumanCommand>): WorkflowHumanR
 
 /** Lazy, project-bound, human HTTP authority. Owns only coordinator journal and receipt key. */
 export function createWorkflowHost(options: WorkflowHostOptions) {
-  fields(options, ['directory', 'projectPath', 'workStore'], ['policyContext']);
+  fields(options, ['directory', 'projectPath', 'workStore'], ['policyContext','conversation','workAssociations','verifiers']);
+  if(options.conversation && !options.workAssociations)fail('WORKFLOW_CONVERSATION');
   const { directory, projectPath, policyContext } = options;
   const borrowed = fields(options.workStore, ['store', 'projectPath']);
   const workStore = { store: options.workStore.store, projectPath: borrowed.projectPath as string };
@@ -217,17 +246,37 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
     if (closed) fail('WORKFLOW_CLOSED');
     if (!selected) {
       const identity = workflowProjectIdentity(projectPath);
+      if(options.workAssociations&&options.workAssociations.projectId!==identity.projectId)fail('WORKFLOW_PROJECT');
       if (workflowProjectIdentity(workStore.projectPath).projectId !== identity.projectId) fail('WORKFLOW_PROJECT');
-      receipts = new ReceiptKey(directory);
+      receipts = new ReceiptKey(directory,identity.projectId);
       try {
         selected = new WorkflowService({
           directory, projectPath, workStore,
           ...(policyContext ? { policyContext } : {}),
-          authorizeHuman: command => receipts?.verify(representation(command), command.receiptHash) === true,
+          ...(options.verifiers ? {verifiers:options.verifiers} : {}),
+          authorizeHuman: command => receipts?.verify(representation(command), command.receiptHash, currentConversation() ?? undefined) === true,
         });
       } catch (error) { receipts.close(); receipts = undefined; throw error; }
     }
     return selected;
+  }
+  function currentConversation(): NativeConversation | null {
+    const value=options.conversation?.() ?? null;if(value===null)return null;
+    const a=fields(value,['provider','threadId','sessionId']);
+    if(!['codex','claude-code'].includes(a.provider as string)||typeof a.threadId!=='string'||! /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(a.threadId)|| (a.sessionId!==null&&(typeof a.sessionId!=='string'||! /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(a.sessionId))))fail('WORKFLOW_CONVERSATION');
+    return {provider:a.provider as NativeConversation['provider'],threadId:a.threadId,sessionId:a.sessionId as string|null};
+  }
+  function bound(workflowId:string): boolean {
+    if(!options.conversation)return true;const current=currentConversation();const binding=options.workAssociations!.binding('workflow',workflowId);
+    return current!==null&&binding!==null&&canonical(current)===canonical(binding.conversation);
+  }
+  function inConversation(workflowId:string): void {if(!bound(workflowId))fail('WORKFLOW_CONVERSATION');}
+  function attested<T extends WorkflowSnapshot>(snapshot: T): T & { conversation?: NativeConversation } {
+    if (!options.conversation) return snapshot;
+    const conversation = currentConversation(), binding = options.workAssociations!.binding('workflow', snapshot.workflow.id);
+    if (!conversation || !binding || canonical(binding.conversation) !== canonical(conversation)) fail('WORKFLOW_CONVERSATION');
+    if (snapshot.workflow.projectId !== binding.projectId || binding.projectId !== opened().projectId) fail('WORKFLOW_PROJECT');
+    return { ...snapshot, conversation };
   }
   function guarded<T>(work: (service: WorkflowService) => T): T {
     try { return work(opened()); }
@@ -243,7 +292,8 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
     if (typeof path !== 'string') fail('WORKFLOW_INPUT');
     const state = resolve(directory), project = workflowProjectIdentity(projectPath).projectPath;
     const full = resolve(project, path.normalize('NFKC').replaceAll('\\', '/').trim());
-    if (inside(state, full) || (scope && inside(full, state))) fail('WORKFLOW_INPUT');
+    const receiptBase=process.platform==='win32'?join(homedir(),'.arcane-private-receipts-v1'):state;
+    if (inside(state, full) || inside(receiptBase, full) || (scope && (inside(full, state)||inside(full,receiptBase)))) fail('WORKFLOW_INPUT');
   }
   function privatePaths(prepared: WorkflowHumanRequest): void {
     // State under a project must never become submitted project evidence or a write scope.
@@ -255,6 +305,8 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
     bounded(input, [authority.controlToken, authority.agentToken]);
     return guarded(service => {
       const a = fields(input, ['action'], ['request', 'workflowId', 'stepKey', 'gate', 'decision', 'submission', 'resolution', 'observedRun']);
+      const conversation=currentConversation();if(options.conversation&&!conversation)fail('WORKFLOW_CONVERSATION');
+      if(a.action!=='recipe')inConversation(id(a.workflowId));
       let result: Omit<WorkflowPreview, 'receiptHash'>;
       switch (a.action) {
         case 'recipe':
@@ -294,7 +346,7 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
         default: fail('WORKFLOW_INPUT');
       }
       privatePaths(result.prepared);
-      const output = { ...result, receiptHash: receipts!.sign(result.prepared) };
+      const output = { ...result, ...(conversation?{conversation}:{}), receiptHash: receipts!.sign(result.prepared, conversation ?? undefined) };
       bounded(output, [authority.controlToken, authority.agentToken]);
       return output;
     });
@@ -303,32 +355,37 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
     human(request, authority);
     bounded(input, [authority.controlToken, authority.agentToken]);
     const a = fields(input, ['preview', 'idempotencyKey']), key = id(a.idempotencyKey);
-    const p = fields(a.preview, ['prepared', 'receiptHash'], ['request', 'resolution', 'observedRun']) as unknown as WorkflowPreview;
+    const p = fields(a.preview, ['prepared', 'receiptHash'], ['request', 'resolution', 'observedRun','conversation']) as unknown as WorkflowPreview;
     return guarded(service => {
-      if (!receipts!.verify(p.prepared, p.receiptHash) || p.prepared.projectId !== service.projectId) fail('WORKFLOW_HUMAN_REQUIRED');
+      const conversation=currentConversation();
+      if(options.conversation&&(!conversation||canonical(p.conversation)!==canonical(conversation)))fail('WORKFLOW_CONVERSATION');
+      if(p.prepared.kind!=='create-recipe')inConversation(id(p.prepared.workflowId));
+      if (!receipts!.verify(p.prepared, p.receiptHash,conversation??undefined) || p.prepared.projectId !== service.projectId) fail('WORKFLOW_HUMAN_REQUIRED');
       privatePaths(p.prepared);
       const common = { workflowId: p.prepared.workflowId, idempotencyKey: key, receiptHash: p.receiptHash };
       // The coordinator checks the new current representation through the same HMAC
       // callback; completed exact journal replays need no ephemeral request permit.
       switch (p.prepared.kind) {
         case 'create-recipe':
-          fields(p, ['prepared', 'receiptHash', 'request']);
+          fields(p, ['prepared', 'receiptHash', 'request'],['conversation']);
           if (canonical(service.prepareCreation(p.request!)) !== canonical(p.prepared)) fail('WORKFLOW_BINDING');
-          return service.create({ request: p.request, idempotencyKey: key, receiptHash: p.receiptHash });
+          const result=service.create({ request: p.request, idempotencyKey: key, receiptHash: p.receiptHash });
+          if(conversation){try{options.workAssociations!.bind({conversation,kind:'workflow',id:result.workflow.id});}catch{fail('WORKFLOW_ASSOCIATION_UNKNOWN');}}
+          return attested(result);
         case 'recipe-gate': {
-          fields(p, ['prepared', 'receiptHash']);
+          fields(p, ['prepared', 'receiptHash'],['conversation']);
           const { workflowId: _recipeId, ...decision } = p.prepared.recipeGate!;
-          return service.recordDecision({ workflowId: common.workflowId, idempotencyKey: key,
-            decision: { ...decision, receiptHash: p.receiptHash } });
+          return attested(service.recordDecision({ workflowId: common.workflowId, idempotencyKey: key,
+            decision: { ...decision, receiptHash: p.receiptHash } }));
         }
         case 'submit-evidence':
-          fields(p, ['prepared', 'receiptHash']);
-          return service.submitHandoff({ ...common, submission: p.prepared.submission });
+          fields(p, ['prepared', 'receiptHash'],['conversation']);
+          return attested(service.submitHandoff({ ...common, submission: p.prepared.submission }));
         case 'review-evidence':
-          fields(p, ['prepared', 'receiptHash']);
-          return service.review({ ...common, stepKey: p.prepared.stepKey, decision: p.prepared.decision });
+          fields(p, ['prepared', 'receiptHash'],['conversation']);
+          return attested(service.review({ ...common, stepKey: p.prepared.stepKey, decision: p.prepared.decision }));
         case 'reconcile': {
-          fields(p, ['prepared', 'receiptHash', 'resolution'], ['observedRun']);
+          fields(p, ['prepared', 'receiptHash', 'resolution'], ['observedRun','conversation']);
           // Reconciliation has an additional exact binding over resolution/run mapping.
           const { binding: _binding, ...base } = p.prepared;
           const normal = { ...base, binding: createHash('sha256').update(canonical(base)).digest('hex') };
@@ -336,21 +393,75 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
             request: normal, resolution: p.resolution, observedRun: p.observedRun ?? null,
           })).digest('hex');
           if (expected !== p.prepared.binding) fail('WORKFLOW_BINDING');
-          return service.reconcile({ ...common, resolution: p.resolution,
-            ...(p.observedRun === undefined ? {} : { observedRun: p.observedRun }) });
+          return attested(service.reconcile({ ...common, resolution: p.resolution,
+            ...(p.observedRun === undefined ? {} : { observedRun: p.observedRun }) }));
         }
         default: fail('WORKFLOW_INPUT');
       }
     });
   }
+  function receipt(input: unknown, request: IncomingMessage, authority: WorkflowHttpAuthority): WorkflowReceiptResponse {
+    human(request, authority);
+    bounded(input, [authority.controlToken, authority.agentToken]);
+    const a = fields(input, ['preview', 'idempotencyKey']), key = id(a.idempotencyKey);
+    const p = fields(a.preview, ['prepared', 'receiptHash'], ['request', 'resolution', 'observedRun', 'conversation']) as unknown as WorkflowPreview;
+    fields(p.prepared, ['kind', 'projectId', 'workflowId', 'recipe', 'stepKey', 'decision', 'binding',
+      'subjectHashes', 'inputArtifacts', 'submission', 'operation', 'recipeGate']);
+    return guarded(service => {
+      const conversation = currentConversation();
+      if (options.conversation && (!conversation || canonical(p.conversation) !== canonical(conversation))) fail('WORKFLOW_CONVERSATION');
+      if (!options.conversation && p.conversation !== undefined) fail('WORKFLOW_CONVERSATION');
+      if (!receipts!.verify(p.prepared, p.receiptHash, conversation ?? undefined) || p.prepared.projectId !== service.projectId) fail('WORKFLOW_HUMAN_REQUIRED');
+      privatePaths(p.prepared);
+      switch (p.prepared.kind) {
+        case 'create-recipe':
+          fields(p, ['prepared', 'receiptHash', 'request'], ['conversation']);
+          if (canonical(service.prepareCreation(p.request!)) !== canonical(p.prepared)) fail('WORKFLOW_BINDING');
+          break;
+        case 'recipe-gate': case 'submit-evidence': case 'review-evidence':
+          fields(p, ['prepared', 'receiptHash'], ['conversation']); break;
+        case 'reconcile':
+          fields(p, ['prepared', 'receiptHash', 'resolution'], ['observedRun', 'conversation']); break;
+        default: fail('WORKFLOW_INPUT');
+      }
+      const observed = service.receipt({ prepared: p.prepared, receiptHash: p.receiptHash, idempotencyKey: key,
+        ...(p.resolution === undefined ? {} : { resolution: p.resolution }),
+        ...(p.observedRun === undefined ? {} : { observedRun: p.observedRun }),
+      });
+      const result: WorkflowReceiptResponse = { ...observed, association: null, snapshot: null,
+        snapshotStatus: 'not-recorded', retry: false };
+      if (!observed.command) return result;
+      result.association = options.conversation ? 'unknown' : 'unscoped';
+      result.snapshotStatus = 'unbound';
+      if (!options.conversation) return result;
+      const binding = options.workAssociations!.binding('workflow', observed.command.workflowId);
+      if (!binding) return result; // Missing attribution stays unknown; never bind or replay.
+      if (binding.projectId !== service.projectId) fail('WORKFLOW_PROJECT');
+      if (canonical(binding.conversation) !== canonical(conversation)) fail('WORKFLOW_CONVERSATION');
+      result.association = 'bound';
+      try { result.snapshot = attested(service.get(observed.command.workflowId, true)); result.snapshotStatus = 'available'; }
+      catch (error) {
+        if (!(error instanceof ArcaneError) || !['WORKFLOW_RECORD', 'WORKFLOW_MAPPING', 'WORKFLOW_EVIDENCE', 'WORKFLOW_CONTEXT', 'WORKFLOW_STATE'].includes(error.code)) throw error;
+        result.snapshotStatus = 'unavailable';
+      }
+      if (Buffer.byteLength(JSON.stringify(result)) > WORKFLOW_RECEIPT_LIMITS.responseBytes) {
+        result.snapshot = null; result.snapshotStatus = 'too-large';
+      }
+      return result;
+    });
+  }
   return {
-    list: () => guarded(service => ({ projectId: service.projectId, workflows: service.list() })),
-    get: (workflowId: string) => guarded(service => service.get(id(workflowId))),
-    currentFlow: () => guarded(service => {
-      const record = service.list().find(item => item.state !== 'halted');
-      return record ? service.get(record.id) : null;
+    list: () => guarded(service => {
+      const workflows = service.list().filter(row => bound(row.id));
+      const conversation = workflows.length && options.conversation ? currentConversation() : null;
+      return { projectId: service.projectId, workflows, ...(conversation ? { conversation } : {}) };
     }),
-    preview, execute, close,
+    get: (workflowId: string) => guarded(service => {inConversation(id(workflowId));return attested(service.get(id(workflowId)));}),
+    currentFlow: () => guarded(service => {
+      const record = service.list().find(item => item.state !== 'halted' && bound(item.id));
+      return record ? attested(service.get(record.id)) : null;
+    }),
+    preview, execute, receipt, close,
   };
 }
 export type WorkflowHost = ReturnType<typeof createWorkflowHost>;

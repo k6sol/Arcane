@@ -1,3 +1,4 @@
+import type { startWorkflowPanel, WorkflowPanelOptions } from './workflow-panel.js';
 import { CodexHistoryPanel } from './codex-history.js';
 import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
@@ -421,6 +422,16 @@ const stateTone = (state: StudioCommand['state']) => state === 'succeeded' ? 'go
 export class StudioWorkbench {
   private canonicalProjectPath = '';
   historyProjectPath(): string { return this.canonicalProjectPath; }
+  private readonly projectListeners = new Set<() => void>();
+  subscribeProjectChange(listener: () => void): () => void {
+    this.projectListeners.add(listener);
+    return () => { this.projectListeners.delete(listener); };
+  }
+  private observeProjectPath(value: unknown): void {
+    if (typeof value !== 'string' || !value.trim() || value.length > 4096 || /[\x00-\x1f]/.test(value) || value === this.canonicalProjectPath) return;
+    this.canonicalProjectPath = value;
+    for (const listener of this.projectListeners) listener();
+  }
   private nativeObservation: NativeObservation | null = null;
   private nativeInventoryReady = false;
   private nativeObserverBusy = false;
@@ -486,7 +497,7 @@ export class StudioWorkbench {
   private text(id: string, value: string) { this.el(id).textContent = value; }
   private value(id: string) { return this.el<HTMLInputElement>(id).value; }
   private checked(id: string) { return this.el<HTMLInputElement>(id).checked; }
-  private badge(id: string, label: string, tone = 'neutral') { const item = this.el(id); item.textContent = label; item.className = 'badge ' + tone; }
+  private badge(id: string, label: string, tone = 'neutral') { const item = this.el(id); item.textContent = label; item.className = 'status-text ' + tone; }
   private notice(message: string, tone = '') { this.text('notice', message); this.el('notice').className = 'notice ' + tone; }
   private error(error: unknown) { this.notice(error instanceof Error ? error.message : String(error), 'error'); }
   private active() { return this.sessions.find(s => s.id === this.sessionId); }
@@ -604,7 +615,7 @@ export class StudioWorkbench {
       // Project/chat metadata does not depend on Studio availability.
       const product = reads[1]!;
       if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
-      else { this.canonicalProjectPath = ''; this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
+      else { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       const sessionRead = reads[0]!;
       if (sessionRead.status === 'rejected') throw sessionRead.reason;
       const sessionData = sessionRead.value as { sessions: StudioSession[] };
@@ -642,7 +653,7 @@ export class StudioWorkbench {
   }
 
   private renderProduct(state: ProductState) {
-    this.canonicalProjectPath = typeof state.projectPath === 'string' && state.projectPath.length <= 4096 && !/[\x00-\x1f]/.test(state.projectPath) ? state.projectPath : '';
+    if (state.protocolVersion === 1) this.observeProjectPath(state.projectPath);
     this.text('project-path', typeof state.projectPath === 'string' ? state.projectPath : 'Project path unavailable');
     const counts = record(state.commandCounts) ? Object.entries(state.commandCounts).map(([key, value]) => key + ': ' + String(value)).join(' · ') : json(state.commandCounts) ?? 'Unavailable';
     this.text('command-counts', counts || 'No commands recorded');
@@ -1293,6 +1304,38 @@ export class StudioWorkbench {
   }
 }
 
+/** Subscribe to trusted controller observations, not DOM labels or polling events. */
+export function createWorkflowContextOptions(
+  getToken: () => string,
+  workbench: Pick<StudioWorkbench, 'historyProjectPath' | 'subscribeProjectChange'>,
+  chat: Pick<CodexChat, 'workflowConversation' | 'subscribeWorkflowContextChange'>,
+  refresh: () => void,
+): WorkflowPanelOptions {
+  const signature = () => JSON.stringify([getToken(), workbench.historyProjectPath(), chat.workflowConversation()]);
+  return {
+    getToken,
+    getProjectPath: () => workbench.historyProjectPath() || null,
+    getNativeConversation: () => chat.workflowConversation(),
+    // Native state exposes no server policy catalogue revision. Model stays null.
+    subscribeContextChange(invalidate) {
+      let previous = signature(), active = true, refreshQueued = false;
+      const changed = () => {
+        const next = signature();
+        if (next === previous) return;
+        previous = next;
+        invalidate();
+        if (!refreshQueued) {
+          refreshQueued = true;
+          queueMicrotask(() => { refreshQueued = false; if (active) refresh(); });
+        }
+      };
+      const removeProject = workbench.subscribeProjectChange(changed);
+      const removeNative = chat.subscribeWorkflowContextChange(changed);
+      return () => { active = false; removeProject(); removeNative(); };
+    },
+  };
+}
+
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   let storage: Pick<Storage, 'getItem' | 'setItem'>;
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
@@ -1301,10 +1344,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const codexChat = new CodexChat(document, new CodexChatApi(token));
   const learningPanel = new LearningPanel(document, token); learningPanel.start();
   const historyPanel = new CodexHistoryPanel(document, { getToken: () => token, getProjectPath: () => workbench.historyProjectPath() }); historyPanel.start();
+  let workflows: ReturnType<typeof startWorkflowPanel> | null = null;
+  let workflowsStopped = false;
+  const refreshWorkflowContext = () => { if (!workflowsStopped) void workflows?.resume(); };
+  // Keep workflow loading optional so an older daemon's missing module cannot break chat.
+  void import('./workflow-panel.js').then(module => {
+    workflows = module.startWorkflowPanel(document, createWorkflowContextOptions(() => token, workbench, codexChat, refreshWorkflowContext));
+    if (!workflowsStopped) return workflows.start();
+  }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume(); } });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }
+
+

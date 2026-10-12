@@ -77,8 +77,8 @@ test('thread, workspace and optional session mismatch reject before reading cont
   assert.deepEqual(reasons(parseCodexThreadRead(read(), { ...SCOPE, cwd: CWD.toLowerCase() })), ['scope-mismatch']);
 });
 
-test('paginated and unknown storage modes fail closed even when turns look like valid legacy data', () => {
-  for (const mode of ['paginated', 'future-mode', null, {}]) {
+test('unknown storage modes fail closed before visiting turn content', () => {
+  for (const mode of ['future-mode', null, {}]) {
     const fixture = read([], { historyMode: mode });
     Object.defineProperty(fixture.thread, 'turns', { get() { assert.fail('unsupported mode accessed content'); } });
     const result = parseCodexThreadRead(fixture, SCOPE);
@@ -399,4 +399,41 @@ test('planners never mint native IDs, accept transcript paths or return plans fo
     assert.equal(plan.cli, null);
     assert.ok(!JSON.stringify(plan).includes('PRIVATE_TOKEN'));
   }
+});
+
+
+test('hydrated paginated thread/read projects exact public IDs only with explicit full turn items', () => {
+  const result = parseCodexThreadRead(read([turn([user(), {type:'reasoning',id:'private-reasoning',summary:['PRIVATE_REASONING']}, assistant()])], {historyMode:'paginated'}), SCOPE);
+  assert.equal(result.completeness, 'complete');
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.excludedItems, 1);
+  assert.equal(result.entries[0]?.ids.threadId, THREAD);
+  assert.equal(result.entries[0]?.ids.sessionId, SESSION);
+  assert.equal(result.entries[0]?.ids.turnId, TURN);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_REASONING'));
+});
+
+test('paginated summaries, missing view and empty histories retain honest hydration gaps', () => {
+  for (const itemsView of ['summary', 'notLoaded', undefined]) {
+    const result = parseCodexThreadRead(read([turn([assistant('a','NOT_HYDRATED')], TURN, {itemsView})], {historyMode:'paginated'}), SCOPE);
+    assert.equal(result.completeness, 'incomplete');
+    assert.deepEqual(reasons(result), ['items-not-full']);
+    assert.equal(result.entries.length,0);
+    assert.ok(!JSON.stringify(result).includes('NOT_HYDRATED'));
+  }
+  const empty = parseCodexThreadRead(read([], {historyMode:'paginated'}), SCOPE);
+  assert.equal(empty.completeness, 'incomplete');
+  assert.deepEqual(reasons(empty), ['missing-turns']);
+  assert.equal(parseCodexThreadRead(read([], {historyMode:'paginated'}), {...SCOPE,includeTurns:false}).completeness,'incomplete');
+});
+
+test('paginated projections still enforce scope, limits and cursor-envelope rejection', () => {
+  const input = read([turn([user(),assistant()]),turn([assistant('other','Public')],'turn-other')],{historyMode:'paginated'});
+  assert.equal(parseCodexThreadRead(input,{...SCOPE,cwd:'/foreign'}).completeness,'rejected');
+  assert.equal(parseCodexThreadRead(input,{...SCOPE,threadId:'foreign'}).completeness,'rejected');
+  const limited=parseCodexThreadRead(input,SCOPE,{maxTurns:1});
+  assert.equal(limited.completeness,'incomplete');
+  assert.ok(limited.truncated);
+  assert.ok(reasons(limited).includes('turn-limit'));
+  assert.deepEqual(reasons(parseCodexThreadRead(read([], {historyMode:'paginated',nextCursor:'opaque'}),SCOPE)),['unsupported-envelope']);
 });

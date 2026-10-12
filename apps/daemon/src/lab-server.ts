@@ -1,3 +1,7 @@
+import { mkdir } from 'node:fs/promises';
+import { createWorkflowHost } from './workflow-host.js';
+import { workflowRoutes } from './workflow-routes.js';
+import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { learningRoutes } from './learning-routes.js';
 import type { LearningService } from './learning-service.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -52,6 +56,37 @@ export async function createConnectionLab(options: Options) {
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
   const nativeChat = codex ? codexRoutes(codex) : null;
+  let associations: ConversationWorkStore | null = null;
+  let workflow: ReturnType<typeof createWorkflowHost> | null = null;
+  try {
+    if (options.workStore) {
+      associations = new ConversationWorkStore({
+        directory: join(options.stateDirectory, 'conversation-work'),
+        projectPath: options.projectPath ?? options.cwd,
+      });
+      const workflowDirectory = join(options.stateDirectory, 'workflows');
+      await mkdir(workflowDirectory, { recursive: true, mode: 0o700 });
+      workflow = createWorkflowHost({
+        directory: workflowDirectory, projectPath: options.projectPath ?? options.cwd,
+        workStore: { store: options.workStore, projectPath: options.projectPath ?? options.cwd },
+        workAssociations: associations,
+        conversation: () => {
+          const state = codex?.state(), thread = state?.snapshot?.thread;
+          const identity = thread?.configured ? thread : state?.nativeHistory;
+          return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
+        },
+        policyContext: () => ({ connections, capabilities: [] }),
+      });
+    }
+  } catch (error) {
+    // Initialization failure must close every owned resource, without closing
+    // the launcher's borrowed WorkStore or masking the original failure.
+    try { workflow?.close(); } catch { /* Preserve original failure. */ }
+    try { associations?.close(); } catch { /* Preserve original failure. */ }
+    try { await codex?.close(); } catch { /* Preserve original failure. */ }
+    throw error;
+  }
+  const workflowApi = workflow ? workflowRoutes(workflow) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     response.end(JSON.stringify(payload));
@@ -75,6 +110,7 @@ export async function createConnectionLab(options: Options) {
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
           ['/learning-panel.js', [join(options.cwd, 'dist/apps/desktop/src/learning-panel.js'), 'text/javascript']],
+          ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
           ['/codex-history.js', [join(options.cwd, 'dist/apps/desktop/src/codex-history.js'), 'text/javascript']],
           ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']]
         ] as [string, [string, string]][] : [])
@@ -85,6 +121,7 @@ export async function createConnectionLab(options: Options) {
         response.writeHead(200, { 'Content-Type': asset[1] + (asset[1].startsWith('image/') ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(data); return;
       }
+      if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;
       if (learning && await learning(request,response,url,token,origin,agentToken)) return;
       if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
       if (native && await native(request,response,url,token,origin)) return;
@@ -121,18 +158,35 @@ export async function createConnectionLab(options: Options) {
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 32;
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
-  catch (error) { await codex?.close(); throw error; }
+  catch (error) {
+    try { workflow?.close(); } catch { /* Preserve listener failure. */ }
+    try { associations?.close(); } catch { /* Preserve listener failure. */ }
+    try { await codex?.close(); } catch { /* Preserve listener failure. */ }
+    throw error;
+  }
   const address = server.address();
   if (!address || typeof address === 'string') throw new ArcaneError('SERVER', 'Local server did not bind.');
   origin = 'http://127.0.0.1:' + address.port;
+  let cleanup: Promise<void> | null = null;
   return {
     server, origin, token, agentToken, url: origin + '/#' + token,
-    async close() {
+    close(): Promise<void> {
+      if (cleanup) return cleanup;
       shuttingDown = true;
-      // Quiesce the listener and sockets before awaiting native child cleanup.
-      const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())).catch(error => error as Error);
-      server.closeAllConnections();
-      try { await codex?.close(); } finally { const error = await listenerClosed; if (error) throw error; }
+      cleanup = (async () => {
+        // Quiesce the listener first; all cleanup paths still run on failure.
+        const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+          .catch(error => error as Error);
+        server.closeAllConnections();
+        const errors: unknown[] = [];
+        try { workflow?.close(); } catch (error) { errors.push(error); }
+        try { associations?.close(); } catch (error) { errors.push(error); }
+        try { await codex?.close(); } catch (error) { errors.push(error); }
+        const listenerError = await listenerClosed;
+        if (listenerError) errors.push(listenerError);
+        if (errors.length) throw new ArcaneError('CLEANUP', 'Owned local service cleanup failed; retained state needs inspection.');
+      })();
+      return cleanup;
     }
   };
 }

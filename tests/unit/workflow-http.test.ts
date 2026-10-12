@@ -7,13 +7,14 @@ import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync,
   readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { createWorkflowHost, WORKFLOW_HTTP_LIMITS, type WorkflowHost, type WorkflowPreview } from '../../apps/daemon/src/workflow-host.js';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { createWorkflowHost, workflowReceiptParent, WORKFLOW_HTTP_LIMITS, type WorkflowHost, type WorkflowPreview } from '../../apps/daemon/src/workflow-host.js';
 import { workflowRoutes } from '../../apps/daemon/src/workflow-routes.js';
 import type { WorkflowSnapshot } from '../../apps/daemon/src/workflow-service.js';
 import type { WorkflowRecipeRequest, WorkflowSubmission } from '../../packages/core/src/workflow-recipes.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
+import { workflowProjectIdentity } from '../../packages/storage/src/workflow-store.js';
 import type { Connection } from '../../packages/protocol/src/providers.js';
 
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -40,6 +41,8 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
   const projectPath = join(root, 'project'), directory = settings.stateInsideProject ? join(projectPath, 'state') : join(root, 'state');
   mkdirSync(projectPath); mkdirSync(join(projectPath, 'src'));
   const work = new WorkStore({ directory, projectPath });
+  const receiptParent = workflowReceiptParent(directory, workflowProjectIdentity(projectPath).projectId);
+  const keyFile = join(receiptParent, 'workflow-human-receipts', 'key-v1');
   const token = settings.token ?? 'fixture-human-' + randomUUID();
   const agentToken = settings.equalTokens ? token : 'fixture-agent-' + randomUUID();
   let contextFailure = false;
@@ -60,6 +63,13 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     const target = resolve(root), boundary = resolve(tmpdir()), part = relative(boundary, target);
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
+    if (process.platform === 'win32') {
+      const privateRoot = resolve(homedir(), '.arcane-private-receipts-v1');
+      const privatePart = relative(privateRoot, resolve(receiptParent));
+      assert.match(privatePart, /^[a-f0-9]{64}$/);
+      assert.ok(!lstatSync(receiptParent).isSymbolicLink());
+      rmSync(resolve(receiptParent), { recursive: true, force: true });
+    }
     rmSync(target, { recursive: true, force: true });
   });
   const call = (path: string, input?: unknown, options: WireOptions = {}): Promise<Reply> => new Promise((resolve, reject) => {
@@ -122,7 +132,7 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
   const restart = () => { host.close(); host = createWorkflowHost(options); route = workflowRoutes(host); };
   return { root, projectPath, directory, work, token, agentToken, origin, call, preview, execute, create,
     get, proof, handoff, review, restart, host: () => host, contextFailure: () => { contextFailure = true; },
-    keyFile: join(directory, 'workflow-human-receipts', 'key-v1') };
+    keyFile };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
@@ -142,7 +152,7 @@ test('lazy host borrows existing WorkStore; preview and metadata never create a 
   assert.equal(lstatSync(f.keyFile).size, 32); assert.equal(lstatSync(f.keyFile).nlink, 1);
   if (process.platform !== 'win32') {
     assert.equal(lstatSync(f.keyFile).mode & 0o777, 0o600);
-    assert.equal(lstatSync(join(f.directory, 'workflow-human-receipts')).mode & 0o777, 0o700);
+    assert.equal(lstatSync(dirname(f.keyFile)).mode & 0o777, 0o700);
   }
   assert.equal(empty.headers['cache-control'], 'no-store'); assert.equal(empty.headers['x-content-type-options'], 'nosniff');
   f.host().close(); assert.equal(f.work.task(unrelated.tasks[0]!.id).state, 'in_progress');
@@ -368,7 +378,7 @@ test('receipt file replacement, missing key, linked file and linked directory fa
     (f: Fixture) => unlinkSync(f.keyFile),
     (f: Fixture) => linkSync(f.keyFile, join(f.root, 'key-hardlink')),
     (f: Fixture) => {
-      const directory = join(f.directory, 'workflow-human-receipts'), moved = join(f.root, 'moved-receipts');
+      const directory = dirname(f.keyFile), moved = join(f.root, 'moved-receipts');
       renameSync(directory, moved); symlinkSync(moved, directory, process.platform === 'win32' ? 'junction' : 'dir');
     },
   ]) {
@@ -423,7 +433,7 @@ test('private receipt storage cannot be used as a project scope or handoff artif
   const id = await f.create(), bytes = readFileSync(f.keyFile);
   assert.equal((await f.call('/v1/workflows/preview', {
     action: 'handoff', workflowId: id, submission: { key: 'prompt', artifacts: [{
-      path: 'state/workflow-human-receipts/key-v1', role: 'brief', sha256: hash(bytes), bytes: bytes.length,
+      path: relative(f.projectPath, f.keyFile).replaceAll('\\', '/'), role: 'brief', sha256: hash(bytes), bytes: bytes.length,
     }], subjectHashes: [], checks: [] },
   })).status, 400);
   assert.equal((await f.get(id)).workflow.taskStates.prompt, 'pending');

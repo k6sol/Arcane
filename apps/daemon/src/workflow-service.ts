@@ -55,6 +55,17 @@ export interface WorkflowSnapshot {
   workflow: StoredWorkflow; tasks: WorkTask[]; assessment: WorkflowAssessment | null;
 }
 export interface WorkflowCommandResult extends WorkflowSnapshot { result: WorkflowCommand['result'] }
+export const WORKFLOW_RECEIPT_LIMITS = Object.freeze({ inputBytes: 128 * 1024, commandBytes: 1024, responseBytes: 512 * 1024 });
+export interface WorkflowReceiptCommand {
+  idempotencyKey: string; kind: WorkflowHumanRequest['kind']; workflowId: string; result: WorkflowCommand['result'];
+}
+export interface WorkflowJournalReceipt {
+  state: 'not-recorded' | WorkflowCommand['state']; command: WorkflowReceiptCommand | null;
+}
+export interface WorkflowReceiptLookup {
+  prepared: WorkflowHumanRequest; receiptHash: string; idempotencyKey: string;
+  resolution?: 'halt' | 'accept-observed'; observedRun?: { runId: string; taskIds: Record<string, string> };
+}
 const CAPABILITY: Record<SafeWorkflowAction, string> = {
   'verify-code': 'local.code.verify', 'verify-asset': 'blender.verify', 'verify-playtest': 'local.playtest.verify',
 };
@@ -198,8 +209,8 @@ export class WorkflowService {
       return task;
     });
   }
-  private checked(record: StoredWorkflow): WorkTask[] {
-    if (record.runId) this.work.ready(record.runId);
+  private checked(record: StoredWorkflow, expireLeases = true): WorkTask[] {
+    if (expireLeases && record.runId) this.work.ready(record.runId);
     const tasks = this.projection(record);
     for (const task of tasks) {
       if (record.taskStates[task.key] !== task.state) fail('WORKFLOW_MAPPING', 'WorkStore state changed outside the coordinator.');
@@ -264,17 +275,83 @@ export class WorkflowService {
       },
     });
   }
-  private snapshot(record: StoredWorkflow): WorkflowSnapshot {
+  private snapshot(record: StoredWorkflow, readOnly = false): WorkflowSnapshot {
     if (record.state !== 'active' || record.operation) {
       return { workflow: record, tasks: record.runId ? this.projection(record) : [], assessment: null };
     }
-    const tasks = this.checked(record);
+    const tasks = this.checked(record, !readOnly);
     return { workflow: record, tasks, assessment: this.assessment(record, tasks) };
   }
-  get(workflowId: string): WorkflowSnapshot { return this.snapshot(this.load(workflowId, false)); }
+  get(workflowId: string, readOnly = false): WorkflowSnapshot { return this.snapshot(this.load(workflowId, false), readOnly); }
   list(): { id: string; recipeId: string; state: StoredWorkflow['state'] }[] {
     this.open();
     return this.journal.list().map(r => ({ id: r.id, recipeId: r.recipe.id, state: r.state }));
+  }
+  /** Exact, authorized journal observation only. Never enters replay, begins a command or touches WorkStore. */
+  receipt(input: unknown): WorkflowJournalReceipt {
+    this.open();
+    const a = object(input, ['prepared', 'receiptHash', 'idempotencyKey'], ['resolution', 'observedRun']);
+    const prepared = clone(object(a.prepared, ['kind', 'projectId', 'workflowId', 'recipe', 'stepKey', 'decision',
+      'binding', 'subjectHashes', 'inputArtifacts', 'submission', 'operation', 'recipeGate'])) as unknown as WorkflowHumanRequest;
+    const key = identifier(a.idempotencyKey), receiptHash = digest(a.receiptHash);
+    if (Buffer.byteLength(canonical(a)) > WORKFLOW_RECEIPT_LIMITS.inputBytes) fail('WORKFLOW_INPUT', 'Receipt lookup exceeds its input bound.');
+    if (prepared.projectId !== this.projectId || workflowProjectIdentity(this.journal.projectPath).projectId !== this.projectId) fail('WORKFLOW_PROJECT', 'Receipt belongs to another project.');
+    digest(prepared.binding); toWorkStoreInput(prepared.recipe);
+    if (!['approved', 'rejected'].includes(prepared.decision)) fail('WORKFLOW_INPUT', 'Invalid prepared receipt decision.');
+    this.requireHuman(prepared, receiptHash);
+    const { binding: _binding, ...base } = prepared;
+    let requestHash: string;
+    if (prepared.kind !== 'reconcile' && prepared.binding !== hash(base)) fail('WORKFLOW_BINDING', 'Prepared receipt binding changed.');
+    switch (prepared.kind) {
+      case 'create-recipe':
+        object(a, ['prepared', 'receiptHash', 'idempotencyKey']);
+        if (prepared.workflowId !== null) fail('WORKFLOW_INPUT', 'Creation has no prepared workflow instance ID.');
+        requestHash = hash({ kind: prepared.kind, recipeId: prepared.recipe.id, receiptHash }); break;
+      case 'recipe-gate': {
+        object(a, ['prepared', 'receiptHash', 'idempotencyKey']);
+        const gate = object(prepared.recipeGate, ['workflowId', 'stepKey', 'gate', 'decision', 'binding']);
+        if (gate.workflowId !== prepared.recipe.id || gate.stepKey !== prepared.stepKey || gate.decision !== prepared.decision) fail('WORKFLOW_BINDING', 'Prepared gate receipt changed.');
+        const { workflowId: _recipeId, ...decision } = gate;
+        requestHash = hash({ kind: prepared.kind, workflowId: identifier(prepared.workflowId), decision: { ...decision, receiptHash } }); break;
+      }
+      case 'submit-evidence':
+        object(a, ['prepared', 'receiptHash', 'idempotencyKey']);
+        requestHash = hash({ kind: prepared.kind, workflowId: identifier(prepared.workflowId), submission: prepared.submission, receiptHash }); break;
+      case 'review-evidence':
+        object(a, ['prepared', 'receiptHash', 'idempotencyKey']);
+        requestHash = hash({ kind: prepared.kind, workflowId: identifier(prepared.workflowId), stepKey: identifier(prepared.stepKey), decision: prepared.decision, receiptHash }); break;
+      case 'reconcile': {
+        object(a, ['prepared', 'receiptHash', 'idempotencyKey', 'resolution'], ['observedRun']);
+        if (a.resolution !== 'halt' && a.resolution !== 'accept-observed') fail('WORKFLOW_INPUT', 'Invalid reconciliation receipt resolution.');
+        if (a.observedRun !== undefined) {
+          const run = object(a.observedRun, ['runId', 'taskIds']); identifier(run.runId);
+          if (!run.taskIds || typeof run.taskIds !== 'object' || Array.isArray(run.taskIds) || Object.keys(run.taskIds).length > WORKFLOW_LIMITS.steps) fail('WORKFLOW_INPUT', 'Invalid observed receipt run mapping.');
+          for (const [stepKey, taskId] of Object.entries(run.taskIds)) { identifier(stepKey); identifier(taskId); }
+        }
+        const normal = { ...base, binding: hash(base) };
+        if (prepared.binding !== hash({ request: normal, resolution: a.resolution, observedRun: a.observedRun ?? null })) fail('WORKFLOW_BINDING', 'Reconciliation receipt envelope changed.');
+        requestHash = hash({ kind: prepared.kind, workflowId: identifier(prepared.workflowId), resolution: a.resolution, observedRun: a.observedRun ?? null, receiptHash }); break;
+      }
+      default: fail('WORKFLOW_INPUT', 'Only human command receipts can be observed.');
+    }
+    const previous = this.journal.command(key, requestHash);
+    if (!previous) return { state: 'not-recorded', command: null };
+    try {
+      object(previous, ['key', 'workflowId', 'requestHash', 'kind', 'receiptHash', 'state', 'result']);
+      identifier(previous.workflowId);
+      if (Buffer.byteLength(JSON.stringify(previous)) > WORKFLOW_RECEIPT_LIMITS.commandBytes ||
+          !['running', 'uncertain', 'done'].includes(previous.state)) throw new Error();
+      const terminal: Record<WorkflowHumanRequest['kind'], WorkflowCommand['result']> = {
+        'create-recipe': 'created', 'recipe-gate': 'decided', 'submit-evidence': 'submitted', 'review-evidence': 'reviewed', reconcile: 'reconciled',
+      };
+      if (previous.state === 'done' ? previous.result !== terminal[prepared.kind] : previous.result !== null) throw new Error();
+    } catch { fail('WORKFLOW_RECEIPT_CORRUPT', 'Stored command receipt is invalid.'); }
+    if (previous.key !== key || previous.requestHash !== requestHash || previous.receiptHash !== receiptHash || previous.kind !== prepared.kind ||
+        (prepared.workflowId !== null && previous.workflowId !== prepared.workflowId)) fail('WORKFLOW_IDEMPOTENCY', 'Key does not identify this exact command receipt.');
+    const record = this.load(previous.workflowId, false);
+    if (record.id !== previous.workflowId || !same(record.recipe, prepared.recipe) ||
+        (prepared.kind === 'create-recipe' && record.creationReceiptHash !== receiptHash)) fail('WORKFLOW_BINDING', 'Receipt workflow identity changed.');
+    return { state: previous.state, command: { idempotencyKey: key, kind: prepared.kind, workflowId: previous.workflowId, result: previous.result } };
   }
   private replay(key: string, requestHash: string): WorkflowCommandResult | undefined {
     const previous = this.journal.command(key, requestHash);

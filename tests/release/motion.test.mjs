@@ -265,7 +265,7 @@ test('studio: native metadata overrides inherited small fonts and keeps live sta
     'button', 'input', 'select', 'textarea', 'summary', 'label', 'legend', '.status-text', '.hint', 'pre', 'code',
     '.identity', '.history-meta', '.history-title', '.node-meta', '.baseline', '.task-id', '.instructions',
     '.evidence details', '.build-task p', '.build-task pre', '.evidence-artifact p', '.node-row p',
-    '.diagnostics-table', '.diagnostics-table th', '.diagnostics-table td', '.key-record h3',
+    '.diagnostics-toolbar p', '.diagnostics-table', '.diagnostics-table th', '.diagnostics-table td', '.key-record h3',
   ]) assert.ok(covered.includes(normalize(selector)), 'Native floor must cover ' + selector);
   assert.doesNotMatch(floor.selector, /wordmark|brand-card|rail-copy/, 'The metadata floor does not resize brand copy');
   for (const selector of ['#codex-scope', '#selected-ref']) {

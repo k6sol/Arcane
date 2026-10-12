@@ -105,7 +105,7 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
 .arcane-app .eyebrow{letter-spacing:0;font-size:12px;font-weight:500}
 
 /* Override inherited small native-control typography without changing its function. */
-.arcane-app :is(button,input,select,textarea,summary,label,legend,.badge,.status-text,.hint,.empty,.eyebrow,.small-label,pre,code,.identity,.history-meta,.history-title,.node-meta,.baseline,.task-id,footer,.root-checks label,.property-row label,.instructions,.evidence details,.build-task p,.build-task pre,.evidence-artifact p,.node-row p,.diagnostics-table,.diagnostics-table th,.diagnostics-table td,.key-record h3){font-size:max(12px,1em)}
+.arcane-app :is(button,input,select,textarea,summary,label,legend,.badge,.status-text,.hint,.empty,.eyebrow,.small-label,pre,code,.identity,.history-meta,.history-title,.node-meta,.baseline,.task-id,footer,.root-checks label,.property-row label,.instructions,.evidence details,.build-task p,.build-task pre,.evidence-artifact p,.node-row p,.diagnostics-toolbar p,.diagnostics-table,.diagnostics-table th,.diagnostics-table td,.key-record h3){font-size:max(12px,1em)}
 #codex-scope,#selected-ref{font-size:12px}
 @media(max-width:700px){.workspace-stage{display:contents}.workspace-stage>.codex-panel{flex:0 0 100%;height:auto;min-height:320px}.workspace-stage>.artifact-panel{flex:0 0 480px;margin-top:18px}}
 
@@ -143,6 +143,27 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
   .workspace-tab[aria-pressed=true],.nav-link[aria-pressed=true],.artifact-stage .asset-previews figure.is-selected,.artifact-stage .asset-previews figure[aria-pressed="true"]{outline:2px solid Highlight;outline-offset:-2px}
   .arcane-app :where(button,a,input,select,textarea,summary,[role=button]):focus-visible,.workspace-search:focus-within,.artifact-stage .asset-previews figure[role="button"]:focus-visible{outline-color:Highlight}
 }
+
+/* Inline conversation workflow controls */
+
+#workflow-panel .arcane-workflow{background:#202020;color:#ededed;font:inherit;border-top:1px solid #414141;padding:18px 0;min-width:0}
+#workflow-panel .arcane-workflow h3,#workflow-panel .arcane-workflow h4{font:inherit;font-weight:600;margin:0 0 12px}
+#workflow-panel .arcane-workflow p{margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+#workflow-panel .arcane-workflow form,#workflow-panel .arcane-workflow fieldset{border:0;padding:0;margin:12px 0;min-width:0}
+#workflow-panel .arcane-workflow label{display:block;margin:10px 0}
+#workflow-panel .arcane-workflow input,#workflow-panel .arcane-workflow select,#workflow-panel .arcane-workflow textarea{display:block;box-sizing:border-box;width:100%;margin-top:5px;background:#292929;color:inherit;border:1px solid #555;border-radius:0;padding:8px;font:inherit}
+#workflow-panel .arcane-workflow textarea{min-height:90px;resize:vertical}
+#workflow-panel .arcane-workflow button{font:inherit;color:inherit;background:transparent;border:1px solid #666;border-radius:0;padding:7px 12px;margin:6px 8px 6px 0;cursor:pointer}
+#workflow-panel .arcane-workflow button[data-primary]{background:#b73737;border-color:#b73737;color:#fff}
+#workflow-panel .arcane-workflow button:disabled{opacity:.5;cursor:default}
+#workflow-panel .arcane-workflow :focus-visible{outline:2px solid #e15858;outline-offset:3px}
+#workflow-panel .arcane-workflow ol{padding-left:24px}
+#workflow-panel .arcane-workflow li{margin:12px 0}
+#workflow-panel .arcane-workflow details{border-top:1px solid #414141;padding:10px 0}
+#workflow-panel .arcane-workflow summary{cursor:pointer;overflow-wrap:anywhere}
+#workflow-panel .arcane-workflow pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.5}
+#workflow-panel .arcane-workflow [hidden]{display:none!important}
+#workflow-panel .arcane-workflow .workflow-preview{border-top:2px solid #b73737;margin-top:16px;padding-top:16px}
 
 /* Keep this universal preference reset last, after every responsive override. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

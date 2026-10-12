@@ -258,9 +258,12 @@
         "apps/desktop/src/learning-panel.ts",
         "tests/unit/learning-http.test.ts",
         "tests/unit/learning-panel.test.ts",
-        "scripts/check-project-memory.mjs"
+        "scripts/check-project-memory.mjs",
+        "runtime/verification/native-history-read-gAIMHS/checks.json",
+        "tests/unit/codex-history-ui.test.ts",
+        "tests/unit/codex-history-service.test.ts"
       ],
-      "note": "Reviewed opt-in local memory routes and Learn UI are integrated: human-only consent/verified evidence review, disable/erase, bounded untrusted context appended only to a draft. Store17/HTTP12/UI28 focused fixtures passed; current root release checks underway. Native history parser30 fixtures and earlier original Codex desktop record read verified; persistent history UI, auto reviewed collection, Claude synchronization and concurrent dual-client registration remain open. Actual real-daemon/Edge integration10/10 passed: opt-in/propose/verify/approve/context/disable/persistence,0nativeinference,0Studiooperations. Newwholeunit/browser461/461 passes withno skips. Native publichistory service and UI integrated;27service/23UIfocusedtests pass plusactual Edge+humanHTTP fixture pass, withsameprojectthread scope, readonlyone-shot thread/read andpersistent redactedbounded cache. Single conversation/toolcontext UX isbeing refined fromhumanfeedback; nativefullmetadata/inference/Claude/release gates not inferred."
+      "note": "Unified single-conversation workspace plus saved public Codex history UI/service integrated. Actual installed CLI read-only owned-thread projection verified:4public entries,1reasoning item excluded, exactnativeIDs, no inference/start/resume/Studio. Hydrated paginated responses require explicit full turn items; summaries and limits remain incomplete. General pagination/desktop visibility/Claude history/full runtime execution remain unverified."
     },
     {
       "id": "DESKTOP-EXE-01",
@@ -279,9 +282,11 @@
         "scripts/check-windows-executable.mjs",
         "scripts/desktop-pipeline.mjs",
         "tests/release/desktop-host.test.mjs",
-        "tests/release/windows-package.test.mjs"
+        "tests/release/windows-package.test.mjs",
+        "runtime/verification/desktop-final-BLpPDQ/verification.json",
+        "runtime/verification/windows-executable-PkH94q/verification.json"
       ],
-      "note": "Old integrity-only WUAFf3 bundle diagnosed with missing ajv/dist/runtime and is not a working distribution. Dependency code/private-state separation fixed; packaging15/15, desktop20/20 and bounded verifier8/8 focused regressions pass. Actual current development host15/15 passed (ready1269ms, firstshow1836ms),0Studio/native inference. New packaged execution proof pending stable integrated sources. Unsigned development preview, not fullproduct signoff. Real normal user-profile launch failed first on Windows Store AppData virtualization; trusted exactMSIX Arcane path normalization now fixes it. Actual Arcane-Untitled native window responding withowned readydaemon;23desktop host regressiontests pass includinglogical/native split and controlledstartuperrors. Newpackage/wholepipeline stillpending."
+      "note": "Updated7FRiD2 portable EXE passed17actualcorelaunch checks and immutable before/after inventory. Browser/unit570/570. Offline168/169 with one owned-temp UNKNOWN realpath preserved; unchanged focused license1/1 laterpassed. No inference/Studio. Unsigned directory distribution, full providers/workflows/nativeStudio/publicinstaller acceptance stillopen."
     },
     {
       "id": "WORKFLOW-RECIPES-01",
@@ -313,13 +318,39 @@
         "apps/daemon/src/workflow-service.ts",
         "packages/storage/src/workflow-store.ts",
         "tests/unit/workflow-service.test.ts",
-        "tests/unit/workflow-store.test.ts"
+        "tests/unit/workflow-store.test.ts",
+        "apps/daemon/src/workflow-host.ts",
+        "apps/daemon/src/workflow-routes.ts",
+        "tests/unit/workflow-http.test.ts",
+        "apps/daemon/src/workflow-private-storage.ts",
+        "apps/desktop/src/workflow-panel.ts",
+        "tests/unit/workflow-panel.test.ts",
+        "tests/unit/workflow-conversation-host.test.ts",
+        "tests/unit/workflow-product.test.ts",
+        "tests/unit/workflow-receipts.test.ts",
+        "tests/unit/workflow-private-storage.test.ts"
       ],
-      "note": "Coordinator/store22focusedtests pass. NewhumanHTTPauthority/routes underimplementation; production native/Studio/verification adapters remainrequired andnotautoapproved."
+      "note": "Installed real lab/product workflow routing, private direct-home Windows receipt storage with unchanged strict ACL/link checks, same-native-conversation persistence, authenticated snapshot attestation, and explicit read-only receipt recovery. Focused fixtures:113pass/1opt-in compiler skip; separately actual official compiler1/1;49merged controller/product checks;25context checks/4browser opt-ins omitted. Production model catalogue revision/verifier registry, native Studio and full automated delivery still open; no automatic inference/publishing."
+    },
+    {
+      "id": "CONVERSATION-WORK-01",
+      "title": "Exact native conversation work associations",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [
+        "WORKFLOW-SERVICE-01"
+      ],
+      "acceptance": "Host-only project/provider/thread/session bindings survive restart and cannot move between chats; absence never backfills",
+      "evidence": [
+        "packages/storage/src/conversation-work-store.ts",
+        "tests/unit/conversation-work-store.test.ts",
+        "docs/build/CONVERSATION_WORK.md"
+      ],
+      "note": "26focused offline binding/persistence/security fixtures pass. Workflow creation/read lifecycle uses these associations. Asset-job association support exists in storage but is not yet wired into production asset routes."
     }
   ],
   "updatedAt": "2026-10-12",
-  "previousTurnClassification": "progress: human native conversation/security integration;317fullbrowser/unit +40skills/release +16Luaufixtures;realcleancopy10checks;actualauthorizedsingleSol6.1Ultra readonlyturn/ArcaneMCProundtrip. NativeStudio userdeferred; productioninheritedMCPisolation/fullfeatures/imports/skills/game-quality remainopen.",
+  "previousTurnClassification": "progress: actual product workflow route/lifecycle wiring, exact native conversation persistence and restart attestation, explicit read-only loss-response recovery, context-safe unified UI. Native Studio and further model tests remain explicitly deferred by user. No full-product completion claim.",
   "requiredCompletionStillOpen": [
     "native-plugin-key-only-widget-and-http",
     "dirty-editor-and-selective-restore-native",
