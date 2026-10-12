@@ -330,16 +330,103 @@ test('search lists real, available navigation matches, escapes labels, deduplica
   results.querySelector('button')!.click(); assert.equal(f.doc.activeElement, f.targets.get('asset-heading')); assert.equal(results.hidden, true);
   f.search.input('mesh'); const match = results.querySelector('button')!;
   assert.equal(match.textContent, label); assert.equal(match.children.length, 0);
-  assert.equal(f.search.key('ArrowDown').defaultPrevented, true); assert.equal(f.doc.activeElement, match);
+  f.search.focus();
+  assert.equal(f.search.key('ArrowDown').defaultPrevented, true); assert.equal(f.doc.activeElement, f.search);
+  assert.equal(f.search.getAttribute('aria-activedescendant'), match.id);
   match.key('Escape'); assert.equal(results.hidden, true); assert.equal(f.doc.activeElement, f.search);
   f.search.input('mesh'); assert.equal(f.search.key('Enter').defaultPrevented, true); assert.equal(f.doc.activeElement, item);
   f.search.input('private fixture prompt'); assert.equal(results.querySelectorAll('button').length, 0);
-  assert.equal(results.textContent, 'No matching workspace sections.');
+  assert.match(results.textContent, /No matching workspace sections/);
   f.search.key('Escape'); assert.equal(results.hidden, true);
-  f.search.input(''); assert.equal(results.children.length, 0); assert.equal(f.search.getAttribute('aria-expanded'), 'false');
-  f.search.key('Enter');
+  f.search.input(''); assert.ok(results.querySelectorAll('button').length > 0); assert.equal(f.search.getAttribute('aria-expanded'), 'true');
+  f.search.key('Escape'); f.search.key('Enter');
   for (const target of f.targets.values()) assert.equal(target.parentElement!.hidden, false);
   f.untouched(); shell.cleanup();
+});
+
+test('keyboard navigator discovers tools, selects with arrows and returns recent destinations first', () => {
+  const f = fixture(), shell = startWorkspaceShell(f.doc.document);
+  f.composer.value = 'Retain this unsent draft';
+  f.doc.body.key('k', { ctrlKey: true });
+  const results = f.doc.getElementById('workspace-search-results')!;
+  const rows = results.querySelectorAll('button');
+  assert.equal(results.hidden, false);
+  assert.equal(f.search.getAttribute('role'), 'combobox');
+  assert.equal(f.search.getAttribute('aria-controls'), 'workspace-search-options');
+  assert.equal(f.doc.getElementById('workspace-search-options')!.getAttribute('role'), 'listbox');
+  assert.equal(rows.length, 6); assert.equal(rows[0]!.getAttribute('aria-selected'), 'true');
+  assert.ok(rows.every(row => row.getAttribute('role') === 'option' && row.tabIndex === -1));
+  f.search.key('ArrowDown'); f.search.key('ArrowDown'); f.search.key('ArrowUp');
+  assert.equal(f.doc.activeElement, f.search);
+  assert.equal(f.search.getAttribute('aria-activedescendant'), rows[1]!.id);
+  assert.equal(rows.filter(row => row.getAttribute('aria-selected') === 'true').length, 1);
+  f.search.key('Enter');
+  assert.equal(f.doc.activeElement, f.targets.get('session-heading')); assert.equal(results.hidden, true);
+  f.doc.body.key('k', { ctrlKey: true });
+  assert.equal(results.querySelector('button')!.getAttribute('data-workspace-target'), 'session-heading');
+  f.search.key('Tab'); assert.equal(results.hidden, true);
+  assert.equal(f.search.getAttribute('aria-activedescendant'), null);
+  f.search.key('ArrowUp');
+  assert.equal(f.search.getAttribute('aria-activedescendant'), results.querySelectorAll('button').at(-1)!.id);
+  assert.equal(f.composer.value, 'Retain this unsent draft'); assert.equal(f.inputs, 0);
+  f.untouched(); shell.cleanup();
+  for (const attribute of ['role', 'aria-controls', 'aria-autocomplete', 'aria-haspopup', 'aria-activedescendant']) assert.equal(f.search.getAttribute(attribute), null);
+});
+
+test('search ranks exact names, matches unordered keywords and accents, and chooses the best duplicate label', () => {
+  const f = fixture();
+  f.navigation.get('session-heading')!.textContent = 'Studio session';
+  const alias = f.add('button', '', f.sidebar, 'Asset downloads'); alias.setAttribute('data-workspace-target', 'asset-heading');
+  const keywords = f.add('button', '', f.sidebar, 'Work queue');
+  keywords.setAttribute('data-workspace-target', 'work-heading'); keywords.setAttribute('data-search-item', 'assets review');
+  const accent = f.add('h2', 'cafe-heading', f.doc.body, 'Café tools'); accent.setAttribute('data-search-item', 'reference');
+  const shell = startWorkspaceShell(f.doc.document), results = f.doc.getElementById('workspace-search-results')!;
+  f.search.input('assets');
+  assert.equal(results.querySelector('button')!.textContent, 'Assets');
+  f.search.input('downloads asset');
+  assert.equal(results.querySelectorAll('button').length, 1); assert.equal(results.querySelector('button')!.textContent, 'Asset downloads');
+  f.search.input('session studio'); assert.equal(results.querySelector('button')!.textContent, 'Studio session');
+  f.search.input('review assets'); assert.equal(results.querySelector('button')!.textContent, 'Work queue');
+  f.search.input('cafe reference'); assert.equal(results.querySelector('button')!.textContent, 'Café tools');
+  f.search.input('review missing-term'); assert.equal(results.querySelectorAll('button').length, 0);
+  f.untouched(); shell.cleanup();
+});
+
+test('discovery keeps tool contexts distinct and ignores unavailable targets and starter drafts', () => {
+  const f = fixture();
+  const blender = f.add('button', '', f.sidebar, 'Blender');
+  blender.setAttribute('data-workspace-target', 'codex-heading'); blender.setAttribute('data-workspace-tool', 'blender');
+  const roblox = f.add('button', '', f.sidebar, 'Roblox Studio');
+  roblox.setAttribute('data-workspace-target', 'codex-heading'); roblox.setAttribute('data-workspace-tool', 'roblox');
+  const starter = f.add('button', '', f.sidebar, 'Private starter');
+  starter.setAttribute('data-workspace-target', 'codex-heading'); starter.setAttribute('data-draft', 'Starter text');
+  f.targets.get('work-heading')!.parentElement!.setAttribute('inert', '');
+  const shell = startWorkspaceShell(f.doc.document), results = f.doc.getElementById('workspace-search-results')!;
+  f.search.input('');
+  assert.equal(results.querySelectorAll('button').length, 7);
+  assert.equal(results.querySelectorAll('button').filter(row => row.hasAttribute('data-workspace-tool')).length, 2);
+  f.search.input('roblox'); f.search.key('Enter'); assert.equal(shell.activeTool, 'roblox');
+  f.search.input('blender'); results.querySelector('button')!.click(); assert.equal(shell.activeTool, 'blender');
+  f.search.input('starter'); assert.equal(results.querySelectorAll('button').length, 0);
+  f.search.input('queue'); assert.equal(results.querySelectorAll('button').length, 0);
+  f.search.input('Assets'); f.targets.get('asset-heading')!.parentElement!.hidden = true;
+  const before = f.doc.activeElement; f.search.key('Enter'); assert.equal(f.doc.activeElement, before);
+  assert.equal(f.inputs, 0); f.untouched(); shell.cleanup();
+});
+
+test('search closes on outside interaction and leaves composition and modified editing keys untouched', () => {
+  const f = fixture(), shell = startWorkspaceShell(f.doc.document), results = f.doc.getElementById('workspace-search-results')!;
+  f.search.input('Assets');
+  for (const modifiers of [{ isComposing: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
+    assert.equal(f.search.key('Enter', modifiers).defaultPrevented, false);
+  }
+  // The fixture models form defaults even during IME; only inspect shell dispatch here.
+  f.search.input('Assets'); f.doc.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+  assert.equal(results.hidden, true);
+  f.search.input('Assets'); f.composer.dispatchEvent(new Event('focusin', { bubbles: true }));
+  assert.equal(results.hidden, true);
+  assert.equal(f.search.key('Tab', { shiftKey: true }).defaultPrevented, false);
+  shell.cleanup();
 });
 
 test('sidebar collapse and preview settings only change presentation; absent optional selectors are no-ops', () => {

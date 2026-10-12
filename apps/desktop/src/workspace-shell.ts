@@ -15,12 +15,28 @@ const TOOL_CONTEXT: Record<WorkspaceTool, { label: string; heading: string; desc
 const workspaceTool = (value: string | null): WorkspaceTool | null =>
   value === 'all' || value === 'blender' || value === 'roblox' ? value : null;
 
+interface NavigationMatch { id: string; key: string; label: string; score: number; tool: WorkspaceTool | null }
+const searchText = (value: string) => value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase().trim();
+
+/** Every term must match; exact labels and word prefixes lead the results. */
+function matchScore(label: string, keywords: string, query: string): number | null {
+  if (!query) return 0;
+  const name = searchText(label), extra = searchText(keywords), words = name.split(/\s+/);
+  const terms = [...new Set(query.split(/\s+/))];
+  if (!terms.every(term => (name + ' ' + extra).includes(term))) return null;
+  let score = name === query ? 1000 : name.startsWith(query) ? 750 : name.includes(query) ? 500 : 0;
+  for (const term of terms) score += words.includes(term) ? 90 : words.some(word => word.startsWith(term)) ? 70 : name.includes(term) ? 40 : 15;
+  return score;
+}
+
 /** Presentation-only navigation. Native actions remain in the existing panels. */
 export class WorkspaceShell {
   private readonly removers: (() => void)[] = [];
   private readonly focusTargets = new Set<HTMLElement>();
   private readonly navigation: HTMLElement[];
   private searchResults: HTMLElement | null = null;
+  private openSearch: (() => void) | null = null;
+  private readonly recentTargets: string[] = [];
   private disposed = false;
   private fullscreenBusy = false;
   private tool: WorkspaceTool = 'all';
@@ -87,6 +103,8 @@ export class WorkspaceShell {
     for (const remove of this.removers.splice(0)) remove();
     this.searchResults?.remove();
     this.searchResults = null;
+    this.openSearch = null;
+    this.recentTargets.length = 0;
     for (const target of this.focusTargets) {
       if (target.getAttribute('tabindex') === '-1') target.removeAttribute('tabindex');
     }
@@ -122,7 +140,7 @@ export class WorkspaceShell {
       this.focusTargets.add(target);
     }
     const home = target.id === 'codex-heading' || target.id === 'codex-composer';
-    const scrollTarget = home ? this.doc.getElementById('workspace-topbar') ?? target : target;
+    const scrollTarget = home ? this.doc.getElementById('workspace-stage') ?? this.doc.getElementById('workspace-topbar') ?? target : target;
     scrollTarget.scrollIntoView?.({ block: 'start' });
     target.focus?.({ preventScroll: true });
   }
@@ -145,7 +163,8 @@ export class WorkspaceShell {
 
   private navigate(id: string | null): boolean {
     const target = id ? this.doc.getElementById(id) : null;
-    if (!target) return false;
+    if (!target || target.closest('[hidden], [inert]')) return false;
+    this.recordVisit('target:' + target.id);
     this.markCurrent(target.id);
     this.focus(target);
     return true;
@@ -200,6 +219,7 @@ export class WorkspaceShell {
 
   private selectTool(tool: WorkspaceTool): void {
     this.onNavigate?.();
+    this.recordVisit('tool:' + tool);
     if (tool === this.tool) return;
     this.tool = tool;
     this.renderTool();
@@ -208,6 +228,13 @@ export class WorkspaceShell {
     if (CustomEvent) this.doc.dispatchEvent(new CustomEvent<WorkspaceToolChange>('workspace:toolchange', {
       detail: { tool }, bubbles: false,
     }));
+  }
+
+  private recordVisit(key: string): void {
+    const previous = this.recentTargets.indexOf(key);
+    if (previous !== -1) this.recentTargets.splice(previous, 1);
+    this.recentTargets.unshift(key);
+    this.recentTargets.length = Math.min(this.recentTargets.length, 6);
   }
 
   private bindShortcuts(): void {
@@ -220,7 +247,7 @@ export class WorkspaceShell {
         const search = this.doc.getElementById('workspace-search');
         const editable = (event.target as Element | null)?.closest?.('input, textarea, select, [contenteditable]');
         if (!search || (editable && editable !== search && editable.getAttribute('contenteditable') !== 'false')) return;
-        event.preventDefault(); this.focus(search);
+        event.preventDefault(); this.focus(search); this.openSearch?.();
       }
     });
   }
@@ -302,56 +329,101 @@ export class WorkspaceShell {
     const results = this.doc.createElement('div');
     results.id = 'workspace-search-results';
     results.className = 'workspace-search-results';
-    results.setAttribute('role', 'region');
-    results.setAttribute('aria-label', 'Workspace navigation matches');
     results.hidden = true;
     search.parentElement.append(results);
     this.searchResults = results;
-    const previousControls = search.getAttribute('aria-controls'), previousExpanded = search.getAttribute('aria-expanded');
-    search.setAttribute('aria-controls', results.id);
-    const close = () => { results.hidden = true; search.setAttribute('aria-expanded', 'false'); };
+    const title = this.doc.createElement('p');
+    title.className = 'workspace-search-title';
+    const options = this.doc.createElement('div');
+    options.id = 'workspace-search-options';
+    options.className = 'workspace-search-options';
+    options.setAttribute('role', 'listbox');
+    options.setAttribute('aria-label', 'Workspace tools');
+    const status = this.doc.createElement('p');
+    status.className = 'workspace-search-status';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    results.append(title, options, status);
+    const attributes = ['role', 'aria-controls', 'aria-expanded', 'aria-autocomplete', 'aria-haspopup', 'aria-activedescendant'];
+    const previousAttributes = attributes.map(name => [name, search.getAttribute(name)] as const);
+    search.setAttribute('role', 'combobox');
+    search.setAttribute('aria-controls', options.id);
+    search.setAttribute('aria-autocomplete', 'list');
+    search.setAttribute('aria-haspopup', 'listbox');
+    let selected = -1;
+    const select = (index: number, scroll = false) => {
+      const rows = Array.from(options.querySelectorAll<HTMLElement>('button'));
+      selected = rows.length ? Math.max(0, Math.min(index, rows.length - 1)) : -1;
+      for (const [position, row] of rows.entries()) row.setAttribute('aria-selected', String(position === selected));
+      const active = rows[selected];
+      if (active) {
+        search.setAttribute('aria-activedescendant', active.id);
+        if (scroll) active.scrollIntoView?.({ block: 'nearest' });
+      } else search.removeAttribute('aria-activedescendant');
+    };
+    const close = () => {
+      results.hidden = true;
+      search.setAttribute('aria-expanded', 'false');
+      search.removeAttribute('aria-activedescendant');
+      selected = -1;
+    };
     close();
     this.removers.push(() => {
-      for (const [name, value] of [['aria-controls', previousControls], ['aria-expanded', previousExpanded]] as const) {
+      for (const [name, value] of previousAttributes) {
         if (value === null) search.removeAttribute(name); else search.setAttribute(name, value);
       }
     });
-    this.listen(search, 'input', () => {
+    const render = () => {
       this.onNavigate?.();
-      results.replaceChildren();
-      const query = search.value.trim().toLocaleLowerCase();
-      if (!query) { close(); return; }
-      const seen = new Set<string>(), sidebar = this.doc.getElementById('app-sidebar');
+      options.replaceChildren();
+      const query = searchText(search.value.slice(0, 256));
+      const matches = new Map<string, NavigationMatch>(), sidebar = this.doc.getElementById('app-sidebar');
       for (const item of this.doc.querySelectorAll<HTMLElement>('[data-workspace-target], [data-search-item]')) {
-        if (results.contains(item) || item.closest('[hidden], [inert]') || item.hasAttribute('disabled')) continue;
+        if (results.contains(item) || item.closest('[hidden], [inert]') || item.hasAttribute('disabled') || item.hasAttribute('data-draft')) continue;
         if (!sidebar?.contains(item) && !item.hasAttribute('data-search-item')) continue;
         const keywords = item.getAttribute('data-search-item') ?? '';
         const id = item.getAttribute('data-workspace-target') || (this.doc.getElementById(keywords) ? keywords : item.id);
         const target = id ? this.doc.getElementById(id) : null;
-        if (!target || seen.has(id)) continue;
+        if (!target || target.closest('[hidden], [inert]')) continue;
         // Search navigation labels and headings, never entire panel transcripts.
         const heading = item.querySelector<HTMLElement>('h1, h2, h3');
         const labelledBy = this.doc.getElementById(item.getAttribute('aria-labelledby') ?? '');
-        const label = (item.getAttribute('aria-label') || labelledBy?.textContent || heading?.textContent
+        const label = (item.getAttribute('aria-label') || item.getAttribute('data-search-label') || labelledBy?.textContent || heading?.textContent
           || (/^(A|BUTTON|H[1-6])$/.test(item.tagName) ? item.textContent : ''))?.trim();
-        if (!label || !(label + ' ' + keywords).toLocaleLowerCase().includes(query)) continue;
-        seen.add(id);
+        if (!label) continue;
+        const tool = workspaceTool(item.getAttribute('data-workspace-tool'));
+        const key = tool ? 'tool:' + tool : 'target:' + id;
+        const score = matchScore(label, keywords, query);
+        if (score === null || (matches.get(key)?.score ?? -1) >= score) continue;
+        matches.set(key, { id, key, label, score, tool });
+      }
+      const ranked = [...matches.values()].sort((a, b) => {
+        if (query) return b.score - a.score;
+        const recentA = this.recentTargets.indexOf(a.key), recentB = this.recentTargets.indexOf(b.key);
+        return (recentA < 0 ? 6 : recentA) - (recentB < 0 ? 6 : recentB);
+      }).slice(0, 16);
+      title.textContent = query ? 'Workspace matches' : this.recentTargets.length ? 'Recent & workspace tools' : 'Jump to a tool';
+      for (const [index, match] of ranked.entries()) {
         const button = this.doc.createElement('button');
         button.type = 'button';
-        button.setAttribute('data-workspace-target', id);
-        const tool = workspaceTool(item.getAttribute('data-workspace-tool'));
-        if (tool) button.setAttribute('data-workspace-tool', tool);
-        button.textContent = label;
-        results.append(button);
+        button.id = 'workspace-search-option-' + index;
+        button.setAttribute('role', 'option');
+        button.setAttribute('tabindex', '-1');
+        button.setAttribute('data-workspace-target', match.id);
+        if (match.tool) button.setAttribute('data-workspace-tool', match.tool);
+        button.textContent = match.label;
+        options.append(button);
       }
-      if (!seen.size) {
-        const empty = this.doc.createElement('p');
-        empty.textContent = 'No matching workspace sections.';
-        results.append(empty);
-      }
+      status.textContent = ranked.length ? `${ranked.length} ${ranked.length === 1 ? 'tool' : 'tools'} · Arrow keys to choose · Enter to open` : 'No matching workspace sections. Try a tool name or keyword.';
       results.hidden = false;
       search.setAttribute('aria-expanded', 'true');
-    });
+      select(0);
+    };
+    this.openSearch = render;
+    this.listen(search, 'focus', render);
+    this.listen(search, 'input', render);
+    // Keep DOM focus in the combobox while its active option is announced.
+    this.listen(results, 'mousedown', event => { event.preventDefault(); });
     this.listen(results, 'click', event => {
       const control = (event.target as Element | null)?.closest?.('button[data-workspace-target]');
       if (!control || !results.contains(control)) return;
@@ -361,25 +433,37 @@ export class WorkspaceShell {
       else if (this.navigate(control.getAttribute('data-workspace-target'))) close();
     });
     this.listen(search, 'keydown', event => {
-      const key = (event as KeyboardEvent).key;
+      const keyboard = event as KeyboardEvent, key = keyboard.key;
+      if (keyboard.isComposing || keyboard.ctrlKey || keyboard.metaKey || keyboard.altKey) return;
       if (key === 'Escape') { event.preventDefault(); close(); }
       if (key === 'Enter') {
         event.preventDefault();
-        const first = results.hidden ? null : results.querySelector<HTMLElement>('button[data-workspace-target]');
-        if (first) {
-          const tool = workspaceTool(first.getAttribute('data-workspace-tool'));
+        const active = results.hidden ? null : options.querySelectorAll<HTMLElement>('button')[selected];
+        if (active) {
+          const tool = workspaceTool(active.getAttribute('data-workspace-tool'));
           if (tool) { this.selectTool(tool); close(); }
-          else if (this.navigate(first.getAttribute('data-workspace-target'))) close();
+          else if (this.navigate(active.getAttribute('data-workspace-target'))) close();
         }
       }
-      if (key === 'ArrowDown' && !results.hidden) {
+      if (key === 'Tab') close();
+      if ((key === 'ArrowDown' || key === 'ArrowUp') && !keyboard.shiftKey) {
         event.preventDefault();
-        const first = results.querySelector<HTMLElement>('button');
-        if (first) this.focus(first);
+        if (results.hidden) {
+          render();
+          if (key === 'ArrowUp') select(options.children.length - 1, true);
+        } else select(selected + (key === 'ArrowDown' ? 1 : -1), true);
       }
     });
     this.listen(results, 'keydown', event => {
-      if ((event as KeyboardEvent).key === 'Escape') { event.preventDefault(); close(); this.focus(search); }
+      if ((event as KeyboardEvent).key === 'Escape') { event.preventDefault(); this.focus(search); close(); }
+    });
+    this.listen(this.doc, 'pointerdown', event => {
+      const target = event.target as Node | null;
+      if (target && target !== search && !results.contains(target)) close();
+    });
+    this.listen(this.doc, 'focusin', event => {
+      const target = event.target as Node | null;
+      if (target && target !== search && !results.contains(target)) close();
     });
   }
 }

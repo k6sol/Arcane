@@ -36,3 +36,15 @@ The current user browser and daemon were not reloaded, restarted, connected or u
 Strict isolated TypeScript compilation passed and all 7 focused unit tests passed. A separate network-blocked headless Edge fixture confirmed the composer remains in view at 945×618, 1440×900 and 390×844, with no horizontal overflow and a 12px minimum visible control font. The 945×618 fixture also kept the composer visible with unknown acknowledgement and approval regions both populated. All 280 pre-existing control IDs remain present exactly once. These checks are isolated fixtures; main still owns verification against the running native controller and browser.
 
 Core UI source is stable and test-ready. No full build, full suite, Git, native CLI, inference, Studio launch, current browser reload or daemon restart was performed.
+
+## Keyboard workspace navigator
+
+Ctrl/Cmd+K opens a searchable tool list with recently visited destinations first. Each search term can match a tool name or its authored keywords in any order; exact names and word prefixes lead the results. Accent-insensitive matching supports names such as Café. Blender, Roblox Studio and All tools remain distinct presentation contexts, while settings entries open the corresponding folded section.
+
+Arrow keys move the active option while focus stays in the search field. Enter opens the selected destination; Escape, Tab and outside interaction dismiss the list. The combobox exposes its expanded state, listbox, active option and result count to assistive technology. Recent destinations stay in memory for the mounted workspace and clear on cleanup. Labels come from navigation and authored headings.
+
+Returning to the conversation scrolls the workspace stage into view, keeping the current draft reachable after browsing advanced settings. The workbench and provider lab share black surfaces, white text and bright red selection accents, with the existing Arcane ridge artwork and explicit focus states. Selected previews continue to use the recorded asset canvases.
+
+`workspace-shell.test.ts` covers discovery, ranking, keyboard selection, recency, unavailable destinations and cleanup. `workspace-navigation-ui.test.ts` exercises the actual compiled shell and markup in installed Edge at 1586×992, 945×618 and 390×844, checks the shared draft and settings navigation, and verifies reduced motion and forced-color selection. Set the existing `ARCANE_UI_BROWSER_MODULE` and `ARCANE_UI_BROWSER_EXE` variables to run it; `ARCANE_UI_SCREENSHOT` also enables named viewport captures in its parent directory. The navigation fixture records zero API requests.
+
+Current-source verification passed strict type checking, 574 unit/browser checks and 153 offline release/skill checks. Both suites completed with zero skipped checks. The source preflight reports `readyToLaunch: true` for local runtime files and dependencies, and the reference palette was visually reviewed in desktop, laptop, mobile and provider-lab captures.

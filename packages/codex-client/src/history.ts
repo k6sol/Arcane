@@ -121,7 +121,7 @@ function reject(reason: HistoryGapReason): NativeHistoryResult {
 }
 
 /**
- * Accept only public legacy thread/read results, optionally in a JSON-RPC reply.
+ * Project public thread/read results with explicit hydration evidence for paginated turns.
  * Wire strings are bounded before JSON.parse; objects visit only allowlisted fields.
  * Return public entries plus evidence of omissions; never return the raw response.
  */
@@ -133,6 +133,7 @@ export function parseCodexThreadRead(
   let thread: RecordValue;
   let threadId: string;
   let sessionId: string | null;
+  let paginated = false;
   const gap = (reason: HistoryGapReason, turnId?: string, itemId?: string) => {
     const entry: NativeHistoryGap = { reason };
     if (turnId !== undefined) entry.turnId = turnId;
@@ -175,7 +176,8 @@ export function parseCodexThreadRead(
     sessionId = nativeSession == null ? null : id(nativeSession);
     if (expectedSession !== undefined && expectedSession !== sessionId) return reject('scope-mismatch');
     const mode = field(thread, 'historyMode');
-    if (mode !== undefined && mode !== 'legacy') return reject('unsupported-history-mode');
+    if (mode !== undefined && mode !== 'legacy' && mode !== 'paginated') return reject('unsupported-history-mode');
+    paginated = mode === 'paginated';
     if (field(thread, 'ephemeral') === true) return reject('ephemeral-thread');
     if (field(thread, 'ephemeral') !== false) throw new InvalidShape();
     if (!includeTurns) return { ...reject('turns-not-requested'), completeness: 'incomplete' };
@@ -190,6 +192,8 @@ export function parseCodexThreadRead(
     turnCount = Array.isArray(turns) ? arrayLength(turns) : 0;
   } catch { return reject('malformed-response'); }
   if (!Array.isArray(turns)) return { ...reject('missing-turns'), completeness: 'incomplete' };
+  // A paginated summary with no hydrated turns is not evidence of an empty chat.
+  if (paginated && turnCount === 0) return { ...reject('missing-turns'), completeness: 'incomplete' };
   let inputTextBytes = 0;
   let entryBytes = 0;
   let inspectedItems = 0;
@@ -228,7 +232,7 @@ export function parseCodexThreadRead(
       if (seenTurns.has(turnId)) { gap('duplicate-turn', turnId); continue; }
       seenTurns.add(turnId);
       const view = field(turn, 'itemsView');
-      if (view !== undefined && view !== 'full') { gap('items-not-full', turnId); continue; }
+      if (view !== 'full' && (paginated || view !== undefined)) { gap('items-not-full', turnId); continue; }
       const status = field(turn, 'status');
       if (status === 'inProgress') gap('unfinished-turn', turnId);
       else if (status === 'failed' || status === 'interrupted') gap('failed-turn', turnId);
