@@ -1,21 +1,67 @@
-MIT License
+ARCANE PROPRIETARY LICENCE
 
-Copyright (c) 2026 k6sol
+Copyright (c) 2026 k6sol (Arcane). All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. SCOPE AND OWNERSHIP
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This repository’s first-party source code, documentation, designs, interfaces, assets, instructions, skill files, and other first-party materials (collectively, the “Materials”) are proprietary, subject to the exceptions below. This is not an open-source licence.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Ownership remains with the applicable copyright holders. Repository access, possession of the Materials, payment, or access to Arcane does not itself grant ownership or permission to reuse the Materials.
+
+2. AUTHORISED ARCANE USE ONLY
+
+Use of the Materials requires an express, valid written licence from the applicable rights holder. Unless that licence expressly states otherwise, authorised use is limited to the official Arcane platform, through its official interfaces and supplied applications, within the purposes, duration, and limits of that licence.
+
+This notice does not itself grant access to Arcane or permission to install, compile, execute, or deploy repository source code.
+
+Any technical copies required to operate an authorised Arcane application are permitted only to the extent expressly authorised by the applicable platform licence.
+
+3. RESTRICTIONS
+
+Except as expressly authorised in writing or permitted under Sections 5 and 6, no person or entity may, in whole or in part:
+
+(a) copy, reproduce, download, extract, scrape, or retain the Materials;
+(b) modify, adapt, translate, or create derivative works from the Materials;
+(c) compile, execute, install, deploy, or independently host the Materials;
+(d) distribute, publish, disclose, sublicense, transfer, sell, rent, or lend the Materials;
+(e) incorporate the Materials into another product, platform, service, repository, application, or instruction library;
+(f) use the Materials to provide a competing service or other commercial offering;
+(g) use the Materials to train or fine-tune artificial intelligence or machine-learning systems;
+(h) reverse engineer, decompile, or disassemble the Materials, or circumvent licence enforcement or access controls; or
+(i) remove, obscure, or alter copyright, attribution, proprietary, or licence notices.
+
+Authorised platform access does not grant permission to extract or reuse the Materials outside Arcane.
+
+4. RESERVED RIGHTS AND WRITTEN PERMISSION
+
+No licence is granted by implication, estoppel, repository visibility, or otherwise under copyright, patent, trademark, trade-secret, or other intellectual-property rights.
+
+All rights not expressly granted are reserved.
+
+Permission requests must be submitted in writing to the owner of the k6sol/Arcane repository. Permission is effective only when expressly granted in writing by the applicable rights holder. Silence, an unanswered request, or repository access is not approval.
+
+A separate written agreement controls only to the extent it expressly grants different rights.
+
+5. THIRD-PARTY AND PREVIOUSLY LICENSED MATERIAL
+
+Third-party software, dependencies, assets, documentation, and other third-party materials remain subject to their own licences and notices. This notice does not relicense those materials, restrict rights granted by their licences, or remove obligations to preserve attribution, licence texts, or other required notices.
+
+This notice does not revoke, narrow, or override rights previously granted under the MIT Licence or another valid licence. Those rights continue to apply to the material covered by the earlier grant, including where that material remains in this repository. Applicable copyright and permission notices must be retained as required by those licences.
+
+User-created projects and content are not included in the Materials merely because they are created, stored, or processed through Arcane. Their ownership and permitted use are governed by their applicable rights and agreements.
+
+6. GITHUB AND MANDATORY LEGAL RIGHTS
+
+Rights granted to GitHub, its affiliates, and GitHub users under applicable GitHub terms remain unaffected. If this repository is public, this includes viewing and forking through GitHub where permitted by those terms. This notice grants no additional permission.
+
+Nothing in this notice excludes or restricts rights that applicable law does not permit the rights holder to exclude or restrict.
+
+7. WARRANTY DISCLAIMER
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE MATERIALS ARE PROVIDED “AS IS” AND “AS AVAILABLE”, WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+8. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDERS SHALL NOT BE LIABLE FOR CLAIMS, DAMAGES, OR OTHER LIABILITY ARISING FROM THE MATERIALS OR THEIR USE, WHETHER IN CONTRACT, TORT, OR OTHERWISE.
+
+These exclusions apply subject to any non-excludable legal rights and any express obligations in a separate written agreement.
