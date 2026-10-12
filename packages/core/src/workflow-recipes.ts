@@ -25,7 +25,8 @@ export type WorkflowAction = 'capture-request' | 'requirements' | 'plan' | 'diag
   | 'verify-asset' | 'apply-studio-patch' | 'playtest' | 'verify-playtest' | 'accept-preview'
   | 'review-analysis' | 'accept-review';
 export type ArtifactRole = 'brief' | 'requirements' | 'plan' | 'diagnosis' | 'patch'
-  | 'blend-source' | 'engine-export' | 'preview' | 'report' | 'studio-receipt'
+  | 'blend-source' | 'engine-export' | 'preview' | 'hero-preview' | 'profile-preview'
+  | 'scale-preview' | 'reference-comparison' | 'report' | 'studio-receipt'
   | 'playtest-log' | 'reproduction' | 'review';
 export type HumanGate = 'model-handoff' | 'plan-acceptance' | 'local-write'
   | 'studio-write' | 'studio-playtest' | 'preview-acceptance' | 'final-review';
@@ -251,7 +252,7 @@ export function createWorkflowRecipe(input: WorkflowRecipeRequest): WorkflowReci
       : 'Read existing APIs and implement a bounded patch in the approved files. Include the regression fix and server-side validation for gameplay state when relevant. Preserve a baseline and reviewable diff. No live Studio edits.',
     asset ? ['blend-source', 'engine-export'] : ['patch'], [], { capabilities: [asset ? 'blender.author' : 'local.patch'], gates: ['local-write'] });
   add('verification', asset ? 'Verify source and actual export' : 'Verify patch deterministically', 'verification', asset ? 'verify-asset' : 'verify-code', 'local-verification', ['implementation'],
-    asset ? 'Inspect actual hashed source/export bytes with a safe local verifier: reopen, reparse geometry, validate transforms, UV/normals, collision/LOD, materials and texture/triangle budgets. Reports must measure real artifacts. Never claim target-engine import from local export checks.'
+    asset ? 'Inspect actual hashed source/export bytes with a safe local verifier: reopen with scripts disabled and no autosave, reparse geometry, validate transforms, UV/normals, collision/LOD, materials and texture/triangle budgets. Reports must measure real artifacts. Never claim target-engine import from local export checks.'
       : 'Use an allowlisted, side-effect-free deterministic verifier for syntax/types, focused regression checks, scope diff and gameplay security invariants. Do not run arbitrary test commands, models or Studio from this verification action.',
     ['report'], asset ? [
       ...pass('artifact-hashes', 'source-reopen', 'export-reparse', 'scale-pivot-axis', 'uv-normals', 'collision-lod'),
@@ -264,7 +265,7 @@ export function createWorkflowRecipe(input: WorkflowRecipeRequest): WorkflowReci
   if (asset) {
     add('preview', 'Render reference comparison previews', 'verification', 'render-preview', 'local-authoring', ['verification', 'implementation'],
       'Produce actual hero, profile and target-scale previews plus a reference comparison/contact sheet from the verified source. A human judges silhouette, materials, lighting and reference match separately from mesh metrics.',
-      ['preview', 'report'], [], { capabilities: ['blender.preview'], gates: ['local-write'], subjects: ['implementation'] });
+      ['hero-preview', 'profile-preview', 'scale-preview', 'reference-comparison', 'report'], [], { capabilities: ['blender.preview'], gates: ['local-write'], subjects: ['implementation'] });
     preview = 'preview';
   }
   if (deliverable === 'playtest-repair' || target) {
@@ -360,7 +361,7 @@ function validateRecipe(recipe: WorkflowRecipe): void {
 export function toWorkStoreInput(recipe: WorkflowRecipe): WorkStoreRecipeInput {
   validateRecipe(recipe);
   return { title: recipe.title, objective: recipe.objective, tasks: recipe.steps.map(step => ({
-    key: step.key, title: step.title, instructions: step.instructions + '\nWorkflow: ' + recipe.id + '\nAction: ' + step.action + '; execution: ' + step.execution + '.\nRequired capabilities: ' + step.capabilities.join(', ') + '.\nHuman gates: ' + step.gates.join(', ') + '.\nPolicy: ' + canonical(WORKFLOW_POLICY),
+    key: step.key, title: step.title, instructions: step.instructions + '\nWorkflow: ' + recipe.id + '\nAction: ' + step.action + '; execution: ' + step.execution + '.\nRequired capabilities: ' + step.capabilities.join(', ') + '.\nExact provider requirement: ' + canonical(step.provider) + '.\nExact Studio requirement: ' + canonical(step.studio) + '.\nHuman gates: ' + step.gates.join(', ') + '.\nRetry policy: ' + canonical(step.retry) + '.\nPolicy: ' + canonical(WORKFLOW_POLICY),
     acceptance: step.acceptance, scope: [...step.scope], dependencies: [...step.dependencies],
   })) };
 }
@@ -368,7 +369,7 @@ function readSubmission(value: unknown): WorkflowSubmission {
   const a = fields(value, ['key', 'artifacts', 'subjectHashes', 'checks']);
   const artifacts = list(a.artifacts, WORKFLOW_LIMITS.artifacts, item => {
     const e = fields(item, ['path', 'sha256', 'bytes', 'role']);
-    const roles: ArtifactRole[] = ['brief', 'requirements', 'plan', 'diagnosis', 'patch', 'blend-source', 'engine-export', 'preview', 'report', 'studio-receipt', 'playtest-log', 'reproduction', 'review'];
+    const roles: ArtifactRole[] = ['brief', 'requirements', 'plan', 'diagnosis', 'patch', 'blend-source', 'engine-export', 'preview', 'hero-preview', 'profile-preview', 'scale-preview', 'reference-comparison', 'report', 'studio-receipt', 'playtest-log', 'reproduction', 'review'];
     if (!roles.includes(e.role as ArtifactRole)) fail('Unknown evidence artifact role.');
     return { path: path(e.path), sha256: digest(e.sha256), bytes: integer(e.bytes, 1, WORKFLOW_LIMITS.artifactBytes), role: e.role as ArtifactRole };
   });

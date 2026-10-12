@@ -306,10 +306,35 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
   for (const { source, sha256 } of sourceChecks) {
     if (hash(await regularBytes(source)) !== sha256) throw new Error('Packaging source changed; incomplete owned output retained for diagnosis.');
   }
+
+  let branding = { applied: false };
+  // Build-only, pinned official resource editor. Never reachable from the app or renderer.
+  if (pkg.devDependencies?.rcedit !== undefined) {
+    const toolVersion = pkg.devDependencies.rcedit;
+    const toolRoot = join(repository, 'node_modules/rcedit');
+    const toolPackage = await json(join(toolRoot, 'package.json'));
+    if (toolVersion !== '5.0.2' || toolPackage.name !== 'rcedit' || toolPackage.version !== toolVersion || lock.packages?.['node_modules/rcedit']?.version !== toolVersion) throw new Error('Expected the exact pinned build-only resource editor.');
+    const tool = join(toolRoot, 'bin/rcedit-x64.exe');
+    const toolBytes = await regularBytes(tool); windowsX64Exe(toolBytes, 'Resource editor');
+    const icon = join(hostRoot, 'icon.ico'), iconBytes = await regularBytes(icon);
+    if (iconBytes.length < 22 || iconBytes.readUInt16LE(0) !== 0 || iconBytes.readUInt16LE(2) !== 1 || iconBytes.readUInt16LE(4) !== 1 || iconBytes.readUInt32LE(18) !== 22 || iconBytes.readUInt32LE(14) !== iconBytes.length - 22) throw new Error('Invalid controlled Arcane icon.');
+    const executable = join(directory, 'Arcane.exe');
+    const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.ELECTRON_RUN_AS_NODE;
+    await run(tool, [executable, '--set-icon', icon, '--set-file-version', pkg.version, '--set-product-version', pkg.version,
+      '--set-version-string', 'ProductName', 'Arcane', '--set-version-string', 'FileDescription', 'Arcane - Build worlds faster',
+      '--set-version-string', 'InternalName', 'Arcane', '--set-version-string', 'OriginalFilename', 'Arcane.exe'],
+      { shell: false, windowsHide: true, timeout: 30000, maxBuffer: 8192, env });
+    const named = await run(tool, [executable, '--get-version-string', 'ProductName'], { shell: false, windowsHide: true, timeout: 5000, maxBuffer: 8192, env });
+    if (named.stdout.trim() !== 'Arcane') throw new Error('Executable branding verification failed.');
+    const brandedBytes = await regularBytes(executable); windowsX64Exe(brandedBytes, 'Arcane');
+    const item = files.find(file => file.path === 'Arcane.exe'); totalBytes += brandedBytes.length - item.bytes;
+    item.bytes = brandedBytes.length; item.sha256 = hash(brandedBytes);
+    branding = { applied: true, productName: 'Arcane', toolVersion, toolSha256: hash(toolBytes), iconSha256: hash(iconBytes) };
+  }
   files.sort((a, b) => a.path.localeCompare(b.path, 'en'));
   const manifest = {
     schemaVersion: 1, kind: 'arcane-windows-directory', createdAt: new Date().toISOString(),
-    version: pkg.version, platform: 'win32', arch: 'x64', signed: false, installer: false,
+    version: pkg.version, platform: 'win32', arch: 'x64', signed: false, installer: false, branding,
     electron: { version: electronVersion, executable: 'Arcane.exe', defaultAppIncluded: false },
     node: { ...node, executable: 'resources/node/node.exe', license: 'resources/node/LICENSE' },
     app: { entry: 'resources/app/main.cjs', productRoot: 'resources/product' },

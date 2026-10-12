@@ -2,10 +2,7 @@
 
 Arcane's Windows build is an unpacked directory containing a real **Arcane.exe**.
 Copy the entire directory together; end users do not need an installed Node.js,
-npm, or Electron. This build has no installer and is unsigned. Renaming the
-Electron executable does not add an Arcane executable icon, version-resource
-branding, code signing, or a signing certificate. An optional host icon affects
-the application window only.
+npm, or Electron. This build has no installer and is unsigned. The actual build also applies the controlled Arcane icon and product/version resources using the pinned build-only resource editor. This does not provide code signing or a signing certificate. The resource editor is an archived upstream tool, never a runtime dependency or remotely reachable app capability.
 
 From a prepared checkout, run this exact packaging command with the current
 standalone Windows x64 Node authority:

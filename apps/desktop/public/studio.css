@@ -228,12 +228,57 @@ button:disabled { filter: none; }
   .artifact-stage { min-height: 300px; }
   .artifact-toolbar nav > button { min-height: 44px; padding-inline: 10px; }
 }
+
+/* Functional text stays readable; tracked wordmark/rail artwork keeps its scale. */
+.workspace-tab, .artifact-toolbar nav > button,
+.starter-grid strong, .starter-grid span, .composer-models select,
+.artifact-view-options, .artifact-view-options button,
+.preview-guide h3, .preview-guide li, .artifact-empty .secondary,
+.artifact-file, .artifact-files .hint { font-size: 11px; }
+.codex-panel .badge, .composer-models #codex-select,
+.workspace-stage #codex-input-size, .chat-stream-note,
+.workspace-stage .codex-message .eyebrow,
+.project-strip .small-label, .workspace-search kbd { font-size: 10px; }
+.workspace-stage .codex-message .hint { font-size: 11px; color: #aba1a0; }
+.chat-topline > p {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #aaa1a0;
+  white-space: normal;
+  overflow: visible;
+}
+.preview-guide p { font-size: 10px; line-height: 1.6; color: #a79b99; }
+.artifact-view-options { color: #aaa1a0; }
+.workspace-stage #codex-input-size { color: #a79b99; }
+.starter-grid span { color: #aaa1a0; }
+.workspace-tools .refresh-tools .badge { font-size: 10px; }
+.artifact-stage .asset-previews figcaption { font-size: 11px; }
+
+/* A quiet resting thumb, with a clear pointer/keyboard affordance. */
+.app-sidebar { scrollbar-color: #3b3331 transparent; }
+.app-sidebar:hover, .app-sidebar:focus-within { scrollbar-color: #927a75 transparent; }
+@supports selector(::-webkit-scrollbar) {
+  /* Chromium's standard scrollbar properties otherwise override its styled thumb. */
+  .app-sidebar, .app-sidebar:hover, .app-sidebar:focus-within { scrollbar-width: auto; scrollbar-color: auto; }
+  .app-sidebar::-webkit-scrollbar { width: 6px; height: 6px; }
+  .app-sidebar::-webkit-scrollbar-track { background: transparent; }
+  .app-sidebar::-webkit-scrollbar-thumb {
+    background: rgba(181, 153, 148, .28);
+    border: 1px solid #111010;
+    border-radius: 8px;
+  }
+  .app-sidebar:hover::-webkit-scrollbar-thumb,
+  .app-sidebar:focus-within::-webkit-scrollbar-thumb { background: rgba(181, 153, 148, .65); }
+  .app-sidebar::-webkit-scrollbar-thumb:hover { background: #b59994; }
+}
+
 @media (forced-colors: active) {
   html, :where(.app-sidebar, .codex-messages, .artifact-stage, .artifact-files, .workspace-search-results, pre) {
     scrollbar-color: auto;
     scrollbar-width: auto;
   }
   ::-webkit-scrollbar-thumb { background: ButtonText; border-color: Canvas; }
+  .app-sidebar::-webkit-scrollbar-thumb { background: ButtonText; border-color: Canvas; }
   :where(.nav-link, .workspace-tab, .artifact-toolbar nav > button)[aria-current="page"],
   .artifact-stage .asset-previews figure:is(.is-selected, [aria-pressed="true"]) {
     outline: 2px solid Highlight;

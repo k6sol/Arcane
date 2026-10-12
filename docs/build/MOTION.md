@@ -18,7 +18,9 @@ Only real manifest-verified figures carrying the shell's role=button receive pre
 
 Desktop layout remains the split workspace. Laptop tabs and preview actions remain reachable. Narrow screens use a scrollable tab row and a bounded, scrollable navigation section; the existing sidebar toggle can collapse that section. Composer choices wrap, search results fit the viewport, and preview/approval content keeps its own scroll area. Disabled model selection stays visible. Existing application-owned hidden attributes still govern conditional content.
 
-Scrollbars retain a visible charcoal/red thumb, stable gutters in content panes and a hover affordance. Forced colors restores system scrollbar colors and a system selection/focus mark.
+The parent supplied the Electron first-show capture runtime/verification/exe-dev-8TkRZO/workspace.png (1496 x 921); it motivated a bounded readability pass. Functional status/composer/stage labels use a 10 px minimum, and tool actions, preview guidance, captions and message metadata use 11 px. Tracked wordmark, rail and decorative brand lettering retain their existing sizes. Live status copy wraps so long error text remains readable.
+
+Content panes retain stable scrollbar gutters. The sidebar uses a quiet, transparent-track 6 px Chromium scrollbar; its thumb becomes clearer on pointer hover or keyboard focus. Other browsers retain a thin standard scrollbar. Forced colors restores system scrollbar colors and a system selection/focus mark.
 
 ## Verification
 
@@ -28,8 +30,10 @@ Run only:
 node --test --test-isolation=none tests/release/motion.test.mjs
 ~~~
 
-The in-process option avoids a child-process spawn in restricted Windows sandboxes. All 10 scoped contracts passed. Script-free browser review at 1440 x 900, 1024 x 768 and 390 x 844 found no page-level horizontal overflow; narrow tab overflow stayed inside its scrollable row and model/preview controls remained rendered.
+The in-process option avoids a child-process spawn in restricted Windows sandboxes. All 12 scoped contracts passed. Script-free browser review at 1440 x 900, 1024 x 768 and 390 x 844 found no page-level horizontal overflow; narrow tab overflow stayed inside its scrollable row and model/preview controls remained rendered.
 
-The dependency-free deterministic contract parses both complete stylesheets with nested media/keyframe context. It checks full reduced-motion coverage, opt-in gating, explicit transition properties, 200 ms maximum durations, single-iteration reveals without delays, precise-pointer hover transforms, canvas isolation, preserved responsive controls, keyboard focus and forced-color scrollbar behavior. The scanner itself is checked against nested blocks and functional commas.
+The readability refinement was also reviewed at 1496 x 921, 1024 x 768 and 390 x 844. The sidebar thumb stayed 6 px when keyboard focus increased its opacity from .28 to .65; functional label sizes were confirmed from computed styles, with tracked brand copy unchanged.
+
+The dependency-free deterministic contract parses both complete stylesheets with nested media/keyframe context. It checks full reduced-motion coverage, opt-in gating, explicit transition properties, 200 ms maximum durations, single-iteration reveals without delays, precise-pointer hover transforms, canvas isolation, preserved responsive controls, keyboard focus, functional label sizes, bounded sidebar thumb geometry and forced-color scrollbar behavior. The scanner itself is checked against nested blocks and functional commas.
 
 These contracts do not prove native provider, live Studio or Electron host behavior. This task does not run those tests or the full suites. Any browser review uses script-free local fixtures of the current markup and styles; fixture states are synthetic and make no claim of successful generation or provider access.

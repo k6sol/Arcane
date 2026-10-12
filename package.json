@@ -32,11 +32,15 @@
     "release:local": "npm run build && npm run build:plugin && node scripts/create-local-release.mjs",
     "test:release": "node --test tests/release/*.test.mjs",
     "start:desktop": "electron apps/desktop/electron",
-    "package:windows": "npm run build && npm run build:plugin && node scripts/package-windows.mjs"
+    "package:windows": "npm run build && npm run build:plugin && node scripts/package-windows.mjs",
+    "release:desktop": "node scripts/desktop-pipeline.mjs",
+    "check:desktop": "node scripts/check-windows-executable.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
     "electron": "44.7.0",
+    "playwright-core": "1.64.0",
+    "rcedit": "5.0.2",
     "typescript": "7.0.2"
   },
   "dependencies": {

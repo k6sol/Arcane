@@ -204,3 +204,45 @@ test('both surfaces retain visible keyboard focus and scrollbar affordances in f
     assert.ok(rules.some(rule => rule.context.some(value => normalize(value) === '@media(forced-colors:active)') && rule.declarations.some(declaration => declaration.property === 'scrollbar-color' && declaration.value === 'auto')), name);
   }
 });
+
+test('studio: functional metadata, stages and preview labels have a 10–11 px floor without resizing brand copy', () => {
+  const css = sheets.find(sheet => sheet.name === 'studio').css;
+  const rules = rulesOf(css);
+  const labels = [
+    '.workspace-tab', '.artifact-toolbar nav > button', '.starter-grid strong', '.starter-grid span',
+    '.composer-models select', '.composer-models #codex-select', '.codex-panel .badge',
+    '.artifact-view-options', '.artifact-view-options button', '.preview-guide h3', '.preview-guide li',
+    '.preview-guide p', '.workspace-stage #codex-input-size', '.chat-stream-note',
+    '.workspace-stage .codex-message .eyebrow', '.workspace-stage .codex-message .hint',
+    '.project-strip .small-label', '.artifact-stage .asset-previews figcaption', '.artifact-files .hint',
+  ];
+  for (const selector of labels) {
+    const sizes = rules.filter(rule => splitTopLevel(rule.selector, ',').some(value => normalize(value) === normalize(selector)))
+      .flatMap(rule => rule.declarations.filter(declaration => declaration.property === 'font-size').map(declaration => declaration.value));
+    assert.ok(sizes.length, selector);
+    assert.ok(/^(?:10|11)px$/.test(sizes.at(-1)), 'Functional text must stay readable across breakpoints: ' + selector);
+  }
+  const polish = css.slice(css.indexOf('/* Functional text'));
+  assert.doesNotMatch(polish, /(?:wordmark small|brand-card strong|rail-copy)\s*\{/);
+  const status = rules.filter(rule => normalize(rule.selector) === '.chat-topline>p').at(-1);
+  assert.ok(status.declarations.some(declaration => declaration.property === 'white-space' && declaration.value === 'normal'), 'Live status text must wrap rather than conceal errors');
+  assert.ok(status.declarations.some(declaration => declaration.property === 'overflow' && declaration.value === 'visible'));
+});
+
+test('studio: sidebar thumb is narrow and quiet at rest, clear on hover/focus, and visible in forced colors', () => {
+  const rules = rulesOf(sheets.find(sheet => sheet.name === 'studio').css);
+  assert.ok(rules.some(rule => rule.context.some(value => value.startsWith('@supports selector(::-webkit-scrollbar)'))
+    && rule.selector.includes('.app-sidebar:hover') && rule.selector.includes('.app-sidebar:focus-within')
+    && rule.declarations.some(declaration => declaration.property === 'scrollbar-color' && declaration.value === 'auto')),
+  'Chromium hover/focus must retain custom thumb styling rather than re-enable its native scrollbar');
+  const scrollbar = rules.find(rule => rule.selector === '.app-sidebar::-webkit-scrollbar');
+  assert.ok(scrollbar.declarations.some(declaration => declaration.property === 'width' && declaration.value === '6px'));
+  const thumb = rules.find(rule => rule.selector === '.app-sidebar::-webkit-scrollbar-thumb');
+  assert.ok(thumb.declarations.some(declaration => declaration.property === 'background' && declaration.value === 'rgba(181, 153, 148, .28)'));
+  assert.ok(rules.some(rule => rule.selector.includes('.app-sidebar:focus-within::-webkit-scrollbar-thumb')
+    && rule.selector.includes('.app-sidebar:hover::-webkit-scrollbar-thumb')
+    && rule.declarations.some(declaration => declaration.property === 'background' && declaration.value === 'rgba(181, 153, 148, .65)')));
+  assert.ok(rules.some(rule => rule.selector === '.app-sidebar::-webkit-scrollbar-thumb'
+    && rule.context.some(value => normalize(value) === '@media(forced-colors:active)')
+    && rule.declarations.some(declaration => declaration.property === 'background' && declaration.value === 'ButtonText')));
+});

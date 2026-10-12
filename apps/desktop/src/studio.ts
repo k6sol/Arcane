@@ -1,3 +1,4 @@
+import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell } from './workspace-shell.js';
@@ -1293,10 +1294,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const token = takeControlToken(window.location, window.history, storage);
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token);
   const codexChat = new CodexChat(document, new CodexChatApi(token));
+  const learningPanel = new LearningPanel(document, token); learningPanel.start();
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); } });
+  window.addEventListener('pagehide', () => { workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); } });
   void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

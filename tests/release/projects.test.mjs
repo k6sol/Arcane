@@ -62,7 +62,7 @@ async function fixture(t) {
   // Execute the unchanged product entry/configuration with all four services replaced
   // by metadata-only fixtures. No HTTP listener, SQLite engine, provider or Studio.
   let productFixture = productSource;
-  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', './lab-server.js', './asset-service.js']) {
+  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', './lab-server.js', './asset-service.js', './learning-service.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
   }
@@ -83,6 +83,7 @@ async function fixture(t) {
       const outputRoot = options.outputRoot ?? join(options.cwd,'runtime','assets');
       return {options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{}};
     }
+    export function createLearningService() { return { close() {} }; }
     export async function createConnectionLab(options) {
       mkdirSync(options.stateDirectory,{recursive:true});
       console.log('fixture-product:' + JSON.stringify({cwd:options.cwd,projectPath:options.projectPath,port:options.port,

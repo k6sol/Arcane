@@ -1,3 +1,5 @@
+import { learningRoutes } from './learning-routes.js';
+import type { LearningService } from './learning-service.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -23,6 +25,8 @@ interface Options {
   projectPath?: string;
   port?: number;
   assetService?: AssetService;
+  /** Owned by the product launcher; absent in metadata-only labs. */
+  learningService?: LearningService;
   /** Test-only service seam. Production creates the trusted personal-local service. */
   codexService?: CodexService;
 }
@@ -31,6 +35,7 @@ export async function createConnectionLab(options: Options) {
   const agentToken = randomBytes(32).toString('hex');
   const bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, agentToken) : null;
   const native = options.studioStore ? nativeRoutes() : null;
+  const learning = options.learningService ? learningRoutes(options.learningService) : null;
   const assets = options.assetService ? assetRoutes(options.assetService) : null;
   const store = new SelectionStore(options.stateDirectory);
   let connections: Connection[] = [];
@@ -40,10 +45,11 @@ export async function createConnectionLab(options: Options) {
   try { selection = await store.read(); } catch { savedStateFailed = true; stateWarnings.push('Saved preference unreadable; original file has not been overwritten. Repair or back it up before saving a new preference.'); }
   let busy = false;
   let origin = '';
+  let shuttingDown = false;
   const codex = options.codexService ?? (options.studioStore ? createCodexService({
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
     arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),
-      projectRoot: options.cwd, daemonUrl: origin, agentToken }),
+      projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
   const nativeChat = codex ? codexRoutes(codex) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
@@ -51,6 +57,7 @@ export async function createConnectionLab(options: Options) {
     response.end(JSON.stringify(payload));
   };
   const server = createServer(async (request, response) => {
+    if (shuttingDown) { response.writeHead(503, {'Connection': 'close'}); response.end(); return; }
     response.setHeader('Referrer-Policy', 'no-referrer');
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
     try {
@@ -67,6 +74,7 @@ export async function createConnectionLab(options: Options) {
           ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
+          ['/learning-panel.js', [join(options.cwd, 'dist/apps/desktop/src/learning-panel.js'), 'text/javascript']],
           ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']]
         ] as [string, [string, string]][] : [])
       ]);
@@ -76,6 +84,7 @@ export async function createConnectionLab(options: Options) {
         response.writeHead(200, { 'Content-Type': asset[1] + (asset[1].startsWith('image/') ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(data); return;
       }
+      if (learning && await learning(request,response,url,token,origin,agentToken)) return;
       if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
       if (native && await native(request,response,url,token,origin)) return;
       if (assets && await assets(request, response, url, token, origin, agentToken)) return;
@@ -118,9 +127,11 @@ export async function createConnectionLab(options: Options) {
   return {
     server, origin, token, agentToken, url: origin + '/#' + token,
     async close() {
+      shuttingDown = true;
+      // Quiesce the listener and sockets before awaiting native child cleanup.
+      const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())).catch(error => error as Error);
       server.closeAllConnections();
-      await codex?.close();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      try { await codex?.close(); } finally { const error = await listenerClosed; if (error) throw error; }
     }
   };
 }

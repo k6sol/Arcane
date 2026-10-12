@@ -1,0 +1,335 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { win32 } from 'node:path';
+import { EventEmitter } from 'node:events';
+import { stripTypeScriptTypes } from 'node:module';
+import vm from 'node:vm';
+
+// Read source directly: no build, Electron, HTTP listener, native CLI or provider.
+const source = path => readFileSync(new URL('../../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+const policySource = source('apps/desktop/electron/policy.cjs');
+const mainSource = source('apps/desktop/electron/main.cjs');
+const preloadSource = source('apps/desktop/electron/preload.cjs');
+const productSource = source('apps/daemon/src/product-main.ts');
+const labSource = source('apps/daemon/src/lab-server.ts');
+const origin = 'http://127.0.0.1:45871';
+const token = 'a'.repeat(64);
+const key = path => win32.resolve(path).toLowerCase();
+
+function filesystemFixture() {
+  const entries = new Map();
+  const put = (path, options = {}) => entries.set(key(path), { path: win32.resolve(path), kind: 'directory', nlink: 1, ...options });
+  put('C:\\');
+  put('C:\\Smoke');
+  put('C:\\Smoke\\new-empty');
+  function entry(path) {
+    const value = entries.get(key(path));
+    if (!value) throw Object.assign(new Error('Fixture path absent.'), { code: 'ENOENT' });
+    return value;
+  }
+  const stat = path => {
+    const value = entry(path);
+    return {
+      nlink: value.nlink,
+      isDirectory: () => value.kind === 'directory',
+      isFile: () => value.kind === 'file',
+      isSymbolicLink: () => value.kind === 'link',
+    };
+  };
+  const physical = path => entry(path).physical ?? entry(path).path;
+  const mkdir = path => {
+    const parts = [];
+    for (let current = win32.resolve(path); !entries.has(key(current)); current = win32.dirname(current)) parts.push(current);
+    for (const part of parts.reverse()) put(part);
+    return undefined;
+  };
+  return {
+    put,
+    async: { lstat: async path => stat(path), realpath: async path => physical(path), mkdir: async path => mkdir(path) },
+    sync: {
+      lstatSync: stat, realpathSync: physical, mkdirSync: mkdir,
+      existsSync: path => entries.has(key(path)),
+      readdirSync: path => [...entries.values()].filter(value => key(win32.dirname(value.path)) === key(path) && key(value.path) !== key(path)).map(value => win32.basename(value.path)),
+    },
+  };
+}
+
+function windowsPolicy(fs = filesystemFixture()) {
+  const module = { exports: {} };
+  vm.runInNewContext(policySource, {
+    module, URL, process: { platform: 'win32' },
+    require(name) {
+      if (name === 'node:path') return win32;
+      if (name === 'node:fs/promises') return fs.async;
+      if (name === 'node:fs') return fs.sync;
+      throw new Error('Unexpected policy dependency: ' + name);
+    },
+  }, { filename: 'policy.cjs' });
+  return module.exports;
+}
+const policy = windowsPolicy();
+
+test('origin accepts only canonical numeric IPv4 loopback and a valid port', () => {
+  assert.equal(policy.validOrigin(origin), true);
+  for (const value of [
+    '', 'http://127.0.0.1:0', 'http://127.0.0.1:65536', 'http://127.0.0.1:045871',
+    'http://localhost:45871', 'http://[::1]:45871', 'https://127.0.0.1:45871',
+    origin + '/', origin + '?token=' + token, origin + '#' + token,
+  ]) assert.equal(policy.validOrigin(value), false, value);
+});
+
+test('navigation accepts the workspace fragment but rejects other origins, paths and queries', () => {
+  assert.equal(policy.navigationAllowed(origin, origin + '/studio#' + token), true);
+  assert.equal(policy.navigationAllowed(origin, origin + '/'), true);
+  for (const value of [
+    'https://example.com/#' + token, 'file:///C:/Windows/win.ini', 'javascript:alert(1)',
+    'http://127.0.0.1:45872/studio', origin + '/v1/product/state',
+    origin + '/studio?token=' + token, 'http://user:pass@127.0.0.1:45871/studio',
+  ]) assert.equal(policy.navigationAllowed(origin, value), false, value);
+});
+
+test('requests allow only the owned origin and its blob downloads', () => {
+  for (const value of [origin + '/studio.js', origin + '/v1/product/state', 'blob:' + origin + '/fixture']) assert.equal(policy.requestAllowed(origin, value), true, value);
+  for (const value of [
+    'https://example.com/', 'http://127.0.0.1:45872/', 'http://localhost:45871/',
+    'file:///C:/Windows/win.ini', 'data:text/html,fixture', 'ws://127.0.0.1:45871/',
+    'blob:https://example.com/fixture', 'blob:null/fixture', 'http://user:pass@127.0.0.1:45871/',
+  ]) assert.equal(policy.requestAllowed(origin, value), false, value);
+  assert.equal(policy.requestAllowed('', origin + '/studio.js'), false);
+});
+
+test('private ready handoff requires the exact envelope and bounded endpoint', () => {
+  const ready = { type: 'arcane-ready', protocolVersion: 1, origin, token };
+  assert.equal(policy.readyMessage(ready).origin, origin);
+  for (const value of [
+    null, {}, { ...ready, extra: true }, { ...ready, protocolVersion: 2 },
+    { ...ready, type: 'ready' }, { ...ready, origin: 'http://localhost:45871' },
+    { ...ready, token: 'short' }, { ...ready, token: 'g'.repeat(64) },
+  ]) assert.throws(() => policy.readyMessage(value));
+});
+
+test('daemon environment drops credentials, runtime injection and inherited Arcane overrides', () => {
+  const env = policy.daemonEnvironment({
+    PATH: 'C:\\Windows\\System32', APPDATA: 'C:\\Users\\Fixture\\AppData\\Roaming',
+    OPENAI_API_KEY: 'fixture-secret', ANTHROPIC_API_KEY: 'fixture-secret',
+    NODE_OPTIONS: '--require=C:\\fixture.js', NODE_PATH: 'C:\\foreign',
+    ELECTRON_RUN_AS_NODE: '1', ARCANE_LOCAL_TOKEN: token, ARCANE_PORT: '1',
+    ARCANE_DAEMON_URL: 'https://example.com', CODEX_HOME: 'C:\\foreign',
+  }, { productRoot: 'C:\\App\\resources\\product', stateRoot: 'C:\\UserData\\runtime\\projects\\fixture', projectPath: 'C:\\Project' });
+  assert.deepEqual(Object.keys(env).sort(), ['APPDATA', 'ARCANE_PORT', 'ARCANE_PROJECT', 'ARCANE_RESOURCE_DIRECTORY', 'ARCANE_STATE_DIRECTORY', 'PATH'].sort());
+  assert.equal(env.ARCANE_PORT, '0');
+  assert.equal(env.ARCANE_RESOURCE_DIRECTORY, 'C:\\App\\resources\\product');
+  assert.equal(env.ARCANE_STATE_DIRECTORY, 'C:\\UserData\\runtime\\projects\\fixture');
+  assert.equal(env.ARCANE_PROJECT, 'C:\\Project');
+});
+
+test('Windows path validation rejects traversal, network, device, ADS and reserved names', () => {
+  assert.equal(policy.localPath('C:\\Smoke\\new-empty'), 'C:\\Smoke\\new-empty');
+  for (const value of [
+    '', 'relative', 'C:relative', 'C:\\', '\\\\server\\share\\folder', '//server/share/folder',
+    '\\\\?\\C:\\Smoke', '\\\\.\\C:\\Smoke', 'C:\\Smoke\\..\\escape', 'C:\\Smoke\\.\\folder',
+    'C:\\Smoke\\NUL.txt', 'C:\\Smoke\\CON', 'C:\\Smoke\\COM1.txt',
+    'C:\\Smoke\\folder.', 'C:\\Smoke\\folder ', 'C:\\Smoke\\file:stream', 'C:\\Smoke\\bad\u0000name',
+  ]) assert.throws(() => policy.localPath(value), undefined, JSON.stringify(value));
+});
+
+test('regression: Windows paths require a drive-qualified absolute root', () => {
+  for (const value of ['\\Temp\\Smoke', '/Temp/Smoke']) assert.throws(() => policy.localPath(value), undefined, value);
+});
+
+test('path containment excludes root equality, siblings and other drives', () => {
+  assert.equal(policy.within('C:\\UserData\\runtime', 'C:\\UserData\\runtime\\projects\\fixture'), true);
+  for (const value of ['C:\\UserData\\runtime', 'C:\\UserData\\runtime-other\\fixture', 'C:\\UserData\\outside', 'D:\\UserData\\runtime\\fixture']) assert.equal(policy.within('C:\\UserData\\runtime', value), false, value);
+});
+
+test('direct path validation rejects parent links and physically redirected directories', async () => {
+  const fs = filesystemFixture(), checked = windowsPolicy(fs);
+  await checked.directPath('C:\\Smoke\\new-empty');
+  fs.put('C:\\Smoke', { kind: 'link', physical: 'C:\\Elsewhere' });
+  await assert.rejects(checked.directPath('C:\\Smoke\\new-empty'));
+  fs.put('C:\\Smoke', { physical: 'C:\\Elsewhere' });
+  await assert.rejects(checked.directPath('C:\\Smoke\\new-empty'));
+});
+
+test('missing leaf allowance still rejects unsafe existing ancestors and hardlinked files', async () => {
+  const fs = filesystemFixture(), checked = windowsPolicy(fs);
+  assert.equal(await checked.directPath('C:\\Smoke\\new-empty\\missing', 'directory', true), 'C:\\Smoke\\new-empty\\missing');
+  fs.put('C:\\Smoke\\new-empty\\record.json', { kind: 'file', nlink: 2 });
+  await assert.rejects(checked.directPath('C:\\Smoke\\new-empty\\record.json', 'file'));
+  fs.put('C:\\Smoke\\new-empty', { kind: 'file' });
+  await assert.rejects(checked.directPath('C:\\Smoke\\new-empty\\missing', 'directory', true));
+});
+
+test('preload exposes only immutable identity with no host capabilities', () => {
+  let exposed;
+  vm.runInNewContext(preloadSource, {
+    require(name) {
+      assert.equal(name, 'electron');
+      return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
+    },
+  });
+  assert.deepEqual(Object.keys(exposed).sort(), ['platform', 'runtime', 'version']);
+  assert.equal(exposed.runtime, 'desktop');
+  assert.equal(Object.isFrozen(exposed), true);
+});
+
+test('source contract: renderer isolation, exact navigation and deny-by-default permissions', () => {
+  for (const property of ['sandbox: true', 'contextIsolation: true', 'nodeIntegration: false', 'nodeIntegrationInWorker: false', 'nodeIntegrationInSubFrames: false', 'webSecurity: true', 'allowRunningInsecureContent: false', 'webviewTag: false']) assert.ok(mainSource.includes(property), property);
+  for (const event of ['will-navigate', 'will-frame-navigate', 'will-redirect', 'will-attach-webview']) assert.ok(mainSource.includes("'" + event + "'"), event);
+  assert.match(mainSource, /event\.isMainFrame/);
+  assert.match(mainSource, /policy\.navigationAllowed\(origin,\s*event\.url\)/);
+  assert.match(mainSource, /onBeforeRequest[\s\S]*policy\.requestAllowed\(origin,\s*details\.url\)/);
+  assert.match(mainSource, /setWindowOpenHandler\([\s\S]*?action:\s*'deny'/);
+  assert.match(mainSource, /setPermissionRequestHandler[\s\S]*?callback\(false\)/);
+  assert.match(mainSource, /setPermissionCheckHandler\(\(\)\s*=>\s*false\)/);
+  assert.match(mainSource, /setDevicePermissionHandler\(\(\)\s*=>\s*false\)/);
+});
+
+test('source contract: bundled resource entry executes in owned writable cwd over private IPC', () => {
+  assert.match(mainSource, /spawn\(nodeExecutable,\s*\[entry\]/);
+  assert.match(mainSource, /cwd:\s*userRoot/);
+  assert.match(mainSource, /shell:\s*false/);
+  assert.match(mainSource, /windowsHide:\s*true/);
+  assert.match(mainSource, /stdio:\s*\['ignore',\s*'ignore',\s*'ignore',\s*'ipc'\]/);
+  assert.match(mainSource, /await stopDaemon\(\)[\s\S]*?await startDaemon\(path\)/);
+  assert.match(productSource, /outputRoot:\s*join\(directory,\s*'assets'\)/);
+  assert.match(productSource, /process\.send\(\{\s*type:\s*'arcane-ready'/);
+});
+
+test('regression: loss of the private desktop IPC parent triggers daemon shutdown', () => {
+  assert.match(productSource, /process\.(?:once|on)\(\s*['"]disconnect['"]\s*,\s*(?:shutdown|\([^)]*\)\s*=>\s*\{?\s*(?:void\s+)?shutdown\()/,
+    'An Electron crash must fence the child rather than leave its daemon bearer and active work alive.');
+});
+
+function stopFixture(child) {
+  const begin = mainSource.indexOf('async function stopDaemon()');
+  const end = mainSource.indexOf('async function startDaemon(', begin);
+  assert.ok(begin >= 0 && end > begin, 'Expected the named desktop shutdown boundary.');
+  const context = { child, token, origin, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.stopOwned = stopDaemon;', context);
+  return context;
+}
+
+test('private stop revokes the host credential immediately and waits for the owned close', async () => {
+  const child = new EventEmitter();
+  Object.assign(child, { exitCode: null, connected: true, kill() { assert.fail('Fixture cleanup should not kill a healthy child.'); } });
+  let envelope;
+  child.send = (message, callback) => { envelope = message; callback(null); };
+  const fixture = stopFixture(child);
+  let settled = false;
+  const stopped = fixture.stopOwned().then(clean => { settled = true; return clean; });
+  await Promise.resolve();
+  assert.equal(fixture.token, '');
+  assert.equal(fixture.origin, '');
+  assert.equal(settled, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(envelope)), { type: 'arcane-shutdown', protocolVersion: 1 });
+  child.exitCode = 0;
+  child.emit('close', 0);
+  assert.equal(await stopped, true);
+});
+
+test('regression: an already failed owned child cannot count as clean quiescence', async () => {
+  const fixture = stopFixture({ exitCode: 9, connected: false });
+  assert.equal(await fixture.stopOwned(), false, 'Failed shutdown must not authorize a new project runtime.');
+});
+
+test('regression: post-idle shutdown fences fresh requests before awaiting child cleanup', async () => {
+  // Source boundary fixture: neither a real listener nor a native service runs.
+  const begin = labSource.lastIndexOf('async close() {');
+  const end = labSource.indexOf('\n    }', begin);
+  assert.ok(begin >= 0 && end > begin, 'Expected the connection lab lifecycle boundary.');
+  const member = labSource.slice(begin, end + '\n    }'.length);
+  let release;
+  const childCleanup = new Promise(resolve => { release = resolve; });
+  const server = {
+    accepting: true,
+    closeAllConnections() {},
+    close(callback) { this.accepting = false; callback?.(); return this; },
+    closeIdleConnections() {},
+  };
+  const cleanup = vm.runInNewContext(stripTypeScriptTypes('const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
+    server, codex: { close: () => childCleanup },
+  });
+  const closing = cleanup();
+  try {
+    await Promise.resolve();
+    assert.equal(server.accepting, false, 'A holder of the old agent bearer can currently open a fresh socket while shutdown waits.');
+  } finally {
+    release();
+    await closing;
+  }
+});
+
+test('regression: empty smoke fixture creates its profile before Electron setPath', () => {
+  const fs = filesystemFixture(), paths = new Map();
+  const app = {
+    isPackaged: true, setName() {}, setAppUserModelId() {}, enableSandbox() {},
+    commandLine: { appendSwitch() {} }, requestSingleInstanceLock: () => false, quit() {},
+    setPath(name, path) {
+      if (!fs.sync.existsSync(path)) throw new Error('Electron setPath requires an existing directory.');
+      paths.set(name, path);
+    },
+    getPath: name => paths.get(name) ?? 'C:\\UserData',
+  };
+  assert.doesNotThrow(() => vm.runInNewContext(mainSource, {
+    require(name) {
+      if (name === 'electron') return { app, BrowserWindow: class {}, Menu: {}, dialog: {}, nativeTheme: {} };
+      if (name === 'node:child_process') return { spawn() { assert.fail('Smoke fixture must not spawn a daemon.'); } };
+      if (name === 'node:path') return win32;
+      if (name === 'node:fs/promises') return fs.async;
+      if (name === 'node:fs') return fs.sync;
+      if (name === 'node:crypto') return { createHash() { assert.fail('Fixture must not start runtime work.'); } };
+      if (name === './policy.cjs') return windowsPolicy(fs);
+      throw new Error('Unexpected host dependency: ' + name);
+    },
+    process: { argv: ['C:\\Arcane\\Arcane.exe', '--arcane-smoke', 'C:\\Smoke\\new-empty'], platform: 'win32', resourcesPath: 'C:\\Arcane\\resources', env: {} },
+    __dirname: 'C:\\Arcane\\resources\\app', performance: { now: () => 0 },
+  }, { filename: 'main.cjs' }));
+  assert.equal(paths.get('userData'), 'C:\\Smoke\\new-empty\\profile');
+});
+
+test('regression: normal packaged asset state is accepted outside resources and OS Temp', async () => {
+  const resources = 'C:\\Program Files\\Arcane\\resources\\product';
+  const userData = 'C:\\Users\\Fixture\\AppData\\Roaming\\Arcane';
+  const directory = win32.join(userData, 'runtime', 'projects', 'fixture');
+  const temp = 'C:\\Users\\Fixture\\AppData\\Local\\Temp';
+  // Evaluate only the trusted constructor arguments, never the daemon entry.
+  const constructor = /assets\s*=\s*await\s*createAssetService\(([\s\S]*?)\)\s*;\s*\}\s*catch/.exec(productSource);
+  assert.ok(constructor, 'Expected product asset-service initialization.');
+  const options = await vm.runInNewContext('(async () => capture(' + constructor[1] + '))()', {
+    capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', stateOverride: directory,
+    resourceOverride: resources, directory, join: win32.join,
+  });
+  const serviceSource = source('apps/daemon/src/asset-service.ts');
+  const begin = serviceSource.indexOf('export async function createAssetService(');
+  const end = serviceSource.indexOf('  const ownerKey', begin);
+  assert.ok(begin >= 0 && end > begin, 'Expected asset root validation boundary.');
+  const validation = serviceSource.slice(begin, end).replace('export ', '') + 'return root;\n}\ncreateAssetService(options);';
+  const pathsSource = source('packages/asset-pipeline/src/paths.ts');
+  const rootBegin = pathsSource.indexOf('export async function prepareOutputRoot(');
+  const rootEnd = pathsSource.indexOf('export async function regularFile(', rootBegin);
+  assert.ok(rootBegin >= 0 && rootEnd > rootBegin, 'Expected output-root policy boundary.');
+  const rootPolicy = pathsSource.slice(rootBegin, rootEnd).replace('export ', '');
+  const fs = filesystemFixture();
+  for (const path of [resources, userData, directory, temp]) fs.sync.mkdirSync(path);
+  const writes = [];
+  const result = await vm.runInNewContext(stripTypeScriptTypes(rootPolicy + '\n' + validation), {
+    options, ...win32, process: { platform: 'win32' }, ArcaneError: Error, AssetError: Error,
+    realpath: fs.async.realpath, lstat: fs.async.lstat, noLinks: async () => {}, tmpdir: () => temp,
+    within: (root, target) => key(root) === key(target) || policy.within(root, target),
+    mkdir: async path => { writes.push(path); return fs.async.mkdir(path); },
+  });
+  assert.equal(result, win32.join(directory, 'assets'));
+  assert.ok(writes.every(path => policy.within(userData, path)), 'Asset initialization may write only beneath owned userData.');
+  // Generation repeats the containment check: fixing service initialization alone
+  // must not leave the actual pipeline rooted in the immutable installation.
+  const pipelineCall = /const pipeline\s*=\s*createAssetPipeline\((\{[\s\S]*?\})\);/.exec(serviceSource);
+  assert.ok(pipelineCall, 'Expected asset pipeline configuration.');
+  const pipeline = vm.runInNewContext('(' + pipelineCall[1] + ')', { options, root: result, ...win32 });
+  assert.equal(policy.within(pipeline.workspaceRoot, pipeline.outputRoot), true, 'Generated asset output must fit the writable pipeline workspace.');
+  assert.equal(pipeline.workerRoot, win32.join(resources, 'workers', 'blender'), 'Bundled worker lookup must retain the immutable resource root.');
+});
+
+

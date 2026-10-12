@@ -275,6 +275,7 @@ test('hard bounds reject oversized input, evidence, graph, budget, snapshots and
   evidence.artifacts[0]!.bytes = 0;
   assert.throws(() => evaluateWorkflowEvidence(step(recipe, evidence.key), evidence, evidence.subjectHashes), /bound/);
   assert.throws(() => validateWorkflowGraph(Array.from({ length: 25 }, () => recipe.steps[0]!)), /step bound/);
+  assert.throws(() => validateWorkflowGraph(Array.from({ length: 24 }, (_, i) => ({ ...step(recipe, 'verification'), key: 'verify_' + i, dependencies: [], subjectSteps: [], retry: { maxAttempts: 3, reason: 'evidence-read-busy' as const } }))), /total attempt/);
   assert.throws(() => assessWorkflow(recipe, { ...ctx, submissions: [...ctx.submissions!, ctx.submissions![0]!] }), /Duplicate/);
   assert.throws(() => assessWorkflow(recipe, { tasks: [{ key: 'missing', state: 'complete' }] }), /unknown/);
 });

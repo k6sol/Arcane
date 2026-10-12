@@ -11,7 +11,7 @@ const args = process.argv.slice(app.isPackaged ? 1 : 2);
 const smoke = args[0] === '--arcane-smoke';
 if (args.length && (!smoke || args.length !== 2)) throw new Error('Only the bounded local smoke-check mode is accepted.');
 const smokeRoot = smoke ? policy.localPath(args[1]) : null;
-if (smokeRoot) app.setPath('userData', join(smokeRoot, 'profile'));
+if (smokeRoot) app.setPath('userData', policy.prepareSmokeDirectory(smokeRoot));
 const locked = app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
@@ -19,7 +19,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
 async function stopDaemon() {
   const owned = child; child = null; token = ''; origin = '';
-  if (!owned || owned.exitCode !== null) return true;
+  if (!owned) return true;
+  if (owned.exitCode !== null || owned.signalCode != null) return owned.exitCode === 0;
   return new Promise(resolve => {
     let finished = false;
     const done = code => { if (finished) return; finished = true; clearTimeout(timer); resolve(code === 0); };
@@ -33,6 +34,14 @@ async function startDaemon(project) {
   const key = createHash('sha256').update(process.platform === 'win32' ? canonical.toLowerCase() : canonical).digest('hex');
   const stateRoot = await ownedDirectory(join(userRoot, 'runtime', 'projects', key));
   const env = policy.daemonEnvironment(process.env, { productRoot, stateRoot, projectPath: canonical });
+  // Persist the per-project listener: key-only Studio connections encode this port.
+  // A conflicting occupied port fails startup; no silent port rotation or key replacement.
+  const portFile = join(stateRoot, 'listener-port.json'); let savedPort = null;
+  try { await policy.directPath(portFile, 'file'); const bytes = await readFile(portFile);
+    if (bytes.length > 1024) throw new Error('Port metadata too large.'); const saved = JSON.parse(bytes.toString('utf8'));
+    if (Object.keys(saved).sort().join(',') !== 'port,protocolVersion' || saved.protocolVersion !== 1 || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535) throw new Error('Invalid listener port metadata.');
+    savedPort = saved.port; env.ARCANE_PORT = String(savedPort);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const entry = await policy.directPath(join(productRoot, 'dist/apps/daemon/src/product-main.js'), 'file');
   const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   child = owned;
@@ -47,8 +56,11 @@ async function startDaemon(project) {
       } catch { /* Exact private parent-child handoff only. */ }
     });
   });
+  const assignedPort = Number(new URL(origin).port);
+  if (savedPort === null) await writeFile(portFile, JSON.stringify({ protocolVersion: 1, port: assignedPort }) + '\n', { flag: 'wx', mode: 0o600 });
+  else if (assignedPort !== savedPort) throw new Error('Listener identity changed unexpectedly.');
   daemonReadyMs = performance.now() - started; projectPath = canonical;
-  owned.once('exit', () => { if (child === owned && !closing && !switching) { token = ''; origin = ''; if (window && !window.isDestroyed()) window.destroy(); void failStartup('The local runtime stopped. Your project records have been retained.'); } });
+  owned.once('exit', () => { if (child === owned && !closing && !switching) { token = ''; origin = ''; void failStartup('The local runtime stopped. Your project records have been retained.'); } });
 }
 function makeWindow() {
   window = new BrowserWindow({ width: 1512, height: 960, minWidth: 1000, minHeight: 680, show: false, title: 'Arcane', backgroundColor: '#0b0b0d', autoHideMenuBar: true, icon: join(__dirname, 'icon.png'),
@@ -88,25 +100,28 @@ async function chooseProject() {
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'File', submenu: [{ label: 'Open project...', accelerator: 'CmdOrCtrl+O', click: () => void chooseProject() }, { type: 'separator' }, { label: 'Quit Arcane', accelerator: 'Alt+F4', click: () => app.quit() }] },
-    { label: 'View', submenu: [{ label: 'Reload workspace', accelerator: 'CmdOrCtrl+R', click: () => { if (window && !switching && origin && token) void loadWorkspace(); } }, { role: 'togglefullscreen' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }] },
+    { label: 'View', submenu: [{ label: 'Reload workspace', accelerator: 'CmdOrCtrl+R', click: () => { if (window && !switching && origin && token) window.webContents.reload(); } }, { role: 'togglefullscreen' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }] },
     { label: 'Help', submenu: [{ label: 'About Arcane', click: () => { if (window) void dialog.showMessageBox(window, { type: 'info', title: 'Arcane', message: 'Arcane 0.1.0 - Local development preview', detail: 'Your tools. Your workspace.\nThis build is unsigned. It does not automatically connect providers, edit Studio, publish, or train model weights.' }); } }] }
   ]));
 }
 async function failStartup(message) {
-  if (closing) return;
+  if (closing) return; closing = true;
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
-  closing = true; await stopDaemon(); app.exit(1);
+  await stopDaemon(); app.exit(1);
 }
 async function checkSmoke() {
   await sleep(1200);
   const stateResponse = await fetch(origin + '/v1/product/state', { headers: { Authorization: 'Bearer ' + token } }); const state = await stateResponse.json();
   const response = await fetch(origin + '/studio');
+  const memoryResponse = await fetch(origin + '/v1/learning/state', { headers: { Authorization: 'Bearer ' + token } }); const memory = await memoryResponse.json();
   const renderer = JSON.parse(await window.webContents.executeJavaScript("JSON.stringify({title:document.title,desktop:window.arcaneDesktop,nodeAvailable:typeof require!=='undefined'||typeof process!=='undefined',scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,staticIds:['workspace-topbar','codex-composer','artifact-panel','app-sidebar'].every(id=>!!document.getElementById(id)),previews:document.querySelectorAll('#asset-previews canvas').length,modelOptions:document.getElementById('codex-model')?.options.length??0})"));
   const prefs = window.webContents.getLastWebPreferences();
   await writeFile(join(smokeRoot, 'workspace.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
   const checks = {
     ownDaemonReady: policy.validOrigin(origin), productStateReadable: stateResponse.ok,
+    projectMemoryOffByDefault: memoryResponse.ok && memory.settings?.optIn === false && memory.records?.length === 0,
+    projectMemoryScoped: /^[a-f0-9]{64}$/.test(memory.settings?.projectId ?? ''),
     studioIdle: Array.isArray(state.studioSessions) && state.studioSessions.length === 0,
     noCommands: Object.values(state.commandCounts ?? {}).every(n => n === 0),
     isolatedRenderer: renderer.nodeAvailable === false && prefs.sandbox === true && prefs.contextIsolation === true && prefs.nodeIntegration === false,

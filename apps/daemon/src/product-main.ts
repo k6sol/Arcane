@@ -1,3 +1,4 @@
+import { createLearningService } from './learning-service.js';
 import { resolve, join, dirname, relative, isAbsolute, sep, parse } from 'node:path';
 import { mkdir, writeFile, unlink, readFile, lstat, realpath, opendir } from 'node:fs/promises';
 import { StudioStore } from '../../../packages/storage/src/studio-store.js';
@@ -79,10 +80,13 @@ const projectPath = resolve(process.env.ARCANE_PROJECT ?? cwd);
 let work: WorkStore;
 try { work = new WorkStore({ directory, projectPath }); } catch (error) { store.close(); throw error; }
 let assets: Awaited<ReturnType<typeof createAssetService>>;
-try {assets=await createAssetService({cwd,projectPath,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){work.close();store.close();throw error;}
-let app: Awaited<ReturnType<typeof createConnectionLab>>;
-try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, assetService: assets, projectPath, port }); }
+try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){work.close();store.close();throw error;}
+let learning: ReturnType<typeof createLearningService>;
+try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
 catch (error) { await assets.close(); work.close(); store.close(); throw error; }
+let app: Awaited<ReturnType<typeof createConnectionLab>>;
+try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, assetService: assets, learningService: learning, projectPath, port }); }
+catch (error) { learning.close(); await assets.close(); work.close(); store.close(); throw error; }
 await mkdir(directory, { recursive: true });
 const descriptor = join(directory, 'daemon.json');
 await writeFile(descriptor, JSON.stringify({ origin: app.origin, pid: process.pid, protocolVersion: 1 }) + '\n', { mode: 0o600 });
@@ -96,10 +100,11 @@ let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
+  const deadline = setTimeout(() => process.exit(1), 15000); deadline.unref();
   let failed = false;
   // Each resource closes even if an earlier cleanup fails. Never remove another
   // daemon's descriptor or promise a rollback for an interrupted Studio write.
-  for (const close of [() => app.close(), () => assets.close(), () => work.close(), () => store.close()]) {
+  for (const close of [() => app.close(), () => assets.close(), () => learning.close(), () => work.close(), () => store.close()]) {
     try { await close(); } catch { failed = true; }
   }
   try {
@@ -112,6 +117,8 @@ async function shutdown() {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => { void shutdown(); });
 // Private Node parent-child IPC for local wrappers/tests; no HTTP shutdown route,
 // shell evaluation, public listener, or browser-controlled process message.
+if (process.send) process.once('disconnect', () => { void shutdown(); });
+if (process.send && !process.connected) void shutdown();
 if (process.send) process.on('message', (message: unknown) => {
   if (message && typeof message === 'object' && 'type' in message && 'protocolVersion' in message &&
       message.type === 'arcane-shutdown' && message.protocolVersion === 1) void shutdown();

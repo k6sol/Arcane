@@ -116,7 +116,7 @@ async function harness(t:test.TestContext,spawned=false) {
   }});
   const routes=codexRoutes(service);let origin='';
   const build=process.env.ARCANE_UI_BUILD_DIR??'dist';
-  const assets=new Map([['/studio',resolve('apps/desktop/public/studio.html')],['/studio.css',resolve('apps/desktop/public/studio.css')],['/studio.js',resolve(build,'apps/desktop/src/studio.js')],['/codex-chat.js',resolve(build,'apps/desktop/src/codex-chat.js')],['/workspace-shell.js',resolve(build,'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(build,'apps/desktop/src/asset-downloads.js')],['/brand/arcane-ridges.png',resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
+  const assets=new Map([['/studio',resolve('apps/desktop/public/studio.html')],['/studio.css',resolve('apps/desktop/public/studio.css')],['/studio.js',resolve(build,'apps/desktop/src/studio.js')],['/codex-chat.js',resolve(build,'apps/desktop/src/codex-chat.js')],['/workspace-shell.js',resolve(build,'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(build,'apps/desktop/src/asset-downloads.js')],['/learning-panel.js',resolve(build,'apps/desktop/src/learning-panel.js')],['/brand/arcane-ridges.png',resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
   let gets=0;
   const server=createServer((request,response)=>{void(async()=>{
     const url=new URL(request.url??'/',origin),asset=assets.get(url.pathname);

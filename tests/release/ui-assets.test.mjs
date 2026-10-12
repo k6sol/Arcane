@@ -24,7 +24,7 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   await write('tsconfig.json', '{}');
   for (const path of ['README.md', 'LICENSE']) await write(path, 'Offline fixture.\n');
   for (const path of REQUIRED_FRONTEND_FILES) {
-    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
+    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
     await put(path, bytes);
   }
   for (const path of firstRunFiles) await put(path, 'Offline first-run fixture; never executed.\n');
