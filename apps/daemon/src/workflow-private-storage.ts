@@ -88,7 +88,7 @@ export function privateWorkflowReceiptStorage(parent: string, prepare: boolean, 
   if(typeof parent!=='string'||!isAbsolute(parent)||parent.length>4096||Array.from(parent).some(c=>c.charCodeAt(0)<32||c.charCodeAt(0)===127)||parent.startsWith(String.fromCharCode(92,92))||parent.startsWith('//')||typeof prepare!=='boolean'||typeof key!=='boolean')fail();
   const root=resolve(parent);
   try { const s=lstatSync(root);if(!s.isDirectory()||s.isSymbolicLink()||realpathSync.native(root).toLowerCase()!==root.toLowerCase())fail(); } catch { fail(); }
-  const windows=process.env.SystemRoot ?? 'C:\Windows';
+  const windows=process.env.SystemRoot ?? ('C:'+String.fromCharCode(92)+'Windows');
   if(!/^[a-z]$/i.test(windows[0] ?? '')||windows.slice(1).toLowerCase()!==String.fromCharCode(58,92)+'windows')fail();
   const executable=join(windows,'System32','WindowsPowerShell','v1.0','powershell.exe');
   try {const s=lstatSync(executable);if(!s.isFile()||s.isSymbolicLink()||realpathSync.native(executable).toLowerCase()!==executable.toLowerCase())fail();}catch{fail();}

@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   startWorkflowPanel, WorkflowPanelApi, WorkflowPanelError, WORKFLOW_RESPONSE_BYTES, WORKFLOW_REQUEST_BYTES,
-  readWorkflowPreview, readWorkflowSnapshot, readWorkflowSubmission, readWorkflowReceipt,
-  type NativeWorkflowConversation, type PanelWorkflowPreview, type WorkflowPanelOptions,
+  readWorkflowPreview, readWorkflowSnapshot, readWorkflowSubmission, readWorkflowReceipt, readWorkflowEvidence, readWorkflowDraft, WORKFLOW_HELPER_RESPONSE_BYTES, WORKFLOW_DRAFT_BYTES,
+  type NativeWorkflowConversation, type PanelWorkflowPreview, type WorkflowPanelOptions, type WorkflowEvidenceInput, type WorkflowDraftProvenance,
 } from '../../apps/desktop/src/workflow-panel.js';
 import { createWorkflowRecipe, type WorkflowRecipeRequest, type WorkflowSubmission, type RequestedModel } from '../../packages/core/src/workflow-recipes.js';
 import type { WorkflowSnapshot } from '../../apps/daemon/src/workflow-service.js';
@@ -18,7 +18,7 @@ const NATIVE: NativeWorkflowConversation = { provider: 'codex', threadId: 'obser
 const serverConversation = (native = NATIVE): Pick<NativeWorkflowConversation, 'provider' | 'threadId' | 'sessionId'> => ({ provider: native.provider, threadId: native.threadId, sessionId: native.sessionId });
 const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 const clone = <T>(value: T): T => structuredClone(value);
-const REQUEST: WorkflowRecipeRequest = { deliverable: 'code-change', engine: 'roblox', title: 'Repair scoped movement', prompt: 'Repair movement and retain server validation.', scope: ['src/movement.luau'], model: null };
+const REQUEST: WorkflowRecipeRequest = { deliverable: 'code-change', engine: 'roblox', title: 'Repair scoped movement', prompt: 'Repair movement and retain server validation.', scope: ['src'], model: null };
 const SUBMISSION: WorkflowSubmission = { key: 'prompt', artifacts: [{ path: 'src/brief.txt', role: 'brief', sha256: digest('actual fixture bytes'), bytes: 20 }], subjectHashes: [], checks: [] };
 function snapshot(request = REQUEST): WorkflowSnapshot {
   const recipe = createWorkflowRecipe(request);
@@ -89,7 +89,7 @@ class DocumentFixture {
   asDocument(): Document { return this as unknown as Document; }
 }
 interface Call { path: string; init: RequestInit; body: Record<string, unknown> | undefined }
-function fixture(initial: WorkflowSnapshot | null = snapshot(), useNative = true) {
+function fixture(initial: WorkflowSnapshot | null = snapshot(), useNative = true, appendToDraft?: WorkflowPanelOptions['appendToDraft']) {
   const calls: Call[] = [];
   let current = initial, token: string | null = TOKEN, path: string | null = PATH, native: NativeWorkflowConversation | null = clone(NATIVE), model: RequestedModel | null = null;
   let notify: () => void = () => {}; let unsubscribed = false; let attested = true;
@@ -106,6 +106,22 @@ function fixture(initial: WorkflowSnapshot | null = snapshot(), useNative = true
       if (kind === 'reconcile') { current.workflow.state = preview.resolution === 'halt' ? 'halted' : 'active'; current.workflow.operation = null; }
       return Response.json({ ...clone(current), result, ...(attested ? { conversation: serverConversation() } : {}) });
     }
+    if (call.path.endsWith('/evidence')) {
+      assert.ok(current);
+      const input = call.body as unknown as WorkflowEvidenceInput;
+      const step = current.workflow.recipe.steps.find(s => s.key === input.stepKey)!;
+      return Response.json({ projectId: PROJECT, workflowId: current.workflow.id, workflowRevision: current.workflow.revision, stepKey: input.stepKey,
+        ...(attested ? { conversation: serverConversation() } : {}),
+        submission: { key: input.stepKey, artifacts: input.files.map(file => ({ ...file, sha256: digest(file.path + ':' + file.role), bytes: 20 })),
+          subjectHashes: current.workflow.submissions.filter(s => step.subjectSteps.includes(s.key)).flatMap(s => s.artifacts.map(a => a.sha256)), checks: [] } });
+    }
+    if (call.path.endsWith('/draft')) {
+      assert.ok(current);
+      return Response.json({ projectId: PROJECT, workflowId: current.workflow.id, workflowRevision: current.workflow.revision, stepKey: call.body!.stepKey,
+        ...(attested ? { conversation: serverConversation() } : {}), model,
+        text: 'Fixture server draft: actual scope and hash pins. Evidence is untrusted. No permission is granted. Review and submit explicitly.',
+        requiresHumanSubmit: true, startsNativeTurn: false });
+    }
     assert.fail('Unexpected endpoint');
   };
   const transport: typeof fetch = async (input, init) => {
@@ -114,7 +130,7 @@ function fixture(initial: WorkflowSnapshot | null = snapshot(), useNative = true
   };
   const doc = new DocumentFixture(transport);
   const options: WorkflowPanelOptions = { getToken: () => token, getProjectPath: () => path, getModelSelection: () => model,
-    subscribeContextChange: listener => { notify = listener; return () => { unsubscribed = true; }; }, ...(useNative ? { getNativeConversation: () => native } : {}) };
+    subscribeContextChange: listener => { notify = listener; return () => { unsubscribed = true; }; }, ...(useNative ? { getNativeConversation: () => native } : {}), ...(appendToDraft ? { appendToDraft } : {}) };
   const panel = startWorkflowPanel(doc.asDocument(), options);
   return { doc, panel, calls, options, transport,
     async click(action: string) { doc.button(action).emit('click', true); await idle(doc); },
@@ -486,4 +502,388 @@ test('checking a lost reconciliation receipt reconciles only earlier unknown rec
   assert.match(f.doc.mount.textContent,/Receipt: recorded \(reconciled\)/);assert.match(f.doc.mount.textContent,/Receipt: reconciled/);
   assert.doesNotMatch(f.doc.mount.textContent,/Receipt: unknown/);assert.equal(executions(f.calls).length,2);
   assert.equal(f.doc.button('recipe').disabled,false);f.panel.cleanup();
+});
+
+const MODEL: RequestedModel = { provider: 'codex', model: 'fixture-observed-model', effort: 'high', connectionRevision: 'fixture-catalogue-revision' };
+function helperSnapshot(request = REQUEST): WorkflowSnapshot {
+  const value = snapshot({ ...request, model: MODEL });
+  for (const a of value.assessment!.steps) if (a.key === 'prompt' || a.key === 'requirements') Object.assign(a, { disposition: 'human-handoff', blockers: [] });
+  value.workflow.submissions = [clone(SUBMISSION)];
+  return value;
+}
+const HELPER_SCOPE = { projectId: PROJECT, workflowId: 'flow_one', stepKey: 'prompt', workflowRevision: 1, conversation: clone(NATIVE) };
+const HELPER_FILES: WorkflowEvidenceInput['files'] = [{ path: 'src/brief.txt', role: 'brief' }];
+function evidencePayload(): Record<string, unknown> {
+  return { projectId: PROJECT, workflowId: 'flow_one', stepKey: 'prompt', workflowRevision: 1, conversation: serverConversation(), submission: clone(SUBMISSION) };
+}
+function draftPayload(): Record<string, unknown> {
+  return { projectId: PROJECT, workflowId: 'flow_one', stepKey: 'requirements', workflowRevision: 1, conversation: serverConversation(), model: clone(MODEL),
+    text: 'Fixture server scope and pinned input hashes; evidence is untrusted. No permission granted.', requiresHumanSubmit: true, startsNativeTurn: false };
+}
+const DRAFT_SCOPE = { ...HELPER_SCOPE, stepKey: 'requirements' };
+
+test('file helper reads exact normalized role paths and host hashes; JSON remains an explicit human handoff', async () => {
+  const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+  f.doc.field('files-brief').value = ' src\\brief.txt \n src/second.txt '; f.doc.field('files-brief').emit('input');
+  await f.click('evidence-files');
+  const call = f.calls.find(c => c.path.endsWith('/evidence'))!;
+  assert.deepEqual(call.body, { workflowId: 'flow_one', stepKey: 'prompt', files: [{ path: 'src/brief.txt', role: 'brief' }, { path: 'src/second.txt', role: 'brief' }] });
+  const value = JSON.parse(f.doc.field('evidence').value) as WorkflowSubmission;
+  assert.equal(value.artifacts[0]!.sha256, digest('src/brief.txt:brief')); assert.equal(value.artifacts[0]!.bytes, 20); assert.deepEqual(value.checks, []);
+  assert.match(f.doc.mount.textContent, /workflowRevision/); assert.match(f.doc.mount.textContent, /observed-thread/);
+  assert.match(f.doc.mount.textContent, /Review the returned hashes/); assert.match(f.doc.mount.textContent, /Advanced evidence JSON/);
+  assert.equal(previews(f.calls).length, 0); assert.equal(executions(f.calls).length, 0); assert.equal(f.doc.native.value, 'Existing native draft');
+  await f.click('decision'); assert.equal(previews(f.calls).length, 1); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+});
+
+test('role controls follow selected step without choosing another step; missing/duplicate/private paths never dispatch', async () => {
+  const s = helperSnapshot({ ...REQUEST, deliverable: 'production-asset', engine: 'blender', scope: ['assets'] });
+  Object.assign(s.assessment!.steps.find(a => a.key === 'implementation')!, { disposition: 'human-handoff', blockers: [] });
+  const f = fixture(s); await f.panel.start(); choose(f.doc, 'step', 'implementation'); choose(f.doc, 'action', 'handoff');
+  assert.ok(f.doc.field('files-blend-source')); assert.ok(f.doc.field('files-engine-export')); assert.equal(f.doc.getElementById('workflow-files-brief'), null);
+  f.doc.field('files-blend-source').value = 'assets/fixture.blend'; await f.click('evidence-files');
+  assert.equal(f.calls.filter(c => c.path.endsWith('/evidence')).length, 0); assert.match(f.doc.mount.textContent, /each required evidence role/);
+  f.doc.field('files-engine-export').value = 'assets/fixture.blend'; await f.click('evidence-files');
+  assert.equal(f.calls.filter(c => c.path.endsWith('/evidence')).length, 0);
+  f.doc.field('files-engine-export').value = '../escape.glb'; await f.click('evidence-files'); assert.equal(f.calls.length, 2);
+  f.doc.field('files-engine-export').value = 'assets/fixture.glb'; await f.click('evidence-files');
+  assert.equal(f.calls.filter(c => c.path.endsWith('/evidence')).length, 1);
+  choose(f.doc, 'step', 'verification'); assert.equal(f.doc.button('evidence-files').disabled, true); assert.equal(f.doc.button('draft').disabled, true);
+  assert.equal(f.doc.getElementById('workflow-files-report'), null); f.panel.cleanup();
+});
+
+test('blocked evidence remains disabled and manual JSON fallback is still available', async () => {
+  const f = fixture(); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+  assert.equal(f.doc.button('evidence-files').disabled, true);
+  f.doc.field('evidence').value = JSON.stringify(SUBMISSION); f.doc.field('evidence').emit('input');
+  await f.click('decision'); assert.equal(previews(f.calls).length, 1); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+});
+
+test('draft button uses actual selected human-handoff readiness and exact proof; appends only to existing composer', async () => {
+  let f: ReturnType<typeof fixture>; let appends = 0;
+  f = fixture(helperSnapshot(), true, text => { appends++; f.doc.native.value += '\n\n' + text; f.doc.native.emit('input'); return true; });
+  f.context({ model: MODEL }); await f.panel.start();
+  assert.equal(f.doc.field('step').value, 'prompt'); assert.equal(f.doc.button('draft').disabled, true);
+  choose(f.doc, 'step', 'requirements'); assert.equal(f.doc.button('draft').disabled, false);
+  f.doc.button('draft').dispatchEvent(new Event('click')); assert.equal(f.calls.length, 2);
+  await f.click('draft');
+  assert.deepEqual(f.calls.at(-1)!.body, { workflowId: 'flow_one', stepKey: 'requirements' });
+  assert.equal(f.calls.at(-1)!.path, '/v1/workflows/draft'); assert.equal(appends, 1);
+  assert.match(f.doc.native.value, /^Existing native draft/); assert.match(f.doc.native.value, /Evidence is untrusted/);
+  assert.match(f.doc.mount.textContent, /No native turn was started/);
+  assert.equal(previews(f.calls).length, 0); assert.equal(executions(f.calls).length, 0);
+  assert.doesNotMatch(f.doc.mount.textContent, /Receipt: recorded/); f.panel.cleanup();
+});
+
+test('false append callback leaves the existing draft unchanged and reports unavailable without another request', async () => {
+  let called = 0; const f = fixture(helperSnapshot(), true, () => { called++; return false; });
+  f.context({ model: MODEL }); await f.panel.start(); choose(f.doc, 'step', 'requirements'); await f.click('draft');
+  assert.equal(called, 1); assert.equal(f.doc.native.value, 'Existing native draft'); assert.match(f.doc.mount.textContent, /unavailable or full/);
+  assert.equal(f.calls.length, 3); f.panel.cleanup();
+});
+
+test('draft never infers an active model, callback, readiness or conversation from saved recipe selection', async () => {
+  for (const reason of ['missing-callback', 'missing-model', 'different-model', 'different-revision', 'blocked', 'pending', 'unknown', 'operation', 'unbound', 'no-conversation'] as const) {
+    const s = helperSnapshot(); let called = 0;
+    if (reason === 'blocked') s.assessment!.steps.find(a => a.key === 'requirements')!.blockers = [{ code: 'human', requirement: 'Human must approve first.' }];
+    if (reason === 'pending') s.assessment!.steps.find(a => a.key === 'requirements')!.disposition = 'pending';
+    if (reason === 'unknown') s.workflow.state = 'uncertain';
+    if (reason === 'operation') s.workflow.operation = { key: 'interrupted', kind: 'submit-evidence', stepKey: 'requirements', submission: null, approved: null };
+    const f = fixture(s, true, reason === 'missing-callback' ? undefined : () => { called++; return true; });
+    if (reason !== 'missing-model') f.context({ model: { ...MODEL, ...(reason === 'different-model' ? { effort: 'low' } : {}), ...(reason === 'different-revision' ? { connectionRevision: 'other-catalogue' } : {}) } });
+    if (reason === 'unbound') f.attested(false); if (reason === 'no-conversation') f.context({ native: null });
+    await f.panel.start(); choose(f.doc, 'step', 'requirements');
+    assert.equal(f.doc.button('draft').disabled, true, reason); await f.click('draft'); assert.equal(called, 0, reason); assert.equal(f.calls.length, 2, reason); f.panel.cleanup();
+  }
+});
+
+test('evidence parser compares exact identity, revision, returned path-role list, actual hashes/bytes and dependency pins', () => {
+  const accepted = readWorkflowEvidence(evidencePayload(), HELPER_SCOPE, HELPER_FILES, []);
+  assert.deepEqual(accepted.submission, SUBMISSION); assert.deepEqual(accepted.conversation, serverConversation());
+  for (const change of [
+    (r: Record<string, unknown>) => { r.projectId = OTHER; }, (r: Record<string, unknown>) => { r.workflowId = 'other_flow'; }, (r: Record<string, unknown>) => { r.stepKey = 'requirements'; },
+    (r: Record<string, unknown>) => { delete r.workflowRevision; }, (r: Record<string, unknown>) => { r.workflowRevision = 0; }, (r: Record<string, unknown>) => { r.workflowRevision = 1.5; },
+    (r: Record<string, unknown>) => { delete r.conversation; }, (r: Record<string, unknown>) => { r.conversation = { ...serverConversation(), threadId: 'wrong-thread' }; },
+    (r: Record<string, unknown>) => { r.conversation = { ...serverConversation(), sessionId: 'wrong-session' }; }, (r: Record<string, unknown>) => { r.conversation = { ...serverConversation(), provider: 'claude-code' }; },
+    (r: Record<string, unknown>) => { r.extra = true; }, (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).key = 'requirements'; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).artifacts[0]!.path = 'src/other.txt'; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).artifacts[0]!.role = 'requirements'; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).artifacts[0]!.sha256 = 'not-a-hash'; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).artifacts[0]!.bytes = 0; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).checks = [{ id: 'invented-pass', outcome: 'pass', evidenceSha256: digest('fake'), subjectDigest: digest('fake') }]; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).subjectHashes = [digest('uninspected-input')]; },
+    (r: Record<string, unknown>) => { (r.submission as WorkflowSubmission).artifacts = []; },
+  ]) { const value = evidencePayload(); change(value); assert.throws(() => readWorkflowEvidence(value, HELPER_SCOPE, HELPER_FILES, []), WorkflowPanelError); }
+  const pinned = evidencePayload(); (pinned.submission as WorkflowSubmission).subjectHashes = [digest('input')];
+  assert.deepEqual(readWorkflowEvidence(pinned, HELPER_SCOPE, HELPER_FILES, [digest('input')]).submission.subjectHashes, [digest('input')]);
+  assert.throws(() => readWorkflowEvidence(pinned, HELPER_SCOPE, HELPER_FILES, []));
+});
+
+test('draft parser requires exact model proof and canonical bound conversation, flags, revision, no invented authority', () => {
+  assert.equal(readWorkflowDraft(draftPayload(), DRAFT_SCOPE, MODEL).text, draftPayload().text);
+  for (const change of [
+    (r: Record<string, unknown>) => { r.projectId = OTHER; }, (r: Record<string, unknown>) => { r.workflowId = 'other_flow'; }, (r: Record<string, unknown>) => { r.stepKey = 'plan'; },
+    (r: Record<string, unknown>) => { delete r.workflowRevision; }, (r: Record<string, unknown>) => { r.workflowRevision = 2; }, (r: Record<string, unknown>) => { r.workflowRevision = -1; },
+    (r: Record<string, unknown>) => { delete r.conversation; }, (r: Record<string, unknown>) => { r.conversation = { ...serverConversation(), threadId: 'wrong-thread' }; },
+    (r: Record<string, unknown>) => { r.conversation = { ...serverConversation(), sessionId: 'wrong-session' }; }, (r: Record<string, unknown>) => { r.conversation = { ...serverConversation(), provider: 'claude-code' }; },
+    (r: Record<string, unknown>) => { r.requiresHumanSubmit = false; }, (r: Record<string, unknown>) => { r.startsNativeTurn = true; }, (r: Record<string, unknown>) => { r.extra = 'authority'; },
+    (r: Record<string, unknown>) => { r.model = null; }, (r: Record<string, unknown>) => { r.model = { ...MODEL, model: 'other' }; }, (r: Record<string, unknown>) => { r.model = { ...MODEL, effort: 'low' }; },
+    (r: Record<string, unknown>) => { r.model = { ...MODEL, connectionRevision: 'guessed-revision' }; }, (r: Record<string, unknown>) => { r.model = { ...MODEL, provider: 'claude' }; },
+  ]) { const value = draftPayload(); change(value); assert.throws(() => readWorkflowDraft(value, DRAFT_SCOPE, MODEL), WorkflowPanelError); }
+  assert.throws(() => readWorkflowDraft(draftPayload(), { ...DRAFT_SCOPE, conversation: null }, MODEL));
+});
+
+test('draft text accepts 64 KiB UTF-8 intact, rejects even one extra byte, and never truncates multibyte text', () => {
+  for (const text of ['x'.repeat(WORKFLOW_DRAFT_BYTES), '😀'.repeat(WORKFLOW_DRAFT_BYTES / 4), '<script>fixture only</script>']) {
+    assert.equal(readWorkflowDraft({ ...draftPayload(), text }, DRAFT_SCOPE, MODEL).text, text);
+    assert.throws(() => readWorkflowDraft({ ...draftPayload(), text: '😀'.repeat(WORKFLOW_DRAFT_BYTES / 4) + 'x' }, DRAFT_SCOPE, MODEL));
+  }
+});
+
+for (const kind of ['evidence', 'draft'] as const) {
+  test(kind + ' API uses exact body with no prompt/model authority and separate 512 KiB response budget', async () => {
+    const calls: { path: string; init: RequestInit }[] = []; let oversized = false;
+    const api = new WorkflowPanelApi(TOKEN, async (input, init) => {
+      calls.push({ path: String(input), init: init! });
+      return oversized ? new Response('{}', { headers: { 'content-type': 'application/json', 'content-length': String(WORKFLOW_HELPER_RESPONSE_BYTES + 1) } }) : Response.json(kind === 'draft' ? draftPayload() : evidencePayload());
+    });
+    const input = { workflowId: 'flow_one', stepKey: kind === 'draft' ? 'requirements' : 'prompt' };
+    const read = () => kind === 'draft' ? api.draft(input) : api.evidence({ ...input, files: HELPER_FILES });
+    await read(); assert.equal(calls[0]!.path, '/v1/workflows/' + kind); assert.equal(calls[0]!.init.method, 'POST');
+    assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), kind === 'draft' ? input : { ...input, files: HELPER_FILES });
+    oversized = true; await assert.rejects(read(), WorkflowPanelError); assert.equal(calls.length, 2);
+  });
+
+  test(kind + ' rejects a stale revision without filling evidence, appending draft, refreshing or retrying', async () => {
+    let appends = 0; const f = fixture(helperSnapshot(), true, () => { appends++; return true; }); f.context({ model: MODEL });
+    const base = f.defaultHandler(); f.handler(async call => {
+      const response = await base(call); if (!call.path.endsWith('/' + kind)) return response;
+      const value = await response.json() as Record<string, unknown>; value.workflowRevision = 2; return Response.json(value);
+    });
+    await f.panel.start(); choose(f.doc, 'action', 'handoff'); if (kind === 'draft') choose(f.doc, 'step', 'requirements');
+    else { f.doc.field('files-brief').value = 'src/brief.txt'; f.doc.field('evidence').value = 'Existing manual evidence'; }
+    await f.click(kind === 'draft' ? 'draft' : 'evidence-files');
+    assert.equal(appends, 0); assert.equal(f.doc.field('evidence').value, kind === 'draft' ? '' : 'Existing manual evidence');
+    assert.match(f.doc.mount.textContent, /Workflow revision changed.*Refresh explicitly/); assert.equal(f.calls.length, 3);
+    assert.equal(previews(f.calls).length, 0); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+  });
+
+  test(kind + ' late responses are discarded on context, form, selected-step, model, token and teardown changes', async () => {
+    for (const mutation of ['native', 'project', 'model', 'token', 'role-path', 'manual-json', 'step', 'stop', 'cleanup'] as const) {
+      let appends = 0; const f = fixture(helperSnapshot(), true, () => { appends++; return true; }); f.context({ model: MODEL });
+      let release!: (value: Response) => void; let signal: AbortSignal | undefined; const base = f.defaultHandler();
+      f.handler(async call => {
+        if (!call.path.endsWith('/' + kind)) return base(call);
+        signal = call.init.signal!; return new Promise<Response>(resolve => { release = resolve; });
+      });
+      await f.panel.start(); choose(f.doc, 'action', 'handoff');
+      if (kind === 'draft') choose(f.doc, 'step', 'requirements');
+      else f.doc.field('files-brief').value = 'src/brief.txt';
+      f.doc.button(kind === 'draft' ? 'draft' : 'evidence-files').emit('click', true); await new Promise(resolve => setTimeout(resolve, 1)); assert.ok(release);
+      if (mutation === 'native') f.context({ native: { ...NATIVE, threadId: 'other-thread' } });
+      if (mutation === 'project') f.context({ path: 'C:/offline/other-project' });
+      if (mutation === 'model') f.context({ model: { ...MODEL, effort: 'low' } });
+      if (mutation === 'token') f.context({ token: 'control-fixture-' + 'd'.repeat(64) });
+      if (mutation === 'role-path') { f.doc.field(kind === 'draft' ? 'files-requirements' : 'files-brief').value = 'src/changed.txt'; f.doc.field(kind === 'draft' ? 'files-requirements' : 'files-brief').emit('input'); }
+      if (mutation === 'manual-json') { f.doc.field('evidence').value = 'Keep edited manual evidence'; f.doc.field('evidence').emit('input'); }
+      if (mutation === 'step') choose(f.doc, 'step', 'plan');
+      if (mutation === 'stop') f.panel.stop(); if (mutation === 'cleanup') f.panel.cleanup();
+      assert.equal(signal!.aborted, true, mutation); release(Response.json(kind === 'draft' ? draftPayload() : evidencePayload())); await new Promise(resolve => setTimeout(resolve, 3));
+      assert.equal(appends, 0, mutation); assert.doesNotMatch(f.doc.getElementById('workflow-evidence')?.value ?? '', /"sha256"/);
+      assert.equal(f.doc.native.value, 'Existing native draft'); assert.equal(f.calls.length, 3);
+      f.panel.cleanup();
+    }
+  });
+
+  test(kind + ' readonly unknown response never retries, claims success, or creates an execution receipt', async () => {
+    const f = fixture(helperSnapshot(), true, () => true); f.context({ model: MODEL }); const base = f.defaultHandler();
+    f.handler(call => call.path.endsWith('/' + kind) ? Promise.resolve(new Response('', { status: 202 })) : base(call));
+    await f.panel.start(); choose(f.doc, 'action', 'handoff'); if (kind === 'draft') choose(f.doc, 'step', 'requirements'); else f.doc.field('files-brief').value = 'src/brief.txt';
+    await f.click(kind === 'draft' ? 'draft' : 'evidence-files'); assert.equal(f.calls.length, 3);
+    assert.doesNotMatch(f.doc.mount.textContent, /Receipt:|Step added|Evidence references prepared/);
+    assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+  });
+}
+test('helper streamed response limits cancel at 512 KiB for both readonly routes, without retries', async () => {
+  for (const kind of ['evidence', 'draft'] as const) {
+    let calls = 0, cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(WORKFLOW_HELPER_RESPONSE_BYTES + 1)); }, cancel() { cancelled = true; } });
+    const api = new WorkflowPanelApi(TOKEN, async () => { calls++; return new Response(stream, { headers: { 'content-type': 'application/json' } }); });
+    const read = kind === 'draft' ? api.draft({ workflowId: 'flow_one', stepKey: 'requirements' }) : api.evidence({ workflowId: 'flow_one', stepKey: 'prompt', files: HELPER_FILES });
+    await assert.rejects(read, (error: unknown) => error instanceof WorkflowPanelError && !error.unknownOutcome);
+    assert.equal(calls, 1); assert.equal(cancelled, true);
+  }
+});
+
+test('helpers accept canonical Claude binding without conflating its RequestedModel provider; local extras never leave the body', () => {
+  const conversation: NativeWorkflowConversation = { ...NATIVE, provider: 'claude-code', sessionId: 'reported-session' };
+  const model: RequestedModel = { ...MODEL, provider: 'claude' };
+  const expected = { ...DRAFT_SCOPE, conversation };
+  const response = { ...draftPayload(), conversation: serverConversation(conversation), model };
+  assert.equal(readWorkflowDraft(response, expected, model).model.provider, 'claude');
+  const evidence = { ...evidencePayload(), conversation: serverConversation(conversation) };
+  assert.equal(readWorkflowEvidence(evidence, { ...HELPER_SCOPE, conversation }, HELPER_FILES, []).conversation!.provider, 'claude-code');
+  assert.throws(() => readWorkflowDraft({ ...response, conversation: { ...serverConversation(conversation), connectionId: 'not-server-binding' } }, expected, model));
+  assert.throws(() => readWorkflowDraft({ ...response, conversation: { provider: 'claude-code', threadId: conversation.threadId } }, expected, model));
+});
+
+test('full 64 KiB server text reaches the atomic callback intact; existing composer 128 KiB cap can refuse without truncation', async () => {
+  const text = '😀'.repeat(WORKFLOW_DRAFT_BYTES / 4); let observed = ''; let appends = 0; let f: ReturnType<typeof fixture>;
+  f = fixture(helperSnapshot(), true, value => {
+    observed = value; appends++;
+    const combined = f.doc.native.value + '\n\n' + value;
+    if (new TextEncoder().encode(combined).byteLength > 128 * 1024) return false;
+    f.doc.native.value = combined; f.doc.native.emit('input'); return true;
+  });
+  f.context({ model: MODEL }); const base = f.defaultHandler();
+  f.handler(call => call.path.endsWith('/draft') ? Promise.resolve(Response.json({ ...draftPayload(), text })) : base(call));
+  await f.panel.start(); choose(f.doc, 'step', 'requirements'); await f.click('draft');
+  assert.equal(observed, text); assert.equal(appends, 1); assert.equal(f.doc.native.value, 'Existing native draft\n\n' + text);
+  f.doc.native.value = 'x'.repeat(64 * 1024); await f.click('draft');
+  assert.equal(observed, text); assert.equal(appends, 2); assert.equal(f.doc.native.value, 'x'.repeat(64 * 1024));
+  assert.match(f.doc.mount.textContent, /unavailable or full/); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+});
+
+test('evidence helper actions and server text stay inert under genuine untrusted events and XSS data', async () => {
+  const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff'); f.doc.field('files-brief').value = 'src/brief.txt';
+  f.doc.button('evidence-files').dispatchEvent(new Event('click')); assert.equal(f.calls.length, 2);
+  let received = ''; const d = fixture(helperSnapshot(), true, text => { received = text; return true; }); d.context({ model: MODEL });
+  const base = d.defaultHandler(); d.handler(call => call.path.endsWith('/draft') ? Promise.resolve(Response.json({ ...draftPayload(), text: '<img src=x onerror=fixture-only>' })) : base(call));
+  await d.panel.start(); choose(d.doc, 'step', 'requirements'); await d.click('draft');
+  assert.equal(received, '<img src=x onerror=fixture-only>'); assert.ok(d.doc.mount.all().every(el => el.tagName !== 'IMG' && el.tagName !== 'SCRIPT'));
+  assert.equal(d.doc.native.value, 'Existing native draft'); f.panel.cleanup(); d.panel.cleanup();
+});
+
+test('generated evidence cannot silently carry across workflows, selected steps, revisions, or contexts', async () => {
+  for (const change of ['workflow', 'step', 'revision', 'context'] as const) {
+    const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+    f.doc.field('files-brief').value = 'src/brief.txt'; await f.click('evidence-files');
+    assert.ok(f.doc.field('evidence').value);
+    if (change === 'workflow') {
+      const other = helperSnapshot(); other.workflow.id = 'flow_two'; f.state(other);
+      choose(f.doc, 'stored', 'flow_two'); assert.equal(f.doc.field('evidence').value, '');
+      await f.click('inspect');
+      assert.equal(f.doc.field('step').value, 'prompt');
+    }
+    if (change === 'step') choose(f.doc, 'step', 'requirements');
+    if (change === 'revision') { const updated = helperSnapshot(); updated.workflow.revision = 2; f.state(updated); await f.click('refresh'); }
+    if (change === 'context') f.context({ native: { ...NATIVE, threadId: 'other-thread' } });
+    assert.equal(f.doc.field('evidence').value, '', change); assert.equal(f.doc.native.value, 'Existing native draft');
+    await f.click('decision'); assert.equal(previews(f.calls).length, 0, change); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+  }
+});
+
+test('manual JSON requires deliberate replacement after another workflow, step or revision; it never auto-carries', async () => {
+  const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+  f.doc.field('evidence').value = JSON.stringify(SUBMISSION); f.doc.field('evidence').emit('input');
+  const second = helperSnapshot(); second.workflow.id = 'flow_two'; f.state(second);
+  choose(f.doc, 'stored', 'flow_two'); await f.click('inspect');
+  assert.equal(f.doc.field('evidence').value, ''); await f.click('decision'); assert.equal(previews(f.calls).length, 0);
+  f.doc.field('evidence').value = JSON.stringify(SUBMISSION); f.doc.field('evidence').emit('input'); await f.click('decision');
+  assert.equal(previews(f.calls).length, 1); assert.equal(previews(f.calls)[0]!.body!.workflowId, 'flow_two');
+  await f.click('discard'); choose(f.doc, 'step', 'requirements'); assert.equal(f.doc.field('evidence').value, '');
+  const third = clone(second); third.workflow.revision = 2; f.doc.field('evidence').value = 'Keep manual text only within the inspected revision';
+  f.state(third); await f.click('refresh'); assert.equal(f.doc.field('evidence').value, ''); f.panel.cleanup();
+});
+
+test('changing generated evidence paths or serialized value refuses stale handoff; explicit manual editing remains usable', async () => {
+  for (const change of ['path-event', 'path-silent', 'blank-path-silent', 'json-silent'] as const) {
+    const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+    f.doc.field('files-brief').value = 'src/brief.txt'; await f.click('evidence-files');
+    if (change === 'json-silent') f.doc.field('evidence').value = JSON.stringify({ ...SUBMISSION, artifacts: [{ ...SUBMISSION.artifacts[0]!, path: 'src/another.txt' }] });
+    else { f.doc.field('files-brief').value = change === 'blank-path-silent' ? '' : 'src/another.txt'; if (change === 'path-event') f.doc.field('files-brief').emit('input'); }
+    await f.click('decision'); assert.equal(previews(f.calls).length, 0, change); assert.equal(f.doc.field('evidence').value, '', change);
+    f.doc.field('evidence').value = JSON.stringify(SUBMISSION); f.doc.field('evidence').emit('input');
+    await f.click('decision'); assert.equal(previews(f.calls).length, 1, change); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+  }
+});
+
+test('refreshing the same workflow revision preserves its prepared evidence and requested files', async () => {
+  const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+  f.doc.field('files-brief').value = 'src/brief.txt'; await f.click('evidence-files');
+  const value = f.doc.field('evidence').value; await f.click('refresh');
+  assert.equal(f.doc.field('evidence').value, value); assert.equal(f.doc.field('files-brief').value, 'src/brief.txt');
+  await f.click('decision'); assert.equal(previews(f.calls).length, 1); f.panel.cleanup();
+});
+
+test('late evidence response cannot overwrite changed paths, manual JSON, or a newly selected workflow', async () => {
+  for (const change of ['silent-path', 'silent-manual', 'workflow'] as const) {
+    const f = fixture(helperSnapshot()); const base = f.defaultHandler(); let release!: (value: Response) => void;
+    f.handler(call => call.path.endsWith('/evidence') ? new Promise<Response>(resolve => { release = resolve; }) : base(call));
+    await f.panel.start(); choose(f.doc, 'action', 'handoff'); f.doc.field('files-brief').value = 'src/brief.txt';
+    f.doc.button('evidence-files').emit('click', true); await new Promise(resolve => setTimeout(resolve, 1)); assert.ok(release);
+    if (change === 'silent-path') f.doc.field('files-brief').value = 'src/changed.txt';
+    if (change === 'silent-manual') f.doc.field('evidence').value = 'Preserve newly entered manual evidence';
+    if (change === 'workflow') choose(f.doc, 'stored', 'flow_two');
+    release(Response.json(evidencePayload())); await new Promise(resolve => setTimeout(resolve, 4));
+    assert.equal(f.doc.field('evidence').value, change === 'silent-manual' ? 'Preserve newly entered manual evidence' : '');
+    assert.equal(previews(f.calls).length, 0); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+  }
+});
+
+test('planned evidence preflight teaches narrow scope and blocks out-of-scope paths without adding permissions or request fields', async () => {
+  const f = fixture(null); await f.panel.start();
+  const narrow = { ...REQUEST, scope: ['src/movement.luau'] }; fill(f.doc, narrow);
+  assert.match(f.doc.mount.textContent, /Before creating.*brief, requirements, plan, review/);
+  f.doc.field('evidence-paths').value = 'src/brief.txt\nsrc/requirements.txt\nsrc/plan.txt\nsrc/review.txt'; await f.click('recipe');
+  assert.equal(previews(f.calls).length, 0); assert.equal(f.doc.field('scope').value, 'src/movement.luau');
+  assert.match(f.doc.mount.textContent, /outside the exact file scope.*Scope was not expanded/);
+  choose(f.doc, 'scope', 'src/movement.luau\nevidence');
+  choose(f.doc, 'evidence-paths', 'evidence/brief.txt\nevidence/requirements.txt\nevidence/plan.txt\nevidence/review.txt');
+  await f.click('recipe'); assert.equal(previews(f.calls).length, 1);
+  const request = previews(f.calls)[0]!.body!.request as WorkflowRecipeRequest;
+  assert.deepEqual(request.scope, ['evidence', 'src/movement.luau']);
+  assert.deepEqual(Object.keys(request).sort(), ['deliverable', 'engine', 'model', 'prompt', 'scope', 'title']);
+  assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+});
+
+test('file-helper and explicit manual fallback both preflight actual paths against exact step scope before HTTP', async () => {
+  const f = fixture(helperSnapshot({ ...REQUEST, scope: ['src/movement.luau'] })); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+  f.doc.field('files-brief').value = 'src/brief.txt'; await f.click('evidence-files');
+  assert.equal(f.calls.length, 2); assert.equal(f.doc.field('evidence').value, '');
+  f.doc.field('evidence').value = JSON.stringify(SUBMISSION); f.doc.field('evidence').emit('input'); await f.click('decision');
+  assert.equal(previews(f.calls).length, 0); assert.equal(f.calls.length, 2);
+  assert.match(f.doc.mount.textContent, /Include every brief, requirements, plan, review/); f.panel.cleanup();
+});
+
+test('draft callback receives exact detached deeply frozen provenance from validated server data and live context only', async () => {
+  let received: WorkflowDraftProvenance | undefined; let receivedText = '';
+  const f = fixture(helperSnapshot(), true, (text, provenance) => { receivedText = text; received = provenance; return true; });
+  f.context({ model: MODEL }); const payload = draftPayload(); const base = f.defaultHandler();
+  f.handler(call => call.path.endsWith('/draft') ? Promise.resolve(Response.json(payload)) : base(call));
+  await f.panel.start(); choose(f.doc, 'step', 'requirements'); await f.click('draft');
+  assert.ok(received); const pin = received;
+  assert.equal(receivedText, payload.text);
+  assert.deepEqual(pin, { projectPath: PATH, projectId: PROJECT, workflowId: 'flow_one', workflowRevision: 1, stepKey: 'requirements', conversation: serverConversation(), model: MODEL });
+  assert.deepEqual(Object.keys(pin).sort(), ['conversation', 'model', 'projectId', 'projectPath', 'stepKey', 'workflowId', 'workflowRevision']);
+  assert.ok(Object.isFrozen(pin) && Object.isFrozen(pin.conversation) && Object.isFrozen(pin.model));
+  assert.equal(Reflect.set(pin, 'workflowId', 'forged'), false); assert.equal(Reflect.set(pin.conversation, 'threadId', 'forged'), false); assert.equal(Reflect.set(pin.model, 'effort', 'low'), false);
+  (payload.conversation as NativeWorkflowConversation).threadId = 'mutated-response'; (payload.model as RequestedModel).model = 'mutated-response';
+  f.context({ model: { ...MODEL, effort: 'low' }, native: { ...NATIVE, threadId: 'changed-live-thread' } });
+  assert.equal(pin.conversation.threadId, NATIVE.threadId); assert.equal(pin.model.model, MODEL.model);
+  assert.equal(pin.workflowId, 'flow_one'); assert.equal(previews(f.calls).length, 0); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+});
+
+test('draft provenance is never dispatched across late context, form, workflow or revision races', async () => {
+  for (const change of ['silent-context', 'form', 'workflow', 'stale-revision'] as const) {
+    let appends = 0; const f = fixture(helperSnapshot(), true, (_text, _pin) => { appends++; return true; }); f.context({ model: MODEL });
+    const base = f.defaultHandler(); let release!: (value: Response) => void;
+    f.handler(call => call.path.endsWith('/draft') ? new Promise<Response>(resolve => { release = resolve; }) : base(call));
+    await f.panel.start(); choose(f.doc, 'step', 'requirements'); f.doc.button('draft').emit('click', true);
+    await new Promise(resolve => setTimeout(resolve, 1)); assert.ok(release);
+    if (change === 'silent-context') f.context({ native: { ...NATIVE, threadId: 'other-thread' } }, false);
+    if (change === 'form') { f.doc.field('evidence-paths').value = 'src/planned.txt'; f.doc.field('evidence-paths').emit('input'); }
+    if (change === 'workflow') choose(f.doc, 'stored', 'flow_two');
+    release(Response.json({ ...draftPayload(), ...(change === 'stale-revision' ? { workflowRevision: 2 } : {}) }));
+    await new Promise(resolve => setTimeout(resolve, 4)); assert.equal(appends, 0, change);
+    assert.equal(f.doc.native.value, 'Existing native draft'); assert.equal(f.calls.length, 3);
+    assert.equal(previews(f.calls).length, 0); assert.equal(executions(f.calls).length, 0); f.panel.cleanup();
+  }
+});
+
+test('an unchanged JSON input notification cannot detach generated provenance or preserve stale paths', async () => {
+  const f = fixture(helperSnapshot()); await f.panel.start(); choose(f.doc, 'action', 'handoff');
+  f.doc.field('files-brief').value = 'src/brief.txt'; await f.click('evidence-files');
+  f.doc.field('evidence').emit('input'); f.doc.field('files-brief').value = 'src/changed.txt'; f.doc.field('files-brief').emit('input');
+  assert.equal(f.doc.field('evidence').value, ''); await f.click('decision'); assert.equal(previews(f.calls).length, 0); f.panel.cleanup();
 });

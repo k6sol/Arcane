@@ -1,7 +1,7 @@
 import { JOB_JOURNAL_BYTES, CUSTOM_REQUEST_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
-import { randomUUID } from 'node:crypto';
 import type { Stats } from 'node:fs';
-import { lstat, opendir, rename, writeFile } from 'node:fs/promises';
+import { lstat, opendir } from 'node:fs/promises';
+import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { AssetError, createAssetPipeline, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
@@ -79,20 +79,35 @@ export async function createAssetService(options: AssetServiceOptions) {
   let probeActive: AbortController | null = null;
   let artifactReadActive = false;
   let pending: Promise<void> = Promise.resolve(), persistenceError = false, closed = false;
+  let scheduledIndex: string | null = null;
+  let closing: Promise<void> | null = null;
+  let persistenceIssue: {phase:'path-check'|'write'|'replace';code:string}|null=null;
   const ordered = () => [...entries.values()].map(e => e.job).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.jobId.localeCompare(a.jobId));
   const snapshot = () => structuredClone(ordered());
   const persist = () => {
     // The advisory index stores only observed events. Full requests remain in journals/manifests.
+    if (persistenceError) return;
     const jobs = [...entries.values()].map(({ job }) => ({ jobId: job.jobId, events: structuredClone(job.events) }));
+    const text = JSON.stringify({ schemaVersion: 1, jobs }, null, 2) + '\n';
+    // Completion changes job state, not the event-only index. Avoid replacing identical bytes.
+    if (text === scheduledIndex) return;
+    scheduledIndex = text;
     pending = pending.then(async () => {
-      const temporary = join(root, 'index-' + randomUUID() + '.tmp'), target = join(root, 'index.json');
-      await noLinks(root);
-      try { await noLinks(target); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-      await writeFile(temporary, JSON.stringify({ schemaVersion: 1, jobs }, null, 2) + '\n', { flag: 'wx' });
-      await rename(temporary, target);
-    }).catch(() => { persistenceError = true; });
+      if (persistenceError) return;
+      await atomicAssetJson(root, 'index.json', text);
+    }).catch((error: unknown) => {
+      persistenceError = true;
+      if (!persistenceIssue) persistenceIssue = error instanceof AtomicJsonFailure
+        ? { phase: error.phase, code: error.code } : { phase: 'path-check', code: 'UNKNOWN' };
+      // First fatal failure latches. Keep original journals and the uncommitted snapshot.
+    });
   };
-  const flushed = async () => { await pending; if (persistenceError) throw new ArcaneError('PERSISTENCE', 'Asset history could not be saved; inspect retained job journals.'); };
+  const flushed = async () => {
+    // Events may enqueue a new snapshot while the previous tail is being awaited.
+    for (;;) { const tail = pending; await tail; if (tail === pending) break; }
+    if (persistenceError) throw new ArcaneError('PERSISTENCE', 'Asset history could not be saved' +
+      (persistenceIssue ? ' (' + persistenceIssue.phase + '/' + persistenceIssue.code + ')' : '') + '; inspect retained job journals.');
+  };
   const ensureOpen = () => { if (closed) throw new ArcaneError('CLOSED', 'Asset service is closed.'); };
   const entry = (jobId: unknown) => {
     const e = entries.get(id(jobId));
@@ -231,7 +246,9 @@ export async function createAssetService(options: AssetServiceOptions) {
     async cancel(jobId: unknown): Promise<AssetJobRecord> {
       ensureOpen();
       const e = entry(jobId), running = active.get(e.job.jobId);
-      if (running) { running.handle.cancel(); await running.completion; await flushed(); }
+      if (running) { running.handle.cancel(); await running.completion; }
+      // A completed worker may already have left active while its history write is pending.
+      await flushed();
       return structuredClone(e.job);
     },
     async manifest(jobId: unknown): Promise<AssetManifest> {
@@ -308,13 +325,18 @@ export async function createAssetService(options: AssetServiceOptions) {
         throw error;
       } finally { artifactReadActive = false; }
     },
-    async close(): Promise<void> {
-      if (closed) return;
+    close(): Promise<void> {
+      if (closing) return closing;
       closed = true; probeActive?.abort();
-      for (const run of active.values()) run.handle.cancel();
-      await Promise.all([...active.values()].map(run => run.completion));
-      while (probeActive) await new Promise<void>(r => setTimeout(r, 10));
-      try { await flushed(); } finally { outputOwners.delete(ownerKey); }
+      closing = (async () => {
+        for (const run of active.values()) run.handle.cancel();
+        try {
+          await Promise.all([...active.values()].map(run => run.completion));
+          while (probeActive) await new Promise<void>(r => setTimeout(r, 10));
+          await flushed();
+        } finally { outputOwners.delete(ownerKey); }
+      })();
+      return closing;
     }
   };
 }

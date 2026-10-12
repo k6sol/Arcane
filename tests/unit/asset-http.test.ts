@@ -508,6 +508,9 @@ test('artifact GET refuses oversized regular files before manifest validation or
 
 test('artifact GET bounds concurrent verification and keeps timeout admission until verification settles', async t => {
   const h = await harness(t, true), f = h.fixture!, validate = h.service.manifest.bind(h.service);
+  const artifact=h.service.artifact.bind(h.service);let settled!:()=>void;
+  const finished=new Promise<void>(resolve=>{settled=resolve;});
+  h.service.artifact=async(...args:Parameters<typeof h.service.artifact>)=>{try{return await artifact(...args);}finally{settled();}};
   let entered!: () => void, release!: () => void;
   const reached = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
   h.service.manifest = async jobId => { entered(); await gate; return validate(jobId); };
@@ -522,12 +525,9 @@ test('artifact GET bounds concurrent verification and keeps timeout admission un
     assert.equal((await h.call(artifactUrl(f.jobId))).status, 409, 'Timeout cannot admit more allocations while a read still runs.');
   } finally { release(); t.mock.timers.reset(); }
   h.service.manifest = validate;
-  // The timed-out validation still owns admission until its final identity checks finish.
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const response = await h.call(artifactUrl(f.jobId));
-    if (response.status === 200) return;
-    assert.equal(response.status, 409);
-    await new Promise(resolve => setTimeout(resolve, 5));
-  }
-  assert.fail('Artifact admission was not released after timed-out verification settled.');
+  // Observe the actual owned read's terminal settlement instead of racing disk I/O
+  // against an arbitrary 250 ms retry window. Production timeout/admission guards stay unchanged.
+  await finished;
+  const response = await h.call(artifactUrl(f.jobId));
+  assert.equal(response.status, 200, 'Admission releases only after the original read settles.');
 });

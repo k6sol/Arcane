@@ -1,3 +1,4 @@
+import { createAssetConversationHost } from './asset-conversation-host.js';
 import { workflowNativeModel } from './workflow-native-model.js';
 import { mkdir } from 'node:fs/promises';
 import { createWorkflowHost } from './workflow-host.js';
@@ -41,7 +42,6 @@ export async function createConnectionLab(options: Options) {
   const bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, agentToken) : null;
   const native = options.studioStore ? nativeRoutes() : null;
   const learning = options.learningService ? learningRoutes(options.learningService) : null;
-  const assets = options.assetService ? assetRoutes(options.assetService) : null;
   const store = new SelectionStore(options.stateDirectory);
   let connections: Connection[] = [];
   let selection: Selection | null = null;
@@ -59,12 +59,17 @@ export async function createConnectionLab(options: Options) {
   const nativeChat = codex ? codexRoutes(codex, {workflowModels:true}) : null;
   let associations: ConversationWorkStore | null = null;
   let workflow: ReturnType<typeof createWorkflowHost> | null = null;
+  let conversationAssets: ReturnType<typeof createAssetConversationHost> | null = null;
   try {
     if (options.workStore) {
       associations = new ConversationWorkStore({
         directory: join(options.stateDirectory, 'conversation-work'),
         projectPath: options.projectPath ?? options.cwd,
       });
+      if (options.assetService && (process.platform === 'win32'
+        ? options.assetService.projectPath.toLowerCase() !== associations.projectPath.toLowerCase()
+        : options.assetService.projectPath !== associations.projectPath))
+        throw new ArcaneError('ASSET_CONVERSATION_PROJECT', 'The asset service and conversation store must attest the same project.');
       const workflowDirectory = join(options.stateDirectory, 'workflows');
       await mkdir(workflowDirectory, { recursive: true, mode: 0o700 });
       workflow = createWorkflowHost({
@@ -83,6 +88,15 @@ export async function createConnectionLab(options: Options) {
         },
       });
     }
+      conversationAssets = options.assetService && associations ? createAssetConversationHost({
+    projectPath: associations.projectPath, workAssociations: associations,
+    conversation: () => {
+      const state = codex?.state(), thread = state?.snapshot?.thread;
+      const identity = thread?.configured ? thread : state?.nativeHistory;
+      return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
+    },
+    start: async request => (await options.assetService!.start(request)).jobId,
+  }) : null;
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
@@ -91,6 +105,7 @@ export async function createConnectionLab(options: Options) {
     try { await codex?.close(); } catch { /* Preserve original failure. */ }
     throw error;
   }
+  const assets = options.assetService ? assetRoutes(options.assetService, conversationAssets ?? undefined) : null;
   const workflowApi = workflow ? workflowRoutes(workflow) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });

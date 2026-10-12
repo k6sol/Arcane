@@ -73,14 +73,19 @@
       "title": "Supervised Blender asset production",
       "owner": "Tesla",
       "agentId": "01a12cfa-6be4-7032-8b67-a85f83a9d880",
-      "state": "verified_component",
+      "state": "in_progress",
       "dependsOn": [],
       "acceptance": "Actual Blender outputs, manifests, geometry checks, export and preview",
       "evidence": [
         "packages/asset-pipeline/.runtime/verification-81e000dc-ca19-4e3b-a7da-24f029bf1dc2/acceptance.json",
-        "tests/unit/asset-http.test.ts"
+        "tests/unit/asset-http.test.ts",
+        "docs/build/ASSET_PERSISTENCE.md",
+        "packages/asset-pipeline/src/atomic-json.ts",
+        "tests/unit/atomic-asset-json.test.ts",
+        "tests/unit/asset-persistence.test.ts"
       ],
-      "priorAgentId": "01a12ce4-58e5-7123-a8c4-2ea0d168b0c5"
+      "priorAgentId": "01a12ce4-58e5-7123-a8c4-2ea0d168b0c5",
+      "note": "Original retained failed index replacement was byte-identical to the later index (1436 bytes/hash recorded). Implemented checked atomic writes/coalescing/tail flush/shared-close; parent27/27 deterministic faults pass. Original errno is unknown: no antivirus/OneDrive cause claim. Fresh broad regression and actual current asset production/EXE verification remain open."
     },
     {
       "id": "NATIVE-01",
@@ -284,9 +289,11 @@
         "tests/release/desktop-host.test.mjs",
         "tests/release/windows-package.test.mjs",
         "runtime/verification/desktop-final-BLpPDQ/verification.json",
-        "runtime/verification/windows-executable-PkH94q/verification.json"
+        "runtime/verification/windows-executable-PkH94q/verification.json",
+        "runtime/verification/windows-executable-yIouOo/verification.json",
+        "runtime/verification/workflow-browser-987af8d5-23a8-4159-9fe7-c8727f1d12b7/workflow.png"
       ],
-      "note": "Updated7FRiD2 portable EXE passed17actualcorelaunch checks and immutable before/after inventory. Browser/unit570/570. Offline168/169 with one owned-temp UNKNOWN realpath preserved; unchanged focused license1/1 laterpassed. No inference/Studio. Unsigned directory distribution, full providers/workflows/nativeStudio/publicinstaller acceptance stillopen."
+      "note": "Fresh q8SmAm portable EXE contains merged reference palette/navigation, exact conversation workflows, authenticated receipt recovery, host-attested active model selection and safe same-thread model switching. Actual EXE17/17 launch/isolation/lifecycle checks passed, before/after manifest853fd8ae5c95efd39e6339b44531bfa5596b3fefd840ff9ecef10ab58e4cd6d5 identical; daemon2397ms/firstdisplay3674ms. Offline UI inventory/accessibility/verifier53/53; focused model/controller/nativeNode fixtures137pass/4browseropt-in-skips, separate realEdge/Node21/21; previously contended receipt case3/3 serialized. No live Studio or further installed-CLI model inference. Unsigned directory, not installer; full-product acceptance remains open. Latest HXzXob candidate has integrity-only proof; do not distribute it as verified. q8SmAm remains the previous sealed launch-verified build. Current asset history failure must be resolved and candidate retested first."
     },
     {
       "id": "WORKFLOW-RECIPES-01",
@@ -328,9 +335,18 @@
         "tests/unit/workflow-conversation-host.test.ts",
         "tests/unit/workflow-product.test.ts",
         "tests/unit/workflow-receipts.test.ts",
-        "tests/unit/workflow-private-storage.test.ts"
+        "tests/unit/workflow-private-storage.test.ts",
+        "apps/daemon/src/workflow-native-model.ts",
+        "packages/protocol/src/workflow-model.ts",
+        "tests/unit/workflow-native-model.test.ts",
+        "tests/unit/workflow-browser.test.ts",
+        "docs/build/WORKFLOW_NATIVE_MODEL.md",
+        "apps/daemon/src/workflow-evidence-builder.ts",
+        "tests/unit/workflow-assistance-http.test.ts",
+        "tests/unit/workflow-evidence-builder.test.ts",
+        "docs/build/WORKFLOW_EVIDENCE_BUILDER.md"
       ],
-      "note": "Installed real lab/product workflow routing, private direct-home Windows receipt storage with unchanged strict ACL/link checks, same-native-conversation persistence, authenticated snapshot attestation, and explicit read-only receipt recovery. Focused fixtures:113pass/1opt-in compiler skip; separately actual official compiler1/1;49merged controller/product checks;25context checks/4browser opt-ins omitted. Production model catalogue revision/verifier registry, native Studio and full automated delivery still open; no automatic inference/publishing."
+      "note": "Actual product routing and exact native-conversation persistence are wired. Host-attested active thread model/catalogue revision now reaches the browser and workflow policy; stale selections reject at preview/confirmation, and completed receipts remain readable after model changes. Same-thread human model/effort switching revokes old grants and sends the new pair only on a separate explicit turn. Focused shared run137pass/4browser-opt-in-skips; separate actual Edge/Node renderer run21/21 with zero live inference/Studio. Real workflow renderer works after reload. Production verifier registry, asset/native step execution and live engine acceptance remain open. Readonly actual-file evidence and same-chat step drafts are now integrated. Independent review fixes clear evidence across workflow/revision/path changes, explain evidence scope, retain draft provenance/re-review and separate stable v2 model catalogue from exact live connection proof. Legacy v1 mismatches require a new human-reviewed recipe; no automatic rebinding. Production local.patch/verifier/asset execution remains unsupported/unwired, not silently accepted."
     },
     {
       "id": "CONVERSATION-WORK-01",
@@ -346,11 +362,51 @@
         "tests/unit/conversation-work-store.test.ts",
         "docs/build/CONVERSATION_WORK.md"
       ],
-      "note": "26focused offline binding/persistence/security fixtures pass. Workflow creation/read lifecycle uses these associations. Asset-job association support exists in storage but is not yet wired into production asset routes."
+      "note": "Durable workflow/native associations plus new host-side asset adapter; agent54/54 adapter/storage checks pass with zero skipped. Production human-only conversation-start/jobs routes now wired, UI/HTTP verification still in progress. Legacy/global/agent asset jobs remain unscoped and are never backfilled."
+    },
+    {
+      "id": "WORKFLOW-ASSISTANCE-01",
+      "title": "Real file evidence and same-chat native step drafts",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [
+        "WORKFLOW-SERVICE-01",
+        "CONVERSATION-WORK-01"
+      ],
+      "acceptance": "Authenticated readonly file hashing, exact subject pins/roles/scopes, stale-workflow isolation and immutable native draft provenance with human re-review; no automatic command/model turn",
+      "evidence": [
+        "apps/daemon/src/workflow-evidence-builder.ts",
+        "tests/unit/workflow-evidence-builder.test.ts",
+        "tests/unit/workflow-assistance-http.test.ts",
+        "tests/unit/workflow-panel.test.ts",
+        "tests/unit/codex-chat-ui.test.ts",
+        "tests/unit/workflow-browser.test.ts",
+        "runtime/verification/workflow-assistance-fba6a3c0-c3b0-4181-a06f-cc2bf8b4abf7/focused-evidence.json",
+        "runtime/verification/workflow-browser-a95bc791-fe41-4f1d-87a1-00c4b6579169/workflow.png"
+      ],
+      "note": "Current114source compile;107initial focused assistance checks; final79panel/8projection-reconnect checks;35provenance/composer checks with4browser opt-ins skipped in that run; separate actualEdge renderer1/1 passed in33816ms. Real local services/files/durable state, borrowed synthetic installed-cli metadata only. No installed CLI starts/model inference/Studio/assets. Broad unit suite and fresh EXE currently pending; full native/code/asset execution remains open."
+    },
+    {
+      "id": "ASSET-CHAT-01",
+      "title": "Same native chat asset production and history",
+      "owner": "parent",
+      "state": "in_progress",
+      "dependsOn": [
+        "ASSET-01",
+        "CONVERSATION-WORK-01"
+      ],
+      "acceptance": "Host-attested exact project/provider/thread/session asset start and durable scoped history, stale browser response isolation, clear legacy/unscoped inspection and unknown-attribution outcomes without replay",
+      "evidence": [
+        "apps/daemon/src/asset-conversation-host.ts",
+        "tests/unit/asset-conversation-host.test.ts",
+        "apps/daemon/src/asset-routes.ts",
+        "docs/build/ASSET_CONVERSATION_HOST.md"
+      ],
+      "note": "Adapter/corestorageagent54/54; real daemonroutes implemented; UI/HTTP tests and current executable not yet verified."
     }
   ],
   "updatedAt": "2026-10-12",
-  "previousTurnClassification": "progress: actual product workflow route/lifecycle wiring, exact native conversation persistence and restart attestation, explicit read-only loss-response recovery, context-safe unified UI. Native Studio and further model tests remain explicitly deferred by user. No full-product completion claim.",
+  "previousTurnClassification": "progress: prior ETA/workflow advice turns alone were no progress; current continuation inspected authoritative worktree, retained original failed index and precise hashes. Implemented checked atomic metadata replacement, index coalescing, cancellation tail draining and shared-close barrier; 27/27 deterministic parent fault checks pass. Parallel actual conversation/asset adapter and strict identity-bound storage complete (agent54/54), production route/UI integration and further verification in progress. No actual Studio/provider turns, antivirus changes, commits or pushes.",
   "requiredCompletionStillOpen": [
     "native-plugin-key-only-widget-and-http",
     "dirty-editor-and-selective-restore-native",

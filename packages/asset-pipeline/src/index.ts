@@ -1,7 +1,7 @@
 import { isDeepStrictEqual as same } from 'node:util';
 import { jsonSnapshot, preflightRecipe, CUSTOM_REQUEST_BYTES, JOB_JOURNAL_BYTES } from './recipe.js';
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
@@ -10,6 +10,7 @@ import { artifactPath, noLinks, prepareOutputRoot, regularFile, readRegularFile,
 import { runBounded, workerEnvironment } from './process.js';
 import { normalizeRequest, readJson, record, sha256, validateAudit, validateManifestFiles } from './validation.js';
 import { AssetError } from './types.js';
+import { atomicAssetJson, AtomicJsonFailure } from './atomic-json.js';
 import type { Artifact, AssetInput, AssetJob, AssetJobEvent, AssetJobResult, AssetManifest, AssetProbe, AssetRequest, JobOptions, OperationOptions, PipelineOptions, RuntimeEvidence } from './types.js';
 export * from './types.js';
 export { discoverExecutables } from './discovery.js';
@@ -42,12 +43,11 @@ function resultLine(stdout: string): Record<string, unknown> {
   catch { throw new AssetError('WORKER_PROTOCOL', 'Worker result is not valid JSON.'); }
 }
 async function atomicJson(directory: string, filename: string, value: unknown): Promise<void> {
-  await noLinks(directory);
-  const temporary = artifactPath(directory, 'state-' + randomUUID() + '.tmp');
-  await writeFile(temporary, (filename === 'job.json' ? JSON.stringify(value) : JSON.stringify(value, null, 2)) + '\n', { flag: 'wx' });
-  const target = artifactPath(directory, filename);
-  try { await noLinks(target); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-  await rename(temporary, target);
+  try { await atomicAssetJson(directory, filename, (filename === 'job.json' ? JSON.stringify(value) : JSON.stringify(value, null, 2)) + '\n'); }
+  catch (error) {
+    if (error instanceof AtomicJsonFailure) throw new AssetError('PERSISTENCE', error.message);
+    throw error;
+  }
 }
 
 export class AssetPipeline {

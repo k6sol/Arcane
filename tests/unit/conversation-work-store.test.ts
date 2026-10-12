@@ -157,13 +157,17 @@ test('all operation inputs reject unknown, missing and invalid fields without mu
 
 test('recognized tokens and prompt fields never persist or appear in errors', t => {
   const f = fixture(t);
-  for (const value of ['sk-proj-' + 'a'.repeat(24), 'ghp_' + 'b'.repeat(24), 'github_pat_' + 'c'.repeat(24),
+  for (const value of ['sk-proj-' + 'a'.repeat(24), 'sk-ant-' + 'a'.repeat(24), 'sk-svcacct-' + 'a'.repeat(24),
+    'ghp_' + 'b'.repeat(24), 'github_pat_' + 'c'.repeat(24), 'AKIA' + 'A'.repeat(16), 'AIza' + 'a'.repeat(20),
     'a'.repeat(64), 'eyJabcde.abcde.abcde', 'token:private-fixture', 'password:private-fixture',
     'arcane_local_v1_8123_' + 'd'.repeat(64)]) {
-    let error: unknown;
-    try { bind(f, 'work-1', { ...native, threadId: value }); } catch (caught) { error = caught; }
-    assert.ok(code('INPUT')(error));
-    assert.ok(!(error as Error).message.includes(value));
+    for (const field of ['threadId', 'sessionId'] as const) {
+      let error: unknown;
+      try { bind(f, 'work-1', { ...native, [field]: value }); } catch (caught) { error = caught; }
+      assert.ok(code('INPUT')(error));
+      assert.ok(!(error as Error).message.includes(value));
+      assert.throws(() => f.store.list({ ...native, [field]: value }), code('INPUT'));
+    }
   }
   assert.throws(() => invalidBind(f.store, { conversation: native, kind: 'workflow', id: 'work-1', prompt: 'never-persist-this-prompt' }), code('INPUT'));
   f.store.close();
@@ -171,6 +175,60 @@ test('recognized tokens and prompt fields never persist or appear in errors', t 
   assert.ok(!persisted.includes('never-persist-this-prompt') && !persisted.includes('private-fixture'));
   assert.deepEqual(readdirSync(f.project), []);
   assert.deepEqual(readdirSync(f.directory), ['conversation-work.sqlite']);
+});
+
+test('all C0/C1 controls and line separators are refused in every work/native ID position without mutation', t => {
+  const f = fixture(t);
+  const controls = [...Array.from({ length: 32 }, (_, i) => i),
+    ...Array.from({ length: 33 }, (_, i) => 127 + i), 0x2028, 0x2029].map(value => String.fromCharCode(value));
+  for (const control of controls) {
+    for (const value of [control + 'Thread', 'Th' + control + 'read', 'Thread' + control]) {
+      assert.throws(() => bind(f, value), code('INPUT'));
+      assert.throws(() => f.store.binding('asset-job', value), code('INPUT'));
+      for (const field of ['threadId', 'sessionId'] as const) {
+        const conversation = { ...native, [field]: value };
+        assert.throws(() => bind(f, 'job', conversation, 'asset-job'), code('INPUT'));
+        assert.throws(() => f.store.list(conversation, 'asset-job'), code('INPUT'));
+      }
+    }
+  }
+  for (const ending of ['\r\n', '\n\r', '\n\n']) {
+    assert.throws(() => bind(f, 'job' + ending), code('INPUT'));
+    assert.throws(() => bind(f, 'job', { ...native, threadId: 'Thread' + ending }), code('INPUT'));
+    assert.throws(() => bind(f, 'job', { ...native, sessionId: 'Session' + ending }), code('INPUT'));
+  }
+  assert.deepEqual(f.store.list(native), { items: [], nextCursor: null });
+  assert.equal(f.store.binding('asset-job', 'job'), null);
+});
+
+test('explicit whole-string ID checks preserve valid syntax and exact maximum lengths', t => {
+  const f = fixture(t);
+  const conversation = { provider: 'claude-code' as const, threadId: 'A._:-09', sessionId: '0._:-AZ' };
+  const id = '_Az09-' + '_'.repeat(CONVERSATION_WORK_LIMITS.workId - 6);
+  const binding = bind(f, id, conversation, 'asset-job');
+  assert.deepEqual(f.store.binding('asset-job', id), binding);
+  const longest = { ...native, threadId: 'T'.repeat(CONVERSATION_WORK_LIMITS.nativeId),
+    sessionId: 'S'.repeat(CONVERSATION_WORK_LIMITS.nativeId) };
+  assert.deepEqual(bind(f, 'longest', longest).conversation, longest);
+  assert.throws(() => bind(f, id + '_', conversation), code('INPUT'));
+  for (const field of ['threadId', 'sessionId'] as const) {
+    assert.throws(() => bind(f, 'too-long', { ...longest, [field]: longest[field] + 'X' }), code('INPUT'));
+  }
+  for (const threadId of ['.Thread', '_Thread', ':Thread', '-Thread']) {
+    assert.throws(() => bind(f, 'bad-leading', { ...native, threadId }), code('INPUT'));
+  }
+});
+
+test('persisted trailing terminators in work/thread/session IDs fail closed without repair', t => {
+  for (const [column, value] of [['work_id', 'work-1\n'], ['thread_id', 'Thread\r\n'], ['session_id', 'Session\u0085']] as const) {
+    const f = fixture(t); bind(f);
+    database(f, db => db.prepare('UPDATE conversation_work_bindings SET ' + column + '=?').run(value));
+    assert.throws(() => f.store.list(native), code('CORRUPT'));
+    assert.throws(() => f.store.binding('workflow', 'work-1'), code('CORRUPT'));
+    assert.throws(() => bind(f, 'another'), code('CORRUPT'));
+    f.store.close(); assert.throws(() => f.open(), code('CORRUPT'));
+    database(f, db => assert.equal(db.prepare('SELECT ' + column + ' AS value FROM conversation_work_bindings').get()?.value, value));
+  }
 });
 
 test('accessors, proxies, symbols, hidden fields and inherited objects are rejected before evaluation', t => {

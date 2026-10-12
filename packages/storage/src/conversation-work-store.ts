@@ -63,12 +63,15 @@ function kind(value: unknown): ConversationWorkKind {
   return value;
 }
 function workId(value: unknown): string {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value)) fail('INPUT', 'Expected a bounded work identifier.');
+  // Scan the entire string: no control/line terminator can sit outside a match.
+  if (typeof value !== 'string' || value.length < 1 || value.length > CONVERSATION_WORK_LIMITS.workId ||
+      /[^A-Za-z0-9_-]/.test(value)) fail('INPUT', 'Expected a bounded work identifier.');
   return value;
 }
 function nativeId(value: unknown): string {
   // Match existing native-history opaque ID syntax, without importing or reading native history.
-  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value) ||
+  if (typeof value !== 'string' || value.length < 1 || value.length > CONVERSATION_WORK_LIMITS.nativeId ||
+      !/^[A-Za-z0-9]/.test(value) || /[^A-Za-z0-9._:-]/.test(value) ||
       /\b(?:sk-(?:proj-|ant-|svcacct-)?[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16}|AIza[A-Za-z0-9_-]{20,}|arcane_local_v\d+_\d+_[a-f0-9]{64})\b/i.test(value) ||
       /\b[a-f0-9]{64}\b/i.test(value) || /\b(?:password|passwd|token|secret|api[_-]?key|authorization|cookie|credentials):/i.test(value) || /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) {
     fail('INPUT', 'Expected a bounded opaque native identifier, without credential content.');

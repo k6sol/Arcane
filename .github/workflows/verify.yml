@@ -16,7 +16,9 @@ jobs:
   local-contracts:
     name: Local contracts (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # Current serialized Windows offline inventory: 805 cases, ~11 minutes.
+    # This is a whole-job budget, not a relaxation of per-test/runtime deadlines.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

@@ -5,6 +5,8 @@ import type { WorkflowPreview, WorkflowPreviewInput } from '../../daemon/src/wor
 
 export const WORKFLOW_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const WORKFLOW_REQUEST_BYTES = 128 * 1024;
+export const WORKFLOW_HELPER_RESPONSE_BYTES = 512 * 1024;
+export const WORKFLOW_DRAFT_BYTES = 64 * 1024;
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const STATES = ['creating', 'active', 'uncertain', 'halted'];
@@ -18,12 +20,21 @@ export type PanelWorkflowPreview = WorkflowPreview & Record<string, unknown>;
 export interface NativeWorkflowConversation {
   provider: 'codex' | 'claude-code'; threadId: string; sessionId: string | null; connectionId?: string; projectPath?: string;
 }
+/** Detached observations only; no authority, gates or permission grant. */
+export interface WorkflowDraftProvenance {
+  readonly projectPath: string; readonly projectId: string; readonly workflowId: string;
+  readonly workflowRevision: number; readonly stepKey: string;
+  readonly conversation: Readonly<Pick<NativeWorkflowConversation, 'provider' | 'threadId' | 'sessionId'>>;
+  readonly model: Readonly<RequestedModel>;
+}
 export interface WorkflowPanelOptions {
   getToken(): string | null;
   getProjectPath(): string | null;
   /** Observed from the existing native controller, never from an input element. */
   getNativeConversation?(): NativeWorkflowConversation | null;
   getModelSelection?(): RequestedModel | null;
+  /** Atomic append to the existing composer; false must leave its draft unchanged. */
+  appendToDraft?(text: string, provenance: WorkflowDraftProvenance): boolean;
   /** Notify synchronously on changes, including a change away and back. */
   subscribeContextChange?(invalidate: () => void): () => void;
   /** Trusted adapter for server-attested conversation metadata using another schema. */
@@ -87,6 +98,21 @@ function relativePath(value: unknown): string {
   if (result.split('/').some(part => !part || part === '.' || part === '..' || /[<>:"|?*\x00-\x1f]/.test(part) || /[. ]$/.test(part) || forbidden.includes(part.toLowerCase()) || part.toLowerCase().startsWith('.env.') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) invalid();
   return result;
 }
+function freezeData<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeData(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+function assertEvidenceScope(paths: readonly string[], scopes: readonly string[]): void {
+  for (const path of paths) {
+    const key = relativePath(path).toLowerCase();
+    if (!scopes.some(scope => { const allowed = relativePath(scope).toLowerCase(); return key === allowed || key.startsWith(allowed + '/'); })) {
+      throw new WorkflowPanelError('Evidence path "' + path + '" is outside the exact file scope. Include every brief, requirements, plan, review and other output path before creating the workflow. Scope was not expanded.');
+    }
+  }
+}
 function observedModel(value: RequestedModel | null): RequestedModel | null {
   if (value === null) return null;
   const model = exact(value, ['provider', 'model', 'effort', 'connectionRevision']);
@@ -149,6 +175,51 @@ export function readWorkflowSubmission(value: unknown): WorkflowSubmission {
   normalized.checks.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   return normalized;
 }
+export interface WorkflowStepInput { workflowId: string; stepKey: string }
+export interface WorkflowEvidenceInput extends WorkflowStepInput { files: { path: string; role: WorkflowSubmission['artifacts'][number]['role'] }[] }
+interface HelperScope extends WorkflowStepInput { workflowRevision: number; projectId: string; conversation: NativeWorkflowConversation | null }
+export interface WorkflowEvidenceResponse extends WorkflowStepInput {
+  projectId: string; workflowRevision: number; conversation?: NativeWorkflowConversation; submission: WorkflowSubmission;
+}
+export interface WorkflowDraftResponse extends WorkflowStepInput {
+  projectId: string; workflowRevision: number; conversation?: NativeWorkflowConversation; model: RequestedModel; text: string;
+  requiresHumanSubmit: true; startsNativeTurn: false;
+}
+function readEvidenceInput(value: WorkflowEvidenceInput): WorkflowEvidenceInput {
+  const r = exact(value, ['workflowId', 'stepKey', 'files']);
+  const files = array(r.files, 20).map(value => {
+    const file = exact(value, ['path', 'role']);
+    return { path: relativePath(file.path), role: member(file.role, ROLES) as WorkflowSubmission['artifacts'][number]['role'] };
+  });
+  if (!files.length || new Set(files.map(f => f.path.toLowerCase())).size !== files.length) invalid();
+  return { workflowId: identifier(r.workflowId), stepKey: identifier(r.stepKey), files };
+}
+function helperScope(r: Row, expected: HelperScope): void {
+  if (hash(r.projectId) !== expected.projectId || identifier(r.workflowId) !== expected.workflowId || identifier(r.stepKey) !== expected.stepKey) invalid();
+  if (integer(r.workflowRevision, 0, Number.MAX_SAFE_INTEGER) !== expected.workflowRevision) throw new WorkflowPanelError('Workflow revision changed. Refresh explicitly before preparing evidence or adding a draft.');
+  if (expected.conversation) {
+    const actual = nativeConversation(exact(r.conversation, ['provider', 'threadId', 'sessionId']) as unknown as NativeWorkflowConversation);
+    if (actual.provider !== expected.conversation.provider || actual.threadId !== expected.conversation.threadId || actual.sessionId !== expected.conversation.sessionId) invalid();
+  } else if (r.conversation !== undefined) invalid();
+}
+/** Host-computed references only; neither file contents nor measured checks are invented. */
+export function readWorkflowEvidence(value: unknown, expected: HelperScope, files: WorkflowEvidenceInput['files'], subjects: readonly string[]): WorkflowEvidenceResponse {
+  const copy = jsonCopy(value, WORKFLOW_HELPER_RESPONSE_BYTES, 16, 16000);
+  const r = exact(copy, ['projectId', 'workflowId', 'stepKey', 'workflowRevision', 'submission'], ['conversation']); helperScope(r, expected);
+  const submission = readWorkflowSubmission(r.submission);
+  if (submission.key !== expected.stepKey || submission.checks.length || canonical(submission.subjectHashes) !== canonical([...new Set(subjects)].sort())) invalid();
+  const sortFiles = (list: {path: string; role: string}[]) => [...list].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  if (canonical(sortFiles(submission.artifacts.map(a => ({ path: a.path, role: a.role })))) !== canonical(sortFiles(files))) invalid();
+  return { ...(copy as WorkflowEvidenceResponse), submission };
+}
+export function readWorkflowDraft(value: unknown, expected: HelperScope, model: RequestedModel): WorkflowDraftResponse {
+  const copy = jsonCopy(value, WORKFLOW_HELPER_RESPONSE_BYTES, 16, 16000);
+  const r = exact(copy, ['projectId', 'workflowId', 'stepKey', 'workflowRevision', 'model', 'text', 'requiresHumanSubmit', 'startsNativeTurn'], ['conversation']); helperScope(r, expected);
+  if (!expected.conversation || r.requiresHumanSubmit !== true || r.startsNativeTurn !== false || canonical(observedModel(r.model as RequestedModel)) !== canonical(model)) invalid();
+  string(r.text, WORKFLOW_DRAFT_BYTES);
+  return copy as WorkflowDraftResponse;
+}
+
 export interface WorkflowList { projectId: string; workflows: { id: string; recipeId: string; state: string }[] }
 export function readWorkflowList(value: unknown): WorkflowList {
   const result = jsonCopy(value), r = row(result); hash(r.projectId);
@@ -209,7 +280,7 @@ export class WorkflowPanelApi {
   constructor(private readonly token: string, private readonly transport: typeof fetch = globalThis.fetch, private readonly timeoutMs = 10000) {
     if (!token || /[\r\n]/.test(token) || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000) invalid();
   }
-  private async request(path: string, method: 'GET' | 'POST', payload?: unknown, signal?: AbortSignal): Promise<unknown> {
+  private async request(path: string, method: 'GET' | 'POST', payload?: unknown, signal?: AbortSignal, responseLimit = WORKFLOW_RESPONSE_BYTES): Promise<unknown> {
     const execute = path === '/execute';
     const body = payload === undefined ? undefined : JSON.stringify(jsonCopy(payload, WORKFLOW_REQUEST_BYTES, 16, 16000));
     if (body?.normalize('NFKC').includes(this.token)) throw new WorkflowPanelError('Workflow content contains the control token.');
@@ -228,11 +299,11 @@ export class WorkflowPanelApi {
         ...(body === undefined ? {} : { body }), signal: controller.signal, cache: 'no-store', credentials: 'same-origin', redirect: 'error', referrerPolicy: 'no-referrer',
       }), aborted]);
       definitive = response.status >= 400 && response.status < 500;
-      if (response.status === 202) throw new WorkflowPanelError('Outcome unknown. Refresh and explicitly reconcile the workflow. Nothing was retried.', execute);
+      if (response.status === 202) throw new WorkflowPanelError(execute ? 'Outcome unknown. Refresh and explicitly reconcile the workflow. Nothing was retried.' : 'Workflow read was not confirmed. Refresh explicitly.', execute);
       if (response.status !== 200) throw new WorkflowPanelError(definitive ? 'Workflow request refused. Refresh before preparing another decision.' : 'Workflow response could not confirm the outcome.', execute && !definitive);
       if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get('Content-Type') ?? '')) invalid();
       const declared = response.headers.get('Content-Length');
-      if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > WORKFLOW_RESPONSE_BYTES)) invalid();
+      if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > responseLimit)) invalid();
       if (!response.body) invalid();
       reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8', { fatal: true }), chunks: string[] = [];
@@ -241,11 +312,11 @@ export class WorkflowPanelApi {
         const chunk = await Promise.race([reader.read(), aborted]);
         if (chunk.done) break;
         size += chunk.value.byteLength;
-        if (size > WORKFLOW_RESPONSE_BYTES) invalid();
+        if (size > responseLimit) invalid();
         chunks.push(decoder.decode(chunk.value, { stream: true }));
       }
       chunks.push(decoder.decode());
-      return jsonCopy(JSON.parse(chunks.join('')) as unknown);
+      return jsonCopy(JSON.parse(chunks.join('')) as unknown, responseLimit);
     } catch (error) {
       if (execute && dispatched && !definitive) throw new WorkflowPanelError('Outcome unknown. Refresh and explicitly reconcile the workflow. Nothing was retried.', true);
       if (error instanceof WorkflowPanelError) throw error;
@@ -260,6 +331,13 @@ export class WorkflowPanelApi {
   currentFlow(signal?: AbortSignal): Promise<unknown> { return this.request('/current-flow', 'GET', undefined, signal); }
   get(id: string, signal?: AbortSignal): Promise<unknown> { return this.request('/' + identifier(id), 'GET', undefined, signal); }
   preview(input: WorkflowPreviewInput, signal?: AbortSignal): Promise<unknown> { return this.request('/preview', 'POST', input, signal); }
+  evidence(input: WorkflowEvidenceInput, signal?: AbortSignal): Promise<unknown> {
+    return this.request('/evidence', 'POST', readEvidenceInput(input), signal, WORKFLOW_HELPER_RESPONSE_BYTES);
+  }
+  draft(input: WorkflowStepInput, signal?: AbortSignal): Promise<unknown> {
+    const r = exact(input, ['workflowId', 'stepKey']);
+    return this.request('/draft', 'POST', { workflowId: identifier(r.workflowId), stepKey: identifier(r.stepKey) }, signal, WORKFLOW_HELPER_RESPONSE_BYTES);
+  }
   receipt(preview: PanelWorkflowPreview, idempotencyKey: string, signal?: AbortSignal): Promise<unknown> {
     return this.request('/receipt', 'POST', { preview, idempotencyKey: identifier(idempotencyKey) }, signal);
   }
@@ -332,17 +410,29 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   const title = field(fields, 'Title', 'input', 'title'); title.required = true; title.maxLength = 300;
   const prompt = field(fields, 'Prompt', 'textarea', 'prompt'); prompt.required = true; prompt.maxLength = 8000;
   const scope = field(fields, 'File scope (one relative path per line)', 'textarea', 'scope'); scope.required = true; scope.maxLength = 6020;
+  const scopeHelp = make('p', 'Before creating this workflow, include every produced brief, requirements, plan, review and other evidence file in the exact scope. Each file must match a listed file or sit inside a listed directory. A code-file-only scope will refuse separate evidence files. No scope or permission is added automatically.');
+  scopeHelp.id = 'workflow-scope-help'; fields.append(scopeHelp); scope.setAttribute('aria-describedby', scopeHelp.id);
+  const plannedEvidence = field(fields, 'Planned evidence file paths (optional, preflight only; one relative path per line)', 'textarea', 'evidence-paths'); plannedEvidence.maxLength = 6020;
+  plannedEvidence.setAttribute('aria-describedby', scopeHelp.id);
   fields.append(make('p', 'Model selection comes from the existing conversation. Unavailable selections and capabilities remain blockers.'));
   const recipeButton = button('Preview workflow', 'recipe', fields, true);
   const flowView = make('div'); root.append(flowView);
   const actions = make('form'); actions.setAttribute('aria-label', 'Prepare workflow decision'); root.append(actions);
   const actionFields = make('fieldset'); actions.append(actionFields); actionFields.append(make('legend', 'Workflow decision'));
   const stepSelect = field(actionFields, 'Step', 'select', 'step');
+  const draftButton = button('Add step to chat draft', 'draft', actionFields);
+  const draftHelp = make('p'); actionFields.append(draftHelp);
   const actionSelect = field(actionFields, 'Action', 'select', 'action'); choices(actionSelect, [['gate', 'Gate decision'], ['handoff', 'Submit actual evidence'], ['review', 'Review submitted evidence'], ['reconcile', 'Reconcile interrupted operation']]);
   const gateSelect = field(actionFields, 'Gate', 'select', 'gate');
   const decision = field(actionFields, 'Decision', 'select', 'decision'); choices(decision, [['approved', 'Approve'], ['rejected', 'Reject']]);
-  const evidence = field(actionFields, 'Evidence submission JSON', 'textarea', 'evidence'); evidence.maxLength = WORKFLOW_REQUEST_BYTES;
-  const evidenceHelp = make('p', 'Use the exact submission fields: key, artifacts [{path, role, sha256, bytes}], subjectHashes, checks [{id, outcome, evidenceSha256, subjectDigest, value?}]. Reference real files and measured reports. Verification steps require the host verifier.'); actionFields.append(evidenceHelp);
+  const fileFields = make('div'); actionFields.append(fileFields);
+  const evidenceButton = button('Prepare evidence from files', 'evidence-files', actionFields);
+  const evidenceSummary = make('pre'); evidenceSummary.hidden = true; actionFields.append(evidenceSummary);
+  const manualEvidence = make('details'); manualEvidence.append(make('summary', 'Advanced evidence JSON')); actionFields.append(manualEvidence);
+  const evidence = field(manualEvidence, 'Evidence submission JSON', 'textarea', 'evidence'); evidence.maxLength = WORKFLOW_REQUEST_BYTES;
+  const evidenceHelp = make('p', 'Manual JSON applies only to this inspected workflow, step and revision; it is never carried to another selection. Use the exact submission fields: key, artifacts [{path, role, sha256, bytes}], subjectHashes, checks [{id, outcome, evidenceSha256, subjectDigest, value?}]. Every artifact path must be inside the step scope. Reference real files and measured reports. Verification steps require the host verifier.'); manualEvidence.append(evidenceHelp);
+  const fileInputs = new Map<string, HTMLTextAreaElement>();
+  let fileStep = '';
   const resolution = field(actionFields, 'Resolution', 'select', 'resolution'); choices(resolution, [['halt', 'Halt workflow'], ['accept-observed', 'Accept exact observed outcome']]);
   const mapping = field(actionFields, 'Observed WorkStore mapping JSON (interrupted creation only)', 'textarea', 'mapping'); mapping.maxLength = 8000;
   const mappingHelp = make('p', 'For interrupted creation, supply the actual {runId, taskIds: {stepKey: taskId}} mapping. Native conversation IDs come only from the parent controller.'); actionFields.append(mappingHelp);
@@ -416,8 +506,42 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       receiptView.append(item);
     }
   };
+  const selectedStep = () => current?.workflow.recipe.steps.find(s => s.key === stepSelect.value);
+  let evidenceOwner = '';
+  let generatedEvidence: {
+    projectId: string; workflowId: string; stepKey: string; workflowRevision: number;
+    contextFingerprint: string; conversation: NativeWorkflowConversation | null;
+    files: WorkflowEvidenceInput['files']; value: string;
+  } | null = null;
+  const evidenceOwnerKey = (): string => current && context && selectedStep()
+    ? canonical([context.fingerprint, current.workflow.projectId, current.workflow.id, current.workflow.revision, stepSelect.value]) : '';
+  const clearEvidence = (): void => {
+    generatedEvidence = null; evidence.value = ''; evidenceSummary.textContent = ''; evidenceSummary.hidden = true; manualEvidence.open = false;
+  };
+  const syncEvidenceOwner = (): void => {
+    const owner = evidenceOwnerKey();
+    if (owner !== evidenceOwner) { clearEvidence(); evidenceOwner = owner; }
+  };
+  const renderFileInputs = (): void => {
+    const step = selectedStep();
+    const key = current && step && step.execution !== 'local-verification' ? canonical([current.workflow.id, step.key, step.quality.roles]) : '';
+    if (key === fileStep) return;
+    fileStep = key; fileFields.replaceChildren(); fileInputs.clear(); evidenceSummary.hidden = true; evidenceSummary.textContent = '';
+    if (!key || !step) return;
+    for (const role of step.quality.roles) {
+      const input = field(fileFields, role.replaceAll('-', ' ') + ' file paths (one relative path per line)', 'textarea', 'files-' + role);
+      input.maxLength = 6020; fileInputs.set(role, input);
+    }
+  };
+  const draftReady = (): boolean => {
+    const step = selectedStep(), a = current?.assessment?.steps.find(s => s.key === step?.key), model = context?.model, native = context?.native;
+    return !!current && current.workflow.state === 'active' && !current.workflow.operation && belongs(current) && !unknownReceipt() &&
+      !!options.getModelSelection && !!options.appendToDraft && !!native && !!model &&
+      step?.execution === 'native-handoff' && a?.disposition === 'human-handoff' && a.state === 'pending' && !a.blockers.length &&
+      canonical(step.provider?.selection ?? null) === canonical(model) && (native.provider === 'codex' ? model.provider === 'codex' : model.provider === 'claude');
+  };
   const controls = (): void => {
-    const active = running && !disposed && !busy;
+    syncEvidenceOwner(); renderFileInputs(); const active = running && !disposed && !busy;
     refreshButton.disabled = !active; inspectButton.disabled = !active || !selectedFlow.value; selectedFlow.disabled = !active;
     fields.disabled = !active || !!unknownReceipt() || !!preview || !!(options.getNativeConversation && !context?.native);
     recipeButton.disabled = fields.disabled || !listing;
@@ -430,7 +554,12 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       (mode === 'review' && current?.workflow.taskStates[stepSelect.value] !== 'needs_review');
     stepSelect.parentElement!.hidden = mode === 'reconcile'; gateSelect.parentElement!.hidden = mode !== 'gate';
     decision.parentElement!.hidden = mode !== 'gate' && mode !== 'review';
-    evidence.parentElement!.hidden = mode !== 'handoff'; evidenceHelp.hidden = mode !== 'handoff';
+    manualEvidence.hidden = mode !== 'handoff'; evidence.parentElement!.hidden = mode !== 'handoff'; evidenceHelp.hidden = mode !== 'handoff';
+    const canReadFiles = !!step && step.execution !== 'local-verification' && current?.workflow.state === 'active' && !current.workflow.operation && !unknownReceipt() && current.assessment?.steps.find(s => s.key === step.key)?.disposition === 'human-handoff';
+    fileFields.hidden = mode !== 'handoff' || step?.execution === 'local-verification';
+    evidenceButton.hidden = fileFields.hidden; evidenceButton.disabled = actionFields.disabled || !listing || !canReadFiles;
+    draftButton.disabled = actionFields.disabled || !listing || mode === 'reconcile' || !draftReady();
+    draftHelp.textContent = !options.appendToDraft ? 'Chat draft integration is unavailable.' : !context?.model || !options.getModelSelection ? 'An exact active model observation is required to prepare a chat draft.' : !draftReady() ? 'Select a native handoff step whose reported readiness is human-handoff.' : 'Adds the server-prepared step to the existing draft. Review and submit it explicitly.';
     resolution.parentElement!.hidden = mode !== 'reconcile';
     const needsMapping = mode === 'reconcile' && resolution.value === 'accept-observed' && current?.workflow.operation?.kind === 'create-recipe';
     mapping.parentElement!.hidden = !needsMapping; mappingHelp.hidden = !needsMapping;
@@ -463,7 +592,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   const invalidate = (message: string, clear = true): void => {
     generation++; pendingController?.abort(); pendingController = null; busy = false; erasePreview();
     for (const r of receipts) if (r.state === 'confirmed') r.state = 'unknown';
-    if (clear) { current = null; listing = null; context = null; title.value = ''; prompt.value = ''; scope.value = ''; evidence.value = ''; mapping.value = ''; choices(selectedFlow, [['', 'Refresh to load workflows']]); flowView.replaceChildren(); contextLine.textContent = ''; }
+    if (clear) { clearEvidence(); evidenceOwner = ''; current = null; listing = null; context = null; title.value = ''; prompt.value = ''; scope.value = ''; plannedEvidence.value = ''; evidence.value = ''; mapping.value = ''; fileStep = ''; fileInputs.clear(); fileFields.replaceChildren(); evidenceSummary.textContent = ''; evidenceSummary.hidden = true; choices(selectedFlow, [['', 'Refresh to load workflows']]); flowView.replaceChildren(); contextLine.textContent = ''; }
     announce(message); controls();
   };
   const checkContext = (): Context => {
@@ -524,11 +653,82 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       current = value; observeReceipt(value); showFlow(); announce(unknownReceipt() ? 'Outcome remains unknown. Inspect the interrupted operation before reconciliation.' : 'Selected workflow read.');
     } finally { end(op.epoch); }
   };
+  const helperExpected = (ctx: Context): HelperScope => {
+    const step = selectedStep();
+    if (!listing || !current || !step || current.workflow.state !== 'active' || current.workflow.operation || !belongs(current) || unknownReceipt()) throw new WorkflowPanelError('Inspect a current workflow linked to this conversation before preparing files or a draft.');
+    return { projectId: listing.projectId, workflowId: current.workflow.id, stepKey: step.key, workflowRevision: current.workflow.revision, conversation: ctx.native };
+  };
+  const helperCurrent = (expected: HelperScope): void => {
+    if (current?.workflow.id !== expected.workflowId || selectedStep()?.key !== expected.stepKey || current.workflow.revision !== expected.workflowRevision) throw new WorkflowPanelError('Workflow revision or selected step changed. Refresh explicitly before using this response.');
+  };
+  const requestedFiles = (step: WorkflowRecipe['steps'][number]): WorkflowEvidenceInput['files'] => {
+    const files: WorkflowEvidenceInput['files'] = [];
+    for (const role of step.quality.roles) {
+      const paths = (fileInputs.get(role)?.value ?? '').split(/\r?\n/).map(p => p.trim()).filter(Boolean).map(p => relativePath(p.normalize('NFKC')));
+      if (!paths.length) throw new WorkflowPanelError('Enter at least one real file path for each required evidence role.');
+      files.push(...paths.map(path => ({ path, role })));
+    }
+    return readEvidenceInput({ workflowId: current!.workflow.id, stepKey: step.key, files }).files;
+  };
+  const prepareFiles = async (): Promise<void> => {
+    const expected = helperExpected(checkContext()), step = selectedStep()!;
+    if (step.execution === 'local-verification') throw new WorkflowPanelError('Verification evidence must come from the host verifier.');
+    if (current?.assessment?.steps.find(s => s.key === step.key)?.disposition !== 'human-handoff') throw new WorkflowPanelError('The selected step is not ready for human evidence handoff. Refresh explicitly to inspect its blockers.');
+    const previousEvidence = evidence.value;
+    const files = requestedFiles(step);
+    assertEvidenceScope(files.map(f => f.path), step.scope);
+    const input = readEvidenceInput({ workflowId: expected.workflowId, stepKey: expected.stepKey, files });
+    const subjects = current!.workflow.submissions.filter(s => step.subjectSteps.includes(s.key)).flatMap(s => s.artifacts.map(a => a.sha256));
+    const op = begin();
+    try {
+      announce('Reading actual file evidence references…');
+      const result = readWorkflowEvidence(await api(op.ctx).evidence(input, op.controller.signal), expected, input.files, subjects);
+      if (!live(op)) return; helperCurrent(expected);
+      let filesStillMatch = false;
+      try { filesStillMatch = canonical(requestedFiles(step)) === canonical(input.files); } catch { /* Changed or invalid form stays stale. */ }
+      if (!filesStillMatch) { clearEvidence(); throw new WorkflowPanelError('Evidence paths changed. Prepare files again; this response was not used.'); }
+      if (evidence.value !== previousEvidence) throw new WorkflowPanelError('Manual evidence changed. The file response was not used; review or prepare again explicitly.');
+      const value = JSON.stringify(result.submission, null, 2);
+      generatedEvidence = freezeData(jsonCopy({
+        projectId: result.projectId, workflowId: result.workflowId, stepKey: result.stepKey, workflowRevision: result.workflowRevision,
+        contextFingerprint: op.ctx.fingerprint, conversation: result.conversation ?? null, files: input.files, value,
+      }));
+      evidenceOwner = evidenceOwnerKey(); evidence.value = value; manualEvidence.open = true;
+      evidenceSummary.textContent = JSON.stringify(result, null, 2); evidenceSummary.hidden = false;
+      announce('Evidence references prepared. Review the returned hashes, then preview a handoff explicitly. No workflow command was executed.');
+    } finally { end(op.epoch); }
+  };
+  const addDraft = async (): Promise<void> => {
+    const ctx = checkContext();
+    if (!draftReady()) throw new WorkflowPanelError('This step needs reported human-handoff readiness, an exact active model and the existing chat draft callback.');
+    const expected = helperExpected(ctx), model = ctx.model!, op = begin();
+    try {
+      announce('Reading the prepared step draft…');
+      const result = readWorkflowDraft(await api(op.ctx).draft({ workflowId: expected.workflowId, stepKey: expected.stepKey }, op.controller.signal), expected, model);
+      if (!live(op)) return; helperCurrent(expected);
+      if (!draftReady()) throw new WorkflowPanelError('Step readiness or active model changed. Refresh explicitly before adding a draft.');
+      let appended: boolean;
+      const liveContext = checkContext();
+      if (!live(op) || !result.conversation) return;
+      helperCurrent(expected);
+      const provenance: WorkflowDraftProvenance = freezeData(jsonCopy({
+        projectPath: liveContext.path, projectId: result.projectId, workflowId: result.workflowId,
+        workflowRevision: result.workflowRevision, stepKey: result.stepKey,
+        conversation: result.conversation, model: result.model,
+      }));
+      try { appended = options.appendToDraft!(result.text, provenance); }
+      catch { throw new WorkflowPanelError('Chat draft could not be updated. Inspect the existing draft before trying again.'); }
+      announce(appended === true ? 'Step added to the existing chat draft. Review it and submit explicitly. No native turn was started.' : 'Chat draft unavailable or full. The existing draft was left unchanged.');
+    } finally { end(op.epoch); }
+  };
   const recipeInput = (): WorkflowPreviewInput => {
     if (unknownReceipt()) throw new WorkflowPanelError('Reconcile the unknown command before creating more work.');
     if (options.getNativeConversation && !context?.native) throw new WorkflowPanelError('Use an observed native conversation before preparing work.');
     const paths = scope.value.split(/\r?\n/).map(p => p.trim()).filter(Boolean).map(relativePath);
     if (!paths.length || paths.length > 20) throw new WorkflowPanelError('Enter 1–20 relative file scopes.');
+    const plannedPaths = plannedEvidence.value.split(/\r?\n/).map(p => p.trim()).filter(Boolean).map(p => relativePath(p.normalize('NFKC')));
+    if (plannedPaths.length > 20) throw new WorkflowPanelError('Enter no more than 20 planned evidence paths.');
+    assertEvidenceScope(plannedPaths, paths); // Client-only preflight; never add these paths to the request scope.
     const request: WorkflowRecipeRequest = {
       deliverable: member(deliverable.value, ['code-change', 'production-asset', 'playtest-repair']) as WorkflowRecipeRequest['deliverable'],
       engine: member(engine.value, ['roblox', 'blender']) as WorkflowRecipeRequest['engine'],
@@ -556,7 +756,19 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
     const step = current.workflow.recipe.steps.find(s => s.key === stepSelect.value); if (!step) invalid();
     if (action === 'handoff') {
       if (step.execution === 'local-verification') throw new WorkflowPanelError('Verification evidence must come from the host verifier.');
+      if (!evidenceOwner || evidenceOwner !== evidenceOwnerKey()) { clearEvidence(); throw new WorkflowPanelError('Evidence selection changed. Prepare files again or enter manual JSON for this inspected workflow.'); }
+      if (generatedEvidence) {
+        const pin = generatedEvidence;
+        let filesStillMatch = false;
+        try { filesStillMatch = canonical(pin.files) === canonical(requestedFiles(step)); } catch { /* Reject stale or malformed paths. */ }
+        if (pin.contextFingerprint !== context?.fingerprint || pin.projectId !== current.workflow.projectId ||
+            pin.workflowId !== current.workflow.id || pin.workflowRevision !== current.workflow.revision || pin.stepKey !== step.key ||
+            pin.value !== evidence.value || !filesStillMatch) {
+          clearEvidence(); throw new WorkflowPanelError('Prepared evidence changed. Prepare files again, or explicitly edit manual JSON for this inspected workflow.');
+        }
+      }
       const submission = readWorkflowSubmission(JSON.parse(evidence.value) as unknown);
+      assertEvidenceScope(submission.artifacts.map(a => a.path), step.scope);
       if (submission.key !== step.key) throw new WorkflowPanelError('Submission key must match the selected step.');
       return { action: 'handoff', workflowId, submission };
     }
@@ -660,6 +872,8 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       checkContext();
       if (action === 'receipt') await checkReceipt(identifier(target!.getAttribute('data-workflow-receipt')));
       else if (action === 'inspect') await inspect();
+      else if (action === 'evidence-files') await prepareFiles();
+      else if (action === 'draft') await addDraft();
       else if (action === 'recipe') await prepare(recipeInput());
       else if (action === 'decision') await prepare(decisionInput());
       else if (action === 'confirm') await confirm();
@@ -671,6 +885,11 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   const edited: EventListener = event => {
     if (!running || disposed) return;
     const target = event.target as HTMLElement;
+    if (target === evidence && generatedEvidence && evidence.value !== generatedEvidence.value) generatedEvidence = null; // Actual manual editing, still bound to the inspected owner.
+    else if ([...fileInputs.values()].some(input => input === target) && generatedEvidence) {
+      clearEvidence(); announce('Evidence paths changed. Prepare files again or explicitly enter manual JSON.');
+    }
+    if (target !== selectedFlow) { evidenceSummary.textContent = ''; evidenceSummary.hidden = true; }
     if (target === selectedFlow) { invalidate('Stored workflow selection changed. Inspect it before a decision.', false); current = null; showFlow(); return; }
     if (preview || busy) invalidate('Form changed. Prepare a new preview.', false);
     if (target === stepSelect) choices(gateSelect, (current?.workflow.recipe.steps.find(s => s.key === stepSelect.value)?.gates ?? []).map(g => [g, g] as const));
@@ -687,10 +906,3 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   if (options.subscribeContextChange) removers.push(options.subscribeContextChange(() => { if (!disposed) invalidate('Context changed. Refresh before preparing another decision.'); }));
   controls(); return controller;
 }
-
-
-
-
-
-
-

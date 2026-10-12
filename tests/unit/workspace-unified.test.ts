@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createWorkflowContextOptions, StudioApi, StudioWorkbench } from '../../apps/desktop/src/studio.js';
+import { appendWorkflowDraft, createWorkflowContextOptions, StudioApi, StudioWorkbench } from '../../apps/desktop/src/studio.js';
 import type { NativeWorkflowConversation } from '../../apps/desktop/src/workflow-panel.js';
 import { startWorkspaceShell } from '../../apps/desktop/src/workspace-shell.js';
 
@@ -348,7 +348,7 @@ test('workflow initial canonical product arrival invalidates and refreshes once 
   const options = createWorkflowContextOptions(() => 'a'.repeat(64), f.workbench, f.chat, () => { refreshes++; });
   const unsubscribe = options.subscribeContextChange!(() => { invalidations++; });
   assert.equal(options.getProjectPath(), null); assert.equal(options.getNativeConversation!(), null);
-  assert.equal(options.getModelSelection, undefined, 'no catalogue revision is fabricated from a saved preference');
+  assert.equal(options.getModelSelection!(), null, 'no catalogue revision is fabricated from a saved preference');
   f.project('C:/trusted/project'); assert.equal(invalidations, 1); await Promise.resolve(); assert.equal(refreshes, 1);
   assert.equal(options.getProjectPath(), 'C:/trusted/project');
   for (let i = 0; i < 5; i++) f.project('C:/trusted/project');
@@ -398,5 +398,37 @@ test('workflow boot retains optional dynamic loading and wires only trusted cont
   assert.match(source, /Restart Arcane to load the workflow tools\./);
   assert.doesNotMatch(source, /addEventListener\('arcane:contextchange'/);
   const wiring = source.slice(source.indexOf('export function createWorkflowContextOptions'), source.indexOf("if (typeof window !== 'undefined'"));
-  assert.doesNotMatch(wiring, /getModelSelection\s*:|connectionRevision\s*:|localStorage|sessionStorage|dispatch\(|turn-start|thread-start|thread-resume|grant-writes/);
+  assert.match(wiring, /getModelSelection: \(\) => chat\.workflowModelSelection\?\.\(\)\?\?null/);
+  assert.doesNotMatch(wiring, /connectionRevision\s*:|localStorage|sessionStorage|dispatch\(|turn-start|thread-start|thread-resume|grant-writes/);
+});
+
+
+test('workflow metadata model changes invalidate exact previews without changing conversation identity or its draft',async()=>{
+  const f=workflowContextFixture();f.project('C:/trusted/project');f.native({provider:'codex',threadId:'observed-thread',sessionId:null,projectPath:'C:/trusted/project'});
+  const chat={...f.chat,workflowModelSelection:()=>selected};
+  let selected:{provider:'codex';model:string;effort:'high';connectionRevision:string}|null=null;
+  let invalidations=0,refreshes=0;
+  const options=createWorkflowContextOptions(()=>'a'.repeat(64),f.workbench,chat,()=>refreshes++);
+  const stop=options.subscribeContextChange!(()=>invalidations++);
+  f.composer.value='Keep my single conversation draft';assert.equal(options.getModelSelection!(),null);
+  selected={provider:'codex',model:'observed',effort:'high',connectionRevision:'b'.repeat(64)};f.pollNative();
+  assert.deepEqual(options.getModelSelection!(),selected);assert.equal(invalidations,1);await Promise.resolve();assert.equal(refreshes,1);
+  f.pollNative();await Promise.resolve();assert.equal(invalidations,1);
+  selected={...selected,connectionRevision:'c'.repeat(64)};f.pollNative();assert.equal(invalidations,2);await Promise.resolve();assert.equal(refreshes,2);
+  assert.equal(f.composer.value,'Keep my single conversation draft');assert.equal(f.requests,0);stop();
+});
+
+
+test('approved step draft appends atomically to the same composer without a submit or native action',()=>{
+  const f=fixture();f.composer.value='My current project request.  ';
+  assert.equal(appendWorkflowDraft(f.doc.document,'Reviewed actual workflow step'),true);
+  assert.equal(f.composer.value,'My current project request.  \n\nReviewed actual workflow step');
+  assert.equal(f.inputs,1);f.untouched();
+});
+test('workflow draft UTF8 and maxlength limits reject the whole addition and preserve every original byte',()=>{
+  const f=fixture();f.composer.value='🧩'.repeat(32760);const original=f.composer.value;
+  assert.equal(appendWorkflowDraft(f.doc.document,'x'.repeat(100)),false);assert.equal(f.composer.value,original);
+  assert.equal(appendWorkflowDraft(f.doc.document,'x'.repeat(64*1024+1)),false);assert.equal(f.composer.value,original);
+  f.composer.value='short';f.composer.setAttribute('maxlength','6');assert.equal(appendWorkflowDraft(f.doc.document,'more'),false);assert.equal(f.composer.value,'short');
+  assert.equal(f.inputs,0);f.untouched();
 });

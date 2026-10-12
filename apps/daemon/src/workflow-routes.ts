@@ -169,11 +169,13 @@ export function workflowRoutes(host: WorkflowHost) {
       if (request.url !== url.pathname || url.pathname.length > 160) throw new LearningHttpError('TARGET', 400);
       const endpoint = url.pathname === PREFIX ? '' : url.pathname.slice(PREFIX.length + 1);
       const authority = { controlToken, origin, agentToken };
-      if (endpoint === 'preview' || endpoint === 'execute' || endpoint === 'receipt') {
+      if (endpoint === 'preview' || endpoint === 'execute' || endpoint === 'receipt' || endpoint === 'evidence' || endpoint === 'draft') {
         if (request.method !== 'POST') throw new LearningHttpError('METHOD', 405);
         const input = await body(request);
         const result = endpoint === 'preview' ? host.preview(input, request, authority) :
-          endpoint === 'receipt' ? host.receipt(input, request, authority) : host.execute(input, request, authority);
+          endpoint === 'receipt' ? host.receipt(input, request, authority) :
+          endpoint === 'evidence' ? host.prepareEvidence(input,request,authority) :
+          endpoint === 'draft' ? host.prepareDraft(input,request,authority) : host.execute(input, request, authority);
         send(200, result); return true;
       }
       if (endpoint !== '' && endpoint !== 'current-flow' && !/^[a-zA-Z0-9_-]{1,64}$/.test(endpoint)) {

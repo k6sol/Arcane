@@ -30,7 +30,8 @@ export function workflowNativeModel(state: CodexProductState | null): {proof:Nat
   models.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
   const current=models.find(m=>m.id===selected.model);
   if(!current?.efforts.includes(selected.effort))return null;
-  const revision=createHash('sha256').update('arcane.workflow.native-catalogue.v1\0').update(JSON.stringify({connectionId:s.connectionId,provenance:s.provenance,
+  // Catalogue/selection identity survives a same-context reconnect; transport freshness stays in proof.connectionId.
+  const revision=createHash('sha256').update('arcane.workflow.native-catalogue.v2\0').update(JSON.stringify({provenance:s.provenance,
     projectPath:state.projectPath,threadId:t.threadId,sessionId:t.sessionId,account:{auth:s.account.auth,plan:s.account.plan,requiresOpenaiAuth:s.account.requiresOpenaiAuth},
     selected,models:models.map(m=>({id:m.id,efforts:m.efforts,defaultEffort:m.defaultEffort,inputModalities:m.inputModalities}))})).digest('hex');
   const proof:NativeWorkflowModelProof={version:1,source:'active-native-thread-catalogue',projectPath:state.projectPath,connectionId:s.connectionId,

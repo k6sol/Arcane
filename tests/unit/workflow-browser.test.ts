@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -11,7 +11,7 @@ import { createAssetService } from '../../apps/daemon/src/asset-service.js';
 import { createLearningService } from '../../apps/daemon/src/learning-service.js';
 import type { CodexService, CodexProductState } from '../../apps/daemon/src/codex-service.js';
 import { workflowReceiptParent } from '../../apps/daemon/src/workflow-host.js';
-import type { WorkflowPreview } from '../../apps/daemon/src/workflow-host.js';
+import type { WorkflowPreview, WorkflowEvidencePreparationResponse, WorkflowDraftResponse } from '../../apps/daemon/src/workflow-host.js';
 import type { WorkflowSnapshot } from '../../apps/daemon/src/workflow-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -27,7 +27,7 @@ const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
 const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 const browserExecutable = process.env.ARCANE_UI_BROWSER_EXE ?? EDGE;
 
-test('owned Edge exercises the real unified workflow UI, exact native attestation, tool switching and reload',
+test('owned Edge synthetic installed-cli metadata fixture exercises evidence, explicit decisions, same-chat draft, tools and reload',
   { skip: !browserModule || process.platform !== 'win32', timeout: 60000 }, async t => {
   assert.equal(resolve(browserExecutable).toLowerCase(), resolve(EDGE).toLowerCase(), 'Use only the fixed installed Edge executable.');
   assert.equal(resolve(browserModule!).toLowerCase(), resolve(SOURCE, 'node_modules/playwright-core/index.mjs').toLowerCase(),
@@ -39,6 +39,10 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   const verification = join(SOURCE, 'runtime/verification', 'workflow-browser-' + randomUUID());
   const screenshot = join(verification, 'workflow.png');
   mkdirSync(join(projectPath, 'src'), { recursive: true });
+  const briefBytes = Buffer.from('Owned evidence brief: preserve the local request and measurable acceptance.\nUTF-8 proof: café 🧩\n');
+  const briefPath = 'src/brief.txt';
+  const briefHash = createHash('sha256').update(briefBytes).digest('hex');
+  writeFileSync(join(projectPath, briefPath), briefBytes);
   mkdirSync(join(resources, 'apps/desktop/public/brand'), { recursive: true });
   mkdirSync(join(resources, 'dist/apps/desktop/src'), { recursive: true });
   mkdirSync(verification, { recursive: true, mode: 0o700 });
@@ -57,8 +61,13 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   const learning = createLearningService({ directory: join(root, 'learning'), projectPath });
   const native: NativeConversation = { provider: 'codex', threadId: randomUUID(), sessionId: randomUUID() };
   const selection = { model: 'offline-browser-fixture', effort: 'high' };
+  // Borrowed synthetic installed-cli metadata through the CodexService state seam.
+  // This declares the installed/coding prerequisite for this UI-only fixture; it
+  // neither creates an installed CLI client nor proves actual CLI integration.
+  // The independent workflow-native-model.test.ts keeps spawned-node-fixture
+  // projection installed:false; production metadata and guards remain unchanged.
   const snapshot: Snapshot = {
-    connectionId: randomUUID(), provenance: 'spawned-node-fixture', connected: true, ready: true,
+    connectionId: randomUUID(), provenance: 'installed-cli', connected: true, ready: true,
     account: { auth: 'subscription', plan: 'plus', requiresOpenaiAuth: true },
     models: [{ model: selection.model, id: 'offline-browser-model', displayName: 'Offline browser fixture',
       efforts: ['high'], defaultEffort: 'high', entitlement: 'unverified' }],
@@ -68,7 +77,8 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
       turnId: 'recorded-fixture-turn', itemId: 'recorded-fixture-text', text: 'Owned fixture public transcript.' }],
     droppedEvents: 0, lastEventSeq: 1, failureCode: null,
   };
-  const counters = { nativeActions: 0, nativeCloses: 0, providerProbes: 0 };
+  const counters = { installedCliStarts: 0, nativeActions: 0, nativeCloses: 0, providerProbes: 0 };
+  t.diagnostic('Borrowed synthetic installed-cli metadata fixture only; no installed CLI client or model turn is started.');
   let closed = false;
   const codex: CodexService = {
     state(): CodexProductState {
@@ -126,7 +136,7 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   });
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
-    const allowedPost = ['/v1/workflows/preview', '/v1/workflows/execute', '/v1/workflows/receipt'];
+    const allowedPost = ['/v1/workflows/preview', '/v1/workflows/execute', '/v1/workflows/receipt', '/v1/workflows/evidence', '/v1/workflows/draft'];
     if (url.origin !== app!.origin || url.pathname.startsWith('/v1/native/') || url.pathname.startsWith('/v1/plugin/') ||
         (request.method() === 'POST' && !allowedPost.includes(url.pathname))) {
       forbiddenRequests.push(url.origin === app!.origin ? url.pathname : url.origin);
@@ -157,6 +167,8 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   assert.equal(work.runs().length, 0);
   const draft = 'Unsent draft preserved across tool selection.';
   await page.locator('#codex-composer').fill(draft);
+  const composer = await page.locator('#codex-composer').elementHandle();
+  assert.ok(composer);
   const chat = await page.locator('#codex-messages').textContent();
   await page.locator('#workflow-title').fill('Edge-owned workflow proof');
   await page.locator('#workflow-prompt').fill('Review a scoped local change with pinned evidence; no native turn is requested.');
@@ -167,6 +179,11 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   assert.equal(preparedResponse.status(), 200);
   const preview = await preparedResponse.json() as WorkflowPreview;
   assert.deepEqual(preview.conversation, native);
+  const observed=await page.evaluate(()=>document.querySelector('#workflow-panel')?.textContent??'');
+  assert.ok(observed.includes('offline-browser-fixture'));
+  assert.equal(preview.request!.model!.model,selection.model);
+  assert.equal(preview.request!.model!.effort,selection.effort);
+  assert.match(preview.request!.model!.connectionRevision,/^[a-f0-9]{64}$/);
   assert.equal(work.runs().length, 0);
   await page.waitForFunction(() => {
     const button = document.querySelector<HTMLButtonElement>('[data-workflow-action="confirm"]');
@@ -184,16 +201,205 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   try { assert.deepEqual(associations.binding('workflow', created.workflow.id)!.conversation, native); }
   finally { associations.close(); }
 
+  // Assistance reads actual files, but cannot submit evidence or accept a step.
+  const executions = () => workflowRequests.filter(r => r.method === 'POST' && r.path === '/v1/workflows/execute').length;
+  const promptTaskId = created.workflow.taskIds.prompt!;
+  const requirementsTaskId = created.workflow.taskIds.requirements!;
+  await page.locator('#workflow-step').selectOption('prompt');
+  await page.locator('#workflow-action').selectOption('handoff');
+  await page.locator('#workflow-files-brief').fill(briefPath);
+  const taskBeforePreparation = work.task(promptTaskId);
+  const evidenceReply = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/v1/workflows/evidence' && response.request().method() === 'POST');
+  await page.locator('[data-workflow-action="evidence-files"]').click();
+  const fileResponse = await evidenceReply;
+  assert.equal(fileResponse.status(), 200);
+  assert.deepEqual(fileResponse.request().postDataJSON(), {
+    workflowId: created.workflow.id, stepKey: 'prompt', files: [{ path: briefPath, role: 'brief' }],
+  });
+  const preparedFiles = await fileResponse.json() as WorkflowEvidencePreparationResponse;
+  assert.equal(preparedFiles.workflowId, created.workflow.id);
+  assert.equal(preparedFiles.projectId, created.workflow.projectId);
+  assert.equal(preparedFiles.workflowRevision, created.workflow.revision);
+  assert.equal(preparedFiles.stepKey, 'prompt');
+  assert.deepEqual(preparedFiles.conversation, native);
+  assert.deepEqual(preparedFiles.submission, {
+    key: 'prompt', artifacts: [{ path: briefPath, role: 'brief', sha256: briefHash, bytes: briefBytes.length }],
+    subjectHashes: [], checks: [],
+  });
+  await page.waitForFunction(hash => {
+    const input = document.getElementById('workflow-evidence') as HTMLTextAreaElement | null;
+    return !!input && input.value.includes(hash);
+  }, briefHash);
+  assert.deepEqual(JSON.parse(await page.locator('#workflow-evidence').inputValue()), preparedFiles.submission);
+  assert.deepEqual(work.task(promptTaskId), taskBeforePreparation);
+  assert.equal(executions(), 1);
+  assert.equal(await page.locator('[data-workflow-action="confirm"]').isVisible(), false);
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+
+  // Each durable command has its own real preview and a separate trusted click.
+  const confirmDecision = async (
+    kind: 'submit-evidence' | 'review-evidence' | 'recipe-gate',
+    result: 'submitted' | 'reviewed' | 'decided',
+    stepKey: 'prompt' | 'requirements',
+    inspect: (prepared: WorkflowPreview) => void,
+  ): Promise<WorkflowSnapshot & { conversation: NativeConversation }> => {
+    const before = executions(), beforePrompt = work.task(promptTaskId), beforeRequirements = work.task(requirementsTaskId);
+    const previewReply = page.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/workflows/preview' && response.request().method() === 'POST');
+    await page.locator('[data-workflow-action="decision"]').click();
+    const response = await previewReply;
+    assert.equal(response.status(), 200);
+    const prepared = await response.json() as WorkflowPreview;
+    assert.equal(prepared.prepared.kind, kind);
+    assert.equal(prepared.prepared.workflowId, created.workflow.id);
+    assert.equal(prepared.prepared.stepKey, stepKey);
+    assert.deepEqual(prepared.conversation, native);
+    inspect(prepared);
+    await page.waitForFunction(() => {
+      const button = document.querySelector<HTMLButtonElement>('[data-workflow-action="confirm"]');
+      return !!button && !button.disabled;
+    });
+    assert.equal(executions(), before, 'Preview cannot execute a durable command.');
+    assert.deepEqual(work.task(promptTaskId), beforePrompt);
+    assert.deepEqual(work.task(requirementsTaskId), beforeRequirements);
+    const executedReply = page.waitForResponse(response =>
+      new URL(response.url()).pathname === '/v1/workflows/execute' && response.request().method() === 'POST');
+    await page.locator('[data-workflow-action="confirm"]').click();
+    const executed = await executedReply;
+    assert.equal(executed.status(), 200);
+    const body = await executed.json() as WorkflowSnapshot & { conversation: NativeConversation; result: string };
+    assert.equal(body.result, result);
+    assert.equal(body.workflow.id, created.workflow.id);
+    assert.deepEqual(body.conversation, native);
+    await page.waitForFunction(expected => {
+      const status = document.querySelector('#workflow-panel [role="status"]');
+      return status?.textContent?.includes('recorded: ' + expected);
+    }, result);
+    assert.equal(executions(), before + 1);
+    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    assert.equal(counters.nativeActions, 0);
+    return body;
+  };
+  const handedOff = await confirmDecision('submit-evidence', 'submitted', 'prompt', prepared => {
+    assert.deepEqual(prepared.prepared.submission, preparedFiles.submission);
+  });
+  assert.equal(handedOff.workflow.taskStates.prompt, 'needs_review');
+  assert.equal(work.task(promptTaskId).state, 'needs_review');
+  assert.deepEqual(handedOff.workflow.submissions.find(s => s.key === 'prompt'), preparedFiles.submission);
+  assert.equal(work.task(requirementsTaskId).state, 'pending');
+
+  await page.locator('#workflow-action').selectOption('review');
+  await page.locator('#workflow-decision').selectOption('approved');
+  const reviewed = await confirmDecision('review-evidence', 'reviewed', 'prompt', prepared => {
+    assert.equal(prepared.prepared.decision, 'approved');
+    assert.deepEqual(prepared.prepared.submission, preparedFiles.submission);
+  });
+  assert.equal(reviewed.workflow.taskStates.prompt, 'complete');
+  assert.equal(work.task(promptTaskId).state, 'complete');
+  const beforeGate = reviewed.assessment!.steps.find(s => s.key === 'requirements');
+  assert.ok(beforeGate);
+  t.diagnostic('Synthetic installed-cli requirements before explicit gate: ' + JSON.stringify(beforeGate));
+  assert.equal(beforeGate.disposition, 'pending');
+  assert.ok(beforeGate.blockers.some(b => b.code === 'human'), 'Model handoff still requires its explicit human gate.');
+  assert.ok(!beforeGate.blockers.some(b => b.code === 'provider'), 'Declared synthetic installed/coding prerequisite must be satisfied: ' + JSON.stringify(beforeGate));
+
+  await page.locator('#workflow-step').selectOption('requirements');
+  await page.locator('#workflow-action').selectOption('gate');
+  await page.locator('#workflow-gate').selectOption('model-handoff');
+  await page.locator('#workflow-decision').selectOption('approved');
+  assert.equal(await page.locator('[data-workflow-action="draft"]').isDisabled(), true);
+  const gated = await confirmDecision('recipe-gate', 'decided', 'requirements', prepared => {
+    assert.equal(prepared.prepared.decision, 'approved');
+    assert.equal(prepared.prepared.recipeGate!.gate, 'model-handoff');
+    assert.deepEqual(prepared.prepared.subjectHashes, [briefHash]);
+    assert.deepEqual(prepared.prepared.inputArtifacts, [{ ...preparedFiles.submission.artifacts[0]!, stepKey: 'prompt' }]);
+  });
+  const afterGate = gated.assessment!.steps.find(s => s.key === 'requirements');
+  assert.ok(afterGate);
+  t.diagnostic('Synthetic installed-cli requirements after explicit gate: ' + JSON.stringify(afterGate));
+  assert.equal(afterGate.disposition, 'human-handoff', 'Synthetic metadata prerequisite or gate is still blocked: ' + JSON.stringify(afterGate));
+  assert.deepEqual(afterGate.blockers, []);
+  assert.equal(gated.workflow.taskStates.requirements, 'pending');
+  assert.equal(executions(), 4);
+
+  // The server prepares text; the UI appends that exact text to the same composer.
+  const beforeDraft = { prompt: work.task(promptTaskId), requirements: work.task(requirementsTaskId) };
+  await page.waitForFunction(() => {
+    const button = document.querySelector<HTMLButtonElement>('[data-workflow-action="draft"]');
+    return !!button && !button.disabled;
+  });
+  const draftReply = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/v1/workflows/draft' && response.request().method() === 'POST');
+  await page.locator('[data-workflow-action="draft"]').click();
+  const textResponse = await draftReply;
+  assert.equal(textResponse.status(), 200);
+  assert.deepEqual(textResponse.request().postDataJSON(), { workflowId: created.workflow.id, stepKey: 'requirements' });
+  const serverDraft = await textResponse.json() as WorkflowDraftResponse;
+  assert.equal(serverDraft.workflowId, created.workflow.id);
+  assert.equal(serverDraft.projectId, created.workflow.projectId);
+  assert.equal(serverDraft.workflowRevision, gated.workflow.revision);
+  assert.equal(serverDraft.stepKey, 'requirements');
+  assert.deepEqual(serverDraft.conversation, native);
+  assert.deepEqual(serverDraft.model, preview.request!.model);
+  assert.equal(serverDraft.requiresHumanSubmit, true);
+  assert.equal(serverDraft.startsNativeTurn, false);
+  assert.ok(serverDraft.text.includes(briefPath) && serverDraft.text.includes(briefHash));
+  assert.ok(serverDraft.text.includes('This draft grants no permission and runs no tool.'));
+  const appendedDraft = draft + '\n\n' + serverDraft.text;
+  await page.waitForFunction(expected => {
+    const input = document.getElementById('codex-composer') as HTMLTextAreaElement | null;
+    return input?.value === expected;
+  }, appendedDraft);
+  assert.equal(await composer.evaluate(element => element === document.getElementById('codex-composer')), true);
+  assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
+  assert.equal(await page.locator('#codex-messages').textContent(), chat);
+  assert.deepEqual(work.task(promptTaskId), beforeDraft.prompt);
+  assert.deepEqual(work.task(requirementsTaskId), beforeDraft.requirements);
+  assert.equal(work.task(requirementsTaskId).evidence.length, 0);
+  assert.equal(work.runs().length, 1);
+  assert.equal(executions(), 4);
+  assert.equal(counters.installedCliStarts, 0); assert.equal(counters.nativeActions, 0); assert.equal(counters.providerProbes, 0);
+  assert.equal(snapshot.thread!.writeGranted, false);
+  assert.equal(snapshot.thread!.turnId, null);
+  assert.deepEqual(snapshot.operations, []); assert.deepEqual(snapshot.approvals, []);
+  assert.deepEqual(codex.state().actions, []);
+  assert.equal(assets.jobs().length, 0); assert.equal(studio.commands().length, 0); assert.equal(studio.keys().length, 0);
+
   for (const tool of ['blender', 'roblox', 'all']) {
     await page.locator('.workspace-tabs [data-workspace-tool="' + tool + '"]').click();
-    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
     assert.equal(await page.locator('#codex-messages').textContent(), chat);
   }
+  // Switching native identity must preserve the appended draft but block sending.
+  const foreignThread = randomUUID(); snapshot.thread!.threadId = foreignThread;
+  await page.waitForFunction(() => {
+    const warning=document.getElementById('codex-draft-review'),submit=document.getElementById('codex-submit') as HTMLButtonElement|null;
+    return !!warning&&!warning.hidden&&submit?.disabled;
+  });
+  assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
+  await page.locator('#codex-draft-review-button').click();
+  await page.waitForFunction(() => (document.getElementById('codex-confirm') as HTMLDialogElement|null)?.open);
+  const draftReview=await page.locator('#codex-confirm-preview').textContent();
+  assert.ok(draftReview!.includes(native.threadId)&&draftReview!.includes(foreignThread));
+  assert.ok(draftReview!.includes(serverDraft.text));
+  await page.locator('#codex-confirm-check').check();
+  await page.locator('#codex-confirm-submit').click();
+  await page.waitForFunction(() => document.getElementById('codex-draft-review')?.hidden===true);
+  assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
+  assert.equal(await page.locator('#codex-submit').isDisabled(), false);
+  assert.equal(counters.nativeActions,0);assert.equal(snapshot.thread!.writeGranted,false);
+  assert.equal(executions(),4,'Draft re-review cannot mutate workflows.');
+  snapshot.thread!.threadId=native.threadId;
+  await page.waitForFunction(thread=>document.getElementById('codex-scope')?.textContent?.includes('Thread '+thread),native.threadId);
+  assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
   assert.equal(counters.nativeActions, 0);
   assert.deepEqual(await page.evaluate(() => (window as typeof window & { fixtureCspViolations: string[] }).fixtureCspViolations), []);
-  const currentResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/workflows/current-flow');
+  const reloadStart = Date.now();
+  const currentResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/workflows/current-flow' && response.request().timing().startTime >= reloadStart)
+    .then(response => response.json() as Promise<WorkflowSnapshot & { conversation: NativeConversation }>);
   await page.reload({ waitUntil: 'domcontentloaded' });
-  const current = await (await currentResponse).json() as WorkflowSnapshot & { conversation: NativeConversation };
+  const current = await currentResponse;
   assert.deepEqual(current.conversation, native);
   assert.equal(current.workflow.id, created.workflow.id);
   await page.locator('#workflow-details > summary').click();
@@ -202,6 +408,11 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
     return document.getElementById('workflow-stored') instanceof HTMLSelectElement &&
       (document.getElementById('workflow-stored') as HTMLSelectElement).value === id && !!action && !action.disabled;
   }, created.workflow.id);
+  assert.equal(current.workflow.taskStates.prompt, 'complete');
+  assert.equal(current.workflow.taskStates.requirements, 'pending');
+  assert.deepEqual(current.workflow.submissions.find(s => s.key === 'prompt'), preparedFiles.submission);
+  assert.ok(current.workflow.decisions.some(d => d.stepKey === 'requirements' && d.gate === 'model-handoff' && d.decision === 'approved'));
+  await page.locator('#workflow-step').selectOption('requirements');
   await page.locator('#workflow-action').selectOption('handoff');
   await page.waitForFunction(() => {
     const button = document.querySelector<HTMLButtonElement>('[data-workflow-action="decision"]');
@@ -209,8 +420,11 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   });
   assert.ok(!(await page.locator('#workflow-panel').textContent())!.includes('no attested link'));
   assert.equal(work.runs().length, 1);
-  assert.equal(workflowRequests.filter(r => r.method === 'POST' && r.path === '/v1/workflows/execute').length, 1);
-  assert.equal(counters.nativeActions, 0); assert.equal(counters.providerProbes, 0);
+  assert.equal(executions(), 4);
+  assert.equal(workflowRequests.filter(r => r.method === 'POST' && r.path === '/v1/workflows/evidence').length, 1);
+  assert.equal(workflowRequests.filter(r => r.method === 'POST' && r.path === '/v1/workflows/draft').length, 1);
+  assert.equal(await page.locator('[data-workflow-action="draft"]').isDisabled(), false);
+  assert.equal(counters.installedCliStarts, 0); assert.equal(counters.nativeActions, 0); assert.equal(counters.providerProbes, 0);
   assert.equal(assets.jobs().length, 0); assert.equal(studio.commands().length, 0); assert.equal(studio.keys().length, 0);
   assert.deepEqual(forbiddenRequests, []); assert.deepEqual(failedResources, []); assert.deepEqual(errors, []);
   assert.deepEqual(await page.evaluate(() => (window as typeof window & { fixtureCspViolations: string[] }).fixtureCspViolations), []);
@@ -220,5 +434,5 @@ test('owned Edge exercises the real unified workflow UI, exact native attestatio
   await page.locator('#workflow-panel').scrollIntoViewIfNeeded();
   await page.screenshot({ path: screenshot, fullPage: false });
   assert.ok(lstatSync(screenshot).size > 1000);
-  t.diagnostic('Owned Edge profile; version=' + context.browser()!.version() + '; screenshot=' + screenshot);
+  t.diagnostic('Owned Edge renderer with borrowed synthetic installed-cli metadata; actual CLI integration untested; installedCliStarts=' + counters.installedCliStarts + '; nativeActions=' + counters.nativeActions + '; version=' + context.browser()!.version() + '; screenshot=' + screenshot);
 });

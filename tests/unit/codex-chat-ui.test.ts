@@ -1,3 +1,5 @@
+import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model.js';
+import type { WorkflowDraftProvenance } from '../../apps/desktop/src/workflow-panel.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
@@ -321,6 +323,7 @@ async function openAdvancedSettings(page:any) {
 // Private document fixture; incoming state is decoded through the real API.
 // No browser, socket, provider process or native action is used by these tests.
 class ContextElement extends EventTarget {
+  tagName=''; focusCount=0; focus():void{this.focusCount++;}
   children: ContextElement[] = []; value = ''; checked = false; disabled = false;
   hidden = false; open = false; className = ''; type = ''; dataset: Record<string, string> = {};
   scrollHeight = 0; scrollTop = 0; clientHeight = 0;
@@ -334,13 +337,14 @@ class ContextElement extends EventTarget {
   setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
   querySelectorAll(): ContextElement[] { return []; }
+  showModal(): void { this.open = true; }
   close(): void { this.open = false; }
 }
 class ContextDocument extends EventTarget {
   private elements = new Map<string, ContextElement>();
   getElementById(id: string): ContextElement {
     let element = this.elements.get(id);
-    if (!element) { element = new ContextElement(); this.elements.set(id, element); }
+    if (!element) { element = new ContextElement(); if(id==='codex-composer')element.tagName='TEXTAREA'; this.elements.set(id, element); }
     return element;
   }
   createElement(): ContextElement { return new ContextElement(); }
@@ -425,4 +429,109 @@ test('synthetic native context decoder rejects missing sessions and cross-projec
   const f = contextChat(initial); let changes = 0; f.chat.subscribeWorkflowContextChange(() => changes++); await f.chat.refresh();
   const invalid = structuredClone(initial); invalid.nativeHistory!.projectPath += '-other'; f.set(invalid); await f.chat.refresh();
   assert.equal(changes, 1); assert.equal(f.chat.workflowConversation()!.threadId, 'cached-thread', 'invalid read cannot replace the last trusted identity');
+});
+
+
+function attestedState():ChatState {
+  const initial=state();initial.snapshot!.selection={model:'fixture-sol',effort:'ultra'};initial.snapshot!.thread=thread();
+  initial.workflowModel=workflowNativeModel(initial)!.proof;return initial;
+}
+test('host model proof is exact to project/connection/thread/session/catalogue, with no fallback for older clients',()=>{
+  const original=attestedState();assert.deepEqual(readCodexState(original).workflowModel,original.workflowModel);
+  assert.equal(readCodexState(state()).workflowModel,undefined);
+  for(const patch of [{version:2},{source:'browser-invented'},{projectPath:PROJECT+'-other'},{connectionId:randomUUID()},{threadId:'other'},{sessionId:null},{provenance:'installed-cli'},{entitlement:'verified'},
+    {selection:{...original.workflowModel!.selection,provider:'claude'}},{selection:{...original.workflowModel!.selection,model:'picker-sol'}},{selection:{...original.workflowModel!.selection,effort:'high'}},
+    {selection:{...original.workflowModel!.selection,connectionRevision:'saved-preference'}},{extra:true}]) {
+    assert.throws(()=>readCodexState({...original,workflowModel:{...original.workflowModel,...patch}}));
+  }
+  assert.throws(()=>readCodexState({...original,displayLimited:true}));
+  assert.throws(()=>readCodexState({...original,snapshot:null}));
+});
+test('attested active model enables idle selection and invalidates workflows only on real proof changes',async()=>{
+  const initial=attestedState(),f=contextChat(initial),draft='One chat, same unsent draft';f.doc.getElementById('codex-composer').value=draft;
+  let changes=0;f.chat.subscribeWorkflowContextChange(()=>changes++);await f.chat.refresh();
+  assert.deepEqual(f.chat.workflowModelSelection(),initial.workflowModel!.selection);assert.equal(changes,1);
+  assert.equal(f.doc.getElementById('codex-model').disabled,false);assert.equal(f.doc.getElementById('codex-effort').disabled,false);
+  initial.snapshot!.models[0]!.displayName='Metadata label only';initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await f.chat.refresh();assert.equal(changes,1);
+  initial.snapshot!.thread!.selection={model:'fixture-sol',effort:'low'};initial.snapshot!.selection={model:'fixture-sol',effort:'low'};initial.workflowModel=workflowNativeModel(initial)!.proof;
+  f.set(initial);await f.chat.refresh();assert.equal(changes,2);assert.equal(f.chat.workflowModelSelection()!.effort,'low');
+  initial.snapshot!.thread!.turnStatus='inProgress';f.set(initial);await f.chat.refresh();assert.equal(changes,2);
+  assert.equal(f.doc.getElementById('codex-model').disabled,true);assert.equal(f.doc.getElementById('codex-select').disabled,true);
+  assert.equal(f.doc.getElementById('codex-composer').value,draft);assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+
+test('an already-open write-grant confirmation cannot authorize a changed model or effort',async()=>{
+  const initial=attestedState(),f=contextChat(initial);
+  await f.chat.refresh();
+  const controller=f.chat as unknown as {openGrant():void;confirm():Promise<void>};
+  controller.openGrant();assert.equal(f.doc.getElementById('codex-confirm').open,true);
+  f.doc.getElementById('codex-confirm-check').checked=true;
+  initial.snapshot!.thread!.selection={model:'fixture-sol',effort:'low'};initial.snapshot!.selection={model:'fixture-sol',effort:'low'};
+  initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await f.chat.refresh();
+  assert.equal(f.doc.getElementById('codex-confirm-submit').disabled,true);
+  await controller.confirm();
+  assert.match(f.doc.getElementById('codex-confirm-warning').textContent,/scope or preview changed/);
+  assert.equal(f.chat.workflowModelSelection()!.effort,'low');
+  assert.ok(f.calls.every(c=>c.method==='GET'),'No stale write grant was dispatched');
+});
+
+function workflowOrigin(value:ChatState):WorkflowDraftProvenance {
+  return {projectPath:value.projectPath,projectId:'a'.repeat(64),workflowId:'fixture-workflow',workflowRevision:3,stepKey:'requirements',
+    conversation:{provider:'codex',threadId:value.snapshot!.thread!.threadId,sessionId:value.snapshot!.thread!.sessionId},model:{...value.workflowModel!.selection}};
+}
+
+test('workflow draft provenance is detached, preserves original text, and blocks mismatched appends',async()=>{
+  const initial=attestedState(),f=contextChat(initial);await f.chat.refresh();
+  f.doc.getElementById('codex-composer').value='Human unsent text.  ';
+  const origin=workflowOrigin(initial);assert.equal(f.chat.appendWorkflowDraft('Prepared workflow instructions',origin),true);
+  const expected='Human unsent text.  \n\nPrepared workflow instructions';assert.equal(f.doc.getElementById('codex-composer').value,expected);
+  const mutable=origin as unknown as {projectPath:string;model:{effort:string}};mutable.projectPath+='-mutated';mutable.model.effort='low';
+  assert.equal(f.doc.getElementById('codex-submit').disabled,false,'Caller mutation cannot alter tracked provenance');
+  assert.equal(f.chat.appendWorkflowDraft('Wrong context',origin),false);assert.equal(f.doc.getElementById('codex-composer').value,expected);
+  assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('workflow drafts cannot submit after thread, session, project or model changes; every byte stays unsent',async()=>{
+  for(const change of ['thread','session','project','model'] as const){
+    const initial=attestedState(),f=contextChat(initial);await f.chat.refresh();
+    assert.equal(f.chat.appendWorkflowDraft('Pinned original workflow text 🧩',workflowOrigin(initial)),true);
+    const draft=f.doc.getElementById('codex-composer').value,next=structuredClone(initial);
+    if(change==='thread')next.snapshot!.thread!.threadId+='-other';
+    if(change==='session')next.snapshot!.thread!.sessionId+='-other';
+    if(change==='project')next.projectPath+='-other';
+    if(change==='model'){next.snapshot!.thread!.selection.effort='low';next.snapshot!.selection!.effort='low';}
+    next.workflowModel=workflowNativeModel(next)!.proof;f.set(next);await f.chat.refresh();
+    assert.equal(f.doc.getElementById('codex-submit').disabled,true,change);
+    assert.equal(f.doc.getElementById('codex-draft-review').hidden,false,change);
+    const controller=f.chat as unknown as {dispatch(action:string,fields:Record<string,unknown>):Promise<void>};
+    await controller.dispatch('turn-start',{threadId:next.snapshot!.thread!.threadId,text:draft});
+    assert.equal(f.doc.getElementById('codex-composer').value,draft);assert.ok(f.calls.every(c=>c.method==='GET'),'Mismatched context never sends a turn');
+  }
+});
+
+test('explicit workflow draft re-review changes no permission, moves no workflow and submits no turn',async()=>{
+  const initial=attestedState(),f=contextChat(initial);await f.chat.refresh();f.chat.appendWorkflowDraft('Reviewed complete draft',workflowOrigin(initial));
+  initial.snapshot!.thread!.threadId+='-different';initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await f.chat.refresh();
+  const controller=f.chat as unknown as {openDraftReview():void;confirm():Promise<void>};
+  controller.openDraftReview();assert.equal(f.doc.getElementById('codex-confirm').open,true);
+  assert.match(f.doc.getElementById('codex-confirm-preview').textContent,/Original workflow context/);assert.match(f.doc.getElementById('codex-confirm-preview').textContent,/Reviewed complete draft/);
+  f.doc.getElementById('codex-confirm-check').checked=true;await controller.confirm();
+  assert.equal(f.doc.getElementById('codex-submit').disabled,false);assert.equal(f.doc.getElementById('codex-composer').value,'Reviewed complete draft');
+  assert.equal(f.doc.getElementById('codex-draft-review').hidden,true);assert.equal(initial.snapshot!.thread!.writeGranted,false);
+  assert.ok(f.calls.every(c=>c.method==='GET'),'Review does not dispatch any native action');
+});
+
+test('draft text/context changes during re-review invalidate confirmation without losing text',async()=>{
+  for(const change of ['text','thread','model'] as const){
+    const initial=attestedState(),f=contextChat(initial);await f.chat.refresh();f.chat.appendWorkflowDraft('Original workflow draft',workflowOrigin(initial));
+    initial.snapshot!.thread!.threadId+='-different';initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await f.chat.refresh();
+    const controller=f.chat as unknown as {openDraftReview():void;confirm():Promise<void>};controller.openDraftReview();f.doc.getElementById('codex-confirm-check').checked=true;
+    if(change==='text')f.doc.getElementById('codex-composer').value+=' Changed by human.';
+    if(change==='thread')initial.snapshot!.thread!.threadId+='-again';
+    if(change==='model'){initial.snapshot!.thread!.selection.effort='low';initial.snapshot!.selection!.effort='low';}
+    initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await controller.confirm();
+    assert.equal(f.doc.getElementById('codex-submit').disabled,true,change);assert.match(f.doc.getElementById('codex-composer').value,/Original workflow draft/);
+    assert.match(f.doc.getElementById('codex-confirm-warning').textContent,/scope or preview changed/);assert.ok(f.calls.every(c=>c.method==='GET'));
+  }
 });

@@ -4,7 +4,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { AssetError, normalizeRequest, type AssetInput } from '../../../packages/asset-pipeline/src/index.js';
-import { ARTIFACT_DOWNLOAD_TIMEOUT_MS, type AssetService } from './asset-service.js';
+import { ARTIFACT_DOWNLOAD_TIMEOUT_MS, HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord } from './asset-service.js';
+import type { AssetConversationHost } from './asset-conversation-host.js';
+import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
 
 function object(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ArcaneError('INPUT', 'Expected a JSON object.');
@@ -73,7 +75,37 @@ async function discardRejectedAssetBody(request: IncomingMessage): Promise<boole
     drain();
   });
 }
-export function assetRoutes(service: AssetService) {
+export function assetRoutes(service: AssetService, conversationHost?: AssetConversationHost) {
+  const conversationJobs = (limit: number, after: string | null) => {
+    if (!conversationHost) throw new ArcaneError('ASSET_CONVERSATION_UNAVAILABLE', 'Chat-specific asset history is unavailable in this host.');
+    const first = conversationHost.listHuman({ limit: 1, ...(after === null ? {} : { after }) });
+    const result = { projectId: first.projectId, projectPath: first.projectPath, conversation: first.conversation,
+      jobs: [] as AssetJobRecord[], nextCursor: null as string | null, byteLimit: HISTORY_PAGE_BYTES };
+    const scope = JSON.stringify([first.projectId, first.projectPath, first.conversation]);
+    const known = new Map(service.jobs().map(job => [job.jobId, job]));
+    let page = first, cursor = after;
+    // Walk association pages, not global job pages; a foreign chat is never exposed.
+    for (let inspected = 0; inspected < limit; inspected++) {
+      if (JSON.stringify([page.projectId, page.projectPath, page.conversation]) !== scope)
+        throw new ArcaneError('ASSET_CONVERSATION_STALE', 'The active chat changed during the asset history read.');
+      const binding = page.items[0];
+      if (!binding) { result.nextCursor = null; break; }
+      const job = known.get(binding.id);
+      if (job) {
+        const candidate = { ...result, jobs: [...result.jobs, job], nextCursor: page.nextCursor };
+        if (Buffer.byteLength(JSON.stringify(candidate)) > HISTORY_PAGE_BYTES) {
+          if (!result.jobs.length) throw new ArcaneError('HISTORY_LIMIT', 'One asset history record exceeds the response bound; inspect its retained journal.');
+          result.nextCursor = cursor; break;
+        }
+        result.jobs.push(job);
+      }
+      result.nextCursor = page.nextCursor;
+      if (page.nextCursor === null || inspected + 1 === limit) break;
+      cursor = page.nextCursor; page = conversationHost.listHuman({ limit: 1, after: cursor });
+    }
+    if (Buffer.byteLength(JSON.stringify(result)) > HISTORY_PAGE_BYTES) throw new ArcaneError('HISTORY_LIMIT', 'Asset conversation history exceeds its byte bound.');
+    return result;
+  };
   // Keep admission until verification AND socket delivery settle, including after a timeout.
   let downloading = false;
   return async (request: IncomingMessage, response: ServerResponse, url: URL, controlToken: string, origin: string, agentToken?: string): Promise<boolean> => {
@@ -96,6 +128,9 @@ export function assetRoutes(service: AssetService) {
       if (!human && !agent) throw new ArcaneError('AUTH', 'Supply the local launcher control or agent bearer.');
       if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new ArcaneError('ORIGIN', 'Cross-origin asset access refused.');
       const route = url.pathname.slice('/v1/assets/'.length);
+      if (route === 'conversation-jobs' || route === 'conversation-start') {
+        assertLearningHumanRequest(request, controlToken, origin, agentToken ?? '');
+      }
       if (route === 'artifact') {
         if (!human || agent) throw new ArcaneError('AUTH', 'Artifact downloads require the distinct human launcher control bearer.');
         const site = request.headers['sec-fetch-site'];
@@ -107,11 +142,18 @@ export function assetRoutes(service: AssetService) {
           if (referrerUrl.origin !== origin || referrerUrl.username || referrerUrl.password) throw new ArcaneError('ORIGIN', 'Cross-site artifact referrer refused.');
         }
       }
-      const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET'], ['artifact', 'GET']]).get(route);
+      const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['conversation-jobs', 'GET'], ['conversation-start', 'POST'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET'], ['artifact', 'GET']]).get(route);
       if (!method) { await send(404, { error: 'NOT_FOUND', message: 'Unknown asset endpoint.' }); return true; }
       if (request.method !== method) { response.setHeader('Allow', method); await send(405, { error: 'METHOD', message: 'Expected ' + method + '.' }); return true; }
-      const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' || route === 'artifact' ? ['jobId', 'path'] : route === 'jobs' ? ['limit', 'after'] : [];
+      const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' || route === 'artifact' ? ['jobId', 'path'] : route === 'jobs' || route === 'conversation-jobs' ? ['limit', 'after'] : [];
       for (const key of url.searchParams.keys()) if (!allowedQuery.includes(key) || url.searchParams.getAll(key).length !== 1) throw new ArcaneError('INPUT', 'Unexpected or duplicate query parameter.');
+      if (route === 'conversation-jobs') {
+        const rawLimit = url.searchParams.get('limit');
+        if (rawLimit !== null && !/^[1-9][0-9]?$/.test(rawLimit)) throw new ArcaneError('INPUT', 'History limit must be 1..64.');
+        const limit = rawLimit === null ? 32 : Number(rawLimit);
+        if (limit > 64) throw new ArcaneError('INPUT', 'History limit must be 1..64.');
+        await send(200, conversationJobs(limit, url.searchParams.get('after'))); return true;
+      }
       if (route === 'jobs') {
         const rawLimit = url.searchParams.get('limit');
         if (rawLimit !== null && !/^[1-9][0-9]?$/.test(rawLimit)) throw new ArcaneError('INPUT', 'History limit must be 1..64.');
@@ -161,13 +203,20 @@ export function assetRoutes(service: AssetService) {
         response.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'" });
         response.end(bytes); return true;
       }
-      const input = object(await readAssetJson(request, route === 'start'));
-      if (route === 'probe') { exactKeys(input, []); await send(200, { probe: await service.probe() }); }
+      const input = object(await readAssetJson(request, route === 'start' || route === 'conversation-start'));
+      if (route === 'conversation-start') {
+        if (!conversationHost) throw new ArcaneError('ASSET_CONVERSATION_UNAVAILABLE', 'Chat-specific asset creation is unavailable in this host.');
+        const result = await conversationHost.startHuman(input);
+        const job = service.jobs().find(item => item.jobId === result.jobId);
+        if (!job) throw new ArcaneError('ASSET_CONVERSATION_UNKNOWN', 'Asset creation was observed but its current record is unavailable; inspect retained jobs without retrying.');
+        await send(202, { ...result, job });
+      } else if (route === 'probe') { exactKeys(input, []); await send(200, { probe: await service.probe() }); }
       else if (route === 'start') { normalizeRequest(input); await send(202, { job: await service.start(input as unknown as AssetInput) }); }
       else { exactKeys(input, ['jobId']); await send(200, { job: await service.cancel(input.jobId) }); }
     } catch (error) {
+      if (error instanceof LearningHttpError) { await send(error.status, { error: error.code, message: error.message }); return true; }
       const known = error instanceof AssetError || error instanceof ArcaneError, code = known ? error.code : 'INTERNAL';
-      const status = code === 'AUTH' ? 401 : ['HOST', 'ORIGIN'].includes(code) ? 403 : code === 'NOT_FOUND' ? 404 : code === 'BUSY' ? 409 : ['JOB_STATE', 'RECONCILIATION', 'HISTORY_LIMIT', 'CLOSED'].includes(code) ? 409 : ['BODY_LIMIT', 'ARTIFACT_LIMIT'].includes(code) ? 413 : ['BODY_TIMEOUT', 'ARTIFACT_TIMEOUT'].includes(code) ? 408 : ['HASH', 'MANIFEST', 'ARTIFACT', 'RECOVERY', 'PERSISTENCE'].includes(code) ? 422 : known ? 400 : 500;
+      const status = code === 'AUTH' ? 401 : ['HOST', 'ORIGIN'].includes(code) ? 403 : code === 'NOT_FOUND' ? 404 : code === 'BUSY' ? 409 : ['JOB_STATE', 'RECONCILIATION', 'HISTORY_LIMIT', 'CLOSED', 'ASSET_CONVERSATION_UNAVAILABLE', 'ASSET_CONVERSATION_REQUIRED', 'ASSET_CONVERSATION_STALE', 'ASSET_CONVERSATION_UNKNOWN'].includes(code) ? 409 : ['BODY_LIMIT', 'ARTIFACT_LIMIT'].includes(code) ? 413 : ['BODY_TIMEOUT', 'ARTIFACT_TIMEOUT'].includes(code) ? 408 : ['HASH', 'MANIFEST', 'ARTIFACT', 'RECOVERY', 'PERSISTENCE'].includes(code) ? 422 : known ? 400 : 500;
       if (!response.headersSent && !response.destroyed) { await send(status, { error: code, message: known ? error.message : 'Local asset operation failed; inspect retained job evidence.' }); }
     }
     return true;

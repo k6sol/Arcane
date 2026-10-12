@@ -2,7 +2,8 @@
 
 The controller operates inside the existing conversation. Its implementation and
 fixtures are `apps/desktop/src/workflow-panel.ts` and
-`tests/unit/workflow-panel.test.ts`; parent owns that controller and styling.
+`tests/unit/workflow-panel.test.ts`; this helper change owns only those two files and this document. Parent owns
+styling, host/routes and same-composer context/append integration.
 Frontend context wiring lives in `apps/desktop/src/studio.ts` and
 `apps/desktop/src/codex-chat.ts`, with synthetic regressions in
 `tests/unit/codex-chat-ui.test.ts` and `tests/unit/workspace-unified.test.ts`.
@@ -29,6 +30,7 @@ const options: WorkflowPanelOptions = {
   getProjectPath: () => currentProjectPath,
   getNativeConversation: () => observedNativeConversation,
   getModelSelection: () => observedModelSelection,
+  appendToDraft: (text, provenance) => existingChat.appendWorkflowDraft(text, provenance),
   subscribeContextChange: invalidate => contextChanges.subscribe(invalidate),
 };
 const workflow = startWorkflowPanel(document, options); // inert
@@ -127,13 +129,17 @@ Actual project, thread, session or binding absence changes do. Metadata reads an
 reconnect observations preserve the exact unsent composer text; they never create,
 resume, run inference in, or grant writes to a native conversation.
 
-**Model proof is currently unavailable.** Native snapshot selection identifies a
-model/effort but exposes no connectionRevision matching the workflow policy's
-server-side catalogue. The installed options omit getModelSelection, so recipe
-model remains null. Generic saved preferences, connection UUIDs, browser-generated
-hashes and timestamps are not substituted for an active native catalogue revision.
-A future parent-owned proof contract must attest that exact mapping before wiring
-the model callback.
+**Active model proof is host-attested.** The installed Codex route projects only a
+ready, configured native thread's exact model/effort and reported catalogue. The
+host computes a bounded SHA-256 revision over its native connection, canonical
+project/thread/session, subscription metadata, active selection and catalogue.
+The browser validates this projection against the same snapshot and never derives
+a revision from UUIDs, saved preferences, timestamps or labels. No proof means
+model:null; no fallback is selected. Changing the model/catalogue invalidates
+prepared workflow decisions. The host rechecks the exact current proof at recipe
+preview and confirmation. This projection grants no write permission or model turn,
+and entitlement remains unverified. A changed model revokes native write grants;
+the next user message applies its exact pair to that same idle native thread.
 
 Parent-owned GET get/current-flow attestation should attach the exact trusted
 canonical top-level conversation only for bound workflows. The frontend consumes
@@ -160,17 +166,20 @@ are constructed inside it; parent should not construct duplicates:
 | workflow-engine | roblox / blender |
 | workflow-title | Human title |
 | workflow-prompt | Human prompt |
-| workflow-scope | One relative scope per line |
+| workflow-scope | Exact files/directories; include every evidence output before creation |
+| workflow-evidence-paths | Optional client-only planned output paths; never added to scope |
+| workflow-scope-help | Scope/evidence guidance linked by aria-describedby |
 | workflow-step | Existing recipe step selection |
 | workflow-action | gate / handoff / review / reconcile |
 | workflow-gate | Selected step's actual gates |
 | workflow-decision | approved / rejected |
 | workflow-evidence | Exact actual-evidence submission JSON |
+| workflow-files-<role> | Selected non-verification step role paths |
 | workflow-resolution | halt / accept-observed |
 | workflow-mapping | Actual WorkStore mapping for interrupted creation |
 
 Buttons use `data-workflow-action` values `refresh`, `inspect`, `recipe`,
-`decision`, `confirm`, `discard`, and `receipt`. They are semantic `type=button` controls.
+`decision`, `confirm`, `discard`, `receipt`, `evidence-files`, and `draft`. They are semantic `type=button` controls.
 Form submissions are prevented. HTTP actions require trusted browser click
 activation; synthetic events cannot request previews or confirm commands.
 Inherited typography, charcoal surfaces, square controls, thin rules, and a red
@@ -189,12 +198,15 @@ Same-origin routes are used without query strings:
 - POST `/v1/workflows/execute`: exactly
   `{ preview: completePreviouslyReturnedPreview, idempotencyKey }`.
 - POST `/v1/workflows/receipt`: that same original envelope, but observation only; no replay or binding write.
+- POST `/v1/workflows/evidence`: read-only file references; see exact helper contract below.
+- POST `/v1/workflows/draft`: read-only same-conversation step text; see exact helper contract below.
 
 Each request carries `Authorization: Bearer <human-control-token>`. POST uses
 `application/json`; browser supplies same-origin Origin. Cache is no-store,
 credentials are same-origin, redirects are errors, referrer policy is no-referrer.
 Responses must be HTTP 200 UTF-8 JSON. GETs have no body. Transport bounds the
-actual decoded stream to 4 MiB, strictly decodes UTF-8, checks declared size, and
+actual decoded stream to 4 MiB (512 KiB for evidence/draft helpers), strictly
+decodes UTF-8, checks declared size, and
 cancels rejected/stalled streams. Requests, including the complete execute envelope,
 are bounded to 128 KiB, depth 16, and 16,000 nodes. Invalid/prototype data fails
 closed. Error response bodies and exception details are not exposed in the UI.
@@ -282,6 +294,162 @@ retries a mutation, or treats an unrelated current workflow as receipt proof.
 Receipts are memory-only (up to 32 retained); teardown/reload requires durable host
 inspection. No token, preview, receipt, or native identifier uses localStorage.
 
+## Read-only file evidence and same-chat draft helpers
+
+These helpers do not execute workflow commands. Their buttons require a trusted
+human click, an inspected active workflow, a matching bound conversation, no
+interrupted operation or unknown command, and reported human-handoff readiness.
+The selected step stays selected; the panel never chooses the next ready step.
+
+### Scope planning before creation
+
+Every produced brief, requirements, plan, review, patch/export/preview/report and
+other evidence file must match a listed scope file or fall inside a listed
+directory. This guidance appears before creating a workflow. A narrow scope
+containing only a code target does not permit separate evidence files.
+
+Optional #workflow-evidence-paths provides client-only preflight for up to 20
+planned relative output paths. Out-of-scope entries prevent the preview request
+and identify the path. This list sends no extra HTTP fields, writes no file and
+**never adds to or broadens workflow scope or permissions**. To allow more outputs,
+the human must edit the exact scope and review its normal preview. An empty
+preflight list is not proof that all future outputs fit.
+
+Actual file-helper paths and explicitly entered manual submission artifact paths
+are checked against the selected step's existing scope before HTTP. This is
+lexical preflight, not filesystem authority; host private-path, directory/link,
+current-byte and policy checks remain authoritative.
+
+### Prepare evidence from files
+
+Select Handoff and a non-verification step. Each required evidence role receives
+a labelled paths textarea, one relative path per line. Enter at least one path
+per required role; the combined request is limited to 20 unique paths. Private,
+absolute, traversal and malformed paths are refused locally; the host remains
+authoritative for filesystem exclusions and actual bytes.
+
+`data-workflow-action="evidence-files"` / **Prepare evidence from files** sends
+one POST `/v1/workflows/evidence`, with no query string:
+
+```json
+{"workflowId":"<inspected id>","stepKey":"<selected key>","files":[{"path":"<normalized relative path>","role":"<required role>"}]}
+```
+
+Required response: `{projectId, workflowId, stepKey, workflowRevision,
+conversation?, submission}`. The revision must equal the inspected workflow's
+revision. In native-bound mode conversation is mandatory and must be exactly
+`{provider:'codex'|'claude-code', threadId, sessionId:string|null}`, matching the
+trusted callback's core identity. Callback connectionId/projectPath extras are
+not required on the server. Project-only compatibility fixtures may omit it.
+
+The submission uses the existing exact schema `{key, artifacts, subjectHashes,
+checks}`. Its key, normalized file paths and roles must match the request.
+Artifacts require valid host-returned SHA-256 hashes and positive bounded byte
+counts; subjectHashes must equal the inspected step's pinned input hashes.
+Checks must be empty: this helper cannot manufacture measurements or passes.
+Verification steps remain host-only. The validated response, including identity,
+revision and hashes, is displayed as text and only the submission fills
+`#workflow-evidence`. **Advanced evidence JSON** remains editable. No preview,
+execute, review, gate approval or completion follows automatically.
+
+Role controls use `#workflow-files-<role>`; they are replaced only when the
+selected workflow/step/role set changes. They reuse the parent's existing CSS.
+
+Generated JSON is pinned in memory to project/workflow/step/revision, trusted
+context fingerprint and canonical conversation, exact normalized requested
+file/role list, and the exact filled value. The detached pin is deeply frozen.
+Workflow, step, revision, context or source-path changes invalidate and clear it.
+Preview rechecks paths and value too, refusing silent DOM substitution. Late
+responses cannot overwrite changed paths or new manual input.
+
+All JSON, including manual fallback, belongs to its inspected workflow/step/
+revision/context and is cleared when that owner changes. The human must supply
+manual JSON again after a selection change; it cannot silently carry between
+workflows sharing step keys. Actual editing of generated JSON enters manual
+fallback for the current owner, retaining all schema, scope, subject and host
+checks. An unchanged input notification does not detach the generated pin.
+Same-owner/same-revision refresh preserves valid prepared evidence.
+
+### Add step to chat draft
+
+`data-workflow-action="draft"` / **Add step to chat draft** is disabled until the
+selected step is native-handoff, its assessment is pending/human-handoff with no
+blockers, and the exact recipe model equals the trusted `getModelSelection()`
+observation, including catalogue connectionRevision. Native provider codex maps
+to RequestedModel provider codex; claude-code maps to claude. A saved preference,
+recipe selection alone, generic model name or invented revision is not proof.
+An observed bound conversation and `appendToDraft` callback are also required.
+
+The trusted click sends one POST `/v1/workflows/draft` with only
+`{workflowId, stepKey}`. No prompt, model, file text or native identifier is
+accepted from the browser body. Required response:
+`{projectId, workflowId, stepKey, workflowRevision, conversation, model, text,
+requiresHumanSubmit:true, startsNativeTurn:false}`. Exact identity, inspected
+revision, conversation and model proof are checked before append. Extra fields,
+contradictory flags and stale revisions are refused.
+
+Text must be nonempty and at most **64 KiB UTF-8**, not 64 KiB characters. It is
+preserved intact or refused; the client never truncates it. The server owns
+construction from the actual recipe/scope/objective/acceptance and hash-pinned
+inputs, identifies evidence as untrusted, and grants no permission.
+
+Parent integration must supply `appendToDraft(text: string, provenance: WorkflowDraftProvenance): boolean` as an atomic
+append to the existing native composer: preserve unsent content, enforce its
+**128 KiB total UTF-8** cap before changing anything, dispatch only input, and
+never submit. Literal false leaves the existing draft unchanged and the panel
+explains unavailable/full. No duplicate composer, native API call, turn, resume,
+grant, workflow submission or audit completion is initiated by this helper.
+The panel does not claim native execution or a completed step.
+
+WorkflowDraftProvenance is exported; its second callback argument is REQUIRED on
+every production call. One-argument fixture functions remain TypeScript-assignable.
+Production parents must consume and track this metadata:
+
+~~~ts
+interface WorkflowDraftProvenance {
+  readonly projectPath: string;
+  readonly projectId: string;
+  readonly workflowId: string;
+  readonly workflowRevision: number;
+  readonly stepKey: string;
+  readonly conversation: Readonly<Pick<NativeWorkflowConversation, 'provider' | 'threadId' | 'sessionId'>>;
+  readonly model: Readonly<RequestedModel>;
+}
+~~~
+
+Only validated server fields and live trusted context form this exact whitelist.
+After response, generation, context, selected-step and revision checks,
+projectPath comes from live context; all other fields come from the validated
+response. Conversation contains only canonical provider/threadId/sessionId,
+without callback connection/project extras. The whole object and nested
+conversation/model are detached and deeply frozen. No token, authority, gate or
+permission is included.
+
+Parent owns CodexChat.appendWorkflowDraft(text, provenance) and its boot callback,
+provenance tracking before atomic append, stale-Send guards and explicit human
+context-review dialog. Pure append utility aliases remain parent-owned. The
+panel neither submits a native turn nor grants permissions.
+
+
+### Transport and stale-result contract
+
+Both helper POST bodies retain the **128 KiB** request bound. Their responses
+have a separate **512 KiB** bound (declared and streamed), fatal UTF-8 decoding,
+existing MIME/status/deadline checks and cancellation. Other workflow transport
+retains its 4 MiB response bound. No automatic retry or follow-up read occurs.
+
+Project, token, canonical native context or exact model changes, away/back
+notifications, any form edit, selected-step change, stop and cleanup abort and
+discard pending helper responses. A stale/missing workflowRevision must not fill
+JSON or append a draft; the user is asked to refresh explicitly. Read failures do
+not create execution receipts or clear existing execution uncertainty. Existing
+preview/explicit-confirm/unique-receipt/reconciliation behavior is unchanged.
+
+Integration needs: parent-provided `#workflow-panel`, the existing trusted context
+callbacks, optional exact active-model proof and atomic append callback, and the
+two read-only routes with the exact response fields above. Missing model proof or
+append callback intentionally leaves draft preparation unavailable. These private
+fixtures do not prove live model availability or packaged/browser rendering.
 ## Focused proof
 
 Strict isolated compilation inherits root ES2023/NodeNext options, strict,
@@ -289,10 +457,19 @@ noUncheckedIndexedAccess, exactOptionalPropertyTypes, and verbatimModuleSyntax,
 with explicit repository Node type roots. Only workflow-panel.test.ts and its
 import dependency closure are compiled to a unique Temp directory. The browser
 module uses type-only imports; it has no runtime daemon/storage/recipe dependency.
-Only the emitted workflow-panel.test.js is run with node --test. No shared build,
-package command, socket, provider, Studio action, or native model is started.
+Historical worker attempt (2026-10-12, **superseded**): 11 diagnostics occurred in
+then-in-progress workflow-evidence-builder.ts, first at line 36. They are not
+current source diagnostics. Parent subsequently reports current source clean
+with 114 explicit product source inputs, 107 assistance checks passed, plus 35 provenance-controller checks passed and
+four opt-in browser cases skipped. These are parent-reported results, not an
+independent compile or browser run claimed by this worker.
 
-47 offline tests exercise private document fixtures and HTTP Response/stream doubles:
+The worker's last executed private document/HTTP-double run passed 78 tests. The
+final unchanged-input regression was added afterward; current panel source has
+79 tests; the parent subsequently compiled current source and ran all 79 successfully. No shared build,
+package command, Git, installed CLI, Studio action or inference was run here.
+
+79 offline test cases cover private document fixtures and HTTP Response/stream doubles:
 inert lifecycle/cleanup and native draft preservation; real Event objects remaining
 untrusted; all three deliverables; exact preview/execute preservation and unique
 keys; model callback and context invalidation; late response cancellation;
@@ -301,11 +478,44 @@ schemas and host-verification exclusion; 202 unknown/explicit reconciliation and
 observed creation mapping; stopped dispatches; malformed/wrong-project/wrong-receipt/
 null-result/5xx/4xx outcomes; XSS text rendering; scope/evidence validation; exact
 routes and transport budgets; fatal UTF-8/MIME/status/size handling; deadlines;
-and absence of native execution, HTML sinks, polling, and browser storage.
+and absence of native execution, HTML sinks, polling, and browser storage. Added
+helper cases cover exact path/role/hash/subject validation, 64 KiB UTF-8 text,
+same-composer append/false preservation, disabled readiness/proof, stale revisions,
+512 KiB helper transport and late-response context/form/teardown cancellation.
+New cases cover cross-workflow/manual evidence reuse, revision and source-path/
+value pinning, same-revision refresh, late silent form changes, scope preflight
+without permission expansion, exact immutable detached callback provenance, and
+live context/form/workflow races.
 
 The fixture's trusted-action-shaped events exercise handler logic privately; they
-do not provide a production trust bypass. The 47 controller tests do not themselves prove browser rendering. Separate actual factory/HTTP tests cover the installed mount/module routes, exact conversation binding, restart replay and complete owned-resource cleanup. The installed context wiring refreshes only on canonical changes. No native model turn or Studio action is part of these proofs.
+do not provide a production trust bypass. These controller tests do not themselves prove browser rendering. Separate actual factory/HTTP tests cover the installed mount/module routes, exact conversation binding, restart replay and complete owned-resource cleanup. The installed context wiring refreshes only on canonical changes. No native model turn or Studio action is part of these proofs.
 
+## Parent-integrated validation (2026-10-12)
 
+Current-source strict product compilation passed with **114 explicit source files**.
+The combined actual-file helper/authenticated HTTP/panel/composer run passed **107/107**.
+Following independent review, the final panel's **79/79** fixtures and native projection/
+durable reconnect's **8/8** fixtures passed. The provenance/composer controller run
+passed **35 checks**, with four separate browser opt-ins skipped in that controller run.
 
+A separate real, owned Edge 155 renderer run passed the complete file preparation,
+separate preview/confirmation/review/gate flow, same-composer append, cross-thread
+submission block, human draft re-review, tool switching and reload in **33,816 ms**.
+It used actual local HTTP services, real owned files and durable work/association
+stores, but **borrowed synthetic installed-cli metadata**. No installed CLI client,
+model turn, provider probe, Studio operation or asset job was started. This establishes
+renderer/route integration, not provider entitlement or live Studio acceptance.
 
+Parent source also tracks appended workflow provenance in memory. A project, canonical
+thread/session or active-model mismatch disables sending and preserves every unsent
+byte. **Review draft context** opens a full-text comparison with original metadata and
+the current target. Its explicit checkbox/confirmation refreshes state, refuses races,
+and only re-reviews text; it cannot submit a turn, grant writes, move the workflow or
+approve evidence. A subsequent send remains a separate human action. Provenance is
+cleared on an empty composer or explicit turn submission, not on tool/context switching.
+No browser storage or copied native chat is created by this mechanism.
+
+Proof inventory: `runtime/verification/workflow-assistance-fba6a3c0-c3b0-4181-a06f-cc2bf8b4abf7/focused-evidence.json`.
+Actual renderer screenshot: `runtime/verification/workflow-browser-a95bc791-fe41-4f1d-87a1-00c4b6579169/workflow.png`.
+Full-product native workflows, asset execution, verifier registry and live engine
+acceptance remain open; passing these components must not close those gates.
