@@ -260,7 +260,7 @@
         "tests/unit/learning-panel.test.ts",
         "scripts/check-project-memory.mjs"
       ],
-      "note": "Reviewed opt-in local memory routes and Learn UI are integrated: human-only consent/verified evidence review, disable/erase, bounded untrusted context appended only to a draft. Store17/HTTP12/UI28 focused fixtures passed; current root release checks underway. Native history parser30 fixtures and earlier original Codex desktop record read verified; persistent history UI, auto reviewed collection, Claude synchronization and concurrent dual-client registration remain open. Actual real-daemon/Edge integration10/10 passed: opt-in/propose/verify/approve/context/disable/persistence,0nativeinference,0Studiooperations. Newwholeunit/browser461/461 passes withno skips."
+      "note": "Reviewed opt-in local memory routes and Learn UI are integrated: human-only consent/verified evidence review, disable/erase, bounded untrusted context appended only to a draft. Store17/HTTP12/UI28 focused fixtures passed; current root release checks underway. Native history parser30 fixtures and earlier original Codex desktop record read verified; persistent history UI, auto reviewed collection, Claude synchronization and concurrent dual-client registration remain open. Actual real-daemon/Edge integration10/10 passed: opt-in/propose/verify/approve/context/disable/persistence,0nativeinference,0Studiooperations. Newwholeunit/browser461/461 passes withno skips. Native publichistory service and UI integrated;27service/23UIfocusedtests pass plusactual Edge+humanHTTP fixture pass, withsameprojectthread scope, readonlyone-shot thread/read andpersistent redactedbounded cache. Single conversation/toolcontext UX isbeing refined fromhumanfeedback; nativefullmetadata/inference/Claude/release gates not inferred."
     },
     {
       "id": "DESKTOP-EXE-01",
@@ -281,7 +281,7 @@
         "tests/release/desktop-host.test.mjs",
         "tests/release/windows-package.test.mjs"
       ],
-      "note": "Initial development host13actualchecks passed, firstshow1574ms. Independent review found and fixed six startup/quiescence/path regressions;19focused fixtures pass. Packaging13tests; source mapping84inputs; actual final exe acceptance pending current pipeline. Unsigned development preview, not fullproduct signoff."
+      "note": "Old integrity-only WUAFf3 bundle diagnosed with missing ajv/dist/runtime and is not a working distribution. Dependency code/private-state separation fixed; packaging15/15, desktop20/20 and bounded verifier8/8 focused regressions pass. Actual current development host15/15 passed (ready1269ms, firstshow1836ms),0Studio/native inference. New packaged execution proof pending stable integrated sources. Unsigned development preview, not fullproduct signoff. Real normal user-profile launch failed first on Windows Store AppData virtualization; trusted exactMSIX Arcane path normalization now fixes it. Actual Arcane-Untitled native window responding withowned readydaemon;23desktop host regressiontests pass includinglogical/native split and controlledstartuperrors. Newpackage/wholepipeline stillpending."
     },
     {
       "id": "WORKFLOW-RECIPES-01",
@@ -298,6 +298,24 @@
         "docs/build/WORKFLOW_RECIPES.md"
       ],
       "note": "14offlinefixtures pass. Pure planning/readiness graph: no automatic model launch, Studio write, publishing or runner completion claim; runner integration remains open."
+    },
+    {
+      "id": "WORKFLOW-SERVICE-01",
+      "title": "Durable evidence-gated workflow coordinator and authenticated human routes",
+      "owner": "parent",
+      "state": "in_progress",
+      "dependsOn": [
+        "WORKFLOW-RECIPES-01",
+        "CORE-01"
+      ],
+      "acceptance": "Project-bound durable coordinator, exact human receipt authority, pinned evidence, no blind execution/replay; actual route/runtime lifecycle and production verifier acceptance",
+      "evidence": [
+        "apps/daemon/src/workflow-service.ts",
+        "packages/storage/src/workflow-store.ts",
+        "tests/unit/workflow-service.test.ts",
+        "tests/unit/workflow-store.test.ts"
+      ],
+      "note": "Coordinator/store22focusedtests pass. NewhumanHTTPauthority/routes underimplementation; production native/Studio/verification adapters remainrequired andnotautoapproved."
     }
   ],
   "updatedAt": "2026-10-12",

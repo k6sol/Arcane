@@ -300,7 +300,7 @@ test('sidebar and tabs navigate by literal ID, synchronize aria-current, and nev
   f.untouched(); shell.cleanup(); assert.equal(conversation.getAttribute('tabindex'), null);
 });
 
-test('drafts emit one bubbling input and open conversation setup preserves the draft and existing conversation', () => {
+test('drafts emit one bubbling input and conversation focus preserves the draft and existing conversation', () => {
   const f = fixture(), shell = startWorkspaceShell(f.doc.document);
   const draft = '<img src=x onerror=alert(1)>\nA draft, never an action.';
   f.draft.setAttribute('data-draft', draft); f.draft.click();
@@ -308,7 +308,7 @@ test('drafts emit one bubbling input and open conversation setup preserves the d
   assert.equal(f.doc.activeElement, f.composer); assert.equal(f.composer.scrollCount, 1);
   assert.equal(f.composer.children.length, 0);
   f.newChat.click(); assert.equal(f.composer.value, draft); assert.equal(f.inputs, 1);
-  assert.equal(f.newChat.getAttribute('aria-label'), 'Open conversation setup');
+  assert.equal(f.newChat.getAttribute('aria-label'), 'Focus current conversation'); assert.equal(f.doc.activeElement, f.composer);
   f.composer.remove(); f.draft.click(); f.newChat.click(); assert.equal(f.inputs, 1);
   f.untouched(); shell.cleanup();
 });

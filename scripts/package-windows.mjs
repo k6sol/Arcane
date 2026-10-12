@@ -31,19 +31,20 @@ const ELECTRON_REQUIRED = [
 ];
 const FORBIDDEN = /^(?:\.env(?:\..*)?|\.npmrc|auth\.json|credentials\.json|daemon\.json|preferences\.json|.*\.(?:log|key|pem|partial))$/i;
 const PRIVATE_DIRECTORIES = new Set(['runtime', '.runtime', '.git', '.codex', '.claude', '.agents', 'cache', '__pycache__', 'generated']);
-const DEPENDENCY_OMISSIONS = new Set(['node_modules', 'test', 'tests', '__tests__', 'tsconfig.json', 'tsconfig.build.json', 'tsconfig.esm.json', 'tsconfig.cjs.json', 'tsconfig.base.json', ...PRIVATE_DIRECTORIES]);
+const DEPENDENCY_CODE_DIRECTORIES = new Set(['runtime', 'cache', 'generated']);
+const DEPENDENCY_OMISSIONS = new Set(['node_modules', 'test', 'tests', '__tests__', 'tsconfig.json', 'tsconfig.build.json', 'tsconfig.esm.json', 'tsconfig.cjs.json', 'tsconfig.base.json', ...[...PRIVATE_DIRECTORIES].filter(name => !DEPENDENCY_CODE_DIRECTORIES.has(name))]);
 const MAX_FILES = 32768, MAX_FILE_BYTES = 512 * 1024 * 1024, MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 const canonical = value => JSON.stringify(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
 
-function safeRelative(path) {
+function safeRelative(path, dependency = path.startsWith('resources/product/node_modules/')) {
   if (typeof path !== 'string' || path.length > 1024 || path.includes('\\') ||
       !/^[A-Za-z0-9_@.+\-/]+$/.test(path)) throw new Error('Invalid Windows bundle path.');
   const segments = path.split('/');
   if (segments.some(part => !part || part === '.' || part === '..' || /[. ]$/.test(part) ||
       /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) ||
-      FORBIDDEN.test(part) || PRIVATE_DIRECTORIES.has(part.toLowerCase()))) throw new Error('Forbidden Windows bundle path.');
+      FORBIDDEN.test(part) || (PRIVATE_DIRECTORIES.has(part.toLowerCase()) && !(dependency && DEPENDENCY_CODE_DIRECTORIES.has(part.toLowerCase()))))) throw new Error('Forbidden Windows bundle path.');
   return path;
 }
 
@@ -210,14 +211,14 @@ async function productionDependencies(repository, pkg, lock) {
   }
   return [...selected.values()].sort((a, b) => a.path.localeCompare(b.path, 'en'));
 }
-async function walk(directory, visit, omit = () => false, prefix = '') {
+async function walk(directory, visit, omit = () => false, prefix = '', dependency = false) {
   await checkedPath(directory, true);
   for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
     const child = prefix ? prefix + '/' + entry.name : entry.name;
     if (omit(child, entry.name)) continue;
-    safeRelative(child);
+    safeRelative(child, dependency || child.startsWith('resources/product/node_modules/'));
     const target = join(directory, entry.name), stat = await lstat(target);
-    if (stat.isDirectory() && !stat.isSymbolicLink()) await walk(target, visit, omit, child);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) await walk(target, visit, omit, child, dependency);
     else { await checkedPath(target); await visit(target, child); }
   }
 }
@@ -316,7 +317,7 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
   await copy(join(release.directory, 'release-manifest.json'), 'resources/source-manifest.json');
   for (const dependency of dependencies) {
     await walk(join(repository, dependency.path), (source, path) => copy(source, 'resources/product/' + dependency.path + '/' + path),
-      (_path, name) => name.startsWith('.') || DEPENDENCY_OMISSIONS.has(name.toLowerCase()));
+      (_path, name) => name.startsWith('.') || DEPENDENCY_OMISSIONS.has(name.toLowerCase()), '', true);
   }
   for (const { source, sha256 } of sourceChecks) {
     if (hash(await regularBytes(source)) !== sha256) throw new Error('Packaging source changed; incomplete owned output retained for diagnosis.');

@@ -44,11 +44,13 @@ function filesystemFixture() {
     for (const part of parts.reverse()) put(part);
     return undefined;
   };
+  const syncRealpath = path => entry(path).logical ?? physical(path);
+  syncRealpath.native = physical;
   return {
     put,
     async: { lstat: async path => stat(path), realpath: async path => physical(path), mkdir: async path => mkdir(path) },
     sync: {
-      lstatSync: stat, realpathSync: physical, mkdirSync: mkdir,
+      lstatSync: stat, realpathSync: syncRealpath, mkdirSync: mkdir,
       existsSync: path => entries.has(key(path)),
       readdirSync: path => [...entries.values()].filter(value => key(win32.dirname(value.path)) === key(path) && key(value.path) !== key(path)).map(value => win32.basename(value.path)),
     },
@@ -333,3 +335,39 @@ test('regression: normal packaged asset state is accepted outside resources and 
 });
 
 
+
+test('private stop accepts a proven zero exit even if IPC close is delayed',async()=>{
+  const child=new EventEmitter();
+  Object.assign(child,{exitCode:null,connected:true,send(_message,cb){cb(null)},kill(){assert.fail('No kill after graceful exit')}});
+  const fixture=stopFixture(child),pending=fixture.stopOwned();child.exitCode=0;child.emit('exit',0,null);
+  assert.equal(await pending,true);
+});
+
+test('trusted profile supports only the known MSIX Arcane AppData mapping',()=>{
+  const fs=filesystemFixture(),roaming='C:\\Users\\Fixture\\AppData\\Roaming',local='C:\\Users\\Fixture\\AppData\\Local';
+  const original=roaming+'\\Arcane',actual=local+'\\Packages\\Vendor.App_123\\LocalCache\\Roaming\\Arcane';
+  const ensure=p=>{for(let current=win32.resolve(p);;current=win32.dirname(current)){fs.put(current);if(win32.dirname(current)===current)break;}};
+  ensure(roaming);ensure(local);ensure(actual);fs.put(original,{physical:actual,logical:original});
+  const checked=windowsPolicy(fs);
+  assert.equal(checked.prepareUserDirectory(original,{appData:roaming,localAppData:local}),actual);
+  fs.put(original,{physical:'C:\\Other\\Arcane'});ensure('C:\\Other\\Arcane');
+  assert.throws(()=>checked.prepareUserDirectory(original,{appData:roaming,localAppData:local}),/Unexpected/);
+  fs.put(original,{kind:'link',physical:actual});
+  assert.throws(()=>checked.prepareUserDirectory(original,{appData:roaming,localAppData:local}),/Unsafe/);
+});
+test('trusted profile does not admit unrelated leafs or redirected physical ancestors',()=>{
+  const fs=filesystemFixture(),roaming='C:\\Users\\Fixture\\AppData\\Roaming',local='C:\\Users\\Fixture\\AppData\\Local';
+  const ensure=p=>{for(let current=win32.resolve(p);;current=win32.dirname(current)){fs.put(current);if(win32.dirname(current)===current)break;}};
+  ensure(roaming);ensure(local);ensure(roaming+'\\Arcane');
+  const checked=windowsPolicy(fs);
+  assert.equal(checked.prepareUserDirectory(roaming+'\\Arcane',{appData:roaming,localAppData:local}),roaming+'\\Arcane');
+  assert.throws(()=>checked.prepareUserDirectory(roaming+'\\OtherApp',{appData:roaming,localAppData:local}),/trusted/);
+  fs.put(roaming,{kind:'link',physical:'C:\\Other'});
+  assert.throws(()=>checked.prepareUserDirectory(roaming+'\\Arcane',{appData:roaming,localAppData:local}),/direct/);
+});
+
+test('profile preparation errors are caught before lock and routed to controlled failure',()=>{
+  assert.match(mainSource,/catch \{ profilePreparationFailed = true; \}/);
+  assert.match(mainSource,/const locked = !profilePreparationFailed && app.requestSingleInstanceLock\(\)/);
+  assert.match(mainSource,/if \(profilePreparationFailed\) app.whenReady\(\).then\(\(\) => failStartup/);
+});

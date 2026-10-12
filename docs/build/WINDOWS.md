@@ -73,7 +73,8 @@ arcane-win32-x64-*/
       package.json
       package-lock.json
       dist/
-      apps/, packages/, plugin/, scripts/, skills/, workers/, docs/, tests/, ...
+      apps/, packages/, plugin/, scripts/, skills/, workers/, docs/, ...
+      [test source and compiled test payloads excluded]
       node_modules/            selected production packages only
   windows-manifest.json
 ~~~
@@ -158,3 +159,19 @@ application launch, provider/Studio/Blender operation, login or inference.
 The desktop has native Window controls, a File > Open project folder picker, Ctrl+O, reload/zoom/fullscreen commands, single-instance focus and bounded graceful shutdown. It uses private IPC to a bundled standalone Node daemon, not renderer-controlled processes. The renderer is sandboxed and context isolated with no Node, generic IPC, shell, file or arbitrary external navigation capability. App resources remain separate from per-user state/assets. Per-project ports persist to keep API-key connections stable; an occupied conflicting port fails rather than silently rotating existing keys.
 
 The executable smoke profile starts no model run or Studio operation. It captures the real workspace, verifies memory is off/project-scoped, confirms idle sessions/commands, sandbox/CSP and normal shutdown, then independently tests bundled-daemon parent-loss shutdown. This is executable launch proof, not a claim that every provider, asset workflow or live Studio feature is complete. The hash inventory is a local integrity check, not a cryptographic publisher signature.
+
+## Launch verifier recovery (12 October 2026)
+
+The earlier integrity-only WUAFf3 bundle was diagnosed as nonlaunching: broad directory exclusions dropped required ajv/dist/runtime implementation code. It must not be distributed as a working app. Locked third-party runtime/cache/generated code now remains in the dependency closure, without admitting Arcane runtime state or hidden credential/configuration directories. A focused packaging regression proves the distinction.
+
+The executable verifier now retains an outer progress.json and terminal process-outcome.json. Its app/ child directory begins empty and owns smoke reports; human tokens never enter verifier reports. Dedicated, bounded integrity workers run the full original guards before and after launch; successful before/after inventories also prove the executable unchanged, without retaining a second 246 MiB buffer. A fixed bundled-Node dependency-import probe runs before Electron.
+
+Windows IPC read streams can remain open after actual exit. Verifier helpers and desktop shutdown now use a proven process exit, with bounded stream drain in the verifier; a timeout alone is never accepted as process termination. The exit event disarms the deadline before that drain. No antivirus, sandbox, TLS, or operating-system protection is changed.
+
+Fresh development-host checks: all 15 passed, daemon ready 1269 ms, first display ready 1836 ms, isolated renderer and project memory off/scoped, no native lifecycle/Studio operations and clean shutdown. This is development-host evidence, not acceptance of a rebuilt executable. Final packaged proof is retained separately under runtime/verification/windows-executable-*/verification.json only when every actual check passes.
+
+## Windows Store AppData virtualization
+
+The normal desktop path is now verified independently from the disposable smoke profile. On this Windows Store host, synchronous compatibility realpath returns the logical AppData/Roaming/Arcane path, while native and asynchronous realpath reveal its OS-managed Packages/<package-id>/LocalCache/Roaming/Arcane backing directory. The trusted Electron profile helper recognizes only that exact Arcane layout, validates direct physical parents and rejects arbitrary redirects, links, sibling apps and unsafe paths. It changes no Windows, antivirus or permission settings and does not inspect provider credentials. Invalid profile setup is caught before acquiring the instance lock and reaches the controlled startup failure path.
+
+A real normal-user development window titled Arcane - Untitled is responding, backed by its own ready local Node daemon and persistent per-project state. This is normal profile/window evidence, not acceptance of the final rebuilt package or every provider feature. The 23 desktop host regressions include a faithful logical/native split fixture.

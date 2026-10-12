@@ -285,3 +285,15 @@ test('key-format parser markers are not material, but actual encoded and unfinis
  assert.equal(hasPrivateKeyMaterial('-----BEGIN PRIVATE KEY-----'),false);
  for(const format of ['','RSA ','EC ','DSA ','ENCRYPTED ','OPENSSH ']) for(const newline of ['\n','\\n','\\\\n']) assert.equal(hasPrivateKeyMaterial('-----BEGIN '+format+'PRIVATE KEY-----'+newline+'A'.repeat(64)),true);
 });
+
+test('production runtime, cache and generated code are not private Arcane runtime state',async t=>{
+  const {write,options}=await fixture(t);
+  for(const dir of ['runtime','cache','generated'])
+    await write('node_modules/helper-a/dist/'+dir+'/required.js','module.exports = 42;');
+  await write('runtime/product/private.txt','private Arcane state');
+  const result=await packageWindows(options),data=await manifest(result.directory);
+  for(const dir of ['runtime','cache','generated'])
+    assert.ok(data.files.some(f=>f.path==='resources/product/node_modules/helper-a/dist/'+dir+'/required.js'));
+  assert.ok(data.files.every(f=>!f.path.includes('resources/product/runtime/')));
+  await verifyWindowsBundle(result.directory);
+});

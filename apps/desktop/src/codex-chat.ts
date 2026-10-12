@@ -10,7 +10,7 @@ const object = (value: unknown): value is Record<string, unknown> => typeof valu
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f]/.test(value);
 const integer = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-const ACTIONS = ['connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','approval'];
+const ACTIONS = ['connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','approval','history-load'];
 const IDLE = ['idle','completed','failed','interrupted'];
 type ChatEvent = SessionEvent;
 export type ChatSnapshot = Omit<Snapshot, 'events'> & { events: ChatEvent[] };
@@ -64,7 +64,7 @@ export function readCodexState(value: unknown): ChatState {
 }
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): CodexAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
-  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'] };
+  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
   const keys = accepted[action]!;
   if (Object.keys(fields).length !== keys.length || keys.some(key => !Object.hasOwn(fields,key))) throw new Error('Native action fields must match the exact browser envelope.');
   const s = state?.snapshot;
@@ -281,6 +281,8 @@ export class CodexChat {
 
   private render() {
     const s=this.snapshot(),t=s?.thread;
+    const notice=this.el('codex-notice').textContent??'';
+    if(['Connect your local CLI when you’re ready.','No connection or model request is started automatically.','Choose a model to start this conversation.'].includes(notice)) this.text('codex-notice',s?.connected?(t?'Continue in this conversation.':s.selection?'Start your conversation when you’re ready.':'Choose a model to start this conversation.'):'Connect your local CLI when you’re ready.');
     const welcome=this.doc.getElementById('welcome-connect');if(welcome)welcome.textContent=s?.connected?(t?'Conversation settings':s.selection?'Start your conversation':'Choose your model & start'):'Connect your local CLI';
     this.text('codex-status',this.state?.connecting?'Connecting':this.state?.closing?'Disconnecting':s?.connected?s.provenance==='spawned-node-fixture'?'Fixture connected':'Native CLI connected':s?'Native CLI disconnected':'Not connected');
     this.text('codex-scope',s?'Connection '+s.connectionId+(t?'\nThread '+t.threadId+'\nTurn '+(t.turnId??'Not started'):'\nNo thread started'):'No native connection selected.');

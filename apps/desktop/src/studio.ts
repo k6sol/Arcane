@@ -1,3 +1,4 @@
+import { CodexHistoryPanel } from './codex-history.js';
 import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
 import { CodexChat, CodexChatApi } from './codex-chat.js';
@@ -418,6 +419,8 @@ const STATE_EXPLANATIONS: Record<StudioCommand['state'], string> = {
 const stateTone = (state: StudioCommand['state']) => state === 'succeeded' ? 'good' : ['failed', 'cancelled'].includes(state) ? 'error' : 'warning';
 
 export class StudioWorkbench {
+  private canonicalProjectPath = '';
+  historyProjectPath(): string { return this.canonicalProjectPath; }
   private nativeObservation: NativeObservation | null = null;
   private nativeInventoryReady = false;
   private nativeObserverBusy = false;
@@ -598,6 +601,10 @@ export class StudioWorkbench {
     const workRead = Promise.allSettled([this.refreshWork(), this.refreshAssets(), this.refreshStudioKeys()]);
     const reads = await Promise.allSettled([this.api.sessions(), this.api.product(), ...(capturedSession ? [this.api.commands(capturedSession)] : [])]);
     try {
+      // Project/chat metadata does not depend on Studio availability.
+      const product = reads[1]!;
+      if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
+      else { this.canonicalProjectPath = ''; this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       const sessionRead = reads[0]!;
       if (sessionRead.status === 'rejected') throw sessionRead.reason;
       const sessionData = sessionRead.value as { sessions: StudioSession[] };
@@ -605,9 +612,6 @@ export class StudioWorkbench {
       this.sessions = sessionData.sessions;
       this.online = true;
       this.renderSessions();
-      const product = reads[1]!;
-      if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
-      else { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       if (capturedSession && capturedSession === this.sessionId) {
         const commandRead = reads[2]!;
         if (commandRead.status === 'rejected') throw commandRead.reason;
@@ -638,6 +642,7 @@ export class StudioWorkbench {
   }
 
   private renderProduct(state: ProductState) {
+    this.canonicalProjectPath = typeof state.projectPath === 'string' && state.projectPath.length <= 4096 && !/[\x00-\x1f]/.test(state.projectPath) ? state.projectPath : '';
     this.text('project-path', typeof state.projectPath === 'string' ? state.projectPath : 'Project path unavailable');
     const counts = record(state.commandCounts) ? Object.entries(state.commandCounts).map(([key, value]) => key + ': ' + String(value)).join(' · ') : json(state.commandCounts) ?? 'Unavailable';
     this.text('command-counts', counts || 'No commands recorded');
@@ -1295,10 +1300,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token);
   const codexChat = new CodexChat(document, new CodexChatApi(token));
   const learningPanel = new LearningPanel(document, token); learningPanel.start();
+  const historyPanel = new CodexHistoryPanel(document, { getToken: () => token, getProjectPath: () => workbench.historyProjectPath() }); historyPanel.start();
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); } });
+  window.addEventListener('pagehide', () => { workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume(); } });
   void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

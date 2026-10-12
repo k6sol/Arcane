@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { JsonlTransport, type InternalProcess } from './transport.js';
 import { arcaneThreadIsIsolated } from './mcp-isolation.js';
@@ -18,9 +20,92 @@ function status(value: unknown): ThreadState['turnStatus'] {
   if (value === 'inProgress' || value === 'completed' || value === 'failed' || value === 'interrupted') return value;
   fail('PROTOCOL', 'Unknown turn status.');
 }
+
+/** One-shot public read path. The lifecycle transport deliberately has no history method. */
+function readHistoryProcess(spec: InternalProcess, bounds: Limits, scope: CodexHistoryScope) {
+  const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, shell: false, windowsHide: true, stdio: 'pipe' });
+  let done = false, stage = 1, bytes = 0, stderrBytes = 0, used = 0, serverRequests = 0;
+  const frame = Buffer.alloc(bounds.maxFrameBytes);
+  let resolveResult!: (value: NativeHistoryResult) => void;
+  let rejectResult!: (error: CodexClientError) => void;
+  const promise = new Promise<NativeHistoryResult>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>(resolve => { resolveClosed = resolve; });
+  child.once('exit', resolveClosed);
+  child.once('close', resolveClosed);
+  const finish = (error: CodexClientError | null, value?: NativeHistoryResult) => {
+    if (done) return;
+    done = true; clearTimeout(deadline);
+    child.kill();
+    const killTimer = setTimeout(() => { child.kill('SIGKILL'); resolveClosed(); }, 1000);
+    void closed.then(() => {
+      clearTimeout(killTimer);
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+      if (error) rejectResult(error); else resolveResult(value!);
+    });
+  };
+  const deadline = setTimeout(() => finish(new CodexClientError('TIMEOUT', 'Native history read timed out.', true)), bounds.requestTimeoutMs);
+  const send = (value: unknown) => {
+    if (done) return;
+    const wire = JSON.stringify(value) + '\n';
+    if (Buffer.byteLength(wire) > bounds.maxFrameBytes || child.stdin.writableLength + Buffer.byteLength(wire) > bounds.maxQueuedBytes) {
+      finish(new CodexClientError('FRAME_LIMIT', 'Native history request exceeds its bound.')); return;
+    }
+    child.stdin.write(wire);
+  };
+  const protocolError = () => finish(new CodexClientError('PROTOCOL', 'Invalid public native history response.', true));
+  child.on('error', () => finish(new CodexClientError('PROCESS_START', 'Native history process could not start.')));
+  child.on('exit', () => { if (!done) finish(new CodexClientError('DISCONNECTED', 'Native history process disconnected.', true)); });
+  child.stdin.on('error', () => { if (!done) finish(new CodexClientError('IO', 'Native history input disconnected.', true)); });
+  child.stdout.on('error', protocolError); child.stderr.on('error', protocolError);
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (done) return;
+    stderrBytes += chunk.length; bytes += chunk.length;
+    if (stderrBytes > bounds.maxStderrBytes || bytes > bounds.maxOutputBytes) finish(new CodexClientError('OUTPUT_LIMIT', 'Native history diagnostics exceeded their bound.', true));
+  });
+  child.stdout.on('data', (chunk: Buffer) => {
+    if (done) return;
+    bytes += chunk.length;
+    if (bytes > bounds.maxOutputBytes) { finish(new CodexClientError('OUTPUT_LIMIT', 'Native history output exceeded its bound.', true)); return; }
+    try {
+      let offset = 0;
+      while (offset < chunk.length && !done) {
+        const newline = chunk.indexOf(10, offset), end = newline < 0 ? chunk.length : newline;
+        const part = chunk.subarray(offset, end);
+        if (used + part.length > bounds.maxFrameBytes) { finish(new CodexClientError('FRAME_LIMIT', 'Native history frame exceeded its bound.', true)); return; }
+        part.copy(frame, used); used += part.length; offset = end + 1;
+        if (newline < 0) break;
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(frame.subarray(0, used)); used = 0;
+        if (!text.trim()) continue;
+        const message = object(JSON.parse(text));
+        if (typeof message.method === 'string') {
+          if (Object.hasOwn(message, 'id')) {
+            if (++serverRequests > bounds.maxServerRequests) { finish(new CodexClientError('OUTPUT_LIMIT', 'Native history callbacks exceeded their bound.', true)); return; }
+            if ((typeof message.id !== 'string' || Buffer.byteLength(message.id) > 256) && !Number.isSafeInteger(message.id)) { protocolError(); return; }
+            // No approval, tool execution or account callback can be accepted by a read.
+            send({ id: message.id, error: { code: -32601, message: 'Unsupported by the history reader.' } });
+          }
+          continue;
+        }
+        if (message.id !== stage || Object.hasOwn(message, 'result') === Object.hasOwn(message, 'error')) { protocolError(); return; }
+        if (Object.hasOwn(message, 'error')) { finish(new CodexClientError('REMOTE_REJECTED', 'Native history read was refused.', true)); return; }
+        if (stage === 1) {
+          object(message.result); stage = 2;
+          send({ method: 'initialized', params: {} });
+          send({ id: 2, method: 'thread/read', params: { threadId: scope.threadId, includeTurns: true } });
+        } else finish(null, parseCodexThreadRead(message.result, scope));
+      }
+    } catch { protocolError(); }
+  });
+  send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'arcane_history_reader', title: 'Arcane History', version: '0.1.0' }, capabilities: { experimentalApi: false } } });
+  return { promise, stop: () => finish(new CodexClientError('STALE_CONNECTION', 'Native history read was cancelled.', true)) };
+}
+
 /** Internal construction seam. The public index exposes only the installed-CLI factory. */
 export class CodexSession {
   #connectionId = randomUUID();
+  #historyRead: ReturnType<typeof readHistoryProcess> | null = null;
+  #processSpec: InternalProcess;
   #transport: JsonlTransport;
   #ready = false;
   #initializing = false;
@@ -46,6 +131,7 @@ export class CodexSession {
   #knownTurnIds = new Set<string>();
   constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only' = 'native-config') {
     this.#cwd = spec.cwd;
+    this.#processSpec = { ...spec, args: [...spec.args], env: { ...spec.env } };
     this.#transport = new JsonlTransport(spec, bounds, message => this.#message(message), error => this.#disconnect(error));
   }
   async initialize(): Promise<void> {
@@ -121,6 +207,22 @@ export class CodexSession {
   async resumeThread(action: HumanAction & { threadId: string }): Promise<ThreadState> {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     return this.#openThread(str(action.threadId));
+  }
+  /** Host supplies the durable binding; this read never adopts/resumes a thread or selects a model. */
+  async readThreadHistory(action: HumanAction & { threadId: string; sessionId?: string }): Promise<NativeHistoryResult> {
+    exact(action, ['initiatedBy','threadId','sessionId']); human({ initiatedBy: action.initiatedBy }); this.#ensureReady();
+    const threadId = str(action.threadId), sessionId = action.sessionId === undefined ? undefined : str(action.sessionId);
+    for (const id of [threadId, sessionId]) if (id !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id) || redactNativeHistoryText(id) !== id)) fail('ARGUMENTS', 'Invalid native history identity.');
+    if (this.#thread && (this.#thread.threadId !== threadId || (sessionId !== undefined && this.#thread.sessionId !== sessionId))) fail('THREAD', 'Read only the exact current native thread.');
+    if (this.#historyRead || this.#threadOperation || this.#turnOperation) fail('BUSY', 'A native request is already pending.');
+    const read = readHistoryProcess(this.#processSpec, this.bounds, { threadId, cwd: this.#cwd, includeTurns: true, ...(sessionId === undefined ? {} : { sessionId }) });
+    this.#historyRead = read;
+    try {
+      const result = await read.promise;
+      this.#ensureReady();
+      if (this.#thread && this.#thread.threadId !== threadId) fail('THREAD', 'Native thread changed during history read.');
+      return result;
+    } finally { if (this.#historyRead === read) this.#historyRead = null; }
   }
   grantThreadWrites(action: HumanAction & { threadId: string }): ThreadState {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
@@ -208,7 +310,10 @@ export class CodexSession {
     if (action.decision === 'accept' && !this.#canAccept(pending)) fail('WRITE_GRANT_REQUIRED', 'Accept requires an explicit thread write grant and an eligible local approval.');
     this.#removeApproval(pending, action.decision);
   }
-  async close(): Promise<void> { await this.#transport.close(); }
+  async close(): Promise<void> {
+    const read = this.#historyRead; read?.stop();
+    await Promise.allSettled([this.#transport.close(), ...(read ? [read.promise] : [])]);
+  }
   #ensureReady(): void {
     if (!this.#ready || !this.#transport.connected) fail('DISCONNECTED', 'A ready local connection is required.');
   }
@@ -359,6 +464,7 @@ export class CodexSession {
   }
   #disconnect(error: CodexClientError): void {
     this.#ready = false; this.#failureCode ??= error.code;
+    this.#historyRead?.stop();
     this.#clearApprovals(null);
     if (this.#thread) {
       this.#thread.writeGranted = false;

@@ -2,6 +2,19 @@
 
 const shells = new WeakMap<Document, WorkspaceShell>();
 
+export type WorkspaceTool = 'all' | 'blender' | 'roblox';
+export interface WorkspaceToolChange { tool: WorkspaceTool }
+const TOOL_CONTEXT: Record<WorkspaceTool, { label: string; heading: string; description: string; settings: string; draft: string }> = {
+  all: { label: 'All tools', heading: 'Your workspace', description: 'Models and scene work stay in this conversation.', settings: 'workspace-settings',
+    draft: 'Tool context: Blender models, materials and textures, and Roblox Studio scenes and scripts.' },
+  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Models, materials, textures and animation in this conversation.', settings: 'asset-heading',
+    draft: 'Tool context: Blender models, materials, textures and animation.' },
+  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Scenes, scripts and game systems in this conversation.', settings: 'session-heading',
+    draft: 'Tool context: Roblox Studio scenes, scripts and game systems.' },
+};
+const workspaceTool = (value: string | null): WorkspaceTool | null =>
+  value === 'all' || value === 'blender' || value === 'roblox' ? value : null;
+
 /** Presentation-only navigation. Native actions remain in the existing panels. */
 export class WorkspaceShell {
   private readonly removers: (() => void)[] = [];
@@ -10,13 +23,20 @@ export class WorkspaceShell {
   private searchResults: HTMLElement | null = null;
   private disposed = false;
   private fullscreenBusy = false;
+  private tool: WorkspaceTool = 'all';
+
+  get activeTool(): WorkspaceTool { return this.tool; }
 
   constructor(private readonly doc: Document, private readonly onNavigate?: () => void) {
     this.navigation = Array.from(doc.querySelectorAll<HTMLElement>('[data-workspace-target]'));
     for (const control of this.navigation) {
       if (control.classList.contains('is-active')) control.setAttribute('aria-current', 'page');
       if (['new-chat', 'sidebar-toggle', 'preview-expand', 'preview-settings'].includes(control.id) || control.hasAttribute('data-draft')) continue;
-      this.button(control, () => { this.navigate(control.getAttribute('data-workspace-target')); });
+      this.button(control, () => {
+        const tool = workspaceTool(control.getAttribute('data-workspace-tool'));
+        if (tool) this.selectTool(tool);
+        else this.navigate(control.getAttribute('data-workspace-target'));
+      }, control.hasAttribute('data-workspace-tool'));
     }
     for (const control of doc.querySelectorAll<HTMLElement>('[data-draft]')) this.button(control, () => {
       const draft = control.getAttribute('data-draft');
@@ -24,8 +44,8 @@ export class WorkspaceShell {
     });
     const newChat = doc.getElementById('new-chat');
     if (newChat) {
-      newChat.setAttribute('aria-label', 'Open conversation setup');
-      newChat.setAttribute('title', 'Open conversation setup');
+      newChat.setAttribute('aria-label', 'Focus current conversation');
+      newChat.setAttribute('title', 'Focus current conversation');
       this.button(newChat, () => this.openComposer());
     }
     const sidebar = doc.getElementById('app-sidebar'), toggle = doc.getElementById('sidebar-toggle');
@@ -48,6 +68,14 @@ export class WorkspaceShell {
       this.listen(doc, 'fullscreenchange', sync);
       this.button(expand, () => { void this.toggleFullscreen(preview, sync); });
     }
+    // Restore presentation context on pageshow without touching the native thread or draft.
+    this.tool = workspaceTool(doc.getElementById('workspace-stage')?.getAttribute('data-workspace-tool') ?? null) ?? 'all';
+    this.renderTool();
+    const addContext = doc.getElementById('workspace-add-context');
+    if (addContext) this.button(addContext, () => {
+      this.openComposer(TOOL_CONTEXT[this.tool].draft +
+        '\nThis is supplemental context. It does not grant permission to run tools or change files.');
+    });
     this.bindSearch();
     this.bindPreviews();
     this.bindShortcuts();
@@ -66,19 +94,29 @@ export class WorkspaceShell {
     if (shells.get(this.doc) === this) shells.delete(this.doc);
   }
 
-  private listen(target: EventTarget, type: string, handler: EventListener): void {
-    target.addEventListener(type, handler);
-    this.removers.push(() => target.removeEventListener(type, handler));
+  private listen(target: EventTarget, type: string, handler: EventListener, capture = false): void {
+    target.addEventListener(type, handler, capture);
+    this.removers.push(() => target.removeEventListener(type, handler, capture));
   }
 
-  private button(control: HTMLElement, action: () => void): void {
+  private button(control: HTMLElement, action: () => void, ownsToolNavigation = false): void {
     // Shell controls inside a native form must never become submit buttons.
     if (control.tagName === 'BUTTON') control.setAttribute('type', 'button');
-    this.listen(control, 'click', event => { event.preventDefault(); action(); });
+    this.listen(control, 'click', event => {
+      event.preventDefault();
+      // Own tool navigation before legacy workshop scrolling, including after pageshow.
+      // Secret dismissal still uses the shared onNavigate callback.
+      if (ownsToolNavigation) event.stopImmediatePropagation();
+      action();
+    }, ownsToolNavigation);
   }
 
   private focus(target: HTMLElement, dismissSecrets = true): void {
     if (dismissSecrets) this.onNavigate?.();
+    // Only explicit navigation opens settings; startup and tool selection do not.
+    for (let ancestor: HTMLElement | null = target; ancestor; ancestor = ancestor.parentElement) {
+      if (ancestor.tagName === 'DETAILS' && !ancestor.hasAttribute('open')) ancestor.setAttribute('open', '');
+    }
     if (target.tabIndex < 0 && !target.hasAttribute('tabindex')) {
       target.setAttribute('tabindex', '-1');
       this.focusTargets.add(target);
@@ -92,11 +130,12 @@ export class WorkspaceShell {
   private markCurrent(id: string): void {
     const chosen = new Map<Element | null, HTMLElement>();
     for (const control of this.navigation) {
-      if (control.hasAttribute('data-draft') || control.getAttribute('data-workspace-target') !== id) continue;
+      if (control.hasAttribute('data-workspace-tool') || control.hasAttribute('data-draft') || control.getAttribute('data-workspace-target') !== id) continue;
       const group = control.closest('nav') ?? control.parentElement;
       if (!chosen.has(group)) chosen.set(group, control);
     }
     for (const control of this.navigation) {
+      if (control.hasAttribute('data-workspace-tool')) continue;
       const group = control.closest('nav') ?? control.parentElement;
       const current = !control.hasAttribute('data-draft') && chosen.get(group) === control;
       control.classList.toggle('is-active', current);
@@ -122,13 +161,53 @@ export class WorkspaceShell {
     const composer = this.composer();
     if (!composer) return;
     this.onNavigate?.();
-    if (draft !== undefined) {
-      composer.value = draft;
+    if (draft !== undefined && draft.length) {
+      const next = composer.value + (composer.value ? '\n\n' : '') + draft;
+      const rawLimit = composer.getAttribute('maxlength');
+      const limit = rawLimit !== null && /^\d+$/.test(rawLimit) ? Number(rawLimit) : 131072;
+      if (next.length > limit || new TextEncoder().encode(next).length > 131072) {
+        this.notice('Tool context exceeds the message limit. Your draft was preserved.');
+        this.focus(composer, false);
+        return;
+      }
+      composer.value = next;
       const InputEvent = this.doc.defaultView?.Event ?? Event;
       composer.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      this.notice('Context added to your draft. Review it before sending.');
     }
     if (this.doc.getElementById('codex-heading')) this.markCurrent('codex-heading');
     this.focus(composer, false);
+  }
+
+  private renderTool(): void {
+    const context = TOOL_CONTEXT[this.tool];
+    this.doc.getElementById('workspace-stage')?.setAttribute('data-workspace-tool', this.tool);
+    for (const [id, value] of [['workspace-tool-label', context.label], ['workspace-context-heading', context.heading],
+      ['workspace-context-description', context.description]] as const) {
+      const element = this.doc.getElementById(id);
+      if (element) element.textContent = value;
+    }
+    this.doc.getElementById('workspace-tool-settings')?.setAttribute('data-workspace-target', context.settings);
+    for (const control of this.navigation) {
+      const tool = workspaceTool(control.getAttribute('data-workspace-tool'));
+      if (!tool) continue;
+      const selected = tool === this.tool;
+      control.setAttribute('aria-pressed', String(selected));
+      control.classList.toggle('is-active', selected);
+      control.removeAttribute('aria-current');
+    }
+  }
+
+  private selectTool(tool: WorkspaceTool): void {
+    this.onNavigate?.();
+    if (tool === this.tool) return;
+    this.tool = tool;
+    this.renderTool();
+    // Integration signal only: never create/resume a native thread or submit text.
+    const CustomEvent = this.doc.defaultView?.CustomEvent;
+    if (CustomEvent) this.doc.dispatchEvent(new CustomEvent<WorkspaceToolChange>('workspace:toolchange', {
+      detail: { tool }, bubbles: false,
+    }));
   }
 
   private bindShortcuts(): void {
@@ -260,6 +339,8 @@ export class WorkspaceShell {
         const button = this.doc.createElement('button');
         button.type = 'button';
         button.setAttribute('data-workspace-target', id);
+        const tool = workspaceTool(item.getAttribute('data-workspace-tool'));
+        if (tool) button.setAttribute('data-workspace-tool', tool);
         button.textContent = label;
         results.append(button);
       }
@@ -275,7 +356,9 @@ export class WorkspaceShell {
       const control = (event.target as Element | null)?.closest?.('button[data-workspace-target]');
       if (!control || !results.contains(control)) return;
       event.preventDefault();
-      if (this.navigate(control.getAttribute('data-workspace-target'))) close();
+      const tool = workspaceTool(control.getAttribute('data-workspace-tool'));
+      if (tool) { this.selectTool(tool); close(); }
+      else if (this.navigate(control.getAttribute('data-workspace-target'))) close();
     });
     this.listen(search, 'keydown', event => {
       const key = (event as KeyboardEvent).key;
@@ -283,7 +366,11 @@ export class WorkspaceShell {
       if (key === 'Enter') {
         event.preventDefault();
         const first = results.hidden ? null : results.querySelector<HTMLElement>('button[data-workspace-target]');
-        if (first && this.navigate(first.getAttribute('data-workspace-target'))) close();
+        if (first) {
+          const tool = workspaceTool(first.getAttribute('data-workspace-tool'));
+          if (tool) { this.selectTool(tool); close(); }
+          else if (this.navigate(first.getAttribute('data-workspace-target'))) close();
+        }
       }
       if (key === 'ArrowDown' && !results.hidden) {
         event.preventDefault();

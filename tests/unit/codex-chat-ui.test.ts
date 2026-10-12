@@ -23,7 +23,7 @@ function thread():ThreadState {return {threadId:'fixture-thread',sessionId:'fixt
 function approval(s:Snapshot,projectPath=PROJECT):Approval {return {handle:randomUUID(),connectionId:s.connectionId,serverRequestId:7,method:'item/commandExecution/requestApproval',threadId:s.thread!.threadId,turnId:s.thread!.turnId!,itemId:'fixture-command',reason:'Fixture only',command:'fixture command <script>window.injected=true</script>',cwd:projectPath,changes:null,canAccept:true,expiresAt:Date.now()+60000};}
 
 test('browser action envelopes exactly match service schemas, with UUIDs and no host configuration',()=>{
-  const st=state(), fields:Record<string,Record<string,unknown>>={connect:{},disconnect:{},select:{model:'fixture-sol',effort:'ultra'},'thread-start':{},'thread-resume':{threadId:'human-exact-id'},'grant-writes':{threadId:'fixture-thread'},'revoke-writes':{threadId:'fixture-thread'},'turn-start':{threadId:'fixture-thread',text:'Human public text'},'turn-interrupt':{threadId:'fixture-thread',turnId:'exact-turn'},approval:{threadId:'fixture-thread',turnId:'exact-turn',handle:'exact-handle',decision:'accept'}};
+  const st=state(), fields:Record<string,Record<string,unknown>>={connect:{},disconnect:{},select:{model:'fixture-sol',effort:'ultra'},'thread-start':{},'thread-resume':{threadId:'human-exact-id'},'grant-writes':{threadId:'fixture-thread'},'revoke-writes':{threadId:'fixture-thread'},'turn-start':{threadId:'fixture-thread',text:'Human public text'},'turn-interrupt':{threadId:'fixture-thread',turnId:'exact-turn'},approval:{threadId:'fixture-thread',turnId:'exact-turn',handle:'exact-handle',decision:'accept'},'history-load':{threadId:'fixture-thread'}};
   for(const [action,args] of Object.entries(fields)){const request=prepareCodexAction(st,action,args);assert.deepEqual(codexActionInput.parse(request),request);assert.equal(request.connectionId,action==='connect'?null:st.snapshot!.connectionId);}
   for(const key of ['initiatedBy','exe','cwd','config','modelProvider'])assert.throws(()=>prepareCodexAction(st,'connect',{[key]:'injected'}),/exact browser envelope/);
   assert.throws(()=>prepareCodexAction(st,'select',{model:'unreported',effort:'ultra'}),/reported/);
@@ -94,6 +94,7 @@ function mockClient(projectPath:string) {
   const push=(delta:string)=>{const t=s.thread!;s.events.push({seq:++s.lastEventSeq,type:'delta',threadId:t.threadId,turnId:t.turnId!,itemId:'public-message',text:delta});};
   const host:CodexHostClient={
     snapshot(){return structuredClone(s);},
+    async readThreadHistory(a){record('history-read',a);return {entries:[{role:'user' as const,text:'Fixture saved user message',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-user'}},{role:'assistant' as const,text:'Fixture imported native history <img src=x onerror=alert(1)>',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-assistant'}}],completeness:'incomplete' as const,gaps:[{reason:'context-compaction' as const,turnId:'saved-turn'}],truncated:false,marker:'[History incomplete: some content was omitted or truncated.]',excludedItems:1,droppedGaps:0,redacted:false};},
     selectModel(a){record('select',a);s.selection={model:a.model,effort:a.effort};return {...s.selection};},
     async startThread(a){record('thread-start',a);s.thread=thread();return structuredClone(s.thread);},
     async resumeThread(a){record('thread-resume',a);s.thread={...thread(),threadId:a.threadId};return structuredClone(s.thread);},
@@ -117,10 +118,12 @@ async function harness(t:test.TestContext,spawned=false) {
   const routes=codexRoutes(service);let origin='';
   const build=process.env.ARCANE_UI_BUILD_DIR??'dist';
   const assets=new Map([['/studio',resolve('apps/desktop/public/studio.html')],['/studio.css',resolve('apps/desktop/public/studio.css')],['/studio.js',resolve(build,'apps/desktop/src/studio.js')],['/codex-chat.js',resolve(build,'apps/desktop/src/codex-chat.js')],['/workspace-shell.js',resolve(build,'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(build,'apps/desktop/src/asset-downloads.js')],['/learning-panel.js',resolve(build,'apps/desktop/src/learning-panel.js')],['/brand/arcane-ridges.png',resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
+  assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   let gets=0;
   const server=createServer((request,response)=>{void(async()=>{
     const url=new URL(request.url??'/',origin),asset=assets.get(url.pathname);
     if(asset){response.writeHead(200,{'Content-Type':url.pathname.endsWith('.png')?'image/png':url.pathname.endsWith('.js')?'text/javascript':url.pathname.endsWith('.css')?'text/css':'text/html','Content-Security-Policy':"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"});response.end(await readFile(asset));return;}
+    if(url.pathname==='/v1/product/state'){const human=request.headers.authorization==='Bearer '+HUMAN;response.writeHead(human?200:403,{'Content-Type':'application/json'});response.end(JSON.stringify(human?{projectPath,protocolVersion:1,studioSessions:[],commandCounts:{},features:{},buildTasks:[]}:{error:'HUMAN_ONLY'}));return;}
     if(url.pathname==='/v1/codex/state')gets++;
     if(await routes(request,response,url,HUMAN,origin,AGENT))return;
     response.writeHead(404,{'Content-Type':'application/json'});response.end(JSON.stringify({error:'NOT_FOUND',message:'Absent from explicit conversation fixture.'}));
@@ -138,11 +141,11 @@ async function browser(t:test.TestContext,origin:string) {
   page.on('pageerror',(e:Error)=>errors.push(e.message));page.on('request',(r:any)=>{if(r.url().endsWith('/v1/codex/action'))posts.push(r.postDataJSON());});
   const text=async(id:string,part:string)=>{await page.waitForFunction(({id,part}:{id:string;part:string})=>document.getElementById(id)?.textContent?.includes(part),{id,part},{timeout:8000});};
   const ready=async(id:string)=>{await page.waitForFunction((id:string)=>!(document.getElementById(id) as HTMLButtonElement).disabled,id,{timeout:8000});};
-  const refresh=async()=>{await page.locator('#codex-refresh').click();await page.waitForTimeout(60);};
-  const open=async(token=HUMAN)=>{try{await page.goto(origin+'/studio#'+token);await page.reload();await ready('codex-refresh');await page.locator('#auto-refresh').uncheck();}catch(error){t.diagnostic('Browser mount diagnostic '+JSON.stringify(await page.evaluate(()=>({title:document.title,refresh:document.getElementById('codex-refresh')?.outerHTML,notice:document.getElementById('codex-notice')?.textContent,main:document.getElementById('notice')?.textContent})))+' errors '+errors.join(';'));throw error;}};
-  const connect=async()=>{await ready('codex-connect');await page.locator('#codex-connect').click();await text('codex-status','Fixture connected');await ready('codex-model');};
-  const select=async()=>{await page.locator('#codex-model').selectOption('fixture-sol');assert.equal(await page.locator('#codex-effort').inputValue(),'');await page.locator('#codex-effort').selectOption('ultra');await page.locator('#codex-select').click();await text('codex-selection','fixture-sol · ultra');await ready('codex-thread-start');};
-  const grant=async()=>{await page.locator('#codex-grant').click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await page.locator('#codex-confirm-check').check();await page.locator('#codex-confirm-submit').click();await text('codex-policy','Workspace writes granted');};
+  const refresh=async()=>{await openAdvancedSettings(page);await page.locator('#codex-refresh').click();await page.waitForTimeout(60);};
+  const open=async(token=HUMAN)=>{try{await page.goto(origin+'/studio#'+token);await page.reload();await ready('codex-refresh');await openAdvancedSettings(page);await page.locator('#auto-refresh').uncheck();}catch(error){t.diagnostic('Browser mount diagnostic '+JSON.stringify(await page.evaluate(()=>({title:document.title,refresh:document.getElementById('codex-refresh')?.outerHTML,notice:document.getElementById('codex-notice')?.textContent,main:document.getElementById('notice')?.textContent})))+' errors '+errors.join(';'));throw error;}};
+  const connect=async()=>{await openAdvancedSettings(page);await ready('codex-connect');await page.locator('#codex-connect').click();await text('codex-status','Fixture connected');await ready('codex-model');};
+  const select=async()=>{await openAdvancedSettings(page);await page.locator('#codex-model').selectOption('fixture-sol');assert.equal(await page.locator('#codex-effort').inputValue(),'');await page.locator('#codex-effort').selectOption('ultra');await page.locator('#codex-select').click();await text('codex-selection','fixture-sol · ultra');await ready('codex-thread-start');};
+  const grant=async()=>{await openAdvancedSettings(page);await page.locator('#codex-grant').click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await page.locator('#codex-confirm-check').check();await page.locator('#codex-confirm-submit').click();await text('codex-policy','Workspace writes granted');};
   return {page,errors,posts,text,ready,refresh,open,connect,select,grant,instance};
 }
 
@@ -278,3 +281,38 @@ test('oversized native state is explicitly compacted without lying about accepte
   const result=await h.post(prepareCodexAction(state(client.s,h.projectPath),'approval',{threadId:a.threadId,turnId:a.turnId,handle:client.s.approvals[0]!.handle,decision:'decline'}));assert.equal(result.status,200);assert.equal(result.body.record.state,'acknowledged');t.diagnostic('Overflow after action '+JSON.stringify({bytes:Buffer.byteLength(JSON.stringify(h.service.state())),approvals:h.service.state().snapshot?.approvals.length,limited:result.body.state.displayLimited,replyApprovals:result.body.state.snapshot?.approvals.length}));assert.equal(result.body.state.displayLimited,true);assert.equal(client.calls.filter(x=>x.method==='approval').length,1);
   await b.page.locator('#codex-disconnect').click();await b.text('codex-status','Not connected');assert.equal(h.service.state().snapshot,null);assert.deepEqual(b.errors,[]);
 });
+
+test('real Edge + human HTTP fixtures: saved history load is explicit, bounded and separate from live text',{skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t),b=await browser(t,h.origin),{page}=b;
+  await b.open();assert.equal(h.connected,0);assert.equal(b.posts.length,0);
+  await page.locator('#refresh').click();await b.text('project-path',h.projectPath);
+  await b.connect();await b.select();await page.locator('#codex-thread-start').click();await b.text('codex-scope','fixture-thread');
+  const c=h.clients[0]!,before=c.calls.length;
+  await page.locator('#codex-history-refresh').click();
+  try{await b.ready('codex-history-thread');}catch(error){t.diagnostic('History mount '+JSON.stringify(await page.evaluate(()=>({status:document.getElementById('codex-history-status')?.textContent,notice:document.getElementById('codex-history-notice')?.textContent,project:document.getElementById('project-path')?.textContent,scope:document.getElementById('codex-history-scope')?.textContent,disabled:(document.getElementById('codex-history-thread') as HTMLSelectElement)?.disabled})))+' pageErrors '+b.errors.join(';')+' binding '+JSON.stringify(h.service.state().nativeHistory));throw error;}
+  assert.equal(c.calls.length,before,'cache read does not launch native history RPC');
+  await page.locator('#codex-history-thread').focus();
+  await page.locator('#codex-history-thread').press('End');
+  await page.locator('#codex-history-thread').press('Enter');
+  await b.ready('codex-history-load');await page.locator('#codex-history-load').click();
+  await b.text('codex-history-status','History incomplete');
+  await b.text('codex-history-entries','Fixture imported native history');
+  await b.text('codex-history-gaps','context-compaction');
+  assert.equal(c.calls.filter(x=>x.method==='history-read').length,1);
+  assert.equal(c.calls.some(x=>['turn-start','grant-writes','thread-resume'].includes(x.method)),false);
+  assert.equal(await page.locator('#codex-history-entries img, #codex-history-entries script').count(),0);
+  assert.equal((await page.locator('#codex-messages').textContent())!.includes('Fixture imported native history'),false);
+  assert.deepEqual(b.errors,[]);
+  assert.equal(h.service.state().nativeHistory!.recorded!.result.entries.length,2);
+  const total=b.posts.length;await page.reload();await b.ready('codex-refresh');
+  assert.equal(b.posts.length,total,'reload must not automatically replay history-load');
+  assert.equal(c.calls.filter(x=>x.method==='history-read').length,1);
+});
+
+async function openAdvancedSettings(page:any) {
+  const outer=page.locator('#workspace-settings');
+  if(await outer.getAttribute('open')===null)await outer.locator(':scope > summary').click();
+  for(const summary of await page.locator('#workspace-settings details.settings-group > summary').all()){
+    if(!await summary.evaluate((el:HTMLElement)=>(el.parentElement as HTMLDetailsElement).open))await summary.click();
+  }
+}

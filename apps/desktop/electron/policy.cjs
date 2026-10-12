@@ -43,6 +43,40 @@ function prepareSmokeDirectory(value) {
   const profile = resolve(root, 'profile'); mkdirSync(profile, { mode: 0o700 }); direct(profile); return profile;
 }
 
+
+/** Normalize only the trusted Electron Arcane profile, including Windows MSIX's
+ * known AppData virtualization. Arbitrary redirection, links and renderer paths
+ * remain forbidden. No permissions or OS settings are changed. */
+function prepareUserDirectory(value, { appData, localAppData } = {}) {
+  const root = localPath(value), sourceParent = localPath(appData);
+  const same = (a,b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  if (!same(require('node:path').dirname(root),sourceParent) || require('node:path').basename(root).toLowerCase() !== 'arcane')
+    throw new Error('The trusted Arcane application-data path is required.');
+  const physical = realpathSync.native ?? realpathSync;
+  function direct(directory) {
+    for(let current=directory;;current=resolve(current,'..')) {
+      const stat=lstatSync(current);
+      if(!stat.isDirectory() || stat.isSymbolicLink() || !same(physical(current),current))
+        throw new Error('Arcane profile parents must be direct directories.');
+      const parent=resolve(current,'..'); if(parent===current) break;
+    }
+  }
+  direct(sourceParent);
+  try { const stat=lstatSync(root); if(!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe Arcane profile.'); }
+  catch(error) { if(error.code!=='ENOENT') throw error; mkdirSync(root,{mode:0o700}); }
+  const actual=localPath(physical(root));
+  if(!same(actual,root)) {
+    if(process.platform !== 'win32' || !localAppData) throw new Error('Unexpected Arcane profile redirection.');
+    const local=localPath(localAppData); direct(local);
+    const rel=relative(resolve(local,'Packages'),actual);
+    const parts=rel.split(/[\\/]/);
+    if(isAbsolute(rel) || parts.length!==4 || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(parts[0]) ||
+        parts[1].toLowerCase()!=='localcache' || parts[2].toLowerCase()!=='roaming' || parts[3].toLowerCase()!=='arcane')
+      throw new Error('Unexpected Arcane profile redirection.');
+  }
+  direct(actual); return actual;
+}
+
 function daemonEnvironment(source, { productRoot, stateRoot, projectPath }) {
   const env = {};
   // Carry operating-system paths, not API keys, Node injection or parent agent configuration.
@@ -55,4 +89,4 @@ function readyMessage(message) {
   if (!message || typeof message !== 'object' || Object.keys(message).sort().join(',') !== 'origin,protocolVersion,token,type' || message.type !== 'arcane-ready' || message.protocolVersion !== 1 || !validOrigin(message.origin) || !/^[a-f0-9]{64}$/.test(message.token)) throw new Error('Invalid private daemon handoff.');
   return { origin: message.origin, token: message.token };
 }
-module.exports = { validOrigin, navigationAllowed, requestAllowed, within, localPath, directPath, prepareSmokeDirectory, daemonEnvironment, readyMessage };
+module.exports = { validOrigin, navigationAllowed, requestAllowed, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage };

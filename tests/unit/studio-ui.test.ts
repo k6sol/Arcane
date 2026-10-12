@@ -151,7 +151,7 @@ test('Studio shell is CSP-compatible, has safe defaults and treats untrusted con
   assert.doesNotMatch(html, /id="key-writes"[^>]*checked/);
   assert.doesNotMatch(source, /\.innerHTML|\.outerHTML|\beval\s*\(|new Function\s*\(/);
   assert.doesNotMatch(html, /id="pair-|id="daemon-url"|daemon URL|pairing code/i); assert.match(html, /Paste the issued Arcane API key/);
-  assert.match(source, /textContent/); assert.match(html, /Authored board/); assert.match(html, /not a live worker runtime/);
+  assert.match(source, /textContent/); assert.match(html, /id="build-heading"/); assert.match(html, /id="build-tasks"/); assert.match(html, /not a live worker runtime/);
 });
 
 test('emitted browser workbench has no Node, store or daemon runtime imports', async () => {
@@ -350,6 +350,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const fixtureRuntime = { executable: 'HTTP-fixture-only-no-Blender', version: 'fixture', pythonVersion: 'fixture', background: true, capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } };
   const posted: { path: string; body: Record<string, unknown>; authorization: string }[] = [];
   const assets = new Map(['/studio', '/studio.css', '/studio.js', '/codex-chat.js', '/workspace-shell.js', '/asset-downloads.js', '/learning-panel.js', '/brand/arcane-ridges.png'].map((path, i) => [path, resolve(['apps/desktop/public/studio.html', 'apps/desktop/public/studio.css', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/learning-panel.js'), 'apps/desktop/public/brand/arcane-ridges.png'][i]!) ]));
+  assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const asset = assets.get(url.pathname);
@@ -412,7 +413,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message)); page.on('console', (message: { type(): string; text(): string }) => { if (message.type() === 'error' && /Content Security Policy|Refused to/.test(message.text())) errors.push(message.text()); });
   const expectText = async (selector: string, text: string) => { try { await page.waitForFunction(({ selector, text }: { selector: string; text: string }) => document.querySelector(selector)?.textContent?.includes(text), { selector, text }); } catch (error) { t.diagnostic('Mount/action diagnostic '+JSON.stringify(await page.evaluate(()=>({main:document.getElementById('notice')?.textContent,codex:document.getElementById('codex-notice')?.textContent})))+' errors '+errors.join(';'));throw error; } };
-  await page.goto(origin + '/studio#' + TOKEN); await expectText('#connection-status', 'Daemon responding'); await page.locator('#auto-refresh').uncheck();
+  await page.goto(origin + '/studio#' + TOKEN); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck();
   assert.equal(new URL(page.url()).hash, ''); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#send').isDisabled(), true);
   await expectText('#key-status', 'Key service responding');
   await page.evaluate(() => { let copied = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied = text; }, readText: async () => copied } }); });
@@ -474,7 +475,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   corruptPreview = true; await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'previews failed'); assert.equal(await page.locator('#asset-previews canvas').count(), 0); corruptPreview = false;
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   if (process.env.ARCANE_UI_SCREENSHOT) { await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT, fullPage: true }); await page.locator('section').filter({ has: page.locator('#asset-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.assets-panel.png' }); }
-  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes').isChecked(), false); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes').isChecked(), false); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
   await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await page.locator('#revoke').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#session-mode', 'Revoked'); assert.equal(await page.locator('#send').isDisabled(), true);
   assert.deepEqual(errors, []); assert.ok(posted.every(p => p.authorization === 'Bearer ' + TOKEN));
 });
@@ -503,7 +504,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
     const response = await fetch(app.origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) });
     return { status: response.status, data: await response.json() as any };
   };
-  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await page.locator('#auto-refresh').uncheck();
+  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck();
   assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#native-token-result').isVisible(), false);
   await page.locator('#native-get-token').click(); await text('#native-notice', 'human review disabled');
   assert.equal(await page.locator('#native-token').textContent(), app.agentToken);
@@ -552,11 +553,11 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   await page.route('**/v1/work/create', async (route: any) => { createPosts++; await route.fetch(); await route.abort('failed'); });
   await page.locator('#work-create').click(); await text('#work-unknown-message', 'Outcome unknown'); assert.equal(await page.locator('#work-create').isDisabled(), true); assert.equal(workStore.runs().length, 2); assert.equal(createPosts, 1);
   await page.unroute('**/v1/work/create'); await page.locator('#work-refresh').click(); await page.waitForFunction(() => !(document.getElementById('work-acknowledge') as HTMLButtonElement).disabled); await page.locator('#work-acknowledge').click(); assert.equal(workStore.runs().length, 2);
-  await page.reload(); await text('#work-status', 'WorkStore responding'); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
+  await page.reload(); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
   await app.close(); workStore.close(); studioStore.close();
   studioStore = new StudioStore({ directory: join(directory, 'studio') }); workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
-  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await page.locator('#auto-refresh').uncheck(); await text('#work-tasks', 'complete');
+  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); await text('#work-tasks', 'complete');
   assert.equal(studioStore.keys()[0]?.keyId, issued.keyId); assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
   assert.equal(workStore.runs().length, 2); assert.equal(workStore.task(first.id).reviewNote, 'Reviewed the revised proof and acceptance criteria');
   await page.locator('[data-task-id="' + first.id + '"]').click(); await text('#work-task-evidence', 'Revised proof');
@@ -600,6 +601,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   } });
   const controls = studioRoutes(studioStore, resolve('.'), workStore, directory, agent);
   const assets = new Map([['/studio', resolve('apps/desktop/public/studio.html')], ['/studio.css', resolve('apps/desktop/public/studio.css')], ['/studio.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')], ['/codex-chat.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js')], ['/workspace-shell.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js')], ['/learning-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/learning-panel.js')], ['/brand/arcane-ridges.png', resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
+  assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   let origin = '';
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', origin), asset = assets.get(url.pathname);
@@ -627,8 +629,8 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   const text = async (selector: string, value: string) => { try { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }, { timeout: 5000 }); } catch (error) { throw new Error('Expected ' + selector + ' to include ' + value + '; request=' + await page.locator('#diagnostics-request-status').textContent() + '; notice=' + await page.locator('#diagnostics-notice').textContent(), { cause: error }); } };
   const waitRead = async () => { await text('#diagnostics-request-status', 'Read complete'); };
   t.diagnostic('Browser executable: ' + (process.env.ARCANE_UI_BROWSER_EXE ?? 'Playwright Chromium') + '; version=' + browser.version() + '; fixture-only native controller');
-  await page.goto(origin + '/studio#' + agent); await page.locator('#auto-refresh').uncheck(); await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
-  await page.goto(origin + '/studio#' + TOKEN); await page.reload(); await page.locator('#auto-refresh').uncheck(); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
+  await page.goto(origin + '/studio#' + agent); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
+  await page.goto(origin + '/studio#' + TOKEN); await page.reload(); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
   await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed); assert.equal(targeted.length, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
   assert.equal(await page.locator('#diagnostics-method option[value="selection"]').getAttribute('disabled') !== null, true); assert.equal(await page.locator('#diagnostics-method option[value="script_grep"]').getAttribute('disabled') !== null, true); await text('#diagnostics-tools', 'execute_luau'); await text('#diagnostics-tools', 'not_read_allowlisted'); assert.equal(await page.locator('#diagnostics-tools img').count(), 0);
   await page.locator('#diagnostics-studio').selectOption(alpha); await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', '<img src=x onerror=alert(1)>'); assert.equal(await page.locator('#diagnostics-output img, #diagnostics-output script').count(), 0); assert.equal(await page.evaluate(() => Boolean((window as unknown as { nativeInjected?: boolean }).nativeInjected)), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(TOKEN), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('fixture-password'), false); assert.equal(created, closed);
@@ -702,3 +704,11 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   assert.deepEqual(errors, []); assert.ok(targeted.every(call => (NATIVE_READ_METHODS as readonly string[]).includes(call.method))); assert.ok(targeted.every(call => call.args.studio_id === alpha || call.args.studio_id === beta));
 });
 
+
+async function openAdvancedSettings(page:any) {
+  const outer=page.locator('#workspace-settings');
+  if(await outer.getAttribute('open')===null)await outer.locator(':scope > summary').click();
+  for(const summary of await page.locator('#workspace-settings details.settings-group > summary').all()){
+    if(!await summary.evaluate((el:HTMLElement)=>(el.parentElement as HTMLDetailsElement).open))await summary.click();
+  }
+}

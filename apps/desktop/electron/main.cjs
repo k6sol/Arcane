@@ -11,8 +11,10 @@ const args = process.argv.slice(app.isPackaged ? 1 : 2);
 const smoke = args[0] === '--arcane-smoke';
 if (args.length && (!smoke || args.length !== 2)) throw new Error('Only the bounded local smoke-check mode is accepted.');
 const smokeRoot = smoke ? policy.localPath(args[1]) : null;
+let profilePreparationFailed = false;
 if (smokeRoot) app.setPath('userData', policy.prepareSmokeDirectory(smokeRoot));
-const locked = app.requestSingleInstanceLock();
+else { try { app.setPath('userData', policy.prepareUserDirectory(app.getPath('userData'), { appData: app.getPath('appData'), localAppData: process.env.LOCALAPPDATA })); } catch { profilePreparationFailed = true; } }
+const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -25,7 +27,7 @@ async function stopDaemon() {
     let finished = false;
     const done = code => { if (finished) return; finished = true; clearTimeout(timer); resolve(code === 0); };
     const timer = setTimeout(() => { if (owned.exitCode === null) owned.kill(); done(1); }, 15000);
-    owned.once('close', done);
+    owned.once('exit', done); owned.once('close', done);
     if (owned.connected) owned.send({ type: 'arcane-shutdown', protocolVersion: 1 }, error => { if (error && owned.exitCode === null) owned.kill(); }); else owned.kill();
   });
 }
@@ -138,7 +140,8 @@ async function checkSmoke() {
   await writeFile(join(smokeRoot, 'checks.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
   closing = true; app.exit(Object.values(checks).every(Boolean) ? 0 : 1);
 }
-if (!locked) app.quit();
+if (profilePreparationFailed) app.whenReady().then(() => failStartup('Arcane application data could not be opened safely. No project or provider was started.'));
+else if (!locked) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
   app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; void stopDaemon().then(clean => app.exit(clean ? 0 : 1)); } });

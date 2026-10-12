@@ -22,7 +22,9 @@ export async function buildDesktopPipeline() {
       child.stdout.on('data',capture);child.stderr.on('data',capture);
       const timeout=setTimeout(()=>{child.kill();reject(new Error('Verification stage deadline exceeded.'));},15*60*1000);
       child.once('error',()=>{clearTimeout(timeout);reject(new Error('Verification process could not start.'));});
-      child.once('close',code=>{clearTimeout(timeout);resolve(code??1);});
+      let drain; const terminal=code=>{clearTimeout(timeout);clearTimeout(drain);resolve(code??1);};
+      child.once('close',terminal);
+      child.once('exit',code=>{clearTimeout(timeout);drain=setTimeout(()=>{child.stdout.destroy();child.stderr.destroy();terminal(code);},250);});
     });
     await writeFile(join(directory,label+'.log'),output,{flag:'wx'});stages.push({label,code,elapsedMs:Date.now()-started});
     console.log(label+': exit '+code+'; '+(Date.now()-started)+'ms; log '+join(directory,label+'.log'));
