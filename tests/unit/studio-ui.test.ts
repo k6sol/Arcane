@@ -159,15 +159,15 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const browserSource = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), 'utf8');
   assert.match(browserSource, /from ['"]\.\/codex-chat\.js['"]/);
   const dynamicImports=[...browserSource.matchAll(/\bimport\s*\(([^)]+)\)/g)].map(match=>match[1]!.trim());
-  assert.deepEqual(dynamicImports,["'./workflow-panel.js'"],'Only the fixed optional workflow browser module may load dynamically.');
-  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/workflow-panel\.js\1\s*\)/g,'');
+  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./chat-tabs.js'"],'Only the fixed workflow and chat tabs browser modules may load dynamically.');
+  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|chat-tabs)\.js\1\s*\)/g,'');
   assert.doesNotMatch(withoutApprovedWorkflow, /\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
   // Parse the emitted module without linking/evaluating it; prose/string payloads
   // containing `from '...'` are not runtime dependencies.
   const parsed=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:browserSource,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
   assert.ifError(parsed.error);assert.equal(parsed.status,0,parsed.stderr);
   const staticModules=JSON.parse(parsed.stdout) as string[];
-  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./provider-setup.js','./workspace-shell.js']);
+  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./provider-setup.js','./studio-key-settings.js','./task-usage-ui.js','./workspace-shell.js']);
 });
 
 test('edit baselines must match the actual succeeded read request and exact client session', () => {
@@ -363,6 +363,11 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
+  assets.set('/studio-key-settings.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-key-settings.js'));
+  assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
+  assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
+  assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
+  assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const asset = assets.get(url.pathname);
@@ -425,7 +430,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message)); page.on('console', (message: { type(): string; text(): string }) => { if (message.type() === 'error' && /Content Security Policy|Refused to/.test(message.text())) errors.push(message.text()); });
   const expectText = async (selector: string, text: string) => { try { await page.waitForFunction(({ selector, text }: { selector: string; text: string }) => document.querySelector(selector)?.textContent?.includes(text), { selector, text }); } catch (error) { t.diagnostic('Mount/action diagnostic '+JSON.stringify(await page.evaluate(()=>({main:document.getElementById('notice')?.textContent,codex:document.getElementById('codex-notice')?.textContent})))+' errors '+errors.join(';'));throw error; } };
-  await page.goto(origin + '/studio#' + TOKEN); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck();
+  await page.goto(origin + '/studio#' + TOKEN); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page);
   assert.equal(new URL(page.url()).hash, ''); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#send').isDisabled(), true);
   await expectText('#key-status', 'Key service responding');
   await page.evaluate(() => { let copied = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied = text; }, readText: async () => copied } }); });
@@ -450,15 +455,15 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   let releaseKey: () => void = () => {}, keyAccepted: () => void = () => {};
   const keyHeld = new Promise<void>(resolve => { releaseKey = resolve; }), keyStored = new Promise<void>(resolve => { keyAccepted = resolve; });
   await page.route('**/v1/studio/keys', async (route: any) => { if (route.request().method() !== 'POST') { await route.continue(); return; } const response = await route.fetch(); keyAccepted(); await keyHeld; await route.fulfill({ response }); });
-  await page.locator('#key-issue').click(); await keyStored; await page.locator('#go-assets').click(); releaseKey(); await expectText('#key-notice', 'secret was cleared by navigation');
+  await page.locator('#key-issue').click(); await keyStored; await page.locator('[data-settings-close]').click(); await page.locator('#go-assets').click(); releaseKey(); await expectText('#key-notice', 'secret was cleared by navigation');
   assert.equal(await page.locator('#key-secret').textContent(), ''); assert.equal(await page.locator('#key-result').isVisible(), false); await page.unroute('**/v1/studio/keys');
   await expectText('#build-tasks', 'Authored fixture board'); assert.equal(await page.locator('#providers-link').getAttribute('href'), '/#' + TOKEN);
-  await page.locator('#session-picker').selectOption(readonly.id); await expectText('#session-mode', 'Read-only'); await expectText('#command-status', 'Read ready');
+  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(readonly.id); await openAdvancedSettings(page); await expectText('#session-mode', 'Read-only'); await expectText('#command-status', 'Read ready');
   await page.locator('#method').selectOption('scene.create'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#command-validation', 'read-only');
   await page.locator('#method').selectOption('scene.children'); await page.locator('#send').click(); await expectText('#receipt-state', 'succeeded');
   assert.equal(posted.at(-1)?.body.sessionId, readonly.id); assert.equal(await page.locator('#receipt-nodes img').count(), 0); await expectText('#receipt-nodes', '<img src=x onerror=alert(1)>');
   await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click(); await expectText('#selected-ref', 'opaque-instance-1');
-  await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await expectText('#command-status', 'Read ready'); assert.equal(await page.locator('#selected-ref').textContent(), 'Choose a returned node in a receipt below.');
+  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(writer.id); await openAdvancedSettings(page); await expectText('#session-mode', 'Writes granted'); await expectText('#command-status', 'Read ready'); assert.equal(await page.locator('#selected-ref').textContent(), 'Choose a returned node in a receipt below.');
   await page.locator('#send').click(); await expectText('#receipt-state', 'succeeded'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click();
   await page.locator('#inspect-target').click(); await expectText('#receipt-title', 'scene.inspect'); await page.locator('#use-baseline').click();
   await page.getByRole('checkbox', { name: 'Change Anchored', exact: true }).check(); await page.getByRole('combobox', { name: 'Anchored value', exact: true }).selectOption('true'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.update');
@@ -477,7 +482,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   failSessions = true; await page.locator('#refresh').click(); await expectText('#connection-status', 'Refresh unavailable'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#notice', 'outcomes have not been inferred'); failSessions = false; await page.locator('#refresh').click(); await expectText('#connection-status', 'Daemon responding');
   await page.locator('#method').selectOption('scene.search'); await page.locator('#query').fill('Duplicate'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.search'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).query, 'Duplicate');
   await page.locator('#method').selectOption('scene.create'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click(); await page.locator('#create-name').fill('Fixture folder'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.create'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).className, 'Folder');
-  await page.locator('#asset-name').fill('fixture-crate');
+  await openAdvancedSettings(page, 'asset-heading'); await page.locator('#asset-name').fill('fixture-crate');
   assert.equal(await page.locator('#asset-start').isDisabled(), true);
   assert.equal(await page.locator('#asset-probe').isDisabled(), true, 'no native conversation can never start or probe chat work');
   assert.ok(!posted.some(item => item.path === '/v1/assets/start' || item.path === '/v1/assets/conversation-start'));
@@ -497,14 +502,14 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   await page.locator('#asset-template').selectOption('environment-kit'); assert.equal(await page.locator('#asset-size').inputValue(), '3, 3, 2.8');
   await page.locator('#asset-name').fill('fixture-room'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
   fixtureAssetJobs[0]!.state = 'succeeded'; fixtureAssetJobs[0]!.manifestAvailable = true;
-  await page.locator('#refresh').click(); await expectText('#asset-job-summary', 'succeeded');
+  await openAdvancedSettings(page); await page.locator('#refresh').click(); await expectText('#asset-job-summary', 'succeeded'); await openAdvancedSettings(page, 'asset-heading');
   assert.ok(!posted.some(item => item.path === '/v1/assets/start' || item.path === '/v1/assets/conversation-start'));
   await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'authenticated previews loaded'); assert.equal(await page.locator('#asset-previews canvas').count(), 2); await expectText('#asset-manifest', 'no native Blender or Studio verification');
   corruptPreview = true; await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'previews failed'); assert.equal(await page.locator('#asset-previews canvas').count(), 0); corruptPreview = false;
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   if (process.env.ARCANE_UI_SCREENSHOT) { await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT, fullPage: true }); await page.locator('section').filter({ has: page.locator('#asset-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.assets-panel.png' }); }
-  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes').isChecked(), false); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
-  await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await page.locator('#revoke').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#session-mode', 'Revoked'); assert.equal(await page.locator('#send').isDisabled(), true);
+  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes').isChecked(), false); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await page.locator('#revoke').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#session-mode', 'Revoked'); assert.equal(await page.locator('#send').isDisabled(), true);
   assert.deepEqual(errors, []); assert.ok(posted.every(p => p.authorization === 'Bearer ' + TOKEN));
 });
 
@@ -523,10 +528,9 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
   const browser = await playwright.chromium.launch({ headless: true, args: ["--disable-gpu"], ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
-  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/studio.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/studio.js'), 'utf8') }); });
-  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/codex-chat.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/codex-chat.js'), 'utf8') }); });
-  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/provider-setup.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/provider-setup.js'), 'utf8') }); });
-  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/desktop-verification.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/desktop-verification.js'), 'utf8') }); });
+  if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'chat-tabs', 'task-usage', 'task-usage-ui']) {
+    await page.route('**/' + name + '.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/' + name + '.js'), 'utf8') }); });
+  }
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
   const text = async (selector: string, value: string) => { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }); };
   const refresh = async () => { await page.locator('#refresh').click(); await page.waitForFunction(() => !(document.getElementById('refresh') as HTMLButtonElement).disabled); };
@@ -534,7 +538,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
     const response = await fetch(app.origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) });
     return { status: response.status, data: await response.json() as any };
   };
-  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck();
+  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page);
   assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#native-token-result').isVisible(), false);
   await page.locator('#native-get-token').click(); await text('#native-notice', 'human review disabled');
   assert.equal(await page.locator('#native-token').textContent(), app.agentToken);
@@ -553,10 +557,10 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   const pluginResponse = await fetch(app.origin + '/v1/plugin/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: issued.apiKey, protocolVersion: 1, identity: { clientSessionId: 'real-http-key-contract-fixture', placeId: 0, universeId: 0, name: 'HTTP key fixture (not native Studio)', pluginVersion: 'fixture' }, capabilities: [...READ_METHODS, ...WRITE_METHODS] }) });
   assert.equal(pluginResponse.status, 200); const connected = await pluginResponse.json() as { sessionId: string };
   await page.locator('#key-dismiss').click(); await refresh(); assert.notEqual(studioStore.keys()[0]?.lastUsedAt, null);
-  await page.locator('#session-picker').selectOption(connected.sessionId); await text('#session-mode', 'Read-only');
+  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(connected.sessionId); await text('#session-mode', 'Read-only'); await openAdvancedSettings(page);
   await page.locator('.key-history-details > summary').click(); await page.locator('#key-history button[data-key-id="' + issued.keyId + '"]').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#key-history', 'Revoked'); await text('#session-mode', 'Revoked');
   assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal(await page.locator('#key-secret').textContent(), '');
-  await page.locator('#session-picker').selectOption('');
+  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(''); await openAdvancedSettings(page);
   await page.locator('.work-create > summary').click(); await page.locator('#work-title').fill('Real durable UI run'); await page.locator('#work-objective').fill('Review hashes and dependencies through actual daemon routes');
   const fillTask = async (index: number, key: string, dependencies: string) => {
     const row = page.locator('.work-task-draft').nth(index);
@@ -583,11 +587,11 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   await page.route('**/v1/work/create', async (route: any) => { createPosts++; await route.fetch(); await route.abort('failed'); });
   await page.locator('#work-create').click(); await text('#work-unknown-message', 'Outcome unknown'); assert.equal(await page.locator('#work-create').isDisabled(), true); assert.equal(workStore.runs().length, 2); assert.equal(createPosts, 1);
   await page.unroute('**/v1/work/create'); await page.locator('#work-refresh').click(); await page.waitForFunction(() => !(document.getElementById('work-acknowledge') as HTMLButtonElement).disabled); await page.locator('#work-acknowledge').click(); assert.equal(workStore.runs().length, 2);
-  await page.reload(); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
+  await page.reload(); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
   await app.close(); workStore.close(); studioStore.close();
   studioStore = new StudioStore({ directory: join(directory, 'studio') }); workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
-  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); await text('#work-tasks', 'complete');
+  await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); await text('#work-tasks', 'complete');
   assert.equal(studioStore.keys()[0]?.keyId, issued.keyId); assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
   assert.equal(workStore.runs().length, 2); assert.equal(workStore.task(first.id).reviewNote, 'Reviewed the revised proof and acceptance criteria');
   await page.locator('[data-task-id="' + first.id + '"]').click(); await text('#work-task-evidence', 'Revised proof');
@@ -634,6 +638,11 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
+  assets.set('/studio-key-settings.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-key-settings.js'));
+  assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
+  assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
+  assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
+  assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   let origin = '';
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', origin), asset = assets.get(url.pathname);
@@ -661,16 +670,16 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   const text = async (selector: string, value: string) => { try { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }, { timeout: 5000 }); } catch (error) { throw new Error('Expected ' + selector + ' to include ' + value + '; request=' + await page.locator('#diagnostics-request-status').textContent() + '; notice=' + await page.locator('#diagnostics-notice').textContent(), { cause: error }); } };
   const waitRead = async () => { await text('#diagnostics-request-status', 'Read complete'); };
   t.diagnostic('Browser executable: ' + (process.env.ARCANE_UI_BROWSER_EXE ?? 'Playwright Chromium') + '; version=' + browser.version() + '; fixture-only native controller');
-  await page.goto(origin + '/studio#' + agent); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
-  await page.goto(origin + '/studio#' + TOKEN); await page.reload(); await openAdvancedSettings(page); await page.locator('#auto-refresh').uncheck(); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
-  await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed); assert.equal(targeted.length, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
+  await page.goto(origin + '/studio#' + agent); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-status', 'Human control required'); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
+  await page.goto(origin + '/studio#' + TOKEN); await page.reload(); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page, 'diagnostics-heading'); assert.equal(created, beforeBrowser); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
+  await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); await text('#diagnostics-connection', 'Closed after this request'); assert.equal(created, closed); assert.equal(targeted.length, 0); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true);
   assert.equal(await page.locator('#diagnostics-method option[value="selection"]').getAttribute('disabled') !== null, true); assert.equal(await page.locator('#diagnostics-method option[value="script_grep"]').getAttribute('disabled') !== null, true); await text('#diagnostics-tools', 'execute_luau'); await text('#diagnostics-tools', 'not_read_allowlisted'); assert.equal(await page.locator('#diagnostics-tools img').count(), 0);
   await page.locator('#diagnostics-studio').selectOption(alpha); await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', '<img src=x onerror=alert(1)>'); assert.equal(await page.locator('#diagnostics-output img, #diagnostics-output script').count(), 0); assert.equal(await page.evaluate(() => Boolean((window as unknown as { nativeInjected?: boolean }).nativeInjected)), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(TOKEN), false); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('fixture-password'), false); assert.equal(created, closed);
   await text('#diagnostics-provenance', alpha); await text('#diagnostics-provenance', 'get_studio_state'); await text('#diagnostics-metadata', 'Browser HTTP + SDK fixture only; no live Studio');
-  const beforeRefreshRead = targeted.length; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(targeted.length, beforeRefreshRead); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('Fixture read'), false); await text('#diagnostics-provenance', 'no targeted read');
+  const beforeRefreshRead = targeted.length; await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(targeted.length, beforeRefreshRead); assert.equal((await page.locator('#diagnostics-output').textContent()).includes('Fixture read'), false); await text('#diagnostics-provenance', 'no targeted read');
   const beforeStale = targeted.length; inventory = [{ id: beta, name: 'SDK fixture B' }]; await page.locator('#diagnostics-read').click(); await text('#diagnostics-output', 'denied as stale'); assert.equal(targeted.length, beforeStale); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
-  await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio option').count(), 2); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
-  inventory = [{ id: alpha, name: 'SDK fixture A' }, { id: beta, name: 'SDK fixture B' }]; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
+  await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio option').count(), 2); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
+  inventory = [{ id: alpha, name: 'SDK fixture A' }, { id: beta, name: 'SDK fixture B' }]; await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), '');
   await page.locator('#diagnostics-studio').selectOption(alpha); holdRead = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const accepted = new Promise<void>(resolve => { readAccepted = resolve; });
   await page.locator('#diagnostics-read').click(); await accepted; await text('#diagnostics-request-status', 'Read in flight'); assert.equal(created, closed + 1); assert.equal(await page.locator('#diagnostics-probe').isDisabled(), true); await page.locator('#diagnostics-studio').selectOption(beta); releaseRead(); await text('#diagnostics-request-status', 'result discarded'); assert.equal((await page.locator('#diagnostics-output').textContent()).includes(alpha), false); assert.equal(created, closed);
   await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', beta);
@@ -685,7 +694,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   await page.locator('#diagnostics-method').selectOption('script_read'); await page.locator('#diagnostics-path').fill('game.ServerScriptService.Fixture'); await page.locator('#diagnostics-start').fill('25'); await page.locator('#diagnostics-end').fill('36'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.deepEqual(targeted.at(-1)?.args, { studio_id: beta, target_file: 'game.ServerScriptService.Fixture', should_read_entire_file: false, start_line_one_indexed: 25, end_line_one_indexed_inclusive: 36 });
   await page.locator('#diagnostics-method').selectOption('script_search'); await page.locator('#diagnostics-query').fill('Fixture'); await page.locator('#diagnostics-read').click(); await waitRead(); assert.equal(targeted.at(-1)?.args.keywords, 'Fixture');
   await page.locator('#diagnostics-method').selectOption('get_console_output');
-  const probeAgain = async () => { await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); };
+  const probeAgain = async () => { await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-request-status', 'Capability observation complete'); };
   // Tampered HTTP receipts exercise UI checks after the real fixture controller closes.
   for (const mismatch of ['target', 'method', 'closure', 'provenance']) {
     await page.route('**/v1/native/read', async (route: any) => {
@@ -709,7 +718,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent('pagehide')); window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
   const readResponse = page.waitForResponse('**/v1/native/read'); releaseRead(); await readResponse; await text('#diagnostics-request-status', 'discarded after page exit'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(await page.locator('#diagnostics-provenance dd').count(), 0); assert.equal(created, closed); await probeAgain();
   holdInventory = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const exitInventoryAccepted = new Promise<void>(resolve => { inventoryAccepted = resolve; });
-  await page.locator('#diagnostics-probe').click(); await exitInventoryAccepted;
+  await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await exitInventoryAccepted;
   await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent('pagehide')); window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
   const inventoryResponse = page.waitForResponse('**/v1/native/capabilities'); releaseRead(); await inventoryResponse; await text('#diagnostics-request-status', 'discarded after page exit'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed); await probeAgain();
   // Hold an old HTTP response after its controller closes, then deliver it during a newer request.
@@ -717,10 +726,10 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   const oldResponseHeld = new Promise<void>(resolve => { releaseOldResponse = resolve; });
   const oldResponseAccepted = new Promise<void>(resolve => { oldResponseReady = resolve; });
   await page.route('**/v1/native/capabilities', async (route: any) => { const response = await route.fetch(); oldResponseReady(); await oldResponseHeld; await route.fulfill({ response }); }, { times: 1 });
-  await page.locator('#diagnostics-probe').click(); await oldResponseAccepted; assert.equal(created, closed);
+  await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await oldResponseAccepted; assert.equal(created, closed);
   await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent('pagehide')); window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
   holdInventory = true; held = new Promise<void>(resolve => { releaseRead = resolve; }); const newInventoryAccepted = new Promise<void>(resolve => { inventoryAccepted = resolve; });
-  await page.locator('#diagnostics-probe').click(); await newInventoryAccepted;
+  await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await newInventoryAccepted;
   const oldResponse = page.waitForResponse('**/v1/native/capabilities'); releaseOldResponse(); await (await oldResponse).finished();
   await page.evaluate(() => new Promise<void>(resolve => setTimeout(resolve, 0)));
   await text('#diagnostics-request-status', 'Capability observation in flight'); assert.equal(await page.locator('#diagnostics-probe').isDisabled(), true); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed + 1);
@@ -730,17 +739,30 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   await page.locator('#diagnostics-read').click(); await waitRead(); await text('#diagnostics-output', beta);
   if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('section').filter({ has: page.locator('#diagnostics-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.native-desktop.png' });
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true); if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('section').filter({ has: page.locator('#diagnostics-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.native-mobile.png' });
-  unavailable = true; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'vetted official Studio MCP executable is unavailable'); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal((await page.locator('#diagnostics-notice').textContent()).includes(TOKEN), false);
-  unavailable = false; inventory = []; await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'No native Studio windows'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
+  unavailable = true; await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'vetted official Studio MCP executable is unavailable'); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal((await page.locator('#diagnostics-notice').textContent()).includes(TOKEN), false);
+  unavailable = false; inventory = []; await openAdvancedSettings(page, 'diagnostics-heading');await page.locator('#diagnostics-probe').click(); await text('#diagnostics-notice', 'No native Studio windows'); assert.equal(await page.locator('#diagnostics-studio').inputValue(), ''); assert.equal(await page.locator('#diagnostics-read').isDisabled(), true); assert.equal(created, closed);
   t.diagnostic('Fixture native connections created=' + created + ', closed=' + closed + '; targeted reads=' + targeted.length + '; no live Studio calls');
+  assert.equal(created, 37); assert.equal(closed, 37); assert.equal(targeted.length, 19);
   assert.deepEqual(errors, []); assert.ok(targeted.every(call => (NATIVE_READ_METHODS as readonly string[]).includes(call.method))); assert.ok(targeted.every(call => call.args.studio_id === alpha || call.args.studio_id === beta));
 });
 
 
-async function openAdvancedSettings(page:any) {
-  const outer=page.locator('#workspace-settings');
-  if(await outer.getAttribute('open')===null)await outer.locator(':scope > summary').click();
-  for(const summary of await page.locator('#workspace-settings details.settings-group > summary').all()){
+async function openAdvancedSettings(page:any, target = 'settings-advanced') {
+  // Use the production shell's presentation request: select the ancestor pane,
+  // open the real modal and focus the intended target before expanding groups.
+  await page.evaluate((target: string) => { document.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target } })); }, target);
+  const drawer = page.locator('#settings-drawer');
+  assert.equal(await drawer.evaluate((dialog: HTMLDialogElement) => dialog.matches(':modal')), true);
+  assert.equal(await drawer.locator('[data-settings-section]:visible').count(), 1);
+  assert.equal(await page.locator('#' + target).isVisible(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), target);
+  for(const summary of await drawer.locator('[data-settings-section]:visible details.settings-group > summary').all()){
     if(!await summary.evaluate((el:HTMLElement)=>(el.parentElement as HTMLDetailsElement).open))await summary.click();
   }
+  // Summary clicks move focus. Restore the intended target through the same
+  // shell path after exposing groups, including after a page lifecycle restart.
+  await page.evaluate((target: string) => { document.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target } })); }, target);
+  assert.equal(await drawer.evaluate((dialog: HTMLDialogElement) => dialog.matches(':modal')), true);
+  assert.equal(await page.locator('#' + target).isVisible(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), target);
 }

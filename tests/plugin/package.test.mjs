@@ -161,14 +161,30 @@ test('method/root/class/material allowlists exactly match the shared protocol an
   }
 });
 
-test('packaged source has no arbitrary evaluation, asset insertion, persistence or publishing API', () => {
+test('packaged source has no arbitrary evaluation, asset insertion, unscoped persistence or publishing API', () => {
   assert.doesNotMatch(allSource, /\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
-  assert.doesNotMatch(allSource, /(?:InsertService|AssetService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay|SetSetting|GetSetting)/);
+  assert.doesNotMatch(allSource, /(?:InsertService|AssetService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
   assert.doesNotMatch(allSource, /(?:SetAttribute|AddTag)\s*\(/);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
   assert.doesNotMatch(allSource, /require\(\s*(?:\d|args\.|command\.)/);
   assert.equal((allSource.match(/:RequestAsync\(/g) ?? []).length, 1);
   assert.doesNotMatch(allSource, /:(?:GetAsync|PostAsync)\(/);
+  const main = byFile['Main.server.luau'];
+  assert.doesNotMatch(files.filter(file => file.filename !== 'Main.server.luau').map(file => file.source).join('\n'), /SetSetting|GetSetting/);
+  // The user explicitly authorized these two own-plugin settings. Any new
+  // setting name or call shape requires a corresponding reviewed test change.
+  const namespaces = Object.fromEntries([...main.matchAll(/local\s+([A-Z_]+)\s*=\s*"(Arcane\.[^"]+)"/g)].map(match => [match[1], match[2]]));
+  assert.deepEqual(namespaces, { KEY_SETTING: 'Arcane.LocalApiKey.v1', STATE_SETTING: 'Arcane.LastConnection.v1' });
+  const calls = [...main.matchAll(/plugin:(GetSetting|SetSetting)\(\s*([A-Z_]+)/g)].map(match => [match[1], namespaces[match[2]]]);
+  assert.deepEqual(calls, [
+    ['GetSetting', 'Arcane.LocalApiKey.v1'], ['GetSetting', 'Arcane.LastConnection.v1'],
+    ['SetSetting', 'Arcane.LastConnection.v1'], ['SetSetting', 'Arcane.LocalApiKey.v1'],
+    ['SetSetting', 'Arcane.LocalApiKey.v1'],
+    ['SetSetting', 'Arcane.LocalApiKey.v1'],
+  ]);
+  assert.equal((main.match(/\b(?:GetSetting|SetSetting)\b/g) ?? []).length, calls.length, 'No alias or dynamic setting access escapes the namespace checks.');
+  assert.match(main, /SetSetting\(STATE_SETTING, \{connected = connected\}\)/);
+  assert.match(main, /function rememberState\(connected: boolean\)/);
 });
 
 test('transport pins literal loopback routes, handles bounded backoff and fences sessions', () => {
@@ -222,13 +238,99 @@ test('native bundle rejects dynamic, undeclared and incorrectly parented module 
   }
 });
 
-test('native Main exposes only one masked API key field with compact Arcane styling and real status', () => {
+test('Main exposes the red Arcane brand, editable key, Connect/Reconnect/Connected/Failed and live ACK color', () => {
   const main = byFile['Main.server.luau'];
   assert.equal((main.match(/Instance\.new\("TextBox"\)/g) ?? []).length, 1);
   assert.equal((main.match(/Instance\.new\("TextButton"\)/g) ?? []).length, 1);
   assert.doesNotMatch(main, /requestPair|pairing code|Daemon URL|local url|credits|quota/i);
-  for (const feature of ['"API Key"', '"Arcane"', '"OrangeStroke"', '"WhiteStroke"', '"Divider"', '"Connect"', '"Disconnect"', 'TextTransparency = 1', 'MaxVisibleGraphemes = 0', 'local entered = keyInput.Text', 'clearInput()', 'requestConnect(entered)', 'status.sessionId ~= nil', 'status.state == "connected"']) assert.ok(main.includes(feature), feature);
+  assert.doesNotMatch(main, /"(?:OrangeStroke|WhiteStroke|Crossbar|Subtitle|Divider|ConnectionDot|ConnectionStatus|Footer|Grants|Detail|Disconnect)"|Instance\.new\("(?:ImageLabel|ImageButton)"\)/);
+  for (const feature of ['"Arcane"', '"Connect"', '"Reconnect"', '"Connected"', '"Failed"', '"Enter a new API key"', 'TextTransparency = 0', 'MaxVisibleGraphemes = -1', 'keyInput.Text = savedKey or ""', 'requestConnect(value)', 'status.sessionId ~= nil', 'status.state == "connected"', 'if live and not keyFailed then colors.green else colors.red']) assert.ok(main.includes(feature), feature);
+  assert.match(main, /header[^\n]*UDim2\.new\(1, 0, 0, 48\)/);
+  assert.match(main, /connectButton\.Position = UDim2\.new\(0, 14, 0, 100\)/);
+  assert.match(main, /inputPanel[^\n]*UDim2\.new\(0, 14, 0, 54\)/);
+  assert.match(main, /red = Color3\.fromRGB\(255, 51, 64\)/);
+  assert.match(main, /for row = 0, 63 do/);
+  assert.doesNotMatch(main, /\b(?:print|warn)\s*\(/);
   assert.ok(byFile['Transport.luau'].includes('"/v1/plugin/connect"'));
   assert.ok(byFile['Validation.luau'].includes('^arcane_local_v1_'));
-  assert.doesNotMatch(allSource, /\/v1\/studio\/keys|SetSetting|SetAttribute|GetSetting/);
+  assert.doesNotMatch(allSource, /\/v1\/studio\/keys|SetAttribute/);
+});
+
+test('native Main auto-opens a compact floating popup with an unobstructed standard key input', () => {
+  const main = byFile['Main.server.luau'];
+  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, true, true, 260, 200, 230, 185\)/);
+  assert.match(main, /panelPadding\.PaddingBottom = UDim\.new\(0, 18\)/);
+  assert.match(main, /CreateDockWidgetPluginGuiAsync\("ArcaneLocalBridgeFloatingV2", info\)/);
+  assert.match(main, /keyInput\.Position = UDim2\.new\(\)/);
+  assert.match(main, /keyInput\.Size = UDim2\.fromScale\(1, 1\)/);
+  for (const property of ['ZIndex = 3', 'Active = true', 'Selectable = true', 'TextEditable = true']) assert.ok(main.includes('keyInput.' + property), property);
+  assert.doesNotMatch(main, /MaskedKey|mask\.ZIndex|TextTransparency = 1|MaxVisibleGraphemes = 0/);
+  assert.match(main, /button:SetActive\(widget\.Enabled\)/);
+  assert.doesNotMatch(main, /(?:GenerateGUID|math\.random).*ArcaneLocalBridge|CaptureFocus\(/, 'No accumulating random widgets or forced typing focus.');
+});
+
+test('native Main scanline polygons exactly match the existing desktop SVG paths and opacity', async () => {
+  const html = await readFile(path.join(repository, 'apps/desktop/public/studio.html'), 'utf8');
+  const svg = html.match(/<svg class="arcane-logo"[^>]*viewBox="0 0 64 64"[^>]*>([\s\S]*?)<\/svg>/)?.[1];
+  assert.ok(svg, 'Use the actual desktop Arcane mark as the reference.');
+  const paths = [...svg.matchAll(/<path d="([^"]+)"[^>]*?(?:opacity="([^"]+)")?\s*\/>/g)];
+  const polygons = [...byFile['Main.server.luau'].matchAll(/^polygon\("([^"]+)",\s*\{([^\n]+)\},\s*([\d.]+)\)/gm)];
+  assert.equal(paths.length, 3); assert.equal(polygons.length, paths.length);
+  for (let index = 0; index < paths.length; index++) {
+    const points = [...polygons[index][2].matchAll(/\{\s*(\d+)\s*,\s*(\d+)\s*\}/g)].map(match => [+match[1], +match[2]]);
+    assert.deepEqual(points, svgPolygon(paths[index][1]), polygons[index][1] + ' uses the exact existing SVG polygon.');
+    const opacity = /opacity="([^"]+)"/.exec(paths[index][0]);
+    assert.ok(Math.abs(+polygons[index][3] - (1 - +(opacity?.[1] ?? 1))) < 1e-12, 'Preserve the SVG facet opacity.');
+  }
+});
+
+// Independent parser for the reference mark's straight-line SVG path commands.
+function svgPolygon(d) {
+  const tokens = d.match(/[MmLlHhVvZz]|-?\d+(?:\.\d+)?/g);
+  const points = []; let cursor = 0, command, x = 0, y = 0;
+  while (cursor < tokens.length) {
+    if (/^[A-Za-z]$/.test(tokens[cursor])) command = tokens[cursor++];
+    if (command.toUpperCase() === 'Z') break;
+    const relative = command === command.toLowerCase();
+    const first = +tokens[cursor++]; assert.ok(Number.isFinite(first));
+    if ('MmLl'.includes(command)) {
+      const second = +tokens[cursor++]; assert.ok(Number.isFinite(second));
+      x = (relative ? x : 0) + first; y = (relative ? y : 0) + second;
+      if (command === 'm') command = 'l'; else if (command === 'M') command = 'L';
+    } else if ('Hh'.includes(command)) x = (relative ? x : 0) + first;
+    else if ('Vv'.includes(command)) y = (relative ? y : 0) + first;
+    else assert.fail('Unsupported reference SVG command: ' + command);
+    points.push([x, y]);
+  }
+  if (points.length > 1 && points.at(-1).every((value, index) => value === points[0][index])) points.pop();
+  return points;
+}
+
+test('explicit clicks preserve raw keys and save before connecting; text edits fence old access without credential fallback', () => {
+  const main = byFile['Main.server.luau'];
+  const click = main.slice(main.indexOf('connectButton.Activated:Connect(function()'), main.indexOf('plugin.Unloading:Connect(function()'));
+  assert.ok(click.indexOf('invalidateInput()') < click.indexOf('V.keyOrigin(entered)'));
+  assert.match(click, /local entered = keyInput\.Text/);
+  assert.doesNotMatch(click, /clearInput\(\)|else savedKey/);
+  assert.ok(click.indexOf('V.keyOrigin(entered)') < click.indexOf('plugin:SetSetting(KEY_SETTING, value)'));
+  assert.ok(click.indexOf('plugin:SetSetting(KEY_SETTING, value)') < click.indexOf('transport:requestConnect(value)'));
+  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 1, 'No mount, settings read or toolbar callback auto-connects.');
+  const malformed = /if not valid then([\s\S]*?)\n\tend/.exec(click)?.[1];
+  assert.ok(malformed);
+  assert.match(malformed, /rejectKey\(\)[\s\S]*transport:requestDisconnect\(\)[\s\S]*return/);
+  assert.equal((main.match(/requestDisconnect\(/g) ?? []).length, 2, 'Text edits and invalid clicks fence old access; there is no Disconnect control.');
+  const rejection = main.slice(main.indexOf('local function rejectKey()'), main.indexOf('local transport:'));
+  assert.match(rejection, /savedKey, hint = true, nil, "Enter a new API key"/);
+  assert.match(rejection, /plugin:SetSetting\(KEY_SETTING, ""\)/);
+  assert.match(rejection, /clearInput\(\)/, 'A current rejection clears the rejected text for replacement guidance.');
+  const invalidation = main.slice(main.indexOf('local function invalidateInput()'), main.indexOf('transport = Transport.new'));
+  assert.match(invalidation, /keyInput\.Text == inputText then return false/);
+  assert.match(invalidation, /savedKey = nil[\s\S]*SetSetting\(KEY_SETTING, ""\)[\s\S]*requestDisconnect\(\)/);
+  assert.match(main, /if invalidateInput\(\) then return end[\s\S]*status\.state == "failed"/);
+  assert.match(main, /pcall\(function\(\) V\.keyOrigin\(previousKey\) end\)/);
+  assert.match(main, /previousKey = nil/);
+  assert.match(main, /count == 1 and type\(previousState\.connected\) == "boolean"/);
+  const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'));
+  assert.match(unload, /savedKey = nil[\s\S]*clearInput\(\)[\s\S]*transport:stop\(\)/);
+  assert.doesNotMatch(unload, /SetSetting|GetSetting|requestConnect|requestDisconnect/);
 });

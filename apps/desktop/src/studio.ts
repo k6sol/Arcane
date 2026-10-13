@@ -5,8 +5,10 @@ import { LearningPanel } from './learning-panel.js';
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
+import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
+import { StudioKeySettings, trustedKeyAction } from './studio-key-settings.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
 import type { AssetInput, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
@@ -215,6 +217,8 @@ export interface AssetConversationStart {
   jobId: string; association: 'bound' | 'unknown'; retry: false; job: AssetJobRecord;
 }
 export interface StudioWorkbenchOptions {
+  isSignedIn?: () => boolean;
+  subscribeSignInChange?: (listener: () => void) => () => void;
   /** Production uses trusted observations from the existing chat controller. */
   getProjectPath?: () => string | null;
   getNativeConversation?: () => (AssetConversation & { projectPath?: string }) | null;
@@ -446,7 +450,7 @@ export class StudioApi {
     if (!/^[a-f0-9]{64}$/.test(this.token)) throw new StudioRequestError('Open /studio with the launcher’s local control token. This tab has no valid token.', 'rejected');
     const nativeRoute = /^\/v1\/native\/(?:capabilities|read)$/.test(path);
     const conversationRoute = /^\/v1\/assets\/conversation-(?:jobs(?:\?[^#]*)?|start)$/.test(path);
-    if (!(nativeRoute || conversationRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/revoke)?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
+    if (!(nativeRoute || conversationRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
     if (conversationRoute) {
       const route = new URL(path, 'http://127.0.0.1'), query = route.searchParams;
       const listing = route.pathname.endsWith('/conversation-jobs');
@@ -481,6 +485,7 @@ export class StudioApi {
   nativeRead(input: NativeReadRequest) { return this.request<NativeObservation>('/v1/native/read', input, 'json', 45000); }
   keys() { return this.request<{ keys: StudioKeyRecord[] }>('/v1/studio/keys'); }
   issueKey(input: { allowedRoots: StudioRoot[]; allowWrites: boolean }) { return this.request<IssuedStudioKey>('/v1/studio/keys', input); }
+  rotateKey() { return this.request<IssuedStudioKey>('/v1/studio/keys/rotate', {}); }
   revokeKey(keyId: string) { return this.request<{ revoked: true }>('/v1/studio/keys/revoke', { keyId }); }
   agentToken() { return this.request<{ token: string; scopes: unknown; canReview: false; expires: string }>('/v1/product/mcp-token', {}); }
   assetJobs() { return this.request<{ jobs: AssetJobRecord[] }>('/v1/assets/jobs'); }
@@ -573,7 +578,9 @@ export class StudioWorkbench {
     const projectId = validPath && typeof identity === 'string' && identity.length === 64 && /^[a-f0-9]{64}$/.test(identity) ? identity : null;
     const path = validPath ? value : this.canonicalProjectPath;
     if (path === this.canonicalProjectPath && projectId === this.canonicalProjectId) return;
+    this.dismissConnectionSecrets(); this.studioKeys = [];
     this.canonicalProjectPath = path; this.canonicalProjectId = projectId;
+    this.keySettings.setProject(projectId);
     for (const listener of this.projectListeners) listener();
   }
   private nativeObservation: NativeObservation | null = null;
@@ -632,7 +639,9 @@ export class StudioWorkbench {
   private keySecretEpoch = 0;
   private confirmation: (() => Promise<void>) | null = null;
   private readonly assetDownloads: ArtifactDownloads;
+  private readonly keySettings: StudioKeySettings;
   constructor(private readonly doc: Document, private readonly api: StudioApi, private readonly origin: string, private readonly token: string, options: StudioWorkbenchOptions = {}) {
+    this.keySettings = new StudioKeySettings(doc, origin);
     this.assetDownloads = new ArtifactDownloads(doc, token);
     this.assetContext = new AssetConversationController({ ...options, getProjectPath: options.getProjectPath ?? (() => this.historyProjectPath() || null) });
     this.assetOptions = options;
@@ -676,9 +685,6 @@ export class StudioWorkbench {
     this.renderNativeForm();
     this.on('native-get-token', 'click', () => { void this.getNativeToken(); });
     this.on('native-copy-token', 'click', () => { if (this.nativeToken) void this.copy(this.nativeToken); });
-    for (const root of STUDIO_ROOTS) {
-      const label = this.make('label'), input = this.make('input'); input.type = 'checkbox'; input.value = root; input.name = 'key-root'; input.checked = root === 'Workspace'; label.append(input, this.make('span', root)); this.el('key-roots').append(label);
-    }
     this.on('asset-form', 'submit', event => { event.preventDefault(); void this.startAsset(); });
     this.on('asset-form', 'input', () => this.renderAssetControls());
     this.on('asset-template', 'change', () => { this.el<HTMLInputElement>('asset-size').value = this.value('asset-template') === 'hero-prop' ? '1, 0.65, 0.7' : '3, 3, 2.8'; this.renderAssetControls(); });
@@ -711,14 +717,19 @@ export class StudioWorkbench {
     this.addWorkTask();
     this.on('refresh', 'click', () => { void this.refresh(); });
     this.on('session-picker', 'change', () => this.selectSession(this.value('session-picker')));
-    this.on('key-form', 'submit', event => { event.preventDefault(); void this.issueStudioKey(); });
+    this.on('key-form', 'submit', event => { const trusted = trustedKeyAction(event); event.preventDefault(); if (trusted) void this.issueStudioKey(); });
+    for (const id of ['settings-key-generate', 'key-setup-generate']) {
+      this.doc.getElementById(id)?.addEventListener('click', event => { if (trustedKeyAction(event)) void this.issueStudioKey(); });
+    }
+    this.assetOptions.subscribeSignInChange?.(() => this.renderKeyControls());
     this.on('key-form', 'change', () => this.renderKeyControls());
-    this.on('key-reveal', 'click', () => { if (!this.issuedKey) return; this.keyRevealed = !this.keyRevealed; this.renderIssuedKey(); });
-    this.on('key-copy', 'click', () => { if (this.issuedKey) void this.copy(this.issuedKey.apiKey); });
+    this.on('key-reveal', 'click', event => { if (!trustedKeyAction(event) || !this.issuedKey) return; this.keyRevealed = !this.keyRevealed; this.renderIssuedKey(); });
+    this.on('key-copy', 'click', event => { if (trustedKeyAction(event) && this.issuedKey) void this.copy(this.issuedKey.apiKey); });
     this.on('key-dismiss', 'click', () => this.clearStudioKey());
     this.on('key-refresh', 'click', () => { void this.refresh(); });
     this.on('key-acknowledge', 'click', () => { if (!this.keyAvailable || !this.keyReadAfterUnknown || this.keyBusy) return; this.keyUnknown = ''; this.keyReadAfterUnknown = false; this.renderKeyControls(); });
     this.doc.addEventListener('click', event => { if (event.target instanceof Element && event.target.closest('a[href]')) this.clearStudioKey(); });
+    this.doc.getElementById('settings-drawer')?.addEventListener('close', () => this.dismissConnectionSecrets());
     this.renderKeyControls();
     this.on('revoke', 'click', () => this.reviewRevoke());
     this.on('command-form', 'submit', event => { event.preventDefault(); void this.send(); });
@@ -744,7 +755,7 @@ export class StudioWorkbench {
     await this.refresh();
     this.schedule();
   }
-  resume() { this.stopped = false; this.subscribeAssetContext(); this.syncAssetContext(); this.renderNativeControls(); void this.refresh().finally(() => this.schedule()); }
+  resume() { this.stopped = false; this.keySettings.resume(); this.subscribeAssetContext(); this.syncAssetContext(); this.renderNativeControls(); void this.refresh().finally(() => this.schedule()); }
   dismissConnectionSecrets(): void {
     this.clearStudioKey(); this.nativeSecretEpoch++; this.nativeToken = '';
     this.text('native-token', ''); this.text('native-scopes', '');
@@ -760,7 +771,7 @@ export class StudioWorkbench {
     const picker = this.el<HTMLSelectElement>('diagnostics-studio'); picker.replaceChildren(); this.option(picker, '', 'Observe Studio choices first');
     this.el('diagnostics-tools').replaceChildren(); this.clearNativeReceipt('Native view cleared after page exit. Observe capabilities again.');
     this.text('diagnostics-request-status', 'Previous request discarded after page exit'); this.text('diagnostics-connection', 'No current request receipt');
-    this.dismissConnectionSecrets(); this.assetDownloads.clear(); this.assetPreviewEpoch++; this.stopped = true;
+    this.dismissConnectionSecrets(); this.keySettings.stop(); this.assetDownloads.clear(); this.assetPreviewEpoch++; this.stopped = true;
     if (this.timer) clearTimeout(this.timer); this.renderNativeControls();
   }
 
@@ -772,7 +783,7 @@ export class StudioWorkbench {
     if (this.refreshing || !this.token) return;
     this.refreshing = true; this.el<HTMLButtonElement>('refresh').disabled = true;
     const capturedSession = this.sessionId, productEpoch = this.productMetadataEpoch;
-    const workRead = Promise.allSettled([this.refreshWork(), this.refreshAssets(), this.refreshStudioKeys()]);
+    const workRead = Promise.allSettled([this.refreshWork(), this.refreshAssets()]);
     const reads = await Promise.allSettled([this.api.sessions(), this.api.product(), ...(capturedSession ? [this.api.commands(capturedSession)] : [])]);
     try {
       // Project/chat metadata does not depend on Studio availability.
@@ -781,6 +792,7 @@ export class StudioWorkbench {
         if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
         else this.observeProjectPath(null);
       }
+      if (!this.stopped && productEpoch === this.productMetadataEpoch) await this.refreshStudioKeys();
       if (product.status === 'rejected') { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       const sessionRead = reads[0]!;
       if (sessionRead.status === 'rejected') throw sessionRead.reason;
@@ -966,21 +978,34 @@ export class StudioWorkbench {
   }
 
   private async refreshStudioKeys() {
+    const project = this.canonicalProjectId, generation = this.productMetadataEpoch;
     try {
-      const data = await this.api.keys(); this.studioKeys = readStudioKeyRecords(data.keys); this.keyAvailable = true;
+      const data = await this.api.keys();
+      if (this.stopped || project !== this.canonicalProjectId || generation !== this.productMetadataEpoch) return;
+      this.studioKeys = readStudioKeyRecords(data.keys); this.keyAvailable = true;
+      this.keySettings.setRecords(this.studioKeys);
       if (this.keyUnknown) this.keyReadAfterUnknown = true;
       if (this.issuedKey && this.studioKeys.some(key => key.keyId === this.issuedKey!.keyId && key.revokedAt)) this.clearStudioKey();
       this.badge('key-status', 'Key service responding', 'good'); this.renderKeyHistory();
     } catch {
+      if (this.stopped || project !== this.canonicalProjectId || generation !== this.productMetadataEpoch) return;
       this.keyAvailable = false; this.keyReadAfterUnknown = false;
+      this.keySettings.metadataUnavailable();
       this.badge('key-status', 'Key service unavailable', 'warning');
       this.text('key-notice', 'Refresh key records from the local daemon before issuing or revoking an API key.');
     } finally { this.renderKeyControls(); }
   }
-  private keyGrant() { return prepareStudioKeyGrant([...this.doc.querySelectorAll<HTMLInputElement>('input[name="key-root"]:checked')].map(input => input.value), this.checked('key-writes')); }
+  private keyGrant() { return prepareStudioKeyGrant([...STUDIO_ROOTS], true); }
   private renderKeyControls() {
-    let valid = false; try { this.keyGrant(); valid = true; } catch { /* Explicit access selection is required. */ }
-    this.el<HTMLButtonElement>('key-issue').disabled = !this.token || !this.keyAvailable || this.keyBusy || Boolean(this.issuedKey) || Boolean(this.keyUnknown) || !valid;
+    const active = this.studioKeys.some(key => !key.revokedAt) || !!this.issuedKey;
+    const ready = this.assetOptions.isSignedIn?.() ?? true;
+    const disabled = !this.token || !this.keyAvailable || this.keyBusy || Boolean(this.keyUnknown) || !ready;
+    for (const id of ['key-issue', 'settings-key-generate', 'key-setup-generate']) {
+      const button = this.doc.getElementById(id) as HTMLButtonElement | null;
+      if (button) { button.disabled = disabled; button.textContent = this.keyBusy ? 'Generating…' : active ? 'Regenerate API key' : 'Generate API key'; }
+    }
+    const setup = this.doc.getElementById('key-setup-gate');
+    if (setup) setup.hidden = !ready || active;
     this.doc.querySelectorAll<HTMLInputElement>('#key-form input').forEach(input => { input.disabled = this.keyBusy || Boolean(this.issuedKey); });
     this.el('key-unknown').hidden = !this.keyUnknown; this.text('key-unknown-message', this.keyUnknown);
     this.el<HTMLButtonElement>('key-acknowledge').disabled = !this.keyAvailable || !this.keyReadAfterUnknown || this.keyBusy;
@@ -994,7 +1019,7 @@ export class StudioWorkbench {
     this.el<HTMLButtonElement>('key-copy').disabled = !key; this.el<HTMLButtonElement>('key-reveal').disabled = !key;
     this.renderKeyControls();
   }
-  private clearStudioKey() { this.keySecretEpoch++; this.issuedKey = null; this.keyRevealed = false; this.renderIssuedKey(); }
+  private clearStudioKey() { this.keySecretEpoch++; this.issuedKey = null; this.keyRevealed = false; this.keySettings.hide(); this.renderIssuedKey(); }
   private renderKeyHistory() {
     const list = this.el('key-history'); list.replaceChildren();
     if (!this.studioKeys.length) list.append(this.make('p', 'No API keys recorded. Issue a key to connect the Arcane plugin.', 'hint'));
@@ -1010,12 +1035,19 @@ export class StudioWorkbench {
     if (unknown) { this.keyUnknown = operation + ' outcome unknown. Refresh the metadata list and revoke any unwanted key. The secret cannot be recovered from history; issuance is never automatically retried.'; this.keyReadAfterUnknown = false; }
   }
   private async issueStudioKey() {
-    if (!this.keyAvailable || this.keyBusy || this.issuedKey || this.keyUnknown) return;
-    let grant: ReturnType<typeof prepareStudioKeyGrant>; try { grant = this.keyGrant(); } catch { this.text('key-notice', 'Choose explicit service access first.'); return; }
+    if (!this.keyAvailable || this.keyBusy || this.keyUnknown || this.assetOptions.isSignedIn?.() === false) return;
+    const grant = this.keyGrant();
     const epoch = ++this.keySecretEpoch; this.keyBusy = true; this.renderKeyControls(); this.text('key-notice', 'Issuing an Arcane API key…');
     try {
-      const result = await this.api.issueKey(grant), key = readIssuedStudioKey(result, this.origin, grant);
-      if (!this.stopped && epoch === this.keySecretEpoch) { this.issuedKey = key; this.keyRevealed = false; this.renderIssuedKey(); this.text('key-notice', 'API key issued. Copy it into the Arcane plugin and press Connect. The secret is shown only in this issuance view.'); }
+      const result = await this.api.rotateKey(), key = readIssuedStudioKey(result, this.origin, grant);
+      if (!this.stopped && epoch === this.keySecretEpoch) {
+        this.issuedKey = key; this.keyRevealed = true;
+        await this.keySettings.rememberIssuedKey(key);
+        this.renderIssuedKey();
+        this.text('key-notice', 'API key generated. Previous keys no longer work.');
+        const drawer = this.doc.getElementById('settings-drawer') as HTMLDialogElement | null;
+        if (drawer && !drawer.open) this.doc.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'workspace-settings' } }));
+      }
       else if (!this.stopped) this.text('key-notice', 'Key issued; its secret was cleared by navigation. Revoke the record and issue a new key if needed.');
     } catch (error) { this.keyFailure(error, 'Key issuance'); }
     finally { this.keyBusy = false; if (!this.stopped) await this.refreshStudioKeys(); this.renderKeyControls(); }
@@ -1027,7 +1059,7 @@ export class StudioWorkbench {
       if (!this.keyAvailable || this.keyBusy || this.keyUnknown || !current || current.revokedAt) return;
       if (this.issuedKey?.keyId === key.keyId) this.clearStudioKey();
       this.keyBusy = true; this.renderKeyControls();
-      try { const result = await this.api.revokeKey(key.keyId); if (result.revoked !== true) throw new StudioRequestError('The key revocation result could not be confirmed.', 'unknown'); this.text('key-notice', 'API key revoked: ' + key.keyId + '.'); }
+      try { const result = await this.api.revokeKey(key.keyId); if (result.revoked !== true) throw new StudioRequestError('The key revocation result could not be confirmed.', 'unknown'); await this.keySettings.forget(key.keyId); this.text('key-notice', 'API key revoked: ' + key.keyId + '.'); }
       catch (error) { this.keyFailure(error, 'Key revocation'); }
       finally { this.keyBusy = false; await this.refresh(); this.renderKeyControls(); }
     }, 'I checked this key ID and its granted service access.');
@@ -1598,12 +1630,16 @@ export function createWorkflowContextOptions(
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  let chatTabController: import('./chat-tabs.js').ChatTabsController | null = null;
   let storage: Pick<Storage, 'getItem' | 'setItem'>;
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
   const token = takeControlToken(window.location, window.history, storage);
   const codexChat = new CodexChat(document, new CodexChatApi(token));
   const providerSetup = startProviderSetup(document, {chat:codexChat});
+  const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
+    isSignedIn: () => providerSetup.isSignedIn(),
+    subscribeSignInChange: listener => providerSetup.subscribeSignInChange(listener),
     assetMode: 'conversation', getNativeConversation: () => codexChat.workflowConversation(),
     subscribeContextChange: listener => codexChat.subscribeWorkflowContextChange(listener),
   });
@@ -1623,9 +1659,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workflowsStopped = true; providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
-  void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  void codexChat.start().then(async () => {
+    const module = await import('./chat-tabs.js');
+    chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true });
+    if (workflowsStopped) chatTabController.stop();
+  }).catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Chat could not be opened. Your saved history is unchanged.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }
 

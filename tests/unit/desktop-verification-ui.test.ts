@@ -314,7 +314,8 @@ test('browser fixture: native keyboard activation, responsive settings, referenc
     await page.addStyleTag({ content: await readFile('apps/desktop/public/studio.css', 'utf8') });
     const compiled = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'), 'utf8');
     // The real markup/controller, with an explicitly fake frozen zero-arg bridge.
-    // StudioWorkbench, Electron, the daemon and native dialogs are never mounted.
+    // StudioWorkbench, WorkspaceShell, Electron, the daemon and system file dialogs
+    // are never mounted. Open the real HTML settings dialog explicitly below.
     await page.addScriptTag({ type: 'module', content: compiled + '\n' + [
       'const calls = [];',
       'const projectId = ' + JSON.stringify(PROJECT) + ';',
@@ -327,10 +328,27 @@ test('browser fixture: native keyboard activation, responsive settings, referenc
     const calls = () => page.evaluate(() => (window as unknown as { verificationFixture: { calls: Call[] } }).verificationFixture.calls);
     assert.deepEqual(await calls(), []);
     assert.equal(await page.locator('#code-verification-settings').getAttribute('open'), null);
-    await page.locator('#workspace-settings > summary').click();
+    const draft = 'Keep this draft and its whitespace.  ';
+    await page.locator('#codex-composer').fill(draft);
+    const drawer = page.locator('#settings-drawer');
+    assert.equal(await drawer.evaluate((dialog: HTMLDialogElement) => dialog.tagName), 'DIALOG');
+    assert.equal(await drawer.getAttribute('open'), null);
+    assert.equal(await drawer.isVisible(), false);
+    await drawer.evaluate((dialog: HTMLDialogElement) => dialog.showModal());
+    assert.equal(await drawer.evaluate((dialog: HTMLDialogElement) => dialog.matches(':modal')), true);
+    // WorkspaceShell normally selects Tools before expanding the nested group.
+    // Keep that pane selection explicit in this controller-only modal fixture.
+    assert.equal(await page.locator('#workspace-settings').evaluate((section: HTMLElement) => section.tagName), 'SECTION');
+    assert.equal(await page.locator('#workspace-settings').getAttribute('open'), null);
+    await page.evaluate(() => {
+      for (const section of document.querySelectorAll<HTMLElement>('[data-settings-section]')) section.hidden = section.id !== 'settings-tools';
+    });
+    assert.equal(await drawer.locator('[data-settings-section]:visible').count(), 1);
+    assert.equal(await page.locator('#settings-tools').isVisible(), true);
+    assert.deepEqual(await calls(), []);
     await page.locator('#code-verification-settings > summary').click();
     const setup = page.getByRole('button', { name: 'Set up Luau verification', exact: true });
-    const refresh = page.getByRole('button', { name: 'Refresh setup status', exact: true });
+    const refresh = page.getByRole('button', { name: 'Check status', exact: true });
     await setup.evaluate((button: HTMLButtonElement) => button.click());
     assert.deepEqual(await calls(), []);
     await refresh.focus(); await page.keyboard.press('Enter');
@@ -355,8 +373,6 @@ test('browser fixture: native keyboard activation, responsive settings, referenc
       assert.ok(dimensions.width <= dimensions.viewport); assert.equal(dimensions.overflow, false);
       assert.ok(dimensions.buttonHeights.every((height: number) => height >= 44));
     }
-    const draft = 'Keep this draft and its whitespace.  ';
-    await page.locator('#codex-composer').fill(draft);
     await page.evaluate(() => {
       const fixture = (window as unknown as { verificationFixture: { controller: { stop(): void; resume(): void } } }).verificationFixture;
       fixture.controller.stop(); fixture.controller.resume();
@@ -371,8 +387,7 @@ test('browser fixture: native keyboard activation, responsive settings, referenc
     await page.locator('#desktop-verification').scrollIntoViewIfNeeded();
     if (process.env.ARCANE_UI_SCREENSHOT) {
       await page.locator('#code-verification-settings').scrollIntoViewIfNeeded();
-      // Keep the disclosure title below the existing sticky workspace header.
-      await page.evaluate(() => window.scrollBy(0, -140));
+      // The real settings dialog owns scrolling within the viewport.
       await page.screenshot({ path: resolve(process.env.ARCANE_UI_SCREENSHOT) });
     }
     assert.deepEqual(errors, []); assert.ok(requests.every(url => !url.includes('/v1/')));

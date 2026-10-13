@@ -142,8 +142,15 @@ export async function createConnectionLab(options: Options) {
     try {
       if (request.headers.host !== new URL(origin).host) throw new ArcaneError('HOST', 'Unexpected local host.');
       const url = new URL(request.url ?? '/', origin);
+      // The product preview must land on the same conversation surface as the
+      // desktop host. The legacy metadata lab remains an explicit diagnostic.
+      if (bridge && request.method === 'GET' && url.pathname === '/') {
+        response.writeHead(307, { Location: '/studio', 'Cache-Control': 'no-store' });
+        response.end(); return;
+      }
       const publicRoutes = new Map<string, [string, string]>([
         ['/', [join(options.cwd, 'apps/desktop/public/index.html'), 'text/html']],
+        ['/diagnostics', [join(options.cwd, 'apps/desktop/public/index.html'), 'text/html']],
         ['/lab.css', [join(options.cwd, 'apps/desktop/public/lab.css'), 'text/css']],
         ['/lab.js', [join(options.cwd, 'dist/apps/desktop/src/lab.js'), 'text/javascript']],
         ...(bridge ? [
@@ -151,11 +158,15 @@ export async function createConnectionLab(options: Options) {
           ['/studio.css', [join(options.cwd, 'apps/desktop/public/studio.css'), 'text/css']],
           ['/studio.js', [join(options.cwd, 'dist/apps/desktop/src/studio.js'), 'text/javascript']],
           ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
+          ['/chat-tabs.js', [join(options.cwd, 'dist/apps/desktop/src/chat-tabs.js'), 'text/javascript']],
+          ['/task-usage.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage.js'), 'text/javascript']],
+          ['/task-usage-ui.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage-ui.js'), 'text/javascript']],
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
           ['/learning-panel.js', [join(options.cwd, 'dist/apps/desktop/src/learning-panel.js'), 'text/javascript']],
           ['/desktop-verification.js', [join(options.cwd, 'dist/apps/desktop/src/desktop-verification.js'), 'text/javascript']],
           ['/provider-setup.js',[join(options.cwd,'dist/apps/desktop/src/provider-setup.js'),'text/javascript']],
+          ['/studio-key-settings.js',[join(options.cwd,'dist/apps/desktop/src/studio-key-settings.js'),'text/javascript']],
           ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
           ['/codex-history.js', [join(options.cwd, 'dist/apps/desktop/src/codex-history.js'), 'text/javascript']],
           ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']]
@@ -217,7 +228,7 @@ export async function createConnectionLab(options: Options) {
   origin = 'http://127.0.0.1:' + address.port;
   let cleanup: Promise<void> | null = null;
   return {
-    server, origin, token, agentToken, url: origin + '/#' + token,
+    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token,
     close(): Promise<void> {
       if (cleanup) return cleanup;
       shuttingDown = true; nativeAssetRegistry?.close();

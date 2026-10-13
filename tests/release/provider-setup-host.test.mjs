@@ -307,9 +307,9 @@ function terminalScripts(process) {
   assert.ok(encoded); return { launcher, inner: Buffer.from(encoded, 'base64').toString('utf16le') };
 }
 
-test('login requests genuine fixed vendor login in a visible terminal with no auth claim or capture', async () => {
+test('Claude login requests genuine fixed vendor login in a visible terminal with no auth claim or capture', async () => {
   const f = fixture();
-  for (const provider of ['codex', 'claude']) {
+  for (const provider of ['claude']) {
     const result = await f.host.login(provider); snapshot(result, provider);
     assert.equal(result.auth, 'unknown'); assert.equal(result.cliVersion, null); assert.match(result.message, /not yet verified/);
     const process = f.processes.at(-1), { launcher, inner } = terminalScripts(process);
@@ -320,7 +320,7 @@ test('login requests genuine fixed vendor login in a visible terminal with no au
     assert.ok(!/ExecutionPolicy|Bypass|setup-token|--console|--with-api-key|device-auth|curl|Invoke-Expression|iex|RunAs/.test(launcher + inner));
     assert.equal(f.dialogs.at(-1).config.defaultId, 0); assert.equal(f.dialogs.at(-1).config.cancelId, 0);
   }
-  assert.equal(f.processes.length, 2); assert.equal(f.urls.length, 0);
+  assert.equal(f.processes.length, 1); assert.equal(f.urls.length, 0);
 });
 
 test('Claude handoff sends no prompt, flags, resume, model, API route or app RPC', async () => {
@@ -352,6 +352,30 @@ test('host window/origin/project changes during confirmation revoke action witho
     const result = await f.host[method]('claude'); snapshot(result, 'claude');
     assert.equal(result.auth, 'unknown'); assert.equal(f.urls.length + f.processes.length, 0);
   }
+});
+
+test('owner cancellation revokes a pending confirmation even when the original context returns', async () => {
+  for (const method of ['install', 'login']) {
+    const f = fixture();
+    f.state.beforeConfirm = () => {
+      const project = f.state.project;
+      f.host.cancelPending();
+      f.state.project = 'C:\\Projects\\other'; f.state.project = project;
+    };
+    const result = await f.host[method]('codex'); snapshot(result, 'codex');
+    assert.equal(result.auth, 'unknown'); assert.equal(result.busy, false);
+    assert.match(result.message, /No completion was verified/);
+    assert.equal(f.urls.length + f.processes.length, 0);
+  }
+});
+
+test('owner cancellation during the version check prevents app-server launch in an unchanged context', async () => {
+  const f = fixture();
+  f.state.reply = () => { f.host.cancelPending(); return null; };
+  const result = await f.host.login('codex'); snapshot(result, 'codex');
+  assert.equal(result.auth, 'unknown'); assert.match(result.message, /No completion was verified/);
+  assert.deepEqual(f.processes.map(value => value.args), [['--version']]);
+  assert.equal(f.urls.length, 0);
 });
 
 test('context changes during terminal shell resolution revoke launch before the process boundary', async () => {
@@ -418,7 +442,8 @@ test('POSIX native status works, but unverified terminal integrations remain una
 test('trusted option validation rejects malformed disable flags, required accessors and unbounded timeouts', () => {
   const f = fixture();
   for (const values of [{ enabled: 'false' }, { getWindow: null }, { getOrigin: null }, { getProjectPath: null },
-    { timeoutMs: 0 }, { timeoutMs: 15001 }, { timeoutMs: 1.5 }]) {
+    { timeoutMs: 0 }, { timeoutMs: 15001 }, { timeoutMs: 1.5 },
+    { loginTimeoutMs: 0 }, { loginTimeoutMs: 300001 }, { loginTimeoutMs: 1.5 }]) {
     assert.throws(() => createProviderSetup({ ...f.options, ...values }), /unavailable/);
   }
 });

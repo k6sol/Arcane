@@ -69,6 +69,9 @@ class FixtureElement extends FixtureTarget {
   set hidden(value: boolean) { if (value) this.setAttribute('hidden', ''); else this.removeAttribute('hidden'); }
   get disabled(): boolean { return this.hasAttribute('disabled'); }
   set disabled(value: boolean) { if (value) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
+  get open(): boolean { return this.hasAttribute('open'); }
+  showModal(): void { assert.equal(this.tagName, 'DIALOG'); this.setAttribute('open', ''); }
+  close(): void { assert.equal(this.tagName, 'DIALOG'); this.removeAttribute('open'); this.dispatchEvent(new Event('close')); }
   get tabIndex(): number { return this.hasAttribute('tabindex') ? Number(this.getAttribute('tabindex')) : /^(BUTTON|INPUT|TEXTAREA)$/.test(this.tagName) ? 0 : -1; }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(''); }
   set textContent(value: string) { this.replaceChildren(); this.text = value; this.ownerDocument.changed(this); }
@@ -97,9 +100,14 @@ class FixtureElement extends FixtureTarget {
   contains(node: FixtureElement): boolean { return node === this || this.children.some(child => child.contains(node)); }
   private matches(selector: string): boolean {
     return selector.split(',').some(part => {
-      const match = /^([a-z][\w-]*)?(?:\[([\w-]+)\])?$/.exec(part.trim());
+      const terms = part.trim().split(/\s+/);
+      if (terms.length > 1) return this.matches(terms.at(-1)!) && !!this.parentElement?.closest(terms.slice(0, -1).join(' '));
+      if(/^#[a-z][\w-]*$/.test(part.trim()))return this.id === part.trim().slice(1);
+      if(/^\.[a-z][\w-]*$/.test(part.trim()))return this.classList.contains(part.trim().slice(1));
+      const match = /^([a-z][\w-]*)?(?:\[([\w-]+)(?:="([^"]*)")?\])?(:checked)?$/.exec(part.trim());
       assert.ok(match, 'Fixture supports selector ' + part);
-      return (!match[1] || this.tagName === match[1].toUpperCase()) && (!match[2] || this.hasAttribute(match[2]));
+      return (!match[1] || this.tagName === match[1].toUpperCase()) && (!match[2] || this.hasAttribute(match[2]))
+        && (match[3] === undefined || this.getAttribute(match[2]!) === match[3]) && (!match[4] || this.hasAttribute('checked'));
     });
   }
   closest(selector: string): FixtureElement | null {
@@ -194,9 +202,17 @@ function fixture() {
     toolButtons.set(tool!, button);
   }
   add('h2', 'codex-heading', stage);
-  const settings = add('details', 'workspace-settings');
-  const assetGroup = add('details', '', settings); const assetHeading = add('h2', 'asset-heading', assetGroup);
-  const studioGroup = add('details', '', settings); add('h2', 'session-heading', studioGroup);
+  const drawer = add('dialog', 'settings-drawer');
+  const sectionNav = add('nav', '', drawer);
+  const sections = new Map<string, FixtureElement>();
+  for (const [id, label] of [['workspace-settings', 'General'], ['settings-connections', 'Connections'], ['settings-tools', 'Tools'], ['settings-advanced', 'Advanced']]) {
+    const section = add('section', id!, drawer); section.setAttribute('data-settings-section', ''); section.hidden = id !== 'workspace-settings'; sections.set(id!, section);
+    const control = add('button', '', sectionNav, label!); control.setAttribute('data-settings-section-target', id!); control.setAttribute('aria-controls', id!);
+    if (id === 'workspace-settings') control.setAttribute('aria-current', 'page');
+  }
+  const settings = sections.get('workspace-settings')!, tools = sections.get('settings-tools')!, connections = sections.get('settings-connections')!, advanced = sections.get('settings-advanced')!;
+  const assetGroup = add('details', '', tools); const assetHeading = add('h2', 'asset-heading', assetGroup);
+  const studioGroup = add('section', '', connections); add('h2', 'session-heading', studioGroup);
   const settingsButton = add('button', 'workspace-tool-settings', stage); settingsButton.setAttribute('data-workspace-target', settings.id);
   const context = add('button', 'workspace-add-context', form);
   const contextLabel = add('span', 'workspace-tool-label', stage);
@@ -219,7 +235,7 @@ function fixture() {
     assert.equal(messages.textContent, 'Existing conversation'); assert.equal(scope.textContent, 'fixture-native-thread');
     assert.equal(doc.getElementById('codex-composer'), composer); assert.equal(previews.children.length, 0);
   };
-  return { doc, start, stage, composer, messages, scope, toolButtons, settings, assetGroup, studioGroup, assetHeading, settingsButton,
+  return { doc, start, stage, composer, messages, scope, toolButtons, drawer, settings, tools, connections, advanced, assetGroup, studioGroup, assetHeading, settingsButton,
     context, contextLabel, newChat, notice, search, untouched, get inputs() { return inputs; }, get secretDismissals() { return secretDismissals; }, get legacyScrolls() { return legacyScrolls; } };
 }
 
@@ -233,6 +249,7 @@ test('tool switching keeps one native conversation and its exact draft, owns leg
     assert.equal(shell.activeTool, tool); assert.equal(f.stage.getAttribute('data-workspace-tool'), tool);
     assert.equal(f.toolButtons.get(tool)!.getAttribute('aria-pressed'), 'true');
     assert.equal(f.settings.hasAttribute('open'), false); assert.equal(f.inputs, 0); f.untouched();
+    assert.equal(f.drawer.open, false);
   }
   assert.equal(f.legacyScrolls, 0); assert.deepEqual(events, ['blender', 'roblox', 'all', 'blender']);
   assert.ok(f.secretDismissals >= 4); shell.cleanup();
@@ -262,7 +279,8 @@ test('draft limits reject the entire addition and preserve existing text and inp
 test('tool settings explicitly reveal the right group and never reset the active tool or draft', () => {
   const f = fixture(), shell = f.start(); f.composer.value = 'Keep me';
   f.toolButtons.get('blender')!.click(); f.settingsButton.click();
-  assert.equal(f.settings.hasAttribute('open'), true); assert.equal(f.assetGroup.hasAttribute('open'), true);
+  assert.equal(f.drawer.open, true); assert.equal(f.settings.hasAttribute('open'), false); assert.equal(f.assetGroup.hasAttribute('open'), true);
+  assert.equal(f.tools.hidden, false); assert.equal(f.settings.hidden, true); assert.equal(f.connections.hidden, true); assert.equal(f.advanced.hidden, true);
   assert.equal(f.studioGroup.hasAttribute('open'), false); assert.equal(f.doc.activeElement, f.assetHeading);
   assert.equal(shell.activeTool, 'blender'); assert.equal(f.composer.value, 'Keep me');
   f.untouched(); shell.cleanup();
@@ -270,10 +288,14 @@ test('tool settings explicitly reveal the right group and never reset the active
 
 test('search selects tool context in the same conversation without revealing advanced panels', () => {
   const f = fixture(), shell = f.start(); f.composer.value = 'Retain draft';
+  // Global search observes the last selected pane. Expose Tools in this direct
+  // fixture while keeping the modal closed, as after visiting Tools and closing.
+  f.settings.hidden = true; f.tools.hidden = false;
   f.search.input('textures'); const results = f.doc.getElementById('workspace-search-results')!;
   assert.equal(results.querySelectorAll('button').length, 1);
   f.search.key('Enter'); assert.equal(shell.activeTool, 'blender');
   assert.equal(f.settings.hasAttribute('open'), false); assert.equal(f.composer.value, 'Retain draft');
+  assert.equal(f.drawer.open, false);
   assert.equal(results.hidden, true); f.untouched(); shell.cleanup();
 });
 
@@ -292,12 +314,33 @@ test('markup has one composer, closed advanced settings, live review notices and
   const html = await readFile(resolve('apps/desktop/public/studio.html'), 'utf8');
   assert.equal([...html.matchAll(/id="codex-compose"/g)].length, 1);
   assert.equal([...html.matchAll(/id="codex-composer"/g)].length, 1);
+  const topbar = html.slice(html.indexOf('<header id="workspace-topbar"'), html.indexOf('</header>'));
+  assert.match(topbar, /id="workspace-chat-tabs"[^>]*role="tablist"[^>]*aria-label="Open chats"/);
+  assert.match(topbar, /id="workspace-new-chat"[^>]*aria-label="New chat"/);
+  assert.doesNotMatch(topbar, /data-workspace-tool|All tools/);
   assert.doesNotMatch(html, /starter-grid|What are we building\?|Textures &amp; Materials|data-draft=/);
-  assert.match(html, /<details class="workspace-tools" id="workspace-settings" tabindex="-1">/);
+  const drawerTag = html.match(/<dialog\b[^>]*\bid="settings-drawer"[^>]*>/)?.[0];
+  assert.ok(drawerTag); assert.match(drawerTag, /aria-labelledby="settings-drawer-heading"/); assert.doesNotMatch(drawerTag, /\bopen\b/);
+  const sections = [...html.matchAll(/<section\b[^>]*\bdata-settings-section(?:\s|>)[^>]*>/g)].map(match => match[0]);
+  assert.equal(sections.length, 4);
+  const ids = ['workspace-settings', 'settings-connections', 'settings-tools', 'settings-advanced'];
+  for (const [index, id] of ids.entries()) {
+    assert.match(sections[index]!, new RegExp('id="' + id + '"'));
+    assert.doesNotMatch(sections[index]!, /\bopen\b/);
+    assert.equal(/\bhidden\b/.test(sections[index]!), index !== 0);
+  }
+  assert.deepEqual([...html.matchAll(/data-settings-section-target="([^"]+)"[^>]*>([^<]+)<\/button>/g)].map(match => [match[1], match[2]]),
+    ids.map((id, index) => [id, ['General', 'Connections', 'Tools', 'Advanced'][index]]));
+  assert.doesNotMatch(html, /<details\b[^>]*\bid="workspace-settings"|class="settings-index"/);
   const settingsAt = html.indexOf('id="workspace-settings"');
   for (const id of ['codex-unknown', 'codex-approval-section']) assert.ok(html.indexOf('id="' + id + '"') < settingsAt);
   assert.match(html, /id="asset-previews" class="asset-previews"><\/div>/);
   assert.ok(html.indexOf('id="codex-model"') > settingsAt); assert.ok(html.indexOf('id="codex-select"') > settingsAt);
+  const general = html.slice(settingsAt, html.indexOf('id="settings-connections"'));
+  assert.match(general, /id="settings-key-heading"/); assert.match(general, /id="provider-setup-panel"/);
+  assert.doesNotMatch(general, /id="(?:native-conversation-settings|key-issue|key-writes|codex-model|codex-select)"/);
+  const advancedAt = html.indexOf('<section id="settings-advanced"');
+  for (const id of ['native-conversation-settings', 'codex-model', 'codex-select', 'key-issue', 'key-writes']) assert.ok(html.indexOf('id="' + id + '"') > advancedAt);
   assert.doesNotMatch(html, /medieval|house|Download All|Model generated/);
   assert.doesNotMatch(html, /class="eyebrow"|class="badge /);
   assert.doesNotMatch(html, /LOCAL STUDIO BRIDGE v1|Session grants · editor baselines/);
@@ -318,6 +361,16 @@ function workflowContextFixture() {
   const f = fixture();
   for (const id of ['project-path', 'command-counts', 'product-evidence', 'build-tasks']) {
     const element = f.doc.createElement('div'); element.id = id; f.doc.body.append(element);
+  }
+  // Project projection now clears both key and scoped-token views. Provide the
+  // real render contract without starting the workbench or bypassing dismissal.
+  for (const id of ['key-result', 'key-secret', 'key-grants', 'key-reveal', 'key-copy', 'key-issue', 'key-unknown', 'key-unknown-message', 'key-acknowledge',
+    'native-token', 'native-scopes', 'native-token-result', 'native-copy-token']) {
+    const element = f.doc.createElement(id === 'key-reveal' || id === 'key-copy' || id === 'key-issue' || id === 'key-acknowledge' || id === 'native-copy-token' ? 'button' : 'div');
+    element.id = id; f.advanced.append(element);
+  }
+  for (const [tag, id] of [['form', 'key-form'], ['div', 'key-history']]) {
+    const element = f.doc.createElement(tag!); element.id = id!; f.advanced.append(element);
   }
   let requests = 0;
   const workbench = new StudioWorkbench(f.doc.document, new StudioApi('a'.repeat(64), async () => {

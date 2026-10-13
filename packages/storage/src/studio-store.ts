@@ -3,12 +3,13 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, w
 import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { isWrite, jsonObject, methodField, object, roots, textField, STUDIO_PROTOCOL, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { isWrite, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs } from '../../core/src/studio-policy.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 interface Options { directory: string; now?: () => number }
 export interface ArcaneKeySummary {keyId:string;allowedRoots:StudioSession['allowedRoots'];allowWrites:boolean;issuedAt:string;revokedAt:string|null;lastUsedAt:string|null}
+export type ArcaneKeyIssue = ArcaneKeySummary & { apiKey: string };
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
@@ -114,7 +115,21 @@ export class StudioStore {
   keys(): ArcaneKeySummary[] {
     return (this.db.prepare("SELECT payload FROM api_keys ORDER BY (json_extract(payload,'$.revokedAt') IS NOT NULL),rowid DESC LIMIT 100").all() as Row[]).map(r=>JSON.parse(r.payload as string) as ArcaneKeySummary);
   }
-  issueKey(input: unknown, port: number): ArcaneKeySummary & {apiKey:string} {
+  issueKey(input: unknown, port: number): ArcaneKeyIssue {
+    return this.transaction(() => this.insertKey(input, port));
+  }
+  rotateKey(input: unknown, port: number): ArcaneKeyIssue {
+    const a = object(input);
+    if (Object.keys(a).length) throw new ArcaneError('INPUT', 'Key rotation requires an empty object.');
+    return this.transaction(() => {
+      // Do not use keys(): its display limit must never leave an old key active.
+      const active = this.db.prepare("SELECT id FROM api_keys WHERE json_extract(payload,'$.revokedAt') IS NULL").all() as Row[];
+      for (const row of active) this.revokeKeyInTransaction(row.id as string);
+      // The plaintext replacement is returned only after the durable COMMIT.
+      return this.insertKey({ allowedRoots: [...ROOTS], allowWrites: true }, port);
+    });
+  }
+  private insertKey(input: unknown, port: number): ArcaneKeyIssue {
     const a=object(input); const allowedRoots=roots(a.allowedRoots);
     if(typeof a.allowWrites!=='boolean'||!Number.isInteger(port)||port<1||port>65535)throw new ArcaneError('INPUT','Explicit key grants and a valid local port are required.');
     if(Number((this.db.prepare("SELECT count(*) AS n FROM api_keys WHERE json_extract(payload,'$.revokedAt') IS NULL").get() as Row).n)>=32)throw new ArcaneError('BUSY','Revoke an unused key before issuing more than 32 active keys.');
@@ -125,14 +140,15 @@ export class StudioStore {
     return {...key,apiKey};
   }
   revokeKey(keyId: string): void {
-    this.transaction(()=>{
-      const row=this.db.prepare('SELECT payload FROM api_keys WHERE id=?').get(keyId) as Row|undefined;
-      if(!row)throw new ArcaneError('KEY','Unknown Arcane key.');
-      const key=JSON.parse(row.payload as string) as ArcaneKeySummary;
-      if(key.revokedAt)return;key.revokedAt=this.iso();this.db.prepare('UPDATE api_keys SET payload=? WHERE id=?').run(JSON.stringify(key),keyId);
-      for(const r of this.db.prepare('SELECT id FROM sessions WHERE key_id=?').all(keyId) as Row[])this.revoke(r.id as string,'arcane_key_revoked');
-      this.event('arcane_key_revoked',keyId,{});
-    });
+    this.transaction(() => this.revokeKeyInTransaction(keyId));
+  }
+  private revokeKeyInTransaction(keyId: string): void {
+    const row=this.db.prepare('SELECT payload FROM api_keys WHERE id=?').get(keyId) as Row|undefined;
+    if(!row)throw new ArcaneError('KEY','Unknown Arcane key.');
+    const key=JSON.parse(row.payload as string) as ArcaneKeySummary;
+    if(key.revokedAt)return;key.revokedAt=this.iso();this.db.prepare('UPDATE api_keys SET payload=? WHERE id=?').run(JSON.stringify(key),keyId);
+    for(const r of this.db.prepare('SELECT id FROM sessions WHERE key_id=?').all(keyId) as Row[])this.revoke(r.id as string,'arcane_key_revoked');
+    this.event('arcane_key_revoked',keyId,{});
   }
   connectWithKey(input: unknown, port: number): PairResult {
     const a=object(input); const apiKey=textField(a.apiKey,'Arcane API key',160);

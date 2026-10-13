@@ -752,6 +752,7 @@ Transport.__index = Transport
 Transport.POLL_SECONDS = 2
 Transport.MAX_BACKOFF_SECONDS = 30
 local ROUTES = table.freeze({connect = "/v1/plugin/connect", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
+local IDENTITY_CHANGED = "Place identity changed; this session is fenced. Inspect receipts and explicitly connect again."
 type Transport = any
 
 function Transport.new(gameModel: any, onStatus: (any) -> ()): Transport
@@ -760,17 +761,63 @@ function Transport.new(gameModel: any, onStatus: (any) -> ()): Transport
 		clientSessionId = http:GenerateGUID(false), onStatus = onStatus, generation = 0,
 		pair = nil, desiredPair = nil, disconnectRequested = false, stopped = false,
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
-		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false}, Transport)
+		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil}, Transport)
 end
 
 function Transport:status(state: string, detail: string, commandId: string?)
 	if self.stopped then return end
-	local pair = if self.pair and self.generation == self.pair.generation and not self.disconnectRequested then self.pair else nil
+	local changed = self.identityFence and self.identityFence.changed
+	if changed and table.find({"connected", "executing", "retrying"}, state) then state, detail = "reconciliation", IDENTITY_CHANGED end
+	local pair = if self.pair and self.generation == self.pair.generation and not self.disconnectRequested and not changed then self.pair else nil
 	self.onStatus({state = state, detail = detail, commandId = commandId,
 		sessionId = if pair then pair.sessionId else nil,
 		allowedRoots = if pair then table.clone(pair.allowedRoots) else {},
 		allowWrites = if pair then pair.allowWrites else false,
 		clientSessionId = self.clientSessionId, editMode = self.run:IsEdit()})
+end
+
+function Transport:dropIdentityFence(): ()
+	local fence = self.identityFence
+	self.identityFence = nil
+	if fence then for _, connection in ipairs(fence.connections) do connection:Disconnect() end end
+end
+
+function Transport:invalidateIdentity(fence: any): ()
+	fence.changed = true -- Sticky for this exchange/session, even if values revert.
+	if self.identityFence == fence then
+		self.blocked = true
+	end
+end
+
+function Transport:observeIdentity(fence: any): boolean
+	if not fence or self.identityFence ~= fence then return false end
+	local identity = fence.identity
+	local ok, matches = pcall(function(): boolean
+		return self.gameModel.PlaceId == identity.placeId and self.gameModel.GameId == identity.universeId
+			and self.gameModel.Name == identity.name
+	end)
+	if not fence.changed and (not ok or not matches) then self:invalidateIdentity(fence) end
+	if fence.changed then self.blocked = true end
+	return not fence.changed
+end
+
+function Transport:watchIdentity(identity: any): any
+	self:dropIdentityFence()
+	local fence: any = {identity = V.immutable(identity), changed = false, connections = {}}
+	self.identityFence = fence
+	-- Signals latch changes during yielding HTTP/editor calls, including a change
+	-- back to the original value. Synchronous comparisons cover deferred signals.
+	for _, property in ipairs({"PlaceId", "GameId", "Name"}) do
+		table.insert(fence.connections, self.gameModel:GetPropertyChangedSignal(property):Connect(function()
+			self:invalidateIdentity(fence)
+			if self.identityFence == fence then self:status("reconciliation", IDENTITY_CHANGED) end
+		end))
+	end
+	return fence
+end
+
+function Transport:checkIdentity(pair: any): ()
+	if not pair or not self:observeIdentity(pair.identityFence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
 end
 
 
@@ -818,6 +865,7 @@ function Transport:stop(): ()
 	self.generation += 1
 	self.stopped = true
 	self:forgetDesired()
+	self:dropIdentityFence()
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
 	self.operations = nil
@@ -829,6 +877,7 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 	V.url(url)
 	if not table.find({ROUTES.connect, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect}, route) then V.fail("URL", "Unsupported plugin route.") end
 	if self.inFlight then V.fail("FLIGHT", "Another HTTP request is in flight.") end
+	if route == ROUTES.poll then self:checkIdentity(self.pair) end
 	local headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" }
 	if token then headers.Authorization = "Bearer " .. token end
 	local body = V.encode(payload, self.http)
@@ -838,13 +887,17 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 		return self.http:RequestAsync({Url = url .. route, Method = "POST", Headers = headers, Body = body, Timeout = 10})
 	end)
 	self.inFlight = false
+	if self.identityFence then self:observeIdentity(self.identityFence) end
 	if not ok then V.fail("NETWORK", "Loopback request failed or timed out.") end
 	if type(response) ~= "table" or type(response.StatusCode) ~= "number" or type(response.Success) ~= "boolean" then V.fail("PROTOCOL", "Invalid HTTP response.") end
 	-- Never inspect/follow Location, and never construct a URL from a response.
 	-- RequestAsync documents Timeout, but no redirect-disable option. Native redirect
 	-- behavior still needs a disposable-fixture check; see docs/build/PLUGIN.md.
 	if response.StatusCode >= 300 and response.StatusCode < 400 then V.fail("REDIRECT", "Daemon returned a redirect; connection refused.") end
-	if response.StatusCode == 401 or response.StatusCode == 403 then V.fail("REVOKED", "Session expired or was revoked; connect again.") end
+	if response.StatusCode == 401 or response.StatusCode == 403 then
+		if route == ROUTES.connect then V.fail("KEY_REJECTED", "Arcane API key was rejected. Enter a new API key.") end
+		V.fail("REVOKED", "Session expired or was revoked; connect again.")
+	end
 	if response.StatusCode == 409 then V.fail("RECONCILE", "Daemon refused the session or receipt; inspect the command and connect again.") end
 	if not response.Success then V.fail("NETWORK", "Daemon request failed (HTTP " .. tostring(response.StatusCode) .. ").") end
 	if type(response.Body) ~= "string" or #response.Body > V.RESULT_BYTES + V.ARGUMENT_BYTES + 8192 then V.fail("BODY_LIMIT", "Daemon response exceeds the transport bound.") end
@@ -854,6 +907,7 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 end
 
 function Transport:clearSession(): ()
+	self:dropIdentityFence()
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
 	self.operations = nil
@@ -871,10 +925,11 @@ function Transport:exchange(desired: any): ()
 	local payload: any = {
 		protocolVersion = V.PROTOCOL,
 		identity = {clientSessionId = self.clientSessionId, placeId = self.gameModel.PlaceId,
-			universeId = self.gameModel.GameId, name = string.sub(self.gameModel.Name, 1, 256), pluginVersion = V.VERSION},
+			universeId = self.gameModel.GameId, name = V.string(self.gameModel.Name, "place name", 200), pluginVersion = V.VERSION},
 		capabilities = V.array(capabilities),
 	}
 	if isKey then payload.apiKey = desired.apiKey else payload.code = desired.code end
+	local fence = self:watchIdentity(payload.identity)
 	desired.apiKey, desired.code = nil, nil
 	local result = self:post(desired.url, if isKey then ROUTES.connect else ROUTES.pair, payload, nil)
 	payload.apiKey, payload.code = nil, nil
@@ -887,12 +942,28 @@ function Transport:exchange(desired: any): ()
 	-- Keep a late pair only long enough to revoke it in the single worker loop.
 	result.url = desired.url
 	result.generation = desired.generation
+	result.identityFence = fence -- Pinned initial payload, never an ACK or later name.
 	if self.stopped then result.token = nil; return end
-	local operations = Operations.new(result, self.gameModel, self.http)
 	self.pair = result
-	self.operations = operations
 	self.failures = 0
 	if self.generation ~= desired.generation then self.disconnectRequested = true; return end
+	self:checkIdentity(result) -- Before resolving any roots in the current engine.
+	self.operations = Operations.new(result, self.gameModel, self.http)
+	local editor = self.operations.editor
+	-- Fence the yielding editor call's return before Operations can reread source.
+	-- Existing operation/callback guards still own lease, baseline and recovery.
+	self.operations.editor = {
+		GetEditorSource = function(_self: any, instance: any): string
+			self:checkIdentity(result)
+			return editor:GetEditorSource(instance)
+		end,
+		UpdateSourceAsync = function(_self: any, instance: any, callback: any): ()
+			self:checkIdentity(result)
+			editor:UpdateSourceAsync(instance, callback)
+			self:checkIdentity(result)
+		end,
+	}
+	self:checkIdentity(result)
 	self:status("connected", "Connected to this Studio window. " .. (if result.allowWrites then "Writes granted." else "Read only."))
 end
 
@@ -917,8 +988,10 @@ function Transport:envelope(command: any): ()
 end
 
 function Transport:guard(command: any, pair: any): ()
-	if self.stopped or self.blocked or self.pair ~= pair or self.generation ~= pair.generation
+	if self.stopped or self.pair ~= pair or self.generation ~= pair.generation
 		or self.disconnectRequested then V.fail("SESSION", "Local session was disconnected or replaced.") end
+	self:checkIdentity(pair)
+	if self.blocked then V.fail("SESSION", "Local session requires reconciliation.") end
 	self:envelope(command)
 	if command.leaseEpoch ~= self.highEpoch then V.fail("LEASE", "Command lease is stale.") end
 	-- DateTime.fromIsoDate accepts UTC RFC3339 daemon timestamps.
@@ -930,6 +1003,7 @@ function Transport:guard(command: any, pair: any): ()
 end
 
 function Transport:dispatch(command: any): ()
+	self:checkIdentity(self.pair) -- Also fences the cached-receipt fast path.
 	self:envelope(command)
 	local fingerprint = V.encode(command, self.http)
 	local cached = self.cache[command.id]
@@ -985,11 +1059,20 @@ function Transport:tick(): number
 		-- uncertain response: a session may already exist at the daemon.
 		local ok, err = pcall(function() self:exchange(desired) end)
 		desired.code, desired.apiKey = nil, nil
-		if not ok then self:status("disconnected", V.safeError(err) .. " Click Connect to try again.") end
+		if not ok and desired.generation == self.generation then
+			if type(err) == "table" and err.code == "KEY_REJECTED" then
+				self:clearSession()
+				self.generation += 1
+				self:status("failed", "Arcane API key was rejected. Enter a new API key.")
+			else
+				self:status(if type(err) == "table" and err.code == "IDENTITY" then "reconciliation" else "disconnected", V.safeError(err) .. " Click Connect to try again.")
+			end
+		end
 		return Transport.POLL_SECONDS
 	end
 	local pair = self.pair
 	if not pair then return Transport.POLL_SECONDS end
+	self:observeIdentity(pair.identityFence)
 	if self.pending then
 		local receipt = self.pending
 		local response = self:post(pair.url, ROUTES.result, receipt.body, pair.token)
@@ -1004,6 +1087,7 @@ function Transport:tick(): number
 	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId}, pair.token)
 	-- A poll that returns after disconnect/re-pair can never dispatch old work.
 	if self.stopped or self.pair ~= pair or self.generation ~= pair.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
+	self:checkIdentity(pair)
 	V.fields(response, {"commands"}, "poll response")
 	local commands = V.list(response.commands, 1, "command queue")
 	if #commands == 1 then self:dispatch(commands[1])
@@ -1049,22 +1133,43 @@ table.freeze(__arcaneFactories)
 
 -- BEGIN Main.server.luau
 local function __arcaneMain(): ()
--- Local plugin UI only. Secrets are transient input and transport memory.
+-- Only the user's Arcane local key is remembered in Studio plugin settings.
+-- Provider credentials and session bearers are never saved.
 local V = __arcaneRequire("Validation")
 local Transport = __arcaneRequire("Transport")
+local KEY_SETTING = "Arcane.LocalApiKey.v1"
+local STATE_SETTING = "Arcane.LastConnection.v1"
+local savedKey: string? = nil
+local lastKnownConnected = false
+local storageFailed = false
+local keyRead, previousKey = pcall(function() return plugin:GetSetting(KEY_SETTING) end)
+if keyRead and type(previousKey) == "string" then
+	local valid = pcall(function() V.keyOrigin(previousKey) end)
+	if valid then savedKey = previousKey end
+end
+previousKey = nil
+local stateRead, previousState = pcall(function() return plugin:GetSetting(STATE_SETTING) end)
+if stateRead and type(previousState) == "table" and getmetatable(previousState) == nil then
+	local count = 0
+	for _ in pairs(previousState) do count += 1 end
+	if count == 1 and type(previousState.connected) == "boolean" then lastKnownConnected = previousState.connected end
+end
+previousState = nil
 local toolbar = plugin:CreateToolbar("Arcane")
 local button = toolbar:CreateButton("ArcaneBridge", "Open Arcane", "", "Arcane")
 button.ClickableWhenViewportHidden = true
-local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 340, 340, 280, 300)
-local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeV1", info)
+-- A new stable widget identity migrates the old docked layout once. Studio
+-- owns floating-window placement; opening the UI never connects a place.
+local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 260, 156, 230, 150)
+local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV2", info)
 widget.Title = "Arcane"
 widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 local colors = {
-	body = Color3.fromRGB(35, 36, 39), header = Color3.fromRGB(27, 28, 31),
-	input = Color3.fromRGB(28, 29, 32), divider = Color3.fromRGB(61, 63, 68),
-	white = Color3.fromRGB(244, 245, 247), muted = Color3.fromRGB(158, 162, 170),
-	orange = Color3.fromRGB(255, 133, 56), red = Color3.fromRGB(209, 61, 67),
+	body = Color3.fromRGB(20, 20, 22), header = Color3.fromRGB(20, 20, 22),
+	input = Color3.fromRGB(27, 27, 30), divider = Color3.fromRGB(52, 52, 58),
+	white = Color3.fromRGB(245, 245, 245), muted = Color3.fromRGB(147, 147, 154),
+	red = Color3.fromRGB(255, 51, 64),
 	green = Color3.fromRGB(71, 203, 133), amber = Color3.fromRGB(225, 166, 68),
 }
 local panel = Instance.new("ScrollingFrame")
@@ -1074,7 +1179,7 @@ panel.BackgroundColor3 = colors.body
 panel.BorderSizePixel = 0
 panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
 panel.CanvasSize = UDim2.new()
-panel.ScrollBarThickness = 3
+panel.ScrollBarThickness = 2
 panel.Parent = widget
 
 local function frame(name: string, parent: Instance, position: UDim2, size: UDim2, color: Color3): Frame
@@ -1104,123 +1209,150 @@ local function label(name: string, parent: Instance, text: string, position: UDi
 	return item
 end
 
-local header = frame("Header", panel, UDim2.new(), UDim2.new(1, 0, 0, 76), colors.header)
-local mark = frame("ArcaneMark", header, UDim2.new(0, 19, 0, 22), UDim2.new(0, 29, 0, 30), colors.header)
+local header = frame("Header", panel, UDim2.new(), UDim2.new(1, 0, 0, 48), colors.header)
+local mark = frame("ArcaneMark", header, UDim2.new(0, 14, 0, 8), UDim2.new(0, 32, 0, 32), colors.header)
 mark.BackgroundTransparency = 1
-local left = frame("WhiteStroke", mark, UDim2.new(0, 6, 0, 1), UDim2.new(0, 5, 0, 28), colors.white)
-left.Rotation = 24
-local right = frame("OrangeStroke", mark, UDim2.new(0, 18, 0, 1), UDim2.new(0, 5, 0, 28), colors.orange)
-right.Rotation = -24
-frame("Crossbar", mark, UDim2.new(0, 9, 0, 19), UDim2.new(0, 12, 0, 4), colors.white)
-local brand = label("Brand", header, "Arcane", UDim2.new(0, 61, 0, 18), UDim2.new(1, -77, 0, 30), 23, colors.white)
+-- Exact polygons from the desktop's 64x64 SVG, as bounded native scanlines.
+-- No upload, remote logo, or white/orange substitute.
+local function polygon(name: string, points: {{number}}, transparency: number): ()
+	for row = 0, 63 do
+		local scan, crossings = row + 0.5, {}
+		for index, a in ipairs(points) do
+			local b = points[index % #points + 1]
+			if (a[2] <= scan and b[2] > scan) or (b[2] <= scan and a[2] > scan) then
+				table.insert(crossings, a[1] + (scan - a[2]) * (b[1] - a[1]) / (b[2] - a[2]))
+			end
+		end
+		table.sort(crossings)
+		for index = 1, #crossings - 1, 2 do
+			local left, right = crossings[index], crossings[index + 1]
+			local strip = frame(name .. tostring(row), mark, UDim2.new(left / 64, 0, row / 64, 0), UDim2.new((right - left) / 64, 0, 1 / 64, 0), colors.red)
+			strip.BackgroundTransparency = transparency
+		end
+	end
+end
+polygon("LogoLegs", {{32,4},{4,57},{17,57},{32,28},{47,57},{60,57}}, 0)
+polygon("LogoCrossbar", {{27,40},{46,53},{40,40}}, 0)
+polygon("LogoFacet", {{19,21},{26,26},{32,14},{27,6}}, 0.2)
+local brand = label("Brand", header, "Arcane", UDim2.new(0, 57, 0, 10), UDim2.new(1, -73, 0, 28), 20, colors.white)
 brand.Font = Enum.Font.GothamBold
-label("Subtitle", header, "STUDIO BRIDGE", UDim2.new(0, 62, 0, 46), UDim2.new(1, -78, 0, 16), 10, colors.muted)
 
 local connectButton = Instance.new("TextButton")
 connectButton.Name = "Connect"
-connectButton.Position = UDim2.new(0, 16, 0, 95)
-connectButton.Size = UDim2.new(1, -32, 0, 34)
+connectButton.Position = UDim2.new(0, 14, 0, 100)
+connectButton.Size = UDim2.new(1, -28, 0, 34)
 connectButton.BackgroundColor3 = colors.red
 connectButton.BorderSizePixel = 0
-connectButton.Text, connectButton.TextColor3 = "Connect", colors.white
+connectButton.Text, connectButton.TextColor3 = if savedKey then "Reconnect" else "Connect", colors.white
 connectButton.Font = Enum.Font.GothamMedium
 connectButton.TextSize = 14
 connectButton.RichText = false
 connectButton.Parent = panel
 corner(connectButton, 6)
 
-local dot = frame("ConnectionDot", panel, UDim2.new(0, 18, 0, 147), UDim2.new(0, 7, 0, 7), colors.muted)
-corner(dot, 4)
-local state = label("ConnectionStatus", panel, "Disconnected", UDim2.new(0, 33, 0, 138), UDim2.new(1, -49, 0, 24), 12, colors.muted)
-frame("Divider", panel, UDim2.new(0, 16, 0, 172), UDim2.new(1, -32, 0, 1), colors.divider)
-label("ApiKeyLabel", panel, "API Key", UDim2.new(0, 16, 0, 187), UDim2.new(1, -32, 0, 20), 13, colors.white)
-local inputPanel = frame("KeyInput", panel, UDim2.new(0, 16, 0, 214), UDim2.new(1, -32, 0, 36), colors.input)
+local inputPanel = frame("KeyInput", panel, UDim2.new(0, 14, 0, 54), UDim2.new(1, -28, 0, 36), colors.input)
 corner(inputPanel, 5)
 local stroke = Instance.new("UIStroke")
 stroke.Color, stroke.Thickness = colors.divider, 1
 stroke.Parent = inputPanel
 
--- Roblox TextBox has no password mode. Hide native glyphs and overlay a fixed
--- mask; the raw input is cleared before queuing any connection exchange.
+-- Use an ordinary native editable textbox: hidden glyphs made actual typing
+-- indistinguishable from a dead input. Saved secrets are NEVER prefilled;
+-- only the user's current edit is visible and is cleared before exchange.
 local keyInput = Instance.new("TextBox")
 keyInput.Name = "ApiKey"
-keyInput.Position = UDim2.new(0, 10, 0, 0)
-keyInput.Size = UDim2.new(1, -20, 1, 0)
+keyInput.Position = UDim2.new()
+keyInput.Size = UDim2.fromScale(1, 1)
 keyInput.BackgroundTransparency = 1
+keyInput.BorderSizePixel = 0
+keyInput.ZIndex = 3
+keyInput.Active = true
+keyInput.Selectable = true
 keyInput.Text = ""
-keyInput.TextTransparency = 1
-keyInput.MaxVisibleGraphemes = 0
+keyInput.TextColor3 = colors.white
+keyInput.TextTransparency = 0
+keyInput.MaxVisibleGraphemes = -1
 keyInput.ClearTextOnFocus = false
 keyInput.MultiLine = false
 keyInput.RichText = false
 keyInput.TextEditable = true
 keyInput.TextSize = 13
-keyInput.Font = Enum.Font.Code
+keyInput.Font = Enum.Font.Gotham
 keyInput.TextXAlignment = Enum.TextXAlignment.Left
 keyInput.Parent = inputPanel
-local mask = label("MaskedKey", inputPanel, "Enter your Arcane API key", UDim2.new(0, 10, 0, 0), UDim2.new(1, -20, 1, 0), 12, colors.muted)
-mask.Active = false
-mask.Selectable = false
-mask.ZIndex = 2
-local function refreshMask(): ()
-	mask.Text = if keyInput.Text == "" then "Enter your Arcane API key" else "••••••••"
-	mask.TextColor3 = if keyInput.Text == "" then colors.muted else colors.white
+local inputPadding = Instance.new("UIPadding")
+inputPadding.PaddingLeft, inputPadding.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
+inputPadding.Parent = keyInput
+keyInput.PlaceholderColor3 = colors.muted
+local hint = "Arcane API key"
+local keyFailed = false
+local function refreshHint(): ()
+	keyInput.PlaceholderText = if savedKey ~= nil then "••••••••" else hint
 end
 local function clearInput(): ()
 	keyInput.Text = ""
-	refreshMask()
+	refreshHint()
 end
-local footer = frame("Footer", panel, UDim2.new(0, 16, 0, 260), UDim2.new(1, -32, 0, 0), colors.body)
-footer.BackgroundTransparency = 1
-footer.AutomaticSize = Enum.AutomaticSize.Y
-local footerLayout = Instance.new("UIListLayout")
-footerLayout.SortOrder = Enum.SortOrder.LayoutOrder
-footerLayout.Padding = UDim.new(0, 8)
-footerLayout.Parent = footer
-local grants = label("Grants", footer, "", UDim2.new(), UDim2.new(1, 0, 0, 0), 11, colors.muted)
-grants.LayoutOrder = 1
-grants.AutomaticSize = Enum.AutomaticSize.Y
-grants.TextWrapped = true
-local details = label("Detail", footer, "Use a key issued in the Arcane workbench.", UDim2.new(), UDim2.new(1, 0, 0, 0), 12, colors.muted)
-details.LayoutOrder = 2
-details.AutomaticSize = Enum.AutomaticSize.Y
-details.TextWrapped = true
-details.TextYAlignment = Enum.TextYAlignment.Top
-
-local hasSession, connecting = false, false
+refreshHint()
+local function rememberState(connected: boolean): ()
+	if lastKnownConnected == connected then return end
+	local ok = pcall(function() plugin:SetSetting(STATE_SETTING, {connected = connected}) end)
+	if ok then lastKnownConnected = connected else storageFailed = true end
+end
+local function rejectKey(): ()
+	-- A rejected key must not become a persistent reconnect trap. Clearing this
+	-- owned setting never revokes a key at the daemon or touches provider logins.
+	keyFailed, savedKey, hint = true, nil, "Enter a new API key"
+	local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
+	if not ok then storageFailed = true end
+	rememberState(false)
+	connectButton.Text = "Failed"
+	connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red
+	refreshHint()
+end
 local transport = Transport.new(game, function(status: any)
-	hasSession = status.sessionId ~= nil
-	connecting = status.state == "connecting" or status.state == "pairing"
-	local connected = hasSession and (status.state == "connected" or status.state == "executing")
-	state.Text = if connected then "Connected" elseif connecting then "Connecting…"
-		elseif status.state == "retrying" then "Connection unavailable" elseif status.state == "disconnecting" then "Disconnecting…"
-		elseif status.state == "reconciliation" then "Review required" else "Disconnected"
-	local color = if connected then colors.green elseif status.state == "retrying" or connecting then colors.amber else colors.muted
-	state.TextColor3, dot.BackgroundColor3 = color, color
-	connectButton.Text = if hasSession or connecting then "Disconnect" else "Connect"
-	grants.Text = if hasSession then (if status.allowWrites then "Writes granted" else "Read only")
-		.. " · " .. table.concat(status.allowedRoots, ", ") else ""
-	details.Text = status.detail
-	if status.state == "disconnected" then clearInput() end
+	if status.state == "failed" then rejectKey(); return end
+	local live = status.sessionId ~= nil and (status.state == "connected" or status.state == "executing")
+	-- Cached history never establishes a current session or green status.
+	connectButton.BackgroundColor3 = if live and not keyFailed then colors.green else colors.red
+	connectButton.Text = if keyFailed then "Failed" elseif savedKey then "Reconnect" else "Connect"
+	if live then rememberState(true)
+	elseif table.find({"disconnected", "retrying", "reconciliation"}, status.state) then rememberState(false) end
+	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
 end)
 local connections: {RBXScriptConnection} = {}
 table.insert(connections, button.Click:Connect(function() widget.Enabled = not widget.Enabled end))
 table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(function() button:SetActive(widget.Enabled) end))
-table.insert(connections, keyInput:GetPropertyChangedSignal("Text"):Connect(refreshMask))
-table.insert(connections, connectButton.Activated:Connect(function()
-	local entered = keyInput.Text
-	clearInput()
-	if hasSession or connecting then transport:requestDisconnect()
-	else
-		local ok, err = pcall(function() transport:requestConnect(entered) end)
-		if not ok then
-			state.Text, state.TextColor3, dot.BackgroundColor3 = "Disconnected", colors.muted, colors.muted
-			details.Text = V.safeError(err)
-		end
+button:SetActive(widget.Enabled)
+table.insert(connections, keyInput:GetPropertyChangedSignal("Text"):Connect(function()
+	if keyFailed and keyInput.Text ~= "" then
+		keyFailed, hint = false, "Arcane API key"
+		connectButton.Text, stroke.Color = "Connect", colors.divider
 	end
-	entered = ""
+	refreshHint()
+end))
+table.insert(connections, connectButton.Activated:Connect(function()
+	local entered = if keyInput.Text ~= "" then keyInput.Text else savedKey
+	clearInput()
+	local valid = pcall(function() V.keyOrigin(entered) end)
+	if not valid then
+		rejectKey()
+		-- Explicit failed replacement also fences an older live connection.
+		transport:requestDisconnect()
+		return
+	end
+	keyFailed, hint = false, "Arcane API key"
+	local value = entered :: string
+	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, value) end)
+	savedKey, storageFailed = value, not stored
+	refreshHint()
+	local ok = pcall(function() transport:requestConnect(value) end)
+	if not ok then rememberState(false); connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red end
+	connectButton.Text = "Reconnect"
+	entered, value = nil, ""
 end))
 table.insert(connections, plugin.Unloading:Connect(function()
+	savedKey = nil
 	clearInput()
 	transport:stop()
 	for _, connection in ipairs(connections) do connection:Disconnect() end

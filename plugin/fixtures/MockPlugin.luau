@@ -1,5 +1,6 @@
 --!strict
--- GUI/startup doubles for the native Lua bundle; never installed or packaged.
+-- GUI/startup doubles for the official standalone Luau VM; never installed.
+-- These fixtures do not certify native Studio focus, selection or key events.
 local function signal(): any
 	local value: any = {connections = {}}
 	function value:Connect(callback: any): any
@@ -25,7 +26,7 @@ local function enumGroup(names: {string}): any
 	for _, name in ipairs(names) do group[name] = {Name = name} end
 	return group
 end
-Enum.InitialDockState = enumGroup({"Right"})
+Enum.InitialDockState = enumGroup({"Right", "Float"})
 Enum.ZIndexBehavior = enumGroup({"Sibling"})
 Enum.AutomaticSize = enumGroup({"Y"})
 Enum.SortOrder = enumGroup({"LayoutOrder"})
@@ -35,7 +36,7 @@ Enum.TextYAlignment = enumGroup({"Top", "Center"})
 Enum.TextTruncate = enumGroup({"AtEnd"})
 Color3.fromRGB = function(r: number, g: number, b: number): any return Color3.new(r / 255, g / 255, b / 255) end
 local UDim: any = {new = function(scale: number, offset: number): any return {Scale = scale, Offset = offset} end}
-local UDim2: any = {new = function(...: any): any return {...} end,
+local UDim2: any = {new = function(xScale: number?, xOffset: number?, yScale: number?, yOffset: number?): any return {xScale or 0, xOffset or 0, yScale or 0, yOffset or 0} end,
 	fromScale = function(x: number, y: number): any return {x, 0, y, 0} end}
 local DockWidgetPluginGuiInfo: any = {new = function(...: any): any return {...} end}
 fixture.workers = {}
@@ -47,6 +48,27 @@ Instance.new = function(className: string): any
 	return instance
 end
 local plugin: any = {Unloading = signal()}
+fixture.settingNames = table.freeze({apiKey = "Arcane.LocalApiKey.v1", lastConnection = "Arcane.LastConnection.v1"})
+fixture.pluginSettings = fixture.pluginSettings or {}
+fixture.getCalls, fixture.setCalls = {}, {}
+local function settingCopy(value: any): any
+	if type(value) ~= "table" then return value end
+	local copy: any = {}
+	for key, item in pairs(value) do copy[key] = settingCopy(item) end
+	return copy
+end
+function plugin:GetSetting(name: string): any
+	table.insert(fixture.getCalls, name)
+	local fault = fixture.getSettingError or (fixture.getSettingFaults and fixture.getSettingFaults[name])
+	if fault then error(fault, 0) end
+	return settingCopy(fixture.pluginSettings[name])
+end
+function plugin:SetSetting(name: string, value: any): ()
+	table.insert(fixture.setCalls, {key = name, value = settingCopy(value)})
+	local fault = fixture.setSettingError or (fixture.setSettingFaults and fixture.setSettingFaults[name])
+	if fault then error(fault, 0) end
+	fixture.pluginSettings[name] = settingCopy(value)
+end
 function plugin:CreateToolbar(name: string): any
 	local toolbar: any = {name = name, destroyed = false}
 	function toolbar:CreateButton(_id: string, _tooltip: string, _icon: string, _text: string): any
@@ -60,9 +82,10 @@ function plugin:CreateToolbar(name: string): any
 	return toolbar
 end
 function plugin:CreateDockWidgetPluginGuiAsync(id: string, info: any): any
-	assert(id == "ArcaneLocalBridgeV1" and #info == 7, "widget API parameters")
+	assert(id == "ArcaneLocalBridgeFloatingV2" and #info == 7, "widget API parameters")
+	fixture.widgetInfo = table.clone(info)
 	local widget = Instance.new("DockWidgetPluginGui")
-	widget.Enabled = false
+	widget.Enabled = info[2]
 	fixture.widget = widget
 	return widget
 end

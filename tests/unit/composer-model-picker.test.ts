@@ -91,7 +91,10 @@ test('markup exposes exact setup/preview hooks and a hidden nonmodal picker with
     'provider-login-gate', 'provider-login-message', 'provider-login-codex', 'provider-login-claude', 'provider-login-start', 'provider-login-refresh',
     'workspace-preview-toggle', 'workspace-preview-close', 'codex-model-trigger', 'codex-model-popover', 'codex-model', 'codex-effort', 'codex-select'];
   for (const id of ids) assert.equal(html.split('id="' + id + '"').length - 1, 1, id);
-  assert.match(html, /id="artifact-panel"[^>]*\bhidden/); assert.match(html, /id="provider-login-gate"[^>]*\bhidden/);
+  assert.match(html, /id="artifact-panel"[^>]*\bhidden/);
+  const gate = html.match(/<section[^>]*id="provider-login-gate"[^>]*>/)![0];
+  assert.doesNotMatch(gate, /\bhidden\b/); assert.match(gate, /aria-labelledby="provider-login-heading"/);
+  assert.match(html, /id="provider-login-start"[^>]*disabled/);
   assert.match(html, /id="codex-model-popover"[^>]*role="dialog"[^>]*aria-modal="false"[^>]*hidden/);
   const select = html.match(/<select id="provider-setup-provider">([\s\S]*?)<\/select>/)![1]!;
   assert.deepEqual([...select.matchAll(/value="([^"]+)"/g)].map(match => match[1]), ['codex', 'claude']);
@@ -104,14 +107,19 @@ async function browserFixture(t: test.TestContext, initial = state()) {
   const files = new Map([
     ['/studio', [resolve('apps/desktop/public/studio.html'), 'text/html']], ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/codex-chat.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
+    ['/workspace-shell.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
+    ['/chat-tabs.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'), 'text/javascript']],
+    ['/codex-history.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'), 'text/javascript']],
   ]);
   const server = createServer((request, response) => { void (async () => {
     if (request.url === '/picker-fixture.js') {
       response.writeHead(200, { 'content-type': 'text/javascript' });
       response.end(`import {CodexChat,CodexChatApi} from '/codex-chat.js';
+        import {startWorkspaceShell} from '/workspace-shell.js';
         const chat = new CodexChat(document,new CodexChatApi('${TOKEN}')); window.fixtureChat=chat;
         window.fixtureProviderStates=[]; chat.subscribeProviderStateChange(()=>window.fixtureProviderStates.push(chat.providerConnectionStatus()));
         window.fixtureSetupChoices=[]; document.addEventListener('workspace:providersetup',e=>window.fixtureSetupChoices.push(e.detail));
+        window.fixtureEnableSettings=()=>startWorkspaceShell(document);
         await chat.start(); window.fixtureReady=true;`); return;
     }
     if (request.url === '/v1/codex/state') {
@@ -164,6 +172,10 @@ test('browser picker searches only native rows, supports keyboard/focus/IME and 
   await f.open(); assert.equal(await page.locator('#codex-model-search').evaluate((el: HTMLElement) => el === document.activeElement), true);
   assert.equal(await page.locator('#codex-model-search').evaluate((el: HTMLInputElement) => el.form === null), true, 'Picker search has no implicit conversation submission');
   assert.equal(await page.locator('#codex-model-options [role=option]').count(), 2);
+  assert.equal(await page.locator('#codex-model-options small').count(),0,'Compact model rows expose IDs in titles, not a second text line');
+  assert.equal(await page.locator('#codex-model-options [aria-selected=true] .picker-selected-check[data-selected=true]').count(),1);
+  assert.equal(await page.locator('#codex-picker-efforts').isVisible(),false,'Reasoning stays collapsed until requested');
+  assert.equal(await page.locator('#codex-model-options button[tabindex="0"]').count(),1,'Model list has a Tab-reachable option');
   await page.locator('#codex-model-search').fill('BETA fixture'); assert.equal(await page.locator('#codex-model-options button').count(), 1);
   assert.equal(await page.locator('#codex-model-popover img').count(), 0);
   await page.locator('#codex-model-search').press('ArrowDown'); await page.keyboard.press('Enter');
@@ -171,6 +183,8 @@ test('browser picker searches only native rows, supports keyboard/focus/IME and 
   assert.deepEqual(await page.locator('#codex-picker-efforts button').allTextContents(), ['medium', 'high']);
   await page.keyboard.press('ArrowRight'); assert.equal(await page.locator('#codex-effort').inputValue(), 'high');
   assert.equal(await page.locator('#codex-model-label').textContent(), 'Fixture Alpha', 'Staging is never reported as applied');
+  await page.keyboard.press('Escape');assert.equal(await page.locator('#codex-picker-efforts').isVisible(),false);
+  assert.equal(await page.locator('#codex-picker-reasoning-trigger').evaluate((el:HTMLElement)=>el===document.activeElement),true);
   await page.keyboard.press('Escape'); assert.equal(await page.locator('#codex-model-popover').isVisible(), false);
   assert.equal(await page.locator('#codex-model-trigger').evaluate((el: HTMLElement) => el === document.activeElement), true);
   await f.open(); await page.locator('#codex-model-search').fill('not-reported'); assert.equal(await page.locator('#codex-model-options button').count(), 0);
@@ -216,13 +230,22 @@ test('browser pre-thread selection starts no thread and the settings fallback sh
   await f.choose('fixture-alpha', 'ultra'); await page.locator('#codex-picker-apply').click();
   await page.waitForFunction(() => document.getElementById('codex-effort-label')?.textContent === 'ultra');
   assert.equal(f.observed().snapshot!.thread, null); assert.equal(f.posts.length, 1);
+  // This controller fixture enables the production shell only for the Settings
+  // fallback; the isolated provider-event fixture keeps its existing boundary.
   await page.evaluate(() => {
-    (document.getElementById('workspace-settings') as HTMLDetailsElement).open = true;
-    (document.getElementById('native-conversation-settings')!.parentElement as HTMLDetailsElement).open = true;
+    (window as any).fixtureEnableSettings();
+    document.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'native-conversation-heading' } }));
   });
+  assert.equal(await page.locator('#settings-drawer').evaluate((drawer: HTMLDialogElement) => drawer.matches(':modal')), true);
+  assert.equal(await page.locator('#settings-drawer [data-settings-section]:visible').count(), 1);
+  assert.equal(await page.locator('#settings-advanced').isVisible(), true);
+  assert.equal(await page.locator('#codex-model').isVisible(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'native-conversation-heading');
   await page.locator('#codex-model').selectOption('fixture-beta'); await page.locator('#codex-effort').selectOption('high');
   await page.locator('#codex-select').click();
   await page.waitForFunction(() => document.getElementById('codex-effort-label')?.textContent === 'high');
+  await page.locator('[data-settings-close]').click();
+  assert.equal(await page.locator('#codex-model-trigger').isVisible(), true);
   assert.match(await page.locator('#codex-model-label').textContent(), /Fixture Beta/);
   assert.equal(await page.locator('#codex-composer').inputValue(), 'A draft before the thread exists.');
   assert.equal(f.observed().snapshot!.thread, null); assert.equal(f.posts.length, 2);
@@ -257,7 +280,8 @@ test('browser rejects optimistic labels and blocks busy, unconfigured, stale, un
 test('browser disconnected setup stays unknown, emits only provider choices and clamps the popover on small viewports', { skip: !browserModule, timeout: 30000 }, async t => {
   const initial = state(); initial.snapshot = null; delete initial.workflowModel;
   const f = await browserFixture(t, initial), { page } = f;
-  assert.equal(await page.locator('#provider-login-gate').isVisible(), false); assert.equal(await page.locator('#artifact-panel').isVisible(), false);
+  assert.equal(await page.locator('#provider-login-gate').isVisible(), true); assert.equal(await page.locator('#provider-login-start').isDisabled(), true);
+  assert.equal(await page.locator('#artifact-panel').isVisible(), false);
   assert.equal(await page.locator('#codex-model-label').textContent(), 'Choose model');
   assert.equal(await page.locator('#provider-setup-status').textContent(), 'Setup status has not been read.');
   for (const id of ['refresh', 'login', 'install', 'launch']) assert.equal(await page.locator('#provider-setup-' + id).isDisabled(), true);
@@ -283,4 +307,38 @@ test('browser disconnected setup stays unknown, emits only provider choices and 
   await f.open(); await page.locator('#codex-picker-claude').click();
   assert.equal((await page.evaluate(() => (window as any).fixtureSetupChoices)).length, 3, 'Resume binds exactly one picker handler');
   assert.equal(f.posts.length, 0);
+});
+
+test('compact reasoning menus expose only reported efforts and restore exact per-chat draft choices', {skip:!browserModule,timeout:30000},async t=>{
+  const initial=state();initial.snapshot!.thread=null;delete initial.workflowModel;
+  initial.nativeAssets={available:true,sealed:true,granted:false,admissionOpen:false};
+  initial.snapshot!.models.push({model:'fixture-custom',id:'custom-id',displayName:'Custom reported model',efforts:['reported-balanced','reported-deep'],defaultEffort:'reported-deep',entitlement:'unverified'});
+  const f=await browserFixture(t,initial),{page}=f;
+  await page.evaluate(()=>(window as any).fixtureChat.enableChatTabs());
+  await f.choose('fixture-alpha','ultra');await page.locator('#codex-picker-apply').click();
+  const first=await page.evaluate(()=>(window as any).fixtureChat.currentStateView().activeChat.key);
+  const draft='First model draft 🧩\nExact whitespace.  ';await page.locator('#codex-composer').fill(draft);
+  assert.equal(await page.evaluate(()=>(window as any).fixtureChat.newChat()),true);
+  await f.choose('fixture-custom','reported-balanced');
+  assert.deepEqual(await page.locator('#codex-picker-efforts [role=radio]').allTextContents(),['reported-balanced','reported-deep']);
+  await page.locator('#codex-picker-apply').click();
+  const second=await page.evaluate(()=>(window as any).fixtureChat.currentStateView().activeChat.key);
+  assert.equal(f.posts.length,0,'Draft preferences never select or start native work');
+  await page.locator('#codex-composer').fill('Second draft');
+  assert.equal(await page.evaluate((key:string)=>(window as any).fixtureChat.selectChat(key),first),true);
+  assert.equal(await page.locator('#codex-composer').inputValue(),draft);
+  assert.equal(await page.locator('#codex-effort-label').textContent(),'ultra');
+  await f.open();assert.equal(await page.locator('[data-picker-model="fixture-alpha"]').getAttribute('aria-selected'),'true');
+  await page.locator('#codex-picker-reasoning-trigger').click();
+  assert.equal(await page.locator('[data-picker-effort="ultra"]').getAttribute('aria-checked'),'true');
+  await page.keyboard.press('ArrowLeft');assert.equal(await page.locator('#codex-picker-efforts').isVisible(),false);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate((key:string)=>(window as any).fixtureChat.selectChat(key),second),true);
+  // pagehide must flush the final input before the controller debounce can run.
+  await page.evaluate(()=>{const input=document.getElementById('codex-composer') as HTMLTextAreaElement;input.value='Final reload text 🧩  ';input.dispatchEvent(new Event('input'));dispatchEvent(new Event('pagehide'));});
+  await page.reload();await page.waitForFunction(()=>(window as any).fixtureReady===true);
+  await page.evaluate(()=>(window as any).fixtureChat.enableChatTabs());
+  assert.equal(await page.locator('#codex-composer').inputValue(),'Final reload text 🧩  ');
+  assert.equal(await page.locator('#codex-effort-label').textContent(),'reported-balanced');
+  assert.equal(await page.locator('#codex-model').inputValue(),'fixture-custom');assert.equal(f.posts.length,0);
 });

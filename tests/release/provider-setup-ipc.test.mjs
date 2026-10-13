@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { win32, posix } from 'node:path';
 import vm from 'node:vm';
+import { StringDecoder } from 'node:string_decoder';
 
 // Run production source, without loading Electron or touching native provider state.
 // Extraction includes the factory accessors and the entire IPC registration loop;
@@ -12,6 +13,7 @@ const source = name => readFileSync(new URL('../../apps/desktop/electron/' + nam
 const mainSource = source('main.cjs');
 const preloadSource = source('preload.cjs');
 const helperSource = source('provider-setup.cjs');
+const loginSource = source('provider-login.cjs');
 const policySource = source('policy.cjs');
 function between(text, start, end) {
   const first = text.indexOf(start), last = text.indexOf(end, first + start.length);
@@ -42,16 +44,29 @@ const unavailable = 'Native provider setup unavailable.';
 const hostUnavailable = 'Provider setup is unavailable. No completion was verified.';
 const bounded = { timeout: 5000 };
 const json = value => JSON.parse(JSON.stringify(value));
+const loginId = 'a1223344-5566-7788-99aa-bbccddeeff00';
+const appServerArgs = ['app-server', '--listen', 'stdio://', '--disable', 'apps', '--disable', 'plugins',
+  '--disable', 'remote_plugin', '--disable', 'skill_mcp_dependency_install'];
+const signedIn = { account: { type: 'chatgpt', planType: 'pro', email: sensitive }, requiresOpenaiAuth: true };
+function authUrl() {
+  const url = new URL('https://auth.openai.com/oauth/authorize');
+  for (const [key, value] of Object.entries({ client_id: 'app_native_codex_fixture', response_type: 'code',
+    redirect_uri: 'http://localhost:1455/auth/callback', scope: 'openid profile email offline_access',
+    state: 'opaque-fixture-state-0123456789', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256' })) url.searchParams.set(key, value);
+  return url.href;
+}
 
 function fakeWindow(url = origin + '/studio#' + 'a'.repeat(64)) {
   const mainFrame = { url };
-  const contents = { mainFrame, destroyed: false, isDestroyed() { return this.destroyed; } };
-  return { webContents: contents, destroyed: false, isDestroyed() { return this.destroyed; } };
+  const contents = Object.assign(new EventEmitter(), { mainFrame, destroyed: false, isDestroyed() { return this.destroyed; } });
+  return Object.assign(new EventEmitter(), { webContents: contents, destroyed: false, isDestroyed() { return this.destroyed; } });
 }
 
 function fixture({ smoke = false } = {}) {
   const hooks = {}, handlers = new Map(), entries = new Map();
   const calls = [], dispatches = [], hostReplies = [], processes = [], metadata = [], dialogs = [], urls = [], nativeFallbacks = [], factoryCalls = [];
+  const rpc = [];
+  let loginChild;
   const key = value => win32.normalize(value).toLowerCase();
   function put(value, kind = 'directory', attributes = {}) {
     entries.set(key(value), { full: win32.normalize(value), kind, ...attributes });
@@ -100,6 +115,28 @@ function fixture({ smoke = false } = {}) {
     const child = new EventEmitter();
     child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
     child.kill = signal => { record.killed = signal; };
+    if (args[0] === 'app-server') {
+      assert.equal(command, codex); assert.deepEqual(Array.from(args), appServerArgs);
+      loginChild = child;
+      child.stdin = new EventEmitter(); child.stdin.writable = true;
+      child.stdin.end = () => { child.stdin.writable = false; };
+      let reads = 0;
+      child.stdin.write = line => {
+        const request = JSON.parse(line); rpc.push(request);
+        assert.ok(['initialize', 'initialized', 'account/read', 'account/login/start', 'account/login/cancel'].includes(request.method), 'No inference, model, signup or arbitrary native method');
+        if (request.id === undefined) return true;
+        queueMicrotask(() => {
+          let result;
+          if (request.method === 'initialize') result = { userAgent: 'arcane_provider_login/0.143.0 (Windows; x86_64) Arcane' };
+          else if (request.method === 'account/read') result = hooks.account?.(++reads) ?? signedIn;
+          else if (request.method === 'account/login/start') result = { type: 'chatgpt', loginId, authUrl: authUrl() };
+          else result = { status: 'canceled' };
+          child.stdout.emit('data', Buffer.from(JSON.stringify({ id: request.id, result }) + '\n'));
+        });
+        return true;
+      };
+      return child;
+    }
     queueMicrotask(async () => {
       try {
         const reply = await hooks.reply?.(record, index) ?? (args[0] === '--version' ? {
@@ -120,6 +157,10 @@ function fixture({ smoke = false } = {}) {
     return child;
   }
   const module = { exports: {} };
+  const loginModule = { exports: {} };
+  vm.runInNewContext(loginSource, { module: loginModule, Buffer, URL, setTimeout, clearTimeout,
+    require(name) { assert.equal(name, 'node:string_decoder'); return { StringDecoder }; },
+  }, { filename: 'provider-login.cjs', timeout: 1000 });
   vm.runInNewContext(helperSource, {
     module, Buffer, URL, setTimeout, clearTimeout,
     process: { platform: 'win32', arch: 'x64', env: {} },
@@ -128,6 +169,7 @@ function fixture({ smoke = false } = {}) {
       if (name === 'node:fs/promises') return { realpath: forbid('realpath'), stat: forbid('stat'), opendir: forbid('opendir') };
       if (name === 'node:child_process') return { spawn: forbid('spawn') };
       if (name === 'node:os') return { homedir: forbid('homedir') };
+      if (name === './provider-login.cjs') return loginModule.exports;
       nativeFallbacks.push(name); throw new Error('Unexpected import: ' + name);
     },
   }, { filename: 'provider-setup.cjs', timeout: 1000 });
@@ -186,7 +228,8 @@ function fixture({ smoke = false } = {}) {
     } } };
   } }, { filename: 'provider-setup-preload.cjs', timeout: 1000 });
   return { bridge: exposed.providerSetup, exposed, handlers, factoryCalls, dialog, event, window: initialWindow,
-    calls, dispatches, hostReplies, processes, metadata, dialogs, urls, nativeFallbacks, hooks, entries, put,
+    calls, dispatches, hostReplies, processes, metadata, dialogs, urls, nativeFallbacks, hooks, entries, put, rpc,
+    notifyLogin() { assert.ok(loginChild); loginChild.stdout.emit('data', Buffer.from(JSON.stringify({ method: 'account/login/completed', params: { loginId, success: true, error: null } }) + '\n')); },
     codex, claude, powershell, state: context.__state, update: context.__setState,
     setEvent: value => { invocationEvent = value; },
     failInvoke: value => { invokeFailure = value; }, failDispatch: value => { dispatchFailure = value; },
@@ -512,18 +555,33 @@ test('successful IPC operations use only fixed probes/pages/vendor intents and m
   for (const provider of providers) snapshot(await f.bridge.install(provider), provider);
   assert.deepEqual(f.urls, ['https://learn.chatgpt.com/docs/codex/cli', 'https://code.claude.com/docs/en/setup']);
   assert.equal(f.processes.length, 4);
-  for (const provider of providers) {
-    const value = await f.bridge.login(provider); snapshot(value, provider); assert.equal(value.auth, 'unknown');
-  }
+  f.hooks.account = read => read === 1 ? { account: null, requiresOpenaiAuth: true } : signedIn;
+  const pending = await f.bridge.login('codex'); snapshot(pending, 'codex');
+  assert.equal(pending.auth, 'unknown'); assert.equal(pending.busy, true);
+  assert.deepEqual(f.urls, ['https://learn.chatgpt.com/docs/codex/cli', 'https://code.claude.com/docs/en/setup', authUrl()]);
+  assert.deepEqual(f.rpc.map(request => request.method), ['initialize', 'initialized', 'account/read', 'account/login/start']);
+  assert.deepEqual(f.rpc[0].params, { clientInfo: { name: 'arcane_provider_login', title: 'Arcane', version: '1.0.0' }, capabilities: null });
+  assert.deepEqual(f.rpc[2].params, { refreshToken: false }); assert.deepEqual(f.rpc[3].params, { type: 'chatgpt' });
+  const beforePoll = f.processes.length;
+  const poll = await f.bridge.status('codex'); snapshot(poll, 'codex');
+  assert.equal(poll.auth, 'unknown'); assert.equal(poll.busy, true); assert.equal(f.processes.length, beforePoll);
+  f.notifyLogin(); await new Promise(resolve => setImmediate(resolve));
+  const completed = await f.bridge.status('codex'); snapshot(completed, 'codex');
+  assert.equal(completed.auth, 'subscription'); assert.equal(completed.busy, false);
+  assert.deepEqual(f.rpc.at(-1).params, { refreshToken: false });
+  assert.equal(f.processes.at(-1).killed, 'SIGKILL');
+  assert.ok(f.hostReplies.every(value => !JSON.stringify(value).includes(loginId) && !JSON.stringify(value).includes('https://auth.')));
+  const claudeLogin = await f.bridge.login('claude'); snapshot(claudeLogin, 'claude'); assert.equal(claudeLogin.auth, 'unknown');
   const nextProject = "C:\\ProviderSetupFixture\\O'Brien; $(synthetic)`&";
   f.put(nextProject); f.update({ projectPath: nextProject });
   const launched = await f.bridge.launch('claude'); snapshot(launched, 'claude'); assert.equal(launched.auth, 'unknown');
   const expected = [
-    "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '" + home + "'; & '" + f.codex + "' 'login'",
     "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '" + home + "'; & '" + f.claude + "' 'auth' 'login'",
     "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '" + nextProject.replaceAll("'", "''") + "'; & '" + f.claude + "'",
   ];
-  for (const [index, record] of f.processes.slice(4).entries()) {
+  assert.deepEqual(f.processes[4].args, ['--version']);
+  assert.equal(f.processes[5].command, f.codex); assert.deepEqual(f.processes[5].args, appServerArgs);
+  for (const [index, record] of f.processes.slice(6).entries()) {
     assert.equal(record.command, f.powershell);
     const scripts = terminalScript(record); assert.equal(scripts.inner, expected[index]);
     assert.equal(/ExecutionPolicy|Bypass|setup-token|--console|--with-api-key|device-auth|Invoke-Expression|RunAs|curl/.test(scripts.launcher + scripts.inner), false);
@@ -533,7 +591,7 @@ test('successful IPC operations use only fixed probes/pages/vendor intents and m
   assert.equal(noHandoff.message, 'Native client handoff is available only for Claude Code.'); assert.equal(f.processes.length, before);
   for (const record of f.processes) {
     assert.equal(record.options.shell, false); assert.equal(record.options.windowsHide, true);
-    assert.deepEqual(record.options.stdio, ['ignore', 'pipe', 'pipe']);
+    assert.deepEqual(record.options.stdio, record.args[0] === 'app-server' ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe']);
     assert.deepEqual(Object.keys(record.options.env).sort(), ['HOME', 'PATH', 'SystemRoot', 'USERPROFILE']);
     assert.equal(JSON.stringify(record.options.env).includes(sensitive), false);
   }

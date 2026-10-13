@@ -42,6 +42,11 @@ export interface CodexHistoryState {
   projectPath: string; threadId: string; sessionId: string | null;
   recorded: CodexRecordedHistory | null;
 }
+export interface CodexSavedThread {
+  provider: 'codex'; projectPath: string; threadId: string; sessionId: string | null;
+  selection: { model: string; effort: string } | null;
+}
+export const CODEX_SAVED_THREAD_LIMIT = 256;
 const historyIdentifier = identifier.refine(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value) && redactNativeHistoryText(value) === value);
 const historyResultSchema = z.strictObject({
   entries: z.array(z.strictObject({ role: z.enum(['user','assistant','tool']), text: z.string().max(NATIVE_HISTORY_LIMITS.maxBytes),
@@ -74,7 +79,7 @@ export interface CodexProductState {
   provider: 'codex'; use: 'personal-local'; projectPath: string;
   connecting: boolean; closing: boolean; busy: boolean; snapshot: Snapshot | null; lastSnapshot: Snapshot | null;
   nativeAssets?: { available: boolean; sealed: boolean; granted: boolean; admissionOpen: boolean };
-  workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
+  workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; nativeThreads?: CodexSavedThread[]; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
 export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readThreadHistory'>>;
@@ -106,14 +111,28 @@ export function createCodexService(options: CodexServiceOptions) {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const db = new DatabaseSync(filename, { timeout: 2000, allowExtension: false });
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (version > 2) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal is newer than this build.'); }
+  if (version > 3) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal is newer than this build.'); }
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
     CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS native_history(
       id INTEGER PRIMARY KEY CHECK(id=1), project_path TEXT NOT NULL, thread_id TEXT NOT NULL, session_id TEXT,
       payload TEXT CHECK(payload IS NULL OR length(CAST(payload AS BLOB))<=2113536)
     ) STRICT;
-    PRAGMA user_version=2;`);
+    CREATE TABLE IF NOT EXISTS native_threads(
+      project_path TEXT NOT NULL, thread_id TEXT NOT NULL, session_id TEXT, selection TEXT,
+      payload TEXT CHECK(payload IS NULL OR length(CAST(payload AS BLOB))<=2113536),
+      PRIMARY KEY(project_path,thread_id)
+    ) STRICT;
+    INSERT OR IGNORE INTO native_threads(project_path,thread_id,session_id,payload)
+      SELECT project_path,thread_id,session_id,payload FROM native_history;
+    PRAGMA user_version=3;`);
+  if(version<3)db.exec(`UPDATE native_threads SET selection=(
+    SELECT json_object('model',json_extract(a.payload,'$.model'),'effort',json_extract(a.payload,'$.effort'))
+    FROM actions a WHERE json_extract(a.payload,'$.state')='acknowledged'
+      AND json_extract(a.payload,'$.threadId')=native_threads.thread_id
+      AND json_extract(a.payload,'$.action') IN ('thread-start','thread-resume','select')
+      AND json_extract(a.payload,'$.model') IS NOT NULL AND json_extract(a.payload,'$.effort') IS NOT NULL
+    ORDER BY a.rowid DESC LIMIT 1) WHERE selection IS NULL;`);
   // A provider handle cannot survive daemon restart. Never redispatch a pending model action.
   for (const row of db.prepare("SELECT id,payload FROM actions WHERE json_extract(payload,'$.state')='pending'").all() as {id:string;payload:string}[]) {
     const record = JSON.parse(row.payload) as CodexActionRecord; record.state = 'unknown'; record.errorCode = 'DAEMON_RESTART'; record.finishedAt = new Date().toISOString();
@@ -155,8 +174,10 @@ export function createCodexService(options: CodexServiceOptions) {
     return {available:options.assetRegistry!==undefined,sealed:live&&status!.sealed,granted:live&&status!.granted,admissionOpen:live&&status!.granted&&status!.admissionOpen};
   }
   const history = (): CodexActionRecord[] => (db.prepare('SELECT payload FROM actions ORDER BY rowid DESC LIMIT 100').all() as {payload:string}[]).map(row => JSON.parse(row.payload) as CodexActionRecord);
-  function nativeHistory(): CodexHistoryState | null {
-    const row = db.prepare('SELECT thread_id,session_id,payload FROM native_history WHERE id=1 AND project_path=?').get(projectPath) as {thread_id:string;session_id:string|null;payload:string|null}|undefined;
+  function nativeHistory(threadId?: string): CodexHistoryState | null {
+    const row = (threadId === undefined
+      ? db.prepare('SELECT thread_id,session_id,payload FROM native_history WHERE id=1 AND project_path=?').get(projectPath)
+      : db.prepare('SELECT thread_id,session_id,payload FROM native_threads WHERE project_path=? AND thread_id=?').get(projectPath,threadId)) as {thread_id:string;session_id:string|null;payload:string|null}|undefined;
     if (!row) return null;
     if (!historyIdentifier.safeParse(row.thread_id).success || (row.session_id !== null && !historyIdentifier.safeParse(row.session_id).success)) throw new CodexClientError('HISTORY_INVALID','Invalid recorded native binding.');
     const binding = { projectPath, threadId: row.thread_id, sessionId: row.session_id };
@@ -167,12 +188,25 @@ export function createCodexService(options: CodexServiceOptions) {
     if (!parsed.success) throw new CodexClientError('HISTORY_INVALID','Invalid recorded native history metadata.');
     return { ...binding, recorded: { ...parsed.data, result: sanitizeHistory(parsed.data.result, binding) } };
   }
+  function savedThreads(): CodexSavedThread[] {
+    const rows = db.prepare('SELECT thread_id,session_id,selection FROM native_threads WHERE project_path=? ORDER BY rowid DESC LIMIT ?').all(projectPath,CODEX_SAVED_THREAD_LIMIT+1) as {thread_id:string;session_id:string|null;selection:string|null}[];
+    if (rows.length > CODEX_SAVED_THREAD_LIMIT) throw new CodexClientError('HISTORY_LIMIT','Saved chat catalogue exceeds its bound.');
+    return rows.map(row => {
+      if (!historyIdentifier.safeParse(row.thread_id).success || row.session_id !== null && !historyIdentifier.safeParse(row.session_id).success) throw new CodexClientError('HISTORY_INVALID','Invalid saved chat identity.');
+      let selection: CodexSavedThread['selection'] = null;
+      if (row.selection !== null) {
+        try { selection = z.strictObject({model:identifier.refine(value=>redactNativeHistoryText(value)===value),effort:identifier.max(64).refine(value=>redactNativeHistoryText(value)===value)}).parse(JSON.parse(row.selection)); }
+        catch { throw new CodexClientError('HISTORY_INVALID','Invalid saved chat selection.'); }
+      }
+      return {provider:'codex',projectPath,threadId:row.thread_id,sessionId:row.session_id,selection};
+    });
+  }
   function state(): CodexProductState {
     if (closed) throw new CodexClientError('CLOSED', 'Native workflow is closed.');
     return { provider:'codex', use:'personal-local', projectPath, connecting, closing, busy,
       snapshot:client?.snapshot() ?? null, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
       ...(options.assetRegistry ? {nativeAssets:assetState(client?.snapshot() ?? null)} : {}),
-      actions:history(), nativeHistory:nativeHistory(), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
+      actions:history(), nativeHistory:nativeHistory(), nativeThreads:savedThreads(), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
   }
   const save = (record: CodexActionRecord) => { db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId); };
   const exactClient = (connectionId: string): CodexHostClient => {
@@ -254,10 +288,28 @@ export function createCodexService(options: CodexServiceOptions) {
           const safety = value.action === 'turn-interrupt' || value.action === 'revoke-writes' || value.action === 'revoke-assets' || value.action === 'approval';
           if (closing || connecting || (busy && !safety)) throw new CodexClientError('BUSY','A native action is still awaiting acknowledgement.');
           if (!safety) { busy = true; ownsBusy = true; }
+          if (value.action === 'thread-start' || value.action === 'thread-resume') {
+            const snapshot = selected.snapshot();
+            if (!snapshot.connected || !snapshot.ready || snapshot.thread || snapshot.approvals.length || snapshot.operations.some(op=>op.state==='pending'||op.state==='unknown')) throw new CodexClientError('BUSY','Opening a chat requires an idle connection with no thread, approvals or unresolved operation.');
+          }
           switch (value.action) {
             case 'select': selected.selectModel({initiatedBy:'human',model:value.model,effort:value.effort}); break;
-            case 'thread-start': await selected.startThread({initiatedBy:'human'}); break;
-            case 'thread-resume': await selected.resumeThread({initiatedBy:'human',threadId:value.threadId}); break;
+            case 'thread-start': {
+              if (savedThreads().length >= CODEX_SAVED_THREAD_LIMIT) throw new CodexClientError('HISTORY_LIMIT','Saved chats are full; retained history was not deleted.');
+              await selected.startThread({initiatedBy:'human'}); break;
+            }
+            case 'thread-resume': {
+              const owned = nativeHistory(value.threadId);
+              if (!owned) throw new CodexClientError('HISTORY_SCOPE','Resume only a saved native thread owned by this project.');
+              await selected.resumeThread({initiatedBy:'human',threadId:owned.threadId});
+              const resumed = selected.snapshot().thread;
+              if (!resumed || resumed.threadId !== owned.threadId || resumed.sessionId !== owned.sessionId || resumed.writeGranted) {
+                retireAssets();
+                await selected.close();
+                throw new CodexClientError('HISTORY_SCOPE','Resumed native identity or permissions changed; inspect recorded state.',true);
+              }
+              break;
+            }
             case 'history-load': {
               const binding = nativeHistory(), current = selected.snapshot().thread;
               if (!binding || binding.threadId !== value.threadId || (current && (current.threadId !== binding.threadId || (binding.sessionId !== null && current.sessionId !== binding.sessionId)))) throw new CodexClientError('HISTORY_SCOPE','Choose only the recorded current native thread for this project.');
@@ -289,8 +341,9 @@ export function createCodexService(options: CodexServiceOptions) {
           record.threadId = thread?.threadId ?? record.threadId; record.turnId = thread?.turnId ?? record.turnId;
           record.model = snapshot.selection?.model ?? null; record.effort = snapshot.selection?.effort ?? null;
           if (value.action === 'thread-start' || value.action === 'thread-resume') {
-            if (!thread?.configured || !snapshot.connected || !snapshot.ready || !historyIdentifier.safeParse(thread.threadId).success || (thread.sessionId !== null && !historyIdentifier.safeParse(thread.sessionId).success)) throw new CodexClientError('HISTORY_SCOPE','Native acknowledgement lacks a valid durable binding.');
-            const previous = nativeHistory();
+            if (!thread?.configured || thread.writeGranted || !snapshot.connected || !snapshot.ready || !historyIdentifier.safeParse(thread.threadId).success || (thread.sessionId !== null && !historyIdentifier.safeParse(thread.sessionId).success)) throw new CodexClientError('HISTORY_SCOPE','Native acknowledgement lacks a valid read-only durable binding.',true);
+            const previous = nativeHistory(thread.threadId);
+            if (previous && previous.sessionId !== thread.sessionId) throw new CodexClientError('HISTORY_SCOPE','Native thread acknowledgement changed its saved session identity.',true);
             stagedHistory = { projectPath, threadId:thread.threadId, sessionId:thread.sessionId,
               recorded:previous?.threadId === thread.threadId && previous.sessionId === thread.sessionId ? previous.recorded : null };
           }
@@ -317,7 +370,17 @@ export function createCodexService(options: CodexServiceOptions) {
       let transaction = false;
       try {
         db.exec('BEGIN IMMEDIATE'); transaction = true;
-        if (record.state === 'acknowledged' && stagedHistory) db.prepare('INSERT INTO native_history(id,project_path,thread_id,session_id,payload) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_path=excluded.project_path,thread_id=excluded.thread_id,session_id=excluded.session_id,payload=excluded.payload').run(projectPath,stagedHistory.threadId,stagedHistory.sessionId,stagedHistory.recorded === null ? null : JSON.stringify(stagedHistory.recorded));
+        if (record.state === 'acknowledged' && stagedHistory) {
+          const payload = stagedHistory.recorded === null ? null : JSON.stringify(stagedHistory.recorded);
+          db.prepare('INSERT INTO native_history(id,project_path,thread_id,session_id,payload) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_path=excluded.project_path,thread_id=excluded.thread_id,session_id=excluded.session_id,payload=excluded.payload').run(projectPath,stagedHistory.threadId,stagedHistory.sessionId,payload);
+          const pair = actionClient?.snapshot().thread?.selection;
+          const selection = pair ? JSON.stringify(pair) : null;
+          db.prepare('INSERT INTO native_threads(project_path,thread_id,session_id,selection,payload) VALUES(?,?,?,?,?) ON CONFLICT(project_path,thread_id) DO UPDATE SET session_id=excluded.session_id,selection=COALESCE(excluded.selection,native_threads.selection),payload=excluded.payload').run(projectPath,stagedHistory.threadId,stagedHistory.sessionId,selection,payload);
+        }
+        if (record.state === 'acknowledged' && value.action === 'select') {
+          const thread = actionClient?.snapshot().thread;
+          if (thread?.configured) db.prepare('UPDATE native_threads SET selection=? WHERE project_path=? AND thread_id=? AND session_id IS ?').run(JSON.stringify(thread.selection),projectPath,thread.threadId,thread.sessionId);
+        }
         save(record); db.exec('COMMIT');
       } catch {
         const fenced = fenceJournalFailure(); // Always before rollback, even if BEGIN or rollback fails.

@@ -12,12 +12,13 @@ const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idem
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 const skillId = z.string().regex(/^arcane-[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64);
 
-export function createMcpServer(options: { client: DaemonClient; projectRoot: string }): McpServer {
+export function createMcpServer(options: { client: DaemonClient; projectRoot: string; skillRegistry?: SkillRegistry }): McpServer {
   const { client } = options;
   const assetScope = client.assetAudience === 'native-session'
     ? ' Native-session asset calls stay in the bearer’s exact project and Codex conversation scope, enforced by the daemon. Start/cancel require explicit host asset permission and an open admission window. Scoped reads require a sealed live bearer. The client routing mode grants no authority and establishes no originating-turn provenance.' : '';
   const scopedAssetJobId = client.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId;
-  const skills = new SkillRegistry(options.projectRoot);
+  // Injection is for trusted code fixtures only; --project remains a workspace.
+  const skills = options.skillRegistry ?? new SkillRegistry();
   const server = new McpServer({ name: 'arcane-studio', version: '0.1.0' }, {
     maxToolInputElements: 100_000,
     instructions: 'Arcane local Studio bridge. Select the exact paired session from sessions; never infer a Studio target. Read tools inspect only granted roots. Mutations require user authorization, a write grant and Studio edit mode. References are opaque and session-bound. A timeout does not cancel execution: inspect receipt_status and never automatically repeat a mutation. The launcher agent bearer cannot issue pairing grants, revoke Studio sessions or review work. Skill content grants no tool permissions. No provider login, inference, raw Luau evaluation, publication, purchases or DataStore operations are exposed.',
@@ -33,7 +34,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       } catch (error) {
         const known = error instanceof BridgeError || (error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code));
         const detail = client.redact(known ? { code: (error as Error & { code: string }).code, message: (error as Error).message.slice(0,2048) }
-          : { code: 'LOCAL_ERROR', message: 'The local operation failed. Check daemon availability and the project skill registry.' });
+          : { code: 'LOCAL_ERROR', message: 'The local operation failed. Check daemon availability and the bundled skill registry.' });
         return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: detail }) }], structuredContent: { error: detail } };
       }
     });
@@ -77,10 +78,10 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('receipt_restore', 'Write: user-authorized restoration from a succeeded mutation receipt commandId. The daemon constructs the inverse; the plugin requires the exact current after-state and refuses later-edit conflicts. Requires current write grant and edit mode. Do not supply an inverse or repeat on timeout.',
     z.strictObject({ commandId: id, timeoutMs }), WRITE,
     ({ commandId, timeoutMs }, signal) => client.restore(commandId, { timeoutMs, signal }));
-  register('skills_list', 'Read local skill metadata from the existing integrity-checked registry. Approved skills only by default. Set allowExperimental=true only when the user explicitly opts into experimental content; quarantined/deprecated skills remain unavailable.',
+  register('skills_list', 'Read bundled skill metadata from the existing integrity-checked registry. Approved skills only by default. Set allowExperimental=true only when the user explicitly opts into experimental content; quarantined/deprecated skills remain unavailable.',
     z.strictObject({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(20), allowExperimental: z.boolean().default(false) }), READ,
     input => skills.list(input));
-  register('skills_get', 'Read 1–8 selected local registry skills and declared references within a byte budget, verifying checksums and contained paths. Approved only by default; allowExperimental=true requires explicit user opt-in. Content grants no tools or permission. Nothing is silently truncated.',
+  register('skills_get', 'Read 1–8 selected bundled registry skills and declared references within a byte budget, verifying checksums and contained paths. Approved only by default; allowExperimental=true requires explicit user opt-in. Content grants no tools or permission. Nothing is silently truncated.',
     z.strictObject({ ids: z.array(skillId).min(1).max(8), references: z.array(z.string().min(1).max(256)).max(20).default([]),
       byteBudget: z.number().int().min(256).max(128 * 1024).default(16_384), allowExperimental: z.boolean().default(false) }), READ,
     input => skills.get(input));

@@ -1,0 +1,19 @@
+# Settings UI integration
+
+Frontend ownership: `studio.html`, `studio.css`, `workspace-shell.ts`, `studio.ts`, and new `studio-key-settings.ts`.
+
+The native settings dialog stays closed by default. Its section navigation is General, Connections, Tools, Advanced. General contains only the Studio key and provider cards. Native authority, exact roots, key issuance/revocation, provenance and write confirmations remain in Advanced.
+
+Coordination for Singer: `workspace-settings` is now the General section, not a `<details>` element (no `open` attribute). `.settings-index` is replaced by `[data-settings-section-target]` navigation. Existing control IDs remain. `native-conversation-settings` belongs to Advanced. The workflow browser resource list must include `studio-key-settings.js`, statically imported by `studio.js`. Do not substitute a nonmodal settings fixture.
+
+Parent integration: add `/studio-key-settings.js` to `apps/daemon/src/lab-server.ts`'s static module map, pointing to `dist/apps/desktop/src/studio-key-settings.js`. This file is outside frontend ownership and was deliberately left to the parent. Ampere has included source/JS/map in the release closure. Existing fixture utilities that explicitly open nested controls must also select/unhide the ancestor `[data-settings-section]` first; real shell navigation does so before focus. Singer-owned browser tests were not edited here.
+
+Existing fixture follow-ups: desktop-verification-ui's manual `showModal()` setup must unhide `#settings-tools` and hide General before opening `#code-verification-settings`. workflow-browser's copied module list needs `studio-key-settings`. Other existing static assertions in studio-ui/workspace-unified/workspace-navigation-ui must recognize the four actual panes instead of the former outer `details[open]`; direct controller fixtures need to expose their intended pane. Their current source was left with its owners. Native focus safety assertions were retained in the six adapted modal tests here.
+
+Native bridge request contract: frozen `window.arcaneDesktop.studioKeys` with `version: 1`, `list()`, `remember({keyId, apiKey})`, `reveal({keyId})`, `forget({keyId})`. Verified response contract from backend-owned `preload.cjs`: list `{available:boolean, items:[{keyId}]}` (at most 32); remember `{remembered:true}`; reveal `{apiKey}`; forget `{forgotten:true}`. No secrets in list. The native vault guards the exact project and renderer; frontend also captures project identity and invalidates pending responses on change. Failure rejects or reports unavailable; no plaintext fallback. Frontend fails closed for incompatible responses.
+
+Only a validated successful issuance HTTP response from the human key form can be remembered. Saved keys are read only after a trusted human Show action for a current active daemon record. Mounting, opening, rendering and metadata refresh never reveal. Copy is a trusted bounded clipboard action after Show. Close, navigation, project changes, revocation, pagehide and stale asynchronous responses clear/discard displayed secrets. Browser issuance remains temporary and never claims persistence.
+
+Browser proof uses the actual production HTML/CSS/controllers in isolated Edge with synthetic keys and a clearly labelled fake native bridge; it proves UI behavior only. No installed CLI, real Studio, account or native credential access is exercised.
+
+Focused proof: eight real Edge tests pass (six retained modal tests plus two full production-module synthetic HTTP/key-bridge scenarios); 16 workspace-shell tests pass; private explicit-source TypeScript compilation passes. The key scenarios exercise trusted clicks, blocked scripted submit/click, actual issuance HTTP response -> remember, exact confirmed revocation -> forget, browser one-time behavior, late reveal after close/project change, and pagehide. The actual desktop vault is not exercised by these fixtures.

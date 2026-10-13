@@ -1,12 +1,14 @@
 'use strict';
-const { app, BrowserWindow, Menu, dialog, nativeTheme, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, dialog, nativeTheme, ipcMain, safeStorage, clipboard } = require('electron');
 const { spawn } = require('node:child_process');
 const { join, resolve, basename } = require('node:path');
 const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
+const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const policy = require('./policy.cjs');
 const { createCodeVerification } = require('./code-verification.cjs');
 const { createProviderSetup } = require('./provider-setup.cjs');
+const { createStudioKeyVault } = require('./studio-key-vault.cjs');
 app.setName('Arcane'); app.setAppUserModelId('com.arcane.desktop'); app.enableSandbox();
 app.commandLine.appendSwitch('disable-background-networking');
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
@@ -19,11 +21,14 @@ else { try { app.setPath('userData', policy.prepareUserDirectory(app.getPath('us
 const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
 let codeVerification, projectSession, providerSetup;
+let studioKeyVault;
+let workspacePreferences;
 const CODE_VERIFICATION_WARNING = 'Arcane opened without Luau verification. The saved compiler is unavailable. Saved configuration was retained; choose an approved compiler in Tool > Configure Luau verification, then restart Arcane.';
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
 async function stopDaemon() {
+  providerSetup?.cancelPending();
   const owned = child; child = null; token = ''; origin = '';
   if (!owned) return true;
   if (owned.exitCode !== null || owned.signalCode != null) return owned.exitCode === 0;
@@ -43,31 +48,92 @@ async function startDaemon(project) {
   // Persist the per-project listener: key-only Studio connections encode this port.
   // A conflicting occupied port fails startup; no silent port rotation or key replacement.
   const portFile = join(stateRoot, 'listener-port.json'); let savedPort = null;
-  try { await policy.directPath(portFile, 'file'); const bytes = await readFile(portFile);
-    if (bytes.length > 1024) throw new Error('Port metadata too large.'); const saved = JSON.parse(bytes.toString('utf8'));
-    if (Object.keys(saved).sort().join(',') !== 'port,protocolVersion' || saved.protocolVersion !== 1 || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535) throw new Error('Invalid listener port metadata.');
-    savedPort = saved.port; env.ARCANE_PORT = String(savedPort);
-  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const startupPortError = message => Object.assign(new Error(message), { code: 'ARCANE_PROJECT_PORT' });
+  const portFailure = () => { throw startupPortError('Saved local port metadata is unavailable. Project records were retained; inspect the Arcane application-data folder before restarting.'); };
+  const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  const sameNode = (a, b) => ['dev', 'ino', 'mode', 'nlink'].every(name => a[name] === b[name]);
+  const sameFile = (a, b) => sameNode(a, b) && ['size', 'mtimeNs', 'ctimeNs'].every(name => a[name] === b[name]);
+  // Snapshot the already approved project/state paths. Only this fixed metadata
+  // file is opened; no key store, credential or renderer-selected path is read.
+  const chain = [];
+  for (const full of [canonical, stateRoot]) {
+    let current = full, depth = 0;
+    for (;;) {
+      if (++depth > 64) portFailure();
+      const stat = fs.lstatSync(current, { bigint: true });
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !samePath(fs.realpathSync(current), current)) portFailure();
+      chain.push({ path: current, stat });
+      const parent = resolve(current, '..'); if (parent === current) break; current = parent;
+    }
+  }
+  function checkDirectories() {
+    for (const node of chain) {
+      const stat = fs.lstatSync(node.path, { bigint: true });
+      if (!sameNode(node.stat, stat) || !stat.isDirectory() || stat.isSymbolicLink() || !samePath(fs.realpathSync(node.path), node.path)) portFailure();
+    }
+  }
+  function readPortRecord() {
+    checkDirectories();
+    let before;
+    try { before = fs.lstatSync(portFile, { bigint: true }); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; checkDirectories(); return null; }
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 1024n || !samePath(fs.realpathSync(portFile), portFile)) portFailure();
+    const fd = fs.openSync(portFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    try {
+      if (!sameFile(before, fs.fstatSync(fd, { bigint: true }))) portFailure();
+      const buffer = Buffer.alloc(1025); let length = 0;
+      while (length < buffer.length) {
+        const count = fs.readSync(fd, buffer, length, buffer.length - length, length);
+        if (!Number.isSafeInteger(count) || count < 0 || count > buffer.length - length) portFailure();
+        if (!count) break; length += count;
+      }
+      checkDirectories();
+      if (length > 1024 || BigInt(length) !== before.size || !sameFile(before, fs.fstatSync(fd, { bigint: true })) ||
+          !sameFile(before, fs.lstatSync(portFile, { bigint: true })) || !samePath(fs.realpathSync(portFile), portFile)) portFailure();
+      const bytes = buffer.subarray(0, length), saved = JSON.parse(bytes.toString('utf8'));
+      if (!saved || Object.getPrototypeOf(saved) !== Object.prototype || Object.keys(saved).sort().join(',') !== 'port,protocolVersion' ||
+          saved.protocolVersion !== 1 || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535) portFailure();
+      return { port: saved.port, stat: before, bytes };
+    } finally { fs.closeSync(fd); }
+  }
+  const priorPortRecord = readPortRecord();
+  if (priorPortRecord) { savedPort = priorPortRecord.port; env.ARCANE_PORT = String(savedPort); }
   const entry = await policy.directPath(join(productRoot, 'dist/apps/daemon/src/product-main.js'), 'file');
   // Host-owned settings are the sole source of compiler configuration. No inherited overrides survive.
   const verification = codeVerification.daemonConfiguration({ projectId: key, projectPath: canonical, stateRoot });
   Object.assign(env, verification.environment);
   const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   child = owned;
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { owned.kill(); reject(new Error('Startup timed out.')); }, 30000);
-    const fail = () => { clearTimeout(timer); reject(new Error('Bundled local runtime failed.')); };
+  const ready = await new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); owned.removeListener('error', fail); owned.removeListener('exit', fail); owned.removeListener('message', onMessage); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('Startup timed out.')); }, 30000);
+    const fail = () => { cleanup(); reject(startupPortError('The local runtime could not start. Project records and the saved port were retained. Check for another app using the local port, then restart Arcane. No automatic retry was attempted.')); };
+    const onMessage = message => {
+      let ready; try { ready = policy.readyMessage(message); } catch { return; }
+      if (child !== owned || origin) return;
+      // Use the validated literal port: URL normalizes the explicit HTTP port 80.
+      const assignedPort = Number(ready.origin.slice(ready.origin.lastIndexOf(':') + 1));
+      cleanup();
+      if (savedPort !== null && assignedPort !== savedPort) { reject(startupPortError('The local runtime reported a different port. The saved port was retained; startup was stopped.')); return; }
+      resolve({ ...ready, assignedPort });
+    };
     owned.once('error', fail); owned.once('exit', fail);
-    owned.on('message', message => {
-      try { const ready = policy.readyMessage(message); if (child !== owned || origin) return;
-        origin = ready.origin; token = ready.token; clearTimeout(timer);
-        owned.removeListener('error', fail); owned.removeListener('exit', fail); owned.removeAllListeners('message'); resolve();
-      } catch { /* Exact private parent-child handoff only. */ }
-    });
+    owned.on('message', onMessage);
   });
-  const assignedPort = Number(new URL(origin).port);
-  if (savedPort === null) await writeFile(portFile, JSON.stringify({ protocolVersion: 1, port: assignedPort }) + '\n', { flag: 'wx', mode: 0o600 });
-  else if (assignedPort !== savedPort) throw new Error('Listener identity changed unexpectedly.');
+  if (child !== owned || (owned.exitCode != null || owned.signalCode != null)) throw new Error('Local runtime stopped before startup completed.');
+  const currentPortRecord = readPortRecord();
+  if (priorPortRecord ? !currentPortRecord || !sameFile(priorPortRecord.stat, currentPortRecord.stat) || !priorPortRecord.bytes.equals(currentPortRecord.bytes) : currentPortRecord !== null) portFailure();
+  if (savedPort === null) {
+    const fd = fs.openSync(portFile, 'wx+', 0o600);
+    try {
+      const created = fs.fstatSync(fd, { bigint: true }); checkDirectories();
+      if (!created.isFile() || created.nlink !== 1n || !sameFile(created, fs.lstatSync(portFile, { bigint: true })) || !samePath(fs.realpathSync(portFile), portFile)) portFailure();
+      fs.writeFileSync(fd, JSON.stringify({ protocolVersion: 1, port: ready.assignedPort }) + '\n'); fs.fsyncSync(fd);
+      const persisted = readPortRecord();
+      if (!persisted || persisted.port !== ready.assignedPort || !sameFile(persisted.stat, fs.fstatSync(fd, { bigint: true }))) portFailure();
+    } finally { fs.closeSync(fd); }
+  }
+  origin = ready.origin; token = ready.token;
   daemonReadyMs = performance.now() - started; projectPath = canonical;
   projectSession = Object.freeze({ projectId: key, projectPath: canonical, stateRoot, activeSettingsHash: verification.settingsHash,
     verificationUnavailable: verification.failure === 'compiler-unavailable',
@@ -115,7 +181,7 @@ async function chooseProject() {
     await startDaemon(path); makeWindow(); await loadWorkspace();
     const pref = join(userRoot, 'last-project.json'); await policy.directPath(pref, 'file', true);
     await writeFile(pref, JSON.stringify({ version: 1, projectPath: path }) + '\n', { mode: 0o600 });
-  } catch { await failStartup('Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
+  } catch (error) { await failStartup(error.code === 'ARCANE_PROJECT_PORT' ? error.message : 'Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
   finally { switching = false; }
 }
 function installMenu() {
@@ -130,6 +196,7 @@ function installMenu() {
   ]));
 }
 async function failStartup(message) {
+  providerSetup?.dispose();
   if (closing) return; closing = true;
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
@@ -161,12 +228,48 @@ async function checkSmoke() {
       return !!bridge && Object.isFrozen(bridge) && bridge.version === 1 &&
         typeof bridge.status === 'function' && typeof bridge.configure === 'function';
     })(),
+    studioKeysBridge: (() => {
+      const bridge = window.arcaneDesktop?.studioKeys;
+      return !!bridge && Object.isFrozen(bridge) && bridge.version === 1 &&
+        ['list','remember','reveal','forget'].every(name => typeof bridge[name] === 'function');
+    })(),
     desktopVerificationController: document.getElementById('desktop-verification')?.getAttribute('aria-busy') === 'false' &&
       document.getElementById('desktop-verification-setup')?.disabled === false &&
       document.getElementById('desktop-verification-refresh')?.disabled === false
   })`));
   const prefs = window.webContents.getLastWebPreferences();
+  const workspacePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.workspacePreferences.read()');
   await writeFile(join(smokeRoot, 'workspace.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
+  // Exercise only the actual packaged renderer's local draft controllers. No
+  // provider setup/lifecycle button, API command or native input is simulated.
+  const localChat = JSON.parse(await window.webContents.executeJavaScript(`(async () => {
+    const deadline = Date.now() + 8000;
+    const tabs = () => Array.from(document.querySelectorAll('#workspace-chat-tabs [role="tab"]'));
+    const wait = async predicate => { while (!predicate()) { if (Date.now() >= deadline) throw new Error('Local chat smoke acknowledgement missing.'); await new Promise(resolve => setTimeout(resolve, 20)); } };
+    const composer = document.getElementById('codex-composer'), create = document.getElementById('workspace-new-chat');
+    if (!composer || !create) throw new Error('Local chat controls missing.');
+    await wait(() => tabs().length === 1 && !create.disabled);
+    const first = tabs()[0].dataset.chatKey;
+    const write = text => { composer.value = text; composer.dispatchEvent(new Event('input', { bubbles: true })); };
+    write('Arcane smoke first unsent draft.'); create.click();
+    await wait(() => tabs().length === 2 && composer.value === '');
+    const second = tabs().find(tab => tab.dataset.chatKey !== first).dataset.chatKey;
+    write('Arcane smoke second unsent draft.');
+    tabs().find(tab => tab.dataset.chatKey === first).click();
+    await wait(() => composer.value === 'Arcane smoke first unsent draft.');
+    tabs().find(tab => tab.dataset.chatKey === second).click();
+    await wait(() => composer.value === 'Arcane smoke second unsent draft.');
+    const stableComposer = composer === document.getElementById('codex-composer');
+    write(''); tabs().find(tab => tab.dataset.chatKey === first).click();
+    await wait(() => composer.value === 'Arcane smoke first unsent draft.'); write('');
+    const close = tabs().find(tab => tab.dataset.chatKey === second).nextElementSibling;
+    if (!close || close.tagName !== 'BUTTON' || close.getAttribute('role') === 'tab') throw new Error('Local chat close control missing.');
+    close.click(); await wait(() => tabs().length === 1 && composer.value === '');
+    return JSON.stringify({ draftsSeparate: true, stableComposer, cleaned: true,
+      taskUsageInactive: document.getElementById('codex-task-usage')?.hidden === true });
+  })()`));
+  const afterChatResponse = await fetch(origin + '/v1/codex/state', { headers: { Authorization: 'Bearer ' + token } });
+  const afterChat = await afterChatResponse.json();
   const checks = {
     ownDaemonReady: policy.validOrigin(origin), productStateReadable: stateResponse.ok,
     projectMemoryOffByDefault: memoryResponse.ok && memory.settings?.optIn === false && memory.records?.length === 0,
@@ -178,6 +281,11 @@ async function checkSmoke() {
     requiredUi: renderer.staticIds === true, noHorizontalOverflow: renderer.scrollWidth <= renderer.width,
     genuineEmptyPreview: renderer.previews === 0, desktopIdentity: renderer.desktop?.runtime === 'desktop',
     desktopVerificationSetupMounted: renderer.codeVerificationBridge === true && renderer.desktopVerificationController === true,
+    studioKeyVaultBridgeMounted: renderer.studioKeysBridge === true,
+    workspacePreferencesDisabledAndEmpty: workspacePreferenceRead?.available === false && workspacePreferenceRead.preferences === null,
+    localChatDraftSwitching: localChat.draftsSeparate === true && localChat.stableComposer === true && localChat.cleaned === true,
+    taskUsageHiddenWithoutTask: localChat.taskUsageInactive === true,
+    localChatIntentsStartNoNativeLifecycle: afterChatResponse.ok && afterChat.state?.snapshot === null && afterChat.state.actions?.length === 0,
     optionalCodeVerificationFailureContained: !projectSession.verificationUnavailable ||
       (projectSession.activeSettingsHash === null && projectSession.verificationEnvironmentAbsent),
     externalNavigationRejected: !policy.navigationAllowed(origin, 'https://example.com/') && !policy.requestAllowed(origin, 'file:///C:/Windows/win.ini'),
@@ -193,6 +301,9 @@ async function checkSmoke() {
     elapsed: { daemonReadyMs: Math.round(daemonReadyMs), firstReadyMs: Math.round(firstReadyMs), totalMs: Math.round(performance.now() - started) },
     viewport: { width: renderer.width, height: renderer.height }, checks,
     codeVerification: { configuredUnavailable: projectSession.verificationUnavailable },
+    studioKeyVault: { enabled: false, encryptionAvailable: safeStorage.isEncryptionAvailable() === true, encryptionRoundTripTested: false },
+    workspacePreferences: { enabled: false, encryptionAvailable: safeStorage.isEncryptionAvailable() === true, encryptionRoundTripTested: false },
+    localChat: { harnessOnlyRendererIntents: true, nativeKeyboardInputVerified: false, inferenceStarted: false },
     inferenceStarted: false, studioOperations: 0, signed: false, fullProductVerified: false };
   await writeFile(join(smokeRoot, 'checks.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
   closing = true; app.exit(Object.values(checks).every(Boolean) ? 0 : 1);
@@ -201,7 +312,7 @@ if (profilePreparationFailed) app.whenReady().then(() => failStartup('Arcane app
 else if (!locked) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
-  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; void stopDaemon().then(clean => app.exit(clean ? 0 : 1)); } });
+  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); void stopDaemon().then(clean => app.exit(clean ? 0 : 1)); } });
   app.on('window-all-closed', () => { if (!switching && !closing) app.quit(); });
   app.whenReady().then(async () => {
     try {
@@ -211,6 +322,16 @@ else {
         return { ...projectSession, window, origin, epoch: projectSession };
       } });
       codeVerification.installIpc(ipcMain);
+      studioKeyVault = createStudioKeyVault({ safeStorage, clipboard, enabled: !smoke, getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      studioKeyVault.installIpc(ipcMain);
+      workspacePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      workspacePreferences.installIpc(ipcMain);
       providerSetup = createProviderSetup({getWindow:()=>closing||switching?null:window,getOrigin:()=>origin,getProjectPath:()=>projectPath,enabled:!smoke,dialog});
       for (const action of ['status','login','install','launch']) ipcMain.handle('arcane:provider-'+action, async (event,...args)=>{
         try {
@@ -234,6 +355,6 @@ else {
         if (Object.keys(saved).sort().join(',') !== 'projectPath,version' || saved.version !== 1) throw new Error('Invalid project preference.'); selected = await policy.directPath(saved.projectPath);
       } catch (error) { if (error.code !== 'ENOENT' && !smoke) await dialog.showMessageBox({ type: 'warning', title: 'Saved project unavailable', message: 'Starting an empty local project. The saved preference was preserved; use File > Open project to choose a folder.' }); }
       await startDaemon(selected); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
-    } catch { await failStartup('Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
+    } catch (error) { await failStartup(error.code === 'ARCANE_PROJECT_PORT' ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
   });
 }

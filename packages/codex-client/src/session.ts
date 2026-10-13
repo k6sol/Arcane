@@ -6,6 +6,38 @@ import { JsonlTransport, type InternalProcess } from './transport.js';
 import { arcaneThreadIsIsolated, type McpInventoryRow } from './mcp-isolation.js';
 import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
+import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
+
+const USAGE_COUNT_LIMIT = 1_000_000_000_000;
+const USAGE_KEYS = ['totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens'] as const;
+function usageObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(value)) &&
+    Reflect.ownKeys(value).length <= 32 && Reflect.ownKeys(value).every(key =>
+      typeof key === 'string' && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value'));
+}
+function usageCount(value: unknown, limit = USAGE_COUNT_LIMIT): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= limit;
+}
+function usageBreakdown(value: unknown): TokenUsageBreakdown | null {
+  if (!usageObject(value) || USAGE_KEYS.some(key => !Object.hasOwn(value, key) || !usageCount(value[key])) ||
+      value.cacheWriteInputTokens !== undefined && !usageCount(value.cacheWriteInputTokens)) return null;
+  const counts = Object.fromEntries(USAGE_KEYS.map(key => [key, value[key]])) as unknown as TokenUsageBreakdown;
+  if (value.cacheWriteInputTokens !== undefined) counts.cacheWriteInputTokens = value.cacheWriteInputTokens as number;
+  if (counts.inputTokens + counts.outputTokens > counts.totalTokens ||
+      counts.cachedInputTokens > counts.inputTokens || counts.reasoningOutputTokens > counts.outputTokens ||
+      (counts.cacheWriteInputTokens ?? 0) + counts.cachedInputTokens > counts.inputTokens) return null;
+  return counts;
+}
+/** Bounded whitelist for the v2 native notification; never reads auth or logs raw frames. */
+export function parseNativeTokenUsage(value: unknown): NativeTokenUsage | null {
+  if (!usageObject(value) || !['total', 'last', 'modelContextWindow'].every(key => Object.hasOwn(value, key))) return null;
+  const total = usageBreakdown(value.total), last = usageBreakdown(value.last);
+  if (!total || !last || !(value.modelContextWindow === null || usageCount(value.modelContextWindow, 1_000_000_000)) ||
+      USAGE_KEYS.some(key => last[key] > total[key]) ||
+      total.cacheWriteInputTokens !== undefined && last.cacheWriteInputTokens !== undefined && last.cacheWriteInputTokens > total.cacheWriteInputTokens) return null;
+  return { source: 'thread/tokenUsage/updated', total, last, modelContextWindow: value.modelContextWindow as number | null, continuity: 'reported' };
+}
 
 interface PendingApproval { value: Approval; timer: NodeJS.Timeout; wireKey: string; safeToAccept: boolean }
 interface TurnPreflight { thread: ThreadState; selection: Selection; accountRevision: number; turnId: string | null; turnStatus: ThreadState['turnStatus']; revoked: boolean }
@@ -124,6 +156,7 @@ export class CodexSession {
   #eventBytes = 0;
   #droppedEvents = 0;
   #lastEventSeq = 0;
+  #usage: TokenUsageReport | undefined;
   #cwd: string;
   #mcpIsolated=false;
   #turnPreflight: TurnPreflight | null = null;
@@ -236,6 +269,7 @@ export class CodexSession {
       account: this.#account, models: this.#models, selection: this.#selection, thread: this.#thread,
       operations: this.#operations, approvals: [...this.#approvals.values()].map(entry => ({ ...entry.value, canAccept: this.#canAccept(entry) })),
       events: this.#events.map(entry => entry.value), droppedEvents: this.#droppedEvents, lastEventSeq: this.#lastEventSeq, failureCode: this.#failureCode,
+      ...(this.#usage ? { usage: this.#usage } : {}),
     });
   }
   async readAccount(): Promise<Account> {
@@ -349,6 +383,7 @@ export class CodexSession {
     this.#cancelledTurnId = null;
     this.#clearApprovals('cancel');
     thread.turnId = null; thread.turnStatus = 'starting';
+    delete thread.durationMs;
     try {
       const result = await this.#requestOperation(operation, {
         threadId: thread.threadId, input: [{ type: 'text', text, text_elements: [] }],
@@ -366,6 +401,7 @@ export class CodexSession {
         operation.turnId = turnId; thread.turnId = turnId; this.#knownTurnIds.add(turnId);
         // A late acknowledgement cannot resurrect a completed or cancelled turn.
         if (thread.turnStatus === 'starting') thread.turnStatus = turnStatus;
+        if (TERMINAL.has(turnStatus) && usageCount(turn.durationMs, 31_536_000_000)) thread.durationMs = turn.durationMs;
         if (TERMINAL.has(turnStatus) && !this.#endNativeAssetIntent(operation)) {
           throw new CodexClientError('UNKNOWN', 'Native asset completion is uncertain.', true);
         }
@@ -688,6 +724,24 @@ export class CodexSession {
   #message(message: Record<string, unknown>): void {
     if (Object.hasOwn(message, 'id')) { this.#serverRequest(message); return; }
     const method = message.method;
+    if (method === 'thread/tokenUsage/updated') {
+      // Usage cannot adopt a thread/turn or revive a disconnected/unknown task.
+      const params = message.params, thread = this.#thread;
+      if (!this.#transport.connected || !thread || !usageObject(params) || params.threadId !== thread.threadId ||
+          params.turnId !== thread.turnId || thread.turnId === null || thread.turnStatus === 'unknown') return;
+      const usage = parseNativeTokenUsage(params.tokenUsage);
+      if (!usage) return; // Optional malformed telemetry must not terminate a real turn.
+      const previous = this.#usage;
+      if (previous && (USAGE_KEYS.some(key => usage.total[key] < previous.total[key]) ||
+          previous.total.cacheWriteInputTokens !== undefined && usage.total.cacheWriteInputTokens !== undefined &&
+          usage.total.cacheWriteInputTokens < previous.total.cacheWriteInputTokens || previous.continuity === 'uncertain')) usage.continuity = 'uncertain';
+      if (previous?.turnId === thread.turnId && JSON.stringify(usage) === JSON.stringify({
+          source: previous.source, total: previous.total, last: previous.last,
+          modelContextWindow: previous.modelContextWindow, continuity: previous.continuity })) return;
+      this.#usage = { ...usage, threadId: thread.threadId, turnId: thread.turnId, seq: this.#lastEventSeq + 1 };
+      this.#event({ type: 'usage', threadId: thread.threadId, turnId: thread.turnId, usage });
+      return;
+    }
     if (method === 'account/updated') {
       if (!this.#initializing || this.#ready || this.#thread) this.#retireNativeAssets();
       this.#accountRevision++;
@@ -734,8 +788,10 @@ export class CodexSession {
       if (method === 'turn/started' && this.#cancelledTurnId === id) return;
       if (method === 'turn/started' && TERMINAL.has(thread.turnStatus)) return;
       thread.turnStatus = state;
+      if (TERMINAL.has(state) && usageCount(raw.durationMs, 31_536_000_000)) thread.durationMs = raw.durationMs;
       if (TERMINAL.has(state)) { this.#endNativeAssetIntent(); this.#clearApprovals(null); }
-      this.#event({ type: 'turn', threadId: thread.threadId, turnId: id, status: state }); return;
+      this.#event({ type: 'turn', threadId: thread.threadId, turnId: id, status: state,
+        ...(TERMINAL.has(state) && thread.durationMs !== undefined ? { durationMs: thread.durationMs } : {}) }); return;
     }
     if (params.turnId !== thread.turnId || !this.#scopeActive(thread.threadId, thread.turnId)) return;
     const turnId = thread.turnId!;

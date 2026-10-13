@@ -148,17 +148,21 @@ test('conversation transport bounds bytes and UTF-8 and never retries uncertain 
 
 // Tiny DOM surface for deterministic controller tests. No browser, daemon, CLI or Studio runs.
 class ElementFixture extends EventTarget {
-  textContent = ''; value = ''; hidden = false; disabled = false; className = ''; type = ''; checked = false;
+  textContent = ''; value = ''; hidden = false; disabled = false; className = ''; type = ''; checked = false; open = false;
   children: ElementFixture[] = []; attributes = new Map<string, string>();
+  constructor(readonly tagName = 'DIV') { super(); }
+  // StudioKeySettings reads the current select options after replaceChildren/append.
+  get options() { return this.children.filter(child => child.tagName === 'OPTION'); }
   replaceChildren(...children: ElementFixture[]) { this.children = children; }
   append(...children: ElementFixture[]) { this.children.push(...children); }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
   querySelectorAll() { return this.children.filter(child => child.type === 'button'); }
 }
 class DocumentFixture {
+  defaultView = null; // Browser fixture; no native key bridge or observers.
   elements = new Map<string, ElementFixture>();
-  getElementById(id: string) { let item = this.elements.get(id); if (!item) { item = new ElementFixture(); this.elements.set(id, item); } return item; }
-  createElement(_tag: string) { return new ElementFixture(); }
+  getElementById(id: string) { let item = this.elements.get(id); if (!item) { item = new ElementFixture(id === 'settings-key-select' ? 'SELECT' : id === 'settings-drawer' ? 'DIALOG' : 'DIV'); this.elements.set(id, item); } return item; }
+  createElement(tag: string) { return new ElementFixture(tag.toUpperCase()); }
 }
 interface WorkbenchFixture {
   assetJobs: AssetJobRecord[]; assetJobId: string; assetAvailable: boolean; assetProbed: boolean; assetBusy: boolean;

@@ -26,11 +26,13 @@ function createProviderSetup(options) {
   const home = options.homedir ?? (() => os.homedir());
   const timeoutMs = options.timeoutMs ?? 8000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15000) fail();
+  const loginTimeoutMs = options.loginTimeoutMs ?? 180000;
+  if (!Number.isInteger(loginTimeoutMs) || loginTimeoutMs < 1 || loginTimeoutMs > 300000) fail();
   const snapshots = new Map(['codex', 'claude'].map(provider => [provider, {
     version: 1, provider, installed: false, auth: 'unknown', cliVersion: null, busy: false, message: null,
   }]));
-  let active = false;
-  const copy = provider => Object.freeze({ ...snapshots.get(provider), busy: active });
+  let active = false, ownedLogin = null, disposed = false, epoch = 0;
+  const copy = provider => Object.freeze({ ...snapshots.get(provider), busy: active || !!ownedLogin?.session.status().pending });
   const update = (provider, values) => snapshots.set(provider, { ...snapshots.get(provider), ...values });
   function providerArgument(args) {
     if (args.length !== 1 || (args[0] !== 'codex' && args[0] !== 'claude')) fail();
@@ -60,11 +62,12 @@ function createProviderSetup(options) {
     const url = new URL(origin);
     if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
         !url.port || url.origin !== origin || url.username || url.password) fail();
-    return { window, origin, project: options.getProjectPath() };
+    return { window, origin, project: options.getProjectPath(), epoch };
   }
   function stillCurrent(scope) {
+    if (disposed) fail();
     const current = context();
-    if (current.window !== scope.window || current.origin !== scope.origin || current.project !== scope.project) fail();
+    if (current.window !== scope.window || current.origin !== scope.origin || current.project !== scope.project || current.epoch !== scope.epoch) fail();
   }
   function nativeEnvironment() {
     // No Arcane authority, provider keys/tokens, injected runtimes, or proxy routing.
@@ -201,14 +204,18 @@ function createProviderSetup(options) {
   async function confirm(scope, action, provider, cwd = null) {
     const dialog = options.dialog ?? require('electron').dialog;
     const name = provider === 'codex' ? 'Codex' : 'Claude Code';
+    const browser = action === 'login' && provider === 'codex';
     const detail = action === 'install' ? 'Open the official installation instructions in your browser. Arcane will not download or install software. Any later download or installation is your separate choice.' :
+      browser ? 'Use the installed native Codex app-server to open official ChatGPT sign-in in your browser. Codex owns the local callback and credentials. Arcane sends no AI request and does not receive credentials or sign-in codes.' :
+      action === 'fallback' ? 'This native Codex explicitly reports that browser login RPC is unsupported. Open the installed Codex login command in a visible PowerShell terminal. Complete sign-in in the vendor browser, then check status in Arcane.' :
       action === 'login' ? `Run the installed native ${name} sign-in command in a visible terminal. Complete authentication only in the vendor terminal or browser. Arcane does not receive credentials or sign-in codes.` :
         'Open unmodified Claude Code in a visible terminal for the current project. Review authentication, billing, project trust, and tool permissions there. Your own API or cloud account can incur charges; Arcane sends no prompt and selects no billing route.';
     const result = await dialog.showMessageBox(scope.window, {
       type: 'question', title: 'Arcane provider setup', message: action === 'install' ? `Open ${name} installation instructions?` :
-        action === 'login' ? `Sign in using native ${name}?` : 'Open native Claude Code?',
+        browser ? 'Sign in with ChatGPT?' : action === 'fallback' ? 'Open native Codex login in a terminal?' :
+          action === 'login' ? `Sign in using native ${name}?` : 'Open native Claude Code?',
       detail: detail + (action === 'launch' ? '\n\nProject: ' + cwd : ''),
-      buttons: ['Cancel', action === 'install' ? 'Open instructions' : 'Open terminal'],
+      buttons: ['Cancel', action === 'install' ? 'Open instructions' : browser ? 'Sign in' : 'Open terminal'],
       defaultId: 0, cancelId: 0, noLink: true,
     });
     stillCurrent(scope);
@@ -234,11 +241,92 @@ function createProviderSetup(options) {
       Buffer.from(launcher, 'utf16le').toString('base64')], cwd, false);
     return result.ok && result.code === 0;
   }
+  function cancelPending() {
+    // Revoke intent even before the owned login exists (dialog/version awaits).
+    // A context that returns to its original paths cannot revive the old action.
+    epoch++;
+    const owned = ownedLogin;
+    if (!owned) return;
+    owned.session.cancel(undefined, true); owned.detach();
+    if (ownedLogin === owned) ownedLogin = null;
+    update('codex', { auth: 'unknown', message: 'Native browser sign-in was cancelled. No completion was verified.' });
+  }
+  async function browserLogin(command, cwd, scope) {
+    const cliVersion = parseVersion('codex', await run(command, ['--version'], cwd));
+    stillCurrent(scope);
+    if (!cliVersion) {
+      update('codex', { cliVersion: null, auth: 'unknown', message: 'Native CLI version could not be verified. Browser sign-in was not started.' });
+      return;
+    }
+    update('codex', { cliVersion, auth: 'unknown' });
+    if (!equal(await checked(command, 'file'), command) || !equal(await checked(cwd, 'directory'), cwd)) fail();
+    stillCurrent(scope);
+    const { createCodexBrowserLogin } = require('./provider-login.cjs');
+    const listeners = [];
+    const owned = { session: null, scope, detach() {
+      for (const [target, event, listener] of listeners) target.removeListener(event, listener);
+      listeners.length = 0;
+    } };
+    const isCurrent = () => {
+      if (disposed || ownedLogin !== owned) return false;
+      try { stillCurrent(scope); return true; } catch { return false; }
+    };
+    owned.session = createCodexBrowserLogin({ spawn, command, cwd, env: nativeEnvironment(), cliVersion,
+      rpcTimeoutMs: timeoutMs, loginTimeoutMs, isCurrent,
+      openExternal: options.openExternal ?? (url => require('electron').shell.openExternal(url)),
+      onChange(value) {
+        if (isCurrent()) update('codex', { auth: value.auth, message: value.message });
+        if (!value.pending) owned.detach();
+      },
+    });
+    ownedLogin = owned;
+    for (const [target, event] of [[scope.window, 'closed'], [scope.window.webContents, 'destroyed'],
+      [scope.window.webContents, 'render-process-gone'], [scope.window.webContents, 'will-navigate'],
+      [scope.window.webContents, 'did-start-navigation']]) {
+      if (typeof target?.on !== 'function' || typeof target?.removeListener !== 'function') continue;
+      const listener = (...args) => {
+        if (event === 'did-start-navigation' && args[3] === false) return;
+        if (ownedLogin === owned) cancelPending();
+      };
+      target.on(event, listener); listeners.push([target, event, listener]);
+    }
+    const result = await owned.session.start();
+    if (!result.pending) { owned.detach(); if (ownedLogin === owned) ownedLogin = null; }
+    stillCurrent(scope);
+    const latest = owned.session.status();
+    update('codex', { auth: latest.auth, message: latest.message });
+    if (result.unsupported) {
+      if (platform !== 'win32') {
+        update('codex', { message: 'Native browser login RPC is unsupported. Run codex login in your own visible terminal, then check status.' });
+      } else if (await confirm(scope, 'fallback', 'codex')) {
+        if (!equal(await checked(command, 'file'), command) || !equal(await checked(cwd, 'directory'), cwd)) fail();
+        stillCurrent(scope);
+        const launched = await terminal(command, ['login'], cwd, scope);
+        update('codex', { auth: 'unknown', message: launched ?
+          'Native browser login RPC is unsupported. Visible Codex login terminal requested; complete sign-in there, then check status. Authentication is not yet verified.' :
+          'Native browser login RPC is unsupported and the visible terminal could not be opened. Run codex login in your own terminal, then check status.' });
+      }
+    }
+  }
   async function act(action, args) {
     const provider = providerArgument(args);
     if (!enabled) return Object.freeze({
       version: 1, provider, installed: false, auth: 'unknown', cliVersion: null, busy: false, message: DISABLED,
     });
+    if (disposed) return Object.freeze({ ...copy(provider), auth: 'unknown', message: 'Provider setup is unavailable. No completion was verified.' });
+    if (ownedLogin) {
+      try { stillCurrent(ownedLogin.scope); } catch { cancelPending(); }
+    }
+    if (ownedLogin?.session.status().pending) return action === 'status' && provider === 'codex' ? copy(provider) :
+      Object.freeze({ ...copy(provider), message: 'Another provider setup action is in progress.' });
+    if (ownedLogin && !active) {
+      // Deliver the actual final RPC outcome once to the polling renderer before
+      // a later explicit refresh runs fresh native CLI metadata checks.
+      const latest = ownedLogin.session.status();
+      ownedLogin.detach(); ownedLogin = null;
+      update('codex', { auth: latest.auth, message: latest.message });
+      if (action === 'status' && provider === 'codex') return copy(provider);
+    }
     if (active) return Object.freeze({ ...copy(provider), message: 'Another provider setup action is in progress.' });
     active = true;
     try {
@@ -270,6 +358,9 @@ function createProviderSetup(options) {
               update(provider, { cliVersion, auth, message: auth === 'unknown' ? 'Native authentication status is unavailable or unrecognized.' :
                 auth === 'api-or-cloud' ? 'Native CLI reports API or cloud authentication. Usage may incur charges; Arcane has not started a request.' : null });
             }
+          } else if (action === 'login' && provider === 'codex') {
+            if (!await confirm(scope, action, provider)) update(provider, { message: 'Native browser sign-in was cancelled.' });
+            else await browserLogin(command, cwd, scope);
           } else if (platform !== 'win32') {
             update(provider, { message: 'A verified visible terminal handoff is unavailable on this platform. Use the native CLI in your own terminal.' });
           } else if (!await confirm(scope, action, provider, cwd)) {
@@ -290,10 +381,16 @@ function createProviderSetup(options) {
     } finally { active = false; }
     return copy(provider);
   }
-  return Object.freeze({
+  const host = {
     status: (...args) => act('status', args), login: (...args) => act('login', args),
     install: (...args) => act('install', args), launch: (...args) => act('launch', args),
+  };
+  // Trusted owner hooks are deliberately outside the renderer's enumerable v1 API.
+  Object.defineProperties(host, {
+    cancelPending: { value: cancelPending },
+    dispose: { value: () => { disposed = true; cancelPending(); } },
   });
+  return Object.freeze(host);
 }
 
 module.exports = { createProviderSetup };

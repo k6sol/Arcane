@@ -732,27 +732,29 @@
     "note": "Compute host canonical identity once at route factory; report physical projectPath and SHA256 projectId matching Electron native configuration. Never caller-supplied ID or inferred DOM identity. No grants/actions changed."
   },
   "latestDesktopRelease": {
-    "directory": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-XZ40Kh",
-    "executable": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-XZ40Kh\\Arcane.exe",
-    "manifestSha256": "31934509c36214b0a0c3d50d8e8ebabcca2b12674a31267c8c1648a1ae8505c1",
-    "files": 3841,
-    "bytes": 503828916,
+    "directory": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-FKUT9G",
+    "executable": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-FKUT9G\\Arcane.exe",
+    "manifestSha256": "2f235e8f4ad1a0aa87992f689a71a812f18102fb01882a6309280bc736d7e8b3",
+    "files": 3842,
+    "bytes": 503884966,
     "actualExecutableChecks": 22,
     "actualExecutablePassed": 22,
-    "daemonReadyMs": 1859,
-    "firstReadyMs": 2240,
-    "proof": "runtime/verification/cli-ui-executable-final-3U7kIa/verification.json",
-    "executableProof": "runtime/verification/windows-executable-QPnnSj/verification.json",
-    "screenshot": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\verification\\windows-executable-QPnnSj\\app\\workspace.png",
-    "compiledSources": 151,
-    "currentAffectedUnitBrowserTests": 553,
-    "currentAffectedUnitBrowserPassed": 553,
-    "currentOfflineTests": 277,
-    "currentOfflinePassed": 277,
-    "currentOfflineSkipped": 0,
-    "priorBroadGate": "runtime/verification/desktop-pipeline-L3evnA/unit-browser-kZWlxY",
+    "daemonReadyMs": 2101,
+    "firstReadyMs": 2544,
+    "proof": "runtime/verification/premium-final-9FYKq4/verification.json",
+    "executableProof": "runtime/verification/windows-executable-r1qJuB/verification.json",
+    "screenshot": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\verification\\windows-executable-r1qJuB\\app\\workspace.png",
+    "compiledSources": 153,
+    "currentAffectedUnitBrowserTests": 145,
+    "currentAffectedUnitBrowserPassed": 145,
+    "currentAffectedScope": "143 checks passed prior gate; entire corrected Codex chat UI suite independently passed on same product source. Test-only inline fixture layout fixed, not production.",
+    "priorOfflineProof": "runtime/verification/cli-ui-executable-final-3U7kIa/verification.json",
+    "priorOfflinePassed": 277,
+    "nativeMetadataProofBeforeUiChange": "runtime/verification/native-packaged-cli-WpQ5mz/verification.json",
+    "backendChanged": false,
     "signed": false,
     "installer": false,
+    "nativeProviderCalls": 0,
     "providerInference": false,
     "studioOperations": 0,
     "fullProductVerified": false
@@ -845,6 +847,32 @@
       "providerInference": false,
       "studioOperations": 0,
       "fullProductVerified": false
+    },
+    {
+      "directory": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-XZ40Kh",
+      "executable": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-XZ40Kh\\Arcane.exe",
+      "manifestSha256": "31934509c36214b0a0c3d50d8e8ebabcca2b12674a31267c8c1648a1ae8505c1",
+      "files": 3841,
+      "bytes": 503828916,
+      "actualExecutableChecks": 22,
+      "actualExecutablePassed": 22,
+      "daemonReadyMs": 1859,
+      "firstReadyMs": 2240,
+      "proof": "runtime/verification/cli-ui-executable-final-3U7kIa/verification.json",
+      "executableProof": "runtime/verification/windows-executable-QPnnSj/verification.json",
+      "screenshot": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\verification\\windows-executable-QPnnSj\\app\\workspace.png",
+      "compiledSources": 151,
+      "currentAffectedUnitBrowserTests": 553,
+      "currentAffectedUnitBrowserPassed": 553,
+      "currentOfflineTests": 277,
+      "currentOfflinePassed": 277,
+      "currentOfflineSkipped": 0,
+      "priorBroadGate": "runtime/verification/desktop-pipeline-L3evnA/unit-browser-kZWlxY",
+      "signed": false,
+      "installer": false,
+      "providerInference": false,
+      "studioOperations": 0,
+      "fullProductVerified": false
     }
   ],
   "currentNativeAssets": {
@@ -877,11 +905,11 @@
       "docs/build/NATIVE_ASSET_JOURNAL_FAILURE.md",
       "docs/build/CODEX_SESSION_IDENTITY.md"
     ],
-    "acceptedExecutable": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-XZ40Kh",
-    "packageProof": "runtime/verification/cli-ui-executable-final-3U7kIa/verification.json"
+    "acceptedExecutable": "C:\\Users\\alexk\\OneDrive\\Documents\\GitHub\\Arcane\\runtime\\windows\\arcane-win32-x64-FKUT9G",
+    "packageProof": "runtime/verification/premium-final-9FYKq4/verification.json"
   },
   "currentCliSetup": {
-    "state": "affected-components-and-actual-executable-verified-native-metadata-only",
+    "state": "native-one-turn-read-only-mcp-and-public-history-verified",
     "implemented": [
       "explicit native setup status/login handoff/official installation instructions",
       "real native catalogue model and effort picker",
@@ -892,22 +920,26 @@
     "nativeConnectionProof": "runtime/verification/native-packaged-cli-WpQ5mz/verification.json",
     "nativeStatusProof": "runtime/verification/native-packaged-cli-WpQ5mz/verification.json",
     "reportedModels": 7,
-    "threadStarted": false,
-    "providerInference": false,
+    "threadStarted": true,
+    "providerInference": true,
     "claude": "unmodified native terminal handoff; no embedded subscription proxy or mirrored history claim",
     "studioOperations": 0,
     "fullProductVerified": false,
-    "userConsentScope": "2026-10-13 explicit real CLI versions/login/Arcane catalogue checks; no inference/login/install/credential reads/Studio",
+    "userConsentScope": "2026-10-13 explicit one Sol6.1 Ultra turn, disposable project, read-only Arcane MCP; exactly one consumed; no Studio operations/grants/uploads/installs",
     "nativeMetadataVerified": true,
-    "modelTurnVerified": false,
-    "threadIsolationVerified": false,
+    "modelTurnVerified": true,
+    "threadIsolationVerified": true,
     "realLoginInstallTerminalHandoffVerified": false,
     "packageProof": "runtime/verification/cli-ui-executable-final-3U7kIa/verification.json",
     "tests": 553,
     "passed": 553,
     "offlineTests": 277,
     "offlinePassed": 277,
-    "actualExecutableChecks": 22
+    "actualExecutableChecks": 22,
+    "nativeTurnProof": "runtime/verification/native-one-turn-mkdhgr/verification.json",
+    "publicHistoryVerified": true,
+    "interactiveDesktopModelTurnVerified": false,
+    "inferenceTurnStarts": 1
   },
   "retainedCliSetupFailures": [
     {
@@ -930,5 +962,226 @@
       "proof": "runtime/verification/native-packaged-cli-ISEWHx/failure.json",
       "reason": "Fixture stopped before connection: output directory outside allowed bundle/Temp roots. Owned Temp directory used; packaged native metadata passed."
     }
-  ]
+  ],
+  "currentPremiumWorkspace": {
+    "state": "affected-frontend-and-actual-executable-verified",
+    "implemented": [
+      "centered single onboarding",
+      "closed-by-default native Settings drawer",
+      "focused conversation and premium typography",
+      "compact Tools menu",
+      "plain-language confirmed progress",
+      "message scope retained in disclosure",
+      "healthy byte counter only exposed to assistive technology",
+      "reduced-motion and forced-colors support"
+    ],
+    "backendChanged": false,
+    "nativeProviderCalls": 0,
+    "studioOperations": 0,
+    "fullProductVerified": false,
+    "compiledSources": 153,
+    "affectedChecks": 145,
+    "affectedPassed": 145,
+    "actualExecutableChecks": 22,
+    "proof": "runtime/verification/premium-final-9FYKq4/verification.json",
+    "retainedFailures": [
+      "runtime/verification/premium-workspace-dtsp9x/failed.json",
+      "runtime/verification/premium-workspace-ZkNeFv/failed.json",
+      "runtime/verification/premium-workspace-Hndkax/failed.json"
+    ],
+    "failureResolution": "Legacy fixture selector grammar, status copy and inline layout updated for the new drawer. Six real production modal/drawer tests passed; all corrected native-chat fixtures passed. No authority guard or deadline changed."
+  },
+  "currentStudioAcceptance": {
+    "state": "installed-key-recovery-native-widget-listed",
+    "inventoryStudios": 1,
+    "nativeStudioId": "f9906dd3-f097-44a4-872f-e50f6506096f",
+    "observedAt": "2026-10-13T15:06:51.955Z",
+    "installedSha256": "cf48e479d3aa37f64be3062fe1cf957442e256db4262915293b53f22482f2b59",
+    "mutationOperations": 0,
+    "fullProductVerified": false,
+    "note": "80/80 plugin fixture checks and 428 source/generated logic checks pass. User-authorized disposable fixture reloaded, native Edit inventory lists installed local Arcane. Native wrong-key typing/pairing/edit-restore remains unverified; occluded capture is not UI proof. Reload undo-observation limitation retained in LOCAL_KEY_AND_RECOVERY_20261013.md."
+  },
+  "currentFullRegression": {
+    "state": "terminal-failed-one-proven-stale-modal-close-race",
+    "priorProof": "runtime/verification/native-ready-regression-th0JsL/failed.json",
+    "sourceCompileInputs": 158,
+    "followups": {
+      "assetSettings": 30,
+      "browserSettings": 65,
+      "workflowAssistanceObserved": 3
+    },
+    "permissionPredicatesChanged": false,
+    "permissionDeadlinesChanged": false,
+    "workflowFailureCause": "Original 503 not reproduced; observational run native checker statuses all zero. Do not claim original cause proven.",
+    "fullProductVerified": false,
+    "proof": "runtime/verification/native-ready-regression-thayYa",
+    "ownedSession": 41281,
+    "tests": 1353,
+    "passed": 1352,
+    "failed": 1,
+    "skipped": 0,
+    "terminalAcknowledged": true,
+    "observationalFollowup": "docs/build/WORKFLOW_ACL_OBSERVATION_20261013.md"
+  },
+  "currentUserKeyHandoff": {
+    "state": "real-local-read-only-key-issued-and-record-confirmed",
+    "origin": "http://127.0.0.1:45871",
+    "allowedRoots": [
+      "Workspace"
+    ],
+    "allowWrites": false,
+    "liveWorkBench": true,
+    "plaintextSaved": false,
+    "proof": "runtime/user-key-session-20261013/handoff.json",
+    "note": "Own key delivered privately to requesting user. Browser handoff is not native desktop vault recovery."
+  },
+  "currentSimpleSettings": {
+    "state": "source-and-focused-browser-verified-not-new-executable",
+    "sources": 158,
+    "keyRecoveryChecks": 80,
+    "currentFollowupChecks": 7,
+    "currentFollowupPassed": 7,
+    "desktopKeyHostChecks": 36,
+    "desktopKeyHostPassed": 36,
+    "retainedIntermediate": {
+      "sessionId": 11112,
+      "checks": 25,
+      "passed": 23,
+      "failed": 1,
+      "cancelled": 1
+    },
+    "followupNote": "Provider fixture selects the real Connections pane; confirmation assertion observes the replacement read within unchanged fixture deadline; details selector expansion retained. Full regression and new EXE remain open.",
+    "proof": "docs/build/LOCAL_KEY_AND_RECOVERY_20261013.md"
+  },
+  "retainedFullRegressionRuns": [
+    {
+      "state": "failed-retained-followup-fixture-repairs-verified",
+      "proof": "runtime/verification/native-ready-regression-PauGqE/failed.json",
+      "tests": 1349,
+      "passed": 1345,
+      "failed": 2,
+      "skipped": 2,
+      "terminalAcknowledged": true,
+      "wholeFixtureFollowup": "docs/build/FULL_REGRESSION_REPAIR.md",
+      "followupTests": 16,
+      "followupPassed": 16,
+      "scope": "No accepted new EXE; fixture drawer/module closure fixes passed, compiler opt-in added to next runner. New user Settings/plugin requests now in progress."
+    },
+    {
+      "state": "terminal-failed",
+      "proof": "runtime/verification/native-ready-regression-th0JsL/failed.json",
+      "tests": 1353,
+      "passed": 1335,
+      "failed": 16,
+      "cancelled": 2,
+      "skipped": 0,
+      "terminalAcknowledged": true
+    }
+  ],
+  "currentNativeKeyVault": {
+    "state": "real-electron-native-encryption-and-production-ipc-verified",
+    "proof": "runtime/verification/native-vault-proof-20261013/run-8094a260-4709-4cea-a584-8993a99bb163/runner.json",
+    "sourceUnchanged": true,
+    "processesClosed": 3,
+    "savedKeyType": "synthetic fixture only",
+    "packagedUiVerified": false,
+    "fullProductVerified": false
+  },
+  "currentPluginFloatingInput": {
+    "state": "standard-native-textbox-installed-81-fixture-tests-passed-human-confirmed-native-typing",
+    "nativeTypingVerified": true,
+    "nativeTypingEvidence": "Direct human reply to latest standard-textbox question: Yes, typing works. Applies to freshly reopened disposable Studio baseplate; not simulated keyboard input or edit/restore proof.",
+    "forceCentered": false,
+    "artifactSha256": "524fdda174202d3555db8fc1df42b15f69c8266337e098547c2d14a089ae283d",
+    "proof": "runtime/verification/plugin-floating-input-20261013/standard-native-input-fixed.tap",
+    "note": "Compact Float and auto-open; overlay removed, human now confirms native input accepts typing. Saved keys not prefilled. Host owns absolute placement. Genuine pairing/edit/restore remains separate; no Hunted changes."
+  },
+  "currentChatFirstUpgrade": {
+    "state": "focused-integration-passed-current-full-regression-and-new-executable-pending",
+    "requirements": ["Minimal EXE/provider sign-in", "Saved provider choices without cached authorization", "Open-chat top tabs", "Per-chat drafts and native binding separation", "Elapsed time, reported tokens and honest cost estimates", "Canonical preview entry shares desktop HTML"],
+    "owners": {"providerUi": "Bernoulli", "chatTabs": "Faraday", "taskMetrics": "Sagan", "integration": "parent"},
+    "currentCompileSources": 167,
+    "focusedProductChecks": {"tests": 54, "passed": 54, "failed": 0, "skipped": 0, "proof": "runtime/verification/plugin-floating-input-20261013/chat-first-focused-integration-2.tap"},
+    "hostProviderChecks": {"tests": 124, "passed": 124, "failed": 0, "skipped": 0, "proof": "runtime/verification/plugin-floating-input-20261013/host-provider-integrated-3.tap"},
+    "sharedBrowserChecks": {"tests": 106, "passed": 106, "failed": 0, "skipped": 0, "proof": "runtime/verification/chat-first-fixture-integration-20261013/proof.json"},
+    "sharedIpcChecks": {"tests": 21, "passed": 21, "failed": 0, "skipped": 0, "proof": "runtime/verification/chat-first-fixture-integration-20261013/proof.json"},
+    "nativePreferenceRestartProof": "runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/runner.json",
+    "note": "Focused suites overlap and are not a total completion score. Native Windows encrypted preferences recovered across a fresh process/port change; full packaged frontend hydration remains open. Old executable predates these changes. No additional inference permission consumed.",
+    "fullProductVerified": false
+  },
+  "currentCanonicalAcceptance": {
+    "state": "unit-1415-of-1415-passed-whole-offline-followup-running-after-one-fixture-inventory-repair",
+    "execSessionId": 17708,
+    "evidenceDirectory": "runtime/verification/frozen-release-followup-w8e7Ut",
+    "canonicalUnitProof": "runtime/verification/native-ready-regression-NjZ3JW/unit-browser-tEhc2p/result.json",
+    "unchangedEmissionFiles": 336,
+    "retainedOfflineAttempt": {"proof": "runtime/verification/native-ready-regression-NjZ3JW/failed.json", "tests": 459, "passed": 458, "failed": 1, "skipped": 0, "cancelled": 0, "elapsedMs": 280016, "terminalAcknowledged": true},
+    "followupScope": "docs/build/FROZEN_RELEASE_FOLLOWUP_20261013.md",
+    "compiledSources": 168,
+    "compileElapsedMs": 12634,
+    "unitCounts": {"tests": 1415, "passed": 1415, "failed": 0, "skipped": 0, "cancelled": 0},
+    "unitElapsedMs": 565697,
+    "unitTerminalAcknowledged": true,
+    "retainedAttempt": {"proof": "runtime/verification/native-ready-regression-Gip8Wd/failed.json", "compileElapsedMs": 15085, "unitElapsedMs": 640982, "tests": 1415, "passed": 1407, "failed": 8, "skipped": 0, "cancelled": 0, "terminalAcknowledged": true},
+    "repairChecks": {"tests": 60, "passed": 60, "failed": 0, "skipped": 0, "cancelled": 0, "elapsedMs": 45250, "proof": "runtime/verification/plugin-floating-input-20261013/canonical-fixture-repair-focused-3.tap"},
+    "followup": "docs/build/CHAT_FIRST_CANONICAL_REPAIR_20261013.md",
+    "automaticRetries": 0,
+    "providerInferenceRuns": 0,
+    "studioMutations": 0,
+    "inputPinning": "Current TypeScript/test/frontend inputs pinned before compile; host/release/plugin inputs pinned immediately before their stage and checked before packaging.",
+    "packagingVerified": false,
+    "fullProductVerified": false
+  },
+  "currentChatFirstNativeHost": {
+    "state": "real-installed-electron-production-host-local-chat-controllers-25-checks-passed",
+    "proof": "runtime/verification/chat-first-native-host-EhZx8n/verification.json",
+    "checks": 25,
+    "mainSourceSha256": "a39a7114cb993916c38f92bed3b7459ec2187a688ae7e13996391c70b7136ad9",
+    "packagedExecutable": false,
+    "encryptedPreferencesRecoveryVerified": false,
+    "nativeKeyboardInputVerified": false,
+    "providerInferenceRuns": 0,
+    "studioMutations": 0,
+    "note": "Actual main/preload/renderer/controller and owned daemon run; two distinct local drafts switch without replacing composer or starting native lifecycle. Smoke mode deliberately disables encrypted preferences/provider setup, so it does not prove restart persistence or user sign-in."
+  },
+  "currentSkillEvaluation": {
+    "state": "eight-authorized-native-turns-completed-and-sealed-behavior-evaluation-blocked-by-disabled-fixture-execution-host",
+    "owner": "Kant",
+    "maxNativeTurns": 8,
+    "nativeTurnsConsumed": 8,
+    "baselineTaskPasses": 0,
+    "assistedTaskPasses": 0,
+    "approvedGuides": 0,
+    "proof": "runtime/verification/skill-evaluation-eight-turns-20261013",
+    "note": "Real exact Sol6.1Ultra responses and usage retained, but no fixture callbacks ran. No skill effectiveness or product capability claim. No retries, replacement turns or new approval."
+  },
+  "currentSkillHarnessPreflight": {
+    "state": "offline-synthetic-callback-readiness-verified-no-native-capability-claim",
+    "checks": 30,
+    "passed": 30,
+    "proof": "runtime/verification/skill-harness-preflight-20261013/verification.json",
+    "nativeCliOperations": 0,
+    "providerInferenceRuns": 0,
+    "sealedEvaluationUnchanged": true,
+    "approvedGuides": 0,
+    "note": "Required fixture execution must be proven before any future paid evaluation. Tool registration alone was insufficient; exact earlier native routing failure remains unproven."
+  },
+  "currentProjectPortAudit": {
+    "state": "existing-flow-guarded-in-place-focused-62-tests-passed-current-package-pending",
+    "focusedChecks": 13,
+    "existingHostChecks": 49,
+    "proof": "docs/build/STABLE_PROJECT_PORT_20261013.md",
+    "newModule": false,
+    "nativePluginReconnectVerified": false,
+    "note": "Existing record format retained. Same real fixture listener/store and original key recover after occupied-port startup failure; authentication used private fixture IPC, not Studio."
+  },
+  "currentRequirementsAudit": {
+    "catalogueRequirements": 222,
+    "proven": 19,
+    "contradicted": 1,
+    "incomplete": 107,
+    "missing": 95,
+    "proof": "runtime/verification/requirements-audit-20261013.json",
+    "scope": "Full original catalogue retained; not a product completion percentage. Goal local delivery gates remain authoritative."
+  }
 }

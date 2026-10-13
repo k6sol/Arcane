@@ -75,7 +75,35 @@ function Instance.new(className: string): any
 	return result
 end
 local services: any = {}
-game = {PlaceId = 0, GameId = 0, Name = "ArcaneDisposableFixture", _children = {}}
+fixture.identitySignals = {}
+game = setmetatable({_identity = {PlaceId = 0, GameId = 0, Name = "ArcaneDisposableFixture"}, _children = {}}, {
+	__index = function(self: any, key: string): any return self._identity[key] end,
+	__newindex = function(self: any, key: string, value: any): ()
+		if self._identity[key] == nil then rawset(self, key, value); return end
+		local previous = self._identity[key]
+		self._identity[key] = value
+		local signal = fixture.identitySignals[key]
+		if previous ~= value and signal then
+			for _, connection in ipairs(table.clone(signal.connections)) do
+				if connection.Connected then connection.callback() end
+			end
+		end
+	end,
+})
+function game:GetPropertyChangedSignal(name: string): any
+	local signal = fixture.identitySignals[name]
+	if not signal then
+		signal = {connections = {}}
+		function signal:Connect(callback: any): any
+			local connection: any = {Connected = true, callback = callback}
+			function connection:Disconnect(): () self.Connected = false end
+			table.insert(self.connections, connection)
+			return connection
+		end
+		fixture.identitySignals[name] = signal
+	end
+	return signal
+end
 function game:GetService(name: string): any
 	if not services[name] then services[name] = Instance.new(name); services[name].Parent = game end
 	return services[name]
@@ -131,7 +159,10 @@ services.RunService = {IsEdit = function(_self: any): boolean return fixture.edi
 services.Selection = {Get = function(_self: any): {any} return fixture.selection or {} end}
 services.CollectionService = {GetTags = function(_self: any, instance: any): {string} return instance._tags or {} end}
 local editor: any = {}
-function editor:GetEditorSource(instance: any): string return fixture.sources[instance] or instance.Source end
+function editor:GetEditorSource(instance: any): string
+	fixture.sourceReads = (fixture.sourceReads or 0) + 1
+	return fixture.sources[instance] or instance.Source
+end
 function editor:UpdateSourceAsync(instance: any, callback: any): ()
 	if fixture.editorHook then fixture.editorHook(instance, callback); return end
 	local updated = callback(self:GetEditorSource(instance))

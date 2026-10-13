@@ -262,5 +262,372 @@ button{background:var(--action)}
  #codex-model-label{max-width:160px}.picker-effort{max-width:60px}
  .composer-model-popover{padding:12px}.picker-effort-option{min-height:44px}
 }
+/* Studio shell: the user's charcoal/red reference, with a quiet conversation canvas.
+   These overrides stay scoped to the shell; tool panels keep their functional layouts. */
+body.arcane-app {
+  --bg:#080808;
+  --panel:#101010;
+  --raised:#1d1c1c;
+  --line:#303030;
+  --text:#f5f5f5;
+  --muted:#b2b2b2;
+  --accent:#ff3340;
+  --action:#d71b29;
+  --focus-ring:#ff7b84;
+  --shell-sidebar:228px;
+  font-family:"Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif;
+  font-size:14px;
+  line-height:1.5;
+  background:var(--bg);
+  height:100svh;
+  min-height:0;
+  overflow:hidden;
+}
+.arcane-app .app-sidebar {
+  position:fixed;
+  inset:0 auto 0 0;
+  width:var(--shell-sidebar);
+  padding:28px 16px 20px;
+  gap:28px;
+  background:#111010;
+  border-right:1px solid #262525;
+  flex-direction:column;
+  align-items:stretch;
+  flex-wrap:nowrap;
+}
+.arcane-app .wordmark {gap:12px;font-size:19px;letter-spacing:2.5px;font-weight:650;margin-right:0}
+.arcane-app .wordmark .arcane-logo {width:32px;height:36px;filter:none}
+.arcane-app .wordmark small {display:block;font-size:12px;letter-spacing:0;margin-top:4px;color:#aaa5a5}
+.arcane-app .new-chat {width:100%;min-height:46px;padding:11px 12px;border:1px solid #493033;border-radius:11px;background:#241719;box-shadow:none;gap:10px;font-weight:550}
+.arcane-app .new-chat kbd {display:block;margin-left:auto;font-size:11px;color:#bbaeb0}
+.arcane-app .sidebar-links,.arcane-app .sidebar-secondary {flex-direction:column;gap:5px;margin:0}
+.arcane-app .sidebar-label {display:block;margin:0 12px 6px;color:#a9a4a4;font-size:12px;font-weight:500}
+.arcane-app .nav-link {width:100%;min-height:46px;padding:11px 12px;gap:12px;border-radius:10px;font-size:13px;font-weight:500;color:#dedada}
+.arcane-app .nav-link small {display:block;margin-top:3px;font-size:12px;line-height:1.45;color:#aaa5a5}
+.arcane-app .nav-link[aria-pressed=true] {background:#262021;border-color:#493335;box-shadow:none;color:var(--text)}
+.arcane-app .sidebar-secondary {margin-top:auto;padding-top:16px;border-top:1px solid #2a2727}
+.arcane-app .sidebar-secondary .icon {display:block;color:#aaa5a5}
+.arcane-app .sidebar-note {display:block;font-size:12px;color:#aaa5a5;padding:0 12px;line-height:1.6}
+.arcane-app .app-main {margin-left:var(--shell-sidebar);min-width:0;min-height:0;overflow:hidden}
+.arcane-app:has(.app-sidebar.collapsed) .app-main {margin-left:0}
+.arcane-app .workspace-topbar {position:relative;z-index:30;min-height:64px;flex-shrink:0;flex-wrap:nowrap;padding:10px 28px;gap:12px;background:#0c0b0b;border-bottom:1px solid #262525}
+.arcane-app .workspace-chat-tabs {display:flex;align-items:center;gap:4px;flex:1 1 0;min-width:0;overflow-x:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.arcane-app .workspace-chat-tabs [role=tab] {display:flex;align-items:center;gap:8px;flex:0 0 auto;max-width:200px;min-height:44px;padding:10px 14px;border-radius:10px;background:transparent;border:1px solid transparent;color:var(--muted);font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true] {background:#211b1c;border-color:#493335;color:var(--text)}
+.arcane-app .chat-tab {display:flex;align-items:center;flex:0 0 auto;border-radius:10px}
+.arcane-app .chat-tab>button[aria-label^="Close "] {min-height:44px;width:32px;padding:8px;background:transparent;color:var(--muted)}
+.arcane-app .chat-tabs-history {position:relative;flex:0 0 auto}
+.arcane-app .chat-tabs-history>summary {min-height:44px;padding:11px 8px;font-size:12px;list-style:none;color:var(--muted)}
+.arcane-app .chat-tabs-history[open] {position:absolute;top:10px;right:360px;z-index:40;width:min(240px,calc(100vw - 24px));max-height:60svh;overflow:auto;padding:4px 8px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 12px 32px #0008}
+.arcane-app .chat-tabs-history>button {display:block;width:100%;min-height:44px;text-align:left;background:transparent;color:var(--text);font-size:12px;overflow-wrap:anywhere}
+.arcane-app .chat-tabs-history>p {padding:12px;font-size:12px;color:var(--muted)}
+.arcane-app #workspace-new-chat {width:44px;min-width:44px;height:44px}
+.arcane-app .icon-button {width:40px;min-width:40px;height:40px;border-radius:10px;background:transparent;border-color:transparent;color:#c3bebe}
+.arcane-app .tool-switcher {position:relative;flex-shrink:0;min-width:0}
+.arcane-app .tool-switcher>summary {display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:40px;padding:8px 12px;list-style:none;color:#dedada;font-size:13px;font-weight:500;border:1px solid transparent;border-radius:10px}
+.arcane-app .tool-switcher>summary::-webkit-details-marker {display:none}
+.arcane-app .tool-switcher>summary .icon {width:16px;height:16px;color:#aaa5a5}
+.arcane-app .tool-switcher[open]>summary {background:#211d1d;border-color:#393333}
+.arcane-app .tool-switcher[open]>summary .icon {transform:rotate(180deg)}
+.arcane-app .tool-switcher .workspace-tabs {position:absolute;left:0;top:calc(100% + 9px);z-index:40;display:flex;flex-direction:column;align-items:stretch;width:216px;max-width:calc(100vw - 24px);max-height:60svh;overflow:auto;padding:6px;gap:3px;border:1px solid #3d3737;border-radius:13px;background:#1a1717;box-shadow:0 16px 48px #0009;order:initial}
+.arcane-app .tool-switcher .workspace-tab {flex-shrink:0;width:100%;min-height:44px;justify-content:flex-start;padding:10px 12px;border-radius:8px;border:1px solid transparent;background:transparent;box-shadow:none;color:#c3bebe;font-size:13px}
+.arcane-app .tool-switcher .workspace-tab[aria-pressed=true] {background:#332225;border-color:#5d3439;color:var(--text);box-shadow:none}
+.arcane-app .workspace-search {width:min(320px,45%);min-width:0;margin-left:auto;gap:9px;padding:0 12px;border-radius:10px;background:#171515;border-color:#343030;min-height:40px}
+.arcane-app .workspace-search input[type=search] {min-height:38px;padding:8px 0;font-size:13px}
+.arcane-app .workspace-search .icon {width:17px;height:17px;color:#aaa5a5}
+.arcane-app .workspace-search kbd {font-size:11px;color:#aaa5a5}
+.arcane-app .workspace-search-results {border:1px solid #3d3737;border-radius:13px;background:#1a1717;box-shadow:0 16px 48px #0009}
+.arcane-app .workspace-search-options button {border-radius:8px}
+.arcane-app .shell-notice {padding-inline:28px;max-height:18svh;overflow:auto;overflow-wrap:anywhere;color:var(--muted);line-height:1.6}
+.arcane-app .app-content {padding:24px 32px 20px;min-width:0;min-height:0;overflow:auto;gap:0}
+.arcane-app .workspace-stage {display:grid;grid-template-columns:minmax(0,1fr);flex:1;min-height:0;flex-shrink:1;height:auto;gap:24px}
+.arcane-app .workspace-stage:not(.preview-open)>.codex-panel {width:100%;max-width:900px;justify-self:center}
+.arcane-app .workspace-stage.preview-open {grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+.arcane-app .workspace-stage>.codex-panel {min-height:0;height:auto;margin:0;border:0;padding:0;background:transparent}
+.arcane-app .workspace-stage>.codex-panel>summary {min-height:40px;padding:0 0 8px;border-bottom:0;gap:12px}
+.arcane-app .chat-title {gap:10px;min-width:0}
+.arcane-app .chat-avatar {width:24px;height:24px;border:0;background:transparent;border-radius:0}
+.arcane-app .chat-avatar .arcane-logo {width:19px;height:19px}
+.arcane-app .workspace-stage h1 {font-size:14px;letter-spacing:0;font-weight:600}
+.arcane-app .chat-heading .status-text {font-size:12px;text-align:right;max-width:45%;overflow-wrap:anywhere}
+.arcane-app .chat-topline {padding:4px 0;gap:10px;min-height:44px;align-items:center}
+.arcane-app .chat-topline p {flex:1;font-size:12px;line-height:1.6;color:#b2acac;max-height:72px;overflow:auto}
+.arcane-app .chat-topline .preview-toggle {min-height:36px;border-radius:9px;padding:7px 11px;border-color:#373030;background:#151212;color:#dedada}
+.arcane-app .codex-conversation {min-height:0;gap:0}
+.arcane-app .conversation-scroll {flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:8px 2px 18px;scroll-padding-block:16px}
+.arcane-app .workspace-stage .codex-messages {flex:none;min-height:0;max-height:none;overflow:visible;padding:8px 0 0;scrollbar-gutter:auto}
+.arcane-app .workspace-stage .codex-messages:not(:has(.codex-message)) {padding:0}
+.arcane-app .conversation-scroll:has(.codex-message) .workspace-welcome,
+.arcane-app .workspace-stage.provider-required .workspace-welcome {display:none}
+.arcane-app .conversation-workflows:has(#workflow-panel:empty) {display:none}
+.arcane-app .workspace-welcome,
+.arcane-app #provider-login-gate {
+  display:flex;
+  flex:0 0 auto;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  max-width:560px;
+  min-height:220px;
+  padding:36px 24px;
+  margin:auto;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  box-shadow:none;
+  text-align:center;
+  overflow:visible;
+}
+.arcane-app .welcome-logo {display:block;margin-bottom:22px}
+.arcane-app .welcome-logo .arcane-logo {width:44px;height:44px;filter:none}
+.arcane-app .workspace-welcome h2,
+.arcane-app #provider-login-gate h2 {font-size:clamp(26px,3vw,36px);font-weight:600;letter-spacing:-1.1px;line-height:1.2;margin:0 0 14px;max-width:100%;overflow-wrap:anywhere;text-wrap:balance}
+.arcane-app .workspace-welcome p,
+.arcane-app #provider-login-message {max-width:440px;margin:0;font-size:14px;color:#bcb5b5;line-height:1.75;text-wrap:pretty;overflow-wrap:anywhere}
+.arcane-app .welcome-connect {align-self:center;margin-top:24px;min-height:44px;padding:10px 16px;border-radius:10px;background:#241719;border:1px solid #63343a;color:var(--text);font-weight:500;box-shadow:none}
+.arcane-app .conversation-start {background:var(--action);border-color:#e34b56;color:#fff}
+.arcane-app .conversation-start:disabled {background:#352226;border-color:#64414a;color:#d0b8bc;opacity:1}
+.arcane-app .workspace-welcome:has(.conversation-start:not([hidden])) {padding-block:16px}
+.arcane-app .workspace-welcome .conversation-start {margin-top:16px}
+.arcane-app #provider-login-gate .button-row {justify-content:center;gap:10px;width:100%;margin-top:24px}
+.arcane-app #provider-login-gate .button-row+.button-row {margin-top:12px}
+.arcane-app #provider-login-gate button {min-height:44px;min-width:116px;padding:11px 18px;border-radius:11px;font-size:13px;font-weight:550;box-shadow:none}
+.arcane-app #provider-login-gate .secondary {background:#211b1c;border-color:#493b3d;color:var(--text)}
+.arcane-app #provider-login-gate button[aria-pressed=true] {border-color:#c94e58;background:#352126}
+.arcane-app #provider-login-gate .connection-emblem {width:44px;height:44px;display:grid;place-items:center;margin-bottom:20px;border:0;background:transparent;box-shadow:none}
+.arcane-app #provider-login-gate .connection-emblem .arcane-logo {width:40px;height:40px}
+.arcane-app #provider-login-gate .provider-next button {min-width:242px;background:var(--action);border-color:var(--action);color:#fff}
+.arcane-app #provider-login-gate .provider-next button:disabled {background:#292123;border-color:#493b3d;color:#c5b9bb;opacity:1}
+.arcane-app .codex-task-usage {display:flex;flex:1 0 100%;order:3;flex-wrap:wrap;gap:6px 16px;padding:10px 2px 0;border-top:1px solid var(--line);font-size:12px;line-height:1.5;color:var(--muted);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.arcane-app .workspace-stage .codex-message {max-width:100%;padding:18px 4px 22px;margin:0 0 10px;background:transparent;border:0;border-radius:0;box-shadow:none;overflow-wrap:anywhere}
+.arcane-app .workspace-stage .codex-message.human {width:fit-content;max-width:85%;margin:8px 0 24px auto;padding:15px 20px;background:#262020;border:1px solid #3a3031;border-radius:18px 18px 5px 18px}
+.arcane-app .workspace-stage .codex-message :is(.message-text,pre.message-text),
+.arcane-app .workspace-stage .codex-message>pre {font-family:"Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif;font-size:15px;font-weight:400;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text);background:transparent;border:0;border-radius:0;padding:0;margin:8px 0;max-height:none;overflow:visible}
+.arcane-app .workspace-stage .codex-message .eyebrow {font-family:inherit;font-size:12px;font-weight:600;letter-spacing:0;color:#c0b8b8}
+.arcane-app .workspace-stage .codex-message .hint {font-size:12px;line-height:1.6;color:#b2acac}
+.arcane-app .message-acknowledgement {margin-top:8px;font-size:12px;color:#bcb5b5;overflow-wrap:anywhere}
+.arcane-app .message-details {margin-top:12px;max-width:100%;color:var(--muted)}
+.arcane-app .message-details>summary {width:fit-content;min-height:36px;padding:7px 0;font-size:12px;color:#b2acac}
+.arcane-app .message-details[open] {border-top:1px solid #3a3031;padding-top:6px}
+.arcane-app .message-details pre {font-family:Consolas,"Cascadia Code",monospace;font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;background:#121010;padding:12px;max-height:280px;overflow:auto}
+.arcane-app .conversation-workflows {margin:8px 0;flex-shrink:0;min-width:0}
+.arcane-app .conversation-workflows>summary {padding:10px 0;min-height:40px;font-size:12px;color:#b2acac}
+.arcane-app .workspace-stage .composer {flex-shrink:0;margin-top:10px;padding:16px 16px 12px;background:#1b1717;border:1px solid #494040;border-radius:14px;box-shadow:none}
+.arcane-app .workspace-stage .composer:focus-within {border-color:#bb5c64;box-shadow:0 0 0 1px #bb5c6433,0 6px 24px #0004}
+.arcane-app .workspace-stage .composer textarea {min-height:62px;max-height:140px;padding:2px 3px;margin:0 0 12px;border:0;border-radius:8px;outline-offset:2px;background:transparent;color:var(--text);font:15px/1.7 "Segoe UI",system-ui,sans-serif;resize:vertical}
+.arcane-app .composer textarea::placeholder {color:#b0a7a7;opacity:1}
+.arcane-app .composer-controls {gap:8px;align-items:center;flex-wrap:wrap}
+.arcane-app .composer-model-picker {flex:0 1 auto;min-width:0;max-width:100%;order:0}
+.arcane-app .composer-model-trigger {min-height:44px;padding:8px 10px;border-radius:10px;background:#252021;border:1px solid #41383a;color:var(--text);font-size:12px;gap:7px}
+.arcane-app .composer-model-trigger .picker-provider {color:#efb1b6;font-size:12px}
+.arcane-app .composer-model-trigger:hover:not(:disabled),
+.arcane-app .composer-model-trigger[aria-expanded=true] {background:#302527;border-color:#8e4b52}
+.arcane-app #codex-model-label {max-width:220px}
+.arcane-app .picker-effort {max-width:80px;color:#bcb2b3;border-color:#514246}
+.arcane-app .composer-tool-context {font-size:12px;gap:6px;min-width:0;order:0}
+.arcane-app .workspace-stage[data-workspace-tool=all] .composer-tool-context {display:none}
+.arcane-app .context-dot {background:#cba8ab;width:5px;height:5px}
+.arcane-app #workspace-add-context {min-height:40px;padding:8px 10px;border-radius:10px;border:1px solid transparent;background:transparent;color:#c3b8b9;font-size:12px;font-weight:400;order:0}
+.arcane-app .workspace-stage #codex-submit {order:0;flex-shrink:0;min-width:44px;width:44px;min-height:44px;height:44px;margin-left:auto;padding:10px;border-radius:12px;background:var(--action);border:1px solid #e34b56;color:#fff;box-shadow:none}
+.arcane-app .workspace-stage #codex-submit:disabled {background:#352226;border-color:#64414a;color:#d0b8bc;opacity:1;box-shadow:none}
+.arcane-app .workspace-stage #codex-input-size:not(.visually-hidden) {margin:10px 3px 0;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.arcane-app .workspace-stage :is(.codex-approval-section,#codex-unknown) {flex-shrink:0;min-height:0;max-height:none;overflow:visible;margin:16px 0;padding:16px;border-radius:12px;line-height:1.6}
+.arcane-app .workspace-stage .codex-approval-section {border-color:#806b40;background:#201c15}
+.arcane-app .workspace-stage .codex-approval {margin:14px 0;padding:16px;border-radius:10px}
+.arcane-app .workspace-stage :is(.codex-approval-section,#codex-unknown) pre {max-height:38svh;overflow:auto}
+.arcane-app .composer-model-popover {width:min(380px,calc(100vw - 24px));max-height:min(540px,calc(100svh - 24px));padding:16px;gap:12px;border:1px solid #4c3f42;border-radius:16px;background:#1c1718;box-shadow:0 18px 64px #000b,0 0 0 1px #ffffff03;color:var(--text)}
+.arcane-app .composer-model-popover h2 {font-size:14px;letter-spacing:0;font-weight:600}
+.arcane-app .composer-model-popover h3 {font-size:12px;color:#bcb2b3;font-weight:500}
+.arcane-app .composer-model-popover input {min-height:44px;padding:10px 12px;border-radius:10px;border-color:#4c3f42;background:#121010;font-size:13px}
+.arcane-app .picker-model-options {gap:4px;max-height:240px;flex-shrink:1;min-height:44px;padding:2px;scroll-padding:6px}
+.arcane-app .picker-model-option {min-height:48px;padding:11px 12px;gap:4px;border-radius:10px;font-size:13px;font-weight:550;background:transparent}
+.arcane-app .picker-model-option small {font-size:12px;line-height:1.5;color:#bcb2b3}
+.arcane-app .picker-model-option[aria-selected=true] {border-color:#a84b56;background:#382329}
+.arcane-app .picker-effort-section {padding-top:12px;border-color:#403437}
+.arcane-app .picker-efforts {gap:6px;margin-top:10px}
+.arcane-app .picker-effort-option {min-height:40px;border-radius:8px;border-color:#4c3f42;padding:8px 12px;font-size:12px;color:#c3b8b9}
+.arcane-app .picker-effort-option[aria-checked=true] {border-color:#a84b56;background:#382329;color:var(--text)}
+.arcane-app #codex-picker-apply {min-height:44px;border-radius:10px;background:#302326;border-color:#80434c;color:var(--text);font-size:13px}
+.arcane-app .picker-setup-actions {padding-top:10px;border-color:#403437;gap:8px}
+.arcane-app .picker-setup-actions button {min-height:40px;padding:8px 0;font-size:12px;color:#c3b8b9}
+.arcane-app .settings-drawer {position:fixed;inset:0;margin:auto;width:min(1040px,calc(100% - 48px));max-width:100%;height:min(780px,calc(100svh - 48px));max-height:100svh;padding:0;border:1px solid #343434;border-radius:16px;background:#151515;color:var(--text);box-shadow:0 24px 80px #0008;overflow:hidden}
+.arcane-app .settings-drawer[open] {display:flex;flex-direction:column}
+.arcane-app .settings-drawer::backdrop {background:#0009;backdrop-filter:blur(5px)}
+.arcane-app .settings-drawer-header {display:flex;align-items:center;justify-content:space-between;gap:20px;flex-shrink:0;padding:18px 26px;border-bottom:1px solid #303030;background:#151515}
+.arcane-app .settings-drawer-header h2 {font-size:19px;font-weight:600;letter-spacing:-.3px}
+.arcane-app .settings-drawer-header p {margin-top:5px;color:#bcb2b3;font-size:12px;line-height:1.6}
+.arcane-app .settings-drawer-header [data-settings-close] {flex-shrink:0;width:44px;height:44px;border:0;border-radius:8px;background:transparent}
+.arcane-app .settings-drawer-body {flex:1;display:grid;grid-template-columns:214px minmax(0,1fr);min-width:0;min-height:0;padding:0;overflow:hidden}
+.arcane-app .settings-sidebar {padding:24px 16px;border-right:1px solid #303030;background:#121212;overflow:auto;min-width:0}
+.arcane-app .settings-search-label {font-size:12px;gap:9px;color:#b2b2b2}
+.arcane-app #settings-search {min-width:0;width:100%;min-height:42px;padding:10px 12px;border:1px solid #363636;border-radius:8px;background:#1a1a1a;font-size:13px}
+.arcane-app .settings-nav {display:flex;flex-direction:column;gap:6px;margin-top:22px}
+.arcane-app .settings-nav button {min-height:44px;padding:11px 14px;text-align:left;border:1px solid transparent;border-radius:8px;background:transparent;color:#c4c4c4;font-size:14px;font-weight:500}
+.arcane-app .settings-nav button[aria-current=page] {background:#2a1b1d;color:#ffc1c5;border-color:#633139;box-shadow:inset 3px 0 0 #e64b55}
+.arcane-app .settings-pages {min-width:0;overflow:auto;overscroll-behavior:contain;padding:24px 32px;scroll-padding-block:24px;scrollbar-width:thin}
+.arcane-app .settings-page {min-width:0;outline-offset:-2px}
+.arcane-app .settings-page-heading {margin:0 0 20px;font-size:25px;font-weight:600;letter-spacing:-.6px}
+.arcane-app .settings-card {padding:18px 24px;margin-bottom:18px;border:1px solid #343434;border-radius:12px;background:#1b1b1b;min-width:0}
+.arcane-app .settings-card h3 {font-size:16px;font-weight:600;letter-spacing:-.2px;margin:0 0 14px}
+.arcane-app .settings-card.provider-setup-panel {max-width:none}
+.arcane-app .settings-card.provider-setup-panel>label {max-width:none;margin-top:0}
+.arcane-app .settings-card-heading {display:flex;align-items:baseline;justify-content:space-between;gap:16px}
+.arcane-app .settings-card label {font-size:12px;color:#bdbdbd;gap:9px}
+.arcane-app .settings-card select {margin:0;min-height:44px;width:100%;font-size:14px;background:#141414;border-color:#404040;border-radius:7px;padding:10px 12px}
+.arcane-app .settings-card .hint {color:#b2b2b2;font-size:12px;line-height:1.7;margin:12px 0}
+.arcane-app .settings-secret-row {display:flex;align-items:center;gap:8px;margin-top:16px;min-width:0}
+.arcane-app .settings-secret-row code {flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-all;padding:12px;border:1px solid #383838;border-radius:7px;background:#141414;color:#c6c6c6;line-height:1.6;font-size:12px;user-select:text}
+.arcane-app .settings-secret-row button {min-width:62px;min-height:44px;background:#252525;border-color:#444;border-radius:7px;font-size:12px}
+.arcane-app .settings-key-card .settings-card-heading h3 {margin-bottom:0}
+.arcane-app .settings-key-details {margin-top:16px;border-top:1px solid #343434}
+.arcane-app .settings-key-details>summary {width:fit-content;min-height:44px;padding:12px 0;color:#bdbdbd;font-size:13px;font-weight:500}
+.arcane-app .settings-key-details[open]>summary {margin-bottom:4px}
+.arcane-app .settings-key-details select {font-size:12px}
+.arcane-app .settings-text-button {min-height:44px;padding:8px 0;background:transparent;border:0;color:#ffb4ba;font-size:13px;text-align:left}
+.arcane-app .settings-service-row {display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-bottom:18px}
+.arcane-app #settings-key-notice:empty {display:none}
+.arcane-app .settings-card .sr-only {position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+.arcane-app .settings-card .settings-link {display:inline-block;min-height:44px;padding:12px 0;font-size:13px}
+.arcane-app #settings-search-empty {font-size:12px;line-height:1.7;margin-top:20px}
+.arcane-app .settings-page>.panel {margin-bottom:18px;border-color:#343434;border-radius:12px;background:#1b1b1b}
+.arcane-app .settings-drawer .workspace-tools {margin:0;border:0;border-radius:0;background:transparent;min-width:0}
+.arcane-app .settings-drawer #workspace-settings>.settings-summary {display:none}
+.arcane-app .settings-drawer .settings-summary {padding:4px 0 16px;min-height:44px;font-size:14px;gap:10px}
+.arcane-app .settings-drawer .settings-content {padding:0;min-width:0}
+.arcane-app .settings-drawer .tools-heading {padding:12px 0 18px;gap:16px;flex-wrap:wrap}
+.arcane-app .settings-drawer .refresh-tools {gap:12px;flex-wrap:wrap}
+.arcane-app .settings-drawer .settings-group {margin-top:16px;padding-top:0;border-color:#332c2d}
+.arcane-app .settings-drawer .settings-group>summary {min-height:48px;padding:13px 3px;font-size:14px;color:#dedede}
+.arcane-app .settings-drawer .settings-group .panel {border-radius:12px;border-color:#343434;background:#1b1b1b}
+.arcane-app .settings-drawer .workbench {grid-template-columns:minmax(0,1fr)}
+.arcane-app .settings-drawer .settings-link {color:#ffc1c5;text-decoration:underline;text-underline-offset:4px}
+.arcane-app :where(.tool-switcher>summary,.message-details>summary,[data-settings-close]):focus-visible {outline:2px solid var(--focus-ring);outline-offset:3px}
+.arcane-app :where(button,input,select,textarea):disabled {cursor:not-allowed}
+@media(hover:hover) and (pointer:fine) {
+  .arcane-app .nav-link:hover,.arcane-app .icon-button:hover,.arcane-app .tool-switcher>summary:hover {background:#282222;color:var(--text)}
+  .arcane-app .new-chat:hover,.arcane-app .welcome-connect:hover {background:#332125;border-color:#9e525b}
+  .arcane-app .tool-switcher .workspace-tab:hover:not([aria-pressed=true]),.arcane-app .picker-model-option:hover:not([aria-selected=true]) {background:#2a2224;color:var(--text)}
+  .arcane-app #workspace-add-context:hover {background:#2b2224;border-color:#4c3f42;color:var(--text)}
+}
+@media(max-width:1100px) and (min-width:761px) {
+  body.arcane-app {--shell-sidebar:204px}
+  .arcane-app .app-sidebar {padding-inline:12px}
+  .arcane-app .workspace-topbar {padding-inline:20px}
+  .arcane-app .app-content {padding:20px 24px 16px}
+  .arcane-app .new-chat {gap:7px;padding-inline:10px}
+  .arcane-app .workspace-stage.preview-open {grid-template-columns:minmax(0,1fr);overflow:auto}
+  .arcane-app .workspace-stage.preview-open>.codex-panel {min-height:440px}
+  .arcane-app .workspace-stage.preview-open>.artifact-panel {min-height:400px}
+}
+@media(max-width:760px) {
+  body.arcane-app {--shell-sidebar:0px}
+  .arcane-app .app-sidebar {position:relative;inset:auto;width:100%;padding:10px 12px;gap:8px;flex-direction:row;align-items:center;flex-wrap:wrap;border-right:0;border-bottom:1px solid #262525;max-height:35svh;overflow:auto}
+  .arcane-app .wordmark {font-size:15px;letter-spacing:2px;gap:8px;margin-right:auto}
+  .arcane-app .wordmark .arcane-logo {width:24px;height:28px}
+  .arcane-app .wordmark small {font-size:10px;margin-top:0}
+  .arcane-app .new-chat {width:auto;min-height:40px;padding:8px 10px;gap:7px}
+  .arcane-app .new-chat kbd {display:block;font-size:10px}
+  .arcane-app .sidebar-links,.arcane-app .sidebar-secondary {flex-direction:row;align-items:center;gap:4px;margin:0;padding:0;border:0}
+  .arcane-app .sidebar-links {flex:1 0 100%}
+  .arcane-app .sidebar-links .nav-link {flex:0 0 auto;white-space:nowrap}
+  .arcane-app .sidebar-label {margin:0 5px;font-size:11px}
+  .arcane-app .nav-link {width:auto;min-height:40px;padding:8px 10px;gap:7px;font-size:12px}
+  .arcane-app .nav-link small {display:none}
+  .arcane-app .sidebar-secondary {flex:1 0 100%;justify-content:flex-start}
+  .arcane-app .sidebar-secondary .icon {display:block;width:17px;height:17px}
+  .arcane-app .sidebar-note {display:none}
+  .arcane-app .app-main {margin-left:0}
+  .arcane-app .workspace-topbar {padding:8px 12px;min-height:56px;gap:6px}
+  .arcane-app .workspace-chat-tabs [role=tab] {max-width:160px;padding-inline:10px}
+  .arcane-app .chat-tabs-history>summary {width:56px;padding:6px;white-space:normal;line-height:1.3}
+  .arcane-app .chat-tabs-history[open] {right:12px}
+  .arcane-app .chat-tabs-history[open]>summary {width:auto;font-size:12px}
+  .arcane-app .workspace-topbar .workspace-search {flex:0 1 112px;width:112px;max-width:38%;margin-left:0}
+  .arcane-app .tool-switcher>summary {padding:8px 10px;gap:10px}
+  .arcane-app .workspace-search {width:auto;flex:1;min-width:0;padding:0 9px;gap:6px}
+  .arcane-app .workspace-search input[type=search] {font-size:12px}
+  .arcane-app .workspace-search kbd {display:none}
+  .arcane-app .shell-notice {padding-inline:14px}
+  .arcane-app .app-content {padding:14px 14px 12px}
+  .arcane-app .workspace-stage {min-height:0;flex:1;flex-shrink:1;gap:16px}
+  .arcane-app .workspace-stage>.codex-panel {min-height:0;flex:none;height:auto}
+  .arcane-app .workspace-stage.preview-open {grid-template-columns:minmax(0,1fr);overflow:auto}
+  .arcane-app .workspace-stage.preview-open>.codex-panel {min-height:360px}
+  .arcane-app .workspace-stage.preview-open>.artifact-panel {min-height:360px;height:60svh}
+  .arcane-app .workspace-welcome,.arcane-app #provider-login-gate {max-width:480px;min-height:180px;padding:24px 12px}
+  .arcane-app .workspace-welcome h2,.arcane-app #provider-login-gate h2 {font-size:27px;letter-spacing:-.7px}
+  .arcane-app .workspace-welcome p,.arcane-app #provider-login-message {font-size:13px;line-height:1.7}
+  .arcane-app .welcome-logo {display:block;margin-bottom:16px}
+  .arcane-app .workspace-stage .composer {padding:12px;border-radius:15px}
+  .arcane-app .workspace-stage .composer textarea {font-size:16px;min-height:52px;max-height:110px;margin-bottom:8px}
+  .arcane-app .composer-model-picker {flex:1 1 calc(100% - 52px);order:0;max-width:calc(100% - 52px)}
+  .arcane-app .composer-model-trigger {width:100%;min-height:44px;padding-inline:8px;gap:6px}
+  .arcane-app #codex-model-label {max-width:100%;flex:1}
+  .arcane-app .picker-effort {max-width:58px;flex-shrink:1}
+  .arcane-app .workspace-stage #codex-submit {order:1;margin-left:auto;min-height:44px;height:44px;width:44px}
+  .arcane-app .composer-tool-context,.arcane-app #workspace-add-context {order:2;min-height:40px}
+  .arcane-app .workspace-stage .codex-message.human {max-width:92%;padding:13px 16px}
+  .arcane-app .workspace-stage .codex-message :is(.message-text,pre.message-text),.arcane-app .workspace-stage .codex-message>pre {font-size:14px;line-height:1.8}
+  .arcane-app .settings-drawer {width:calc(100% - 16px);height:calc(100svh - 16px);border-radius:12px}
+  .arcane-app .settings-drawer-header {padding:16px 18px;gap:12px}
+  .arcane-app .settings-drawer-body {grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);padding:0}
+  .arcane-app .settings-sidebar {padding:12px 16px;border-right:0;border-bottom:1px solid #303030;overflow:visible}
+  .arcane-app .settings-search-label {font-size:12px;display:block}
+  .arcane-app #settings-search {margin-top:6px}
+  .arcane-app .settings-nav {flex-direction:row;gap:3px;margin-top:10px}
+  .arcane-app .settings-nav button {flex:1;padding:10px 7px;min-width:0;text-align:center;font-size:12px}
+  .arcane-app .settings-nav button[aria-current=page] {box-shadow:inset 0 -2px 0 #e64b55}
+  .arcane-app .settings-pages {padding:22px 16px;scroll-padding-block:16px}
+  .arcane-app .settings-page-heading {font-size:23px;margin-bottom:18px}
+  .arcane-app .settings-card {padding:18px 16px}
+  .arcane-app .settings-card-heading {align-items:flex-start;gap:10px}
+  .arcane-app .settings-secret-row {flex-wrap:wrap}
+  .arcane-app .settings-secret-row code {flex-basis:100%}
+  .arcane-app .settings-drawer .form-row {flex-wrap:wrap}
+  .arcane-app .settings-drawer .form-row>label {flex-basis:180px}
+  .arcane-app .picker-effort-option {min-height:44px}
+}
+@media(max-width:360px) {
+  .arcane-app .app-sidebar {padding:8px 10px;gap:5px}
+  .arcane-app .nav-link {padding:7px 8px}
+  .arcane-app .new-chat {padding-inline:8px}
+  .arcane-app .sidebar-links .tool-icon {width:18px;height:18px}
+  .arcane-app .sidebar-label {margin-inline:3px}
+  .arcane-app .chat-topline {gap:7px}
+  .arcane-app .workspace-stage .composer {padding:10px}
+  .arcane-app .composer-model-trigger {gap:5px;font-size:12px}
+}
+@media(max-height:650px) {
+  .arcane-app .app-content {padding-top:12px;padding-bottom:12px}
+  .arcane-app .workspace-welcome,.arcane-app #provider-login-gate {min-height:150px;padding-block:18px}
+  .arcane-app .workspace-welcome h2,.arcane-app #provider-login-gate h2 {font-size:26px;margin-bottom:10px}
+  .arcane-app .welcome-logo {display:block;margin-bottom:10px}
+  .arcane-app .welcome-logo .arcane-logo {width:28px;height:28px}
+  .arcane-app .welcome-connect,.arcane-app #provider-login-gate .button-row {margin-top:16px}
+  .arcane-app #provider-login-gate .connection-emblem {width:28px;height:28px;margin-bottom:12px}
+  .arcane-app #provider-login-gate .connection-emblem .arcane-logo {width:28px;height:28px}
+  .arcane-app .workspace-stage .composer textarea {min-height:44px;max-height:84px;margin-bottom:6px}
+  .arcane-app .workspace-stage .composer {padding-top:10px;margin-top:6px}
+  .arcane-app .chat-topline {min-height:40px;padding-block:4px}
+}
+@media(max-height:440px) {
+  body.arcane-app {overflow:auto}
+  .arcane-app .app-main {overflow:visible;min-height:320px;flex-shrink:0}
+  .arcane-app .app-content {overflow:visible;min-height:260px}
+  .arcane-app .workspace-stage>.codex-panel {min-height:260px}
+  .arcane-app .conversation-scroll {min-height:100px;max-height:45svh}
+  .arcane-app .composer-model-popover {max-height:calc(100svh - 16px)}
+}
+@media(forced-colors:active) {
+  .arcane-app .settings-drawer::backdrop {background:Canvas;opacity:.8;backdrop-filter:none}
+  .arcane-app .settings-drawer,.arcane-app .composer-model-popover,.arcane-app .tool-switcher .workspace-tabs {border:1px solid CanvasText;box-shadow:none}
+  .arcane-app .workspace-stage .composer:focus-within,.arcane-app .workspace-search:focus-within {outline:2px solid Highlight;outline-offset:2px;box-shadow:none}
+  .arcane-app :is(.nav-link[aria-pressed=true],.workspace-tab[aria-pressed=true],.picker-model-option[aria-selected=true],.picker-effort-option[aria-checked=true],#provider-login-gate button[aria-pressed=true]) {outline:2px solid Highlight;outline-offset:-3px}
+  .arcane-app :where(button,a,input,select,textarea,summary,[role=button]):focus-visible {outline-color:Highlight}
+  .arcane-app .workspace-stage #codex-submit:disabled {color:GrayText;border-color:GrayText}
+}
+/* Keep semantic hidden states authoritative over shell flex layouts. */
+.arcane-app [hidden] {display:none!important}
 /* Keep this universal preference reset last, after every responsive override. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

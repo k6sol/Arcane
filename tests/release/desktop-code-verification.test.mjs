@@ -241,7 +241,8 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   const context = { projectSession: null, child: null, origin: '', token: '', closing: false, switching: false,
     projectPath: '', userRoot: 'C:\\Owned', productRoot: 'C:\\App', nodeExecutable: 'C:\\App\\node.exe',
     process: { platform: 'win32', env: { ARCANE_LUAU_COMPILER_PATH: 'C:\\foreign.exe' } },
-    performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, join: win32.join, createHash: crypto.createHash,
+    performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, join: win32.join, resolve: win32.resolve, createHash: crypto.createHash, Buffer,
+    fs: { ...f.disk.filesystem, writeFileSync(fd, bytes) { const value = Buffer.from(bytes); f.disk.filesystem.writeSync(fd, value, 0, value.length); } },
     codeVerification: f.api, URL, setTimeout: () => 1, clearTimeout() {}, console: { warn: text => warnings.push(text) },
     policy: { ...f.policy, directPath: async value => value },
     ownedDirectory: async value => { assert.equal(value, f.stateRoot); return value; },
@@ -262,7 +263,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   assert.equal(context.projectSession.verificationUnavailable, true); assert.equal(context.projectSession.verificationEnvironmentAbsent, true);
   assert.equal(warnings.length, 1); assert.match(warnings[0], /opened without Luau verification/);
   for (const value of [f.compilerPath, f.projectPath, f.stateRoot]) assert.equal(warnings[0].includes(value), false);
-  assert.deepEqual(f.disk.node(f.configPath).bytes, original); assert.equal(f.disk.writes.length, 0); assert.equal(f.opens.length, 0);
+  assert.deepEqual(f.disk.node(f.configPath).bytes, original); assert.deepEqual(f.disk.writes, [['create', f.stateRoot + '\\listener-port.json']]); assert.equal(f.opens.length, 0);
   // Settings validation remains fatal in main, before even the daemon double is requested.
   f.disk.node(f.configPath).bytes = Buffer.from('{corrupt'); context.origin = ''; context.token = '';
   await rejectsGeneric(context.coldStart(f.projectPath)); assert.equal(requested.length, 1);

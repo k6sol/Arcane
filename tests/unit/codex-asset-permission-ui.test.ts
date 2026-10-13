@@ -2,8 +2,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { setImmediate as tick } from 'node:timers/promises';
 import {
   CodexChat, CodexChatApi, CodexHttpError, prepareCodexAction, readCodexState,
@@ -349,23 +350,27 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
 }, async t => {
   const { chromium } = await import('playwright-core');
   const { createServer } = await import('node:http');
-  const browser = await chromium.launch({ executablePath: process.env.ARCANE_ASSET_UI_BROWSER_EXE!,
-    headless: true, args: ['--disable-gpu'] });
+  const profile = process.env.ARCANE_ASSET_UI_PROFILE_DIR ?? await mkdtemp(join(tmpdir(), 'arcane-asset-permission-edge-'));
+  const browser = await chromium.launchPersistentContext(profile, { executablePath: process.env.ARCANE_ASSET_UI_BROWSER_EXE!,
+    headless: true, args: ['--disable-gpu'], viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' });
   t.after(() => browser.close());
   const build = process.env.ARCANE_UI_BUILD_DIR; assert.ok(build, 'Owned private build must be explicit');
   const html = (await readFile(resolve('apps/desktop/public/studio.html'), 'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '');
   const css = await readFile(resolve('apps/desktop/public/studio.css'), 'utf8');
   const js = await readFile(resolve(build, 'apps/desktop/src/codex-chat.js'), 'utf8');
+  const shellJs = await readFile(resolve(build, 'apps/desktop/src/workspace-shell.js'), 'utf8');
   const server = createServer((request, reply) => {
     const path = request.url?.split('?')[0];
-    const body = path === '/fixture' ? html : path === '/studio.css' ? css : path === '/codex-chat.js' ? js : null;
+    const body = path === '/fixture' ? html : path === '/studio.css' ? css : path === '/codex-chat.js' ? js : path === '/workspace-shell.js' ? shellJs : null;
     reply.writeHead(body === null ? 404 : 200, { 'Content-Type': path === '/fixture' ? 'text/html' : path?.endsWith('.css') ? 'text/css' : 'text/javascript' });
     reply.end(body ?? '');
   });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
   const address = server.address(); assert.ok(address && typeof address !== 'string');
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }), posts: ChatAction[] = [], errors: string[] = [];
+  const page = await browser.newPage(), posts: ChatAction[] = [], errors: string[] = [];
+  page.setDefaultTimeout(6000);
+  t.diagnostic('Synthetic native state only; Edge ' + browser.browser()!.version() + '; owned profile ' + profile);
   let observed = state();
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/v1/codex/**', async route => {
@@ -385,18 +390,26 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
   await page.evaluate(async token => {
     const modulePath: string = '/codex-chat.js';
     const module = await import(modulePath);
+    const shellPath: string = '/workspace-shell.js';
+    const { startWorkspaceShell } = await import(shellPath);
+    const shell = startWorkspaceShell(document);
     const chat = new module.CodexChat(document, new module.CodexChatApi(token));
     await chat.start();
-    const group = document.querySelector('.codex-asset-permission')!;
-    for (let parent = group.parentElement; parent; parent = parent.parentElement) if (parent.tagName === 'DETAILS') (parent as HTMLDetailsElement).open = true;
-    (window as unknown as { stopFixture: () => void }).stopFixture = () => chat.stop();
+    (window as unknown as { stopFixture: () => void }).stopFixture = () => { chat.stop(); shell.cleanup(); };
   }, TOKEN);
+  assert.equal(await page.locator('#settings-drawer').isVisible(), false);
+  await page.locator('#codex-composer').fill('Owned browser draft 🧩');
+  await page.locator('#app-sidebar [data-workspace-target="workspace-settings"]').click();
+  assert.equal(await page.locator('#settings-drawer').evaluate(dialog => dialog.matches(':modal')), true);
+  await page.locator('[data-settings-section-target="settings-advanced"]').click();
+  await page.locator('#settings-advanced > details').filter({ has: page.locator('#native-conversation-settings') }).locator(':scope > summary').click();
+  assert.equal(await page.locator('#settings-advanced').isVisible(), true);
+  assert.equal(await page.locator('#workspace-settings').isVisible(), false);
   const grant = page.locator('#codex-assets-grant'), revoke = page.locator('#codex-assets-revoke');
   await page.waitForFunction(() => !(document.getElementById('codex-assets-grant') as HTMLButtonElement).disabled);
   assert.equal(posts.length, 0);
   await grant.evaluate(button => (button as HTMLButtonElement).click());
   await page.evaluate(() => new Promise<void>(done => requestAnimationFrame(() => done()))); assert.equal(posts.length, 0);
-  await page.locator('#codex-composer').fill('Owned browser draft 🧩');
   await grant.focus(); await page.keyboard.press('Enter');
   await page.waitForFunction(() => document.getElementById('codex-assets-status')?.textContent?.includes('admission is open'));
   assert.deepEqual(posts.map(p => p.action), ['grant-assets']);

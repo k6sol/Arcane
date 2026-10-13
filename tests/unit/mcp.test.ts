@@ -13,6 +13,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { DaemonClient, validateDaemonUrl } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
+import { SkillRegistry } from '../../apps/mcp/src/skills.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
 import { HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord, type AssetJobPage } from '../../apps/daemon/src/asset-service.js';
@@ -150,8 +151,9 @@ async function recordFixture(t: test.TestContext, handle: (url: URL, body: Recor
   return { url: 'http://127.0.0.1:' + address.port, requests };
 }
 
-async function linked(t: test.TestContext, daemon: { url: string }, projectRoot = ROOT, token = TOKEN) {
-  const server = createMcpServer({ client: new DaemonClient({ url: daemon.url, token, pollIntervalMs: 10 }), projectRoot });
+async function linked(t: test.TestContext, daemon: { url: string }, projectRoot = ROOT, token = TOKEN, skillRegistry?: SkillRegistry) {
+  const server = createMcpServer({ client: new DaemonClient({ url: daemon.url, token, pollIntervalMs: 10 }), projectRoot,
+    ...(skillRegistry ? { skillRegistry } : {}) });
   const client = new Client({ name: 'arcane-sdk-fixture', version: '1.0.0' });
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
@@ -328,7 +330,7 @@ test('fixture SDK: spawned official stdio transport initializes and actually exe
 test('fixture SDK: skill registry defaults to approved only, explicit experimental opt-in and checksum enforcement', async t => {
   const f=await fixture(t),project=await directory(t);
   await cp(join(ROOT,'scripts'),join(project,'scripts'),{recursive:true}); await cp(join(ROOT,'skills'),join(project,'skills'),{recursive:true});
-  const client=await linked(t,f,project);
+  const client=await linked(t,f,project,TOKEN,new SkillRegistry({fixtureRoot:project}));
   assert.deepEqual((await call(client,'skills_list')).data.items,[]);
   const rejected=await call(client,'skills_get',{ids:['arcane-studio-context']}); assert.equal(rejected.result.isError,true); assert.equal(rejected.data.error.code,'UNAPPROVED');
   assert.ok((await call(client,'skills_list',{allowExperimental:true,query:'studio'})).data.items.length>0);
@@ -345,7 +347,7 @@ test('fixture SDK: approved skill loading still excludes quarantined/deprecated 
   const registryPath=join(project,'skills/registry.json'),registry=JSON.parse(await readFile(registryPath,'utf8'));
   registry.skills[0].status='approved'; registry.skills[0].approved=true; registry.skills[0].evaluationRuns=[{outcome:'passed',evidence:'non-native-test-fixture-only'}];
   registry.skills[1].status='quarantined'; registry.skills[2].status='deprecated'; await writeFile(registryPath,JSON.stringify(registry));
-  const client=await linked(t,f,project);
+  const client=await linked(t,f,project,TOKEN,new SkillRegistry({fixtureRoot:project}));
   assert.deepEqual((await call(client,'skills_list')).data.items.map((item:any)=>item.id),['arcane-studio-context']);
   assert.notEqual((await call(client,'skills_get',{ids:['arcane-studio-context']})).result.isError,true);
   for(const skill of registry.skills.slice(1,3)) assert.equal((await call(client,'skills_get',{ids:[skill.id],allowExperimental:true})).data.error.code,'UNAPPROVED');

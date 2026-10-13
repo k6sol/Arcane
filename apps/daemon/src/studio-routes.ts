@@ -23,7 +23,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       const expectedAgent = () => typeof agentToken === 'function' ? agentToken(request) : agentToken;
       const human = matches(controlToken); const agent = matches(expectedAgent());
       if (!plugin && !human && !agent) throw new ArcaneError('AUTH', 'Open the local launcher session, or supply its scoped local MCP bearer.');
-      if (agent && ['/v1/studio/pairing', '/v1/studio/revoke', '/v1/studio/keys', '/v1/studio/keys/revoke', '/v1/work/review', '/v1/product/mcp-token'].includes(url.pathname)) throw new ArcaneError('SCOPE', 'Agent bearer cannot grant Studio access, revoke human sessions or approve work. Use the human panel.');
+      if (agent && ['/v1/studio/pairing', '/v1/studio/revoke', '/v1/studio/keys', '/v1/studio/keys/rotate', '/v1/studio/keys/revoke', '/v1/work/review', '/v1/product/mcp-token'].includes(url.pathname)) throw new ArcaneError('SCOPE', 'Agent bearer cannot grant Studio access, revoke human sessions or approve work. Use the human panel.');
       if (request.method === 'GET' && !plugin) {
         if (work && url.pathname === '/v1/work/runs') { send(200, { runs: work.runs() }); return true; }
         if (work && url.pathname === '/v1/work/ready') { send(200, { tasks: work.ready(url.searchParams.get('runId') ?? undefined) }); return true; }
@@ -77,6 +77,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         return true;
       }
       if (url.pathname === '/v1/studio/keys') send(200,store.issueKey(a,Number(new URL(origin).port)));
+      else if (url.pathname === '/v1/studio/keys/rotate') send(200,store.rotateKey(a,Number(new URL(origin).port)));
       else if (url.pathname === '/v1/studio/keys/revoke') {store.revokeKey(textField(a.keyId,'key ID'));send(200,{revoked:true});}
       else if (url.pathname === '/v1/studio/pairing') send(200, store.createGrant(a));
       else if (url.pathname === '/v1/studio/revoke') { store.revoke(textField(a.sessionId, 'session ID')); send(200, { revoked: true }); }

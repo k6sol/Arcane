@@ -123,6 +123,11 @@ async function harness(t:test.TestContext,spawned=false) {
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
+  assets.set('/studio-key-settings.js', resolve(build, 'apps/desktop/src/studio-key-settings.js'));
+  assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
+  assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
+  assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
+  assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   let gets=0;
   const server=createServer((request,response)=>{void(async()=>{
     const url=new URL(request.url??'/',origin),asset=assets.get(url.pathname);
@@ -145,11 +150,20 @@ async function browser(t:test.TestContext,origin:string) {
   page.on('pageerror',(e:Error)=>errors.push(e.message));page.on('request',(r:any)=>{if(r.url().endsWith('/v1/codex/action'))posts.push(r.postDataJSON());});
   const text=async(id:string,part:string)=>{await page.waitForFunction(({id,part}:{id:string;part:string})=>document.getElementById(id)?.textContent?.includes(part),{id,part},{timeout:8000});};
   const ready=async(id:string)=>{await page.waitForFunction((id:string)=>!(document.getElementById(id) as HTMLButtonElement).disabled,id,{timeout:8000});};
-  const refresh=async()=>{await openAdvancedSettings(page);await page.locator('#codex-refresh').click();await page.waitForTimeout(60);};
-  const open=async(token=HUMAN)=>{try{await page.goto(origin+'/studio#'+token);await page.reload();await ready('codex-refresh');await openAdvancedSettings(page);await page.locator('#auto-refresh').uncheck();}catch(error){t.diagnostic('Browser mount diagnostic '+JSON.stringify(await page.evaluate(()=>({title:document.title,refresh:document.getElementById('codex-refresh')?.outerHTML,notice:document.getElementById('codex-notice')?.textContent,main:document.getElementById('notice')?.textContent})))+' errors '+errors.join(';'));throw error;}};
-  const connect=async()=>{await openAdvancedSettings(page);await ready('codex-connect');await page.locator('#codex-connect').click();await text('codex-status','Fixture connected');await ready('codex-model');};
-  const select=async()=>{await openAdvancedSettings(page);await page.locator('#codex-model').selectOption('fixture-sol');assert.equal(await page.locator('#codex-effort').inputValue(),'');await page.locator('#codex-effort').selectOption('ultra');await page.locator('#codex-select').click();await text('codex-selection','fixture-sol · ultra');await ready('codex-thread-start');};
-  const grant=async()=>{await openAdvancedSettings(page);await page.locator('#codex-grant').click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await page.locator('#codex-confirm-check').check();await page.locator('#codex-confirm-submit').click();await text('codex-policy','Workspace writes granted');};
+  const refresh=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-refresh')).click();await page.waitForTimeout(60);};
+  const open=async(token=HUMAN)=>{try{await page.goto(origin+'/studio#'+token);await page.reload();await ready('codex-refresh');await openAdvancedSettings(page);await (await visibleControl(page,'#auto-refresh')).uncheck();}catch(error){t.diagnostic('Browser mount diagnostic '+JSON.stringify(await page.evaluate(()=>({title:document.title,refresh:document.getElementById('codex-refresh')?.outerHTML,notice:document.getElementById('codex-notice')?.textContent,main:document.getElementById('notice')?.textContent})))+' errors '+errors.join(';'));throw error;}};
+  const connect=async()=>{await openAdvancedSettings(page);await ready('codex-connect');await (await visibleControl(page,'#codex-connect')).click();await text('codex-status','Test connection');await ready('codex-disconnect');};
+  const select=async()=>{
+    const active=page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]');
+    if(await active.count() && (await active.getAttribute('title'))!=='Unsent local draft') {
+      await page.locator('[data-settings-close]').click(); await page.locator('#workspace-new-chat').click();
+    }
+    await openAdvancedSettings(page);await (await visibleControl(page,'#codex-model')).selectOption('fixture-sol');assert.equal(await page.locator('#codex-effort').inputValue(),'');await (await visibleControl(page,'#codex-effort')).selectOption('ultra');
+    const before=posts.length;await (await visibleControl(page,'#codex-select')).click();
+    await text('codex-effort-label','ultra');await ready('codex-thread-start');
+    assert.equal(posts.length,before,'A draft model choice is local until its explicit native open gesture');
+  };
+  const grant=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-grant')).click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await text('codex-policy','Workspace writes granted');};
   return {page,errors,posts,text,ready,refresh,open,connect,select,grant,instance};
 }
 
@@ -166,69 +180,93 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   const h=await harness(t),b=await browser(t,h.origin),{page}=b;
   await b.open(AGENT);await b.text('codex-notice','HUMAN_ONLY');assert.equal(await page.locator('#codex-connect').isDisabled(),true);assert.equal(h.connected,0);
   await b.open();await b.ready('codex-connect');assert.equal(h.connected,0);assert.equal(b.posts.length,0);assert.equal(await page.locator('#codex-model').inputValue(),'');
-  await b.connect();const c=h.clients[0]!,connectionId=c.s.connectionId;
+  await b.connect();let c=h.clients[0]!,connectionId=c.s.connectionId;
   assert.equal(c.calls.length,0);assert.equal(await page.locator('#codex-model').inputValue(),'');assert.equal(await page.locator('#codex-effort').inputValue(),'');assert.equal(await page.locator('#codex-thread-start').isDisabled(),true);
   await b.text('codex-profile','profile requested · verified:false');assert.equal(await page.locator('#codex-panel img, #codex-panel script').count(),0);
-  await b.select();await page.locator('#codex-resume-id').fill('human-exact-native-thread');await page.locator('#codex-thread-resume').click();await b.text('codex-scope','human-exact-native-thread');await b.ready('codex-grant');
+  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-scope','fixture-thread');
+  assert.equal(h.service.state().nativeThreads?.[0]?.projectPath,h.projectPath);
+  assert.equal(h.service.state().nativeThreads?.[0]?.sessionId,'fixture-session');
+  assert.equal(c.calls.filter(v=>v.method==='thread-start').length,1);
+  await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');await b.connect();
+  await (await visibleControl(page,'#codex-resume-id')).fill('unowned-raw-thread');assert.equal(await page.locator('#codex-thread-resume').isDisabled(),true);
+  await (await visibleControl(page,'#codex-resume-id')).fill('fixture-thread');await b.ready('codex-thread-resume');await (await visibleControl(page,'#codex-thread-resume')).click();await b.text('codex-scope','fixture-thread');await b.ready('codex-grant');
+  c=h.clients.at(-1)!;connectionId=c.s.connectionId;
   assert.equal(c.calls.some(v=>v.method==='thread-start'),false);assert.equal(c.s.thread!.writeGranted,false);
-  await page.locator('#codex-grant').click();await b.text('codex-confirm-preview',connectionId);await b.text('codex-confirm-preview','human-exact-native-thread');await b.text('codex-confirm-preview',h.projectPath);
-  await page.locator('#codex-confirm-check').check();c.s.thread!.threadId='changed-thread-scope';await b.text('codex-scope','changed-thread-scope');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await page.locator('#codex-confirm-cancel').click();assert.equal(c.s.thread!.writeGranted,false);
-  c.s.thread!.threadId='human-exact-native-thread';await b.refresh();await b.text('codex-scope','human-exact-native-thread');await b.grant();
+  await (await visibleControl(page,'#codex-grant')).click();await b.text('codex-confirm-preview',connectionId);await b.text('codex-confirm-preview','fixture-thread');await b.text('codex-confirm-preview',h.projectPath);
+  await (await visibleControl(page,'#codex-confirm-check')).check();c.s.thread!.threadId='changed-thread-scope';await b.text('codex-scope','changed-thread-scope');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-cancel')).click();assert.equal(c.s.thread!.writeGranted,false);
+  c.s.thread!.threadId='fixture-thread';await b.refresh();await b.text('codex-scope','fixture-thread');await b.grant();
   // Delay a granted HTTP snapshot, revoke without emitting events, then deliver the old reply.
-  await page.locator('#codex-revoke').click();await b.text('codex-policy','Read-only thread');
+  await (await visibleControl(page,'#codex-revoke')).click();await b.text('codex-policy','Read-only thread');
   let releaseGrant:()=>void=()=>{},grantReady:()=>void=()=>{};
   const grantHeld=new Promise<void>(done=>{releaseGrant=done;}),grantAccepted=new Promise<void>(done=>{grantReady=done;});
   await page.route('**/v1/codex/action',async(route:any)=>{const response=await route.fetch();grantReady();await grantHeld;await route.fulfill({response});},{times:1});
-  await page.locator('#codex-grant').click();await page.locator('#codex-confirm-check').check();await page.locator('#codex-confirm-submit').click();await grantAccepted;
-  await page.locator('#codex-revoke').click();await b.text('codex-policy','Read-only thread');
+  await (await visibleControl(page,'#codex-grant')).click();await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await grantAccepted;
+  await (await visibleControl(page,'#codex-revoke')).click();await b.text('codex-policy','Read-only thread');
   await page.evaluate(()=>{const seen:string[]=[];(window as unknown as {policySeen:string[]}).policySeen=seen;new MutationObserver(()=>{seen.push(document.getElementById('codex-policy')!.textContent!);}).observe(document.getElementById('codex-policy')!,{childList:true});});
   const grantResponse=page.waitForResponse('**/v1/codex/action');releaseGrant();await (await grantResponse).finished();await b.ready('codex-grant');
   assert.equal(c.s.thread!.writeGranted,false);assert.equal(await page.evaluate(()=>(window as unknown as {policySeen:string[]}).policySeen.some(s=>s.includes('writes granted'))),false);await b.grant();
-  await page.locator('#codex-composer').fill('🧩'.repeat(32769));assert.equal(await page.locator('#codex-submit').isDisabled(),true);
-  const beforeTyping=b.posts.length;await page.locator('#codex-composer').fill('Fixture human message <script>window.injected=true</script>');assert.equal(b.posts.length,beforeTyping);
-  await page.locator('#codex-submit').click();await b.text('codex-policy','inProgress');await b.text('codex-messages','samesame public');assert.equal(await page.locator('#codex-submit').isDisabled(),true);
+  await (await visibleControl(page,'#codex-composer')).fill('🧩'.repeat(32769));assert.equal(await page.locator('#codex-submit').isDisabled(),true);
+  const beforeTyping=b.posts.length;await (await visibleControl(page,'#codex-composer')).fill('Fixture human message <script>window.injected=true</script>');assert.equal(b.posts.length,beforeTyping);
+  await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-policy','inProgress');await b.text('codex-messages','samesame public');assert.equal(await page.locator('#codex-submit').isDisabled(),true);
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-conversation.png'});
   const output=await page.locator('#codex-messages').textContent();await b.refresh();assert.equal(await page.locator('#codex-messages').textContent(),output);assert.equal(await page.locator('#codex-messages script, #codex-messages img').count(),0);assert.equal(await page.evaluate(()=>Boolean((window as unknown as {injected?:boolean}).injected)),false);
   const a=approval(c.s,h.projectPath);a.canAccept=false;c.s.approvals=[a];await b.refresh();await b.text('codex-approvals','fixture command');assert.equal(await page.locator('#codex-approvals [data-decision="accept"]').isDisabled(),true);
   const file:Approval={...a,canAccept:true,method:'item/fileChange/requestApproval',command:null,cwd:null,itemId:'full-file',changes:[{path:'src/full.ts',kind:'update',movePath:null,diff:'@@ full scoped diff @@\n'+('+line\n'.repeat(2000))+'+FULL-END <img src=x onerror=alert(1)>'}]};
   c.s.approvals=[file];await b.refresh();await b.text('codex-approvals','FULL-END');assert.equal(await page.locator('#codex-approvals img').count(),0);
-  await page.locator('#codex-approvals [data-decision="accept"]').click();for(const id of [file.connectionId,file.threadId,file.turnId,file.handle,file.itemId])await b.text('codex-confirm-preview',id);await b.text('codex-confirm-preview','FULL-END');await page.locator('#codex-confirm-check').check();
+  await (await visibleControl(page,'#codex-approvals [data-decision="accept"]')).click();for(const id of [file.connectionId,file.threadId,file.turnId,file.handle,file.itemId])await b.text('codex-confirm-preview',id);await b.text('codex-confirm-preview','FULL-END');await (await visibleControl(page,'#codex-confirm-check')).check();
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-confirm').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-approval.png'});
-  file.changes![0]!.diff='@@ changed preview @@';await b.text('codex-approvals','changed preview');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await page.locator('#codex-confirm-cancel').click();assert.equal(c.calls.some(v=>v.method==='approval'),false);
-  await page.locator('#codex-approvals [data-decision="accept"]').click();await page.locator('#codex-confirm-check').check();await page.locator('#codex-confirm-submit').click();await page.waitForFunction(()=>document.getElementById('codex-approval-section')?.hidden===true);
+  file.changes![0]!.diff='@@ changed preview @@';await b.text('codex-approvals','changed preview');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-cancel')).click();assert.equal(c.calls.some(v=>v.method==='approval'),false);
+  await (await visibleControl(page,'#codex-approvals [data-decision="accept"]')).click();await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await page.waitForFunction(()=>document.getElementById('codex-approval-section')?.hidden===true);
   assert.equal(c.calls.filter(v=>v.method==='approval').length,1);
-  await page.locator('#codex-interrupt').click();await b.text('codex-policy','interrupted');
+  await (await visibleControl(page,'#codex-interrupt')).click();await b.text('codex-policy','interrupted');
   // Lose HTTP acknowledgement after the actual service has durably recorded the action.
   await page.route('**/v1/codex/action',async(route:any)=>{const response=await route.fetch();assert.equal(response.status(),200);await route.abort('failed');},{times:1});
   const beforeLoss=c.calls.filter(v=>v.method==='turn-start').length;
-  await page.locator('#codex-composer').fill('Fixture lost HTTP ack');await page.locator('#codex-submit').click();await page.waitForFunction(()=>!document.getElementById('codex-unknown')?.hidden);await b.text('codex-unknown-requests','acknowledged');
-  assert.equal(c.calls.filter(v=>v.method==='turn-start').length,beforeLoss+1);assert.equal(await page.locator('#codex-submit').isDisabled(),true);await b.ready('codex-acknowledge');await page.locator('#codex-acknowledge').click();assert.equal(await page.locator('#codex-unknown').isVisible(),false);
+  await (await visibleControl(page,'#codex-composer')).fill('Fixture lost HTTP ack');await (await visibleControl(page,'#codex-submit')).click();await page.waitForFunction(()=>!document.getElementById('codex-unknown')?.hidden);await b.text('codex-unknown-requests','acknowledged');
+  assert.equal(c.calls.filter(v=>v.method==='turn-start').length,beforeLoss+1);assert.equal(await page.locator('#codex-submit').isDisabled(),true);await b.ready('codex-acknowledge');await (await visibleControl(page,'#codex-acknowledge')).click();assert.equal(await page.locator('#codex-unknown').isVisible(),false);
   // A real service action may still await acknowledgement; safety requests remain independent.
-  await page.locator('#codex-interrupt').click();await b.text('codex-policy','interrupted');c.hold();await page.locator('#codex-composer').fill('Fixture held turn');await page.locator('#codex-submit').click();await b.ready('codex-interrupt');
-  assert.equal(h.service.state().busy,true);assert.equal(await page.locator('#codex-disconnect').isDisabled(),false);assert.equal(await page.locator('#codex-revoke').isDisabled(),false);await page.locator('#codex-interrupt').click();await b.text('codex-policy','interrupted');assert.equal(await page.locator('#codex-submit').isDisabled(),true);c.release();await page.waitForFunction(()=>!document.getElementById('codex-unknown')?.textContent?.includes('pending'));
+  await (await visibleControl(page,'#codex-interrupt')).click();await b.text('codex-policy','interrupted');c.hold();await (await visibleControl(page,'#codex-composer')).fill('Fixture held turn');await (await visibleControl(page,'#codex-submit')).click();await b.ready('codex-interrupt');
+  assert.equal(h.service.state().busy,true);assert.equal(await page.locator('#codex-disconnect').isDisabled(),false);assert.equal(await page.locator('#codex-revoke').isDisabled(),false);await (await visibleControl(page,'#codex-interrupt')).click();await b.text('codex-policy','interrupted');assert.equal(await page.locator('#codex-submit').isDisabled(),true);c.release();await page.waitForFunction(()=>!document.getElementById('codex-unknown')?.textContent?.includes('pending'));
   await b.refresh();
   // Old HTTP snapshots cannot reconnect the UI after an explicit disconnect.
   let releaseReply:()=>void=()=>{},replyReady:()=>void=()=>{};
   const heldReply=new Promise<void>(r=>{releaseReply=r;}),acceptedReply=new Promise<void>(r=>{replyReady=r;});
   await page.route('**/v1/codex/action',async(route:any)=>{const response=await route.fetch();replyReady();await heldReply;await route.fulfill({response});},{times:1});
-  await page.locator('#codex-composer').fill('Fixture old connection response');await b.ready('codex-submit');await page.locator('#codex-submit').click();await acceptedReply;await b.ready('codex-disconnect');await page.locator('#codex-disconnect').click();await b.text('codex-status','Not connected');const oldResponse=page.waitForResponse('**/v1/codex/action');releaseReply();await oldResponse;await b.ready('codex-connect');assert.equal(await page.locator('#codex-messages').textContent().then((v:string)=>v.includes('Fixture old connection response')),false);
+  await (await visibleControl(page,'#codex-composer')).fill('Fixture old connection response');await b.ready('codex-submit');await (await visibleControl(page,'#codex-submit')).click();await acceptedReply;await b.ready('codex-disconnect');await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');const oldResponse=page.waitForResponse('**/v1/codex/action');releaseReply();await oldResponse;await b.ready('codex-connect');assert.equal(await page.locator('#codex-messages').textContent().then((v:string)=>v.includes('Fixture old connection response')),false);
   assert.equal(h.service.state().snapshot,null);
   // Collapse pauses ordinary background reads, while reopening fetches current metadata.
-  await page.locator('#codex-panel>summary').click();await page.waitForTimeout(1800);const collapsedGets=h.gets;await page.waitForTimeout(1700);assert.equal(h.gets,collapsedGets);await page.locator('#go-codex').click();await page.waitForFunction(()=>Boolean((document.getElementById('codex-panel') as HTMLDetailsElement).open));await b.ready('codex-connect');
-  await b.connect();await b.select();await page.locator('#codex-thread-start').click();await b.text('codex-policy','Read-only thread');
+  await (await visibleControl(page,'#codex-panel>summary')).click();await page.waitForTimeout(1800);const collapsedGets=h.gets;await page.waitForTimeout(1700);assert.equal(h.gets,collapsedGets);await (await visibleControl(page,'#go-codex')).click();await page.waitForFunction(()=>Boolean((document.getElementById('codex-panel') as HTMLDetailsElement).open));await b.ready('codex-connect');
+  await b.connect();await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
   // A native timeout stays unknown after GET reconciliation and reload. No turn is replayed.
-  const latest=h.clients.at(-1)!;latest.loseAck();await page.locator('#codex-composer').fill('Synthetic native unknown acknowledgement');await page.locator('#codex-submit').click();await b.text('codex-unknown-requests','unknown');
+  const latest=h.clients.at(-1)!;latest.loseAck();await (await visibleControl(page,'#codex-composer')).fill('Synthetic native unknown acknowledgement');await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-unknown-requests','unknown');
   assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-unknown.png'});
   await page.reload();await b.text('codex-unknown-requests','unknown');assert.equal(await page.locator('#codex-submit').isDisabled(),true);assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);
   await page.evaluate(()=>{window.dispatchEvent(new PageTransitionEvent('pagehide'));window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));});
   await b.text('codex-unknown-requests','unknown');await b.refresh();assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
-  await page.locator('#codex-disconnect').click();await b.text('codex-status','Not connected');await b.ready('codex-acknowledge');await page.locator('#codex-acknowledge').click();
-  await b.connect();assert.equal(await page.locator('#codex-model').inputValue(),'');assert.equal(await page.locator('#codex-thread-start').isDisabled(),true);await b.select();await page.locator('#codex-thread-start').click();await b.text('codex-policy','Read-only thread');
+  await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');await b.ready('codex-acknowledge');await (await visibleControl(page,'#codex-acknowledge')).click();
+  await b.connect();await page.locator('[data-settings-close]').click();await page.locator('#workspace-new-chat').click();
+  assert.equal(await page.locator('#codex-model').inputValue(),'');assert.equal(await page.locator('#codex-thread-start').isDisabled(),true);await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-desktop.png'});
   await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-mobile.png'});
-  assert.deepEqual(await page.evaluate(()=>Object.keys(sessionStorage)),['arcane-lab-session']);assert.equal(await page.evaluate(()=>localStorage.length),0);
+  assert.deepEqual(await page.evaluate(()=>Object.keys(sessionStorage)),['arcane-lab-session']);
+  const presentation=await page.evaluate(()=>Object.fromEntries(Object.entries(localStorage)));
+  const chatKey='arcane.chat-tabs.v1:'+encodeURIComponent(h.projectPath);
+  assert.deepEqual(Object.keys(presentation).sort(),[chatKey,'arcane.provider-presentation.v1'].sort());
+  assert.deepEqual(JSON.parse(presentation['arcane.provider-presentation.v1']!),{version:1,provider:'codex'});
+  const preferences=JSON.parse(presentation[chatKey]!);
+  assert.deepEqual(Object.keys(preferences).sort(),['activeKey','projectPath','provider','tabs','version']);
+  assert.equal(preferences.version,1);assert.equal(preferences.projectPath,h.projectPath);assert.equal(preferences.provider,'codex');
+  assert.ok(preferences.tabs.length>0&&preferences.tabs.length<=16);
+  assert.ok(preferences.tabs.some((tab:any)=>tab.key===preferences.activeKey));
+  assert.ok(Buffer.byteLength(presentation[chatKey]!)<=512*1024);
+  for(const tab of preferences.tabs){
+    assert.deepEqual(Object.keys(tab).sort(),['draft','key','kind','localId','previewOpen','projectPath','provider','selection','sessionId','threadId','title','tool','workflowDraft']);
+    assert.equal(tab.projectPath,h.projectPath);assert.equal(tab.provider,'codex');
+    if(tab.selection)assert.deepEqual(Object.keys(tab.selection).sort(),['effort','model']);
+  }
+  assert.equal(JSON.stringify(presentation).includes(HUMAN),false);assert.equal(JSON.stringify(presentation).includes(AGENT),false);
   assert.equal((await page.locator('#codex-panel').textContent()).includes(HUMAN),false);
   for(const input of b.posts)assert.deepEqual(codexActionInput.parse(input),input);assert.deepEqual(b.errors,[]);
   t.diagnostic('Installed Edge '+b.instance.version()+'; actual human-only service + synthetic host; '+h.connected+' fixture connections; no live inference or Studio calls.');
@@ -237,13 +275,13 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
 test('real Edge + spawned Node native client: metadata-only connect, native readonly thread, public approvals and human interruption', {skip:!browserModule,timeout:60000},async t=>{
   const h=await harness(t,true),b=await browser(t,h.origin),{page}=b;await b.open();await b.ready('codex-connect');assert.equal(h.connected,0);
   await b.connect();assert.equal(h.connected,1);assert.equal(h.children[0]!.snapshot().thread,null);
-  await b.select();await page.locator('#codex-thread-start').click();await b.text('codex-policy','Read-only thread');await b.ready('codex-grant');await b.grant();
-  await page.locator('#codex-composer').fill('Synthetic human turn; spawned Node only');await page.locator('#codex-submit').click();await b.text('codex-policy','inProgress');await b.text('codex-approvals','fixture test command');await b.text('codex-approvals','@@ fixture diff @@');
+  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');await b.ready('codex-grant');await b.grant();
+  await (await visibleControl(page,'#codex-composer')).fill('Synthetic human turn; spawned Node only');await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-policy','inProgress');await b.text('codex-approvals','fixture test command');await b.text('codex-approvals','@@ fixture diff @@');
   assert.equal(await page.locator('.codex-approval').count(),2);assert.equal(await page.locator('#codex-submit').isDisabled(),true);
-  const file=page.locator('.codex-approval').filter({hasText:'Review scoped file changes'});
-  await file.locator('[data-decision="accept"]').click();await b.text('codex-confirm-preview','review.txt');await b.text('codex-confirm-preview',h.children[0]!.snapshot().connectionId);await page.locator('#codex-confirm-check').check();await page.locator('#codex-confirm-submit').click();await page.waitForFunction(()=>document.querySelectorAll('.codex-approval').length===1);
-  await page.locator('.codex-approval [data-decision="decline"]').click();await page.waitForFunction(()=>document.querySelectorAll('.codex-approval').length===0);
-  await page.locator('#codex-interrupt').click();await b.text('codex-policy','interrupted');await page.locator('#codex-disconnect').click();await b.text('codex-status','Not connected');
+  await visibleControl(page,'#codex-approvals');const file=page.locator('.codex-approval').filter({hasText:'Review scoped file changes'});
+  await file.locator('[data-decision="accept"]').click();await b.text('codex-confirm-preview','review.txt');await b.text('codex-confirm-preview',h.children[0]!.snapshot().connectionId);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await page.waitForFunction(()=>document.querySelectorAll('.codex-approval').length===1);
+  await (await visibleControl(page,'.codex-approval [data-decision="decline"]')).click();await page.waitForFunction(()=>document.querySelectorAll('.codex-approval').length===0);
+  await (await visibleControl(page,'#codex-interrupt')).click();await b.text('codex-policy','interrupted');await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');
   const audit=(await readFile(join(h.directory,'audit-1.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
   const inputs=audit.filter(v=>v.type==='input').map(v=>v.message);
   assert.equal(inputs.filter(v=>v.method==='thread/start').length,1);assert.equal(inputs.filter(v=>v.method==='turn/start').length,1);
@@ -277,48 +315,62 @@ test('malformed action receipts remain unknown even when the HTTP status says ac
 
 
 test('oversized native state is explicitly compacted without lying about accepted actions or hiding stop controls', {skip:!browserModule,timeout:60000},async t=>{
-  const h=await harness(t),b=await browser(t,h.origin);await b.open();await b.connect();await b.select();await b.page.locator('#codex-thread-start').click();await b.text('codex-policy','Read-only thread');
+  const h=await harness(t),b=await browser(t,h.origin);await b.open();await b.connect();await b.select();await (await visibleControl(b.page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
   const client=h.clients[0]!;client.s.thread={...client.s.thread!,writeGranted:true,turnId:'fixture-large-turn',turnStatus:'inProgress'};
   const a=approval(client.s,h.projectPath);a.command=null;a.cwd=null;a.method='item/fileChange/requestApproval';a.changes=[{path:'src/review.ts',kind:'update',movePath:null,diff:'x'.repeat(65536)}];
   client.s.approvals=Array.from({length:16},(_,n)=>({...a,handle:randomUUID(),itemId:'fixture-large-'+n,changes:Array.from({length:8},()=>({...a.changes![0]!}))}));
   await b.refresh();await b.text('codex-profile','Display limited:');assert.equal(await b.page.locator('#codex-submit').isDisabled(),true);assert.equal(await b.page.locator('#codex-revoke').isDisabled(),false);assert.equal(await b.page.locator('#codex-disconnect').isDisabled(),false);assert.equal(await b.page.locator('#codex-approvals [data-decision="accept"]').count(),0);
   const result=await h.post(prepareCodexAction(state(client.s,h.projectPath),'approval',{threadId:a.threadId,turnId:a.turnId,handle:client.s.approvals[0]!.handle,decision:'decline'}));assert.equal(result.status,200);assert.equal(result.body.record.state,'acknowledged');t.diagnostic('Overflow after action '+JSON.stringify({bytes:Buffer.byteLength(JSON.stringify(h.service.state())),approvals:h.service.state().snapshot?.approvals.length,limited:result.body.state.displayLimited,replyApprovals:result.body.state.snapshot?.approvals.length}));assert.equal(result.body.state.displayLimited,true);assert.equal(client.calls.filter(x=>x.method==='approval').length,1);
-  await b.page.locator('#codex-disconnect').click();await b.text('codex-status','Not connected');assert.equal(h.service.state().snapshot,null);assert.deepEqual(b.errors,[]);
+  await (await visibleControl(b.page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');assert.equal(h.service.state().snapshot,null);assert.deepEqual(b.errors,[]);
 });
 
-test('real Edge + human HTTP fixtures: saved history load is explicit, bounded and separate from live text',{skip:!browserModule,timeout:60000},async t=>{
+test('real Edge + human HTTP fixtures: explicit native open loads public history; later loads stay scoped and deduplicated',{skip:!browserModule,timeout:60000},async t=>{
   const h=await harness(t),b=await browser(t,h.origin),{page}=b;
   await b.open();assert.equal(h.connected,0);assert.equal(b.posts.length,0);
-  await page.locator('#refresh').click();await b.text('project-path',h.projectPath);
-  await b.connect();await b.select();await page.locator('#codex-thread-start').click();await b.text('codex-scope','fixture-thread');
-  const c=h.clients[0]!,before=c.calls.length;
-  await page.locator('#codex-history-refresh').click();
+  await (await visibleControl(page,'#refresh')).click();await b.text('project-path',h.projectPath);
+  await b.connect();await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-scope','fixture-thread');
+  await b.text('codex-notice','History loaded.');
+  const c=h.clients[0]!,before=c.calls.length,historyBefore=c.calls.filter(x=>x.method==='history-read').length;
+  assert.equal(historyBefore,1,'The acknowledged explicit chat open loads its real public history once');
+  await (await visibleControl(page,'#codex-history-refresh')).click();
   try{await b.ready('codex-history-thread');}catch(error){t.diagnostic('History mount '+JSON.stringify(await page.evaluate(()=>({status:document.getElementById('codex-history-status')?.textContent,notice:document.getElementById('codex-history-notice')?.textContent,project:document.getElementById('project-path')?.textContent,scope:document.getElementById('codex-history-scope')?.textContent,disabled:(document.getElementById('codex-history-thread') as HTMLSelectElement)?.disabled})))+' pageErrors '+b.errors.join(';')+' binding '+JSON.stringify(h.service.state().nativeHistory));throw error;}
   assert.equal(c.calls.length,before,'cache read does not launch native history RPC');
-  await page.locator('#codex-history-thread').focus();
-  await page.locator('#codex-history-thread').press('End');
-  await page.locator('#codex-history-thread').press('Enter');
-  await b.ready('codex-history-load');await page.locator('#codex-history-load').click();
+  await (await visibleControl(page,'#codex-history-thread')).focus();
+  await (await visibleControl(page,'#codex-history-thread')).press('End');
+  await (await visibleControl(page,'#codex-history-thread')).press('Enter');
+  await b.ready('codex-history-load');await (await visibleControl(page,'#codex-history-load')).click();
   await b.text('codex-history-status','History incomplete');
   await b.text('codex-history-entries','Fixture imported native history');
   await b.text('codex-history-gaps','context-compaction');
-  assert.equal(c.calls.filter(x=>x.method==='history-read').length,1);
+  assert.equal(c.calls.filter(x=>x.method==='history-read').length,historyBefore+1);
   assert.equal(c.calls.some(x=>['turn-start','grant-writes','thread-resume'].includes(x.method)),false);
   assert.equal(await page.locator('#codex-history-entries img, #codex-history-entries script').count(),0);
-  assert.equal((await page.locator('#codex-messages').textContent())!.includes('Fixture imported native history'),false);
+  assert.equal(await page.locator('#codex-messages .message-text').filter({hasText:'Fixture imported native history'}).count(),1,'Saved public chat text is rendered once as text');
+  assert.equal(await page.locator('#codex-messages img, #codex-messages script').count(),0);
   assert.deepEqual(b.errors,[]);
   assert.equal(h.service.state().nativeHistory!.recorded!.result.entries.length,2);
   const total=b.posts.length;await page.reload();await b.ready('codex-refresh');
   assert.equal(b.posts.length,total,'reload must not automatically replay history-load');
-  assert.equal(c.calls.filter(x=>x.method==='history-read').length,1);
+  assert.equal(c.calls.filter(x=>x.method==='history-read').length,historyBefore+1);
 });
 
-async function openAdvancedSettings(page:any) {
-  const outer=page.locator('#workspace-settings');
-  if(await outer.getAttribute('open')===null)await outer.locator(':scope > summary').click();
-  for(const summary of await page.locator('#workspace-settings details.settings-group > summary').all()){
-    if(!await summary.evaluate((el:HTMLElement)=>(el.parentElement as HTMLDetailsElement).open))await summary.click();
-  }
+async function openAdvancedSettings(page:any, target='native-conversation-heading') {
+  await page.evaluate((target:string)=>document.dispatchEvent(new CustomEvent('workspace:settingsrequest',{detail:{target}})),target);
+  const drawer=page.locator('#settings-drawer');
+  assert.equal(await drawer.evaluate((dialog:HTMLDialogElement)=>dialog.matches(':modal')),true);
+  assert.equal(await drawer.locator('[data-settings-section]:visible').count(),1);
+  assert.equal(await page.locator('#'+target).isVisible(),true);
+}
+
+async function visibleControl(page:any, selector:string) {
+  const locator=page.locator(selector);
+  const context=await locator.evaluate((el:HTMLElement)=>({settings:!!el.closest('#settings-drawer'),confirmation:!!el.closest('#codex-confirm'),target:el.id}));
+  // Navigation opens only the control's ancestor pane/details. Real user actions
+  // still go through Edge, and the native confirmation remains the top modal.
+  if(context.settings)await openAdvancedSettings(page,context.target);
+  else if(!context.confirmation&&await page.locator('#settings-drawer').evaluate((dialog:HTMLDialogElement)=>dialog.open))await page.locator('[data-settings-close]').click();
+  assert.equal(await locator.isVisible(),true,selector+' must be reachable through the production modal');
+  return locator;
 }
 
 
@@ -536,4 +588,19 @@ test('draft text/context changes during re-review invalidate confirmation withou
     assert.equal(f.doc.getElementById('codex-submit').disabled,true,change);assert.match(f.doc.getElementById('codex-composer').value,/Original workflow draft/);
     assert.match(f.doc.getElementById('codex-confirm-warning').textContent,/scope or preview changed/);assert.ok(f.calls.every(c=>c.method==='GET'));
   }
+});
+
+test('typing immediately invalidates an open draft review without notifying conversation subscribers',async t=>{
+  const initial=attestedState(),f=contextChat(initial);await f.chat.start();t.after(()=>f.chat.stop());
+  f.chat.appendWorkflowDraft('Original draft 🧩  ',workflowOrigin(initial));
+  initial.snapshot!.thread!.threadId+='-changed';initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await f.chat.refresh();
+  const controller=f.chat as unknown as {openDraftReview():void};controller.openDraftReview();
+  f.doc.getElementById('codex-confirm-check').checked=true;f.doc.getElementById('codex-confirm-check').dispatchEvent(new Event('change'));
+  assert.equal(f.doc.getElementById('codex-confirm-submit').disabled,false);
+  let changes=0;f.chat.subscribeStateChange(()=>changes++);
+  const draft=f.doc.getElementById('codex-composer').value+'Final human edit.  ';
+  f.doc.getElementById('codex-composer').value=draft;f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  assert.equal(f.doc.getElementById('codex-confirm-submit').disabled,true);
+  assert.equal(f.doc.getElementById('codex-composer').value,draft);assert.equal(changes,0);
+  assert.ok(f.calls.every(call=>call.method==='GET'));
 });

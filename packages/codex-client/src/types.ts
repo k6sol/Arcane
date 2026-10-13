@@ -46,6 +46,8 @@ export interface ThreadState {
   threadId: string; sessionId: string | null; selection: Selection; configured: boolean;
   writeGranted: boolean; turnId: string | null;
   turnStatus: 'idle' | 'starting' | 'inProgress' | 'cancelling' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+  /** Native turn duration when explicitly reported; never derived from wall timestamps. */
+  durationMs?: number;
 }
 export type ApprovalMethod = 'item/commandExecution/requestApproval' | 'item/fileChange/requestApproval';
 export interface FileChangePreview { path: string; kind: 'add' | 'delete' | 'update'; movePath: string | null; diff: string }
@@ -55,14 +57,29 @@ export interface Approval {
   reason: string | null; command: string | null; cwd: string | null;
   changes: FileChangePreview[] | null; canAccept: boolean; expiresAt: number;
 }
+/** Native counts, not monetary charges. `last` is not a turn total. */
+export interface TokenUsageBreakdown {
+  totalTokens: number; inputTokens: number; cachedInputTokens: number;
+  outputTokens: number; reasoningOutputTokens: number;
+  /** Older protocol versions omit this count; omission is not zero. */
+  cacheWriteInputTokens?: number;
+}
+export interface NativeTokenUsage {
+  source: 'thread/tokenUsage/updated';
+  total: TokenUsageBreakdown; last: TokenUsageBreakdown; modelContextWindow: number | null;
+  /** A decrease cannot distinguish a reset from a delayed native update. */
+  continuity: 'reported' | 'uncertain';
+}
+export interface TokenUsageReport extends NativeTokenUsage { threadId: string; turnId: string; seq: number }
 export type SessionEventValue =
   | { type: 'thread'; threadId: string }
-  | { type: 'turn'; threadId: string; turnId: string; status: string }
+  | { type: 'turn'; threadId: string; turnId: string; status: string; durationMs?: number }
   | { type: 'delta'; threadId: string; turnId: string; itemId: string; text: string }
   | { type: 'item'; threadId: string; turnId: string; itemId: string; itemType: string; status: string | null }
   | { type: 'approval'; handle: string; threadId: string; turnId: string }
   | { type: 'approval-cleared'; handle: string }
   | { type: 'account-changed' }
+  | { type: 'usage'; threadId: string; turnId: string; usage: NativeTokenUsage }
   | { type: 'error'; threadId: string | null; turnId: string | null; code: string };
 export type SessionEvent = SessionEventValue & { seq: number };
 export interface Snapshot {
@@ -72,6 +89,8 @@ export interface Snapshot {
   selection: Selection | null; thread: ThreadState | null; operations: Operation[];
   approvals: Approval[]; events: SessionEvent[]; droppedEvents: number; lastEventSeq: number;
   failureCode: string | null;
+  /** Absent until a supported, bounded native usage notification is received. */
+  usage?: TokenUsageReport;
 }
 export class CodexClientError extends Error {
   constructor(public readonly code: string, message: string, public readonly dispatched = false, public readonly remoteCode: number | null = null) {

@@ -25,11 +25,11 @@ function assetActivity(value: unknown): WorkspaceAssetActivity | null {
 export type WorkspaceTool = 'all' | 'blender' | 'roblox';
 export interface WorkspaceToolChange { tool: WorkspaceTool }
 const TOOL_CONTEXT: Record<WorkspaceTool, { label: string; heading: string; description: string; settings: string; draft: string }> = {
-  all: { label: 'All tools', heading: 'Your workspace', description: 'Models and scene work stay in this conversation.', settings: 'workspace-settings',
+  all: { label: 'All tools', heading: 'Your workspace', description: 'Models and scenes.', settings: 'workspace-settings',
     draft: 'Tool context: Blender models, materials and textures, and Roblox Studio scenes and scripts.' },
-  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Models, materials, textures and animation in this conversation.', settings: 'asset-heading',
+  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Models, materials, textures and animation.', settings: 'asset-heading',
     draft: 'Tool context: Blender models, materials, textures and animation.' },
-  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Scenes, scripts and game systems in this conversation.', settings: 'session-heading',
+  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Scenes, scripts and game systems.', settings: 'session-heading',
     draft: 'Tool context: Roblox Studio scenes, scripts and game systems.' },
 };
 const workspaceTool = (value: string | null): WorkspaceTool | null =>
@@ -60,6 +60,8 @@ export class WorkspaceShell {
   private disposed = false;
   private fullscreenBusy = false;
   private tool: WorkspaceTool = 'all';
+  private settingsReturnFocus: HTMLElement | null = null;
+  private settingsSections: HTMLElement[] = [];
 
   get activeTool(): WorkspaceTool { return this.tool; }
 
@@ -113,6 +115,8 @@ export class WorkspaceShell {
         '\nThis is supplemental context. It does not grant permission to run tools or change files.');
     });
     this.bindSearch();
+    this.bindSettingsDrawer();
+    this.bindToolSwitcher();
     this.bindPreviewPresentation();
     this.bindPreviews();
     this.bindShortcuts();
@@ -121,6 +125,7 @@ export class WorkspaceShell {
   cleanup(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.closeSettings(false);
     for (const remove of this.removers.splice(0)) remove();
     this.searchResults?.remove();
     this.searchResults = null;
@@ -152,6 +157,17 @@ export class WorkspaceShell {
 
   private focus(target: HTMLElement, dismissSecrets = true): void {
     if (dismissSecrets) this.onNavigate?.();
+    const drawer = this.settingsDialog();
+    if (drawer) {
+      if (drawer.contains(target)) {
+        const section = target.closest<HTMLElement>('[data-settings-section]');
+        if (section) this.selectSettingsSection(section);
+        if (!drawer.open && typeof drawer.showModal === 'function') {
+          this.settingsReturnFocus = this.doc.activeElement as HTMLElement | null;
+          try { drawer.showModal(); } catch { this.notice('Settings could not be opened. Please try again.'); return; }
+        }
+      } else if (drawer.open) this.closeSettings(false);
+    }
     // Only explicit navigation opens settings; startup and tool selection do not.
     for (let ancestor: HTMLElement | null = target; ancestor; ancestor = ancestor.parentElement) {
       if (ancestor.tagName === 'DETAILS' && !ancestor.hasAttribute('open')) ancestor.setAttribute('open', '');
@@ -164,6 +180,108 @@ export class WorkspaceShell {
     const scrollTarget = home ? this.doc.getElementById('workspace-stage') ?? this.doc.getElementById('workspace-topbar') ?? target : target;
     scrollTarget.scrollIntoView?.({ block: 'start' });
     target.focus?.({ preventScroll: true });
+  }
+
+  private settingsDialog(): HTMLDialogElement | null {
+    const element = this.doc.getElementById('settings-drawer');
+    return element?.tagName === 'DIALOG' ? element as HTMLDialogElement : null;
+  }
+
+  private closeSettings(restoreFocus = true): void {
+    const drawer = this.settingsDialog(), target = this.settingsReturnFocus;
+    this.settingsReturnFocus = null;
+    if (drawer?.open) this.onNavigate?.();
+    if (drawer?.open && typeof drawer.close === 'function') drawer.close();
+    if (restoreFocus && target?.isConnected && !target.closest('[hidden], [inert]')) target.focus?.({ preventScroll: true });
+  }
+
+  private bindSettingsDrawer(): void {
+    const drawer = this.settingsDialog();
+    if (!drawer) return;
+    this.settingsSections = Array.from(drawer.querySelectorAll<HTMLElement>('[data-settings-section]'));
+    const navigation = Array.from(drawer.querySelectorAll<HTMLButtonElement>('[data-settings-section-target]'));
+    const search = this.doc.getElementById('settings-search') as HTMLInputElement | null;
+    const filter = () => {
+      const query = searchText(search?.value ?? '');
+      const matches: HTMLElement[] = [];
+      for (const control of navigation) {
+        const section = this.settingsSections.find(section => section.id === control.getAttribute('data-settings-section-target'));
+        const labels = section ? Array.from(section.querySelectorAll('h2, h3, label, summary')).map(label => label.textContent ?? '').join(' ') : '';
+        control.hidden = !section || matchScore(control.textContent ?? '', labels, query) === null;
+        if (!control.hidden && section) matches.push(section);
+      }
+      const empty = this.doc.getElementById('settings-search-empty');
+      if (empty) empty.hidden = matches.length !== 0;
+      const current = this.settingsSections.find(section => !section.hidden);
+      if (matches.length && (!current || !matches.includes(current))) {
+        this.onNavigate?.(); this.selectSettingsSection(matches[0]!);
+      } else if (!matches.length) {
+        this.onNavigate?.();
+        for (const section of this.settingsSections) section.hidden = true;
+        for (const control of navigation) control.removeAttribute('aria-current');
+      }
+    };
+    if (search) this.listen(search, 'input', filter);
+    for (const control of navigation) this.button(control, () => {
+      const section = this.settingsSections.find(section => section.id === control.getAttribute('data-settings-section-target'));
+      if (section) this.focus(section);
+    });
+    for (const control of drawer.querySelectorAll<HTMLElement>('[data-settings-close]')) this.button(control, () => this.closeSettings());
+    this.listen(drawer, 'cancel', event => { event.preventDefault(); this.closeSettings(); });
+    this.listen(drawer, 'close', () => {
+      // A queued close from an earlier opening must not affect the current modal.
+      if (drawer.open) return;
+      this.onNavigate?.(); if (this.settingsReturnFocus) this.closeSettings();
+    });
+    this.listen(drawer, 'click', event => {
+      if (event.target !== drawer) return;
+      const input = event as MouseEvent, bounds = drawer.getBoundingClientRect();
+      if (input.clientX < bounds.left || input.clientX > bounds.right || input.clientY < bounds.top || input.clientY > bounds.bottom) this.closeSettings();
+    });
+    // Presentation-only requests: they do not probe, log in, grant permissions or submit.
+    this.listen(this.doc, 'workspace:settingsrequest', event => {
+      const detail: unknown = (event as CustomEvent).detail;
+      if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return;
+      const fields = Object.getOwnPropertyDescriptors(detail);
+      if (Reflect.ownKeys(fields).length !== 1 || !fields.target || !('value' in fields.target)) return;
+      const id: unknown = fields.target.value;
+      if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,127}$/.test(id)) return;
+      const target = this.doc.getElementById(id);
+      if (target && drawer.contains(target)) this.navigate(id);
+    });
+  }
+
+  private selectSettingsSection(section: HTMLElement): void {
+    for (const page of this.settingsSections) page.hidden = page !== section;
+    for (const control of this.doc.querySelectorAll<HTMLElement>('[data-settings-section-target]')) {
+      if (control.getAttribute('data-settings-section-target') === section.id) control.setAttribute('aria-current', 'page');
+      else control.removeAttribute('aria-current');
+    }
+    // A section request from elsewhere in the shell must remain reachable after a search.
+    const active = this.doc.activeElement;
+    if (active?.id !== 'settings-search') {
+      const search = this.doc.getElementById('settings-search') as HTMLInputElement | null;
+      if (search) search.value = '';
+      for (const control of this.doc.querySelectorAll<HTMLElement>('[data-settings-section-target]')) control.hidden = false;
+      const empty = this.doc.getElementById('settings-search-empty'); if (empty) empty.hidden = true;
+    }
+  }
+
+  private bindToolSwitcher(): void {
+    for (const switcher of this.doc.querySelectorAll<HTMLDetailsElement>('.tool-switcher')) {
+      const close = (restore = false) => {
+        if (!switcher.open) return;
+        switcher.open = false;
+        if (restore) switcher.querySelector<HTMLElement>('summary')?.focus();
+      };
+      this.listen(this.doc, 'pointerdown', event => {
+        if (event.target && !switcher.contains(event.target as Node)) close();
+      });
+      this.listen(switcher, 'keydown', event => {
+        const key = event as KeyboardEvent;
+        if (key.key === 'Escape' && !key.isComposing && !event.defaultPrevented) { event.preventDefault(); close(true); }
+      });
+    }
   }
 
   private markCurrent(id: string): void {
@@ -184,7 +302,10 @@ export class WorkspaceShell {
 
   private navigate(id: string | null): boolean {
     const target = id ? this.doc.getElementById(id) : null;
-    if (!target || target.closest('[hidden], [inert]')) return false;
+    if (!target) return false;
+    const section = target.closest<HTMLElement>('[data-settings-section]');
+    if (section) this.selectSettingsSection(section);
+    if (target.closest('[hidden], [inert]')) return false;
     this.recordVisit('target:' + target.id);
     this.markCurrent(target.id);
     this.focus(target);
@@ -240,6 +361,11 @@ export class WorkspaceShell {
 
   private selectTool(tool: WorkspaceTool): void {
     this.onNavigate?.();
+    for (const switcher of this.doc.querySelectorAll<HTMLDetailsElement>('.tool-switcher')) {
+      const menuFocused = switcher.contains(this.doc.activeElement);
+      switcher.open = false;
+      if (menuFocused) switcher.querySelector<HTMLElement>('summary')?.focus();
+    }
     this.recordVisit('tool:' + tool);
     if (tool === this.tool) return;
     this.tool = tool;
@@ -345,7 +471,7 @@ export class WorkspaceShell {
     if (close) this.button(close, () => setOpen(false, true));
     this.listen(preview, 'keydown', event => {
       const key = event as KeyboardEvent;
-      if (!state.open || event.defaultPrevented || key.key !== 'Escape' || key.isComposing || key.repeat ||
+      if (!state.open || this.settingsDialog()?.open || event.defaultPrevented || key.key !== 'Escape' || key.isComposing || key.repeat ||
           key.ctrlKey || key.metaKey || key.altKey || key.shiftKey || this.doc.fullscreenElement === preview) return;
       event.preventDefault();
       setOpen(false, true);
@@ -373,14 +499,16 @@ export class WorkspaceShell {
     if (!previews) return;
     const summary = this.doc.getElementById('asset-job-summary'), status = this.doc.getElementById('preview-guide-status');
     let selected: HTMLElement | null = null;
-    const sync = () => {
-      const figures = Array.from(previews.querySelectorAll<HTMLElement>('figure')).filter(figure => figure.querySelector('canvas'));
+    let figures: HTMLElement[] = [];
+    const sync = (refreshFigures = true) => {
+      if(refreshFigures)figures = Array.from(previews.querySelectorAll<HTMLElement>('figure')).filter(figure => figure.querySelector('canvas'));
       if (!selected || !figures.includes(selected)) selected = figures.find(figure => figure.getAttribute('aria-pressed') === 'true') ?? figures[0] ?? null;
       for (const figure of figures) {
-        figure.setAttribute('role', 'button');
-        figure.setAttribute('tabindex', '0');
-        figure.setAttribute('aria-pressed', String(figure === selected));
-        figure.classList.toggle('is-selected', figure === selected);
+        if(figure.getAttribute('role')!=='button')figure.setAttribute('role', 'button');
+        if(figure.getAttribute('tabindex')!=='0')figure.setAttribute('tabindex', '0');
+        const pressed=figure===selected;
+        if(figure.getAttribute('aria-pressed')!==String(pressed))figure.setAttribute('aria-pressed', String(pressed));
+        if(figure.classList.contains('is-selected')!==pressed)figure.classList.toggle('is-selected', pressed);
       }
       if (status) {
         const text = figures.length ? (summary?.textContent ?? '')
@@ -408,7 +536,7 @@ export class WorkspaceShell {
     });
     const Observer = this.doc.defaultView?.MutationObserver;
     if (Observer) {
-      const observer = new Observer(sync);
+      const observer = new Observer(records => sync(!records || records.some(record => previews.contains(record.target))));
       observer.observe(previews, { childList: true, subtree: true });
       if (summary && status) observer.observe(summary, { childList: true, subtree: true, characterData: true });
       this.removers.push(() => observer.disconnect());

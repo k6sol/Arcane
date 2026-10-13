@@ -23,10 +23,13 @@ local function command(method: string, args: any, epoch: number?): any
 		createdAt = "2026-10-11T00:00:00.000Z", finishedAt = V.NULL, result = V.NULL, error = V.NULL}
 end
 local function fresh(): any
+	fixture.identitySignals = {}
+	game.PlaceId, game.GameId, game.Name = 0, 0, "ArcaneDisposableFixture"
 	fixture.now, fixture.expiry, fixture.edit = 1000, 2000, true
 	fixture.httpHook, fixture.editorHook, fixture.historyHook = nil, nil, nil
 	fixture.failProperty, fixture.failBegin, fixture.failFinish, fixture.failDestroy = nil, nil, nil, nil
 	fixture.sources, fixture.selection = {}, {}
+	fixture.sourceReads = 0
 	local workspace = game:GetService("Workspace")
 	for _, child in ipairs(workspace:GetChildren()) do child.Parent = nil end
 	fixture.writes, fixture.committed, fixture.cancelled = 0, 0, 0
@@ -287,18 +290,24 @@ do
 	client:cycle(); client:cycle()
 	check(fixture.requests == requests + 1 and client.desiredPair == nil, "one-use pairing never retries uncertainty")
 end
-for _, status in ipairs({301, 302, 307, 308, 401, 409}) do
+for _, status in ipairs({301, 302, 307, 308, 401, 403, 409}) do
 	local client = transport()
 	fixture.httpHook = function(_request: any): any return response({}, status) end
-	refuses(if status < 400 then "REDIRECT" elseif status == 401 then "REVOKED" else "RECONCILE",
+	refuses(if status < 400 then "REDIRECT" elseif status == 401 or status == 403 then "REVOKED" else "RECONCILE",
 		function() client:post(client.pair.url, "/v1/plugin/poll", {sessionId = "session-test"}, client.pair.token) end)
 	check(not client.inFlight, "HTTP flight released on refusal")
 end
-do
+for _, status in ipairs({401, 403}) do
 	local client = transport()
-	fixture.httpHook = function(_request: any): any return response({}, 401) end
+	local statuses: any = {}
+	client.onStatus = function(value: any): () table.insert(statuses, value) end
+	fixture.httpHook = function(_request: any): any return response({}, status) end
+	local requests = fixture.requests
 	client:cycle()
 	check(client.pair == nil, "daemon restart revocation clears token")
+	check(statuses[#statuses].state == "disconnected" and statuses[#statuses].sessionId == nil, "poll revocation remains disconnected, never key-rejected")
+	client:cycle(); client:cycle()
+	check(fixture.requests == requests + 1, "revoked poll does not reconnect automatically")
 end
 do
 	local client = transport()
@@ -378,6 +387,92 @@ do
 	client:cycle(); client:cycle(); client:cycle()
 	check(fixture.requests == requests + 1 and client.pair == nil and queued.apiKey == nil, "uncertain connect never automatically retries or retains key")
 	check(statuses[#statuses].state == "disconnected" and not string.find(statuses[#statuses].detail, key, 1, true), "uncertain connection is visibly disconnected with redacted error")
+	for _, status in ipairs(statuses) do check(status.state ~= "failed", "network uncertainty is not a key rejection") end
+end
+
+-- Only a current connect-route 401/403 retires the human key intent. Recovery is
+-- another explicit exchange, and late rejection cannot cancel a newer intent.
+for _, statusCode in ipairs({401, 403}) do
+	fresh()
+	local wrongKey = "arcane_local_v1_45871_" .. string.rep("f", 64)
+	local correctKey = "arcane_local_v1_45871_" .. string.rep("a", 64)
+	local statuses: any = {}
+	local client = Transport.new(game, function(status: any): () table.insert(statuses, status) end)
+	fixture.httpHook = function(_request: any): any return response({}, statusCode) end
+	refuses("KEY_REJECTED", function() client:post("http://127.0.0.1:45871", "/v1/plugin/connect", {apiKey = wrongKey}, nil) end)
+	client:requestConnect(wrongKey)
+	local rejected, generation, requests = client.desiredPair, client.generation, fixture.requests
+	client:cycle()
+	check(rejected.apiKey == nil and client.desiredPair == nil and client.generation > generation, "rejection erases and retires only the current key intent")
+	check(client.pair == nil and client.operations == nil and client.pending == nil and client.identityFence == nil and not client.blocked, "rejected exchange clears session state and identity observers")
+	local failure = statuses[#statuses]
+	check(failure.state == "failed" and failure.sessionId == nil and #failure.allowedRoots == 0 and not failure.allowWrites, "key-rejected status never grants a live session")
+	check(string.find(failure.detail, "Enter a new API key", 1, true) ~= nil and not string.find(V.encode(failure, http), wrongKey, 1, true), "rejection requests a replacement without exposing the key")
+	client:cycle(); client:cycle()
+	check(fixture.requests == requests + 1 and statuses[#statuses] == failure, "rejected key never retries or replaces its failure status automatically")
+	fixture.httpHook = function(request: any): any
+		check(V.decode(request.Body, http).apiKey == correctKey, "explicit recovery sends only the new key")
+		return response({sessionId = "session-test", token = "recovery-token", protocolVersion = 1, allowedRoots = {"Workspace"}, allowWrites = false})
+	end
+	client:requestConnect(correctKey)
+	check(client.pair == nil and statuses[#statuses].state == "connecting", "replacement intent is not an ACK")
+	client:cycle()
+	check(fixture.requests == requests + 2 and client.pair ~= nil and client.pair.token == "recovery-token" and client.desiredPair == nil, "new correct key recovers in exactly one exchange")
+	check(statuses[#statuses].state == "connected" and statuses[#statuses].sessionId == "session-test", "only the recovery ACK reports connected")
+	client:stop()
+
+	fresh()
+	statuses = {}
+	client = Transport.new(game, function(status: any): () table.insert(statuses, status) end)
+	client:requestConnect(wrongKey)
+	local replacement: any = nil
+	fixture.httpHook = function(_request: any): any
+		client:requestConnect(correctKey)
+		replacement = client.desiredPair
+		return response({}, statusCode)
+	end
+	client:cycle()
+	check(client.desiredPair == replacement and replacement.apiKey == correctKey and client.generation == replacement.generation, "stale rejection preserves the newer desired key and generation")
+	check(statuses[#statuses].state == "connecting", "stale rejection cannot publish failed over a newer intent")
+	fixture.httpHook = function(request: any): any
+		check(V.decode(request.Body, http).apiKey == correctKey, "stale rejection recovery exchanges the newer key")
+		return response({sessionId = "session-test", token = "newer-token", protocolVersion = 1, allowedRoots = {"Workspace"}, allowWrites = false})
+	end
+	client:cycle()
+	check(client.pair ~= nil and client.desiredPair == nil and statuses[#statuses].state == "connected", "newer intent ACK survives the older rejection")
+	client:stop()
+end
+
+do
+	fresh()
+	local statuses: any = {}
+	local client = Transport.new(game, function(status: any): () table.insert(statuses, status) end)
+	fixture.httpHook = function(_request: any): any return response({}, 500) end
+	client:requestConnect("arcane_local_v1_45871_" .. string.rep("a", 64))
+	local requests = fixture.requests
+	client:cycle(); client:cycle()
+	check(fixture.requests == requests + 1 and statuses[#statuses].state == "disconnected", "HTTP 500 is an uncertain exchange, not a rejected key or automatic retry")
+	client:stop()
+end
+do
+	fresh()
+	local key = "arcane_local_v1_45871_" .. string.rep("a", 64)
+	local client = Transport.new(game, function(_status: any) end)
+	client:requestConnect(key)
+	local queued, requests = client.desiredPair, fixture.requests
+	refuses("KEY", function() client:requestConnect("malformed-replacement") end)
+	check(client.desiredPair == queued and fixture.requests == requests, "transport validation rejects malformed input before any exchange or intent mutation")
+	client:requestDisconnect() -- Main's malformed-replacement branch explicitly fences the old intent.
+	check(queued.apiKey == nil and client.desiredPair == nil, "internal malformed replacement disconnect forgets old queued key")
+	client:cycle(); client:cycle()
+	check(fixture.requests == requests and client.pair == nil, "malformed replacement never dispatches or automatically retries")
+	fixture.httpHook = function(request: any): any
+		check(V.decode(request.Body, http).apiKey == key, "new valid key replaces malformed intent")
+		return response({sessionId = "session-test", token = "replacement-token", protocolVersion = 1, allowedRoots = {"Workspace"}, allowWrites = false})
+	end
+	client:requestConnect(key); client:cycle()
+	check(client.pair ~= nil and client.desiredPair == nil and fixture.requests == requests + 1, "malformed then new key recovers with one explicit exchange")
+	client:stop()
 end
 do
 	fresh()
@@ -396,6 +491,131 @@ do
 	client:tick()
 	check(client.disconnectRequested and client.pair.generation ~= client.generation, "late key exchange is fenced for revocation")
 	refuses("SESSION", function() client:guard(targeted(client, "selection.read", {}, 60000), client.pair) end)
+end
+
+-- The exact initial exchange identity is pinned, including across yielding HTTP.
+for _, field in ipairs({"PlaceId", "GameId", "Name"}) do
+	for _, route in ipairs({"connect", "pair"}) do
+		fresh()
+		local statuses: any = {}
+		local client = Transport.new(game, function(status: any) table.insert(statuses, status) end)
+		local original = game[field]
+		fixture.httpHook = function(request: any): any
+			local initial = V.decode(request.Body, http).identity
+			check(initial.placeId == 0 and initial.universeId == 0 and initial.name == "ArcaneDisposableFixture", "exchange payload captures original engine identity")
+			game[field] = if field == "Name" then "OtherFixture" else 42
+			game[field] = original -- Change-and-return must still retire this exchange.
+			return response({sessionId = "session-test", token = "old-place-token", protocolVersion = 1, allowedRoots = {"Workspace"}, allowWrites = true})
+		end
+		if route == "connect" then client:requestConnect("arcane_local_v1_45871_" .. string.rep("a", 64))
+		else client:requestPair("http://127.0.0.1:45871", "identity-fixture") end
+		local writes, requests = fixture.writes, fixture.requests
+		client:cycle(); client:cycle()
+		check(client.pair ~= nil and client.pair.identityFence.changed and client.blocked and client.operations == nil, "changed exchange ACK cannot create root registry")
+		check(client.pair.identityFence.identity.name == "ArcaneDisposableFixture" and table.isfrozen(client.pair.identityFence.identity), "pinned identity is immutable initial payload")
+		check(fixture.writes == writes and fixture.requests == requests + 1 and client.desiredPair == nil, "changed exchange never reads scene, writes, retries or polls")
+		check(statuses[#statuses].state == "reconciliation" and not statuses[#statuses].allowWrites, "changed exchange never reports connected grants")
+		client:stop()
+	end
+end
+
+-- A poll resumed in another identity cannot dispatch even a read command.
+for _, field in ipairs({"PlaceId", "GameId", "Name"}) do
+	local client = transport()
+	local envelope = targeted(client, "selection.read", {}, 70000)
+	local original = game[field]
+	local writes, requests = fixture.writes, fixture.requests
+	fixture.httpHook = function(_request: any): any
+		game[field] = if field == "Name" then "OtherFixture" else 42
+		game[field] = original
+		return response({commands = V.array({envelope})})
+	end
+	refuses("IDENTITY", function() client:tick() end)
+	client:cycle()
+	check(client.blocked and client.cacheCount == 0 and fixture.writes == writes and fixture.requests == requests + 1, "changed poll refuses queued read and stops polling after values revert")
+	client:stop()
+end
+
+-- Current-value comparison also fences work before deferred property signals.
+do
+	local client = transport()
+	local parent = client.operations.registry:ref(game:GetService("Workspace"))
+	local queued = targeted(client, "scene.create", {parent = parent, className = "Model", name = "NeverCreate"}, 71000)
+	local writes = fixture.writes
+	game._identity.PlaceId = 42 -- Simulate a deferred GetPropertyChangedSignal.
+	refuses("IDENTITY", function() client:dispatch(queued) end)
+	game._identity.PlaceId = 0
+	refuses("IDENTITY", function() client:dispatch(queued) end)
+	check(client.blocked and client.pending == nil and fixture.writes == writes, "queued mutation cannot pass a latched identity fence")
+	client:stop()
+end
+
+-- UpdateSourceAsync callbacks are non-yielding identity guards, not a rollback.
+for _, phase in ipairs({"before-callback", "callback-reinvocation", "editor-return"}) do
+	local client = transport()
+	local applied = phase ~= "before-callback"
+	local scriptInstance, ref = attached(client.operations, "Script", "IdentityCallback")
+	fixture.sources[scriptInstance] = "before"
+	local update = targeted(client, "script.update", {ref = ref, expectedSource = "before", source = "after"}, 72000)
+	local readsBeforeChange = 0
+	fixture.editorHook = function(instance: any, callback: any): ()
+		if applied then
+			fixture.sources[instance] = callback("before") -- First proposal already applied.
+		end
+		game.Name = "OtherFixture"
+		game.Name = "ArcaneDisposableFixture"
+		readsBeforeChange = fixture.sourceReads
+		if phase == "editor-return" then return end -- No callback reinvocation.
+		callback(if applied then "after" else "before")
+	end
+	local writes = fixture.writes
+	client:dispatch(update)
+	check(client.blocked and client.pending.body.state == "failed" and fixture.writes == writes, "callback identity change blocks further mutation")
+	check(fixture.sources[scriptInstance] == (if applied then "after" else "before"), "identity fence never rolls back an applied editor proposal")
+	check(fixture.sourceReads == readsBeforeChange, "changed editor return never rereads source")
+	if applied then check(client.pending.body.result.partial and not client.pending.body.result.rollbackVerified, "applied proposal retains ambiguous recovery receipt") end
+	fixture.httpHook = function(request: any): any
+		check(string.find(request.Url, "/v1/plugin/result", 1, true) ~= nil, "blocked callback delivers only existing receipt")
+		return response({accepted = true})
+	end
+	local requests = fixture.requests
+	client:tick(); client:tick()
+	check(fixture.requests == requests + 1 and client.pending == nil and client.blocked, "receipt ACK cannot resume callback-fenced work")
+	client:stop()
+end
+
+-- Successful/cached receipts survive a switch, without enabling more work.
+do
+	local client = transport()
+	local parent = client.operations.registry:ref(game:GetService("Workspace"))
+	local create = targeted(client, "scene.create", {parent = parent, className = "Model", name = "AlreadyApplied"}, 73000)
+	client:dispatch(create)
+	local receipt = client.pending
+	check(receipt.body.state == "succeeded" and not client.blocked, "unchanged identity mutation succeeds")
+	game.GameId = 42
+	game.GameId = 0
+	local writes = fixture.writes
+	refuses("IDENTITY", function() client:dispatch(create) end)
+	fixture.httpHook = function(request: any): any
+		check(request.Body == V.encode(receipt.body, http), "identity switch preserves exact existing receipt")
+		return response({accepted = true})
+	end
+	client:tick()
+	check(receipt.acknowledged and client.blocked and client.pending == nil, "successful receipt ACK retains identity latch")
+	refuses("IDENTITY", function() client:dispatch(create) end)
+	local requests = fixture.requests
+	client:cycle()
+	check(fixture.writes == writes and fixture.requests == requests, "cached receipt never re-enables work or automatic cleanup")
+	local connections = table.clone(client.identityFence.connections)
+	client:stop()
+	for _, connection in ipairs(connections) do check(not connection.Connected, "unload disconnects identity watchers") end
+end
+do
+	local client = transport()
+	fixture.httpHook = function(_request: any): any return response({commands = V.array({})}) end
+	client:tick()
+	check(not client.blocked and not client.identityFence.changed and client.operations ~= nil, "unchanged identity poll remains usable")
+	client:stop()
 end
 
 print("Arcane logic checks passed: " .. checks)

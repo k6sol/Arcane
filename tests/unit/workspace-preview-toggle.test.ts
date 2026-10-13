@@ -65,6 +65,7 @@ class Node extends Target {
   contains(node: Node): boolean { return this === node || this.children.some(child => child.contains(node)); }
   private matches(selector: string): boolean {
     return selector.split(',').some(part => {
+      if(/^\.[a-z][\w-]*$/.test(part.trim()))return this.classList.contains(part.trim().slice(1));
       const match = /^([a-z][\w-]*)?(?:\[([\w-]+)(?:="([^"]*)")?\])?$/.exec(part.trim());
       assert.ok(match, 'Fixture selector: ' + part);
       return (!match[1] || this.tagName === match[1].toUpperCase()) &&

@@ -84,7 +84,7 @@ async function fixture(t) {
   await write('toolchains/electron/dist/electron.exe', pe());
   await write('toolchains/electron/dist/version', '44.7.0');
   await write('toolchains/electron/dist/resources/default_app.asar', 'Never package the default application.');
-  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
+  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
   await write('apps/desktop/electron/icon.png', png);
   await write('apps/desktop/electron/node-LICENSE.txt', fixtureLicense);
   const nodeExecutable = join(root, 'toolchains/node/node.exe');
@@ -122,6 +122,10 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
   });
   assert.ok(data.files.some(file => file.path === 'resources/app/icon.png'));
   assert.ok(data.files.some(file => file.path === 'resources/app/code-verification.cjs'));
+  assert.ok(data.files.some(file => file.path === 'resources/app/studio-key-vault.cjs'));
+  assert.ok(data.files.some(file => file.path === 'resources/app/workspace-preferences.cjs'));
+  assert.ok(data.files.some(file => file.path === 'resources/app/provider-login.cjs'));
+  assert.ok(data.files.some(file => file.path === 'resources/product/dist/apps/desktop/src/studio-key-settings.js'));
   assert.deepEqual(data.dependencies.map(dep => dep.path), [
     'node_modules/@modelcontextprotocol/sdk', 'node_modules/@modelcontextprotocol/sdk/node_modules/helper-a',
     'node_modules/helper-a', 'node_modules/zod',
@@ -227,6 +231,15 @@ test('missing host, missing transitive package and stale installed package fail 
   await rm(join(root, 'apps/desktop/electron/code-verification.cjs'));
   await assert.rejects(packageWindows(options), /ENOENT/);
   await writeJson('apps/desktop/electron/code-verification.cjs', {}); // Fixture host bytes are not executed.
+  await rm(join(root, 'apps/desktop/electron/studio-key-vault.cjs'));
+  await assert.rejects(packageWindows(options), /ENOENT/);
+  await writeJson('apps/desktop/electron/studio-key-vault.cjs', {}); // Fixture host bytes are not executed.
+  await rm(join(root, 'apps/desktop/electron/workspace-preferences.cjs'));
+  await assert.rejects(packageWindows(options), /ENOENT/);
+  await writeJson('apps/desktop/electron/workspace-preferences.cjs', {});
+  await rm(join(root, 'apps/desktop/electron/provider-login.cjs'));
+  await assert.rejects(packageWindows(options), /ENOENT/);
+  await writeJson('apps/desktop/electron/provider-login.cjs', {});
   await rm(join(root, 'apps/desktop/electron/preload.cjs'));
   await assert.rejects(packageWindows(options), /ENOENT/);
   await writeJson('apps/desktop/electron/preload.cjs', {}); // Fixture host bytes are not executed.
@@ -243,6 +256,12 @@ test('stale compiled sources remain gated by createLocalRelease provenance', asy
   const { write, options } = await fixture(t);
   await write('apps/desktop/src/workspace-shell.ts', 'export const changed = true;\n');
   await assert.rejects(packageWindows(options), /Compiled source is stale/);
+});
+
+test('Studio key controller compiled output is a required part of the release closure', async t => {
+  const { root, options } = await fixture(t);
+  await rm(join(root, 'dist/apps/desktop/src/studio-key-settings.js'));
+  await assert.rejects(packageWindows(options), /missing dist\/apps\/desktop\/src\/studio-key-settings\.js/);
 });
 
 test('hardlinks, junctions and symlinks cannot redirect packaging or verification', async t => {
@@ -273,7 +292,7 @@ test('optional host icon is copied only when present; unknown Electron payloads 
 
 test('host code must equal its source snapshot even if an outer file descriptor is rehashed', async t => {
   const { options } = await fixture(t);
-  for (const path of ['resources/app/policy.cjs', 'resources/app/code-verification.cjs']) {
+  for (const path of ['resources/app/policy.cjs', 'resources/app/code-verification.cjs', 'resources/app/provider-login.cjs', 'resources/app/studio-key-vault.cjs', 'resources/app/workspace-preferences.cjs']) {
     const result = await packageWindows(options), bytes = Buffer.from('// Changed host policy fixture.\n');
     await writeFile(join(result.directory, path), bytes);
     await mutateManifest(result.directory, data => {

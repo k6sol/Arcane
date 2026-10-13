@@ -54,7 +54,9 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     copyFileSync(join(SOURCE, 'apps/desktop/public', name), join(resources, 'apps/desktop/public', name));
   }
   copyFileSync(join(SOURCE, 'apps/desktop/public/brand/arcane-ridges.png'), join(resources, 'apps/desktop/public/brand/arcane-ridges.png'));
-  for (const name of ['studio', 'codex-chat', 'codex-history', 'learning-panel', 'workspace-shell', 'asset-downloads', 'workflow-panel', 'desktop-verification']) {
+  // Include studio's static provider/key-settings imports so the actual module graph can
+  // bootstrap; a missing fixture resource prevents even the transcript refresh.
+  for (const name of ['studio', 'codex-chat', 'codex-history', 'learning-panel', 'workspace-shell', 'provider-setup', 'studio-key-settings', 'asset-downloads', 'workflow-panel', 'desktop-verification', 'chat-tabs', 'task-usage', 'task-usage-ui']) {
     copyFileSync(join(EMITTED, 'apps/desktop/src', name + '.js'), join(resources, 'dist/apps/desktop/src', name + '.js'));
   }
 
@@ -88,7 +90,9 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     state(): CodexProductState {
       assert.equal(closed, false);
       return structuredClone({ provider: 'codex', use: 'personal-local', projectPath, connecting: false, closing: false,
-        busy: false, snapshot, lastSnapshot: null, actions: [], nativeHistory: null,
+        busy: false, snapshot, lastSnapshot: null, actions: [],
+        nativeHistory: { projectPath, threadId: native.threadId, sessionId: native.sessionId, recorded: null },
+        nativeThreads: [{ provider: 'codex', projectPath, threadId: native.threadId, sessionId: native.sessionId, selection }],
         nativeTools: { configured: false, verified: false } });
     },
     async action() { counters.nativeActions++; throw new Error('Native lifecycle actions are forbidden in this browser fixture.'); },
@@ -376,11 +380,21 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.deepEqual(codex.state().actions, []);
   assert.equal(assets.jobs().length, 0); assert.equal(studio.commands().length, 0); assert.equal(studio.keys().length, 0);
 
-  for (const tool of ['blender', 'roblox', 'all']) {
-    await page.locator('.workspace-tabs [data-workspace-tool="' + tool + '"]').click();
+  for (const tool of ['blender', 'roblox']) {
+    await page.locator('#app-sidebar [data-workspace-tool="' + tool + '"]').click();
+    assert.equal(await page.locator('#workspace-stage').getAttribute('data-workspace-tool'), tool);
     assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
     assert.equal(await page.locator('#codex-messages').textContent(), chat);
   }
+  if(await page.locator('#settings-drawer').isVisible()) {
+    await page.keyboard.press('Escape');await page.locator('#settings-drawer').waitFor({state:'hidden'});
+  }
+  await page.locator('#workspace-preview-toggle').click();
+  assert.equal(await page.locator('#artifact-panel').isVisible(), true);
+  await page.locator('#workspace-preview-close').click();
+  assert.equal(await page.locator('#artifact-panel').isVisible(), false);
+  assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
+  assert.equal(await page.locator('#codex-messages').textContent(), chat);
   // Switching native identity must preserve the appended draft but block sending.
   const foreignThread = randomUUID(); snapshot.thread!.threadId = foreignThread;
   await page.waitForFunction(() => {
@@ -388,11 +402,21 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     return !!warning&&!warning.hidden&&submit?.disabled;
   });
   assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
+  assert.equal(await page.locator('#codex-draft-review-button').isDisabled(), true,
+    'An unowned changed native identity cannot be approved merely by reviewing text.');
+  assert.equal(counters.nativeActions,0);
+  // Preserve the real review-dialog test within the same exact owned chat.
+  // A model ACK change requires review, but does not change thread ownership.
+  snapshot.thread!.threadId=native.threadId;
+  const changedSelection={model:'offline-browser-review-fixture',effort:'high'};
+  snapshot.models.push({model:changedSelection.model,id:'offline-browser-review-model',displayName:'Offline review fixture',efforts:['high'],defaultEffort:'high',entitlement:'unverified'});
+  snapshot.selection=changedSelection;snapshot.thread!.selection=changedSelection;
+  await page.waitForFunction(() => !(document.getElementById('codex-draft-review-button') as HTMLButtonElement).disabled);
   mark('native-draft-review');
   await page.locator('#codex-draft-review-button').click();
   await page.waitForFunction(() => (document.getElementById('codex-confirm') as HTMLDialogElement|null)?.open);
   const draftReview=await page.locator('#codex-confirm-preview').textContent();
-  assert.ok(draftReview!.includes(native.threadId)&&draftReview!.includes(foreignThread));
+  assert.ok(draftReview!.includes(native.threadId)&&draftReview!.includes(selection.model)&&draftReview!.includes(changedSelection.model));
   assert.ok(draftReview!.includes(serverDraft.text));
   await page.locator('#codex-confirm-check').check();
   await page.locator('#codex-confirm-submit').click();
@@ -401,7 +425,8 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.equal(await page.locator('#codex-submit').isDisabled(), false);
   assert.equal(counters.nativeActions,0);assert.equal(snapshot.thread!.writeGranted,false);
   assert.equal(executions(),4,'Draft re-review cannot mutate workflows.');
-  snapshot.thread!.threadId=native.threadId;
+  snapshot.selection=selection;snapshot.thread!.selection=selection;
+  assert.equal(snapshot.models.pop()?.model,changedSelection.model);
   await page.waitForFunction(thread=>document.getElementById('codex-scope')?.textContent?.includes('Thread '+thread),native.threadId);
   assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
   assert.equal(counters.nativeActions, 0);

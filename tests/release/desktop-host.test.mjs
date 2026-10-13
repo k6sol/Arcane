@@ -171,11 +171,15 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['codeVerification', 'platform', 'providerSetup', 'runtime', 'version']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['codeVerification', 'platform', 'providerSetup', 'runtime', 'studioKeys', 'version', 'workspacePreferences']);
   assert.equal(exposed.runtime, 'desktop');
   assert.equal(Object.isFrozen(exposed), true);
   assert.equal(Object.isFrozen(exposed.codeVerification), true);
   assert.equal(Object.isFrozen(exposed.providerSetup),true);
+  assert.equal(Object.isFrozen(exposed.studioKeys), true);
+  assert.equal(Object.isFrozen(exposed.workspacePreferences), true);
+  assert.deepEqual(Object.keys(exposed.workspacePreferences).sort(), ['read', 'save', 'version']);
+  assert.deepEqual(Object.keys(exposed.studioKeys).sort(), ['copy', 'forget', 'list', 'remember', 'reveal', 'version']);
   assert.deepEqual(Object.keys(exposed.providerSetup).sort(),['install','launch','login','status','version']);
   assert.deepEqual(Object.keys(exposed.codeVerification).sort(), ['configure', 'status', 'version']);
 });
@@ -212,7 +216,8 @@ function stopFixture(child) {
   const begin = mainSource.indexOf('async function stopDaemon()');
   const end = mainSource.indexOf('async function startDaemon(', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the named desktop shutdown boundary.');
-  const context = { child, token, origin, setTimeout: () => 1, clearTimeout() {} };
+  const context = { child, token, origin, loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {} };
+  context.providerSetup = { cancelPending() { context.loginCancellations++; } };
   vm.createContext(context);
   vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.stopOwned = stopDaemon;', context);
   return context;
@@ -229,6 +234,7 @@ test('private stop revokes the host credential immediately and waits for the own
   await Promise.resolve();
   assert.equal(fixture.token, '');
   assert.equal(fixture.origin, '');
+  assert.equal(fixture.loginCancellations, 1, 'The owned pending sign-in is cancelled before waiting for daemon quiescence.');
   assert.equal(settled, false);
   assert.deepEqual(JSON.parse(JSON.stringify(envelope)), { type: 'arcane-shutdown', protocolVersion: 1 });
   child.exitCode = 0;
@@ -239,6 +245,7 @@ test('private stop revokes the host credential immediately and waits for the own
 test('regression: an already failed owned child cannot count as clean quiescence', async () => {
   const fixture = stopFixture({ exitCode: 9, connected: false });
   assert.equal(await fixture.stopOwned(), false, 'Failed shutdown must not authorize a new project runtime.');
+  assert.equal(fixture.loginCancellations, 1);
 });
 
 test('regression: post-idle shutdown fences fresh requests before awaiting child cleanup', async () => {
@@ -293,6 +300,8 @@ test('regression: empty smoke fixture creates its profile before Electron setPat
       if (name === './policy.cjs') return windowsPolicy(fs);
       if (name === './provider-setup.cjs') return {createProviderSetup(){assert.fail('Fixture must not start provider setup work.');}};
       if (name === './code-verification.cjs') return { createCodeVerification() { assert.fail('Fixture must not start runtime work.'); } };
+      if (name === './studio-key-vault.cjs') return { createStudioKeyVault() { assert.fail('Fixture must not start key storage work.'); } };
+      if (name === './workspace-preferences.cjs') return { createWorkspacePreferences() { assert.fail('Fixture must not start preference storage work.'); } };
       throw new Error('Unexpected host dependency: ' + name);
     },
     process: { argv: ['C:\\Arcane\\Arcane.exe', '--arcane-smoke', 'C:\\Smoke\\new-empty'], platform: 'win32', resourcesPath: 'C:\\Arcane\\resources', env: {} },
