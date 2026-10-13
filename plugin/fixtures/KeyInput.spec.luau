@@ -26,6 +26,8 @@ local function edited(): ()
 end
 local function reloadSavedKey(): ()
 	local oldClient, requests, writes = client, fixture.requests, #fixture.setCalls
+	local state = fixture.pluginSettings[lastSetting]
+	local resume = state ~= nil and state.connected == true
 	plugin.Unloading:Fire()
 	assert(oldClient.stopped and oldClient.pair == nil and keyInput.Text == ""
 		and fixture.pluginSettings[keySetting] == key, "unload clears lifetime memory while retaining the saved raw key")
@@ -38,11 +40,11 @@ local function reloadSavedKey(): ()
 	end
 	client = fixture.transports[#fixture.transports]
 	assert(client ~= oldClient and client.clientSessionId ~= oldClient.clientSessionId and client.pair == nil
-		and client.desiredPair == nil and client.pending == nil and client.highEpoch == 0 and next(client.cache) == nil,
+		and (client.desiredPair ~= nil) == resume and client.pending == nil and client.highEpoch == 0 and next(client.cache) == nil,
 		"reloaded Main creates a fresh lifetime without any token, command or epoch")
 	assert(keyInput.Text == key and keyInput.TextEditable and control.Text == "Reconnect"
-		and control.BackgroundColor3 ~= green and fixture.requests == requests and #fixture.setCalls == writes,
-		"saved raw key is visible and editable on real Main reload without probing or cached green")
+		and control.BackgroundColor3 ~= green and fixture.requests == requests and #fixture.setCalls == writes + (if resume then 1 else 0),
+		"successful saved connection queues one fresh authentication; no request or cached green before the worker")
 end
 idleMount()
 enter(key); clickConnect()
@@ -115,9 +117,9 @@ else
 		reloadSavedKey()
 		worker = coroutine.create(fixture.workers[#fixture.workers])
 		local requests = fixture.requests
-		cycle(); cycle()
-		assert(fixture.requests == requests and control.Text == "Reconnect", "idle reloaded worker never authenticates automatically")
-		control.Activated:Fire(); ack(); unload()
+		ack()
+		assert(fixture.requests == requests + 1 and control.Text == "Connected", "successful history resumes with one real exchange and no click")
+		unload()
 	elseif mode == "select all delete" or mode == "select all replace" then
 		local epoch, writes = client.generation, #fixture.setCalls
 		keyInput.SelectionStart, keyInput.CursorPosition = 1, #keyInput.Text + 1

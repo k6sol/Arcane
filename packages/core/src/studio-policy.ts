@@ -1,9 +1,16 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { instanceRef, jsonObject, object, textField, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite } from '../../protocol/src/studio.js';
 
-export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric'] as const;
+export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
-const PART_PROPERTIES = new Set(['Size', 'Position', 'Color', 'Anchored', 'CanCollide', 'Transparency', 'Material']);
+// Keep the legacy six-class contract for existing generated models.
+export const GEOMETRY_CREATE_CLASSES = ['WedgePart', 'CornerWedgePart', 'SpawnLocation'] as const;
+export const SAFE_CREATE_CLASSES = [...CREATE_CLASSES, ...GEOMETRY_CREATE_CLASSES] as const;
+export const SHAPES = ['Block', 'Ball', 'Cylinder'] as const;
+export const PART_SHAPE_CLASSES = ['Part', 'FlagStand', 'Platform', 'Seat', 'SkateboardPlatform', 'SpawnLocation'] as const;
+export const BASE_PART_CLASSES = [...PART_SHAPE_CLASSES, 'MeshPart', 'UnionOperation', 'NegateOperation', 'IntersectOperation', 'WedgePart', 'CornerWedgePart', 'TrussPart', 'VehicleSeat'] as const;
+export const MAX_PROPERTIES = 12;
+const PART_PROPERTIES = new Set(['Size', 'Position', 'Orientation', 'Color', 'Anchored', 'CanCollide', 'CastShadow', 'Transparency', 'Reflectance', 'Material', 'Shape']);
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (value && typeof value === 'object') return '{' + Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => JSON.stringify(k) + ':' + canonical(v)).join(',') + '}';
@@ -25,27 +32,32 @@ function root(value: unknown, session: StudioSession): void {
 }
 export function validateProperties(value: unknown, className: string, allowName: boolean): Record<string, Json> {
   const properties = jsonObject(value);
-  if (Object.keys(properties).length > 8) throw new ArcaneError('INPUT', 'Too many properties.');
+  if (Object.keys(properties).length > MAX_PROPERTIES) throw new ArcaneError('INPUT', 'Too many properties.');
   for (const [key, v] of Object.entries(properties)) {
     if (key === 'Name' && allowName) { textField(v, 'name', 100); continue; }
-    if (!['Part', 'MeshPart', 'UnionOperation', 'WedgePart', 'TrussPart'].includes(className) || !PART_PROPERTIES.has(key)) throw new ArcaneError('PROPERTY', 'Property is not writable by the safe bridge.');
-    if (key === 'Anchored' || key === 'CanCollide') { if (typeof v !== 'boolean') throw new ArcaneError('PROPERTY', 'Expected boolean.'); continue; }
-    if (key === 'Transparency') { if (typeof v !== 'number' || v < 0 || v > 1) throw new ArcaneError('PROPERTY', 'Transparency must be 0..1.'); continue; }
+    if (!(BASE_PART_CLASSES as readonly string[]).includes(className) || !PART_PROPERTIES.has(key)) throw new ArcaneError('PROPERTY', 'Property is not writable by the safe bridge.');
+    if (key === 'Shape') {
+      if (!(PART_SHAPE_CLASSES as readonly string[]).includes(className) || !SHAPES.includes(v as typeof SHAPES[number])) throw new ArcaneError('PROPERTY', 'Shape requires a Part and must be Block, Ball or Cylinder.');
+      continue;
+    }
+    if (key === 'Anchored' || key === 'CanCollide' || key === 'CastShadow') { if (typeof v !== 'boolean') throw new ArcaneError('PROPERTY', 'Expected boolean.'); continue; }
+    if (key === 'Transparency' || key === 'Reflectance') { if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) throw new ArcaneError('PROPERTY', `${key} must be 0..1.`); continue; }
     if (key === 'Material') { if (!MATERIALS.includes(v as typeof MATERIALS[number])) throw new ArcaneError('PROPERTY', 'Unsupported material.'); continue; }
     const tagged = object(v, 'tagged property'); keys(tagged, ['type', 'value']);
     if (tagged.type !== (key === 'Color' ? 'Color3' : 'Vector3') || !Array.isArray(tagged.value) || tagged.value.length !== 3 || tagged.value.some(n => typeof n !== 'number' || !Number.isFinite(n) || Math.abs(n) > 100000)) throw new ArcaneError('PROPERTY', 'Expected a bounded tagged three-component value.');
     if (key === 'Color' && tagged.value.some(n => (n as number) < 0 || (n as number) > 1)) throw new ArcaneError('PROPERTY', 'Color channels must be 0..1.');
     if (key === 'Size' && tagged.value.some(n => (n as number) < 0.05 || (n as number) > 2048)) throw new ArcaneError('PROPERTY', 'Part dimensions must be 0.05..2048 studs.');
+    if (key === 'Orientation' && tagged.value.some(n => (n as number) < -360 || (n as number) > 360)) throw new ArcaneError('PROPERTY', 'Orientation channels must be -360..360 degrees.');
   }
   return properties;
 }
 export function engineProperties(value: Record<string, Json>): Record<string, Json> {
   const result: Record<string, Json> = {};
   for (const [key, v] of Object.entries(value)) {
-    if (['Size', 'Position', 'Color'].includes(key) && v && typeof v === 'object' && !Array.isArray(v)) {
+    if (['Size', 'Position', 'Orientation', 'Color'].includes(key) && v && typeof v === 'object' && !Array.isArray(v)) {
       const tagged = v as { type: string; value: number[] };
       result[key] = { type: tagged.type, value: tagged.value.map(Math.fround) };
-    } else result[key] = key === 'Transparency' && typeof v === 'number' ? Math.fround(v) : v;
+    } else result[key] = ['Transparency', 'Reflectance'].includes(key) && typeof v === 'number' ? Math.fround(v) : v;
   }
   return result;
 }
@@ -66,7 +78,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
     case 'script.update': keys(a, ['ref', 'expectedSource', 'source']); ref(a.ref, session); source(a.expectedSource); source(a.source); break;
     case 'scene.create': {
       keys(a, ['parent', 'className', 'name', 'properties']); ref(a.parent, session); textField(a.name, 'instance name', 100);
-      if (!CREATE_CLASSES.includes(a.className as typeof CREATE_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported creation class.');
+      if (!SAFE_CREATE_CLASSES.includes(a.className as typeof SAFE_CREATE_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported creation class.');
       a.properties = engineProperties(validateProperties(a.properties ?? {}, a.className as string, false)); break;
     }
     case 'scene.update': {

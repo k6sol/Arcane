@@ -1,5 +1,12 @@
 import {fail} from './validation.js';
+import { missingArcaneTools } from '../../protocol/src/arcane-tools.js';
 export interface McpInventoryRow {name:string;runtimeStatus:string|null;toolNames:string[];toolsError:boolean;plugin:boolean;pluginId:string|null}
+/** Check effective native inventory, not merely a configured/connected server. */
+export function requireArcaneBuildTools(rows: readonly McpInventoryRow[]): void {
+ const row=rows.find(value=>value.name==='arcane');
+ const missing=missingArcaneTools(row?.toolNames ?? []);
+ if(missing.length)fail('MCP_CAPABILITIES','Arcane build tools did not load: '+missing.join(', ')+'. No model turn was sent.');
+}
 /** Child-only policy; unsupported CLI dotted keys fail closed, never rewrite user config. */
 export function arcaneIsolationOverrides(rows:McpInventoryRow[],nodeExecutable:string,agentToken:string):string[] {
  const args:string[]=[];

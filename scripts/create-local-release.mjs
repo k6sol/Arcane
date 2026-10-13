@@ -24,7 +24,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'dist/apps/desktop/src/asset-downloads.js', 'dist/apps/desktop/src/asset-downloads.js.map',
   'apps/desktop/src/learning-panel.ts', 'dist/apps/desktop/src/learning-panel.js', 'dist/apps/desktop/src/learning-panel.js.map', 'apps/desktop/src/codex-history.ts','apps/desktop/src/workflow-panel.ts', 'dist/apps/desktop/src/codex-history.js','dist/apps/desktop/src/workflow-panel.js', 'dist/apps/desktop/src/codex-history.js.map','dist/apps/desktop/src/workflow-panel.js.map', BRAND_BITMAP_PATH,
 ];
-const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd']);
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'apps/desktop/public/vendor/three/LICENSE']);
 const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
 const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
 export function validateBrandBitmap(bytes) {

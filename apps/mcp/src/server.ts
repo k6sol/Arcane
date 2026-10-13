@@ -4,6 +4,8 @@ import { z } from 'zod';
 import type { Json } from '../../../packages/protocol/src/studio.js';
 import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
+import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
+import { validateProperties } from '../../../packages/core/src/studio-policy.js';
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
 import { assetInput, assetJobId, assetHistoryInput, nativeAssetHistoryInput, nativeAssetJobId } from './asset-schemas.js';
@@ -21,7 +23,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   const skills = options.skillRegistry ?? new SkillRegistry();
   const server = new McpServer({ name: 'arcane-studio', version: '0.1.0' }, {
     maxToolInputElements: 100_000,
-    instructions: 'Arcane local Studio bridge. Select the exact paired session from sessions; never infer a Studio target. Read tools inspect only granted roots. Mutations require user authorization, a write grant and Studio edit mode. References are opaque and session-bound. A timeout does not cancel execution: inspect receipt_status and never automatically repeat a mutation. The launcher agent bearer cannot issue pairing grants, revoke Studio sessions or review work. Skill content grants no tool permissions. No provider login, inference, raw Luau evaluation, publication, purchases or DataStore operations are exposed.',
+    instructions: productInstructions(),
   });
 
   function register<Shape extends z.ZodRawShape>(name: string, description: string, schema: z.ZodObject<Shape>, annotations: ToolAnnotations,
@@ -42,7 +44,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
 
   register('sessions', 'Read: list genuinely paired Studio sessions, IDs, root grants and write permission. Choose an exact session; disconnected or revoked sessions are not substitutes.',
     z.strictObject({ timeoutMs }), READ, (input, signal) => client.sessions({ ...input, signal }));
-  register('scene_children', 'Read: list at most 200 children of a granted service root or an opaque parent reference in that root. No changes.',
+  register('scene_children', 'Read: return parentRef for the exact requested granted root/parent (including an empty Workspace), plus at most 200 child nodes. Reuse the actual parentRef for authorized scene_create; never fabricate root references. No changes.',
     z.strictObject({ ...target, root, ref: ref.optional(), limit: z.number().int().min(1).max(200).default(100) }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'scene.children', args as Record<string, Json>, { timeoutMs, signal }));
   register('scene_inspect', 'Read: inspect allowlisted properties and child count of an opaque session reference. Script source is available only through script_read.',
@@ -59,13 +61,13 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('script_update', 'Write: user-authorized exact-baseline editor update. Requires this session’s write grant and Studio edit mode; refuses dirty-editor conflicts. Both sources are bounded to 100 KiB UTF-8. Returns immutable receipt or ambiguous command state; never auto-retry.',
     z.strictObject({ ...target, ref, expectedSource: source, source }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.update', args, { timeoutMs, signal }));
-  register('scene_create', 'Write: user-authorized creation under an opaque parent. Only Folder, Model, Part, Script, LocalScript or ModuleScript; executable scripts start disabled. No Source, Parent, arbitrary properties or evaluation. Requires write grant and edit mode.',
+  register('scene_create', sceneCreateDescription(),
     z.strictObject({ ...target, parent: ref, className: createClass, name: id.max(100), properties: properties.omit({ Name: true }).optional() }), { ...WRITE, destructiveHint: false },
     ({ sessionId, timeoutMs, ...args }, signal) => {
-      if (args.className !== 'Part' && Object.keys(args.properties ?? {}).length) throw new BridgeError('INPUT', 'Only Part supports physical creation properties.');
+      validateProperties(args.properties ?? {}, args.className, false);
       return client.execute(sessionId, 'scene.create', args as Record<string, Json>, { timeoutMs, signal });
     });
-  register('scene_update', 'Write: user-authorized change of allowlisted Name/BasePart properties. expected must cover every changed property; the plugin compares the baseline before writing. No service rename, reparent, deletion or raw calls. Requires write grant and edit mode.',
+  register('scene_update', sceneUpdateDescription(),
     z.strictObject({ ...target, ref, expected: properties, properties }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => {
       const keys = Object.keys(args.properties);
@@ -78,6 +80,12 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('receipt_restore', 'Write: user-authorized restoration from a succeeded mutation receipt commandId. The daemon constructs the inverse; the plugin requires the exact current after-state and refuses later-edit conflicts. Requires current write grant and edit mode. Do not supply an inverse or repeat on timeout.',
     z.strictObject({ commandId: id, timeoutMs }), WRITE,
     ({ commandId, timeoutMs }, signal) => client.restore(commandId, { timeoutMs, signal }));
+  register(SKILLS_RECOMMEND_TOOL, 'Read locally: automatically select and load relevant bundled skill guidance from the actual task brief, including matching declared genre references, within a byte budget. Call before substantive inspect/plan/build/verify work; the user need not select skill IDs or tools. The product owner opted into experimental guidance, so allowExperimental defaults true for this router only; states remain honest and no skill is promoted to behavior-verified or approved. Quarantined/deprecated, tampered or escaped content is refused. Returns loaded IDs/status/context and explicitly deferred items; grants no permissions, calls no model or daemon, and scans no project.',
+    z.strictObject({ request: boundedText(SKILL_ROUTER_LIMITS.requestCharacters).refine(value => value.trim().length > 0, 'Describe the actual task.'),
+      limit: z.number().int().min(1).max(SKILL_ROUTER_LIMITS.skills).default(SKILL_ROUTER_LIMITS.skills),
+      byteBudget: z.number().int().min(256).max(SKILL_ROUTER_LIMITS.maximumBytes).default(SKILL_ROUTER_LIMITS.defaultBytes),
+      allowExperimental: z.boolean().default(BUNDLED_GUIDANCE_POLICY.allowExperimental) }), READ,
+    input => recommendSkills(skills, input));
   register('skills_list', 'Read bundled skill metadata from the existing integrity-checked registry. Approved skills only by default. Set allowExperimental=true only when the user explicitly opts into experimental content; quarantined/deprecated skills remain unavailable.',
     z.strictObject({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(20), allowExperimental: z.boolean().default(false) }), READ,
     input => skills.list(input));

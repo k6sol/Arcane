@@ -253,4 +253,11 @@ table.insert(connections, plugin.Unloading:Connect(function()
 	widget:Destroy()
 	toolbar:Destroy()
 end))
+-- Resume a previously successful user connection once in a fresh lifetime.
+-- This only queues authentication; cached state is never proof of connection,
+-- no session token/command is restored, and an ambiguous exchange is not replayed.
+if savedKey ~= nil and lastKnownConnected then
+	local ok = pcall(function() transport:requestConnect(savedKey) end)
+	if not ok then rememberState(false) end
+end
 transport:start()

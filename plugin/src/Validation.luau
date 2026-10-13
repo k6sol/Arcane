@@ -1,7 +1,7 @@
 --!strict
 local Validation = {}
 Validation.PROTOCOL = 1
-Validation.VERSION = "0.1.0"
+Validation.VERSION = "0.1.2"
 Validation.ARGUMENT_BYTES = 256 * 1024
 Validation.RESULT_BYTES = 512 * 1024
 Validation.SOURCE_BYTES = 100 * 1024
@@ -13,6 +13,11 @@ local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read"})
 Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "scene.restore"})
+Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
+Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
+Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
+Validation.SHAPES = table.freeze({"Block", "Ball", "Cylinder"})
+Validation.MAX_PROPERTIES = 12
 
 function Validation.fail(code: string, message: string): never
 	error(table.freeze({code = code, message = message}), 0)
@@ -62,6 +67,85 @@ end
 function Validation.boolean(value: any, label: string): boolean
 	if type(value) ~= "boolean" then Validation.fail("INPUT", "Invalid " .. label .. ".") end
 	return value
+end
+
+-- Protocol enum names are data. Resolve only a bounded enum and verify the
+-- native result before recording, allocating, or assigning any property.
+function Validation.enum(value: any, allowed: {string}, category: any, label: string): any
+	if type(value) ~= "string" or not table.find(allowed, value) then Validation.fail("PROPERTY", "Unsupported " .. label .. ".") end
+	local ok, item = pcall(function() return category[value] end)
+	if not ok or typeof(item) ~= "EnumItem" or item.EnumType ~= category or item.Name ~= value then
+		Validation.fail("PROPERTY", "Native " .. label .. " enum is unavailable.")
+	end
+	return item
+end
+
+-- Extend the frozen legacy codec without changing its six-class public list.
+-- Creation uses reflected class allowlists; existing objects use native IsA.
+function Validation.geometryProperties(legacy: any): any
+	local codec: any = {CLASSES = Validation.CREATE_CLASSES, MATERIALS = legacy.MATERIALS}
+	local fields = table.clone(legacy.PART_FIELDS)
+	for _, name in ipairs({"Orientation", "CastShadow", "Reflectance"}) do table.insert(fields, name) end
+	codec.PART_FIELDS = table.freeze(fields)
+	function codec.decode(name: string, value: any, isBasePart: boolean, isPart: boolean?): any
+		if name == "Shape" then
+			if not isPart then Validation.fail("PROPERTY", "Shape requires a native Part.") end
+			return Validation.enum(value, Validation.SHAPES, Enum.PartType, name)
+		end
+		if name == "Orientation" or name == "CastShadow" or name == "Reflectance" then
+			if not isBasePart then Validation.fail("PROPERTY", "Property requires a native BasePart.") end
+			if name == "CastShadow" then return Validation.boolean(value, name) end
+			if name == "Reflectance" then return Validation.number(value, 0, 1, name) end
+			local tag = Validation.fields(value, {"type", "value"}, "tagged property")
+			if tag.type ~= "Vector3" then Validation.fail("PROPERTY", "Incorrect property type tag.") end
+			local components = Validation.list(tag.value, 3, "components")
+			if #components ~= 3 then Validation.fail("PROPERTY", "Property needs three components.") end
+			for _, component in ipairs(components) do Validation.number(component, -360, 360, name) end
+			return Vector3.new(components[1], components[2], components[3])
+		end
+		if name == "Material" then
+			if not isBasePart then Validation.fail("PROPERTY", "Property requires a native BasePart.") end
+			return Validation.enum(value, legacy.MATERIALS, Enum.Material, name)
+		end
+		return legacy.decode(name, value, isBasePart)
+	end
+	function codec.encode(name: string, value: any): any
+		if name == "Orientation" then return {type = "Vector3", value = Validation.array({value.X, value.Y, value.Z})} end
+		if name == "Shape" then return value.Name end
+		return legacy.encode(name, value)
+	end
+	function codec.validate(instance: any, values: any, service: boolean): ({[string]: any}, {string})
+		Validation.object(values, "properties")
+		local decoded: {[string]: any}, names: {string} = {}, {}
+		for name, value in pairs(values) do
+			if service then Validation.fail("SERVICE", "Service properties cannot be changed.") end
+			if #names >= Validation.MAX_PROPERTIES then Validation.fail("INPUT", "Too many properties.") end
+			decoded[name] = codec.decode(name, value, instance:IsA("BasePart"), instance:IsA("Part"))
+			table.insert(names, name)
+		end
+		table.sort(names)
+		return decoded, names
+	end
+	function codec.snapshot(instance: any, names: {string}?): {[string]: any}
+		local selected: {string} = names or {"Name"}
+		if not names and instance:IsA("BasePart") then
+			selected = table.clone(codec.PART_FIELDS)
+			table.insert(selected, "Name")
+			if instance:IsA("Part") then table.insert(selected, "Shape") end
+		end
+		local result: {[string]: any} = {}
+		for _, name in ipairs(selected) do result[name] = codec.encode(name, instance[name]) end
+		if not names and instance:IsA("BaseScript") then result.Disabled = instance.Disabled end
+		return result
+	end
+	function codec.compare(instance: any, expected: any, names: {string}): boolean
+		local decoded = codec.validate(instance, expected, false)
+		for _, name in ipairs(names) do
+			if expected[name] == nil or instance[name] ~= decoded[name] then return false end
+		end
+		return true
+	end
+	return table.freeze(codec)
 end
 
 function Validation.array(value: {any}): {any}

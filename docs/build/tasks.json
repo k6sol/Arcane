@@ -1254,7 +1254,7 @@
     "scope": "Full original catalogue retained; not a product completion percentage. Goal local delivery gates remain authoritative."
   },
   "currentSimplifiedKeyAndPerformanceUpgrade": {
-    "state": "implementation-complete-focused-validation-in-progress",
+    "state": "current-exe-open-27-checks-pass-scoped-full-regression-acceptance",
     "requested": "One Generate API key step after sign-in; only Regenerate afterwards; full supported Studio roots and writes; desktop copy and encrypted key persistence; editable visible saved plugin key; Connected ACK / red Reconnect / failed replacement; taller plugin; compact catalogue-only model/reasoning; lower typing hot-path work",
     "nativeClipboardHostTests": {
       "tests": 38,
@@ -1280,6 +1280,58 @@
       "source": "runtime/chat-tabs-perf-1791922195305/after-realview.json",
       "trailingSaveApproxMs": 400
     },
-    "fullProductVerified": false
+    "fullProductVerified": false,
+    "executable": "C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/windows/arcane-win32-x64-cW8IBK/Arcane.exe",
+    "executableProof": "runtime/verification/windows-executable-KaRjO1/verification.json",
+    "normalUserLaunchPid": 13668,
+    "targetedCoordinatorTests": {
+      "tests": 50,
+      "passed": 50,
+      "skipped": 0
+    },
+    "fullRegression": {
+      "state": "terminal-original-unit-invocation-failed-two-obsolete-ui-assertions-both-repaired-and-passed-in-isolated-run",
+      "originalEvidence": "runtime/verification/key-performance-full-rO9FJh",
+      "unitTests": 1458,
+      "originalUnitPassed": 1456,
+      "originalUnitFailed": 2,
+      "skipped": 0,
+      "repairedUnitTests": 2,
+      "repairedUnitPassed": 2,
+      "offlineTests": 491,
+      "offlinePassed": 491,
+      "allProductionAndOtherFixturesUnchanged": true,
+      "combinedEvidence": "runtime/verification/frontend-key-repair-P5D18L/combined-verification.json",
+      "notANewFullInvocation": true,
+      "execSessionId": 9526,
+      "terminalAcknowledged": true
+    },
+    "documentation": "docs/build/KEY_ONBOARDING_AND_PERFORMANCE_20261013.md"
+  },
+  "currentAcceptedDevelopmentPreview": {
+    "executable": "C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/windows/arcane-win32-x64-cW8IBK/Arcane.exe",
+    "manifestSha256": "44e5cabf99778828936a65d558d4b0465e171b8b059758c7a870e309d2824279",
+    "packagedFiles": 3896,
+    "actualExecutableChecks": 27,
+    "signed": false,
+    "installer": false,
+    "requiresWholeFolder": true,
+    "fullProductVerified": false,
+    "openedForUser": true,
+    "pid": 13668
+  },
+  "lastAutomaticBuildUpdate": {
+    "date": "2026-10-13",
+    "state": "verified_components_pending_packaged_bridge_acceptance",
+    "tools": 25,
+    "pluginVersion": "0.1.2",
+    "regressionTests": 353,
+    "regressionPass": 353,
+    "nativeMetadataInferenceTurns": 0,
+    "nativePrimitiveCheckRestored": true,
+    "causality": "Native metadata reports the full tool catalogue for both profiles; filtering is not proven as the prior failure cause. Proven product gaps were missing parentRef, Shape/Orientation, a weak inventory readiness gate, and automatic routing guidance.",
+    "evidence": "runtime/verification/automatic-build-components-current-20261013.json",
+    "fullProductVerified": false,
+    "savedSuccessfulConnectionResume": "One fresh authentication on startup; no cached green, restored commands or automatic ambiguous retry."
   }
 }

@@ -1,6 +1,7 @@
 --!strict
 local V = require(script.Parent.Validation)
-local P = require(script.Parent.Properties)
+local LegacyProperties = require(script.Parent.Properties)
+local P = V.geometryProperties(LegacyProperties)
 local Registry = require(script.Parent.Registry)
 local Operations = {}
 Operations.__index = Operations
@@ -59,7 +60,7 @@ function Operations:children(args: any): any
 	local children = parent:GetChildren()
 	local items = V.array({})
 	for index = 1, math.min(limit, #children) do table.insert(items, self.registry:node(children[index])) end
-	return {items = items, truncated = #children > limit}
+	return {parentRef = self.registry:ref(parent), items = items, truncated = #children > limit}
 end
 
 function Operations:search(args: any): any
@@ -153,9 +154,13 @@ function Operations:create(command: any, args: any, guard: () -> ()): any
 	-- Decode the complete payload before allocating or parenting an Instance.
 	V.object(properties, "properties")
 	local decoded: {[string]: any} = {}
+	local propertyCount = 0
 	for key, value in pairs(properties) do
+		propertyCount += 1
+		if propertyCount > V.MAX_PROPERTIES then V.fail("INPUT", "Too many properties.") end
 		if key == "Name" then V.fail("PROPERTY", "Use the create name field.") end
-		decoded[key] = P.decode(key, value, args.className == "Part")
+		decoded[key] = P.decode(key, value, table.find(V.BASE_PART_CLASSES, args.className) ~= nil,
+			table.find(V.PART_SHAPE_CLASSES, args.className) ~= nil)
 	end
 	local instance: any = nil
 	local result = self:record(command, guard, function(progress: any): any

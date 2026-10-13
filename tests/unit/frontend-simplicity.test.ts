@@ -9,17 +9,20 @@ import { pathToFileURL } from 'node:url';
 const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 const source = (file: string) => readFile(resolve(file), 'utf8');
 
-test('General keeps the key lifecycle hooks and initial guards in an optional disclosure', async () => {
+test('General keeps one key action and initial guards without permission or history selectors', async () => {
   const html = await source('apps/desktop/public/studio.html');
   const general = html.slice(html.indexOf('<section id="workspace-settings"'), html.indexOf('<section id="settings-connections"'));
   const details = general.match(/<details id="settings-key-details"[^>]*>[\s\S]*?<\/details>/)?.[0];
   assert.ok(details);
-  assert.doesNotMatch(details.slice(0, details.indexOf('>')), /\b(?:open|hidden)\b/);
+  assert.match(details.slice(0, details.indexOf('>')), /\bhidden\b/);
+  assert.doesNotMatch(details.slice(0, details.indexOf('>')), /\bopen\b/);
   assert.match(details, /<summary>Key details<\/summary>/);
   for (const id of ['settings-key-select', 'settings-key-metadata', 'settings-key-storage']) {
     assert.equal(details.split('id="' + id + '"').length - 1, 1, id);
   }
-  assert.match(general, /id="settings-key-heading">Current key<\/h3>/);
+  assert.match(general, /id="settings-key-heading">Arcane API key<\/h3>/);
+  assert.match(general, /id="settings-key-generate"[^>]*disabled>Generate API key/);
+  assert.doesNotMatch(html, /id="key-writes"|id="key-roots"|name="key-root"/);
   for (const id of ['settings-key-secret', 'settings-key-show', 'settings-key-copy', 'settings-key-notice']) {
     assert.equal(general.split('id="' + id + '"').length - 1, 1, id);
     assert.doesNotMatch(details, new RegExp('id="' + id + '"'));
@@ -111,21 +114,21 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
       assert.equal(await page.locator('#settings-key-copy').isDisabled(), true);
       await fits('settings-key-show');
       await capture('general-' + viewport.width);
-      await details.locator('summary').focus(); await page.keyboard.press('Enter');
-      assert.equal(await page.locator('#settings-key-select').isVisible(), true);
+      assert.equal(await details.isVisible(), false);
+      assert.equal(await page.locator('#settings-key-generate').isVisible(), true);
+      assert.equal(await page.locator('#settings-key-generate').isDisabled(), true);
+      await fits('settings-key-generate');
       assert.match((await page.locator('#settings-key-storage').textContent())!, /temporary|unavailable/i);
-      await details.locator('summary').press('Space');
       assert.equal(await details.getAttribute('open'), null);
       await page.keyboard.press('Escape'); await drawer.waitFor({ state: 'hidden' });
       assert.equal(await opener.evaluate(node => node === document.activeElement), true);
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'settings-key-select' } })));
-    assert.equal(await details.getAttribute('open'), '');
-    assert.equal(await page.locator('#settings-key-select').isVisible(), true);
-    await page.locator('#workspace-settings [data-workspace-target="key-heading"]').click();
-    assert.equal(await page.locator('#settings-advanced').isVisible(), true);
-    assert.equal(await page.locator('#key-heading').evaluate(node => node === document.activeElement), true);
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'settings-key-generate' } })));
+    assert.equal(await details.getAttribute('open'), null);
+    assert.equal(await page.locator('#settings-key-select').isVisible(), false);
+    assert.equal(await page.locator('#settings-advanced').isVisible(), false);
+    assert.equal(await page.locator('#settings-key-generate').evaluate(node => node === document.activeElement), false, 'Disabled generation cannot gain focus or grant access.');
     await page.keyboard.press('Escape');
     await page.locator('#go-assets').click();
     assert.equal(await page.locator('.composer-tool-context').isVisible(), true);

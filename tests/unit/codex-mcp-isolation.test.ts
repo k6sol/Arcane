@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { arcaneThreadIsIsolated, type McpInventoryRow } from '../../packages/codex-client/src/mcp-isolation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
+import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { CodexClientError, type Approval } from '../../packages/codex-client/src/types.js';
 
@@ -31,10 +32,12 @@ const record = value => appendFileSync(audit, JSON.stringify(value) + '\n');
 const held = (file, reply) => { const timer = setInterval(() => { if (existsSync(file)) { clearInterval(timer); reply(); } }, 5); };
 const row = (name, runtimeStatus = 'disabled') => ({ name, runtimeStatus, tools: {}, toolsError: null, pluginId: null });
 const inventory = params => {
-  const arcane = { ...row('arcane', 'connected'), tools: { work_runs: { description: 'SYNTHETIC_PRIVATE_DESCRIPTION' } } };
+  const arcane = { ...row('arcane', 'connected'), tools: Object.fromEntries(${JSON.stringify(ARCANE_TOOL_NAMES)}.map(name=>[name,{description:'SYNTHETIC_PRIVATE_DESCRIPTION'}])) };
   let data = [arcane, row('inherited')], nextCursor = null;
   const mode = scenario.inventory;
   if (check >= (scenario.failCheck || 2) || mode === 'initial-inherited') {
+    if (mode === 'read-only-tools') delete arcane.tools.scene_create;
+    if (mode === 'missing-skill-router') delete arcane.tools.skills_recommend;
     if (mode === 'inherited' || mode === 'initial-inherited') data[1].runtimeStatus = 'connected';
     if (mode === 'missing-arcane') data = [row('inherited')];
     if (mode === 'duplicate') data = [arcane, arcane];
@@ -175,6 +178,7 @@ test('native-config retains its legacy launch and turn path without automatic in
 });
 
 for (const [inventory, expected] of [
+  ['read-only-tools', 'MCP_CAPABILITIES'], ['missing-skill-router', 'MCP_CAPABILITIES'],
   ['inherited', 'MCP_ISOLATION'], ['missing-arcane', 'MCP_ISOLATION'], ['null-status', 'MCP_ISOLATION'], ['error', 'MCP_ISOLATION'], ['plugin-arcane', 'MCP_ISOLATION'],
   ...['duplicate', 'unknown-status', 'missing-status', 'missing-error', 'missing-plugin', 'bad-error', 'bad-plugin', 'bad-tools', 'bad-tool-value', 'bad-name', 'bad-data', 'bad-row', 'page-bound', 'server-bound', 'tool-bound', 'tool-name-bound', 'cursor-loop', 'pagination-bound', 'duplicate-page', 'missing-cursor'].map(mode => [mode, 'MCP_INVENTORY']),
   ['remote', 'REMOTE_REJECTED'], ['timeout', 'TIMEOUT'], ['disconnect', 'DISCONNECTED'],

@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "protocolVersion": 1,
-  "pluginVersion": "0.1.0",
+  "pluginVersion": "0.1.2",
   "format": "roblox-xml-v4",
   "preferredArtifact": "ArcaneLocalBridge.lua",
   "entry": "ArcaneLocalBridge",
   "sources": [
     {
       "path": "src/Main.server.luau",
-      "bytes": 11096,
-      "sha256": "51d04e37be4bd40068b8d9ec6dd5ab42dd8e04145594623e2ad778776406f64e"
+      "bytes": 11496,
+      "sha256": "10e4968ee5dec55143afa5c05f7f03de3bcbd2d4188a3e423b542c6a35de538c"
     },
     {
       "path": "src/Types.luau",
@@ -18,8 +18,8 @@
     },
     {
       "path": "src/Validation.luau",
-      "bytes": 11457,
-      "sha256": "50f570ba18f43303fc3995746716de279b7366cc91cd6497f962ec44934bd15b"
+      "bytes": 16353,
+      "sha256": "a7a9d8dd50ea98e8d63ce911a10e79d6712bdf3efb6df799f0da5f6c3e2655d9"
     },
     {
       "path": "src/Registry.luau",
@@ -28,13 +28,13 @@
     },
     {
       "path": "src/Properties.luau",
-      "bytes": 3599,
-      "sha256": "af4cceeeb232b098dab7b3c4eca78dcba3918df69104865d2864055864bc0fc9"
+      "bytes": 3652,
+      "sha256": "0fe813c80234aad409bc91fe2f0404d3d2031c1575725e6a21bc157a3d97f77b"
     },
     {
       "path": "src/Operations.luau",
-      "bytes": 13688,
-      "sha256": "981c9d2a5fb3133824c495e6b746458e11aa08397854c10c66017a231c35c2ec"
+      "bytes": 14014,
+      "sha256": "76aa0e133d7b0083c75ef034e10120db8abaa31044a60b715ed53578bb1709db"
     },
     {
       "path": "src/Transport.luau",
@@ -46,20 +46,20 @@
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 64562,
-      "sha256": "a214abfa99488cb8f138627b3227c8814436c518e89e6e2b3c8ccf4b02162e10"
+      "bytes": 70237,
+      "sha256": "2a8990f74fff69977545087e5510cda3593145a9de0895cd6e45f888a505bef0"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 64562,
-      "sha256": "a214abfa99488cb8f138627b3227c8814436c518e89e6e2b3c8ccf4b02162e10"
+      "bytes": 70237,
+      "sha256": "2a8990f74fff69977545087e5510cda3593145a9de0895cd6e45f888a505bef0"
     },
     {
       "name": "ArcaneLocalBridge.lua",
       "format": "luau-source",
-      "bytes": 64298,
-      "sha256": "38e2fd7b2c8bd057572774baf744345fd57034fa9c4605fd8d5365f2e8de5463"
+      "bytes": 69973,
+      "sha256": "161f5be1aaf727444a0d9942b333bce8071bdadebd51420de25b1de1e7945179"
     }
   ]
 }

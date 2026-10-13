@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { nativeEnvironment, type InternalProcess } from './transport.js';
 import { exact, fail, str } from './validation.js';
 import type { ArcaneMcpLaunchProfile } from './types.js';
+import { ARCANE_TOOL_NAMES } from '../../protocol/src/arcane-tools.js';
 
 const BUNDLED_ENTRY = fileURLToPath(new URL('../../../apps/mcp/src/main.js', import.meta.url));
 const NODE_NAME = process.platform === 'win32' ? 'node.exe' : 'node';
@@ -61,6 +62,10 @@ export async function prepareCodexProcess(command: string, cwd: string, profile?
     '-c', 'mcp_servers.arcane.command=' + JSON.stringify(node),
     '-c', 'mcp_servers.arcane.args=' + JSON.stringify([entry, '--project', project]),
     '-c', 'mcp_servers.arcane.env_vars=["ARCANE_DAEMON_URL","ARCANE_LOCAL_TOKEN"]',
+    '-c', 'mcp_servers.arcane.enabled=true',
+    '-c', 'mcp_servers.arcane.required=true',
+    '-c', 'mcp_servers.arcane.enabled_tools=' + JSON.stringify(ARCANE_TOOL_NAMES),
+    '-c', 'mcp_servers.arcane.disabled_tools=[]',
   );
   if (command.includes(agentToken) || cwd.includes(agentToken) || args.some(arg => arg.includes(agentToken))) fail('MCP_PROFILE', 'The agent bearer cannot occur in launch paths or arguments.');
   env.ARCANE_DAEMON_URL = daemonUrl;

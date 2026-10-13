@@ -9,6 +9,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile.js';
+import { ARCANE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
 import {arcaneIsolationOverrides,arcaneThreadIsIsolated} from '../../packages/codex-client/src/mcp-isolation.js';
 import type { Approval, ArcaneMcpLaunchProfile, LimitOptions, SessionEventValue } from '../../packages/codex-client/src/types.js';
 
@@ -728,6 +729,10 @@ test('optional MCP profile creates fixed ephemeral argv and only named child env
     '-c','mcp_servers.arcane.command='+JSON.stringify(process.execPath),
     '-c','mcp_servers.arcane.args='+JSON.stringify([BUNDLED_ENTRY,'--project',ROOT]),
     '-c','mcp_servers.arcane.env_vars=["ARCANE_DAEMON_URL","ARCANE_LOCAL_TOKEN"]',
+    '-c','mcp_servers.arcane.enabled=true',
+    '-c','mcp_servers.arcane.required=true',
+    '-c','mcp_servers.arcane.enabled_tools='+JSON.stringify(ARCANE_TOOL_NAMES),
+    '-c','mcp_servers.arcane.disabled_tools=[]',
   ]);
   assert.deepEqual(spawn.argv,launchArgs);
   assert.equal(spawn.arcaneDaemonUrl,profile.daemonUrl);
@@ -853,7 +858,7 @@ test('an agent bearer embedded in a project path is rejected before it can reach
 
 
 test('human MCP inventory is bounded metadata, without endpoint, auth or raw tool descriptions',async t=>{
-  const {session,receipts}=await fixture(t);const rows=await session.inspectMcpServers(HUMAN);assert.deepEqual(rows,[{name:'arcane',runtimeStatus:'connected',toolNames:['work_runs'],toolsError:false,plugin:false,pluginId:null}]);assert.equal(JSON.stringify(rows).includes('FIXTURE_SECRET'),false);assert.equal(session.snapshot().thread,null);assert.equal(inputs(await receipts()).filter(m=>m.method==='mcpServerStatus/list').length,1);
+  const {session,receipts}=await fixture(t);const rows=await session.inspectMcpServers(HUMAN);assert.deepEqual(rows,[{name:'arcane',runtimeStatus:'connected',toolNames:[...ARCANE_TOOL_NAMES],toolsError:false,plugin:false,pluginId:null}]);assert.equal(JSON.stringify(rows).includes('FIXTURE_SECRET'),false);assert.equal(session.snapshot().thread,null);assert.equal(inputs(await receipts()).filter(m=>m.method==='mcpServerStatus/list').length,1);
   await assert.rejects(()=>session.inspectMcpServers({initiatedBy:'agent'} as never),code('HUMAN_REQUIRED'));
 });
 for(const mode of ['bad-mcp-inventory','mcp-cursor-loop'])test('native MCP inventory rejects '+mode+' without model work',async t=>{const {session}=await fixture(t,mode);await assert.rejects(()=>session.inspectMcpServers(HUMAN),code('MCP_INVENTORY'));assert.equal(session.snapshot().thread,null);});
@@ -869,7 +874,7 @@ test('Arcane-only child overrides disable inherited tools with literal safe dott
 
 test('Arcane-only native thread is configured only after the actual scoped MCP inventory passes',async t=>{
  const {session,receipts}=await fixture(t,'normal',{},true,undefined,'arcane-only');assert.equal(session.snapshot().mcpIsolation,'arcane-only-pending');session.selectModel({...HUMAN,...PAIR});await session.startThread(HUMAN);assert.equal(session.snapshot().thread?.configured,true);assert.equal(session.snapshot().mcpIsolation,'arcane-only-verified');
- const calls=inputs(await receipts());assert.equal(calls.filter(m=>m.method==='mcpServerStatus/list').length,1);assert.equal(calls.find(m=>m.method==='mcpServerStatus/list')!.params!.threadId,THREAD);assert.equal(calls.filter(m=>m.method==='turn/start').length,0);
+ const calls=inputs(await receipts()); assert.equal(calls.find(m=>m.method==='thread/start')!.params!.developerInstructions,ARCANE_TASK_INSTRUCTIONS);assert.equal(calls.filter(m=>m.method==='mcpServerStatus/list').length,1);assert.equal(calls.find(m=>m.method==='mcpServerStatus/list')!.params!.threadId,THREAD);assert.equal(calls.filter(m=>m.method==='turn/start').length,0);
 });
 test('unexpected inherited MCP server fences the thread before any native turn can start',async t=>{
  const {session,receipts}=await fixture(t,'inherited-mcp-active',{},true,undefined,'arcane-only');session.selectModel({...HUMAN,...PAIR});await assert.rejects(()=>session.startThread(HUMAN),code('MCP_ISOLATION'));assert.equal(session.snapshot().connected,false);assert.equal(session.snapshot().thread?.configured,false);assert.equal(session.snapshot().operations.at(-1)?.state,'unknown');await assert.rejects(()=>session.startTurn(INPUT),code('DISCONNECTED'));assert.equal(inputs(await receipts()).filter(m=>m.method==='turn/start').length,0);

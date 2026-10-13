@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ROOTS, READ_METHODS, WRITE_METHODS, jsonObject } from '../../../packages/protocol/src/studio.js';
-import { MATERIALS, CREATE_CLASSES } from '../../../packages/core/src/studio-policy.js';
+import { MATERIALS, SAFE_CREATE_CLASSES, SHAPES } from '../../../packages/core/src/studio-policy.js';
 
 export function boundedText(max: number) {
   return z.string().min(1).max(max).refine(value => !value.includes('\0'), 'NUL is not allowed.');
@@ -18,15 +18,17 @@ export const source = z.string().max(100 * 1024).refine(value => !value.includes
   'Source must be NUL-free and at most 100 KiB UTF-8.');
 const channel = z.number().min(-100000).max(100000);
 const vector = z.strictObject({ type: z.literal('Vector3'), value: z.tuple([channel, channel, channel]) });
+const degrees = z.number().min(-360).max(360);
+const orientation = z.strictObject({ type: z.literal('Vector3'), value: z.tuple([degrees, degrees, degrees]) });
 const color = z.strictObject({ type: z.literal('Color3'), value: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)]) });
 // Share daemon allowlists; the plugin still rechecks native class and edit state.
 export const properties = z.strictObject({
   Name: id.max(100).optional(),
   Size: vector.refine(value => value.value.every(channel => channel >= 0.05 && channel <= 2048), 'Size channels must be 0.05–2048 studs.').optional(),
-  Position: vector.optional(), Color: color.optional(), Anchored: z.boolean().optional(), CanCollide: z.boolean().optional(),
-  Transparency: z.number().min(0).max(1).optional(), Material: z.enum(MATERIALS).optional(),
+  Position: vector.optional(), Orientation: orientation.optional(), Color: color.optional(), Anchored: z.boolean().optional(), CanCollide: z.boolean().optional(), CastShadow: z.boolean().optional(),
+  Transparency: z.number().min(0).max(1).optional(), Reflectance: z.number().min(0).max(1).optional(), Material: z.enum(MATERIALS).optional(), Shape: z.enum(SHAPES).optional(),
 });
-export const createClass = z.enum(CREATE_CLASSES);
+export const createClass = z.enum(SAFE_CREATE_CLASSES);
 export const commandState = z.enum(['queued', 'dispatched', 'succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
 const boundedArgs = z.record(z.string(), z.json()).superRefine((value, context) => {
   try { jsonObject(value); } catch { context.addIssue({ code: 'custom', message: 'Invalid or oversized command arguments.' }); }

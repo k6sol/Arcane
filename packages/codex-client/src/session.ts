@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process';
 import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { JsonlTransport, type InternalProcess } from './transport.js';
-import { arcaneThreadIsIsolated, type McpInventoryRow } from './mcp-isolation.js';
+import { arcaneThreadIsIsolated, requireArcaneBuildTools, type McpInventoryRow } from './mcp-isolation.js';
+import { ARCANE_TASK_INSTRUCTIONS } from '../../protocol/src/arcane-tools.js';
 import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
@@ -368,6 +369,7 @@ export class CodexSession {
         const rows = await this.#inspectMcpServers(thread.threadId, () => this.#checkTurnPreflight(preflight));
         this.#checkTurnPreflight(preflight);
         if (!arcaneThreadIsIsolated(rows)) fail('MCP_ISOLATION', 'The current native thread is not isolated to Arcane. No turn was sent.');
+        requireArcaneBuildTools(rows);
         this.#mcpIsolated = true;
       } catch (error) {
         this.#invalidateIsolation(error);
@@ -568,6 +570,7 @@ export class CodexSession {
       const result = await this.#requestOperation(operation, {
         ...(id === null ? {} : { threadId: id }), model: pair.model, modelProvider: 'openai',
         cwd: this.#cwd, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: 'read-only',
+        ...(this.mcpPolicy==='arcane-only' ? { developerInstructions: ARCANE_TASK_INSTRUCTIONS } : {}),
       });
       this.#decodeAcknowledgement(() => {
         const resultObject = object(result);
@@ -600,6 +603,7 @@ export class CodexSession {
           const inventory=await this.#inspectMcpServers(thread.threadId,check);
           check();
           if(!arcaneThreadIsIsolated(inventory))fail('MCP_ISOLATION','The native thread exposes an inherited tool server or Arcane is not connected. No turn can be started.');
+          requireArcaneBuildTools(inventory);
           this.#mcpIsolated=true;thread.configured=true;
         } catch(error) { this.#invalidateIsolation(error);throw error; }
       }

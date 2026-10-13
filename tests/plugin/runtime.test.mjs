@@ -309,7 +309,7 @@ http.RequestAsync = function(_self: any, request: any): any fixture.requests += 
 ` });
 });
 
-test('saved local key reload stays visible and red, never probes, and reconnects only after a user click', { skip: !runtime || !compile }, async t => {
+test('saved successful connection resumes once; other saved keys wait for a click and all remain red until ACK', { skip: !runtime || !compile }, async t => {
   for (const connected of [true, false]) await t.test('cached connected=' + connected, async () => {
     await runLuauFixture({
       setup: `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)
@@ -318,9 +318,14 @@ fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = ${connected}
 assert(keyInput.Text == key and keyInput.PlaceholderText == "Arcane API key" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
 assert(control.BackgroundColor3 == Color3.fromRGB(255, 51, 64), "cached true or false is red until current ACK")
 assert(#fixture.getCalls == 2, "reload reads exactly the two owned keys")
-idleMount(); storageBoundaries(); noSecretText()
-clickConnect(); ack()
-assert(connectCount == 1 and pollCount == 0 and fixture.pluginSettings[keySetting] == key, "explicit saved-key click establishes one live connection")
+if ${connected} then
+  assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == 1, "successful history queues exactly one fresh authentication and clears cached connected state")
+  assert(fixture.pluginSettings[lastSetting].connected == false, "restart truth stays disconnected until the new exchange ACK")
+  ack(); cycle()
+  assert(connectCount == 1 and pollCount == 1 and client.desiredPair == nil, "auto resume uses the one worker without duplicate exchanges")
+else idleMount(); clickConnect(); ack() end
+storageBoundaries(); noSecretText()
+assert(connectCount == 1 and fixture.pluginSettings[keySetting] == key, "both paths establish one actual connection and retain the raw key")
 unload()
 assert(fixture.pluginSettings[keySetting] == key, "reload/unload retains the saved key")
 `,
@@ -372,9 +377,9 @@ for (const format of ['source', 'generated']) {
         setup: saved ? `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = true}` : '',
         checks: `
-idleMount()
-if ${saved} then assert(control.Text == "Reconnect", "saved bad key offers an explicit reconnect") else enter(key) end
-clickConnect()
+if ${saved} then
+  assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and control.Text == "Reconnect" and control.BackgroundColor3 ~= green, "saved successful history queues only one current authentication, without cached green")
+else idleMount(); enter(key); clickConnect() end
 assert(fixture.pluginSettings[keySetting] == key, "save-before-click exchange contract remains in force")
 local rejected = client.desiredPair
 fixture.uiHttpHook = function(request: any): any
@@ -532,7 +537,7 @@ test('failed live exchanges and identity scope changes persist only connected fa
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = true}`;
   await t.test('failed initial exchange', async () => {
     await runLuauFixture({ setup: saved, checks: `
-idleMount(); clickConnect()
+assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and control.BackgroundColor3 ~= green, "auto resume only queues a fresh exchange")
 fixture.uiHttpHook = function(_request: any): any error("network fault unrelated-session-secret") end
 cycle()
 assert(client.pair == nil and client.desiredPair == nil and control.BackgroundColor3 ~= green, "failed exchange cannot establish live green")
@@ -546,7 +551,7 @@ clickConnect(); ack(); unload()
   });
   for (const field of ['PlaceId', 'GameId', 'Name']) await t.test('identity fence: ' + field, async () => {
     await runLuauFixture({ setup: saved, checks: `
-idleMount(); clickConnect()
+assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and control.BackgroundColor3 ~= green, "auto resume only queues a fresh exchange")
 fixture.uiHttpHook = function(request: any): any
   assert(string.find(request.Url, "/v1/plugin/connect", 1, true), "only the explicit exchange is pending")
   local original = game["${field}"]

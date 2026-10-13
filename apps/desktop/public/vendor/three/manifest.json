@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "library": "three",
+  "libraryVersion": "0.186.1",
+  "license": "MIT",
+  "npmIntegrity": "sha512-blFeqb49wRCSGUGj7gtpfnSGHy2lwDk94RhUmS1c/hTby70kvChbWpkJ4Pm1390LqzzvTmzgXKHPEafJwCb8jA==",
+  "transform": "Only static bare from-three imports become the same-origin pinned module; no minification or runtime CDN.",
+  "files": [
+    {
+      "path": "build/three.module.js",
+      "sourceSha256": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea",
+      "sha256": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea",
+      "bytes": 662772
+    },
+    {
+      "path": "build/three.core.js",
+      "sourceSha256": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+      "sha256": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+      "bytes": 1458113
+    },
+    {
+      "path": "examples/jsm/loaders/GLTFLoader.js",
+      "sourceSha256": "131c0f78c01d19368ae495caa65b3adaa10487810a36a05bb5901b769a35ac16",
+      "sha256": "d4097f6f93be9e1426df82bab0d8487d119706f1b88c1c3a4ecb071982ad0a9a",
+      "bytes": 117600
+    },
+    {
+      "path": "examples/jsm/controls/OrbitControls.js",
+      "sourceSha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+      "sha256": "6c620729e172b312b6cf2b05845cc9d396ec53fbf2df0bc751bcd141637d10e1",
+      "bytes": 40785
+    },
+    {
+      "path": "examples/jsm/utils/BufferGeometryUtils.js",
+      "sourceSha256": "9fb63427ce6641fa14fd0baff9cc4d1b5f9c3d85fd084bf2e90e803c44ec1797",
+      "sha256": "603737a264997911bf6bd821627231e335c9a5ed38f9cf312ead317889b89711",
+      "bytes": 37742
+    },
+    {
+      "path": "examples/jsm/utils/SkeletonUtils.js",
+      "sourceSha256": "b1632a703206c3d830de9fcbe515696770d04b71a15ee6b50afa6d2c3298c86f",
+      "sha256": "9ad57ab38b4515699b4b158725235f2ff3c51fa8c163082ad66b8362da796b20",
+      "bytes": 11565
+    },
+    {
+      "path": "LICENSE",
+      "sourceSha256": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+      "sha256": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+      "bytes": 1081
+    }
+  ]
+}

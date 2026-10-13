@@ -314,7 +314,8 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.doesNotMatch(click, /clearInput\(\)|else savedKey/);
   assert.ok(click.indexOf('V.keyOrigin(entered)') < click.indexOf('plugin:SetSetting(KEY_SETTING, value)'));
   assert.ok(click.indexOf('plugin:SetSetting(KEY_SETTING, value)') < click.indexOf('transport:requestConnect(value)'));
-  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 1, 'No mount, settings read or toolbar callback auto-connects.');
+  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 2, 'Only explicit input and a previously successful saved connection queue authentication.');
+  assert.match(main, /if savedKey ~= nil and lastKnownConnected then[\s\S]*transport:requestConnect\(savedKey\)/);
   const malformed = /if not valid then([\s\S]*?)\n\tend/.exec(click)?.[1];
   assert.ok(malformed);
   assert.match(malformed, /rejectKey\(\)[\s\S]*transport:requestDisconnect\(\)[\s\S]*return/);
@@ -331,7 +332,7 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.match(main, /pcall\(function\(\) V\.keyOrigin\(previousKey\) end\)/);
   assert.match(main, /previousKey = nil/);
   assert.match(main, /count == 1 and type\(previousState\.connected\) == "boolean"/);
-  const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'));
+  const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'), main.indexOf('-- Resume a previously successful user connection'));
   assert.match(unload, /savedKey = nil[\s\S]*clearInput\(\)[\s\S]*transport:stop\(\)/);
   assert.doesNotMatch(unload, /SetSetting|GetSetting|requestConnect|requestDisconnect/);
 });

@@ -12,10 +12,20 @@ local function triple(first: number, second: number, third: number): any
 end
 local Vector3: any = {new = triple}
 local Color3: any = {new = triple}
-local materials: any = setmetatable({}, {__index = function(self: any, name: string): any
-	local value = {Name = name}; rawset(self, name, value); return value
-end})
-local Enum: any = {Material = materials, FinishRecordingOperation = {Commit = "Commit", Cancel = "Cancel"}}
+local function enumCategory(names: {string}): any
+	local category: any = {}
+	for index, name in ipairs(names) do category[name] = table.freeze({Name = name, Value = index - 1, EnumType = category, _enumItem = true}) end
+	return category
+end
+local materials: any = enumCategory({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt"})
+local Enum: any = {Material = materials, PartType = enumCategory({"Ball", "Block", "Cylinder"}), FinishRecordingOperation = {Commit = "Commit", Cancel = "Cancel"}}
+local nativeTypeof = typeof
+local function typeof(value: any): string
+	if type(value) == "table" and value._enumItem == true then return "EnumItem" end
+	return nativeTypeof(value)
+end
+local partClasses = {"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"}
+local basePartClasses = {"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"}
 local DateTime: any = {
 	now = function(): any return {UnixTimestampMillis = fixture.now} end,
 	fromIsoDate = function(value: string): any
@@ -31,7 +41,8 @@ local game: any
 
 function methods:IsA(name: string): boolean
 	return name == "Instance" or name == self.ClassName
-		or (name == "BasePart" and table.find({"Part", "MeshPart", "WedgePart", "UnionOperation", "TrussPart"}, self.ClassName) ~= nil)
+		or (name == "Part" and table.find(partClasses, self.ClassName) ~= nil)
+		or (name == "BasePart" and table.find(basePartClasses, self.ClassName) ~= nil)
 		or (name == "BaseScript" and table.find({"Script", "LocalScript"}, self.ClassName) ~= nil)
 		or (name == "LuaSourceContainer" and table.find({"Script", "LocalScript", "ModuleScript"}, self.ClassName) ~= nil)
 end
@@ -53,6 +64,15 @@ instanceMetatable = {
 	__newindex = function(self: any, key: string, value: any): ()
 		if string.sub(key, 1, 1) == "_" then rawset(self, key, value); return end
 		if fixture.failProperty == key then error("injected property setter failure") end
+		if key == "Shape" or key == "Material" then
+			local category = if key == "Shape" then Enum.PartType else Enum.Material
+			if not self:IsA(if key == "Shape" then "Part" else "BasePart") or typeof(value) ~= "EnumItem" or value.EnumType ~= category then
+				error("invalid enum property assignment")
+			end
+		end
+		if key == "Orientation" or key == "CastShadow" or key == "Reflectance" then
+			if not self:IsA("BasePart") then error("invalid physical property assignment") end
+		end
 		if key == "Parent" then
 			local previous = self._properties.Parent
 			if previous and previous._children then
@@ -69,10 +89,22 @@ local Instance: any = {}
 function Instance.new(className: string): any
 	local result = setmetatable({_properties = {ClassName = className, Name = className,
 		Size = triple(4, 1, 2), Position = triple(0, 0, 0), Color = triple(0.5, 0.5, 0.5),
+		Orientation = triple(0, 0, 0), CastShadow = true, Reflectance = 0,
+		Shape = if table.find(partClasses, className) then Enum.PartType.Block else nil,
 		Material = materials.Plastic, Anchored = false, CanCollide = true, Transparency = 0, Disabled = false, Source = ""},
 		_children = {}, _attributes = {}, _destroyed = false}, instanceMetatable)
 	table.insert(fixture.created, result)
 	return result
+end
+-- Geometry is derived independently from stored object values using Roblox's
+-- documented Y-X-Z orientation order. A cylinder's axial dimension is local X.
+function fixture.geometry(instance: any): any
+	assert(instance:IsA("Part"), "geometry fixture requires a Part")
+	local x, y, z = math.rad(instance.Orientation.X), math.rad(instance.Orientation.Y), math.rad(instance.Orientation.Z)
+	local sx, cx, sy, cy, sz, cz = math.sin(x), math.cos(x), math.sin(y), math.cos(y), math.sin(z), math.cos(z)
+	return {primitive = instance.Shape.Name, axialLength = instance.Size.X,
+		diameters = {instance.Size.Y, instance.Size.Z},
+		axis = {cy * cz + sy * sx * sz, cx * sz, -sy * cz + cy * sx * sz}}
 end
 local services: any = {}
 fixture.identitySignals = {}

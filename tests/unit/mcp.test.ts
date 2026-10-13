@@ -23,6 +23,7 @@ import type { AssetInput, AssetManifest, AssetProbe, AssemblyRecipe, AssemblyGeo
 import { normalizeRequest, validateAudit, sha256 } from '../../packages/asset-pipeline/src/validation.js';
 import { preflightRecipe, preflightPart, expectedSockets, rotate, CUSTOM_REQUEST_BYTES } from '../../packages/asset-pipeline/src/recipe.js';
 import { READ_METHODS, WRITE_METHODS } from '../../packages/protocol/src/studio.js';
+import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import type { StudioCommand, StudioSession, InstanceRef, Json } from '../../packages/protocol/src/studio.js';
 
 // These fixtures exercise actual SDK/HTTP/SQLite code, but simulate the plugin and never use native Studio.
@@ -34,7 +35,7 @@ const REFERENCE: InstanceRef = { instanceId: 'opaque-1', sessionId: SESSION_ID, 
 const TOOL_ACCESS = {
   sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true,
   script_update: false, scene_create: false, scene_update: false, receipt_status: true, receipt_restore: false,
-  skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
+  skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
   work_progress: false, work_submit: false, assets_probe: true, assets_jobs: true, assets_start: false, assets_cancel: false, assets_manifest: true,
 };
 const EDITOR_SOURCE = '--!strict\nreturn "café 🧩"\n';
@@ -185,7 +186,7 @@ test('MCP: exact literal loopback URL and environment bearer validation', () => 
 test('fixture SDK: advertised tools are strict bounded operations with read/write annotations', async t => {
   const f = await fixture(t), client = await linked(t,f);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), Object.keys(TOOL_ACCESS).sort());
+  assert.deepEqual(tools.map(tool => tool.name).sort(), [...ARCANE_TOOL_NAMES].sort());
   for (const tool of tools) {
     assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
     assert.equal(tool.annotations?.openWorldHint, false, tool.name);
@@ -321,7 +322,7 @@ test('fixture SDK: spawned official stdio transport initializes and actually exe
   let diagnostics=''; transport.stderr?.on('data',chunk=>{diagnostics+=String(chunk);});
   const client=new Client({name:'arcane-spawn-fixture',version:'1.0.0'});
   after(t,()=>client.close()); await client.connect(transport);
-  assert.deepEqual((await client.listTools()).tools.map(tool => tool.name).sort(), Object.keys(TOOL_ACCESS).sort());
+  assert.deepEqual((await client.listTools()).tools.map(tool => tool.name).sort(), [...ARCANE_TOOL_NAMES].sort());
   assert.equal((await call(client,'sessions')).data.sessions[0].id,SESSION_ID);
   assert.equal((await call(client,'scene_search',{sessionId:SESSION_ID,root:'Workspace',query:'Same'})).data.state,'succeeded');
   assert.equal(f.state.posts,1); assert.equal(diagnostics,'');
