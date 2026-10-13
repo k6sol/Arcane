@@ -83,7 +83,7 @@ function openPin(full, bound, expectedDigest, expectedBytes) {
 function checkPin(pin) {
   const first = fs.fstatSync(pin.fd, { bigint: true }), bytes = readBounded(pin.fd, pin.bound);
   const last = fs.fstatSync(pin.fd, { bigint: true }), current = checkChain(pin.chain).at(-1).stat;
-  if (!sameFile(pin.before, first) || !sameFile(first, last) || !sameFile(last, current) ||
+  if (!sameFile(pin.before, first) || !sameFile(first, last) || !sameFile(last, current) || BigInt(bytes.length) !== last.size ||
       (pin.bytes !== undefined && bytes.length !== pin.bytes) || (pin.digest !== undefined && digest(bytes) !== pin.digest)) fail();
   return bytes;
 }
@@ -246,13 +246,22 @@ function createCodeVerification({ dialog, getSession, smoke = false }) {
     let snapshot, compiler;
     try {
       snapshot = readSettings(project);
-      if (!snapshot.settings) return { environment: {}, settingsHash: null };
+      if (!snapshot.settings) { checkSnapshot(snapshot); return { environment: {}, settingsHash: null, failure: null }; }
       if (process.platform !== 'win32') fail();
-      compiler = openPin(snapshot.settings.compilerPath, COMPILER_BYTES, COMPILER_SHA256, COMPILER_BYTES).pin;
       const folder = evidence(project, path.join(project.projectPath, ...snapshot.settings.evidenceDirectory.split('/')));
-      checkSnapshot(snapshot); checkPin(compiler); checkChain(folder.chain);
+      checkSnapshot(snapshot); checkChain(folder.chain);
+      try {
+        compiler = openPin(snapshot.settings.compilerPath, COMPILER_BYTES, COMPILER_SHA256, COMPILER_BYTES).pin;
+        checkPin(compiler);
+      } catch {
+        // Only compiler validation is optional. Recheck trusted state outside its failure boundary.
+        // Never forward an unvalidated compiler, inherit replacements, or repair persisted settings.
+        checkSnapshot(snapshot); checkChain(folder.chain);
+        return { environment: {}, settingsHash: null, failure: 'compiler-unavailable' };
+      }
+      checkSnapshot(snapshot); checkChain(folder.chain);
       return { environment: { ARCANE_LUAU_COMPILER_PATH: snapshot.settings.compilerPath, ARCANE_LUAU_COMPILER_SHA256: COMPILER_SHA256,
-        ARCANE_LUAU_EVIDENCE_DIRECTORY: snapshot.settings.evidenceDirectory }, settingsHash: snapshot.hash };
+        ARCANE_LUAU_EVIDENCE_DIRECTORY: snapshot.settings.evidenceDirectory }, settingsHash: snapshot.hash, failure: null };
     } catch { fail(); }
     finally { if (compiler) fs.closeSync(compiler.fd); if (snapshot?.pin) fs.closeSync(snapshot.pin.fd); }
   }

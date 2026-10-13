@@ -8,7 +8,7 @@ import type { StudioCommand, StudioMethod, StudioSession, Json } from '../../../
 import { command, session } from './schemas.js';
 import { workTask, workRun, workDefinition, leaseToken } from './work-schemas.js';
 import type { WorkTask, WorkRun } from '../../../packages/storage/src/work-store.js';
-import { assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, type SafeAssetInput } from './asset-schemas.js';
+import { assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel, nativeAssetJobId, nativeAssetCursorMatchesScope, type SafeAssetInput } from './asset-schemas.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -31,6 +31,13 @@ function validateToken(value: string | undefined): string {
   return value;
 }
 
+export type AssetAudience = 'generic' | 'native-session';
+function validateAssetAudience(value: unknown): AssetAudience {
+  if (value === undefined || value === 'generic') return 'generic';
+  if (value === 'native-session') return value;
+  throw new BridgeError('CONFIG_ASSET_AUDIENCE', 'Asset audience must be generic or native-session in trusted constructor options.');
+}
+
 export interface WaitOptions { timeoutMs?: number; signal?: AbortSignal }
 export interface CommandOutcome {
   commandId: string | null;
@@ -47,12 +54,15 @@ export interface CommandOutcome {
 
 export class DaemonClient {
   readonly url: string;
+  /** Trusted routing selection only. The daemon resolves authority from the existing bearer. */
+  readonly assetAudience: AssetAudience;
   readonly #token: string;
   readonly #pollIntervalMs: number;
 
-  constructor(options: { url: string; token: string; pollIntervalMs?: number }) {
+  constructor(options: { url: string; token: string; pollIntervalMs?: number; assetAudience?: AssetAudience }) {
     this.url = validateDaemonUrl(options.url);
     this.#token = validateToken(options.token);
+    this.assetAudience = validateAssetAudience(options.assetAudience);
     this.#pollIntervalMs = options.pollIntervalMs ?? 500;
     if (!Number.isInteger(this.#pollIntervalMs) || this.#pollIntervalMs < 5 || this.#pollIntervalMs > 2000) {
       throw new BridgeError('CONFIG_POLL', 'Polling interval must be 5–2000 milliseconds.');
@@ -60,7 +70,12 @@ export class DaemonClient {
   }
 
   static fromEnvironment(env: NodeJS.ProcessEnv = process.env): DaemonClient {
-    return new DaemonClient({ url: validateDaemonUrl(env.ARCANE_DAEMON_URL), token: validateToken(env.ARCANE_LOCAL_TOKEN) });
+    const audience = env.ARCANE_ASSET_AUDIENCE;
+    if (audience !== undefined && audience !== 'native-session') {
+      throw new BridgeError('CONFIG_ASSET_AUDIENCE', 'ARCANE_ASSET_AUDIENCE must be absent or exactly native-session.');
+    }
+    return new DaemonClient({ url: validateDaemonUrl(env.ARCANE_DAEMON_URL), token: validateToken(env.ARCANE_LOCAL_TOKEN),
+      assetAudience: audience === undefined ? 'generic' : 'native-session' });
   }
 
   redact<T>(value: T): T {
@@ -200,36 +215,58 @@ export class DaemonClient {
       'Inspect this task and hashed evidence with work_runs. Submission may have applied; do not repeat it automatically. Human review owns acceptance.', options);
   }
 
+  private assetPath(name: 'probe' | 'jobs' | 'start' | 'cancel' | 'manifest'): string {
+    return (this.assetAudience === 'native-session' ? '/v1/assets/native/' : '/v1/assets/') + name;
+  }
+
   async assetsProbe(options: WaitOptions = {}) {
-    return this.postOnce('/v1/assets/probe', {}, z.object({ probe: assetProbe }), {},
+    return this.postOnce(this.assetPath('probe'), {}, z.object({ probe: assetProbe }), {},
       'The fixed local runtime probe may still be running. Inspect daemon availability before requesting another probe.', options);
   }
 
   async assetsJobs(options: WaitOptions & z.output<typeof assetHistoryInput> = {}) {
     const { timeoutMs: _timeout, signal: _signal, ...history } = options;
-    const input = assetHistoryInput.parse(history), query = new URLSearchParams();
+    const input = (this.assetAudience === 'native-session' ? nativeAssetHistoryInput : assetHistoryInput).parse(history), query = new URLSearchParams();
     if (input.limit !== undefined) query.set('limit', String(input.limit));
     if (input.after !== undefined) query.set('after', input.after);
-    return this.readRecord('/v1/assets/jobs' + (query.size ? '?' + query.toString() : ''), assetJobPage, options);
+    const path = this.assetPath('jobs') + (query.size ? '?' + query.toString() : '');
+    if (this.assetAudience === 'native-session') {
+      const schema = nativeAssetJobPage.refine(page => page.jobs.length <= (input.limit ?? 32)
+        && (input.after === undefined || (nativeAssetCursorMatchesScope(input.after, page)
+          && (page.nextCursor === null || Number(page.nextCursor.slice(65)) > Number(input.after.slice(65))))), 'Wrong native history scope or pagination.');
+      return this.readRecord(path, schema, options);
+    }
+    return this.readRecord(path, assetJobPage, options);
   }
 
   async assetsStart(input: SafeAssetInput, options: WaitOptions = {}) {
     const body = safeAssetInput(assetInput.parse(jsonSnapshot(input)));
-    return this.postOnce('/v1/assets/start', body, z.object({ job: assetJob }), { jobId: null, name: body.name },
+    if (this.assetAudience === 'native-session') {
+      return this.postOnce(this.assetPath('start'), body, nativeAssetStart, { jobId: null, name: body.name, retry: false },
+        'Inspect assets_jobs in this same native project and conversation scope. Creation or association may be unknown; do not repeat the start or adopt an unassociated global job. operationId is diagnostic, not a daemon idempotency key.', options);
+    }
+    return this.postOnce(this.assetPath('start'), body, z.object({ job: assetJob }), { jobId: null, name: body.name },
       'Inspect assets_jobs for this asset name and request. The job may have started; do not repeat the start automatically. operationId is diagnostic, not a daemon idempotency key.', options);
   }
 
   async assetsCancel(jobId: string, options: WaitOptions = {}) {
-    assetJobId.parse(jobId);
+    (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);
+    const nextStep = this.assetAudience === 'native-session'
+      ? 'Inspect this exact job with assets_jobs in the same native project and conversation scope. Cancellation may have applied; partial artifacts remain. Do not repeat automatically.'
+      : 'Inspect this exact job with assets_jobs. Cancellation may have applied; partial artifacts remain. Do not repeat automatically.';
+    if (this.assetAudience === 'native-session') {
+      const schema = nativeAssetCancel.refine(value => ('job' in value ? value.job.jobId : value.jobId) === jobId, 'Wrong asset job.')
+        .transform(value => 'job' in value ? value : { ...value, terminal: false, ambiguous: true, nextStep });
+      return this.postOnce(this.assetPath('cancel'), { jobId }, schema, { jobId, retry: false }, nextStep, options);
+    }
     const schema = z.object({ job: assetJob }).refine(value => value.job.jobId === jobId, 'Wrong asset job.');
-    return this.postOnce('/v1/assets/cancel', { jobId }, schema, { jobId },
-      'Inspect this exact job with assets_jobs. Cancellation may have applied; partial artifacts remain. Do not repeat automatically.', options);
+    return this.postOnce(this.assetPath('cancel'), { jobId }, schema, { jobId }, nextStep, options);
   }
 
   async assetsManifest(jobId: string, options: WaitOptions = {}) {
-    assetJobId.parse(jobId);
+    (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);
     const schema = z.object({ manifest: assetManifest }).refine(value => value.manifest.jobId === jobId, 'Wrong asset manifest.');
-    return this.readRecord('/v1/assets/manifest?jobId=' + encodeURIComponent(jobId), schema, options);
+    return this.readRecord(this.assetPath('manifest') + '?jobId=' + encodeURIComponent(jobId), schema, options);
   }
 
   private async readRecord<T>(path: string, schema: z.ZodType<T>, options: WaitOptions): Promise<T> {
@@ -241,7 +278,7 @@ export class DaemonClient {
     } finally { deadline.dispose(); }
   }
 
-  private async postOnce<T>(path: string, input: object, schema: z.ZodType<T>, identity: Record<string, string | null>, nextStep: string, options: WaitOptions) {
+  private async postOnce<T>(path: string, input: object, schema: z.ZodType<T>, identity: Record<string, string | boolean | null>, nextStep: string, options: WaitOptions) {
     const deadline = this.deadline(options);
     // Diagnostic ID only: these endpoints do not promise request-id idempotency.
     const operationId = randomUUID();

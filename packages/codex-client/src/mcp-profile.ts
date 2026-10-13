@@ -18,6 +18,15 @@ async function regular(path: string): Promise<string> {
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) fail('MCP_PROFILE', 'Arcane MCP requires direct regular executable/entry files.');
   return realpath(path);
 }
+/** Secret-free inventory launch; reset inherited Arcane settings using existing fields. */
+export function prepareCodexDiscoveryProcess(command: string, cwd: string): InternalProcess {
+  return {
+    command, cwd, env: nativeEnvironment(),
+    args: ['app-server', '--listen', 'stdio://', '-c',
+      'mcp_servers.arcane={command=' + JSON.stringify(process.execPath) + ',args=["-e","process.exit(0)"],enabled=false,enabled_tools=[]}'],
+  };
+}
+
 /**
  * Internal launch builder, never browser input or a public generic config API.
  * trustedEntry is a code-level test seam; the public factory always uses BUNDLED_ENTRY.

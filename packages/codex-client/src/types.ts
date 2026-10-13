@@ -12,8 +12,19 @@ export type LocalUse = 'personal-local' | 'open-source-local';
 export interface ArcaneMcpLaunchProfile {
   nodeExecutable: string; serverEntry: string; projectRoot: string; daemonUrl: string; agentToken: string;
 }
+/** Host-only local dispatch intent, never provider-origin attribution or RPC input. */
+export interface NativeAssetIntent {
+  readonly connectionId: string; readonly threadId: string; readonly operationId: string;
+}
+/** Supply an exact frozen object with four own data callbacks from trusted host code. */
+export interface NativeAssetHooks {
+  finalCredential(): string;
+  dispatched(intent: NativeAssetIntent): void;
+  ended(intent: NativeAssetIntent): void;
+  retired(): void;
+}
 export interface ConnectOptions {
-  command: string; cwd: string; use: LocalUse; limits?: LimitOptions; arcaneMcp?: ArcaneMcpLaunchProfile;
+  command: string; cwd: string; use: LocalUse; limits?: LimitOptions; arcaneMcp?: ArcaneMcpLaunchProfile; nativeAssetHooks?: NativeAssetHooks;
 }
 export interface HumanAction { initiatedBy: 'human' }
 export interface Selection { model: string; effort: string }
@@ -66,4 +77,18 @@ export class CodexClientError extends Error {
   constructor(public readonly code: string, message: string, public readonly dispatched = false, public readonly remoteCode: number | null = null) {
     super(message); this.name = 'CodexClientError';
   }
+}
+/** Internal construction validation; deliberately not exported by the public index. */
+export function validateNativeAssetHooks(value: unknown): NativeAssetHooks {
+  const names = ['finalCredential', 'dispatched', 'ended', 'retired'];
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !Object.isFrozen(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new CodexClientError('ARGUMENTS', 'Native asset hooks must be an exact frozen own-data callback object.');
+  }
+  const keys = Reflect.ownKeys(value), descriptors = Object.getOwnPropertyDescriptors(value);
+  if (keys.length !== names.length || keys.some(key => typeof key !== 'string' || !names.includes(key)) ||
+      names.some(name => !Object.hasOwn(descriptors, name) || !Object.hasOwn(descriptors[name]!, 'value') || typeof descriptors[name]!.value !== 'function')) {
+    throw new CodexClientError('ARGUMENTS', 'Native asset hooks must be an exact frozen own-data callback object.');
+  }
+  return value as NativeAssetHooks;
 }

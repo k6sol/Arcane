@@ -3,11 +3,12 @@ import { spawn } from 'node:child_process';
 import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { JsonlTransport, type InternalProcess } from './transport.js';
-import { arcaneThreadIsIsolated } from './mcp-isolation.js';
-import { CodexClientError, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
+import { arcaneThreadIsIsolated, type McpInventoryRow } from './mcp-isolation.js';
+import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 
 interface PendingApproval { value: Approval; timer: NodeJS.Timeout; wireKey: string; safeToAccept: boolean }
+interface TurnPreflight { thread: ThreadState; selection: Selection; accountRevision: number; turnId: string | null; turnStatus: ThreadState['turnStatus']; revoked: boolean }
 const APPROVALS = new Set(['item/commandExecution/requestApproval','item/fileChange/requestApproval']);
 const TERMINAL = new Set(['completed','failed','interrupted']);
 const PLANS = new Set(['free','go','plus','pro','team','business','enterprise','edu','unknown']);
@@ -113,6 +114,8 @@ export class CodexSession {
   #models: Model[] = [];
   #selection: Selection | null = null;
   #thread: ThreadState | null = null;
+  #threadAcknowledgement: Readonly<{ threadId: string; sessionId: string | null }> | null = null;
+  #threadSessionObserved = false;
   #operations: Operation[] = [];
   #approvals = new Map<string, PendingApproval>();
   #serverIds = new Set<string>();
@@ -123,13 +126,23 @@ export class CodexSession {
   #lastEventSeq = 0;
   #cwd: string;
   #mcpIsolated=false;
+  #turnPreflight: TurnPreflight | null = null;
+  #accountRevision = 0;
+  #accountReads = 0;
   #failureCode: string | null = null;
   #threadOperation: Operation | null = null;
   #turnOperation: Operation | null = null;
   #catalogueLoading = false;
   #cancelledTurnId: string | null = null;
   #knownTurnIds = new Set<string>();
-  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only' = 'native-config') {
+  #nativeAssetHooks: NativeAssetHooks | undefined;
+  #assetIntent: { operation: Operation; scope: NativeAssetIntent } | null = null;
+  #assetsRetired = false;
+  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only' = 'native-config', hooks?: NativeAssetHooks) {
+    if (hooks !== undefined) {
+      this.#nativeAssetHooks = validateNativeAssetHooks(hooks);
+      if (mcpPolicy !== 'arcane-only') fail('MCP_PROFILE', 'Native asset hooks require Arcane isolation.');
+    }
     this.#cwd = spec.cwd;
     this.#processSpec = { ...spec, args: [...spec.args], env: { ...spec.env } };
     this.#transport = new JsonlTransport(spec, bounds, message => this.#message(message), error => this.#disconnect(error));
@@ -143,8 +156,19 @@ export class CodexSession {
         capabilities: { experimentalApi: false },
       });
       this.#transport.initialized();
+      const initialRevision = this.#accountRevision;
       await Promise.all([this.#readAccount(), this.#listModels()]);
+      let stableAccount = this.#accountRevision === initialRevision + 2 && this.#account !== null;
+      // Startup account announcements are normal before any thread/authority
+      // exists. Reconcile METADATA only, bounded to two extra complete reads.
+      for (let attempt = 0; !stableAccount && attempt < 2; attempt++) {
+        const revision = this.#accountRevision;
+        await this.#readAccount();
+        stableAccount = this.#accountRevision === revision + 2 && this.#account !== null;
+      }
+      if (!stableAccount) fail('ACCOUNT_CHANGED', 'Native account metadata did not stabilize during initialization.');
       if (!this.#transport.connected) fail('DISCONNECTED', 'Native CLI is disconnected.');
+      if (this.#assetsRetired) fail('ACCOUNT_CHANGED', 'Native asset authority retired during initialization.');
       this.#ready = true;
     } catch (error) {
       this.#transport.stop(error instanceof CodexClientError ? error : new CodexClientError('PROTOCOL', 'Initialization failed.'));
@@ -153,23 +177,55 @@ export class CodexSession {
     }
   }
   /** Bounded native MCP inventory only; does not execute a tool, login, or expose endpoints/auth material. */
-  async inspectMcpServers(action: HumanAction & {threadId?:string}): Promise<{name:string;runtimeStatus:string|null;toolNames:string[];toolsError:boolean;plugin:boolean;pluginId:string|null}[]> {
-    exact(action,['initiatedBy','threadId']);human({initiatedBy:action.initiatedBy});this.#ensureReady();if(action.threadId!==undefined&&this.#thread?.threadId!==action.threadId)fail('STATE','Inspect only the exact current native thread.');
-    const rows:{name:string;runtimeStatus:string|null;toolNames:string[];toolsError:boolean;plugin:boolean;pluginId:string|null}[]=[];
-    const cursors=new Set<string>(),names=new Set<string>();let cursor:string|null=null,totalTools=0;
-    for(let page=0;page<8;page++) {
-      const result=object(await this.#transport.request('mcpServerStatus/list',{cursor,limit:32,detail:'toolsAndAuthOnly',...(action.threadId?{threadId:action.threadId}:{})}));
-      if(!Array.isArray(result.data)||result.data.length>32)fail('MCP_INVENTORY','Native MCP inventory exceeds its page bound.');
-      for(const value of result.data) {
-        const raw=object(value),name=str(raw.name,256);if(names.has(name)||rows.length>=64)fail('MCP_INVENTORY','Duplicate or excessive native MCP servers.');names.add(name);
-        const runtimeStatus=raw.runtimeStatus==null?null:str(raw.runtimeStatus,64);
-        if(runtimeStatus!==null&&!['notStarted','starting','connected','authenticationRequired','failed','cancelled','disabled'].includes(runtimeStatus))fail('MCP_INVENTORY','Unknown native MCP runtime status.');
-        const toolNames=Object.keys(object(raw.tools));totalTools+=toolNames.length;if(totalTools>2048)fail('MCP_INVENTORY','Native MCP tool names exceed their bound.');for(const tool of toolNames)str(tool,256);
-        rows.push({name,runtimeStatus,toolNames,toolsError:raw.toolsError!=null,plugin:raw.pluginId!=null,pluginId:raw.pluginId==null?null:str(raw.pluginId,256)});
+  async inspectMcpServers(action: HumanAction & {threadId?:string}): Promise<McpInventoryRow[]> {
+    exact(action,['initiatedBy','threadId']);human({initiatedBy:action.initiatedBy});this.#ensureReady();
+    const threadId=action.threadId===undefined?undefined:str(action.threadId),thread=this.#thread;
+    return this.#inspectMcpServers(threadId,()=>{
+      this.#ensureReady();
+      if(threadId!==undefined&&(this.#thread!==thread||thread?.threadId!==threadId))fail('STATE','Inspect only the exact current native thread.');
+    });
+  }
+  async #inspectMcpServers(threadId: string | undefined, check: () => void): Promise<McpInventoryRow[]> {
+    const rows: McpInventoryRow[] = [];
+    const cursors = new Set<string>(), names = new Set<string>();
+    let cursor: string | null = null, totalTools = 0;
+    try {
+      for (let page = 0; page < 8; page++) {
+        check();
+        const response = await this.#transport.request('mcpServerStatus/list', { cursor, limit: 4, detail: 'toolsAndAuthOnly', ...(threadId === undefined ? {} : { threadId }) });
+        check();
+        const result = object(response);
+        if (this.mcpPolicy === 'arcane-only' && !Object.hasOwn(result, 'nextCursor')) fail('MCP_INVENTORY', 'Native MCP inventory lacks pagination metadata.');
+        if (!Array.isArray(result.data) || result.data.length > 4) fail('MCP_INVENTORY', 'Native MCP inventory exceeds its page bound.');
+        for (const value of result.data) {
+          const raw = object(value), name = str(raw.name, 256);
+          if (names.has(name) || rows.length >= 64) fail('MCP_INVENTORY', 'Duplicate or excessive native MCP servers.');
+          names.add(name);
+          if (this.mcpPolicy === 'arcane-only' &&
+              (!['runtimeStatus','pluginId','toolsError'].every(key => Object.hasOwn(raw, key)) || raw.toolsError !== null && typeof raw.toolsError !== 'string')) {
+            fail('MCP_INVENTORY', 'Native MCP inventory lacks valid isolation metadata.');
+          }
+          const runtimeStatus = raw.runtimeStatus == null ? null : str(raw.runtimeStatus, 64);
+          if (runtimeStatus !== null && !['notStarted','starting','connected','authenticationRequired','failed','cancelled','disabled'].includes(runtimeStatus)) fail('MCP_INVENTORY', 'Unknown native MCP runtime status.');
+          const tools = object(raw.tools), toolNames = Object.keys(tools);
+          totalTools += toolNames.length;
+          if (totalTools > 2048) fail('MCP_INVENTORY', 'Native MCP tool names exceed their bound.');
+          for (const tool of toolNames) {
+            str(tool, 256);
+            if (this.mcpPolicy === 'arcane-only') object(tools[tool]);
+          }
+          rows.push({ name, runtimeStatus, toolNames, toolsError: raw.toolsError != null, plugin: raw.pluginId != null, pluginId: raw.pluginId == null ? null : str(raw.pluginId, 256) });
+        }
+        if (result.nextCursor == null) return rows;
+        cursor = str(result.nextCursor, 1024);
+        if (cursors.has(cursor)) fail('MCP_INVENTORY', 'Native MCP inventory pagination repeated.');
+        cursors.add(cursor);
       }
-      if(result.nextCursor==null)return rows;cursor=str(result.nextCursor,1024);if(cursors.has(cursor))fail('MCP_INVENTORY','Native MCP inventory pagination repeated.');cursors.add(cursor);
+      fail('MCP_INVENTORY', 'Native MCP inventory pagination exceeds its bound.');
+    } catch (error) {
+      if (error instanceof CodexClientError && error.code === 'ARGUMENTS') fail('MCP_INVENTORY', 'Malformed native MCP inventory.');
+      throw error;
     }
-    fail('MCP_INVENTORY','Native MCP inventory pagination exceeds its bound.');
   }
   snapshot(): Snapshot {
     // Defensive copies: the host cannot grant writes or mutate approval scope by editing metadata.
@@ -186,6 +242,7 @@ export class CodexSession {
     this.#ensureReady();
     try { return await this.#readAccount(); }
     catch (error) {
+      this.#retireNativeAssets();
       this.#account = null;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel');
@@ -196,7 +253,7 @@ export class CodexSession {
   selectModel(action: HumanAction & Selection): Selection {
     this.#ensureReady();
     exact(action, ['initiatedBy','model','effort']); human({ initiatedBy: action.initiatedBy });
-    if (this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown')) {
+    if (this.#turnPreflight || this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown')) {
       fail('STATE', 'Reconcile the native lifecycle before changing its model or effort.');
     }
     const thread = this.#thread;
@@ -223,14 +280,16 @@ export class CodexSession {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     return this.#openThread(str(action.threadId));
   }
+  /** Trusted host-code seam; public history checks human/live/exact scope before consulting it. */
+  protected historyProcessSpec(): InternalProcess { return this.#processSpec; }
   /** Host supplies the durable binding; this read never adopts/resumes a thread or selects a model. */
   async readThreadHistory(action: HumanAction & { threadId: string; sessionId?: string }): Promise<NativeHistoryResult> {
     exact(action, ['initiatedBy','threadId','sessionId']); human({ initiatedBy: action.initiatedBy }); this.#ensureReady();
     const threadId = str(action.threadId), sessionId = action.sessionId === undefined ? undefined : str(action.sessionId);
     for (const id of [threadId, sessionId]) if (id !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id) || redactNativeHistoryText(id) !== id)) fail('ARGUMENTS', 'Invalid native history identity.');
     if (this.#thread && (this.#thread.threadId !== threadId || (sessionId !== undefined && this.#thread.sessionId !== sessionId))) fail('THREAD', 'Read only the exact current native thread.');
-    if (this.#historyRead || this.#threadOperation || this.#turnOperation) fail('BUSY', 'A native request is already pending.');
-    const read = readHistoryProcess(this.#processSpec, this.bounds, { threadId, cwd: this.#cwd, includeTurns: true, ...(sessionId === undefined ? {} : { sessionId }) });
+    if (this.#historyRead || this.#turnPreflight || this.#threadOperation || this.#turnOperation) fail('BUSY', 'A native request is already pending.');
+    const read = readHistoryProcess(this.historyProcessSpec(), this.bounds, { threadId, cwd: this.#cwd, includeTurns: true, ...(sessionId === undefined ? {} : { sessionId }) });
     this.#historyRead = read;
     try {
       const result = await read.promise;
@@ -242,6 +301,7 @@ export class CodexSession {
   grantThreadWrites(action: HumanAction & { threadId: string }): ThreadState {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId);
+    if (this.#turnPreflight) fail('STATE', 'Wait for the current turn isolation check before granting writes.');
     if (thread.turnStatus === 'cancelling' || thread.turnStatus === 'unknown' || thread.turnStatus === 'starting') fail('STATE', 'Writes cannot be granted during an uncertain lifecycle.');
     thread.writeGranted = true;
     return structuredClone(thread);
@@ -249,6 +309,7 @@ export class CodexSession {
   revokeThreadWrites(action: HumanAction & { threadId: string }): void {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId, false);
+    if (this.#turnPreflight?.thread === thread) this.#turnPreflight.revoked = true;
     thread.writeGranted = false;
     this.#clearApprovals('cancel');
     // Stop the active turn as well: a sandbox already sent on turn/start cannot be downgraded locally.
@@ -259,10 +320,30 @@ export class CodexSession {
   async startTurn(action: HumanAction & { threadId: string; text: string }): Promise<ThreadState> {
     exact(action, ['initiatedBy','threadId','text']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId);
-    if (this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
+    if (this.#turnPreflight || this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
         !['idle','completed','failed','interrupted'].includes(thread.turnStatus)) fail('BUSY', 'The previous turn must be reconciled before starting another.');
     const text = str(action.text, this.bounds.maxInputBytes);
     this.#validatePair(thread.selection);
+    if (this.mcpPolicy === 'arcane-only') {
+      const preflight: TurnPreflight = { thread, selection: { ...thread.selection }, accountRevision: this.#accountRevision,
+        turnId: thread.turnId, turnStatus: thread.turnStatus, revoked: false };
+      // Reserve the entire asynchronous check without inventing a turn or an operation ID.
+      this.#turnPreflight = preflight; this.#mcpIsolated = false;
+      try {
+        this.#clearApprovals('cancel');
+        const rows = await this.#inspectMcpServers(thread.threadId, () => this.#checkTurnPreflight(preflight));
+        this.#checkTurnPreflight(preflight);
+        if (!arcaneThreadIsIsolated(rows)) fail('MCP_ISOLATION', 'The current native thread is not isolated to Arcane. No turn was sent.');
+        this.#mcpIsolated = true;
+      } catch (error) {
+        this.#invalidateIsolation(error);
+        // A dispatched metadata request is not a dispatched turn. The host persists this distinction.
+        throw error instanceof CodexClientError
+          ? new CodexClientError(error.code, error.message, false, error.remoteCode)
+          : new CodexClientError('MCP_ISOLATION', 'Native isolation could not be verified. No turn was sent.');
+      }
+      finally { this.#turnPreflight = null; }
+    }
     const operation = this.#newOperation('turn/start', thread.threadId, null);
     this.#turnOperation = operation;
     this.#cancelledTurnId = null;
@@ -285,6 +366,9 @@ export class CodexSession {
         operation.turnId = turnId; thread.turnId = turnId; this.#knownTurnIds.add(turnId);
         // A late acknowledgement cannot resurrect a completed or cancelled turn.
         if (thread.turnStatus === 'starting') thread.turnStatus = turnStatus;
+        if (TERMINAL.has(turnStatus) && !this.#endNativeAssetIntent(operation)) {
+          throw new CodexClientError('UNKNOWN', 'Native asset completion is uncertain.', true);
+        }
         operation.state = 'acknowledged';
       });
       return structuredClone(thread);
@@ -298,11 +382,13 @@ export class CodexSession {
   async interruptTurn(action: HumanAction & { threadId: string; turnId: string }): Promise<void> {
     exact(action, ['initiatedBy','threadId','turnId']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId, false);
+    if (this.#turnPreflight) fail('STATE', 'No turn has been dispatched during the isolation check.');
     const turnId = str(action.turnId);
     if (thread.turnId !== turnId || !['starting','inProgress'].includes(thread.turnStatus)) fail('STATE', 'Select the exact active turn to interrupt.');
     const operation = this.#newOperation('turn/interrupt', thread.threadId, turnId);
     // Fence first, synchronously, before any write or acknowledgement. Late prompts cannot be accepted.
     this.#cancelledTurnId = turnId; thread.turnStatus = 'cancelling'; thread.writeGranted = false;
+    this.#endNativeAssetIntent();
     this.#clearApprovals('cancel');
     try {
       await this.#requestOperation(operation, { threadId: thread.threadId, turnId });
@@ -327,11 +413,12 @@ export class CodexSession {
     this.#removeApproval(pending, action.decision);
   }
   async close(): Promise<void> {
+    this.#retireNativeAssets();
     const read = this.#historyRead; read?.stop();
     await Promise.allSettled([this.#transport.close(), ...(read ? [read.promise] : [])]);
   }
   #ensureReady(): void {
-    if (!this.#ready || !this.#transport.connected) fail('DISCONNECTED', 'A ready local connection is required.');
+    if (!this.#ready || !this.#transport.connected || this.#assetsRetired) fail('DISCONNECTED', 'A ready local connection is required.');
   }
   #ensureSubscription(): void {
     this.#ensureReady();
@@ -347,21 +434,54 @@ export class CodexSession {
     const model = this.#models.find(entry => entry.model === pair.model);
     if (!model || !model.efforts.includes(pair.effort)) fail('SELECTION', 'The exact selected model and effort must occur in the current native catalogue.');
   }
-  async #readAccount(): Promise<Account> {
-    const result = object(await this.#transport.request('account/read', { refreshToken: false }));
-    if (typeof result.requiresOpenaiAuth !== 'boolean') fail('PROTOCOL', 'Account response lacks provider metadata.');
-    const raw = result.account == null ? null : object(result.account);
-    const account: Account = {
-      auth: raw === null ? 'signed-out' : raw.type === 'chatgpt' ? 'subscription' : 'unsupported',
-      plan: raw?.type === 'chatgpt' && typeof raw.planType === 'string' && PLANS.has(raw.planType) ? raw.planType : null,
-      requiresOpenaiAuth: result.requiresOpenaiAuth,
-    };
-    this.#account = account;
-    if (account.auth !== 'subscription' && this.#thread) {
-      this.#thread.writeGranted = false; this.#clearApprovals('cancel');
-      if (['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
+  #checkIsolationContext(thread: ThreadState, pair: Selection, accountRevision: number): void {
+    this.#ensureSubscription();
+    const identity = this.#threadAcknowledgement;
+    if (!identity || thread.threadId !== identity.threadId || thread.sessionId !== identity.sessionId) {
+      fail('PROTOCOL', 'Native thread acknowledgement identity changed during the isolation check.');
     }
-    return structuredClone(account);
+    if (this.#accountReads || this.#accountRevision !== accountRevision || this.#thread !== thread ||
+        this.#selection?.model !== pair.model || this.#selection.effort !== pair.effort ||
+        thread.selection.model !== pair.model || thread.selection.effort !== pair.effort) {
+      fail('STATE', 'Native account, thread or selection changed during the isolation check.');
+    }
+    this.#validatePair(pair);
+  }
+  #checkTurnPreflight(preflight: TurnPreflight): void {
+    this.#checkIsolationContext(preflight.thread, preflight.selection, preflight.accountRevision);
+    if (preflight.revoked) fail('GRANT_REVOKED', 'Write permission was revoked before turn dispatch. No turn was sent.');
+    if (this.#turnPreflight !== preflight || !preflight.thread.configured || this.#threadOperation || this.#turnOperation ||
+        preflight.thread.turnId !== preflight.turnId || preflight.thread.turnStatus !== preflight.turnStatus ||
+        this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown')) {
+      fail('STATE', 'Native lifecycle changed during the isolation check. No turn was sent.');
+    }
+  }
+  #invalidateIsolation(error: unknown): void {
+    this.#retireNativeAssets();
+    this.#mcpIsolated = false;
+    if (this.#thread) { this.#thread.configured = false; this.#thread.writeGranted = false; }
+    // Disconnect clears cached approvals without replaying an uncertain callback delivery.
+    this.#transport.stop(error instanceof CodexClientError ? error : new CodexClientError('MCP_ISOLATION', 'Native isolation could not be verified.'));
+  }
+  async #readAccount(): Promise<Account> {
+    this.#accountReads++; this.#accountRevision++;
+    try {
+      const result = object(await this.#transport.request('account/read', { refreshToken: false }));
+      if (!Object.hasOwn(result, 'account') || typeof result.requiresOpenaiAuth !== 'boolean') fail('PROTOCOL', 'Account response lacks provider metadata.');
+      const raw = result.account === null ? null : object(result.account);
+      const account: Account = {
+        auth: raw === null ? 'signed-out' : raw.type === 'chatgpt' ? 'subscription' : 'unsupported',
+        plan: raw?.type === 'chatgpt' && typeof raw.planType === 'string' && PLANS.has(raw.planType) ? raw.planType : null,
+        requiresOpenaiAuth: result.requiresOpenaiAuth,
+      };
+      if ((this.#ready || this.#thread) && this.#account && (this.#account.auth !== account.auth || this.#account.plan !== account.plan || this.#account.requiresOpenaiAuth !== account.requiresOpenaiAuth)) this.#retireNativeAssets();
+      this.#account = account;
+      if (account.auth !== 'subscription' && this.#thread) {
+        this.#thread.writeGranted = false; this.#clearApprovals('cancel');
+        if (['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
+      }
+      return structuredClone(account);
+    } finally { this.#accountReads--; this.#accountRevision++; }
   }
   async #listModels(): Promise<void> {
     if (this.#catalogueLoading) fail('BUSY', 'A catalogue refresh is already pending.');
@@ -403,6 +523,8 @@ export class CodexSession {
     if (!this.#selection) fail('SELECTION', 'Select an exact model and effort first.');
     this.#validatePair(this.#selection);
     if (this.#thread || this.#threadOperation) fail('STATE', 'This connection already owns a thread lifecycle.');
+    if (this.mcpPolicy === 'arcane-only' && this.#accountReads) fail('BUSY', 'Wait for the current native account read before opening a thread.');
+    const accountRevision = this.#accountRevision;
     const pair = { ...this.#selection };
     const operation = this.#newOperation(id === null ? 'thread/start' : 'thread/resume', id, null);
     this.#threadOperation = operation;
@@ -417,7 +539,7 @@ export class CodexSession {
         const threadId = str(rawThread.id);
         if ((id && threadId !== id) || (operation.threadId && operation.threadId !== threadId)) fail('PROTOCOL', 'Thread acknowledgement changed the exact ID.');
         operation.threadId = threadId;
-        this.#adoptThread(threadId, pair, optionalText(rawThread.sessionId, 256));
+        this.#acknowledgeThread(threadId, pair, optionalText(rawThread.sessionId, 256));
         const sandbox = object(resultObject.sandbox);
         if (resultObject.model !== pair.model || resultObject.modelProvider !== 'openai' || resultObject.approvalPolicy !== 'on-request' || resultObject.approvalsReviewer !== 'user' || sandbox.type !== 'readOnly' || sandbox.networkAccess !== false || typeof resultObject.cwd !== 'string' || resolve(resultObject.cwd) !== resolve(this.#cwd)) {
           fail('SETTINGS_MISMATCH', 'Native thread settings do not match the requested local policy and model.');
@@ -433,9 +555,17 @@ export class CodexSession {
       });
       const thread = this.#thread!;
       if(this.mcpPolicy==='arcane-only') {
-        const inventory=await this.inspectMcpServers({initiatedBy:'human',threadId:thread.threadId});
-        if(!arcaneThreadIsIsolated(inventory))fail('MCP_ISOLATION','The native thread exposes an inherited tool server or Arcane is not connected. No turn can be started.');
-        this.#mcpIsolated=true;thread.configured=true;
+        const turnId=thread.turnId,turnStatus=thread.turnStatus;
+        const check=()=>{
+          this.#checkIsolationContext(thread,pair,accountRevision);
+          if(this.#threadOperation!==operation||thread.turnId!==turnId||thread.turnStatus!==turnStatus)fail('STATE','Thread setup changed during the isolation check.');
+        };
+        try {
+          const inventory=await this.#inspectMcpServers(thread.threadId,check);
+          check();
+          if(!arcaneThreadIsIsolated(inventory))fail('MCP_ISOLATION','The native thread exposes an inherited tool server or Arcane is not connected. No turn can be started.');
+          this.#mcpIsolated=true;thread.configured=true;
+        } catch(error) { this.#invalidateIsolation(error);throw error; }
       }
       return structuredClone(thread);
     } catch (error) {
@@ -444,13 +574,36 @@ export class CodexSession {
       throw error;
     } finally { this.#threadOperation = null; }
   }
-  #adoptThread(id: string, selection: Selection, sessionId: string | null): void {
-    if (this.#thread && this.#thread.threadId !== id) fail('PROTOCOL', 'Thread notification changed identity.');
+  #acknowledgeThread(id: string, selection: Selection, sessionId: string | null): void {
+    const identity = this.#threadAcknowledgement;
+    if (this.#thread && this.#thread.threadId !== id || identity && (identity.threadId !== id || identity.sessionId !== sessionId)) {
+      fail('PROTOCOL', 'Thread acknowledgement changed identity.');
+    }
+    const conflict = this.#threadSessionObserved && this.#thread?.sessionId !== sessionId;
+    // The decoded ACK is canonical evidence, including null, even when earlier
+    // provisional notification evidence conflicts and setup must fail closed.
     this.#thread ??= { threadId: id, sessionId, selection, configured: false, writeGranted: false, turnId: null, turnStatus: 'idle' };
-    if (sessionId !== null) this.#thread.sessionId = sessionId;
+    this.#thread.sessionId = sessionId;
+    this.#threadAcknowledgement ??= Object.freeze({ threadId: id, sessionId });
+    if (conflict) fail('PROTOCOL', 'Thread notification conflicts with its acknowledgement session.');
+  }
+  #adoptThread(id: string, selection: Selection, sessionId: string | null, sessionSpecified: boolean): void {
+    if (this.#thread && this.#thread.threadId !== id) fail('PROTOCOL', 'Thread notification changed identity.');
+    const identity = this.#threadAcknowledgement;
+    if (sessionSpecified && (identity ? identity.sessionId !== sessionId : this.#threadSessionObserved && this.#thread?.sessionId !== sessionId)) {
+      fail('PROTOCOL', 'Thread notification changed the exact session.');
+    }
+    this.#thread ??= { threadId: id, sessionId, selection, configured: false, writeGranted: false, turnId: null, turnStatus: 'idle' };
+    // Omission makes no session claim. Once acknowledged, notifications never
+    // replace or enrich the canonical tuple, even with a later non-null value.
+    if (!identity && sessionSpecified) { this.#thread.sessionId = sessionId; this.#threadSessionObserved = true; }
   }
   #newOperation(method: Operation['method'], threadId: string | null, turnId: string | null): Operation {
     if (this.#operations.length >= this.bounds.maxOperations) {
+      if (this.#nativeAssetHooks) {
+        this.#retireNativeAssets();
+        this.#transport.stop(new CodexClientError('OPERATION_LIMIT', 'Operation history exhausted; explicit reconciliation is required.'));
+      }
       if (method === 'turn/interrupt') this.#transport.stop(new CodexClientError('OPERATION_LIMIT', 'Operation history exhausted during cancellation; explicit reconciliation is required.'));
       fail('OPERATION_LIMIT', 'Reconnect explicitly after reconciling the bounded operation history.');
     }
@@ -458,12 +611,45 @@ export class CodexSession {
     this.#operations.push(operation); return operation;
   }
   #requestOperation(operation: Operation, params: unknown): Promise<unknown> {
-    return this.#transport.request(operation.method, params, id => { operation.requestId = id; });
+    return this.#transport.request(operation.method, params, id => { operation.requestId = id; },
+      this.#nativeAssetHooks && operation.method === 'turn/start' ? () => this.#dispatchNativeAssetIntent(operation) : undefined);
+  }
+  #dispatchNativeAssetIntent(operation: Operation): void {
+    if (this.#assetsRetired || !this.#transport.connected || !this.#mcpIsolated || !this.#thread?.configured ||
+        this.#turnOperation !== operation || this.#thread.threadId !== operation.threadId || this.#assetIntent) {
+      fail('STATE', 'Native asset dispatch scope is unavailable.');
+    }
+    const scope = Object.freeze({ connectionId: this.#connectionId, threadId: this.#thread.threadId, operationId: operation.operationId });
+    this.#assetIntent = { operation, scope };
+    this.#nativeAssetHooks!.dispatched(scope);
+  }
+  #endNativeAssetIntent(operation?: Operation): boolean {
+    const intent = this.#assetIntent;
+    if (!intent || operation && intent.operation !== operation) return true;
+    this.#assetIntent = null; // Fence before calling host code, including reentrant close.
+    try { this.#nativeAssetHooks!.ended(intent.scope); return true; }
+    catch {
+      this.#retireNativeAssets();
+      this.#transport.stop(new CodexClientError('UNKNOWN', 'Native asset completion is uncertain.', true));
+      return false;
+    }
+  }
+  #retireNativeAssets(): void {
+    if (!this.#nativeAssetHooks || this.#assetsRetired) return;
+    this.#assetsRetired = true;
+    this.#ready = false;
+    this.#endNativeAssetIntent();
+    try { this.#nativeAssetHooks.retired(); } catch { /* Cleanup must continue even if trusted host code fails. */ }
   }
   #decodeAcknowledgement(decode: () => void): void {
     // This boundary runs only after a successful RPC response, never before dispatch.
     // Shared argument validators must not turn malformed native ACKs into safe-to-retry operations.
-    try { decode(); }
+    try {
+      decode();
+      if (this.#nativeAssetHooks && !this.#transport.connected) {
+        throw new CodexClientError('UNKNOWN', 'Native lifecycle acknowledgement arrived after disconnect.', true);
+      }
+    }
     catch (error) {
       const code = error instanceof CodexClientError && error.code !== 'ARGUMENTS' ? error.code : 'PROTOCOL';
       throw new CodexClientError(code, 'Invalid native lifecycle acknowledgement.', true);
@@ -474,12 +660,21 @@ export class CodexSession {
     operation.errorCode = native.code;
     const observed = operation.method === 'thread/start' ? operation.threadId !== null : operation.method === 'turn/start' ? operation.turnId !== null : false;
     operation.state = native.code === 'REMOTE_REJECTED' && !observed ? 'rejected' : native.dispatched ? 'unknown' : operation.state === 'unknown' || observed ? 'unknown' : 'not-sent';
+    if (operation.method === 'turn/start') this.#endNativeAssetIntent(operation);
+    if (this.#nativeAssetHooks && operation.state === 'unknown') {
+      this.#retireNativeAssets(); this.#transport.stop(native);
+    }
     if (native.code === 'SETTINGS_MISMATCH' || native.code === 'PROTOCOL') {
       operation.state = 'unknown'; this.#transport.stop(native);
     }
   }
   #disconnect(error: CodexClientError): void {
+    this.#retireNativeAssets();
     this.#ready = false; this.#failureCode ??= error.code;
+    if (this.mcpPolicy === 'arcane-only') {
+      this.#mcpIsolated = false;
+      if (this.#thread) this.#thread.configured = false;
+    }
     this.#historyRead?.stop();
     this.#clearApprovals(null);
     if (this.#thread) {
@@ -494,6 +689,8 @@ export class CodexSession {
     if (Object.hasOwn(message, 'id')) { this.#serverRequest(message); return; }
     const method = message.method;
     if (method === 'account/updated') {
+      if (!this.#initializing || this.#ready || this.#thread) this.#retireNativeAssets();
+      this.#accountRevision++;
       this.#account = null;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel'); this.#event({ type: 'account-changed' });
@@ -510,12 +707,18 @@ export class CodexSession {
       return;
     }
     if (method === 'thread/started') {
-      if (!this.#threadOperation) return;
+      if (!this.#threadOperation && !this.#threadAcknowledgement) return;
       const raw = object(params.thread); const id = str(raw.id);
-      if (this.#threadOperation.threadId && this.#threadOperation.threadId !== id) fail('PROTOCOL', 'Thread notification changed the exact ID.');
-      this.#threadOperation.threadId = id;
-      this.#adoptThread(id, this.#selection!, optionalText(raw.sessionId, 256));
-      this.#event({ type: 'thread', threadId: id }); return;
+      // Ignore unrelated late threads; same-thread identity conflicts must still
+      // retire a configured connection and any active asset intent.
+      if (!this.#threadOperation && id !== this.#threadAcknowledgement!.threadId) return;
+      if (this.#threadOperation) {
+        if (this.#threadOperation.threadId && this.#threadOperation.threadId !== id) fail('PROTOCOL', 'Thread notification changed the exact ID.');
+        this.#threadOperation.threadId = id;
+      }
+      this.#adoptThread(id, this.#selection!, optionalText(raw.sessionId, 256), Object.hasOwn(raw, 'sessionId'));
+      if (this.#threadOperation) this.#event({ type: 'thread', threadId: id });
+      return;
     }
     if (!this.#thread || params.threadId !== this.#thread.threadId) return;
     const thread = this.#thread;
@@ -531,7 +734,7 @@ export class CodexSession {
       if (method === 'turn/started' && this.#cancelledTurnId === id) return;
       if (method === 'turn/started' && TERMINAL.has(thread.turnStatus)) return;
       thread.turnStatus = state;
-      if (TERMINAL.has(state)) this.#clearApprovals(null);
+      if (TERMINAL.has(state)) { this.#endNativeAssetIntent(); this.#clearApprovals(null); }
       this.#event({ type: 'turn', threadId: thread.threadId, turnId: id, status: state }); return;
     }
     if (params.turnId !== thread.turnId || !this.#scopeActive(thread.threadId, thread.turnId)) return;
@@ -555,6 +758,7 @@ export class CodexSession {
   #scopeActive(threadId: string, turnId: string | null): boolean {
     const thread = this.#thread;
     return this.#transport.connected && thread !== null && thread.threadId === threadId && turnId !== null && thread.turnId === turnId &&
+      (this.mcpPolicy !== 'arcane-only' || thread.configured && this.#mcpIsolated) &&
       this.#cancelledTurnId !== turnId && ['starting','inProgress'].includes(thread.turnStatus);
   }
   #serverRequest(message: Record<string, unknown>): void {

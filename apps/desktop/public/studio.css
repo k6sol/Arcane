@@ -206,5 +206,61 @@ button{background:var(--action)}
 .desktop-verification .button-row{display:flex;flex-wrap:wrap;gap:10px}
 .desktop-verification button{min-height:44px;max-width:100%;white-space:normal}
 .desktop-verification [hidden]{display:none!important}
+/* Asset permission stays inside the existing native settings. */
+.codex-asset-permission{min-width:0;max-width:70ch;margin:18px 0;padding:16px 0 0;border-top:1px solid var(--line)}
+.codex-asset-permission legend{font:inherit;font-weight:600;padding:0 8px 0 0}
+.codex-asset-permission p{overflow-wrap:anywhere}
+.codex-asset-permission .button-row{display:flex;flex-wrap:wrap;gap:10px}
+.codex-asset-permission button{min-height:44px;max-width:100%;white-space:normal;font-size:12px}
+/* Conversation first; the shell owns opening a genuine preview or explicit toggle. */
+.workspace-stage{grid-template-columns:minmax(0,1fr)}
+.workspace-stage:not(.preview-open)>.codex-panel{width:100%;max-width:980px;justify-self:center}
+.workspace-stage:not(.preview-open)>.artifact-panel{display:none}
+.workspace-stage.preview-open{grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+.chat-topline .preview-toggle{margin-left:auto;flex-shrink:0;padding:7px 10px;min-height:36px;font-weight:500;font-size:12px}
+.chat-topline .icon-button{margin-left:0}
+#workspace-preview-close{flex-shrink:0}
+.composer-model-picker{min-width:0;max-width:100%}
+.composer-model-trigger{display:flex;align-items:center;gap:7px;max-width:100%;min-height:36px;padding:7px 9px;background:transparent;border-color:var(--line);color:var(--text);font-size:12px;font-weight:500;text-align:left}
+.composer-model-trigger:hover:not(:disabled),.composer-model-trigger[aria-expanded=true]{background:var(--raised);border-color:var(--accent)}
+.composer-model-trigger .icon{width:14px;height:14px;flex-shrink:0;color:var(--muted)}
+.composer-model-trigger .picker-provider{color:var(--accent);flex-shrink:0}
+#codex-model-label{min-width:0;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.picker-effort{color:var(--muted);border-left:1px solid var(--line);padding-left:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80px}
+.composer-model-popover{position:fixed;z-index:80;display:flex;flex-direction:column;gap:10px;width:min(360px,calc(100vw - 24px));max-height:min(480px,calc(100svh - 24px));overflow:auto;overscroll-behavior:contain;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text);font-size:13px;scrollbar-width:thin}
+.composer-model-popover h2{font-size:14px;letter-spacing:0}.composer-model-popover h3{font-size:12px;color:var(--muted)}
+.composer-model-popover input{min-height:40px;flex-shrink:0;font-size:13px}
+.picker-model-options{display:flex;flex-direction:column;gap:3px;max-height:220px;min-height:0;overflow:auto;flex-shrink:0;scrollbar-width:thin}
+.picker-model-option{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%;min-height:44px;padding:9px 10px;background:transparent;border:1px solid transparent;color:var(--text);text-align:left;font-size:13px;font-weight:500;overflow-wrap:anywhere}
+.picker-model-option small{color:var(--muted);font-size:12px;font-weight:400}
+.picker-model-option:hover:not(:disabled){background:var(--raised)}
+.picker-model-option[aria-selected=true]{border-color:var(--accent);background:#211012}
+.picker-effort-section{border-top:1px solid var(--line);padding-top:10px;flex-shrink:0}
+.picker-efforts{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.picker-effort-option{min-height:36px;padding:7px 10px;border:1px solid var(--line);background:transparent;color:var(--muted);font-weight:500;font-size:12px;max-width:100%;overflow-wrap:anywhere}
+.picker-effort-option[aria-checked=true]{border-color:var(--accent);color:var(--text);background:#211012}
+.composer-model-popover .hint{margin:0;font-size:12px;overflow-wrap:anywhere}
+#codex-picker-effort-hint{margin-top:8px}
+#codex-picker-apply{min-height:40px;flex-shrink:0;font-size:12px}
+.picker-setup-actions{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:8px;flex-shrink:0}
+.picker-setup-actions button{min-height:36px;max-width:100%;white-space:normal;text-align:left}
+.provider-setup-panel,.provider-login-gate{min-width:0;max-width:70ch;padding:16px 0}
+.provider-setup-panel>label{margin-top:12px;max-width:360px}
+.provider-login-gate{padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.provider-login-gate h2{font-size:17px}
+.provider-login-gate .button-row+.button-row{margin-top:10px}
+.provider-setup-panel button,.provider-login-gate button{min-height:44px;max-width:100%;white-space:normal}
+.provider-setup-panel p,.provider-login-gate p{overflow-wrap:anywhere}
+@media(max-width:700px){
+ .workspace-stage{display:grid;grid-template-columns:minmax(0,1fr);flex:1;min-height:320px}
+ .workspace-stage.preview-open{grid-template-columns:minmax(0,1fr);flex:none}
+ .workspace-stage>.codex-panel{min-height:320px;height:auto;flex:none}
+ .workspace-stage>.artifact-panel{margin-top:0;min-height:360px;height:min(520px,70svh);flex:none}
+ .composer-controls{gap:6px}.composer-model-picker{flex:1 0 calc(100% - 52px);order:0}
+ .composer-model-trigger{max-width:100%;min-height:44px}.workspace-stage #codex-submit{order:1}
+ .composer-tool-context,#workspace-add-context{order:2}
+ #codex-model-label{max-width:160px}.picker-effort{max-width:60px}
+ .composer-model-popover{padding:12px}.picker-effort-option{min-height:44px}
+}
 /* Keep this universal preference reset last, after every responsive override. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

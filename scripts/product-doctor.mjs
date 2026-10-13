@@ -14,6 +14,9 @@ export async function productDoctor({ repository = REPOSITORY, nodeVersion = pro
   for (const [id, path] of [
     ['daemon-entry', 'dist/apps/daemon/src/product-main.js'], ['mcp-entry', 'dist/apps/mcp/src/main.js'],
     ['workbench-entry', 'dist/apps/desktop/src/studio.js'], ['codex-chat-entry', 'dist/apps/desktop/src/codex-chat.js'],
+    ['desktop-verification-source', 'apps/desktop/src/desktop-verification.ts'], ['desktop-verification-entry', 'dist/apps/desktop/src/desktop-verification.js'],
+    ['desktop-verification-map', 'dist/apps/desktop/src/desktop-verification.js.map'],
+    ['provider-setup-source','apps/desktop/src/provider-setup.ts'], ['provider-setup-entry','dist/apps/desktop/src/provider-setup.js'], ['provider-setup-host','apps/desktop/electron/provider-setup.cjs'],
     ['workspace-shell-source', 'apps/desktop/src/workspace-shell.ts'], ['workspace-shell-entry', 'dist/apps/desktop/src/workspace-shell.js'],
     ['workspace-shell-map', 'dist/apps/desktop/src/workspace-shell.js.map'],
     ['asset-downloads-source', 'apps/desktop/src/asset-downloads.ts'], ['asset-downloads-entry', 'dist/apps/desktop/src/asset-downloads.js'], ['asset-downloads-map', 'dist/apps/desktop/src/asset-downloads.js.map'], ['learning-panel-source', 'apps/desktop/src/learning-panel.ts'], ['learning-panel-entry', 'dist/apps/desktop/src/learning-panel.js'], ['learning-panel-map', 'dist/apps/desktop/src/learning-panel.js.map'], ['workflow-panel-source', 'apps/desktop/src/workflow-panel.ts'], ['workflow-panel-entry', 'dist/apps/desktop/src/workflow-panel.js'], ['workflow-panel-map', 'dist/apps/desktop/src/workflow-panel.js.map'], ['codex-history-source', 'apps/desktop/src/codex-history.ts'], ['codex-history-entry', 'dist/apps/desktop/src/codex-history.js'], ['codex-history-map', 'dist/apps/desktop/src/codex-history.js.map'], ['codex-controller-entry', 'dist/apps/daemon/src/codex-service.js'],

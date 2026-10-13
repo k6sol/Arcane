@@ -3,7 +3,8 @@ import { CodexHistoryPanel } from './codex-history.js';
 import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
 import { CodexChat, CodexChatApi } from './codex-chat.js';
-import { startWorkspaceShell } from './workspace-shell.js';
+import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
+import { startProviderSetup } from './provider-setup.js';
 import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
@@ -586,6 +587,7 @@ export class StudioWorkbench {
   private nativeBusy = false;
   private assetJobs: AssetJobRecord[] = [];
   private assetJobId = '';
+  private assetActivitySignature = '';
   private assetAvailable = false;
   private assetBusy = false;
   private assetProbed = false;
@@ -1354,6 +1356,13 @@ export class StudioWorkbench {
   }
   private renderAssetJob() {
     const job = this.currentAssetJob(); this.text('asset-job-record', job ? json(job) : 'No asset job selected.');
+    if (job?.state === 'running' && this.assetAvailable) {
+      const key = this.historyProjectPath() + '\0' + job.jobId;
+      if (key !== this.assetActivitySignature) { this.assetActivitySignature = key;
+        const EventType = this.doc.defaultView?.CustomEvent;
+        if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'running'},bubbles:false}));
+      }
+    }
     this.text('asset-job-summary', job ? job.request.name + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
   }
   private assetFailure(error: unknown, operation: string) {
@@ -1430,6 +1439,8 @@ export class StudioWorkbench {
           if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
           const figure = this.make('figure'), canvas = this.make('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', artifact.path + ' for job ' + job.jobId); canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
           figure.append(canvas, this.make('figcaption', artifact.path + ' · SHA-256 verified')); this.el('asset-previews').append(figure);
+          const EventType = this.doc.defaultView?.CustomEvent;
+          if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'succeeded'},bubbles:false}));
         } finally { bitmap.close(); }
       }));
       if (this.assetCurrent(ticket) && epoch === this.assetPreviewEpoch && this.assetJobId === job.jobId) this.text('asset-notice', reads.some(r => r.status === 'rejected') ? 'Manifest loaded; one or more previews failed authentication, decoding or integrity verification. Inspect the recorded manifest.' : 'Manifest and authenticated previews loaded. Review validation warnings and limitations before using exports.');
@@ -1591,6 +1602,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
   const token = takeControlToken(window.location, window.history, storage);
   const codexChat = new CodexChat(document, new CodexChatApi(token));
+  const providerSetup = startProviderSetup(document, {chat:codexChat});
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
     assetMode: 'conversation', getNativeConversation: () => codexChat.workflowConversation(),
     subscribeContextChange: listener => codexChat.subscribeWorkflowContextChange(listener),
@@ -1611,8 +1623,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workflowsStopped = true; desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

@@ -15,7 +15,7 @@ function deploymentManifest(source) {
   const files = source.files.filter(file => deploymentPath(file.path));
   return { ...source, fileCount: files.length, totalBytes: files.reduce((total, file) => total + file.bytes, 0), files };
 }
-const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs'];
+const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs'];
 const PRODUCTION_ROOTS = ['@modelcontextprotocol/sdk', 'zod'];
 const ELECTRON_FILES = new Set([
   'electron.exe', 'LICENSE', 'LICENSES.chromium.html', 'version',

@@ -6,8 +6,11 @@ import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { object, textField } from '../../../packages/protocol/src/studio.js';
 import type { StudioStore } from '../../../packages/storage/src/studio-store.js';
 import type { WorkStore } from '../../../packages/storage/src/work-store.js';
+import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 
-export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken = '') {
+export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken: string | ((request: IncomingMessage) => string) = '') {
+  // Canonical host identity, never supplied by a browser/model or inferred from UI text.
+  const project = workflowProjectIdentity(projectPath);
   let attempts: number[] = [];
   return async (request: IncomingMessage, response: ServerResponse, url: URL, controlToken: string, origin: string): Promise<boolean> => {
     if (!url.pathname.startsWith('/v1/studio/') && !url.pathname.startsWith('/v1/plugin/') && !url.pathname.startsWith('/v1/product/') && !url.pathname.startsWith('/v1/work/')) return false;
@@ -17,7 +20,8 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       const bearer = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : '';
       const plugin = url.pathname.startsWith('/v1/plugin/');
       const matches = (token: string) => token.length > 0 && Buffer.byteLength(bearer) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(token));
-      const human = matches(controlToken); const agent = matches(agentToken);
+      const expectedAgent = () => typeof agentToken === 'function' ? agentToken(request) : agentToken;
+      const human = matches(controlToken); const agent = matches(expectedAgent());
       if (!plugin && !human && !agent) throw new ArcaneError('AUTH', 'Open the local launcher session, or supply its scoped local MCP bearer.');
       if (agent && ['/v1/studio/pairing', '/v1/studio/revoke', '/v1/studio/keys', '/v1/studio/keys/revoke', '/v1/work/review', '/v1/product/mcp-token'].includes(url.pathname)) throw new ArcaneError('SCOPE', 'Agent bearer cannot grant Studio access, revoke human sessions or approve work. Use the human panel.');
       if (request.method === 'GET' && !plugin) {
@@ -31,7 +35,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         if (url.pathname === '/v1/product/state') {
           let buildTasks: unknown[] = [];
           try { const board = JSON.parse(await readFile(join(cwd, 'docs/build/tasks.json'), 'utf8')) as { tasks: unknown[] }; buildTasks = board.tasks; } catch { /* Optional authored board is not a connected task runtime. */ }
-          send(200, { projectPath, protocolVersion: 1, studioSessions: store.sessions(), commandCounts: store.counts(), buildTasks,
+          send(200, { projectPath: project.projectPath, projectId: project.projectId, protocolVersion: 1, studioSessions: store.sessions(), commandCounts: store.counts(), buildTasks,
             features: [
               { id: 'studio-bridge', state: 'implemented-local', verified: 'automated bridge/controller fixtures; native installed-plugin acceptance deferred by user' },
               { id: 'native-providers', state: 'metadata-only', verified: 'native CLI metadata probes; inference not enabled' },
@@ -49,8 +53,10 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         attempts.push(now);
       }
       if (['/v1/work/review', '/v1/product/mcp-token'].includes(url.pathname) && (!human || request.headers.origin !== origin)) throw new ArcaneError('ORIGIN', 'Human review/token handoff requires the local browser panel origin.');
-      const input = await readBridgeJson(request); const a = object(input);
-      if (url.pathname === '/v1/product/mcp-token') { send(200, { token: agentToken, scopes: ['studio-granted-commands', 'work-coordination', 'fixed-template-assets'], canReview: false, expires: 'daemon lifetime' }); return true; }
+      const input = await readBridgeJson(request);
+      if (agent && !matches(expectedAgent())) throw new ArcaneError('SCOPE', 'The native agent connection changed before its operation.');
+      const a = object(input);
+      if (url.pathname === '/v1/product/mcp-token') { send(200, { token: expectedAgent(), scopes: ['studio-granted-commands', 'work-coordination', 'fixed-template-assets'], canReview: false, expires: 'daemon lifetime' }); return true; }
       if (plugin) {
         if (url.pathname === '/v1/plugin/connect') {send(200,store.connectWithKey(a,Number(new URL(origin).port)));return true;}
         if (url.pathname === '/v1/plugin/pair') { send(200, store.pair(a)); return true; }

@@ -16,6 +16,9 @@ export function parsePrivateReceiptDescriptor(value: unknown, prepare: boolean, 
 
 // Fixed native ACL operation. Neither source code nor a command/executable path
 // comes from workflow text, HTTP JSON, an MCP tool, or provider configuration.
+// Read-only .NET inspection avoids filesystem-provider discovery; verified
+// against native attributes, owner/DACL/rules and rejection cases. The native
+// binary, complete predicates, preparation writes and 5000ms deadline are unchanged.
 // Only a new, empty, direct Arcane child receives a narrower DACL. An existing
 // directory is inspected, never "repaired". No ACL elsewhere is changed.
 const SCRIPT=String.raw`
@@ -31,16 +34,26 @@ try {
   $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')
   $danger=[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
   function Direct([string]$path) {
-    $item=Get-Item -LiteralPath $path -Force
-    if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'link'}
+    $attributes=[IO.File]::GetAttributes($path)
+    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'link'}
+    if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){
+      $item=[IO.DirectoryInfo]::new($path)
+    } else { $item=[IO.FileInfo]::new($path) }
+    $item.Refresh()
     return $item
   }
-  function Acl([string]$path) { return (Get-Acl -LiteralPath $path) }
+  function IsDirectory($item) { return (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) }
+  function Acl([string]$path) {
+    if(([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::Directory) -ne 0){
+      return [IO.Directory]::GetAccessControl($path)
+    }
+    return [IO.File]::GetAccessControl($path)
+  }
   function Rules($acl) { return $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) }
   $at=$root
   while($at){
     $item=Direct $at
-    if(-not $item.PSIsContainer){throw 'ancestor'}
+    if(-not (IsDirectory $item)){throw 'ancestor'}
     foreach($rule in (Rules (Acl $at))){
       if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and $allowed -notcontains $rule.IdentityReference.Value -and ($rule.FileSystemRights -band $danger) -ne 0){throw 'ancestor-acl'}
     }
@@ -55,7 +68,7 @@ try {
     $info=[IO.Directory]::CreateDirectory($dir)
     $item=Direct $dir
     $prior=Acl $dir
-    if(-not $item.PSIsContainer -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value -or @(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0){throw 'created-scope'}
+    if(-not (IsDirectory $item) -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value -or @(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0){throw 'created-scope'}
     $acl=New-Object Security.AccessControl.DirectorySecurity
     $acl.SetOwner($user)
     $acl.SetAccessRuleProtection($true,$false)
@@ -69,13 +82,13 @@ try {
   }
   $item=Direct $dir
   $acl=Acl $dir
-  if(-not $item.PSIsContainer -or -not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-dir'}
+  if(-not (IsDirectory $item) -or -not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-dir'}
   foreach($rule in (Rules $acl)){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private-dir-rule'}}
   if($key){
     $file=[IO.Path]::Combine($dir,'key-v1')
     $item=Direct $file
     $acl=Acl $file
-    if($item.PSIsContainer -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-key'}
+    if((IsDirectory $item) -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-key'}
     foreach($rule in (Rules $acl)){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private-key-rule'}}
   }
   [ordered]@{version=1;created=$created;directoryPrivate=$true;keyPrivate=$key;ancestorsSafe=$true} | ConvertTo-Json -Compress

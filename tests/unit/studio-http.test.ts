@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
@@ -40,6 +41,10 @@ test('real loopback bridge rejects cross-origin, audience confusion and bearerle
   assert.equal((await post('/v1/studio/commands', { sessionId: pair.sessionId, requestId: 'http-write-001', method: 'scene.create', args: {} }, app.token)).status, 403);
   const state = await fetch(app.origin + '/v1/product/state', { headers: { Authorization: 'Bearer ' + app.token } }); assert.equal(state.status, 200);
   const text = await state.text(); assert.equal(text.includes(pair.token), false); assert.equal(text.includes(app.token), false);
+  const metadata = JSON.parse(text) as { projectPath: string; projectId: string };
+  const physical = await realpath(resolve('.'));
+  assert.equal(metadata.projectPath, physical);
+  assert.equal(metadata.projectId, createHash('sha256').update(process.platform === 'win32' ? physical.toLowerCase() : physical).digest('hex'), 'Live product identity must match the canonical native host and controller scope.');
   assert.equal((await post('/v1/studio/revoke', { sessionId: pair.sessionId }, app.token, app.origin)).status, 200);
   assert.equal((await post('/v1/plugin/poll', { sessionId: pair.sessionId }, pair.token)).status, 409);
 });

@@ -1,7 +1,9 @@
 # Arcane — provider-native models and features
 Version 0.1.0 · 11 October 2026
 
-**Implemented:** a runnable local connection lab, native metadata adapters, exact preference validation/storage and tests. **Not implemented:** inference, feature execution, native desktop packaging or the Studio/plugin bridge. The lab is a development slice, not a subscription proxy or a finished platform.
+**Current implementation update (13 October 2026):** the metadata lab is now accompanied by a personal-local native Codex conversation controller, exact model/effort switching, scoped human approvals, durable public history and same-chat work associations. Arcane also has a Studio plugin/MCP bridge and an unsigned Windows portable desktop build. One previously authorized native Codex read-only smoke turn and one Arcane MCP roundtrip were recorded; this is not full native-feature or end-to-end game-development acceptance. Further installed-provider and Studio tests remain user-deferred. Embedded Claude, native image/design artifact return, general engine import/rigging and skill behavior acceptance remain open.
+
+The dated installation observations and proposed feature matrix below are historical design evidence, not a fresh capability probe or a claim that every listed integration is implemented. Current component evidence and remaining gates are recorded in [the build ledger](build/tasks.json). Arcane is not a subscription credential proxy or a finished platform.
 
 ## 1. Product principle
 

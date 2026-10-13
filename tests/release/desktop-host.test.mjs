@@ -171,10 +171,12 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['codeVerification', 'platform', 'runtime', 'version']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['codeVerification', 'platform', 'providerSetup', 'runtime', 'version']);
   assert.equal(exposed.runtime, 'desktop');
   assert.equal(Object.isFrozen(exposed), true);
   assert.equal(Object.isFrozen(exposed.codeVerification), true);
+  assert.equal(Object.isFrozen(exposed.providerSetup),true);
+  assert.deepEqual(Object.keys(exposed.providerSetup).sort(),['install','launch','login','status','version']);
   assert.deepEqual(Object.keys(exposed.codeVerification).sort(), ['configure', 'status', 'version']);
 });
 
@@ -245,7 +247,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   const end = labSource.indexOf('\n    }', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the connection lab lifecycle boundary.');
   const member = labSource.slice(begin, end + '\n    }'.length);
-  let release;
+  let release, nativeAssetsFenced = false;
   const childCleanup = new Promise(resolve => { release = resolve; });
   const server = {
     accepting: true,
@@ -254,12 +256,15 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     closeIdleConnections() {},
   };
   const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
-    server, workflow: null, associations: null, ArcaneError: Error, codex: { close: () => childCleanup },
+    server, workflow: null, associations: null, ArcaneError: Error,
+    nativeAssetRegistry: { close() { nativeAssetsFenced = true; } },
+    codex: { close: () => { assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); return childCleanup; } },
   });
   const closing = cleanup();
   try {
     await Promise.resolve();
     assert.equal(server.accepting, false, 'A holder of the old agent bearer can currently open a fresh socket while shutdown waits.');
+    assert.equal(nativeAssetsFenced, true, 'Shutdown retires native authority while child cleanup is still held');
   } finally {
     release();
     await closing;
@@ -286,6 +291,7 @@ test('regression: empty smoke fixture creates its profile before Electron setPat
       if (name === 'node:fs') return fs.sync;
       if (name === 'node:crypto') return { createHash() { assert.fail('Fixture must not start runtime work.'); } };
       if (name === './policy.cjs') return windowsPolicy(fs);
+      if (name === './provider-setup.cjs') return {createProviderSetup(){assert.fail('Fixture must not start provider setup work.');}};
       if (name === './code-verification.cjs') return { createCodeVerification() { assert.fail('Fixture must not start runtime work.'); } };
       throw new Error('Unexpected host dependency: ' + name);
     },

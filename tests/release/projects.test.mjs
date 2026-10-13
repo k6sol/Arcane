@@ -12,7 +12,8 @@ const productSource = await readFile(new URL('../../apps/daemon/src/product-main
 const digest = path => createHash('sha256').update(process.platform === 'win32' ? path.toLowerCase() : path).digest('hex');
 function cleanEnv(extra = {}) {
   const env = { ...process.env };
-  for (const name of ['ARCANE_PROJECT', 'ARCANE_STATE_DIRECTORY', 'ARCANE_PORT']) delete env[name];
+  for (const name of ['ARCANE_PROJECT', 'ARCANE_STATE_DIRECTORY', 'ARCANE_PORT',
+    'ARCANE_LUAU_COMPILER_PATH', 'ARCANE_LUAU_COMPILER_SHA256', 'ARCANE_LUAU_EVIDENCE_DIRECTORY']) delete env[name];
   return { ...env, ...extra };
 }
 function observed(output, label = 'fixture-child:') {
@@ -59,18 +60,26 @@ async function fixture(t) {
       port: process.env.ARCANE_PORT, stateFresh, previous}));
     process.exit(Number(process.env.FIXTURE_EXIT_CODE ?? '0'));
   `);
-  // Execute the unchanged product entry/configuration with all four services replaced
-  // by metadata-only fixtures. No HTTP listener, SQLite engine, provider or Studio.
+  // Execute the unchanged product entry/configuration with services and compiler configuration replaced
+  // by metadata-only fixtures. No HTTP listener, SQLite engine, compiler, provider or Studio.
   let productFixture = productSource;
-  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', './lab-server.js', './asset-service.js', './learning-service.js']) {
+  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
   }
   await write('product.fixture.ts', productFixture);
   await write('product-services.fixture.mjs', `
+    import assert from 'node:assert/strict';
     import {existsSync, mkdirSync, readFileSync} from 'node:fs';
     import {join} from 'node:path';
     const data = (directory, file) => existsSync(join(directory,file)) ? JSON.parse(readFileSync(join(directory,file),'utf8')) : [];
+    // This path/state fixture keeps the optional compiler unconfigured; it never creates a verifier.
+    export function workflowCodeHostConfiguration(environment) {
+      for (const name of ['ARCANE_LUAU_COMPILER_PATH', 'ARCANE_LUAU_COMPILER_SHA256', 'ARCANE_LUAU_EVIDENCE_DIRECTORY']) {
+        assert.equal(environment[name], undefined, 'Compiler configuration is outside this offline fixture.');
+      }
+      return undefined;
+    }
     export class StudioStore {
       constructor({directory}) { mkdirSync(directory,{recursive:true}); this.directory=directory; this.keys=data(directory,'studio.sqlite'); }
       close() {}

@@ -6,6 +6,7 @@ const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
 const policy = require('./policy.cjs');
 const { createCodeVerification } = require('./code-verification.cjs');
+const { createProviderSetup } = require('./provider-setup.cjs');
 app.setName('Arcane'); app.setAppUserModelId('com.arcane.desktop'); app.enableSandbox();
 app.commandLine.appendSwitch('disable-background-networking');
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
@@ -17,7 +18,8 @@ if (smokeRoot) app.setPath('userData', policy.prepareSmokeDirectory(smokeRoot));
 else { try { app.setPath('userData', policy.prepareUserDirectory(app.getPath('userData'), { appData: app.getPath('appData'), localAppData: process.env.LOCALAPPDATA })); } catch { profilePreparationFailed = true; } }
 const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
-let codeVerification, projectSession;
+let codeVerification, projectSession, providerSetup;
+const CODE_VERIFICATION_WARNING = 'Arcane opened without Luau verification. The saved compiler is unavailable. Saved configuration was retained; choose an approved compiler in Tool > Configure Luau verification, then restart Arcane.';
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
@@ -67,7 +69,10 @@ async function startDaemon(project) {
   if (savedPort === null) await writeFile(portFile, JSON.stringify({ protocolVersion: 1, port: assignedPort }) + '\n', { flag: 'wx', mode: 0o600 });
   else if (assignedPort !== savedPort) throw new Error('Listener identity changed unexpectedly.');
   daemonReadyMs = performance.now() - started; projectPath = canonical;
-  projectSession = Object.freeze({ projectId: key, projectPath: canonical, stateRoot, activeSettingsHash: verification.settingsHash });
+  projectSession = Object.freeze({ projectId: key, projectPath: canonical, stateRoot, activeSettingsHash: verification.settingsHash,
+    verificationUnavailable: verification.failure === 'compiler-unavailable',
+    verificationEnvironmentAbsent: !['ARCANE_LUAU_COMPILER_PATH', 'ARCANE_LUAU_COMPILER_SHA256', 'ARCANE_LUAU_EVIDENCE_DIRECTORY'].some(name => Object.hasOwn(env, name)) });
+  if (projectSession.verificationUnavailable) console.warn(CODE_VERIFICATION_WARNING);
   owned.once('exit', () => { if (child === owned && !closing && !switching) { token = ''; origin = ''; void failStartup('The local runtime stopped. Your project records have been retained.'); } });
 }
 function makeWindow() {
@@ -85,7 +90,15 @@ function makeWindow() {
   window.on('page-title-updated', event => event.preventDefault());
   window.on('closed', () => { window = null; if (!switching && !closing) app.quit(); });
 }
-async function loadWorkspace() { await window.loadURL(origin + '/studio#' + token); window.setTitle('Arcane - ' + basename(projectPath).slice(0, 80)); }
+async function showCodeVerificationWarning() {
+  if (smoke || closing || !window || window.isDestroyed() || !projectSession?.verificationUnavailable) return;
+  try { await dialog.showMessageBox(window, { type: 'warning', title: 'Luau verification unavailable', message: CODE_VERIFICATION_WARNING }); }
+  catch { console.warn('Luau verification warning could not be displayed.'); }
+}
+async function loadWorkspace() {
+  await window.loadURL(origin + '/studio#' + token); window.setTitle('Arcane - ' + basename(projectPath).slice(0, 80));
+  await showCodeVerificationWarning();
+}
 async function chooseProject() {
   if (switching || closing || !window) return;
   const selected = await dialog.showOpenDialog(window, { title: 'Open a local project', properties: ['openDirectory', 'dontAddToRecent'] });
@@ -126,8 +139,32 @@ async function checkSmoke() {
   await sleep(1200);
   const stateResponse = await fetch(origin + '/v1/product/state', { headers: { Authorization: 'Bearer ' + token } }); const state = await stateResponse.json();
   const response = await fetch(origin + '/studio');
+  const nativeAssetResponse = await fetch(origin + '/v1/codex/state', { headers: { Authorization: 'Bearer ' + token } });
+  const nativeAssetState = await nativeAssetResponse.json();
   const memoryResponse = await fetch(origin + '/v1/learning/state', { headers: { Authorization: 'Bearer ' + token } }); const memory = await memoryResponse.json();
-  const renderer = JSON.parse(await window.webContents.executeJavaScript("JSON.stringify({title:document.title,desktop:window.arcaneDesktop,nodeAvailable:typeof require!=='undefined'||typeof process!=='undefined',scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,staticIds:['workspace-topbar','codex-composer','artifact-panel','app-sidebar'].every(id=>!!document.getElementById(id)),previews:document.querySelectorAll('#asset-previews canvas').length,modelOptions:document.getElementById('codex-model')?.options.length??0})"));
+  const renderer = JSON.parse(await window.webContents.executeJavaScript(`JSON.stringify({
+    title: document.title, desktop: window.arcaneDesktop,
+    nodeAvailable: typeof require !== 'undefined' || typeof process !== 'undefined',
+    scrollWidth: document.documentElement.scrollWidth, width: innerWidth, height: innerHeight,
+    staticIds: ['workspace-topbar','codex-composer','artifact-panel','app-sidebar'].every(id => !!document.getElementById(id)),
+    previews: document.querySelectorAll('#asset-previews canvas').length,
+    modelOptions: document.getElementById('codex-model')?.options.length ?? 0,
+    conversationOnly: document.getElementById('artifact-panel')?.hidden === true && !document.getElementById('workspace-stage')?.classList.contains('preview-open'),
+    providerSetupMounted: !!window.arcaneDesktop?.providerSetup && Object.isFrozen(window.arcaneDesktop.providerSetup) &&
+      document.getElementById('provider-setup-panel')?.getAttribute('aria-busy') === 'false' && document.getElementById('provider-setup-refresh')?.disabled === false,
+    nativeAssetPermissionControls: document.getElementById('codex-assets-grant')?.disabled === true &&
+      document.getElementById('codex-assets-revoke')?.disabled === true &&
+      !!document.getElementById('codex-assets-status')?.textContent &&
+      document.getElementById('codex-assets-status')?.textContent !== 'Asset permission has not been read.',
+    codeVerificationBridge: (() => {
+      const bridge = window.arcaneDesktop?.codeVerification;
+      return !!bridge && Object.isFrozen(bridge) && bridge.version === 1 &&
+        typeof bridge.status === 'function' && typeof bridge.configure === 'function';
+    })(),
+    desktopVerificationController: document.getElementById('desktop-verification')?.getAttribute('aria-busy') === 'false' &&
+      document.getElementById('desktop-verification-setup')?.disabled === false &&
+      document.getElementById('desktop-verification-refresh')?.disabled === false
+  })`));
   const prefs = window.webContents.getLastWebPreferences();
   await writeFile(join(smokeRoot, 'workspace.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
   const checks = {
@@ -140,13 +177,23 @@ async function checkSmoke() {
     sameOriginCsp: (response.headers.get('content-security-policy') ?? '').includes("script-src 'self'"),
     requiredUi: renderer.staticIds === true, noHorizontalOverflow: renderer.scrollWidth <= renderer.width,
     genuineEmptyPreview: renderer.previews === 0, desktopIdentity: renderer.desktop?.runtime === 'desktop',
+    desktopVerificationSetupMounted: renderer.codeVerificationBridge === true && renderer.desktopVerificationController === true,
+    optionalCodeVerificationFailureContained: !projectSession.verificationUnavailable ||
+      (projectSession.activeSettingsHash === null && projectSession.verificationEnvironmentAbsent),
     externalNavigationRejected: !policy.navigationAllowed(origin, 'https://example.com/') && !policy.requestAllowed(origin, 'file:///C:/Windows/win.ini'),
-    nativeLifecycleNotStarted: renderer.modelOptions <= 1
+    nativeLifecycleNotStarted: renderer.modelOptions <= 1,
+    conversationOnlyDefault:renderer.conversationOnly === true,providerSetupMounted:renderer.providerSetupMounted === true,
+    nativeAssetPermissionMounted: nativeAssetResponse.ok && nativeAssetState.state?.snapshot === null &&
+      nativeAssetState.state?.nativeAssets?.available === true && nativeAssetState.state.nativeAssets.sealed === false &&
+      nativeAssetState.state.nativeAssets.granted === false && nativeAssetState.state.nativeAssets.admissionOpen === false &&
+      renderer.nativeAssetPermissionControls === true
   };
   checks.shutdownClean = await stopDaemon();
   const report = { schemaVersion: 1, kind: 'arcane-windows-executable-smoke', version: app.getVersion(), electronVersion: process.versions.electron,
     elapsed: { daemonReadyMs: Math.round(daemonReadyMs), firstReadyMs: Math.round(firstReadyMs), totalMs: Math.round(performance.now() - started) },
-    viewport: { width: renderer.width, height: renderer.height }, checks, inferenceStarted: false, studioOperations: 0, signed: false, fullProductVerified: false };
+    viewport: { width: renderer.width, height: renderer.height }, checks,
+    codeVerification: { configuredUnavailable: projectSession.verificationUnavailable },
+    inferenceStarted: false, studioOperations: 0, signed: false, fullProductVerified: false };
   await writeFile(join(smokeRoot, 'checks.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
   closing = true; app.exit(Object.values(checks).every(Boolean) ? 0 : 1);
 }
@@ -164,6 +211,16 @@ else {
         return { ...projectSession, window, origin, epoch: projectSession };
       } });
       codeVerification.installIpc(ipcMain);
+      providerSetup = createProviderSetup({getWindow:()=>closing||switching?null:window,getOrigin:()=>origin,getProjectPath:()=>projectPath,enabled:!smoke,dialog});
+      for (const action of ['status','login','install','launch']) ipcMain.handle('arcane:provider-'+action, async (event,...args)=>{
+        try {
+          const contents=window?.webContents,frame=event.senderFrame;
+          if(closing||switching||!contents||contents.isDestroyed()||event.sender!==contents||frame!==contents.mainFrame||
+            !frame||!policy.validOrigin(origin)||!policy.navigationAllowed(origin,frame.url)||new URL(frame.url).href!==frame.url||
+            args.length!==1||!['codex','claude'].includes(args[0]))throw Error('Denied');
+          return await providerSetup[action](args[0]);
+        } catch { throw new Error('Native provider setup unavailable.'); }
+      });
       // Electron can create the profile before ready, so validate the report before the app launches (runner owns the empty root).
       if (smokeRoot) await policy.directPath(smokeRoot);
       userRoot = await ownedDirectory(app.getPath('userData'));

@@ -10,6 +10,7 @@ import {
 import type { IncomingMessage } from 'node:http';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
+import { createWorkflowRecipe } from '../../../packages/core/src/workflow-recipes.js';
 import type { ArtifactRole, HumanGate, RequestedModel, WorkflowRecipeRequest, WorkflowSubmission } from '../../../packages/core/src/workflow-recipes.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
@@ -170,9 +171,9 @@ class ReceiptKey {
     this.file = join(this.directory, 'key-v1');
     directPath(this.directory);
     const existing = existsSync(this.directory);
-    if (process.platform === 'win32') {
-      const protection = privateWorkflowReceiptStorage(parent, !existing, false);
-      if (!existing && protection?.created !== true) fail('WORKFLOW_RECEIPT_STORAGE');
+    if (process.platform === 'win32' && !existing) {
+      const protection = privateWorkflowReceiptStorage(parent, true, false);
+      if (protection?.created !== true) fail('WORKFLOW_RECEIPT_STORAGE');
     } else if (!existing) mkdirSync(this.directory, { mode: 0o700 });
     privateMode(lstatSync(this.directory), true);
     if (!existing) {
@@ -181,7 +182,11 @@ class ReceiptKey {
       const fresh = randomBytes(32);
       try {
         let offset = 0;
-        while (offset < fresh.length) offset += writeSync(fd, fresh, offset, fresh.length - offset);
+        while (offset < fresh.length) {
+          const remaining = fresh.length - offset, count = writeSync(fd, fresh, offset, remaining);
+          if (!Number.isSafeInteger(count) || count < 1 || count > remaining) fail('WORKFLOW_RECEIPT_STORAGE');
+          offset += count;
+        }
         fsyncSync(fd);
       } finally { fresh.fill(0); closeSync(fd); }
       if (process.platform !== 'win32') {
@@ -189,7 +194,11 @@ class ReceiptKey {
         try { fsyncSync(dir); } finally { closeSync(dir); }
       }
     }
-    // Existing directory with missing/damaged key is never silently regenerated.
+    // Existing storage has not been read or modified above. read() performs the
+    // complete unchanged native directory/key/ancestor ACL check BEFORE opening
+    // its key, then pins regular-file bytes/identity. Do not duplicate the same
+    // directory-only ACL process here or cache validation across requests.
+    // A missing/damaged existing key is never silently regenerated.
     this.key = this.read();
   }
   private read(validateAcl = true): Buffer {
@@ -207,7 +216,8 @@ class ReceiptKey {
       if (!sameFile(selected, before)) fail('WORKFLOW_RECEIPT_STORAGE');
       let count = 0;
       while (count < bytes.length) {
-        const read = readSync(fd, bytes, count, bytes.length - count, count);
+        const remaining = bytes.length - count, read = readSync(fd, bytes, count, remaining, count);
+        if (!Number.isSafeInteger(read) || read < 0 || read > remaining) fail('WORKFLOW_RECEIPT_STORAGE');
         if (!read) break;
         count += read;
       }
@@ -351,8 +361,16 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
   function preview(input: unknown, request: IncomingMessage, authority: WorkflowHttpAuthority): WorkflowPreview {
     human(request, authority);
     bounded(input, [authority.controlToken, authority.agentToken]);
+    const a = fields(input, ['action'], ['request', 'workflowId', 'stepKey', 'gate', 'decision', 'submission', 'resolution', 'observedRun']);
+    if (a.action === 'recipe') {
+      fields(a, ['action', 'request']);
+      // Pure recipe validation and private-scope refusal do not need a signing
+      // key. Refuse malformed/private requests before opening lazy native storage.
+      // The service still reconstructs, pins and authorizes the valid command.
+      const normalized = createWorkflowRecipe(a.request as WorkflowRecipeRequest);
+      for (const path of new Set(normalized.steps.flatMap(step => step.scope))) privatePath(path, true);
+    }
     return guarded(service => {
-      const a = fields(input, ['action'], ['request', 'workflowId', 'stepKey', 'gate', 'decision', 'submission', 'resolution', 'observedRun']);
       const conversation=currentConversation();if(options.conversation&&!conversation)fail('WORKFLOW_CONVERSATION');
       if(a.action!=='recipe')inConversation(id(a.workflowId));
       let result: Omit<WorkflowPreview, 'receiptHash'>;

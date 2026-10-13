@@ -31,6 +31,7 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   await write('dist/apps/daemon/src/product-main.js', daemon);
   await write('dist/apps/daemon/src/codex-service.js', '// Offline fixture only.\n');
   await write('dist/apps/mcp/src/main.js', '// Offline fixture only.\n');
+  await write('apps/desktop/electron/provider-setup.cjs', '// Offline native setup host fixture; never executed.\n');
   await write('workers/blender/asset_worker.py', '# Offline fixture only.\n');
   await write('skills/registry.json', '{}');
   const plugin = '--!strict\n-- Offline fixture only.\n';
@@ -144,6 +145,8 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/studio', ['apps/desktop/public/studio.html', 'text/html; charset=utf-8']],
     ['/codex-chat.js', ['dist/apps/desktop/src/codex-chat.js', 'text/javascript; charset=utf-8']],
     ['/workspace-shell.js', ['dist/apps/desktop/src/workspace-shell.js', 'text/javascript; charset=utf-8']],
+    ['/desktop-verification.js', ['dist/apps/desktop/src/desktop-verification.js', 'text/javascript; charset=utf-8']],
+    ['/provider-setup.js',['dist/apps/desktop/src/provider-setup.js','text/javascript; charset=utf-8']],
     ['/brand/arcane-ridges.png', ['apps/desktop/public/brand/arcane-ridges.png', 'image/png']],
   ]);
   const server = createServer(async (request, response) => {
@@ -153,7 +156,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     const send = (status, body) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(body)); };
     const route = routes.get(request.url);
     if (route) {
-      if (['/workspace-shell.js', '/brand/arcane-ridges.png'].includes(request.url) && (request.headers.authorization || request.headers.origin)) return send(400, { error: 'Fixture requires a credential-free public request.' });
+      if (['/workspace-shell.js', '/desktop-verification.js', '/brand/arcane-ridges.png'].includes(request.url) && (request.headers.authorization || request.headers.origin)) return send(400, { error: 'Fixture requires a credential-free public request.' });
       if (unsafePngHeaders && request.url.endsWith('.png')) response.setHeader('X-Content-Type-Options', 'unsafe');
       response.writeHead(200, { 'Content-Type': route[1] }); response.end(await readFile(join(root, route[0]))); return;
     }
@@ -185,10 +188,10 @@ async function runAcceptance(options = {}) {
   return { result, report };
 }
 
-test('acceptance HTTP double expects thirteen checks including credential-free exact UI routes and public safe headers', async () => {
+test('acceptance HTTP double expects fourteen checks including credential-free exact UI routes and public safe headers', async () => {
   const { result, report } = await runAcceptance();
-  assert.equal(result.status, 0); assert.equal(report.passed, true); assert.equal(report.checks.length, 13);
-  for (const label of ['workspace-shell-public-module-and-safe-headers', 'brand-png-public-bytes-and-safe-headers', 'workspace-static-routes-are-exact']) assert.ok(report.checks.some(check => check.label === label && check.passed));
+  assert.equal(result.status, 0); assert.equal(report.passed, true); assert.equal(report.checks.length, 14);
+  for (const label of ['workspace-shell-public-module-and-safe-headers', 'desktop-verification-public-module-and-safe-headers', 'brand-png-public-bytes-and-safe-headers', 'workspace-static-routes-are-exact']) assert.ok(report.checks.some(check => check.label === label && check.passed));
   assert.equal(report.studioCalls, 0); assert.equal(report.providerInferenceRuns, 0); assert.equal(report.blenderRuns, 0);
   assert.deepEqual(report.shutdown, { code: 0, signal: null });
 });
@@ -201,4 +204,17 @@ test('acceptance rejects unsafe PNG headers and redacts human, agent and Studio 
   assert.equal(failed.result.status, 1); assert.equal(failed.report.passed, false);
   assert.match(failed.report.error, /\[redacted\]/);
   for (const credential of ['b'.repeat(64), 'c'.repeat(64), 'arcane_local_v1_45871_' + 'd'.repeat(64)]) assert.ok(!failed.result.stdout.includes(credential));
+});
+
+
+test('desktop verification is required by doctor, source release, and the exact public module route', async()=>{
+  const required=['apps/desktop/src/desktop-verification.ts','dist/apps/desktop/src/desktop-verification.js','dist/apps/desktop/src/desktop-verification.js.map'];
+  for(const name of required)assert.ok(REQUIRED_FRONTEND_FILES.includes(name),name);
+  const lab=await readFile(new URL('../../apps/daemon/src/lab-server.ts',import.meta.url),'utf8');
+  assert.match(lab,/\['\/desktop-verification\.js', \[join\(options\.cwd, 'dist\/apps\/desktop\/src\/desktop-verification\.js'\), 'text\/javascript'\]\]/);
+  const {root}=await fixture({omit:'dist/apps/desktop/src/desktop-verification.js'});
+  const doctor=await productDoctor({repository:root,nodeVersion:'24.0.0'});
+  assert.equal(doctor.readyToLaunch,false);
+  assert.equal(doctor.checks.find(item=>item.id==='desktop-verification-entry').status,'fail');
+  assert.equal(doctor.credentialsRead,false);assert.equal(doctor.networkUsed,false);
 });

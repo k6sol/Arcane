@@ -19,6 +19,16 @@ export interface AssetServiceOptions {
   pythonExecutable?: string;
   jobDeadlineMs?: number;
 }
+/** Trusted host-code admission only; never an AssetInput or HTTP JSON field. */
+export interface AssetStartAdmission {
+  beforeCreate(): void;
+  created(jobId: string): void;
+}
+function synchronousAdmissionResult(result: unknown): void {
+  if (result !== null && (typeof result === 'object' || typeof result === 'function') && typeof (result as { then?: unknown }).then === 'function') {
+    throw new ArcaneError('ADMISSION_ASYNC', 'Asset start admission callbacks must be synchronous.');
+  }
+}
 export interface AssetJobRecord {
   schemaVersion: 1;
   jobId: string;
@@ -207,24 +217,25 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (Buffer.byteLength(JSON.stringify(page)) > HISTORY_PAGE_BYTES) throw new ArcaneError('HISTORY_LIMIT', 'History response exceeds its byte bound.');
       return page;
     },
-    async start(input: AssetInput): Promise<AssetJobRecord> {
+    async start(input: AssetInput, admission?: AssetStartAdmission): Promise<AssetJobRecord> {
       ensureOpen(); await flushed(); ensureOpen();
       if (probeActive || active.size) throw new AssetError('BUSY', 'A Blender operation is already running.');
       if ([...entries.values()].some(e => e.job.state === 'interrupted')) throw new ArcaneError('RECONCILIATION', 'Lost worker supervision requires inspection before starting work in this output root. Use a fresh trusted output root after confirming the old worker has stopped.');
       if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history is full; use a fresh trusted output root.');
       const request = normalizeRequest(input);
       const now = new Date().toISOString();
-      const handle = pipeline.start(input, { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}), onEvent: event => {
+      const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}), onEvent: (event: AssetJobEvent) => {
         const e = entries.get(event.jobId);
         if (!e || closed) return;
         e.job.stage = event.stage; e.job.updatedAt = event.at;
         // The terminal event precedes completion; completion verifies the result before exposing it.
         if (event.state === 'running') e.job.state = event.state;
         e.job.events.push(event); e.job.events = e.job.events.slice(-64); persist();
-      } });
+      } };
+      if (admission) synchronousAdmissionResult(admission.beforeCreate());
+      const handle = pipeline.start(input, operation);
       const job: AssetJobRecord = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
       entries.set(handle.id, { directory: handle.directory, job });
-      persist();
       const completion = handle.completion.then(async result => {
         let state: AssetJobState = result.state, error = result.error;
         let manifestPath: string | null = null;
@@ -240,7 +251,14 @@ export async function createAssetService(options: AssetServiceOptions) {
       }).catch(() => { job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' }; })
         .finally(() => { active.delete(handle.id); persist(); });
       active.set(handle.id, { handle, completion });
-      try { await flushed(); } catch (e) { handle.cancel(); await completion; throw e; }
+      // Install supervision before host bookkeeping can throw. A created job is
+      // never a safe pre-creation rejection, even if its witness callback fails.
+      let admissionFailure: ArcaneError | undefined;
+      try { if (admission) synchronousAdmissionResult(admission.created(handle.id)); }
+      catch { admissionFailure = new ArcaneError('ADMISSION_CREATED', 'Asset job ' + handle.id + ' was created, but its admission callback failed; inspect retained job history.'); }
+      persist();
+      try { await flushed(); } catch (e) { handle.cancel(); await completion; throw admissionFailure ?? e; }
+      if (admissionFailure) throw admissionFailure;
       return structuredClone(job);
     },
     async cancel(jobId: unknown): Promise<AssetJobRecord> {

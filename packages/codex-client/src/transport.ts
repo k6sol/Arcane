@@ -52,8 +52,9 @@ export class JsonlTransport {
     });
   }
   get connected(): boolean { return !this.#closed && !this.#exited; }
-  request(method: Method, params: unknown, onId?: (id: number) => void): Promise<unknown> {
+  request(method: Method, params: unknown, onId?: (id: number) => void, onDispatched?: () => void): Promise<unknown> {
     if (!METHODS.has(method)) return Promise.reject(new CodexClientError('METHOD', 'Method is outside the fixed client surface.'));
+    if (onDispatched && method !== 'turn/start') return Promise.reject(new CodexClientError('METHOD', 'Dispatch callbacks are only supported for turn/start.'));
     if (!this.connected) return Promise.reject(new CodexClientError('DISCONNECTED', 'Native CLI is disconnected.'));
     if (this.#pending.size >= this.bounds.maxPendingRequests) return Promise.reject(new CodexClientError('PENDING_LIMIT', 'Too many pending requests.'));
     const id = this.#nextId++;
@@ -61,9 +62,17 @@ export class JsonlTransport {
       const timer = setTimeout(() => this.stop(new CodexClientError('TIMEOUT', 'Native request timed out.')), this.bounds.requestTimeoutMs);
       const entry = { resolve, reject, timer, dispatched: false };
       this.#pending.set(id, entry);
-      onId?.(id);
-      try { this.#write({ id, method, params }); entry.dispatched = true; }
+      try {
+        onId?.(id);
+        this.#write({ id, method, params }); entry.dispatched = true;
+        onDispatched?.();
+      }
       catch (error) {
+        if (entry.dispatched) {
+          // The bytes have crossed the write boundary; callback failure cannot make them retryable.
+          this.stop(new CodexClientError('UNKNOWN', 'Native dispatch completion is uncertain.', true));
+          return;
+        }
         clearTimeout(timer); this.#pending.delete(id);
         reject(error instanceof CodexClientError ? error : new CodexClientError('IO', 'Native request could not be written.'));
       }

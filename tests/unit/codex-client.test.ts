@@ -896,7 +896,9 @@ test('same-thread model switch is local, revokes grants and sends the exact pair
   assert.deepEqual(turn.sandboxPolicy, { type: 'readOnly', networkAccess: false });
   assert.ok(!Object.hasOwn(turn, 'config')); assert.ok(!Object.hasOwn(turn, 'apiKey'));
   assert.equal(calls.filter(m => m.method === 'thread/start').length, 1); assert.equal(calls.filter(m => m.method === 'thread/resume').length, 0);
-  assert.equal(calls.filter(m => m.method === 'mcpServerStatus/list').length, 1);
+  const inventoryCalls = calls.filter(m => m.method === 'mcpServerStatus/list');
+  assert.equal(inventoryCalls.length, 2, 'thread setup plus a fresh pre-turn isolation check');
+  assert.ok(inventoryCalls.every(m => m.params?.threadId === THREAD));
 });
 
 test('same-thread effort-only switch resets grants; idle same-pair selection is a defensive no-op', async t => {

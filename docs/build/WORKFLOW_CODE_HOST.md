@@ -23,9 +23,12 @@ The evidence directory must be covered by the reviewed workflow scope and cannot
 contain the input source files. Supported subjects are the complete set of 1–16
 implementation `.luau`/`.lua` patch artifacts, not a diff or arbitrary executable.
 
-**Current desktop limitation:** Electron deliberately drops inherited Arcane
-configuration. This tuple is supported by the CLI product launcher, not yet by
-packaged-desktop settings. Do not claim the sealed portable EXE includes this feature.
+**Desktop source implementation:** Electron still drops inherited Arcane
+configuration. The new [native desktop setup](DESKTOP_CODE_VERIFICATION.md) saves a
+project-scoped host-owned tuple and supplies only validated compiler settings at
+the next daemon start. Saving does not execute verification or restart active work.
+The previously sealed pxvwBu portable EXE does not contain this setup addition;
+a fresh compile, bundle and actual launch check remain required.
 
 ## Real route and lifecycle
 
@@ -109,3 +112,8 @@ request, intact compiler/source/report pins and blocked unsupported quality.
 Five independent native-boundary tests also passed: post-check failure, per-request
 freshness, direct-command checks and transient key mutation fail closed. These
 boundary tests are explicitly native ACL doubles after real private preparation.
+
+
+## Existing-receipt cold start
+
+The existing key constructor no longer repeats a directory-only native ACL process immediately before its full directory/key/ancestor check. No existing key bytes or content are read first: read() performs the unchanged full native check before opening the key, then its original regular-file identity/byte pins. New private directories still require exact native preparation and the post-creation full check. Read/write counts now require bounded integer progress, preserving partial files on failure without repair or regeneration. Parent original handoff/review/restart fixture passed afterward with unchanged8000ms HTTP and5000ms native limits. Exact-source boundary doubles passed23tests/179scenarios. A full desktop pipeline is running separately; these results are not a green broad regression or native Studio/provider acceptance.

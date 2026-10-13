@@ -1,6 +1,8 @@
 # First run on Windows
 
-Arcane currently runs from your own cloned repository or unsigned local source release. Use your own writable folder and an ordinary Windows terminal. The bootstrap supports Windows PowerShell 5.1 and needs Node 24+ with npm. It does not require administrator rights or an existing provider login to check, build or open the workbench.
+Arcane has two launch routes: a complete unsigned Windows portable directory with **Arcane.exe**, or the source bootstrap documented below. For the portable route, keep the entire directory together and launch Arcane.exe; Node/npm do not need to be installed separately. It remains a development preview, not a signed installer or a fully verified product. See [Windows packaging and operation](WINDOWS.md).
+
+For the source route, use your own cloned repository or unsigned local source release in a writable folder and an ordinary Windows terminal. The bootstrap supports Windows PowerShell 5.1 and needs Node 24+ with npm. It does not require administrator rights or an existing provider login to check, build or open the workbench.
 
 ## 1. Get Node and npm
 
@@ -46,9 +48,15 @@ To explicitly do all three steps in order, append `-InstallDependencies -Prepare
 
 ## 5. Connect your own native CLI
 
-Before clicking **Connect**, install the supported native CLI yourself and log in through that CLI with your own account. For Codex, follow the [official Codex CLI setup guide](https://learn.chatgpt.com/docs/codex/cli) and [authentication guide](https://learn.chatgpt.com/docs/auth); complete `codex login` in your own terminal. Arcane setup does not run login, install or update a CLI, copy someone else's credentials, or require a session from the development machine.
+In the desktop app, open **Settings → Provider setup**. **Refresh setup status** explicitly checks the installed native CLI's version and login status. Nothing is probed automatically when Arcane opens. **Get CLI** offers a confirmation to open the official installation instructions; it does not download, install or update software. **Log in** offers a separate native confirmation and opens the vendor's own login command in a visible terminal. Complete authentication there or in the vendor browser, then refresh status. Arcane never receives passwords or sign-in codes and does not copy credentials from the development machine.
+
+For Codex, follow the [official CLI setup guide](https://learn.chatgpt.com/docs/codex/cli) and [authentication guide](https://learn.chatgpt.com/docs/auth). You can also complete `codex login` in your own terminal. Browser-only Arcane does not have these native setup capabilities, but can connect an already installed, signed-in Codex client through the local daemon.
 
 In Arcane's native Codex panel, a human clicks **Connect** to initialize the installed native client and read account/model metadata. Choose an exact model and reasoning effort reported by that client. Starting or resuming a thread and sending a message are separate human actions; connection alone does not start an inference turn. See [the native client contract](CODEX_CLIENT.md) for scope and approval details. A reported account, model or plan does not prove successful inference or complete provider feature coverage. Images/design capabilities and other provider features still need their own acceptance evidence. Arcane does not provide a shared SaaS subscription: each user supplies their own supported account and access, subject to the provider's terms and availability.
+
+The composer now has a searchable model/effort picker backed only by that native catalogue. The preview is hidden by default; use **Preview** to toggle it. An actual asset job can open it, but changing tools or mentioning a model in chat does not create an asset or open an empty permanent panel.
+
+For Claude Code, use [Anthropic's setup](https://code.claude.com/docs/en/setup) and [authentication](https://code.claude.com/docs/en/authentication) instructions. **Open Claude Code** hands off to the unmodified native terminal client in your selected project, after confirmation; Arcane sends no prompt and selects no billing route. This is not an embedded Claude subscription chat or a guarantee of mirrored history. Embedding Claude in a third-party app needs a separately supported API/cloud integration; see [Anthropic's client and credential restrictions](https://code.claude.com/docs/en/legal-and-compliance).
 
 ## Studio testing is deferred
 

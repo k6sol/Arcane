@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 import { normalizeRequest, validateAudit } from '../../../packages/asset-pipeline/src/validation.js';
-import { jsonSnapshot } from '../../../packages/asset-pipeline/src/recipe.js';
+import { jsonSnapshot, JOB_JOURNAL_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { AssetInput, AssetRequest, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
 import { id, boundedText } from './schemas.js';
 import { HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetJobPage } from '../../daemon/src/asset-service.js';
@@ -63,6 +65,46 @@ export const assetJobPage: z.ZodType<AssetJobPage> = z.object({ schemaVersion: z
 }).refine(page => page.total >= page.jobs.length && new Set(page.jobs.map(job => job.jobId)).size === page.jobs.length
   && (page.nextCursor === null || page.nextCursor === page.jobs.at(-1)?.jobId)
   && Buffer.byteLength(JSON.stringify(page)) <= HISTORY_PAGE_BYTES, 'Invalid bounded asset history page.');
+
+// Native envelopes are response evidence, never caller-supplied authority.
+export const nativeAssetJobId = assetJobId.length(36);
+const nativeId = z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\s\S])/);
+const nativeScope = {
+  projectId: z.string().length(64).regex(/^[a-f0-9]{64}$/),
+  projectPath: path.refine(value => isAbsolute(value) && !/[\x00-\x1f\x7f]/.test(value)
+    && Buffer.byteLength(value) <= 4096, 'Expected a bounded absolute project path.'),
+  conversation: z.strictObject({ provider: z.literal('codex'), threadId: nativeId, sessionId: nativeId.nullable() }),
+};
+export const nativeAssetCursor = z.string().min(66).max(81).regex(/^[a-f0-9]{64}:[1-9][0-9]{0,15}(?![\s\S])/)
+  .refine(value => Number.isSafeInteger(Number(value.slice(65))), 'Cursor sequence exceeds its bounds.');
+export const nativeAssetHistoryInput = z.strictObject({ limit: z.number().int().min(1).max(64).optional(), after: nativeAssetCursor.optional() });
+
+function boundedNativeRecord(max: number) {
+  // Check the wire record before existing schemas can strip unknown fields.
+  return z.unknown().refine(value => Buffer.byteLength(JSON.stringify(value) ?? '') <= max, 'Native asset record exceeds its byte bound.');
+}
+const nativeJob = boundedNativeRecord(JOB_JOURNAL_BYTES).pipe(assetJob)
+  .refine(job => nativeAssetJobId.safeParse(job.jobId).success, 'Expected an exact job UUID.');
+export function nativeAssetCursorMatchesScope(cursor: string, scope: z.output<z.ZodObject<typeof nativeScope>>): boolean {
+  const { projectId, conversation } = scope;
+  const digest = createHash('sha256').update(JSON.stringify([projectId, conversation.provider, conversation.threadId, conversation.sessionId, 'asset-job'])).digest('hex');
+  return cursor.slice(0, 64) === digest;
+}
+export const nativeAssetJobPage = boundedNativeRecord(HISTORY_PAGE_BYTES).pipe(z.strictObject({
+  ...nativeScope, jobs: z.array(nativeJob).max(64), nextCursor: nativeAssetCursor.nullable(), byteLimit: z.literal(HISTORY_PAGE_BYTES),
+})).refine(page => new Set(page.jobs.map(job => job.jobId)).size === page.jobs.length
+  && (page.nextCursor === null || nativeAssetCursorMatchesScope(page.nextCursor, page)), 'Invalid scoped native asset history page.');
+export const nativeAssetStart = boundedNativeRecord(JOB_JOURNAL_BYTES).pipe(z.strictObject({
+  ...nativeScope, jobId: nativeAssetJobId.nullable(), association: z.enum(['bound', 'unknown']),
+  creation: z.enum(['created', 'unknown']), retry: z.literal(false), job: nativeJob.optional(),
+})).refine(ack => (ack.association !== 'bound' || (ack.creation === 'created' && ack.jobId !== null))
+  && (ack.jobId !== null || (ack.creation === 'unknown' && ack.association === 'unknown'))
+  && (ack.job === undefined || ack.job.jobId === ack.jobId), 'Invalid native creation or association acknowledgement.');
+
+export const nativeAssetCancel = boundedNativeRecord(JOB_JOURNAL_BYTES).pipe(z.union([
+  z.object({ job: nativeJob }),
+  z.strictObject({ jobId: nativeAssetJobId, state: z.literal('unknown'), retry: z.literal(false) }),
+]));
 
 const mesh = z.object({ name: id, role: z.enum(['render', 'lod1', 'collision']), vertices: count, edges: count, faces: count, triangles: count,
   nonManifoldEdges: count, looseVertices: count, looseEdges: count, duplicateVertices: count, duplicateFaces: count, degenerateFaces: count,

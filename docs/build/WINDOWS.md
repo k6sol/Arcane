@@ -26,8 +26,8 @@ download or lifecycle-script execution. It retains create-local-release.mjs's
 current-source/compiled-map checks, so changed TypeScript must be rebuilt before
 packaging. Never ignore a stale or missing source-map provenance failure.
 
-Required host inputs are apps/desktop/electron/main.cjs, policy.cjs and
-preload.cjs. If apps/desktop/electron/icon.png exists, its PNG signature is checked
+Required host inputs are apps/desktop/electron/main.cjs, policy.cjs,
+preload.cjs, code-verification.cjs and provider-setup.cjs. If apps/desktop/electron/icon.png exists, its PNG signature is checked
 and it is copied to resources/app/icon.png. The separately maintained
 apps/desktop/public/brand/arcane-ridges.png remains a product asset.
 
@@ -64,6 +64,7 @@ arcane-win32-x64-*/
       main.cjs
       policy.cjs
       preload.cjs
+      code-verification.cjs     native project-scoped verification setup
       icon.png                 optional
     node/
       node.exe
@@ -170,6 +171,14 @@ Windows IPC read streams can remain open after actual exit. Verifier helpers and
 
 Fresh development-host checks: all 15 passed, daemon ready 1269 ms, first display ready 1836 ms, isolated renderer and project memory off/scoped, no native lifecycle/Studio operations and clean shutdown. This is development-host evidence, not acceptance of a rebuilt executable. Final packaged proof is retained separately under runtime/verification/windows-executable-*/verification.json only when every actual check passes.
 
+## Current verified preview (13 October 2026)
+
+Portable folder: `runtime/windows/arcane-win32-x64-bO9gOu`. Open `Arcane.exe` and keep the entire adjacent folder together. This unsigned Windows x64 preview includes native Luau setup and secret-free embedded discovery/history helpers. It needs no installed Node runtime, but native provider use still requires the user's own supported CLI/login.
+
+Actual executable proof: `runtime/verification/windows-executable-eAiI0C/verification.json`; all **19/19** checks passed. Daemon ready1650ms, first UIready1903ms, total smoke4401ms. Actual native-setup controller mount, isolated renderer/CSP, unchanged before/after inventories, bundled imports, parent-loss and clean shutdown passed; no provider inference or Studio operations. SHA256 manifest: `36a3cf534a00835210451243503d8b4630ec488b69f615e6446571729d085cbd`.
+
+Current acceptance: affected HTTP/MCP/browser/controller108/108 and full offline/standalone-Luau-plugin251/251, zero skips. The earlier whole unit/browser gate1070pass +two later official-compiler follow-ups is retained separately and predates the last single metadata-route fix. This is a transparent composed local acceptance, not a rewritten green original pipeline or full-product/native-provider/Studio acceptance. The failed immutable SpmvHP bundle is retained, not recommended.
+
 ## Windows Store AppData virtualization
 
 The normal desktop path is now verified independently from the disposable smoke profile. On this Windows Store host, synchronous compatibility realpath returns the logical AppData/Roaming/Arcane path, while native and asynchronous realpath reveal its OS-managed Packages/<package-id>/LocalCache/Roaming/Arcane backing directory. The trusted Electron profile helper recognizes only that exact Arcane layout, validates direct physical parents and rejects arbitrary redirects, links, sibling apps and unsafe paths. It changes no Windows, antivirus or permission settings and does not inspect provider credentials. Invalid profile setup is caught before acquiring the instance lock and reaches the controlled startup failure path.
@@ -182,3 +191,8 @@ Latest portable folder: runtime/windows/arcane-win32-x64-7FRiD2. Launch Arcane.e
 Proof:runtime/verification/desktop-final-BLpPDQ/verification.json and runtime/verification/windows-executable-PkH94q/verification.json. Inventory SHA-256:1ad6b95076ce66adb29376b411d3a4d558b1a30a26a5f4d883ab1803278a0f26. Full browser/unit suite passed570/570 with no skips. Offline suite passed168/169; its one UNKNOWN realpath failure in a disposable license fixture is preserved in the report. The identical isolated license test subsequently passed1/1 with guards unchanged; this was an explicit focused run, not an automatic retry or a rewritten passing pipeline report. Actual EXE acceptance was then run separately.
 
 This is verified core executable/UI launch, not full product acceptance. Claude feature parity, production workflow integration, general asset/native history workflows, public signing/installer and the user-deferred live Studio tests remain open. Earlier WUAFf3 must still not be distributed as working.
+
+
+## Project-scoped code verification
+
+The current bO9gOu preview includes [native Luau setup](DESKTOP_CODE_VERIFICATION.md) under Workspace settings, and its actual controller mount passed executable acceptance. Earlier pxvwBu remains unchanged and lacks the feature. Real dialog/configuration use, native provider and Studio acceptance are not claimed by mount checks. Saved configuration is not compiler readiness or full workflow approval.

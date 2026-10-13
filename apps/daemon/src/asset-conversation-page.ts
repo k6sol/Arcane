@@ -1,8 +1,9 @@
 import { types } from 'node:util';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import type { NativeConversation } from '../../../packages/storage/src/conversation-work-store.js';
-import type { AssetConversationHost, AssetConversationListing } from './asset-conversation-host.js';
+import type { AssetConversationHost, AssetConversationListing, NativeAssetConversationHost } from './asset-conversation-host.js';
 import { HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetService } from './asset-service.js';
+import type { NativeAssetActor } from './native-asset-authority.js';
 
 export interface AssetConversationJobPage {
   projectId: string;
@@ -62,6 +63,29 @@ export function assetConversationJobPage(
   host: AssetConversationHost,
   options: { limit: number; after: string | null },
 ): AssetConversationJobPage {
+  return capturedJobPage(service, pagination => host.listHuman(pagination), options);
+}
+
+/** Registry-captured native reads only. The service must attest the exact borrowed
+ * project. Prefix verification reuses the same actor and never calls listHuman. */
+export function nativeAssetConversationJobPage(
+  service: Pick<AssetService, 'jobs' | 'projectPath'>,
+  host: Pick<NativeAssetConversationHost, 'listNative'>,
+  actor: NativeAssetActor,
+  options: { limit: number; after: string | null },
+): AssetConversationJobPage {
+  return capturedJobPage(service, pagination => {
+    const listing = host.listNative(actor, pagination);
+    if (listing.projectPath !== service.projectPath) stale();
+    return listing;
+  }, options);
+}
+
+function capturedJobPage(
+  service: Pick<AssetService, 'jobs'>,
+  list: (pagination: { limit: number; after?: string }) => AssetConversationListing,
+  options: { limit: number; after: string | null },
+): AssetConversationJobPage {
   if (!options || typeof options !== 'object' || types.isProxy(options) || Array.isArray(options) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(options) as object | null)) {
     throw new ArcaneError('INPUT', 'History limit must be 1..64 with a storage cursor or null.');
@@ -77,7 +101,7 @@ export function assetConversationJobPage(
     throw new ArcaneError('INPUT', 'History limit must be 1..64 with a storage cursor or null.');
   }
   const pagination = (count: number) => ({ limit: count, ...(after === null ? {} : { after }) });
-  const first = snapshot(host.listHuman(pagination(limit)), limit);
+  const first = snapshot(list(pagination(limit)), limit);
   if (first.nextCursor !== null && first.nextCursor === after) stale();
   const result: AssetConversationJobPage = {
     projectId: first.projectId, projectPath: first.projectPath, conversation: { ...first.conversation },
@@ -124,7 +148,7 @@ export function assetConversationJobPage(
   if (consumed < 1 || consumed >= first.items.length) historyLimit();
 
   let prefix: AssetConversationListing;
-  try { prefix = snapshot(host.listHuman(pagination(consumed)), consumed); }
+  try { prefix = snapshot(list(pagination(consumed)), consumed); }
   catch { stale(); } // No verified cursor exists if the second observation fails.
   if (prefix.projectId !== first.projectId || prefix.projectPath !== first.projectPath ||
       !sameNative(prefix.conversation, first.conversation) || prefix.items.length !== consumed ||

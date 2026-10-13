@@ -404,11 +404,15 @@ test('actual host retains a gated recipe across metadata reconnect using borrowe
   const requirements = current.assessment!.steps.find(step => step.key === 'requirements')!;
   assert.equal(requirements.disposition, 'human-handoff', JSON.stringify(requirements)); assert.deepEqual(requirements.blockers, []);
   assert.equal(work.task(requirementsTask).state, 'pending', 'Human handoff readiness never starts a native turn.');
-  for (const [key, capability] of [['implementation', 'local.patch'], ['verification', 'local.code.verify']] as const) {
-    const assessment = current.assessment!.steps.find(step => step.key === key)!;
-    assert.equal(assessment.disposition, 'pending');
-    assert.ok(assessment.blockers.some(b => b.code === 'capability' && b.requirement === capability), JSON.stringify(assessment));
-  }
+  const implementation = current.assessment!.steps.find(step => step.key === 'implementation')!;
+  assert.equal(implementation.disposition, 'pending');
+  assert.ok(!implementation.blockers.some(b => b.code === 'capability' && b.requirement === 'local.patch'), 'Production local.patch is an explicit human handoff, not an unavailable automatic executor.');
+  assert.ok(implementation.blockers.some(b => b.code === 'dependency' && b.requirement === 'plan'));
+  assert.ok(implementation.blockers.some(b => b.code === 'human' && b.requirement === 'model-handoff'));
+  assert.ok(implementation.blockers.some(b => b.code === 'human' && b.requirement === 'local-write'));
+  const verification = current.assessment!.steps.find(step => step.key === 'verification')!;
+  assert.equal(verification.disposition, 'pending');
+  assert.ok(verification.blockers.some(b => b.code === 'capability' && b.requirement === 'local.code.verify'), JSON.stringify(verification));
   const beforeDraft = work.runs(), draft = await ok('/v1/workflows/draft', { workflowId, stepKey: 'requirements' });
   assert.deepEqual(draft.model, initial.selection); assert.deepEqual(draft.conversation, native);
   assert.equal(draft.startsNativeTurn, false); assert.equal(draft.requiresHumanSubmit, true);

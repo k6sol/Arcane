@@ -70,7 +70,7 @@ The dependency-free builder produces the preferred `plugin/build/ArcaneLocalBrid
 
 `npm run release:local` builds the TypeScript/plugin artifacts and writes a fresh manifest-hashed source directory under `runtime/releases/`. Check a returned directory with `node scripts/create-local-release.mjs --verify ABSOLUTE_RELEASE_DIRECTORY`. This checks integrity only. The directory excludes user runtime data, credentials, generated client settings and node_modules; a recipient needs Node 24+ and its own `npm ci` dependencies, then `npm run doctor` and `npm run start:arcane`.
 
-Clean package boot verification is pending. This is an unsigned source-directory release, with no Electron package, native Windows installer, signing or dependency bundling. It does not establish full release completion.
+This command creates an unsigned source-directory release, not a bundled desktop application. A separate Windows portable build now includes Electron, Node and production dependencies; see the Windows executable section below. Neither an integrity manifest nor local launch checks establish full-product completion. There is still no signed installer.
 
 ## Connect a native coding client
 
@@ -85,7 +85,7 @@ npm run native:plan
 npm run launch:native
 ```
 
-Use the scoped agent token, not the browser control token, plugin API key or provider credential. The launch script rechecks native subscription metadata and passes explicit model/effort and local MCP configuration to the genuine interactive Codex/Claude CLI. The native client owns login, inference, approvals and its features. No completed native inference or end-to-end client task is recorded. Confirm actual runtime settings in that client; do not treat accepted flags as proof. Claude planning may create a project-local MCP config even in dry-run mode.
+Use the scoped agent token, not the browser control token, plugin API key or provider credential. The launch script rechecks native subscription metadata and passes explicit model/effort and local MCP configuration to the genuine interactive Codex/Claude CLI. The native client owns login, inference, approvals and its features. One separately authorized native Codex read-only smoke turn and Arcane MCP roundtrip were recorded earlier; a general end-to-end development task is not verified. Additional native testing is currently deferred by the user. Confirm actual runtime settings in that client; do not treat accepted flags as proof. Claude planning may create a project-local MCP config even in dry-run mode.
 
 Alternatively, generate reviewable config templates with `node apps/mcp/scripts/generate-config.mjs --project C:\Users\alexk\OneDrive\Documents\GitHub\Arcane`. Existing output is not overwritten and home client settings are not edited. See [MCP setup](docs/build/MCP.md). **VS Code was only opened for this repository; the user cancelled VS Code MCP installation.** Do not report a connected VS Code client.
 

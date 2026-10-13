@@ -7,6 +7,10 @@ import {
   CONVERSATION_WORK_LIMITS, ConversationWorkStore,
   type ConversationWorkBinding, type ConversationWorkPage, type NativeConversation,
 } from '../../../packages/storage/src/conversation-work-store.js';
+import type { AssetStartAdmission } from './asset-service.js';
+import {
+  assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor,
+} from './native-asset-authority.js';
 
 export interface AssetConversationHostOptions {
   /** Exact canonical path of the borrowed store and the host's asset service. */
@@ -17,6 +21,8 @@ export interface AssetConversationHostOptions {
   /** Host attests this callback starts in projectPath and returns the created job ID.
    * It is invoked once per start. The adapter never owns or closes the service/store. */
   start: (request: AssetRequest) => string | Promise<string>;
+  /** Trusted service creation witness only. Admission is host code, never JSON. */
+  startNative?: (request: AssetRequest, admission: AssetStartAdmission) => Promise<string>;
 }
 export interface AssetConversationStartResult {
   projectId: string;
@@ -31,6 +37,16 @@ export interface AssetConversationListing extends ConversationWorkPage {
   projectId: string;
   projectPath: string;
   conversation: NativeConversation;
+}
+export interface NativeAssetConversationStartResult {
+  projectId: string;
+  projectPath: string;
+  jobId: string | null;
+  association: 'bound' | 'unknown';
+  /** Original registry capture; unknown association is not proof of persistence. */
+  conversation: NativeConversation;
+  creation: 'created' | 'unknown';
+  retry: false;
 }
 
 function fail(code: string): never {
@@ -114,15 +130,24 @@ function equal(a: NativeConversation, b: NativeConversation): boolean {
  * human methods must never be reachable with an agent bearer. No client role,
  * project path, conversation, service or callback is accepted in operation data. */
 export function createAssetConversationHost(options: AssetConversationHostOptions) {
-  const a = fields(options, ['projectPath', 'workAssociations', 'conversation', 'start']);
+  const a = fields(options, ['projectPath', 'workAssociations', 'conversation', 'start'], ['startNative']);
   if (!a.workAssociations || types.isProxy(a.workAssociations) || !(a.workAssociations instanceof ConversationWorkStore) ||
-      typeof a.conversation !== 'function' || typeof a.start !== 'function') fail('INPUT');
+      typeof a.conversation !== 'function' || typeof a.start !== 'function' ||
+      (Object.hasOwn(a, 'startNative') && typeof a.startNative !== 'function')) fail('INPUT');
   const associations = a.workAssociations;
   // Do not normalize a different project spelling into authority.
   if (typeof a.projectPath !== 'string' || a.projectPath !== associations.projectPath) fail('PROJECT');
   const projectPath = a.projectPath, projectId = associations.projectId;
   const observe = a.conversation as AssetConversationHostOptions['conversation'];
   const start = a.start as AssetConversationHostOptions['start'];
+  const startNative = a.startNative as AssetConversationHostOptions['startNative'];
+  function captured(actor: NativeAssetActor, operation: 'read' | 'mutate'): NativeConversation {
+    assertNativeAssetActor(actor, operation);
+    const scope = nativeAssetActorScope(actor);
+    if (scope.projectId !== projectId || scope.projectPath !== projectPath) fail('PROJECT');
+    // Registry identity only. Never observe current/saved/human native context.
+    return Object.freeze({ ...scope.conversation });
+  }
   function current(): NativeConversation {
     const value = observe();
     if (value === null) fail('REQUIRED');
@@ -137,6 +162,60 @@ export function createAssetConversationHost(options: AssetConversationHostOption
     return associations.list(native, 'asset-job', p);
   }
   return {
+    async startNative(actor: NativeAssetActor, input: unknown): Promise<NativeAssetConversationStartResult> {
+      const conversation = captured(actor, 'mutate'), request = assetRequest(input);
+      page(conversation, { limit: 1 }); // Validate scope and borrowed storage before dispatch.
+      if (!startNative) fail('NATIVE_UNAVAILABLE');
+      let active = true, attempted = false, admitted = false, witnessed = false, uncertain = false;
+      let id: string | null = null, association: 'bound' | 'unknown' = 'unknown';
+      let admissionFailure: unknown;
+      const admission: AssetStartAdmission = Object.freeze({
+        beforeCreate(): void {
+          if (!active || attempted || witnessed) { uncertain = true; fail('ADMISSION'); }
+          attempted = true;
+          try {
+            // Called synchronously by the service AFTER its awaited preflight,
+            // immediately before allocation. Never recapture or upgrade the actor.
+            assertNativeAssetActor(actor, 'mutate');
+            page(conversation, { limit: 1 });
+            admitted = true;
+          } catch (error) { admissionFailure = error; throw error; }
+        },
+        created(value: string): void {
+          if (!active || witnessed) { uncertain = true; fail('ADMISSION'); }
+          witnessed = true; // Record creation even if the witness ID is malformed.
+          try { id = jobId(value); } catch { uncertain = true; return; }
+          if (!admitted) { uncertain = true; return; }
+          // Allocation has happened. Original attribution must survive revocation,
+          // retirement, window end and UI context changes. Exactly one bind attempt.
+          try { associations.bind({ conversation, kind: 'asset-job', id }); association = 'bound'; }
+          catch { uncertain = true; } // Includes a lost persistence ACK. Never probe/rebind.
+        },
+      });
+      try {
+        const returned = jobId(await startNative(request, admission));
+        if (!witnessed) { id = returned; uncertain = true; } // Missing witness cannot adopt a global job.
+        else if (id !== returned) uncertain = true;
+      } catch (error) {
+        // Only an observed admission refusal, before any witness, is definitive.
+        // A callback rejection alone cannot rule out a lost creation acknowledgement.
+        if (!witnessed && !admitted && admissionFailure !== undefined) throw admissionFailure;
+        uncertain = true;
+      } finally { active = false; }
+      return { projectId, projectPath, jobId: id,
+        association: uncertain ? 'unknown' : association, conversation: { ...conversation },
+        creation: uncertain ? 'unknown' : 'created', retry: false };
+    },
+    listNative(actor: NativeAssetActor, pagination: unknown = {}): AssetConversationListing {
+      const conversation = captured(actor, 'read'), result = page(conversation, pagination);
+      return { projectId, projectPath, conversation: { ...conversation }, ...result };
+    },
+    bindingNative(actor: NativeAssetActor, input: unknown): ConversationWorkBinding | null {
+      const conversation = captured(actor, 'read'), id = jobId(input);
+      page(conversation, { limit: 1 });
+      const binding = associations.binding('asset-job', id);
+      return binding && binding.projectId === projectId && equal(binding.conversation, conversation) ? binding : null;
+    },
     async startHuman(input: unknown): Promise<AssetConversationStartResult> {
       const request = assetRequest(input), conversation = current();
       page(conversation, { limit: 1 });
@@ -167,4 +246,8 @@ export function createAssetConversationHost(options: AssetConversationHostOption
     },
   };
 }
-export type AssetConversationHost = ReturnType<typeof createAssetConversationHost>;
+// Preserve the original structural seam used by human routes and their fixtures.
+export type AssetConversationHost = Pick<ReturnType<typeof createAssetConversationHost>,
+  'startHuman' | 'startAgent' | 'listHuman' | 'bindingHuman'>;
+export type NativeAssetConversationHost = Pick<ReturnType<typeof createAssetConversationHost>,
+  'startNative' | 'listNative' | 'bindingNative'>;

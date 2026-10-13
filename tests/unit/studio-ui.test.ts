@@ -167,7 +167,7 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const parsed=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:browserSource,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
   assert.ifError(parsed.error);assert.equal(parsed.status,0,parsed.stderr);
   const staticModules=JSON.parse(parsed.stdout) as string[];
-  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./codex-chat.js','./codex-history.js','./learning-panel.js','./workspace-shell.js']);
+  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./provider-setup.js','./workspace-shell.js']);
 });
 
 test('edit baselines must match the actual succeeded read request and exact client session', () => {
@@ -361,6 +361,8 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const posted: { path: string; body: Record<string, unknown>; authorization: string }[] = [];
   const assets = new Map(['/studio', '/studio.css', '/studio.js', '/codex-chat.js', '/workspace-shell.js', '/asset-downloads.js', '/learning-panel.js', '/brand/arcane-ridges.png'].map((path, i) => [path, resolve(['apps/desktop/public/studio.html', 'apps/desktop/public/studio.css', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/learning-panel.js'), 'apps/desktop/public/brand/arcane-ridges.png'][i]!) ]));
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
+  assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
+  assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const asset = assets.get(url.pathname);
@@ -371,7 +373,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
       if (url.pathname === '/v1/studio/keys') { send({ keys: fixtureKeys }); return; }
       if (url.pathname === '/v1/work/runs') { send({ runs: [] }); return; }
       if (url.pathname === '/v1/work/ready') { send({ tasks: [] }); return; }
-      if (url.pathname === '/v1/assets/jobs') { send({ jobs: fixtureAssetJobs }); return; }
+      if (url.pathname === '/v1/assets/jobs') { send(url.searchParams.has('limit') ? { schemaVersion: 1, jobs: fixtureAssetJobs, total: fixtureAssetJobs.length, nextCursor: null, byteLimit: 512 * 1024 } : { jobs: fixtureAssetJobs }); return; }
       if (url.pathname === '/v1/assets/manifest') {
         const job = fixtureAssetJobs.find(j => j.jobId === url.searchParams.get('jobId'))!;
         const manifest: AssetManifest = { schemaVersion: 1, jobId: job.jobId, createdAt: job.startedAt, request: job.request, runtime: fixtureRuntime, templateSha256: '0'.repeat(64), coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false }, validation: audit(), artifacts: ['preview-hero.png', 'preview-side.png'].map(path => ({ path, role: 'preview', bytes: fixturePng.length, sha256: createHash('sha256').update(fixturePng).digest('hex') })), limitations: ['HTTP contract fixture only; no native Blender or Studio verification.'] }; send({ manifest }); return;
@@ -475,12 +477,28 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   failSessions = true; await page.locator('#refresh').click(); await expectText('#connection-status', 'Refresh unavailable'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#notice', 'outcomes have not been inferred'); failSessions = false; await page.locator('#refresh').click(); await expectText('#connection-status', 'Daemon responding');
   await page.locator('#method').selectOption('scene.search'); await page.locator('#query').fill('Duplicate'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.search'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).query, 'Duplicate');
   await page.locator('#method').selectOption('scene.create'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click(); await page.locator('#create-name').fill('Fixture folder'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.create'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).className, 'Folder');
-  await page.locator('#asset-name').fill('fixture-crate'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
-  await page.locator('#asset-probe').click(); await expectText('#asset-runtime', 'HTTP-fixture-only-no-Blender'); await page.waitForFunction(() => !(document.getElementById('asset-start') as HTMLButtonElement).disabled);
-  await page.locator('#asset-start').click(); await expectText('#asset-job-summary', 'running'); assert.equal(posted.at(-1)?.path, '/v1/assets/start'); assert.equal(posted.at(-1)?.body.template, 'hero-prop'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
-  await page.locator('#asset-cancel').click(); await expectText('#asset-job-summary', 'cancelled'); assert.deepEqual(posted.at(-1)?.body, { jobId: fixtureAssetJobs[0]!.jobId });
-  await page.locator('#asset-template').selectOption('environment-kit'); assert.equal(await page.locator('#asset-size').inputValue(), '3, 3, 2.8'); await page.locator('#asset-name').fill('fixture-room'); await page.locator('#asset-start').click(); await expectText('#asset-job-summary', 'fixture-room');
-  fixtureAssetJobs[0]!.state = 'succeeded'; fixtureAssetJobs[0]!.manifestAvailable = true; await page.locator('#refresh').click(); await expectText('#asset-job-summary', 'succeeded');
+  await page.locator('#asset-name').fill('fixture-crate');
+  assert.equal(await page.locator('#asset-start').isDisabled(), true);
+  assert.equal(await page.locator('#asset-probe').isDisabled(), true, 'no native conversation can never start or probe chat work');
+  assert.ok(!posted.some(item => item.path === '/v1/assets/start' || item.path === '/v1/assets/conversation-start'));
+  // This harness has no native chat. Explicit global inspection must not invent one
+  // or permit creation. Authored retained jobs exercise legacy cancellation/preview.
+  const now = new Date().toISOString();
+  fixtureAssetJobs.unshift({ schemaVersion: 1, jobId: '11111111-1111-4111-8111-000000000001',
+    request: { schemaVersion: 1, template: 'hero-prop', name: 'fixture-crate', seed: 1,
+      sizeMeters: [1, 0.65, 0.7], color: [0.4, 0.4, 0.4], triangleBudget: 2000, renderResolution: 256, renderSamples: 8 },
+    directory: 'Authored retained HTTP fixture only', manifestPath: null, manifestAvailable: false,
+    state: 'running', stage: 'fixture-stage', startedAt: now, updatedAt: now, events: [], error: null });
+  await page.locator('#asset-history-scope').selectOption('global'); await expectText('#asset-status', 'Global asset history');
+  await page.locator('#asset-job-picker').selectOption(fixtureAssetJobs[0]!.jobId);
+  await expectText('#asset-job-summary', 'running'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
+  await page.locator('#asset-cancel').click(); await expectText('#asset-job-summary', 'cancelled');
+  assert.deepEqual(posted.at(-1)?.body, { jobId: fixtureAssetJobs[0]!.jobId });
+  await page.locator('#asset-template').selectOption('environment-kit'); assert.equal(await page.locator('#asset-size').inputValue(), '3, 3, 2.8');
+  await page.locator('#asset-name').fill('fixture-room'); assert.equal(await page.locator('#asset-start').isDisabled(), true);
+  fixtureAssetJobs[0]!.state = 'succeeded'; fixtureAssetJobs[0]!.manifestAvailable = true;
+  await page.locator('#refresh').click(); await expectText('#asset-job-summary', 'succeeded');
+  assert.ok(!posted.some(item => item.path === '/v1/assets/start' || item.path === '/v1/assets/conversation-start'));
   await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'authenticated previews loaded'); assert.equal(await page.locator('#asset-previews canvas').count(), 2); await expectText('#asset-manifest', 'no native Blender or Studio verification');
   corruptPreview = true; await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'previews failed'); assert.equal(await page.locator('#asset-previews canvas').count(), 0); corruptPreview = false;
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
@@ -507,6 +525,8 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/studio.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/studio.js'), 'utf8') }); });
   if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/codex-chat.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/codex-chat.js'), 'utf8') }); });
+  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/provider-setup.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/provider-setup.js'), 'utf8') }); });
+  if (process.env.ARCANE_UI_BUILD_DIR) await page.route('**/desktop-verification.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/desktop-verification.js'), 'utf8') }); });
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
   const text = async (selector: string, value: string) => { await page.waitForFunction(({ selector, value }: { selector: string; value: string }) => document.querySelector(selector)?.textContent?.includes(value), { selector, value }); };
   const refresh = async () => { await page.locator('#refresh').click(); await page.waitForFunction(() => !(document.getElementById('refresh') as HTMLButtonElement).disabled); };
@@ -612,6 +632,8 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   const controls = studioRoutes(studioStore, resolve('.'), workStore, directory, agent);
   const assets = new Map([['/studio', resolve('apps/desktop/public/studio.html')], ['/studio.css', resolve('apps/desktop/public/studio.css')], ['/studio.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js')], ['/codex-chat.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js')], ['/workspace-shell.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js')], ['/learning-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/learning-panel.js')], ['/brand/arcane-ridges.png', resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
+  assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
+  assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
   let origin = '';
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', origin), asset = assets.get(url.pathname);

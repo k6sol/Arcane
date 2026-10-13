@@ -57,11 +57,15 @@ try {
   publicSafeHeaders(workspaceModule, 'text/javascript; charset=utf-8');
   assert.ok(workspaceModule.bytes.equals(await readFile(join(directory, 'dist/apps/desktop/src/workspace-shell.js'))), 'Workspace module must match the integrity-checked package bytes.');
   assert.ok(!workspaceModule.text.includes(token)); check('workspace-shell-public-module-and-safe-headers');
+  const verificationModule = await request('/desktop-verification.js', { bearer: '', browserOrigin: '' });
+  publicSafeHeaders(verificationModule, 'text/javascript; charset=utf-8');
+  assert.ok(verificationModule.bytes.equals(await readFile(join(directory, 'dist/apps/desktop/src/desktop-verification.js'))), 'Desktop verification module must match the integrity-checked package bytes.');
+  assert.ok(!verificationModule.text.includes(token)); check('desktop-verification-public-module-and-safe-headers');
   const brand = await request('/brand/arcane-ridges.png', { bearer: '', browserOrigin: '', binary: true });
   publicSafeHeaders(brand, 'image/png'); validateBrandBitmap(brand.bytes);
   assert.ok(brand.bytes.equals(await readFile(join(directory, BRAND_BITMAP_PATH))), 'Brand PNG must match the integrity-checked package bytes.');
   assert.equal(brand.bytes.indexOf(Buffer.from(token)), -1); check('brand-png-public-bytes-and-safe-headers');
-  for (const route of ['/workspace-shell.js.map', '/brand/unlisted.png', '/brand/arcane-ridges.png.extra']) assert.equal((await request(route)).status, 404);
+  for (const route of ['/workspace-shell.js.map', '/desktop-verification.js.map', '/desktop-verification.js.extra', '/brand/unlisted.png', '/brand/arcane-ridges.png.extra']) assert.equal((await request(route)).status, 404);
   check('workspace-static-routes-are-exact');
   const state = await request('/v1/product/state'); assert.equal(state.status, 200); const product = JSON.parse(state.text); assert.equal(product.projectPath, directory); assert.deepEqual(product.studioSessions, []); check('isolated-sqlite-product-state');
   assert.equal((await request('/v1/product/state', { browserOrigin: 'https://untrusted.invalid' })).status, 403); check('cross-origin-refused');

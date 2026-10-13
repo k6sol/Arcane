@@ -1,0 +1,11 @@
+# Native asset authority registry
+
+Host-only volatile authority implemented in native-asset-authority.ts. It is not an HTTP registration API and does not attest a provider session by itself. Required production integration must issue the token only for the final isolated native child, seal from the exact configured acknowledgement **after durable action commit**, and retire synchronously from native lifecycle hooks. The source integration is now present in the LAB, Codex service and native client hooks. Actual installed-native credential delivery and lifecycle ordering remain unverified; passing explicit fixtures does not complete native acceptance.
+
+A daemon/project admits at most128 unique launch incarnations; each has128 local intent slots. Credentials are random32-byte secrets, retained only in host launch closures; registry lookup holds SHA256 digests. JSON snapshots contain no secret. Pending credentials admit nothing. Exact provider/thread/session/connection seals are immutable, including sessionId:null; changed seals permanently retire the key. Generic/human grants and native file-write/Studio permissions are unrelated.
+
+Mutation requires both an explicit host/human asset grant and a locally dispatched intent window. Opaque WeakMap actors capture the original generation and scope; JSON, clones, proxies and caller role/identity claims cannot recreate them. Revocation, terminal, reconnect and shutdown fence already-captured requests. An actor never upgrades across await or into a newer intent. Historical binding after a witnessed creation must use its pre-creation captured scope, not reacquire current authority.
+
+Local dispatch is NOT proof of remote acknowledgement or provider-originating turn. A prior-turn request first delivered in a later window still has valid conversation scope but unproven turn provenance; the tests preserve this limitation. No SDK request IDs, model text or current-turn lookup are accepted as provenance.
+
+Component fixtures use actual temporary directories and the exact registry, but explicit host seals/grants/dispatches. They do not start a provider, Studio, Blender or network service, and do not prove native credential delivery or lifecycle integration. Standalone tests and current integrated proof must be recorded separately.

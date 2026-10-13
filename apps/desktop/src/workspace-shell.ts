@@ -2,6 +2,26 @@
 
 const shells = new WeakMap<Document, WorkspaceShell>();
 
+/** StudioWorkbench emits this only for observed asset activity; it grants no authority. */
+export const WORKSPACE_ASSET_ACTIVITY_EVENT = 'workspace:assetactivity';
+export interface WorkspaceAssetActivity { jobId: string; state: 'queued' | 'running' | 'succeeded' }
+interface PreviewPresentation { open: boolean; seenJobs: Set<string>; returnFocus: HTMLElement | null }
+// Keep presentation choices across pagehide/pageshow on the same document, without storage.
+const previewPresentations = new WeakMap<Document, PreviewPresentation>();
+const PREVIEW_JOB_LIMIT = 256;
+
+function assetActivity(value: unknown): WorkspaceAssetActivity | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  // Copy only two bounded data fields. No text, URLs, paths, or accessor execution.
+  const fields = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(fields).length !== 2 || !fields.jobId || !fields.state ||
+      !('value' in fields.jobId) || !('value' in fields.state)) return null;
+  const jobId: unknown = fields.jobId.value, state: unknown = fields.state.value;
+  if (typeof jobId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(jobId) ||
+      (state !== 'queued' && state !== 'running' && state !== 'succeeded')) return null;
+  return { jobId, state };
+}
+
 export type WorkspaceTool = 'all' | 'blender' | 'roblox';
 export interface WorkspaceToolChange { tool: WorkspaceTool }
 const TOOL_CONTEXT: Record<WorkspaceTool, { label: string; heading: string; description: string; settings: string; draft: string }> = {
@@ -47,7 +67,7 @@ export class WorkspaceShell {
     this.navigation = Array.from(doc.querySelectorAll<HTMLElement>('[data-workspace-target]'));
     for (const control of this.navigation) {
       if (control.classList.contains('is-active')) control.setAttribute('aria-current', 'page');
-      if (['new-chat', 'sidebar-toggle', 'preview-expand', 'preview-settings'].includes(control.id) || control.hasAttribute('data-draft')) continue;
+      if (['new-chat', 'sidebar-toggle', 'preview-expand', 'preview-settings', 'workspace-preview-toggle', 'workspace-preview-close'].includes(control.id) || control.hasAttribute('data-draft')) continue;
       this.button(control, () => {
         const tool = workspaceTool(control.getAttribute('data-workspace-tool'));
         if (tool) this.selectTool(tool);
@@ -93,6 +113,7 @@ export class WorkspaceShell {
         '\nThis is supplemental context. It does not grant permission to run tools or change files.');
     });
     this.bindSearch();
+    this.bindPreviewPresentation();
     this.bindPreviews();
     this.bindShortcuts();
   }
@@ -269,10 +290,82 @@ export class WorkspaceShell {
     try {
       if (exiting) await this.doc.exitFullscreen();
       else await preview.requestFullscreen();
+      // A close may arrive while the browser is still entering fullscreen.
+      if (!this.disposed && preview.hidden && this.doc.fullscreenElement === preview && typeof this.doc.exitFullscreen === 'function') await this.doc.exitFullscreen();
       if (!this.disposed) { sync(); this.notice(''); }
     } catch {
       this.notice('Unable to change preview fullscreen. Use your browser fullscreen controls.');
     } finally { this.fullscreenBusy = false; }
+  }
+
+  private bindPreviewPresentation(): void {
+    const stage = this.doc.getElementById('workspace-stage'), preview = this.doc.getElementById('artifact-panel');
+    if (!stage || !preview) return;
+    const toggle = this.doc.getElementById('workspace-preview-toggle'), close = this.doc.getElementById('workspace-preview-close');
+    let presentation = previewPresentations.get(this.doc);
+    if (!presentation) {
+      presentation = { open: false, seenJobs: new Set(), returnFocus: null };
+      previewPresentations.set(this.doc, presentation);
+    }
+    const state = presentation;
+    const sync = () => {
+      preview.hidden = !state.open;
+      stage.classList.toggle('preview-open', state.open);
+      toggle?.setAttribute('aria-controls', preview.id);
+      toggle?.setAttribute('aria-expanded', String(state.open));
+      toggle?.setAttribute('aria-pressed', String(state.open));
+      toggle?.setAttribute('aria-label', state.open ? 'Hide model preview' : 'Show model preview');
+    };
+    const usable = (target: HTMLElement | null): target is HTMLElement =>
+      !!target && target.isConnected && typeof target.focus === 'function' && !target.closest('[hidden], [inert], [disabled]');
+    const restoreFocus = () => {
+      const target = [state.returnFocus, toggle, this.composer()].find(usable);
+      state.returnFocus = null;
+      if (target) this.focus(target);
+    };
+    const setOpen = (open: boolean, manual = false) => {
+      if (this.disposed || state.open === open) return;
+      if (open) {
+        const active = this.doc.activeElement as HTMLElement | null;
+        state.returnFocus = manual ? toggle : usable(active) && active !== this.doc.body && !preview.contains(active) ? active : this.composer();
+      }
+      state.open = open;
+      sync();
+      if (manual && open) this.focus(close ?? preview);
+      if (!open) {
+        if (this.doc.fullscreenElement === preview && typeof this.doc.exitFullscreen === 'function') {
+          void this.doc.exitFullscreen().catch(() => {
+            this.notice('Unable to exit preview fullscreen. Use your browser fullscreen controls.');
+          });
+        }
+        restoreFocus();
+      }
+    };
+    if (toggle) this.button(toggle, () => setOpen(!state.open, true));
+    if (close) this.button(close, () => setOpen(false, true));
+    this.listen(preview, 'keydown', event => {
+      const key = event as KeyboardEvent;
+      if (!state.open || event.defaultPrevented || key.key !== 'Escape' || key.isComposing || key.repeat ||
+          key.ctrlKey || key.metaKey || key.altKey || key.shiftKey || this.doc.fullscreenElement === preview) return;
+      event.preventDefault();
+      setOpen(false, true);
+    });
+    this.listen(this.doc, WORKSPACE_ASSET_ACTIVITY_EVENT, event => {
+      if (this.disposed) return;
+      const activity = assetActivity((event as CustomEvent<unknown>).detail);
+      if (!activity || state.seenJobs.has(activity.jobId) || state.seenJobs.size >= PREVIEW_JOB_LIMIT) return;
+      // Completion alone is not a loaded preview. The producer emits succeeded
+      // after appending its verified, decoded canvas, never for empty placeholders.
+      if (activity.state === 'succeeded') {
+        const canvases = this.doc.getElementById('asset-previews')?.querySelectorAll<HTMLCanvasElement>('figure canvas[role="img"]');
+        if (!canvases || !Array.from(canvases).some(canvas => canvas.width > 0 && canvas.height > 0)) return;
+      }
+      // Once observed, this identity cannot reopen a deliberately closed panel,
+      // even after another job, repeated polls, canvas replacements or pageshow.
+      state.seenJobs.add(activity.jobId);
+      setOpen(true);
+    });
+    sync();
   }
 
   private bindPreviews(): void {

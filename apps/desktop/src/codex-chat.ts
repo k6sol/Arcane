@@ -1,5 +1,5 @@
 /// <reference lib="dom" />
-import type { CodexAction, CodexActionOutcome, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
+import type { CodexAction, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
 import type { RequestedModel } from '../../../packages/core/src/workflow-recipes.js';
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
 import type { Approval, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
@@ -13,11 +13,38 @@ const object = (value: unknown): value is Record<string, unknown> => typeof valu
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f]/.test(value);
 const integer = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-const ACTIONS = ['connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','approval','history-load'];
+const ACTIONS = ['grant-assets','revoke-assets','connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','approval','history-load'];
 const IDLE = ['idle','completed','failed','interrupted'];
 type ChatEvent = SessionEvent;
 export type ChatSnapshot = Omit<Snapshot, 'events'> & { events: ChatEvent[] };
-export type ChatState = Omit<CodexProductState, 'snapshot' | 'lastSnapshot'> & { snapshot: ChatSnapshot | null; lastSnapshot: ChatSnapshot | null };
+export interface NativeAssetPermission { available: boolean; sealed: boolean; granted: boolean; admissionOpen: boolean }
+export type ChatAction = CodexAction;
+export type ChatActionRecord = CodexActionRecord;
+export type ChatState = Omit<CodexProductState, 'snapshot' | 'lastSnapshot' | 'nativeAssets' | 'actions'> & {
+  snapshot: ChatSnapshot | null; lastSnapshot: ChatSnapshot | null; actions: ChatActionRecord[];
+  nativeAssets?: NativeAssetPermission;
+};
+/** JSON data only: reject getters without invoking them, including hidden/symbol fields. */
+function dataObject(value: unknown, keys?: readonly string[]): value is Record<string, unknown> {
+  if (!object(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const own = Reflect.ownKeys(value);
+  return (!keys || own.length === keys.length && keys.every(key => Object.hasOwn(value, key))) &&
+    own.every(key => typeof key === 'string' && (() => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      return descriptor.enumerable && Object.hasOwn(descriptor, 'value');
+    })());
+}
+function readNativeAssets(value: unknown): NativeAssetPermission | null {
+  if (value === null) return null;
+  const keys = ['available', 'sealed', 'granted', 'admissionOpen'];
+  if (!dataObject(value, keys) || keys.some(key => typeof value[key] !== 'boolean') ||
+      (!value.available && (value.sealed || value.granted || value.admissionOpen)) ||
+      (value.granted || value.admissionOpen) && (!value.available || !value.sealed) ||
+      value.admissionOpen && !value.granted) {
+    throw new Error('Invalid exact native asset permission state.');
+  }
+  return value as unknown as NativeAssetPermission;
+}
 
 export function eventSequence(event: ChatEvent): number {
   const value = event.seq;
@@ -26,7 +53,7 @@ export function eventSequence(event: ChatEvent): number {
 }
 function readSnapshot(value: unknown): ChatSnapshot | null {
   if (value === null) return null;
-  if (!object(value) || !uuid(value.connectionId) || !['installed-cli','spawned-node-fixture'].includes(String(value.provenance)) || typeof value.connected !== 'boolean' || typeof value.ready !== 'boolean' || !Array.isArray(value.models) || value.models.length > 512 || !Array.isArray(value.operations) || value.operations.length > 128 || !Array.isArray(value.approvals) || value.approvals.length > 16 || !Array.isArray(value.events) || value.events.length > 256 || !integer(value.droppedEvents) || !integer(value.lastEventSeq)) throw new Error('Invalid bounded native snapshot.');
+  if (!dataObject(value) || !uuid(value.connectionId) || !['installed-cli','spawned-node-fixture'].includes(String(value.provenance)) || typeof value.connected !== 'boolean' || typeof value.ready !== 'boolean' || !Array.isArray(value.models) || value.models.length > 512 || !Array.isArray(value.operations) || value.operations.length > 128 || !Array.isArray(value.approvals) || value.approvals.length > 16 || !Array.isArray(value.events) || value.events.length > 256 || !integer(value.droppedEvents) || !integer(value.lastEventSeq)) throw new Error('Invalid bounded native snapshot.');
   if(value.mcpIsolation!==undefined&&!['native-config','arcane-only-pending','arcane-only-verified'].includes(String(value.mcpIsolation)))throw new Error('Invalid native MCP isolation evidence.');
   if (value.account !== null && (!object(value.account) || !['subscription','signed-out','unsupported'].includes(String(value.account.auth)) || !(value.account.plan === null || text(value.account.plan)) || typeof value.account.requiresOpenaiAuth !== 'boolean')) throw new Error('Invalid native account metadata.');
   const names = new Set<string>();
@@ -35,9 +62,9 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
     if (!object(model) || !text(model.model) || names.has(model.model) || !text(model.id) || !text(model.displayName) || model.entitlement !== 'unverified' || !Array.isArray(model.efforts) || !model.efforts.length || model.efforts.length > 16 || model.efforts.some(e => !text(e,64)) || new Set(model.efforts).size !== model.efforts.length) throw new Error('Invalid reported model/effort catalogue.');
     names.add(model.model);
   }
-  const pair = (p: unknown) => object(p) && text(p.model) && text(p.effort,64) && models.some((m: Model) => m.model === p.model && m.efforts.includes(p.effort as string));
+  const pair = (p: unknown) => dataObject(p) && text(p.model) && text(p.effort,64) && models.some((m: Model) => m.model === p.model && m.efforts.includes(p.effort as string));
   if (value.selection !== null && !pair(value.selection)) throw new Error('The native selection is absent from the reported catalogue.');
-  if (value.thread !== null && (!object(value.thread) || !text(value.thread.threadId) || !(value.thread.sessionId === null || text(value.thread.sessionId)) || !pair(value.thread.selection) || typeof value.thread.configured !== 'boolean' || typeof value.thread.writeGranted !== 'boolean' || !(value.thread.turnId === null || text(value.thread.turnId)) || ![...IDLE,'starting','inProgress','cancelling','unknown'].includes(String(value.thread.turnStatus)))) throw new Error('Invalid exact native thread scope.');
+  if (value.thread !== null && (!dataObject(value.thread) || !text(value.thread.threadId) || !(value.thread.sessionId === null || text(value.thread.sessionId)) || !pair(value.thread.selection) || typeof value.thread.configured !== 'boolean' || typeof value.thread.writeGranted !== 'boolean' || !(value.thread.turnId === null || text(value.thread.turnId)) || ![...IDLE,'starting','inProgress','cancelling','unknown'].includes(String(value.thread.turnStatus)))) throw new Error('Invalid exact native thread scope.');
   for (const a of value.approvals) {
     if (!object(a) || !text(a.handle) || !uuid(a.connectionId) || !text(a.threadId) || !text(a.turnId) || !text(a.itemId) || !['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(String(a.method)) || !(text(a.serverRequestId) || typeof a.serverRequestId === 'number' && Number.isSafeInteger(a.serverRequestId)) || !(a.reason === null || typeof a.reason === 'string' && utf8(a.reason) <= 4096) || typeof a.canAccept !== 'boolean' || !integer(a.expiresAt) || !(a.command === null || typeof a.command === 'string' && utf8(a.command) <= 32768) || !(a.cwd === null || text(a.cwd,4096)) || !(a.changes === null || Array.isArray(a.changes) && a.changes.length <= 32)) throw new Error('Invalid bounded native approval.');
     if (Array.isArray(a.changes)) for (const c of a.changes) if (!object(c) || !text(c.path,4096) || !['add','delete','update'].includes(String(c.kind)) || !(c.movePath === null || text(c.movePath,4096)) || typeof c.diff !== 'string' || utf8(c.diff) > 65536) throw new Error('A full file preview exceeded its bound.');
@@ -52,14 +79,18 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
   }
   return value as unknown as ChatSnapshot;
 }
-function readActionRecord(value: unknown): CodexActionRecord {
-  if (!object(value) || !uuid(value.requestId) || !ACTIONS.includes(String(value.action)) || !(value.connectionId === null || uuid(value.connectionId)) || !['pending','acknowledged','rejected','unknown'].includes(String(value.state))) throw new Error('Invalid native action receipt.');
+function readActionRecord(value: unknown): ChatActionRecord {
+  if (!dataObject(value, ['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt']) || !uuid(value.requestId) || !ACTIONS.includes(String(value.action)) || !(value.connectionId === null || uuid(value.connectionId)) || !['pending','acknowledged','rejected','unknown'].includes(String(value.state))) throw new Error('Invalid native action receipt.');
   for (const key of ['threadId','turnId','model','effort','errorCode']) if (!(value[key] === null || text(value[key], key === 'effort' ? 64 : 256))) throw new Error('Invalid native action receipt metadata.');
   if (!text(value.createdAt,64) || !Number.isFinite(Date.parse(value.createdAt)) || !(value.finishedAt === null || text(value.finishedAt,64) && Number.isFinite(Date.parse(value.finishedAt)))) throw new Error('Invalid native action receipt timestamps.');
-  return value as unknown as CodexActionRecord;
+  if (['grant-assets','revoke-assets'].includes(String(value.action)) && (!uuid(value.connectionId) || !text(value.threadId))) throw new Error('Invalid exact native asset action receipt scope.');
+  return value as unknown as ChatActionRecord;
 }
 export function readCodexState(value: unknown): ChatState {
-  if (!object(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !object(value.nativeTools) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
+  if (!dataObject(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !dataObject(value.nativeTools, ['configured','verified']) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
+  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','workflowModel','displayLimited'];
+  if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected native workflow state field.');
+  if (Object.hasOwn(value, 'nativeAssets')) readNativeAssets(value.nativeAssets);
   readSnapshot(value.snapshot); readSnapshot(value.lastSnapshot);
   if (value.nativeHistory !== undefined && value.nativeHistory !== null) {
     const binding = value.nativeHistory;
@@ -82,20 +113,30 @@ export function readCodexState(value: unknown): ChatState {
   }
   const ids = new Set<string>();
   for (const action of value.actions) { const r = readActionRecord(action); if (ids.has(r.requestId)) throw new Error('Duplicate native action receipt.'); ids.add(r.requestId); }
+  if (value.nativeAssets === null) { const { nativeAssets: unsupported, ...compatible } = value; return compatible as unknown as ChatState; }
   return value as unknown as ChatState;
 }
-export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): CodexAction {
+export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
-  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
+  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
   const keys = accepted[action]!;
-  if (Object.keys(fields).length !== keys.length || keys.some(key => !Object.hasOwn(fields,key))) throw new Error('Native action fields must match the exact browser envelope.');
+  if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
+  if (action === 'grant-assets' || action === 'revoke-assets') {
+    if (state) readCodexState(state);
+    const assets = state?.nativeAssets, snapshot = state?.snapshot, thread = snapshot?.thread;
+    if (!assets?.available || !assets.sealed || state?.connecting || state?.closing ||
+        !snapshot?.connected || !snapshot.ready || !thread?.configured || fields.threadId !== thread.threadId ||
+        action === 'grant-assets' && (state?.displayLimited || state?.busy || !IDLE.includes(thread.turnStatus))) {
+      throw new Error('An available sealed asset capability and exact configured live native thread are required.');
+    }
+  }
   const s = state?.snapshot;
   if (action !== 'connect' && !s) throw new Error('An exact reported native connection is required.');
   if (action === 'select' && (!text(fields.model) || !text(fields.effort,64) || !s!.models.some(m => m.model === fields.model && m.efforts.includes(fields.effort as string)))) throw new Error('Choose an exact reported model and effort; there is no fallback.');
   for (const key of ['threadId','turnId','handle']) if (key in fields && !text(fields[key])) throw new Error('Enter an exact bounded scope ID.');
   if (action === 'turn-start' && (typeof fields.text !== 'string' || !fields.text.trim() || utf8(fields.text) > CODEX_INPUT_BYTES)) throw new Error('Submit nonempty text of at most 128 KiB in UTF-8.');
   if (action === 'approval' && !['accept','decline','cancel'].includes(String(fields.decision))) throw new Error('Choose one explicit approval decision.');
-  return { requestId, connectionId: action === 'connect' ? null : s!.connectionId, action, ...fields } as CodexAction;
+  return { requestId, connectionId: action === 'connect' ? null : s!.connectionId, action, ...fields } as ChatAction;
 }
 
 export class CodexHttpError extends Error {
@@ -107,7 +148,7 @@ export class CodexChatApi {
   safe(value: string): string {
     return value.replaceAll(this.#token || '\0', '[REDACTED]').replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g,'[REDACTED]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [REDACTED]').replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}/g,'[REDACTED]').replace(/("?(?:accessToken|access_token|apiKey|api_key|password|secret)"?\s*[:=]\s*["']?)[^"',;\s]+/gi,'$1[REDACTED]').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g,'');
   }
-  async request(path: '/v1/codex/state' | '/v1/codex/action', input?: CodexAction, signal?: AbortSignal): Promise<unknown> {
+  async request(path: '/v1/codex/state' | '/v1/codex/action', input?: ChatAction, signal?: AbortSignal): Promise<unknown> {
     if (!/^[a-f0-9]{64}$/.test(this.#token)) throw new CodexHttpError('Open the launcher’s human control link.',false);
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort',abort,{once:true}); if(signal?.aborted) controller.abort();
@@ -130,12 +171,13 @@ export class CodexChatApi {
     finally {clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
-  async action(input: CodexAction, signal?: AbortSignal): Promise<Omit<CodexActionOutcome,'state'> & {state: ChatState}> {
+  async action(input: ChatAction, signal?: AbortSignal): Promise<{record: ChatActionRecord; replayed: boolean; state: ChatState}> {
     const value=await this.request('/v1/codex/action',input,signal);
     if(!object(value)||typeof value.replayed!=='boolean')throw new CodexHttpError('Native acknowledgement was unreadable; inspect this request ID.',true);
     try {
     const r=readActionRecord(value.record);
     if(r.requestId!==input.requestId||r.action!==input.action||(input.action!=='connect'&&r.connectionId!==input.connectionId)||(input.action==='connect'&&r.state==='acknowledged'&&!uuid(r.connectionId)))throw new CodexHttpError('Native acknowledgement did not match the exact request.',true);
+    if ((input.action === 'grant-assets' || input.action === 'revoke-assets') && r.threadId !== input.threadId) throw new CodexHttpError('Native asset acknowledgement did not match the exact thread.', true);
     return {record:r,replayed:value.replayed,state:readCodexState(value.state)};
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
@@ -189,18 +231,26 @@ export function appendWorkflowText(doc: Document, value: string): boolean {
   input.dispatchEvent(new EventType('input',{bubbles:true}));input.focus({preventScroll:true});return true;
 }
 
-interface Uncertain { input:CodexAction; read:boolean }
+interface Uncertain { input:ChatAction; read:boolean }
 interface Confirmation { action:'grant-writes'|'approval'|'review-draft'; fields:Record<string,unknown>; fingerprint:string; connectionId:string; generation:number }
+export interface ProviderConnectionStatus {
+  connected: boolean; ready: boolean; fresh: boolean;
+  auth: 'subscription' | 'signed-out' | 'unsupported' | 'unknown';
+}
 export class CodexChat {
   private state:ChatState|null=null;
   private fresh=false; private stopped=false; private generation=0; private readVersion=0;
   private timer:ReturnType<typeof setTimeout>|undefined;
   private readController:AbortController|undefined;
-  private readonly pending=new Map<string,CodexAction>();
+  private readonly pending=new Map<string,ChatAction>();
   private readonly uncertain=new Map<string,Uncertain>();
   private readonly transcript=new CodexTranscript();
   private confirmation:Confirmation|null=null;
   private approvalSignature=''; private modelSignature=''; private messageSignature='';
+  private selectionSignature=''; private pickerSignature='';
+  private readonly pickerCleanup: (() => void)[] = [];
+  private readonly providerStateListeners = new Set<() => void>();
+  private providerStateSignature='';
   private workflowDraftOrigins: WorkflowDraftProvenance[] = [];
   private reviewedDraftTarget: string | null = null;
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
@@ -210,6 +260,24 @@ export class CodexChat {
   private value(id:string){return this.el<HTMLInputElement>(id).value;}
   private on(id:string,event:string,fn:(e:Event)=>void){this.el(id).addEventListener(event,fn);}
   private readonly workflowContextListeners = new Set<() => void>();
+  /** Presentation metadata only, from validated state; unknown is never signed-out. */
+  providerConnectionStatus(): ProviderConnectionStatus | null {
+    if (!this.state) return null;
+    const snapshot = this.snapshot();
+    return { connected: snapshot?.connected === true, ready: snapshot?.ready === true,
+      fresh: this.fresh && !this.stopped, auth: snapshot?.account?.auth ?? 'unknown' };
+  }
+  subscribeProviderStateChange(listener: () => void): () => void {
+    this.providerStateListeners.add(listener);
+    return () => { this.providerStateListeners.delete(listener); };
+  }
+  private publishProviderState() {
+    const signature = JSON.stringify(this.providerConnectionStatus());
+    if (signature === this.providerStateSignature) return;
+    this.providerStateSignature = signature;
+    // A presentation subscriber cannot interrupt the native action lifecycle.
+    for (const listener of this.providerStateListeners) { try { listener(); } catch {} }
+  }
   subscribeWorkflowContextChange(listener: () => void): () => void {
     this.workflowContextListeners.add(listener);
     return () => { this.workflowContextListeners.delete(listener); };
@@ -260,10 +328,229 @@ export class CodexChat {
     this.text('codex-confirm-warning', 'This only re-reviews draft text for this conversation. It does not submit a turn, move a workflow, grant writes or accept evidence.');
   }
   private snapshot(){return this.state?.snapshot;}
+  private assetScope(state = this.state) {
+    const s = state?.snapshot, t = s?.thread;
+    return JSON.stringify([state?.projectPath, s?.connectionId, s?.connected, s?.ready, t?.threadId, t?.sessionId, t?.configured]);
+  }
+  private assetEligible(action: 'grant-assets' | 'revoke-assets') {
+    const s = this.snapshot(), t = s?.thread, assets = this.state?.nativeAssets;
+    if (this.stopped || !this.fresh || this.state?.connecting || this.state?.closing ||
+        !s?.connected || !s.ready || !t?.configured || !assets?.available || !assets.sealed) return false;
+    if (action === 'revoke-assets') return ![...this.pending.values()].some(p => p.action === action);
+    return this.normal() && IDLE.includes(t.turnStatus) && !(assets.granted && assets.admissionOpen);
+  }
+  private bindAssetButton(id: string, action: 'grant-assets' | 'revoke-assets') {
+    const button = this.el<HTMLButtonElement>(id);
+    let gesture: { scope: string; generation: number } | null = null;
+    const capture = () => { gesture = { scope: this.assetScope(), generation: this.generation }; };
+    const modified = (input: MouseEvent | KeyboardEvent) => input.altKey || input.ctrlKey || input.metaKey || input.shiftKey;
+    this.on(id, 'pointerdown', event => {
+      const input = event as PointerEvent;
+      gesture = null;
+      if (event.isTrusted === true && !event.defaultPrevented && input.button === 0 && !modified(input) && !button.disabled && this.assetEligible(action)) capture();
+    });
+    this.on(id, 'keydown', event => {
+      const input = event as KeyboardEvent;
+      if (input.key !== 'Enter' && input.key !== ' ') return;
+      gesture = null;
+      if (event.isTrusted !== true || input.repeat || modified(input) || button.disabled || !this.assetEligible(action)) event.preventDefault();
+      else capture(); // Native button activation produces the trusted click; no separate key dispatch.
+    });
+    this.on(id, 'click', event => {
+      const input = event as MouseEvent, bound = gesture;
+      gesture = null;
+      if (event.isTrusted !== true || event.defaultPrevented || input.button !== 0 || modified(input) ||
+          button.disabled || !this.assetEligible(action) ||
+          bound && (bound.generation !== this.generation || bound.scope !== this.assetScope())) return;
+      event.preventDefault();
+      const thread = this.snapshot()!.thread!;
+      void this.dispatch(action, { threadId: thread.threadId });
+    });
+  }
+  private renderAssets() {
+    const assets = this.state?.nativeAssets;
+    let status = 'Asset jobs are unsupported by this native connection.';
+    if (!this.state) status = 'Asset permission has not been read.';
+    else if (!this.fresh || this.uncertain.size || this.state.displayLimited) status = 'Asset permission is uncertain. Refresh and review recorded native actions.';
+    else if (assets) {
+      if (!assets.available) status = 'Asset jobs are unavailable.';
+      else if (!assets.sealed) status = 'Asset capability is not sealed. Allowing jobs is disabled.';
+      else if (!this.snapshot()?.connected || !this.snapshot()?.ready || this.state.connecting || this.state.closing) status = 'No live native connection. Allowing jobs is disabled.';
+      else if (!this.snapshot()?.thread?.configured) status = 'Choose a configured native thread before allowing asset jobs.';
+      else status = (assets.granted ? 'Asset permission granted for this thread.' : 'Asset permission not granted for this thread.') +
+        (assets.admissionOpen ? ' Job admission is open.' : ' Job admission is closed.');
+    }
+    if ([...this.pending.values()].some(p => p.action === 'grant-assets' || p.action === 'revoke-assets')) status = 'Asset permission change awaiting native acknowledgement. ' + status;
+    this.text('codex-assets-status', status);
+    this.el<HTMLButtonElement>('codex-assets-grant').disabled = !this.assetEligible('grant-assets');
+    this.el<HTMLButtonElement>('codex-assets-revoke').disabled = !this.assetEligible('revoke-assets');
+  }
   private scope(){const s=this.snapshot();return JSON.stringify([s?.connectionId,s?.thread?.threadId,s?.thread?.turnId,this.state?.projectPath,s?.thread?.selection.model,s?.thread?.selection.effort]);}
   private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
+  private canSelectModel() {
+    const thread = this.snapshot()?.thread;
+    return this.normal() && (!thread || thread.configured && IDLE.includes(thread.turnStatus));
+  }
+
+  // The composer stages the existing settings controls; it owns no second selection.
+  private picker() {
+    const popover = this.doc.getElementById('codex-model-popover');
+    return popover?.getAttribute('role') === 'dialog' ? popover : null;
+  }
+  private pickerCanOpen() {
+    return !this.stopped && !this.pending.size && !this.uncertain.size && !this.state?.busy &&
+      !this.state?.connecting && !this.state?.closing && !this.state?.displayLimited &&
+      (!this.snapshot() || this.canSelectModel());
+  }
+  private closePicker(restore = false) {
+    const popover = this.picker(); if (!popover) return;
+    const wasOpen = !popover.hidden; popover.hidden = true;
+    this.el('codex-model-trigger').setAttribute('aria-expanded', 'false');
+    if (restore && wasOpen) {
+      const trigger = this.el<HTMLButtonElement>('codex-model-trigger');
+      (trigger.disabled ? this.el('codex-composer') : trigger).focus({ preventScroll: true });
+    }
+  }
+  private positionPicker() {
+    const popover = this.picker(), view = this.doc.defaultView;
+    if (!popover || popover.hidden || !view) return;
+    const viewport = view.visualViewport, margin = 12, gap = 8;
+    const leftEdge = (viewport?.offsetLeft ?? 0) + margin, topEdge = (viewport?.offsetTop ?? 0) + margin;
+    const width = Math.max(0, (viewport?.width ?? view.innerWidth) - margin * 2);
+    const bottomEdge = topEdge + Math.max(0, (viewport?.height ?? view.innerHeight) - margin * 2);
+    const rect = this.el('codex-model-trigger').getBoundingClientRect(), panelWidth = Math.min(360, width);
+    const above = Math.max(0, rect.top - topEdge - gap), below = Math.max(0, bottomEdge - rect.bottom - gap);
+    const useAbove = above >= below;
+    popover.style.width = panelWidth + 'px';
+    popover.style.maxHeight = Math.min(480, useAbove ? above : below) + 'px';
+    popover.style.left = Math.max(leftEdge, Math.min(rect.left, leftEdge + width - panelWidth)) + 'px';
+    const height = popover.getBoundingClientRect().height;
+    popover.style.top = Math.max(topEdge, Math.min(useAbove ? rect.top - gap - height : rect.bottom + gap, bottomEdge - height)) + 'px';
+  }
+  private bindPicker() {
+    if (!this.picker() || this.pickerCleanup.length) return;
+    const listen = (target: EventTarget, type: string, fn: (event: Event) => void, capture = false) => {
+      target.addEventListener(type, fn, capture);
+      this.pickerCleanup.push(() => target.removeEventListener(type, fn, capture));
+    };
+    listen(this.el('codex-model-trigger'), 'click', () => {
+      if (!this.pickerCanOpen()) return;
+      const popover = this.picker()!;
+      if (!popover.hidden) { this.closePicker(true); return; }
+      popover.hidden = false; this.el('codex-model-trigger').setAttribute('aria-expanded', 'true');
+      this.el<HTMLInputElement>('codex-model-search').value = ''; this.pickerSignature = '';
+      this.renderPicker(); this.el('codex-model-search').focus({ preventScroll: true }); this.positionPicker();
+    });
+    listen(this.el('codex-model-search'), 'input', () => this.renderPicker());
+    listen(this.el('codex-picker-apply'), 'click', () => {
+      const select = this.el<HTMLButtonElement>('codex-select');
+      if (!this.canSelectModel() || select.disabled || this.picker()!.hidden) return;
+      this.closePicker(true); select.click(); // The real guarded select action remains authoritative.
+    });
+    for (const [id, provider] of [['codex-picker-connect', 'codex'], ['codex-picker-claude', 'claude']] as const) {
+      listen(this.el(id), 'click', () => {
+        if (this.stopped || this.picker()!.hidden) return;
+        this.closePicker();
+        const EventType = this.doc.defaultView?.CustomEvent ?? CustomEvent;
+        this.doc.dispatchEvent(new EventType('workspace:providersetup', { detail: { provider } }));
+      });
+    }
+    listen(this.picker()!, 'keydown', event => {
+      const key = event as KeyboardEvent;
+      if (key.isComposing || key.altKey || key.ctrlKey || key.metaKey) return;
+      if (key.key === 'Escape') { event.preventDefault(); this.closePicker(true); return; }
+      const target = event.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts');
+      const inModels = models.contains(target), inEfforts = efforts.contains(target);
+      if (target === this.el('codex-model-search') && ['ArrowDown', 'ArrowUp'].includes(key.key)) {
+        const rows = Array.from(models.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+        const row = key.key === 'ArrowDown' ? rows[0] : rows.at(-1);
+        if (row) { event.preventDefault(); row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' }); }
+      } else if ((inModels || inEfforts) && ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key.key)) {
+        const rows = Array.from((inModels ? models : efforts).querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+        const index = rows.indexOf(target as HTMLButtonElement), step = ['ArrowUp', 'ArrowLeft'].includes(key.key) ? -1 : 1;
+        const next = key.key === 'Home' ? 0 : key.key === 'End' ? rows.length - 1 : (index + step + rows.length) % rows.length;
+        const row = rows[next]; if (!row) return;
+        event.preventDefault(); row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' });
+        if (inEfforts) row.click();
+      } else if (target === this.el('codex-model-search') && key.key === 'Enter') {
+        event.preventDefault(); // Searching must never submit the surrounding conversation form.
+        this.el('codex-model-options').querySelector<HTMLButtonElement>('button:not(:disabled)')?.click();
+      }
+    });
+    const outside = (event: Event) => {
+      const popover = this.picker()!; if (popover.hidden) return;
+      const target = event.target as Node | null;
+      if (target && !popover.contains(target) && !this.el('codex-model-trigger').contains(target)) this.closePicker();
+    };
+    listen(this.doc, 'pointerdown', outside); listen(this.doc, 'focusin', outside);
+    const reposition = () => this.positionPicker();
+    listen(this.doc, 'scroll', reposition, true);
+    if (this.doc.defaultView) {
+      listen(this.doc.defaultView, 'resize', reposition);
+      if (this.doc.defaultView.visualViewport) {
+        listen(this.doc.defaultView.visualViewport, 'resize', reposition);
+        listen(this.doc.defaultView.visualViewport, 'scroll', reposition);
+      }
+    }
+  }
+  private renderPicker() {
+    const popover = this.picker(); if (!popover) return;
+    const snapshot = this.snapshot(), selection = snapshot?.thread?.configured ? snapshot.thread.selection : snapshot?.selection;
+    const reported = snapshot?.models.find(model => model.model === selection?.model);
+    this.text('codex-model-label', reported?.displayName ?? 'Choose model');
+    this.text('codex-effort-label', selection?.effort ?? ''); this.el('codex-effort-label').hidden = !selection;
+    const trigger = this.el<HTMLButtonElement>('codex-model-trigger'); trigger.disabled = !this.pickerCanOpen();
+    trigger.setAttribute('aria-busy', String([...this.pending.values()].some(input => input.action === 'select')));
+    trigger.setAttribute('aria-label', this.api.safe(selection ? 'Codex reported model: ' + selection.model + ', effort: ' + selection.effort : 'Choose Codex model and effort'));
+    this.text('codex-model-picker-status', this.uncertain.size ? 'Native acknowledgement is uncertain. Review recorded actions.' :
+      this.pending.size ? 'Awaiting native acknowledgement.' : !snapshot ? 'Connect Codex to read its reported models.' :
+      !this.fresh ? 'Native state is unavailable. Refresh before changing models.' : !this.canSelectModel() ? 'Model changes are unavailable in the current native state.' :
+      selection ? 'Reported selection: ' + selection.model + ' · ' + selection.effort : 'No model and effort selection acknowledged.');
+    if (trigger.disabled && !popover.hidden) this.closePicker(popover.contains(this.doc.activeElement));
+    if (popover.hidden) return;
+    const query = this.value('codex-model-search').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const model = this.value('codex-model'), effort = this.value('codex-effort'), enabled = this.canSelectModel();
+    const signature = JSON.stringify([snapshot?.models ?? [], query, model, effort, enabled]);
+    if (signature !== this.pickerSignature) {
+      this.pickerSignature = signature;
+      const focused = this.doc.activeElement as HTMLElement | null;
+      const focusModel = focused?.dataset.pickerModel, focusEffort = focused?.dataset.pickerEffort;
+      const host = this.el('codex-model-options'); host.replaceChildren();
+      const models = (snapshot?.models ?? []).filter(item => query.every(word => (item.displayName + ' ' + item.model).toLocaleLowerCase().includes(word)));
+      for (const item of models) {
+        const row = this.make('button', undefined, 'picker-model-option'); row.type = 'button'; row.tabIndex = -1;
+        row.dataset.pickerModel = item.model; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item.model === model)); row.disabled = !enabled;
+        row.append(this.make('span', item.displayName), this.make('small', item.model));
+        row.addEventListener('click', () => {
+          if (!this.canSelectModel() || this.picker()!.hidden || !this.snapshot()?.models.some(current => current.model === item.model)) return;
+          if (this.value('codex-model') !== item.model) { this.el<HTMLSelectElement>('codex-model').value = item.model; this.populateEfforts(); }
+          this.renderControls();
+          this.el('codex-picker-efforts').querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+        }); host.append(row);
+      }
+      this.el('codex-model-empty').hidden = models.length > 0;
+      this.text('codex-model-empty', snapshot?.models.length ? 'No reported models match your search.' : 'No Codex models have been reported. Review connection setup.');
+      const effortHost = this.el('codex-picker-efforts'); effortHost.replaceChildren();
+      const efforts = snapshot?.models.find(item => item.model === model)?.efforts ?? [];
+      for (const value of efforts) {
+        const button = this.make('button', value, 'picker-effort-option'); button.type = 'button'; button.dataset.pickerEffort = value;
+        button.setAttribute('role', 'radio'); button.setAttribute('aria-checked', String(value === effort));
+        button.tabIndex = value === (effort || efforts[0]) ? 0 : -1; button.disabled = !enabled;
+        button.addEventListener('click', () => {
+          if (!this.canSelectModel() || this.picker()!.hidden || !this.snapshot()?.models.find(item => item.model === this.value('codex-model'))?.efforts.includes(value)) return;
+          this.el<HTMLSelectElement>('codex-effort').value = value; this.renderControls();
+        }); effortHost.append(button);
+      }
+      this.text('codex-picker-effort-hint', efforts.length ? 'Only efforts reported for this model are shown.' : 'Choose a reported model, then an effort.');
+      if (focusModel) Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(row => row.dataset.pickerModel === focusModel)?.focus({ preventScroll: true });
+      if (focusEffort) Array.from(effortHost.querySelectorAll<HTMLButtonElement>('button')).find(row => row.dataset.pickerEffort === focusEffort)?.focus({ preventScroll: true });
+    }
+    this.el<HTMLButtonElement>('codex-picker-apply').disabled = this.el<HTMLButtonElement>('codex-select').disabled;
+    this.positionPicker();
+  }
 
   async start() {
+    this.bindPicker();
     this.on('codex-connect','click',()=>void this.dispatch('connect'));
     this.on('codex-refresh','click',()=>void this.refresh());
     this.on('codex-disconnect','click',()=>void this.dispatch('disconnect'));
@@ -273,6 +560,8 @@ export class CodexChat {
     this.on('codex-thread-start','click',()=>void this.dispatch('thread-start'));
     this.on('codex-resume-id','input',()=>this.renderControls());
     this.on('codex-thread-resume','click',()=>void this.dispatch('thread-resume',{threadId:this.value('codex-resume-id')}));
+    this.bindAssetButton('codex-assets-grant', 'grant-assets');
+    this.bindAssetButton('codex-assets-revoke', 'revoke-assets');
     this.on('codex-grant','click',()=>this.openGrant());
     this.on('codex-revoke','click',()=>{const t=this.snapshot()?.thread;if(t)void this.dispatch('revoke-writes',{threadId:t.threadId});});
     this.on('codex-interrupt','click',()=>{const t=this.snapshot()?.thread;if(t?.turnId)void this.dispatch('turn-interrupt',{threadId:t.threadId,turnId:t.turnId});});
@@ -291,9 +580,10 @@ export class CodexChat {
   stop() {
     this.stopped=true;this.generation++;this.readVersion++;this.readController?.abort();if(this.timer)clearTimeout(this.timer);
     for(const input of this.pending.values())this.uncertain.set(input.requestId,{input,read:false});
-    this.closeConfirmation();this.fresh=false;this.transcript.reset();this.messageSignature='';this.el('codex-messages').replaceChildren();this.renderControls();
+    this.closePicker();for(const cleanup of this.pickerCleanup.splice(0))cleanup();
+    this.closeConfirmation();this.fresh=false;this.transcript.reset();this.messageSignature='';this.el('codex-messages').replaceChildren();this.renderControls();this.publishProviderState();
   }
-  resume(){this.stopped=false;void this.refresh().finally(()=>this.schedule());}
+  resume(){this.stopped=false;this.bindPicker();void this.refresh().finally(()=>this.schedule());}
   private schedule() {
     if(this.stopped)return;if(this.timer)clearTimeout(this.timer);
     this.timer=setTimeout(()=>{const active=!this.doc.hidden&&(this.el<HTMLDetailsElement>('codex-panel').open||this.pending.size>0||this.uncertain.size>0||!!this.confirmation);if(active)void this.refresh().finally(()=>this.schedule());else this.schedule();},1500);
@@ -309,11 +599,12 @@ export class CodexChat {
     } catch(error) {
       if(controller.signal.aborted||this.stopped||epoch!==this.generation||version!==this.readVersion)return;
       this.fresh=false;this.text('codex-notice',error instanceof Error?error.message:'Native state unavailable.');
-    } finally {if(version===this.readVersion&&!this.stopped)this.render();}
+    } finally {if(version===this.readVersion&&!this.stopped){this.render();this.publishProviderState();}}
   }
   private applyState(state:ChatState) {
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
-    if(before!==after){this.generation++;this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.closeConfirmation();}
+    if(before!==after){this.generation++;this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.selectionSignature='';this.closeConfirmation();this.closePicker(true);}
+    else if(this.assetScope()!==this.assetScope(state)) { this.generation++; this.closePicker(true); } // Invalidate gestures/replies; retain the disabled stale review for explicit dismissal.
     if(state.snapshot)this.transcript.consume(state.snapshot);
     const contextBefore = JSON.stringify([this.state?.projectPath ?? null, this.workflowConversation(), this.workflowModelSelection()]);
     this.state = state;
@@ -322,8 +613,9 @@ export class CodexChat {
     }
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
     for(const r of state.actions) if(['pending','unknown'].includes(r.state)&&!this.pending.has(r.requestId)&&!this.uncertain.has(r.requestId)&&(r.connectionId===state.snapshot?.connectionId||r.action==='connect'&&state.connecting)) {
-      this.uncertain.set(r.requestId,{input:{requestId:r.requestId,connectionId:r.action==='connect'?null:r.connectionId,action:r.action} as CodexAction,read:true});
+      this.uncertain.set(r.requestId,{input:{requestId:r.requestId,connectionId:r.action==='connect'?null:r.connectionId,action:r.action} as ChatAction,read:true});
     }
+    this.publishProviderState();
   }
   private canAcknowledge() {
     if(!this.fresh||!this.uncertain.size)return false;
@@ -336,23 +628,25 @@ export class CodexChat {
   }
   private async dispatch(action:string,fields:Record<string,unknown>={}) {
     if(this.stopped)return;
-    const safety=action==='disconnect'||action==='revoke-writes'||action==='turn-interrupt'||action==='approval'&&fields.decision!=='accept';
+    if(action==='select'&&!this.canSelectModel())return;
+    if ((action === 'grant-assets' || action === 'revoke-assets') && !this.assetEligible(action)) return;
+    const safety=action==='revoke-assets'||action==='disconnect'||action==='revoke-writes'||action==='turn-interrupt'||action==='approval'&&fields.decision!=='accept';
     if(this.state?.displayLimited&&!safety&&action!=='connect')return;
     if(!safety&&action!=='connect'&&!this.normal()&&!(action==='approval'&&!this.uncertain.size&&this.fresh))return;
     if(action==='connect'&&(!this.fresh||this.snapshot()||this.uncertain.size||this.pending.size||this.state?.connecting||this.state?.closing))return;
     if(action==='turn-start'&&this.draftNeedsReview()){this.text('codex-notice','This workflow draft belongs to another conversation or model. Review it before submitting; your text has been preserved.');this.renderControls();return;}
-    let input:CodexAction;try{input=prepareCodexAction(this.state,action,fields);}catch(error){this.text('codex-notice',String(error));return;}
+    let input:ChatAction;try{input=prepareCodexAction(this.state,action,fields);}catch(error){this.text('codex-notice',String(error));return;}
     if([...this.pending.values()].some(p=>p.action===input.action&&(input.action!=='approval'||'handle' in p&&p.handle===fields.handle)))return;
     if(safety){this.generation++;this.readVersion++;this.readController?.abort();this.closeConfirmation();}
     if(action==='disconnect')this.fresh=false;
-    const epoch=this.generation;
+    const epoch=this.generation, assetScope=this.assetScope();
     this.pending.set(input.requestId,input);this.text('codex-notice','Awaiting native acknowledgement · '+input.requestId);
     if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.el<HTMLTextAreaElement>('codex-composer').value='';this.clearDraftOrigins();}
     this.render();
     try {
       const outcome=await this.api.action(input);
       const current=this.snapshot()?.connectionId;
-      const fenced=this.stopped||epoch!==this.generation||(input.action!=='connect'&&input.action!=='disconnect'&&current!==input.connectionId)||(input.action==='disconnect'&&!!current&&current!==input.connectionId)||(input.action==='connect'&&!!current&&current!==outcome.record.connectionId);
+      const fenced=this.stopped||epoch!==this.generation||((input.action==='grant-assets'||input.action==='revoke-assets')&&assetScope!==this.assetScope())||(input.action!=='connect'&&input.action!=='disconnect'&&current!==input.connectionId)||(input.action==='disconnect'&&!!current&&current!==input.connectionId)||(input.action==='connect'&&!!current&&current!==outcome.record.connectionId);
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;this.text('codex-notice',input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Turn completion is reported separately.');}
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;
@@ -361,7 +655,7 @@ export class CodexChat {
       if(!this.stopped&&epoch===this.generation)this.text('codex-notice',(error instanceof Error?error.message:'Unknown native HTTP acknowledgement.')+' Request ID retained: '+input.requestId+'. No automatic retry.');
     } finally {
       this.pending.delete(input.requestId);
-      if(!this.stopped){this.render();await this.refresh();}
+      if(!this.stopped){this.render();this.publishProviderState();await this.refresh();}
     }
   }
   private populateEfforts() {
@@ -383,8 +677,10 @@ export class CodexChat {
     this.text('codex-profile',this.state?.nativeTools.configured?'Native tool profile requested · verified:false. Studio grants remain separate; no Studio connection was established by this panel.':'Native tool profile not requested · verified:false. Studio grants remain separate.');
     if(this.state?.displayLimited)this.text('codex-profile','Display limited: public events and approvals were omitted, not resolved. New work is blocked. Review the native client or use interrupt, revoke or disconnect. '+this.el('codex-profile').textContent);
     if(s?.mcpIsolation)this.text('codex-profile','Native MCP scope: '+s.mcpIsolation+'. Read-only applies to native file/command execution; Arcane MCP operations still use their separate grants. '+this.el('codex-profile').textContent);
-    const signature=JSON.stringify(s?.models??[]);
-    if(signature!==this.modelSignature){this.modelSignature=signature;const select=this.el<HTMLSelectElement>('codex-model');select.replaceChildren();const p=this.make('option','Choose reported model');p.value='';select.append(p);for(const m of s?.models??[]){const o=this.make('option',m.displayName+' · '+m.model);o.value=m.model;select.append(o);}select.value=s?.selection?.model??'';this.populateEfforts();if(s?.selection)this.el<HTMLSelectElement>('codex-effort').value=s.selection.effort;}
+    const signature=JSON.stringify(s?.models??[]),selection=t?.configured?t.selection:s?.selection,selectionSignature=JSON.stringify(selection??null);
+    const catalogueChanged=signature!==this.modelSignature;
+    if(catalogueChanged){this.modelSignature=signature;const select=this.el<HTMLSelectElement>('codex-model');select.replaceChildren();const p=this.make('option','Choose reported model');p.value='';select.append(p);for(const m of s?.models??[]){const o=this.make('option',m.displayName+' · '+m.model);o.value=m.model;select.append(o);}}
+    if(catalogueChanged||selectionSignature!==this.selectionSignature){this.selectionSignature=selectionSignature;this.el<HTMLSelectElement>('codex-model').value=selection?.model??'';this.populateEfforts();if(selection)this.el<HTMLSelectElement>('codex-effort').value=selection.effort;}
     this.text('codex-selection',s?.selection?'Reported selection: '+s.selection.model+' · '+s.selection.effort:'No model/effort selection acknowledged.');
     const messageSignature=JSON.stringify(this.transcript.messages);
     if(messageSignature!==this.messageSignature){
@@ -415,13 +711,15 @@ export class CodexChat {
     card.append(row);host.append(card);
   }
   private renderControls() {
+    this.renderAssets();
     const s=this.snapshot(),t=s?.thread,normal=this.normal(),connected=!!s, pair=s?.selection?.model===this.value('codex-model')&&s?.selection?.effort===this.value('codex-effort');
     const disable=(id:string,value:boolean)=>{this.el<HTMLButtonElement>(id).disabled=value;};
     const pending=(action:string)=>[...this.pending.values()].some(p=>p.action===action);
     disable('codex-connect',!this.fresh||this.stopped||connected||!!this.pending.size||!!this.uncertain.size||!!this.state?.connecting||!!this.state?.closing);
-    disable('codex-disconnect',this.stopped||!connected||pending('disconnect'));
-    disable('codex-select',!normal||(!!t&&(!t.configured||!IDLE.includes(t.turnStatus)))||pair||!this.value('codex-model')||!this.value('codex-effort'));
-    disable('codex-model',!normal||(!!t&&(!t.configured||!IDLE.includes(t.turnStatus))));disable('codex-effort',!normal||(!!t&&(!t.configured||!IDLE.includes(t.turnStatus))));
+    disable('codex-disconnect',this.stopped||!s||pending('disconnect'));
+    const reportedPair=s?.models.some(model=>model.model===this.value('codex-model')&&model.efforts.includes(this.value('codex-effort')));
+    disable('codex-select',!this.canSelectModel()||pair||!reportedPair);
+    disable('codex-model',!this.canSelectModel());disable('codex-effort',!this.canSelectModel());
     const subscription=s?.account?.auth==='subscription'&&s.account.requiresOpenaiAuth;
     disable('codex-thread-start',!normal||!!t||!pair||!subscription);disable('codex-thread-resume',!normal||!!t||!pair||!subscription||!text(this.value('codex-resume-id')));
     disable('codex-grant',!normal||!t?.configured||t.writeGranted||!IDLE.includes(t.turnStatus));
@@ -435,6 +733,7 @@ export class CodexChat {
     disable('codex-acknowledge',!this.canAcknowledge());
     for(const card of Array.from(this.el('codex-approvals').children)){const a=s?.approvals.find(a=>a.handle===(card as HTMLElement).dataset.handle);for(const b of Array.from(card.querySelectorAll<HTMLButtonElement>('button[data-decision]')))b.disabled=this.stopped||!a||a.connectionId!==s?.connectionId||a.threadId!==t?.threadId||a.turnId!==t?.turnId||a.expiresAt<=Date.now()||[...this.pending.values()].some(p=>p.action==='approval'&&p.handle===a.handle)||(b.dataset.decision==='accept'&&(!this.fresh||!!this.uncertain.size||!approvalEligible(this.state,a)));}
     disable('codex-confirm-submit',!this.el<HTMLInputElement>('codex-confirm-check').checked||!this.confirmationValid());
+    this.renderPicker();
   }
   private openGrant() {
     const t=this.snapshot()?.thread;if(!t||!this.normal()||!IDLE.includes(t.turnStatus))return;

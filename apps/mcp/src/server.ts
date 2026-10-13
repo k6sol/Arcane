@@ -6,7 +6,7 @@ import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
-import { assetInput, assetJobId, assetHistoryInput } from './asset-schemas.js';
+import { assetInput, assetJobId, assetHistoryInput, nativeAssetHistoryInput, nativeAssetJobId } from './asset-schemas.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -14,6 +14,9 @@ const skillId = z.string().regex(/^arcane-[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64);
 
 export function createMcpServer(options: { client: DaemonClient; projectRoot: string }): McpServer {
   const { client } = options;
+  const assetScope = client.assetAudience === 'native-session'
+    ? ' Native-session asset calls stay in the bearer’s exact project and Codex conversation scope, enforced by the daemon. Start/cancel require explicit host asset permission and an open admission window. Scoped reads require a sealed live bearer. The client routing mode grants no authority and establishes no originating-turn provenance.' : '';
+  const scopedAssetJobId = client.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId;
   const skills = new SkillRegistry(options.projectRoot);
   const server = new McpServer({ name: 'arcane-studio', version: '0.1.0' }, {
     maxToolInputElements: 100_000,
@@ -97,18 +100,18 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('work_submit','Write: submit 1–20 local project evidence paths and notes under your task lease. The daemon verifies containment and hashes files. Task enters needs_review; human panel owns acceptance. No review-approval tool is exposed. Inspect work_runs after an ambiguous wait; never repeat submission automatically.',
     z.strictObject({taskId:id,leaseToken,evidence:z.array(evidenceInput).min(1).max(20),timeoutMs}),{...WRITE,destructiveHint:false},
     ({timeoutMs,...input},signal)=>client.workSubmit(input,{timeoutMs,signal}));
-  register('assets_probe', 'Read: probe installed local Blender/Python using the daemon’s fixed bundled runtime checks. Returns observed capabilities or unavailable; no arbitrary scripts, executable paths or uploads. A timeout may leave the probe running.',
+  register('assets_probe', 'Read: probe installed local Blender/Python using the daemon’s fixed bundled runtime checks. Returns observed capabilities or unavailable; no arbitrary scripts, executable paths or uploads. A timeout may leave the probe running.' + assetScope,
     z.strictObject({ timeoutMs }), READ, (input, signal) => client.assetsProbe({ ...input, signal }));
-  register('assets_jobs', 'Read: fetch one bounded local asset history page, preserving full recipes and observed state. limit is 1–64 (daemon default 32); use nextCursor as after for the next explicit page. No automatic pagination, start or replay. Use after an ambiguous acknowledgement.',
-    assetHistoryInput.extend({ timeoutMs }), READ, (input, signal) => client.assetsJobs({ ...input, signal }));
-  register('assets_start', 'Write: user-authorized local asset generation using hero-prop, environment-kit or a bounded custom-assembly JSON recipe (96 parts, 8 materials, 64 sockets; box/cylinder/cone/sphere/closed mesh). Shared normalization/topology/budget preflight runs before HTTP. Custom size/color come from the recipe; fixed-template defaults are unchanged. The daemon chooses contained output and its installed runtime. No scripts, paths, imports, uploads or publication accepted. Returns a job acknowledgement, not completed production evidence. On timeout inspect assets_jobs; never auto-retry.',
+  register('assets_jobs', 'Read: fetch one bounded local asset history page, preserving full recipes and observed state. limit is 1–64 (daemon default 32); use nextCursor as after for the next explicit page. No automatic pagination, start or replay. Use after an ambiguous acknowledgement.' + assetScope,
+    (client.assetAudience === 'native-session' ? nativeAssetHistoryInput : assetHistoryInput).extend({ timeoutMs }), READ, (input, signal) => client.assetsJobs({ ...input, signal }));
+  register('assets_start', 'Write: user-authorized local asset generation using hero-prop, environment-kit or a bounded custom-assembly JSON recipe (96 parts, 8 materials, 64 sockets; box/cylinder/cone/sphere/closed mesh). Shared normalization/topology/budget preflight runs before HTTP. Custom size/color come from the recipe; fixed-template defaults are unchanged. The daemon chooses contained output and its installed runtime. No scripts, paths, imports, uploads or publication accepted. Returns a job acknowledgement, not completed production evidence. On timeout inspect assets_jobs; never auto-retry.' + assetScope,
     assetInput.extend({ timeoutMs }), { ...WRITE, destructiveHint: false },
     ({ timeoutMs, ...input }, signal) => client.assetsStart(input, { timeoutMs, signal }));
-  register('assets_cancel', 'Write: user-authorized cancellation of this exact local jobId. Partial artifacts remain for review. A lost acknowledgement is ambiguous; inspect assets_jobs and do not repeat automatically.',
-    z.strictObject({ jobId: assetJobId, timeoutMs }), WRITE,
+  register('assets_cancel', 'Write: user-authorized cancellation of this exact local jobId. Partial artifacts remain for review. A lost acknowledgement is ambiguous; inspect assets_jobs and do not repeat automatically.' + assetScope,
+    z.strictObject({ jobId: scopedAssetJobId, timeoutMs }), WRITE,
     ({ jobId, timeoutMs }, signal) => client.assetsCancel(jobId, { timeoutMs, signal }));
-  register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including assembly/source-request hashes, mesh geometry hashes, bounds, floor origins and measured PBR values, socket/export poses, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.',
-    z.strictObject({ jobId: assetJobId, timeoutMs }), READ,
+  register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including assembly/source-request hashes, mesh geometry hashes, bounds, floor origins and measured PBR values, socket/export poses, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.' + assetScope,
+    z.strictObject({ jobId: scopedAssetJobId, timeoutMs }), READ,
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
   return server;
 }

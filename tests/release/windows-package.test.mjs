@@ -84,7 +84,7 @@ async function fixture(t) {
   await write('toolchains/electron/dist/electron.exe', pe());
   await write('toolchains/electron/dist/version', '44.7.0');
   await write('toolchains/electron/dist/resources/default_app.asar', 'Never package the default application.');
-  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
+  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
   await write('apps/desktop/electron/icon.png', png);
   await write('apps/desktop/electron/node-LICENSE.txt', fixtureLicense);
   const nodeExecutable = join(root, 'toolchains/node/node.exe');

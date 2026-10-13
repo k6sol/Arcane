@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path, { win32 } from 'node:path';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 
 const read = name => fs.readFileSync(new URL('../../' + name, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
@@ -159,12 +160,130 @@ test('launch reads settings and validates compiler and evidence; only the three 
   assert.match(mainSource, /codeVerification\.daemonConfiguration[\s\S]*Object\.assign\(env, verification\.environment\)[\s\S]*spawn\(nodeExecutable/);
 });
 
-test('status reports persisted configuration even when the configured compiler is missing; startup fails closed', async () => {
+test('missing compiler is isolated with explicit host-only metadata; persisted configuration remains readable', async () => {
   const f = fixture({ configured: true });
   f.disk.nodes.delete(f.disk.key(f.compilerPath));
   assert.equal((await f.api.status()).configured, true);
-  throwsGeneric(() => f.api.daemonConfiguration(f.session()));
+  assert.deepEqual(json(f.api.daemonConfiguration(f.session())), { environment: {}, settingsHash: null, failure: 'compiler-unavailable' });
   assert.equal(f.disk.writes.length, 0);
+});
+
+test('cold-start compiler failures emit no compiler env, retain source config and start no process or tools', async () => {
+  for (const invalidate of [
+    f => { f.disk.nodes.delete(f.disk.key(f.compilerPath)); },
+    f => { f.disk.node(f.compilerPath).bytes = Buffer.alloc(1); },
+    f => { f.disk.node(f.compilerPath).bytes[0] = 0; },
+    f => { f.disk.node(f.compilerPath).nlink = 2n; },
+    f => { f.disk.node('C:\\Tools').kind = 'link'; },
+  ]) {
+    const f = fixture({ configured: true }), original = Buffer.from(f.disk.node(f.configPath).bytes);
+    invalidate(f);
+    const configured = f.api.daemonConfiguration(f.session());
+    assert.deepEqual(json(configured), { environment: {}, settingsHash: null, failure: 'compiler-unavailable' });
+    const environment = f.policy.daemonEnvironment({ ARCANE_LUAU_COMPILER_PATH: 'C:\\foreign.exe',
+      ARCANE_LUAU_COMPILER_SHA256: 'b'.repeat(64), ARCANE_LUAU_EVIDENCE_DIRECTORY: 'foreign' },
+    { productRoot: 'C:\\App', stateRoot: f.stateRoot, projectPath: f.projectPath });
+    Object.assign(environment, configured.environment);
+    for (const key of f.host.ENV_KEYS) assert.equal(Object.hasOwn(environment, key), false);
+    f.session().activeSettingsHash = configured.settingsHash;
+    assert.deepEqual(json(await f.api.status()), expectedStatus(f, { configured: true, pendingRestart: true, evidenceDirectory: 'evidence' }));
+    assert.deepEqual(f.disk.node(f.configPath).bytes, original);
+    assert.equal(f.disk.writes.length, 0); assert.equal(f.opens.length, 0); assert.equal(f.confirmations.length, 0);
+    assert.equal(f.disk.descriptors.size, 0);
+  }
+});
+
+test('compiler isolation does not swallow project, state, evidence or persisted-settings security failures', () => {
+  for (const invalidate of [
+    f => { f.disk.node(f.projectPath).kind = 'link'; },
+    f => { f.disk.node(f.stateRoot).physical = 'C:\\foreign'; },
+    f => { f.disk.node(f.configPath).nlink = 2n; },
+    f => { f.disk.node(f.configPath).bytes = Buffer.from('{corrupt'); },
+    f => { f.disk.nodes.delete(f.disk.key(f.projectPath + '\\evidence')); },
+    f => { const lstat = f.disk.filesystem.lstatSync;
+      f.disk.filesystem.lstatSync = name => {
+        if (f.disk.key(name) === f.disk.key(f.compilerPath)) {
+          f.disk.node(f.configPath).bytes = Buffer.from('{changed during compiler check');
+          throw new Error('C:\\secret\\compiler error');
+        }
+        return lstat(name);
+      };
+    },
+  ]) {
+    const f = fixture({ configured: true }); invalidate(f);
+    throwsGeneric(() => f.api.daemonConfiguration(f.session()));
+    assert.equal(f.disk.writes.length, 0); assert.equal(f.disk.descriptors.size, 0);
+  }
+});
+
+test('an unavailable compiler can be corrected through native dialog doubles without restarting active work', async () => {
+  const f = fixture({ configured: true }); f.disk.nodes.delete(f.disk.key(f.compilerPath));
+  const unavailable = f.api.daemonConfiguration(f.session()); f.session().activeSettingsHash = unavailable.settingsHash;
+  assert.equal((await f.api.status()).pendingRestart, true);
+  const session = f.session();
+  f.disk.put(f.compilerPath, { kind: 'file', bytes: Buffer.from(syntheticCompiler) });
+  assert.deepEqual(json(await f.api.configure()), expectedStatus(f, { configured: true, pendingRestart: true, evidenceDirectory: 'evidence' }));
+  assert.equal(f.session(), session); assert.equal(f.session().activeSettingsHash, null);
+  assert.equal(f.opens.length, 2); assert.equal(f.confirmations.length, 1); assert.equal(f.disk.descriptors.size, 0);
+  // Only a subsequent startup consumes the corrected compiler; configuration alone leaves the active session unchanged.
+  const nextStart = f.api.daemonConfiguration(f.session()); assert.equal(nextStart.failure, null);
+  assert.equal(nextStart.environment.ARCANE_LUAU_COMPILER_PATH, f.compilerPath);
+});
+
+test('main cold start passes an isolated unavailable compiler to the core daemon double with a generic warning', async () => {
+  const f = fixture({ configured: true }), original = Buffer.from(f.disk.node(f.configPath).bytes);
+  f.disk.nodes.delete(f.disk.key(f.compilerPath));
+  const begin = mainSource.indexOf('async function startDaemon('), end = mainSource.indexOf('function makeWindow()', begin);
+  assert.ok(begin >= 0 && end > begin);
+  const warnings = [], requested = [], child = new EventEmitter();
+  const warning = /const CODE_VERIFICATION_WARNING = ('[^']*');/.exec(mainSource)?.[1];
+  assert.ok(warning);
+  const context = { projectSession: null, child: null, origin: '', token: '', closing: false, switching: false,
+    projectPath: '', userRoot: 'C:\\Owned', productRoot: 'C:\\App', nodeExecutable: 'C:\\App\\node.exe',
+    process: { platform: 'win32', env: { ARCANE_LUAU_COMPILER_PATH: 'C:\\foreign.exe' } },
+    performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, join: win32.join, createHash: crypto.createHash,
+    codeVerification: f.api, URL, setTimeout: () => 1, clearTimeout() {}, console: { warn: text => warnings.push(text) },
+    policy: { ...f.policy, directPath: async value => value },
+    ownedDirectory: async value => { assert.equal(value, f.stateRoot); return value; },
+    readFile: async () => { throw Object.assign(new Error('Fixture has no saved listener.'), { code: 'ENOENT' }); },
+    writeFile: async (name, bytes) => { assert.equal(name, f.stateRoot + '\\listener-port.json'); assert.equal(JSON.parse(bytes).port, 45871); },
+    spawn: (executable, args, options) => {
+      requested.push({ executable, args, options });
+      queueMicrotask(() => child.emit('message', { type: 'arcane-ready', protocolVersion: 1, origin, token: 'a'.repeat(64) }));
+      return child;
+    }, failStartup() { assert.fail('Core startup must survive only this compiler-specific failure.'); },
+  };
+  vm.createContext(context);
+  vm.runInContext('const CODE_VERIFICATION_WARNING = ' + warning + ';\n' + mainSource.slice(begin, end) + '\nglobalThis.coldStart = startDaemon;', context);
+  await context.coldStart(f.projectPath);
+  assert.equal(requested.length, 1, 'Only an in-memory core daemon spawn request is observed; no process executes.');
+  for (const key of f.host.ENV_KEYS) assert.equal(Object.hasOwn(requested[0].options.env, key), false);
+  assert.equal(context.projectSession.activeSettingsHash, null);
+  assert.equal(context.projectSession.verificationUnavailable, true); assert.equal(context.projectSession.verificationEnvironmentAbsent, true);
+  assert.equal(warnings.length, 1); assert.match(warnings[0], /opened without Luau verification/);
+  for (const value of [f.compilerPath, f.projectPath, f.stateRoot]) assert.equal(warnings[0].includes(value), false);
+  assert.deepEqual(f.disk.node(f.configPath).bytes, original); assert.equal(f.disk.writes.length, 0); assert.equal(f.opens.length, 0);
+  // Settings validation remains fatal in main, before even the daemon double is requested.
+  f.disk.node(f.configPath).bytes = Buffer.from('{corrupt'); context.origin = ''; context.token = '';
+  await rejectsGeneric(context.coldStart(f.projectPath)); assert.equal(requested.length, 1);
+});
+
+test('compiler warning is native and generic, suppressed in smoke, and cannot make core startup fail', async () => {
+  const begin = mainSource.indexOf('async function showCodeVerificationWarning()'), end = mainSource.indexOf('async function loadWorkspace()', begin);
+  assert.ok(begin >= 0 && end > begin);
+  const warnings = [], dialogs = [];
+  const context = { smoke: true, closing: false, window: { isDestroyed: () => false }, projectSession: { verificationUnavailable: true },
+    CODE_VERIFICATION_WARNING: 'Generic warning fixture.', console: { warn: text => warnings.push(text) },
+    dialog: { async showMessageBox(_owner, options) { dialogs.push(options); } } };
+  vm.createContext(context);
+  vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.showWarning = showCodeVerificationWarning;', context);
+  await context.showWarning(); assert.equal(dialogs.length, 0);
+  context.smoke = false; await context.showWarning(); assert.equal(dialogs.length, 1); assert.equal(dialogs[0].type, 'warning');
+  context.dialog.showMessageBox = async () => { throw new Error('C:\\secret\\dialog error'); };
+  await assert.doesNotReject(context.showWarning());
+  assert.deepEqual(warnings, ['Luau verification warning could not be displayed.']);
+  assert.match(mainSource, /optionalCodeVerificationFailureContained:/);
+  assert.match(mainSource, /codeVerification: \{ configuredUnavailable: projectSession\.verificationUnavailable \}/);
 });
 
 test('compiler hash, filename, size, hardlinks, redirects and physical ancestors reject before confirmation', async () => {
@@ -294,6 +413,12 @@ test('native FS read boundary rejects non-integer, negative, nonfinite and overs
   const f = fixture({ configured: true }), read = f.disk.filesystem.readSync;
   f.disk.filesystem.readSync = (fd, bytes, offset, remaining, position) => read(fd, bytes, offset, Math.min(remaining, 23), position);
   assert.equal((await f.api.status()).configured, true); assert.equal(f.disk.descriptors.size, 0);
+  const truncated = fixture({ configured: true }), readTruncated = truncated.disk.filesystem.readSync;
+  const prefixBytes = truncated.disk.node(truncated.configPath).bytes.length;
+  truncated.disk.node(truncated.configPath).bytes = Buffer.concat([truncated.disk.node(truncated.configPath).bytes, Buffer.from('trailing')]);
+  truncated.disk.filesystem.readSync = (fd, bytes, offset, remaining, position) => position >= prefixBytes ? 0
+    : readTruncated(fd, bytes, offset, Math.min(remaining, prefixBytes - position), position);
+  await rejectsGeneric(truncated.api.status()); assert.equal(truncated.disk.descriptors.size, 0);
 });
 
 test('native FS write boundary rejects zero, non-integer, negative, nonfinite and oversized counts', async () => {
@@ -366,6 +491,36 @@ test('smoke disables configuring via API and IPC while status remains safe', asy
   assert.match(mainSource, /Configure Luau verification[\s\S]*?enabled: !smoke/);
 });
 
+test('smoke read-only observation distinguishes a mounted controller from disabled static HTML without native calls', () => {
+  const checkSmoke = mainSource.slice(mainSource.indexOf('async function checkSmoke()'), mainSource.indexOf('if (profilePreparationFailed) app.whenReady()'));
+  const probe = /executeJavaScript\(`([\s\S]*?)`\)/.exec(checkSmoke)?.[1];
+  assert.ok(probe, 'Expected a read-only renderer smoke observation.');
+  assert.match(checkSmoke, /desktopVerificationSetupMounted: renderer\.codeVerificationBridge === true && renderer\.desktopVerificationController === true/);
+  const bridge = Object.freeze({ version: 1, status() { assert.fail('Smoke must not call status.'); },
+    configure() { assert.fail('Smoke must not call configure.'); } });
+  const elements = new Map([
+    ['desktop-verification', { getAttribute: () => 'false' }],
+    ['desktop-verification-setup', { disabled: false }], ['desktop-verification-refresh', { disabled: false }],
+  ]);
+  function observe(native = bridge) {
+    return JSON.parse(vm.runInNewContext(probe, { window: { arcaneDesktop: { codeVerification: native } },
+      document: { title: 'Fixture', documentElement: { scrollWidth: 1200 }, getElementById: id => elements.get(id), querySelectorAll: () => [] },
+      innerWidth: 1200, innerHeight: 900 }));
+  }
+  assert.equal(observe().codeVerificationBridge, true); assert.equal(observe().desktopVerificationController, true);
+  elements.get('desktop-verification-setup').disabled = true;
+  assert.equal(observe().desktopVerificationController, false);
+  elements.get('desktop-verification-setup').disabled = false;
+  elements.get('desktop-verification-refresh').disabled = true;
+  assert.equal(observe().desktopVerificationController, false);
+  elements.get('desktop-verification-refresh').disabled = false;
+  elements.get('desktop-verification').getAttribute = () => 'true';
+  assert.equal(observe().desktopVerificationController, false);
+  assert.equal(observe({ ...bridge }).codeVerificationBridge, false);
+  assert.equal(observe(Object.freeze({ ...bridge, version: 2 })).codeVerificationBridge, false);
+  assert.equal(observe(Object.freeze({ version: 1, status: bridge.status })).codeVerificationBridge, false);
+});
+
 test('sandboxed preload exposes a frozen v1 API; paths, flags and generic errors cannot cross', async () => {
   let exposed, unavailable = null; const calls = [];
   vm.runInNewContext(preloadSource, { require(name) {
@@ -408,7 +563,8 @@ test('owned real files: bounded corruption fails closed without resetting', asyn
   const window = { isDestroyed: () => false }, session = { projectId, projectPath, stateRoot, window, origin, epoch: {}, activeSettingsHash: hash(JSON.stringify(settings) + '\n') };
   const api = host.createCodeVerification({ getSession: () => session, dialog: { showOpenDialog() { assert.fail('No real dialog.'); } } });
   assert.equal((await api.status()).configured, true);
-  throwsGeneric(() => api.daemonConfiguration(session));
+  if (process.platform === 'win32') assert.deepEqual(json(api.daemonConfiguration(session)), { environment: {}, settingsHash: null, failure: 'compiler-unavailable' });
+  else throwsGeneric(() => api.daemonConfiguration(session));
   await writeFile(configPath, Buffer.alloc(4097, 0x20));
   await rejectsGeneric(api.status());
   const fresh = host.createCodeVerification({ getSession: () => session, dialog: {} });

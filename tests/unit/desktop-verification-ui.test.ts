@@ -2,6 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { setImmediate as tick } from 'node:timers/promises';
 import {
@@ -291,3 +293,88 @@ test('Node import is inert even with hostile window/document/fetch getters', () 
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8', timeout: 10000 });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, '');
 });
+
+const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
+test('browser fixture: native keyboard activation, responsive settings, reference palette and preserved draft without API traffic',
+  { skip: !browserModule, timeout: 60000 }, async t => {
+    const playwright = await import(pathToFileURL(browserModule!).href);
+    const browser = await playwright.chromium.launch({ headless: true, args: ['--disable-gpu'],
+      ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) });
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 945, height: 850 } });
+    const errors: string[] = [], requests: string[] = [];
+    page.on('pageerror', (error: Error) => errors.push(error.message));
+    await page.route('**/*', (route: { request(): { url(): string }; abort(): Promise<void> }) => {
+      requests.push(route.request().url()); return route.abort();
+    });
+    const html = (await readFile('apps/desktop/public/studio.html', 'utf8'))
+      .replace('<script type="module" src="/studio.js"></script>', '')
+      .replace('<link rel="stylesheet" href="/studio.css">', '');
+    await page.setContent(html);
+    await page.addStyleTag({ content: await readFile('apps/desktop/public/studio.css', 'utf8') });
+    const compiled = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'), 'utf8');
+    // The real markup/controller, with an explicitly fake frozen zero-arg bridge.
+    // StudioWorkbench, Electron, the daemon and native dialogs are never mounted.
+    await page.addScriptTag({ type: 'module', content: compiled + '\n' + [
+      'const calls = [];',
+      'const projectId = ' + JSON.stringify(PROJECT) + ';',
+      'const value = {version:1,projectId,configured:false,pendingRestart:false,evidenceDirectory:null,cancelled:false};',
+      'const bridge = Object.freeze({version:1,status:(...args)=>{calls.push({action:"status",args});return Promise.resolve({...value});},configure:(...args)=>{calls.push({action:"configure",args});return Promise.resolve({...value,configured:true,pendingRestart:true,evidenceDirectory:"evidence/luau"});}});',
+      'const controller = startDesktopVerification(document,{getProjectId:()=>projectId,subscribeProjectChange:()=>()=>{},nativeBridge:bridge});',
+      'window.verificationFixture = {calls,controller};',
+    ].join('\n') });
+    await page.waitForFunction(() => !!(window as unknown as { verificationFixture: unknown }).verificationFixture);
+    const calls = () => page.evaluate(() => (window as unknown as { verificationFixture: { calls: Call[] } }).verificationFixture.calls);
+    assert.deepEqual(await calls(), []);
+    assert.equal(await page.locator('#code-verification-settings').getAttribute('open'), null);
+    await page.locator('#workspace-settings > summary').click();
+    await page.locator('#code-verification-settings > summary').click();
+    const setup = page.getByRole('button', { name: 'Set up Luau verification', exact: true });
+    const refresh = page.getByRole('button', { name: 'Refresh setup status', exact: true });
+    await setup.evaluate((button: HTMLButtonElement) => button.click());
+    assert.deepEqual(await calls(), []);
+    await refresh.focus(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.getElementById('desktop-verification-status')?.textContent?.startsWith('No Luau'));
+    assert.deepEqual(await calls(), [{ action: 'status', args: [] }]);
+    await setup.focus(); await page.keyboard.press('Space');
+    await page.waitForFunction(() => document.getElementById('desktop-verification-status')?.textContent?.includes('next manual restart'));
+    assert.deepEqual(await calls(), [{ action: 'status', args: [] }, { action: 'configure', args: [] }]);
+    assert.equal(await setup.getAttribute('aria-describedby'), 'desktop-verification-help');
+    const palette = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement);
+      return ['--bg', '--text', '--accent'].map(name => style.getPropertyValue(name).trim());
+    });
+    assert.deepEqual(palette, ['#080808', '#f5f5f5', '#ff3340']);
+    for (const width of [945, 390]) {
+      await page.setViewportSize({ width, height: 850 });
+      await setup.scrollIntoViewIfNeeded();
+      const dimensions = await page.locator('#desktop-verification').evaluate((root: HTMLElement) => ({
+        viewport: innerWidth, width: root.getBoundingClientRect().width, overflow: root.scrollWidth > root.clientWidth,
+        buttonHeights: [...root.querySelectorAll('button')].map(button => button.getBoundingClientRect().height),
+      }));
+      assert.ok(dimensions.width <= dimensions.viewport); assert.equal(dimensions.overflow, false);
+      assert.ok(dimensions.buttonHeights.every((height: number) => height >= 44));
+    }
+    const draft = 'Keep this draft and its whitespace.  ';
+    await page.locator('#codex-composer').fill(draft);
+    await page.evaluate(() => {
+      const fixture = (window as unknown as { verificationFixture: { controller: { stop(): void; resume(): void } } }).verificationFixture;
+      fixture.controller.stop(); fixture.controller.resume();
+    });
+    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    assert.equal((await calls()).length, 2);
+    await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+    await setup.focus();
+    assert.equal(await setup.evaluate((button: HTMLElement) => getComputedStyle(button).outlineStyle), 'solid');
+    await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'reduce' });
+    await page.setViewportSize({ width: 945, height: 850 });
+    await page.locator('#desktop-verification').scrollIntoViewIfNeeded();
+    if (process.env.ARCANE_UI_SCREENSHOT) {
+      await page.locator('#code-verification-settings').scrollIntoViewIfNeeded();
+      // Keep the disclosure title below the existing sticky workspace header.
+      await page.evaluate(() => window.scrollBy(0, -140));
+      await page.screenshot({ path: resolve(process.env.ARCANE_UI_SCREENSHOT) });
+    }
+    assert.deepEqual(errors, []); assert.ok(requests.every(url => !url.includes('/v1/')));
+    t.diagnostic('Fixture-only Edge ' + browser.version() + '; 945/390px; real trusted Enter/Space; zero native/API actions.');
+  });

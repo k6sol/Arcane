@@ -95,7 +95,7 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
       response.on('end', () => resolve({ status: response.statusCode!, text: Buffer.concat(chunks).toString('utf8'), headers: response.headers }));
       response.on('error', reject);
     });
-    request.setTimeout(8000, () => request.destroy(new Error('Fixture deadline'))); request.on('error', reject);
+    request.setTimeout(8000, () => request.destroy(new Error('Fixture deadline: ' + (options.method ?? (raw === undefined && !options.chunks ? 'GET' : 'POST')) + ' ' + (path.startsWith('/v1/workflows/') ? '/v1/workflows/<route>' : '/v1/workflows')))); request.on('error', reject);
     for (const chunk of options.chunks ?? []) request.write(chunk);
     request.end(raw);
   });
@@ -575,9 +575,11 @@ test('fresh previews allow distinct identical recipes; key substitution and cros
 
 test('private receipt storage cannot be used as a project scope or handoff artifact', async t => {
   const f = await fixture(t, { stateInsideProject: true });
+  assert.equal(existsSync(f.keyFile), false, 'Denied private scope starts with no signing key.');
   assert.equal((await f.call('/v1/workflows/preview', {
     action: 'recipe', request: { ...recipe(), scope: ['state/workflow-human-receipts'] },
   })).status, 400);
+  assert.equal(existsSync(f.keyFile), false, 'Pure private-scope refusal must not prepare/read a signing key.');
   const id = await f.create(), bytes = readFileSync(f.keyFile);
   assert.equal((await f.call('/v1/workflows/preview', {
     action: 'handoff', workflowId: id, submission: { key: 'prompt', artifacts: [{

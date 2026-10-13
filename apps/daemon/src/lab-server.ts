@@ -1,3 +1,6 @@
+import { createNativeAssetRegistry } from './native-asset-authority.js';
+import { nativeAssetRoutes } from './native-asset-routes.js';
+import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import { createWorkflowCodeHostVerifier, type WorkflowCodeHostConfiguration } from './workflow-code-host.js';
 import { createAssetConversationHost } from './asset-conversation-host.js';
 import { workflowNativeModel } from './workflow-native-model.js';
@@ -20,7 +23,7 @@ import type { WorkStore } from '../../../packages/storage/src/work-store.js';
 import type { AssetService } from './asset-service.js';
 import { assetRoutes } from './asset-routes.js';
 import { nativeRoutes } from './native-routes.js';
-import { createCodexService, type CodexService } from './codex-service.js';
+import { createCodexService, type CodexService, type CodexServiceOptions } from './codex-service.js';
 import { codexRoutes } from './codex-routes.js';
 
 interface Options {
@@ -36,13 +39,22 @@ interface Options {
   learningService?: LearningService;
   /** Test-only service seam. Production creates the trusted personal-local service. */
   codexService?: CodexService;
+  /** Trusted/test-only client factory for the owned service; never supplied by HTTP. */
+  codexConnect?: CodexServiceOptions['connect'];
   /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
   workflowCodeVerification?: WorkflowCodeHostConfiguration;
 }
 export async function createConnectionLab(options: Options) {
   const token = randomBytes(32).toString('hex');
   const agentToken = randomBytes(32).toString('hex');
-  const bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, agentToken) : null;
+  const nativeAssetRegistry = options.assetService && options.workStore
+    ? createNativeAssetRegistry({projectPath:workflowProjectIdentity(options.projectPath ?? options.cwd).projectPath}) : null;
+  const coreAgentToken = (request: IncomingMessage): string => {
+    const value = request.headers.authorization;
+    const bearer = typeof value==='string' && /^Bearer [a-f0-9]{64}(?![\s\S])/.test(value) ? value.slice(7) : '';
+    return nativeAssetRegistry?.recognizes(bearer) ? bearer : agentToken;
+  };
+  const bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, coreAgentToken) : null;
   const native = options.studioStore ? nativeRoutes() : null;
   const learning = options.learningService ? learningRoutes(options.learningService) : null;
   const store = new SelectionStore(options.stateDirectory);
@@ -56,6 +68,8 @@ export async function createConnectionLab(options: Options) {
   let shuttingDown = false;
   const codex = options.codexService ?? (options.studioStore ? createCodexService({
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
+    ...(options.codexConnect ? {connect:options.codexConnect} : {}),
+    ...(nativeAssetRegistry ? {assetRegistry:nativeAssetRegistry} : {}),
     arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
@@ -102,16 +116,20 @@ export async function createConnectionLab(options: Options) {
         return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
       },
       start: async request => (await options.assetService!.start(request)).jobId,
+      startNative: async (request,admission) => (await options.assetService!.start(request,admission)).jobId,
     }) : null;
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
+    nativeAssetRegistry?.close();
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
     try { associations?.close(); } catch { /* Preserve original failure. */ }
     try { await codex?.close(); } catch { /* Preserve original failure. */ }
     throw error;
   }
   const assets = options.assetService ? assetRoutes(options.assetService, conversationAssets ?? undefined) : null;
+  const scopedAssets = options.assetService && conversationAssets && nativeAssetRegistry
+    ? nativeAssetRoutes(options.assetService,conversationAssets,nativeAssetRegistry) : null;
   const workflowApi = workflow ? workflowRoutes(workflow) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -136,6 +154,8 @@ export async function createConnectionLab(options: Options) {
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
           ['/learning-panel.js', [join(options.cwd, 'dist/apps/desktop/src/learning-panel.js'), 'text/javascript']],
+          ['/desktop-verification.js', [join(options.cwd, 'dist/apps/desktop/src/desktop-verification.js'), 'text/javascript']],
+          ['/provider-setup.js',[join(options.cwd,'dist/apps/desktop/src/provider-setup.js'),'text/javascript']],
           ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
           ['/codex-history.js', [join(options.cwd, 'dist/apps/desktop/src/codex-history.js'), 'text/javascript']],
           ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']]
@@ -151,6 +171,7 @@ export async function createConnectionLab(options: Options) {
       if (learning && await learning(request,response,url,token,origin,agentToken)) return;
       if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
       if (native && await native(request,response,url,token,origin)) return;
+      if (scopedAssets && await scopedAssets(request,response,url,origin)) return;
       if (assets && await assets(request, response, url, token, origin, agentToken)) return;
       if (bridge && await bridge(request, response, url, token, origin)) return;
       const supplied = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
@@ -185,6 +206,7 @@ export async function createConnectionLab(options: Options) {
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 32;
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
+    nativeAssetRegistry?.close();
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
     try { associations?.close(); } catch { /* Preserve listener failure. */ }
     try { await codex?.close(); } catch { /* Preserve listener failure. */ }
@@ -198,7 +220,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + '/#' + token,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true;
+      shuttingDown = true; nativeAssetRegistry?.close();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))

@@ -12,6 +12,20 @@ export function arcaneIsolationOverrides(rows:McpInventoryRow[],nodeExecutable:s
  if(agentToken&&args.some(arg=>arg.includes(agentToken)))fail('MCP_ISOLATION','A private bearer cannot occur in child configuration arguments.');
  return args;
 }
-export function arcaneThreadIsIsolated(rows:McpInventoryRow[]):boolean {
- return rows.some(row=>row.name==='arcane'&&row.runtimeStatus==='connected'&&!row.toolsError)&&rows.every(row=>row.name==='arcane'||row.runtimeStatus==='disabled');
+export function arcaneThreadIsIsolated(rows:readonly McpInventoryRow[]):boolean {
+ if(!Array.isArray(rows)||!rows.length||rows.length>64)return false;
+ const names=new Set<string>();let tools=0,arcane=false;
+ const bounded=(value:unknown):value is string=>typeof value==='string'&&value.length>0&&!value.includes('\0')&&Buffer.byteLength(value)<=256;
+ for(const row of rows) {
+  if(!row||typeof row!=='object'||!bounded(row.name)||names.has(row.name)||typeof row.toolsError!=='boolean'||typeof row.plugin!=='boolean'||
+     (row.pluginId!==null&&!bounded(row.pluginId))||row.plugin!==(row.pluginId!==null)||!Array.isArray(row.toolNames))return false;
+  names.add(row.name);tools+=row.toolNames.length;
+  if(tools>2048||new Set(row.toolNames).size!==row.toolNames.length)return false;
+  for(const tool of row.toolNames)if(!bounded(tool))return false;
+  if(row.name==='arcane') {
+   if(row.runtimeStatus!=='connected'||row.toolsError||row.plugin)return false;
+   arcane=true;
+  } else if(row.runtimeStatus!=='disabled')return false;
+ }
+ return arcane;
 }

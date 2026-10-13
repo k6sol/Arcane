@@ -54,7 +54,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     copyFileSync(join(SOURCE, 'apps/desktop/public', name), join(resources, 'apps/desktop/public', name));
   }
   copyFileSync(join(SOURCE, 'apps/desktop/public/brand/arcane-ridges.png'), join(resources, 'apps/desktop/public/brand/arcane-ridges.png'));
-  for (const name of ['studio', 'codex-chat', 'codex-history', 'learning-panel', 'workspace-shell', 'asset-downloads', 'workflow-panel']) {
+  for (const name of ['studio', 'codex-chat', 'codex-history', 'learning-panel', 'workspace-shell', 'asset-downloads', 'workflow-panel', 'desktop-verification']) {
     copyFileSync(join(EMITTED, 'apps/desktop/src', name + '.js'), join(resources, 'dist/apps/desktop/src', name + '.js'));
   }
 

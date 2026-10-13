@@ -17,7 +17,7 @@ function exactKeys(input: Record<string, unknown>, keys: string[]) {
   if (Object.keys(input).some(k => !keys.includes(k))) throw new ArcaneError('INPUT', 'Unexpected request field.');
 }
 /** Hard byte and elapsed-time bounds, independent of the parent server body reader. */
-async function readAssetJson(request: IncomingMessage, allowRecipe = false): Promise<unknown> {
+export async function readAssetJson(request: IncomingMessage, allowRecipe = false): Promise<unknown> {
   if (request.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new ArcaneError('CONTENT_TYPE', 'Expected application/json.');
   if (request.headers['content-encoding'] && request.headers['content-encoding'] !== 'identity') throw new ArcaneError('CONTENT_TYPE', 'Compressed bodies are unsupported.');
   const limit = allowRecipe ? CUSTOM_REQUEST_BYTES : 16384;
@@ -47,7 +47,7 @@ async function readAssetJson(request: IncomingMessage, allowRecipe = false): Pro
 /** Discard rejected bytes without parsing or retaining them before deciding socket reuse.
  * At most 64 KiB and 200 ms: stalled/large uploads still get Connection: close.
  */
-async function discardRejectedAssetBody(request: IncomingMessage): Promise<boolean> {
+export async function discardRejectedAssetBody(request: IncomingMessage): Promise<boolean> {
   if (request.readableEnded || (request.complete && request.readableLength === 0)) return true;
   if (request.destroyed || request.aborted) return false;
   if (!request.headers['transfer-encoding'] && Number(request.headers['content-length'] ?? '0') === 0) return true;
