@@ -4,8 +4,7 @@
 the existing `ConversationWorkStore`. It adds asset-job binding and scoped metadata
 reads without changing asset services, routes or frontend code. The authorized
 storage hardening uses explicit length/allowed-character checks for work/native
-IDs; accepted syntax, credential restrictions and storage policies are unchanged. Parent
-integration is still required. The adapter performs no CLI, Studio or provider
+IDs; accepted syntax, credential restrictions and storage policies are unchanged. Production integration is now wired in `lab-server.ts` and `asset-routes.ts`; browser integration is in `studio.ts`. Combined verification remains separate. The adapter performs no CLI, Studio or provider
 calls and never opens or closes the borrowed store/service.
 
 ## Parent integration seam
@@ -38,7 +37,7 @@ callback or reading/writing association storage. The existing daemon bearer cann
 attest a native conversation.
 
 Keep standalone/global admin starts and listings separate from these conversation
-methods. The planned parent `/v1/assets/conversation-start` and
+methods. The production `/v1/assets/conversation-start` and
 `/v1/assets/conversation-jobs` endpoints can require a live native conversation
 without changing existing explicitly unscoped `/start` and `/jobs` behavior.
 
@@ -141,3 +140,19 @@ a JSON roundtrip. Thus the ID-only start callback is compatible with
 `assets.start(request)`; subsequent parent snapshot retrieval can use `service.jobs()`.
 The five owned files also passed whitespace/conflict-marker checks. This
 verification used no shared output, actual worker/provider turns, commits or pushes.
+
+## Current production wiring
+
+- Human-only exact control bearer and same-origin POST create via `/v1/assets/conversation-start`. Raw duplicate authority headers, agent/equal-agent bearers and client chat/project fields are refused.
+- `GET /v1/assets/conversation-jobs` hydrates only the current host-attested native bindings. Complete records use a 512 KiB UTF-8 response cap and 1..64 association-page count bound with exact storage cursors. Foreign cursors fail; absent records are not invented.
+- Lab initialization checks the asset service and association store attest the same physical project spelling (case-insensitive on Windows). Existing initialization cleanup closes only the lab-owned resources.
+- Production UI defaults to this chat. It synchronously clears selected history/manifest/previews/downloads on native/project changes, validates response provenance and keeps ambiguous created IDs for explicitly labelled global inspection. Global history does not infer attribution; production global inspection is not a new unscoped creation permission.
+- Exact serialized JSON byte accounting admits valid near-limit arrays without charging their JavaScript index property names. The existing 256 KiB body/normalized-request bounds, depth and node caps remain unchanged.
+
+Current scoped evidence: parent54/54 real adapter/storage checks; agent18/18 UI-controller checks and15/15 original HTTP checks. Parent combined run is pending, including the near-limit regression; these numbers are not a claim of a finished release or actual native integrations.
+
+## Bounded page performance
+
+The production route now uses `asset-conversation-page.ts`: one full native association page plus, only on byte overflow, one verified prefix page. This replaces up to 64 repeated storage attestations without changing the 512 KiB envelope, 1..64 binding limit, original stored cursors, complete records or exact scope. Orphans count toward pagination but never become invented jobs. An uncertain near-limit first record does not consume following orphans whose sequence digit growth could make a fitting record exceed the byte cap. Prefix mutation or changed project/native metadata rejects, never infers or retries a third read.
+
+Parent focused verification: 58/58 page/HTTP/UI checks, followed by 26/26 including independent boundary reproductions, and 2/2 HTTP checks using the original 8-second request deadline. Whole-suite and current repack acceptance remain separate.

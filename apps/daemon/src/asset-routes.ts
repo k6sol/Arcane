@@ -4,8 +4,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { AssetError, normalizeRequest, type AssetInput } from '../../../packages/asset-pipeline/src/index.js';
-import { ARTIFACT_DOWNLOAD_TIMEOUT_MS, HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord } from './asset-service.js';
+import { ARTIFACT_DOWNLOAD_TIMEOUT_MS, type AssetService } from './asset-service.js';
 import type { AssetConversationHost } from './asset-conversation-host.js';
+import { assetConversationJobPage } from './asset-conversation-page.js';
 import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
 
 function object(input: unknown): Record<string, unknown> {
@@ -78,33 +79,7 @@ async function discardRejectedAssetBody(request: IncomingMessage): Promise<boole
 export function assetRoutes(service: AssetService, conversationHost?: AssetConversationHost) {
   const conversationJobs = (limit: number, after: string | null) => {
     if (!conversationHost) throw new ArcaneError('ASSET_CONVERSATION_UNAVAILABLE', 'Chat-specific asset history is unavailable in this host.');
-    const first = conversationHost.listHuman({ limit: 1, ...(after === null ? {} : { after }) });
-    const result = { projectId: first.projectId, projectPath: first.projectPath, conversation: first.conversation,
-      jobs: [] as AssetJobRecord[], nextCursor: null as string | null, byteLimit: HISTORY_PAGE_BYTES };
-    const scope = JSON.stringify([first.projectId, first.projectPath, first.conversation]);
-    const known = new Map(service.jobs().map(job => [job.jobId, job]));
-    let page = first, cursor = after;
-    // Walk association pages, not global job pages; a foreign chat is never exposed.
-    for (let inspected = 0; inspected < limit; inspected++) {
-      if (JSON.stringify([page.projectId, page.projectPath, page.conversation]) !== scope)
-        throw new ArcaneError('ASSET_CONVERSATION_STALE', 'The active chat changed during the asset history read.');
-      const binding = page.items[0];
-      if (!binding) { result.nextCursor = null; break; }
-      const job = known.get(binding.id);
-      if (job) {
-        const candidate = { ...result, jobs: [...result.jobs, job], nextCursor: page.nextCursor };
-        if (Buffer.byteLength(JSON.stringify(candidate)) > HISTORY_PAGE_BYTES) {
-          if (!result.jobs.length) throw new ArcaneError('HISTORY_LIMIT', 'One asset history record exceeds the response bound; inspect its retained journal.');
-          result.nextCursor = cursor; break;
-        }
-        result.jobs.push(job);
-      }
-      result.nextCursor = page.nextCursor;
-      if (page.nextCursor === null || inspected + 1 === limit) break;
-      cursor = page.nextCursor; page = conversationHost.listHuman({ limit: 1, after: cursor });
-    }
-    if (Buffer.byteLength(JSON.stringify(result)) > HISTORY_PAGE_BYTES) throw new ArcaneError('HISTORY_LIMIT', 'Asset conversation history exceeds its byte bound.');
-    return result;
+    return assetConversationJobPage(service, conversationHost, { limit, after });
   };
   // Keep admission until verification AND socket delivery settle, including after a timeout.
   let downloading = false;

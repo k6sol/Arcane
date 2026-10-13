@@ -100,3 +100,11 @@ test('changed physical output ancestor forbids replacement of a substituted dire
   assert.equal(attempts, 1); assert.equal(await fs.readFile(join(output, 'index.json'), 'utf8'), '{"external":true}\n');
   assert.equal(await fs.readFile(target, 'utf8'), '{"old":true}\n');
 });
+
+test('empty existing advisory destination remains identity-pinned and safely replaceable', async t => {
+  const { root, target } = await fixture(t);
+  await fs.writeFile(target, '');
+  await atomicAssetJson(root, 'index.json', '{"recovered":true}\n');
+  assert.equal(await fs.readFile(target, 'utf8'), '{"recovered":true}\n');
+  assert.deepEqual(await fs.readdir(root), ['index.json']);
+});

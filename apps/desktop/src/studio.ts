@@ -4,6 +4,7 @@ import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell } from './workspace-shell.js';
+import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
@@ -239,7 +240,8 @@ function readAssetJob(value: unknown): AssetJobRecord {
   const request = assetFields(r.request, ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples'], ['recipe']);
   if (request.schemaVersion !== 1 || !['hero-prop', 'environment-kit', 'custom-assembly'].includes(String(request.template))) throw new Error('Invalid recorded asset request.');
   const { schemaVersion: _schema, recipe, ...parameters } = request;
-  prepareAssetInput({ ...parameters, template: request.template === 'custom-assembly' ? 'hero-prop' : request.template });
+  prepareAssetInput({ ...parameters, ...(request.template === 'custom-assembly' ? { template: 'hero-prop', sizeMeters: [1, 1, 1] } : {}) });
+  if (request.template === 'custom-assembly' && (!Array.isArray(request.sizeMeters) || request.sizeMeters.length !== 3 || request.sizeMeters.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0.01 || value > 40))) throw new Error('Invalid recorded custom asset dimensions.');
   if (request.template === 'custom-assembly' ? !record(recipe) : recipe !== undefined) throw new Error('Invalid recorded asset recipe.');
   for (const event of r.events) {
     const e = assetFields(event, ['jobId', 'at', 'stage', 'state']);
@@ -299,9 +301,9 @@ export class AssetConversationController {
   retainUnknown(ticket: AssetContextTicket, value: unknown, message: string): void {
     let receipt: AssetConversationStart | null = null;
     try { receipt = readAssetConversationStart(value); } catch { /* Preserve a safe known ID even when the remaining receipt cannot be trusted. */ }
-    const id = receipt?.jobId ?? (record(value) && assetId(value.jobId) ? value.jobId : null);
+    const id = receipt?.jobId ?? (record(value) && assetId(value.jobId) ? value.jobId : record(value) && record(value.job) && assetId(value.job.jobId) ? value.job.jobId : null);
     if (id && this.uncertain.some(item => item.projectPath === ticket.projectPath && item.jobId === id)) return;
-    this.uncertain.push({ projectPath: ticket.projectPath, conversation: ticket.conversation, jobId: id, job: receipt?.job ?? null, message });
+    this.uncertain.push({ projectPath: ticket.projectPath, conversation: ticket.conversation, jobId: id, job: receipt?.projectPath === ticket.projectPath ? receipt.job : null, message });
   }
   unknownDetails(): readonly { jobId: string | null; job: AssetJobRecord | null; message: string }[] {
     const ticket = this.capture();
@@ -462,7 +464,7 @@ export class StudioApi {
         return blob as T;
       }
       let data: unknown;
-      try { data = nativeRoute || conversationRoute ? await boundedNativeJson(response, conversationRoute ? 'Asset conversation' : 'Native') : await response.json(); } catch (error) { if (nativeRoute && error instanceof StudioRequestError) throw error; throw new StudioRequestError(error instanceof Error ? error.message : 'The daemon returned an unreadable response (HTTP ' + response.status + ').', post && response.status < 400 || response.status >= 500 && post ? 'unknown' : 'unavailable'); }
+      try { data = nativeRoute || conversationRoute || /^\/v1\/assets\/jobs\?limit=/.test(path) ? await boundedNativeJson(response, nativeRoute ? 'Native' : 'Asset history') : await response.json(); } catch (error) { if (nativeRoute && error instanceof StudioRequestError) throw error; throw new StudioRequestError(error instanceof Error ? error.message : 'The daemon returned an unreadable response (HTTP ' + response.status + ').', post && response.status < 400 || response.status >= 500 && post ? 'unknown' : 'unavailable'); }
       if (!response.ok) {
         const detail = record(data) && typeof data.message === 'string' ? data.message : 'Local request failed.';
         const code = record(data) && typeof data.error === 'string' ? data.error + ': ' : '';
@@ -481,6 +483,15 @@ export class StudioApi {
   revokeKey(keyId: string) { return this.request<{ revoked: true }>('/v1/studio/keys/revoke', { keyId }); }
   agentToken() { return this.request<{ token: string; scopes: unknown; canReview: false; expires: string }>('/v1/product/mcp-token', {}); }
   assetJobs() { return this.request<{ jobs: AssetJobRecord[] }>('/v1/assets/jobs'); }
+  async assetGlobalJobs(limit = 32, after?: string): Promise<{ jobs: AssetJobRecord[]; nextCursor: string | null }> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 64 || (after !== undefined && !assetText(after, 1024))) throw new StudioRequestError('Invalid global asset page request.', 'rejected');
+    const value = await this.request<unknown>('/v1/assets/jobs?limit=' + limit + (after === undefined ? '' : '&after=' + encodeURIComponent(after)));
+    const r = assetFields(value, ['schemaVersion', 'jobs', 'total', 'nextCursor', 'byteLimit']);
+    if (utf8(JSON.stringify(r)) > ASSET_CONVERSATION_BYTES || r.schemaVersion !== 1 || r.byteLimit !== ASSET_CONVERSATION_BYTES || !Array.isArray(r.jobs) || r.jobs.length > limit || typeof r.total !== 'number' || !Number.isSafeInteger(r.total) || r.total < r.jobs.length || !(r.nextCursor === null || assetText(r.nextCursor, 1024))) throw new Error('Invalid bounded global asset page.');
+    const jobs = r.jobs.map(readAssetJob);
+    if (new Set(jobs.map(job => job.jobId)).size !== jobs.length) throw new Error('Duplicate global asset jobs.');
+    return { jobs, nextCursor: r.nextCursor };
+  }
   async assetConversationJobs(limit = 32, after?: string): Promise<AssetConversationPage> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 64 || (after !== undefined && !assetText(after, 1024))) throw new StudioRequestError('Choose an asset page limit from 1 to 64 and a bounded opaque cursor.', 'rejected');
     return readAssetConversationPage(await this.request('/v1/assets/conversation-jobs?limit=' + limit + (after === undefined ? '' : '&after=' + encodeURIComponent(after))), limit);
@@ -519,7 +530,7 @@ export function takeControlToken(location: Pick<Location, 'hash' | 'pathname' | 
   return /^[a-f0-9]{64}$/.test(token) ? token : '';
 }
 
-interface ProductState { projectPath: string; protocolVersion: 1; studioSessions: unknown; commandCounts: unknown; features: unknown; buildTasks: unknown }
+interface ProductState { projectId?: string; projectPath: string; protocolVersion: 1; studioSessions: unknown; commandCounts: unknown; features: unknown; buildTasks: unknown }
 interface PendingRequest { path: '/v1/studio/commands' | '/v1/studio/restore'; body: Record<string, unknown>; sessionId: string; requestId: string }
 interface PropertyControl { checked: HTMLInputElement; inputs: (HTMLInputElement | HTMLSelectElement)[] }
 const HELP: Record<string, string> = {
@@ -544,15 +555,24 @@ const stateTone = (state: StudioCommand['state']) => state === 'succeeded' ? 'go
 
 export class StudioWorkbench {
   private canonicalProjectPath = '';
+  private canonicalProjectId: string | null = null;
+  private productMetadataEpoch = 0;
+  getCurrentProduct(): Readonly<{ projectId: string; projectPath: string }> | null {
+    return !this.stopped && this.canonicalProjectId
+      ? Object.freeze({ projectId: this.canonicalProjectId, projectPath: this.canonicalProjectPath }) : null;
+  }
   historyProjectPath(): string { return this.canonicalProjectPath; }
   private readonly projectListeners = new Set<() => void>();
   subscribeProjectChange(listener: () => void): () => void {
     this.projectListeners.add(listener);
     return () => { this.projectListeners.delete(listener); };
   }
-  private observeProjectPath(value: unknown): void {
-    if (typeof value !== 'string' || !value.trim() || value.length > 4096 || /[\x00-\x1f]/.test(value) || value === this.canonicalProjectPath) return;
-    this.canonicalProjectPath = value;
+  private observeProjectPath(value: unknown, identity: unknown = null): void {
+    const validPath = typeof value === 'string' && !!value.trim() && value.length <= 4096 && !/[\x00-\x1f]/.test(value);
+    const projectId = validPath && typeof identity === 'string' && identity.length === 64 && /^[a-f0-9]{64}$/.test(identity) ? identity : null;
+    const path = validPath ? value : this.canonicalProjectPath;
+    if (path === this.canonicalProjectPath && projectId === this.canonicalProjectId) return;
+    this.canonicalProjectPath = path; this.canonicalProjectId = projectId;
     for (const listener of this.projectListeners) listener();
   }
   private nativeObservation: NativeObservation | null = null;
@@ -730,6 +750,7 @@ export class StudioWorkbench {
     this.el<HTMLButtonElement>('native-copy-token').disabled = true;
   }
   stop() {
+    this.productMetadataEpoch++; this.observeProjectPath(null);
     this.removeAssetContext?.(); this.removeAssetContext = null; this.removeAssetProject?.(); this.removeAssetProject = null;
     this.assetContext.invalidate(); this.resetAssetContext();
     this.nativeViewEpoch++; this.nativeRequestEpoch++; this.nativeObserverBusy = false;
@@ -748,14 +769,17 @@ export class StudioWorkbench {
   async refresh(): Promise<void> {
     if (this.refreshing || !this.token) return;
     this.refreshing = true; this.el<HTMLButtonElement>('refresh').disabled = true;
-    const capturedSession = this.sessionId;
+    const capturedSession = this.sessionId, productEpoch = this.productMetadataEpoch;
     const workRead = Promise.allSettled([this.refreshWork(), this.refreshAssets(), this.refreshStudioKeys()]);
     const reads = await Promise.allSettled([this.api.sessions(), this.api.product(), ...(capturedSession ? [this.api.commands(capturedSession)] : [])]);
     try {
       // Project/chat metadata does not depend on Studio availability.
       const product = reads[1]!;
-      if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
-      else { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
+      if (!this.stopped && productEpoch === this.productMetadataEpoch) {
+        if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
+        else this.observeProjectPath(null);
+      }
+      if (product.status === 'rejected') { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       const sessionRead = reads[0]!;
       if (sessionRead.status === 'rejected') throw sessionRead.reason;
       const sessionData = sessionRead.value as { sessions: StudioSession[] };
@@ -793,7 +817,7 @@ export class StudioWorkbench {
   }
 
   private renderProduct(state: ProductState) {
-    if (state.protocolVersion === 1) this.observeProjectPath(state.projectPath);
+    this.observeProjectPath(state.protocolVersion === 1 ? state.projectPath : null, state.projectId);
     this.text('project-path', typeof state.projectPath === 'string' ? state.projectPath : 'Project path unavailable');
     const counts = record(state.commandCounts) ? Object.entries(state.commandCounts).map(([key, value]) => key + ': ' + String(value)).join(' · ') : json(state.commandCounts) ?? 'Unavailable';
     this.text('command-counts', counts || 'No commands recorded');
@@ -1272,16 +1296,20 @@ export class StudioWorkbench {
     try {
       let jobs: AssetJobRecord[], cursor: string | null = null;
       if (ticket.global) {
-        const data = await this.api.assetJobs(); if (!Array.isArray(data.jobs) || data.jobs.length > 256) throw new Error('Invalid global asset history.');
-        jobs = data.jobs.map(readAssetJob);
+        if (this.assetOptions.assetMode === 'standalone') {
+          const data = await this.api.assetJobs(); if (!Array.isArray(data.jobs) || data.jobs.length > 256) throw new Error('Invalid global asset history.');
+          jobs = data.jobs.map(readAssetJob);
+        } else {
+          const data = await this.api.assetGlobalJobs(32, after ?? undefined); jobs = data.jobs; cursor = data.nextCursor;
+        }
       } else {
         const data = await this.api.assetConversationJobs(32, after ?? undefined);
         if (!this.assetCurrent(ticket) || requestEpoch !== this.assetReadEpoch) return;
         if (!this.assetContext.matches(ticket, data)) throw new Error('Asset history does not match this exact project and native chat.');
-        if (after && data.nextCursor === after) throw new Error('Asset history returned a nonadvancing cursor.');
         jobs = data.jobs; cursor = data.nextCursor;
       }
       if (!this.assetCurrent(ticket) || requestEpoch !== this.assetReadEpoch) return;
+      if (after && cursor === after) throw new Error('Asset history returned a nonadvancing cursor.');
       const combined = more ? [...this.assetJobs, ...jobs] : jobs;
       if (ticket.global) for (const item of this.assetContext.unknownDetails()) if (item.job && !combined.some(job => job.jobId === item.jobId)) combined.push(item.job);
       const unique = [...new Map(combined.map(job => [job.jobId, job])).values()];
@@ -1311,7 +1339,8 @@ export class StudioWorkbench {
     this.el<HTMLSelectElement>('asset-history-scope').value = ticket.global ? 'global' : 'conversation';
     this.text('asset-scope-detail', ticket.global ? 'All chats and retained unscoped jobs in this project. These records do not establish a binding to the current chat.' : ticket.conversation ? 'Assets recorded for this exact native chat and project.' : 'Open a native chat in this exact project. Global asset history is available for retained jobs.');
     this.el<HTMLButtonElement>('asset-history-more').disabled = !this.assetNextCursor || this.assetBusy || !this.assetAvailable;
-    this.el('asset-history-more').hidden = ticket.global || !this.assetNextCursor;
+    this.el('asset-history-more').hidden = !this.assetNextCursor;
+    this.text('asset-history-more', ticket.global ? 'Load more global jobs' : 'Load more jobs for this chat');
     const uncertain = this.assetContext.unknownDetails();
     this.el('asset-ambiguous').hidden = !uncertain.length;
     this.text('asset-ambiguous-records', uncertain.length ? json(uncertain.map(item => ({ jobId: item.jobId, association: 'unknown', retry: false, message: item.message, ...(ticket.global && item.job ? { job: item.job } : {}) }))) : '');
@@ -1354,6 +1383,7 @@ export class StudioWorkbench {
         if (receipt.association === 'unknown' || receipt.projectPath !== ticket.projectPath || JSON.stringify(receipt.conversation) !== JSON.stringify(ticket.conversation)) this.assetContext.retainUnknown(ticket, receipt, 'Job was created; association is unknown. Inspect its ID in global history. Do not retry, rebind or recreate it.');
         if (!this.assetCurrent(ticket)) return;
         if (!this.assetContext.matches(ticket, receipt) || receipt.association !== 'bound') {
+          this.assetContext.retainUnknown(ticket, receipt, 'The start receipt did not establish a binding to this exact chat. Do not retry, rebind or recreate the job.');
           this.assetUnknown = 'Job ' + receipt.jobId + ' was created with an unknown chat association. Inspect global asset history. Do not retry, rebind or recreate it.';
           this.assetReadAfterUnknown = false; this.text('asset-notice', this.assetUnknown); return;
         }
@@ -1390,9 +1420,11 @@ export class StudioWorkbench {
       const previews = manifest.artifacts.filter(a => a.role === 'preview' && ['preview-hero.png', 'preview-side.png'].includes(a.path));
       const reads = await Promise.allSettled(previews.map(async artifact => {
         const blob = await this.api.assetPreview(job.jobId, artifact.path);
+        if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
         if (blob.size !== artifact.bytes) throw new Error('Preview byte count does not match its manifest.');
         const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(n => n.toString(16).padStart(2, '0')).join('');
         if (digest !== artifact.sha256) throw new Error('Preview hash does not match its manifest.');
+        if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
         const bitmap = await createImageBitmap(blob);
         try {
           if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
@@ -1558,8 +1590,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   let storage: Pick<Storage, 'getItem' | 'setItem'>;
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
   const token = takeControlToken(window.location, window.history, storage);
-  const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token);
   const codexChat = new CodexChat(document, new CodexChatApi(token));
+  const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
+    assetMode: 'conversation', getNativeConversation: () => codexChat.workflowConversation(),
+    subscribeContextChange: listener => codexChat.subscribeWorkflowContextChange(listener),
+  });
+  const desktopVerification = startDesktopVerification(document, {
+    getProjectId: () => workbench.getCurrentProduct()?.projectId ?? null,
+    subscribeProjectChange: listener => workbench.subscribeProjectChange(listener),
+  });
   const learningPanel = new LearningPanel(document, token); learningPanel.start();
   const historyPanel = new CodexHistoryPanel(document, { getToken: () => token, getProjectPath: () => workbench.historyProjectPath() }); historyPanel.start();
   let workflows: ReturnType<typeof startWorkflowPanel> | null = null;
@@ -1572,8 +1611,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workflowsStopped = true; workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Native conversation UI unavailable. Refresh recorded state before continuing.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

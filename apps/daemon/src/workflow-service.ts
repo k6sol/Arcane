@@ -37,6 +37,8 @@ export type WorkflowVerificationResult =
   | { status: 'unsupported' };
 export interface WorkflowVerifier {
   action: SafeWorkflowAction;
+  /** Optional live host observation; only synchronous true permits dispatch. */
+  available?: () => boolean;
   /** Fixed host function: read-only and deterministic. Never build commands from workflow text. */
   verify: (request: Readonly<WorkflowVerificationRequest>) => Promise<WorkflowVerificationResult> | WorkflowVerificationResult;
 }
@@ -48,6 +50,8 @@ export interface WorkflowServiceOptions {
   authorizeHuman?: (command: Readonly<WorkflowHumanCommand>) => boolean;
   /** Trusted current observations; never accept this context from route JSON. */
   policyContext?: () => Pick<WorkflowContext, 'connections' | 'studioSessions' | 'capabilities'>;
+  /** Host-only synchronous envelope; must validate authority before and after evaluating the assessment. */
+  authorizationSnapshot?: (evaluate: () => WorkflowAssessment) => WorkflowAssessment;
   verifiers?: readonly WorkflowVerifier[];
   now?: () => number;
 }
@@ -109,18 +113,23 @@ export class WorkflowService {
   private readonly ownsWork: boolean;
   private readonly authorize: WorkflowServiceOptions['authorizeHuman'];
   private readonly context: WorkflowServiceOptions['policyContext'];
-  private readonly verifiers = new Map<SafeWorkflowAction, WorkflowVerifier['verify']>();
+  private readonly authorizationSnapshot: WorkflowServiceOptions['authorizationSnapshot'];
+  private readonly verifiers = new Map<SafeWorkflowAction, Readonly<WorkflowVerifier>>();
   private busy = false;
   private closed = false;
+  private verificationSettled: Promise<void> | null = null;
 
   constructor(options: WorkflowServiceOptions) {
     const identity = workflowProjectIdentity(options.projectPath);
     this.projectId = identity.projectId;
     this.authorize = options.authorizeHuman; this.context = options.policyContext;
+    this.authorizationSnapshot = options.authorizationSnapshot;
+    if (this.authorizationSnapshot !== undefined && typeof this.authorizationSnapshot !== 'function') fail('WORKFLOW_INPUT', 'Expected a synchronous host authorization envelope.');
     if (options.verifiers && options.verifiers.length > 3) fail('WORKFLOW_INPUT', 'At most three fixed verifiers may be registered.');
     for (const verifier of options.verifiers ?? []) {
-      if (!Object.hasOwn(CAPABILITY, verifier.action) || typeof verifier.verify !== 'function' || this.verifiers.has(verifier.action)) fail('WORKFLOW_INPUT', 'Expected unique host verifier registrations.');
-      this.verifiers.set(verifier.action, verifier.verify);
+      if (!Object.hasOwn(CAPABILITY, verifier.action) || typeof verifier.verify !== 'function' || (verifier.available !== undefined && typeof verifier.available !== 'function') || this.verifiers.has(verifier.action)) fail('WORKFLOW_INPUT', 'Expected unique host verifier registrations.');
+      this.verifiers.set(verifier.action, Object.freeze({ action: verifier.action, verify: verifier.verify,
+        ...(verifier.available === undefined ? {} : { available: verifier.available }) }));
     }
     if (options.workStore && workflowProjectIdentity(options.workStore.projectPath).projectId !== this.projectId) fail('WORKFLOW_PROJECT', 'Borrowed WorkStore must belong to the selected project.');
     this.journal = new WorkflowStore({ directory: options.directory, projectPath: options.projectPath });
@@ -253,6 +262,14 @@ export class WorkflowService {
   private requireHuman(request: WorkflowHumanRequest, receiptHash: string): void {
     if (!this.authorized(request, digest(receiptHash))) fail('WORKFLOW_HUMAN_REQUIRED', 'An exact trusted host human receipt is required.');
   }
+  private verifierAvailable(verifier: Readonly<WorkflowVerifier>): boolean {
+    if (!verifier.available) return true;
+    try {
+      const result: unknown = verifier.available();
+      if (result instanceof Promise) void result.catch(() => undefined);
+      return result === true;
+    } catch { return false; }
+  }
   private assessment(record: StoredWorkflow, tasks: WorkTask[]): WorkflowAssessment {
     let observed: Pick<WorkflowContext, 'connections' | 'studioSessions' | 'capabilities'>;
     try {
@@ -263,9 +280,10 @@ export class WorkflowService {
     const localIds = Object.values(CAPABILITY);
     const capabilities: NonNullable<WorkflowContext['capabilities']> = [
       ...(observed.capabilities ?? []).filter(c => !localIds.includes(c.id)),
-      ...[...this.verifiers.keys()].map(action => ({ id: CAPABILITY[action], state: 'available' as const, safety: 'read-only-deterministic' as const })),
+      ...[...this.verifiers.values()].map(verifier => ({ id: CAPABILITY[verifier.action],
+        state: this.verifierAvailable(verifier) ? 'available' as const : 'unsupported' as const, safety: 'read-only-deterministic' as const })),
     ];
-    return assessWorkflow(record.recipe, {
+    const evaluate = () => assessWorkflow(record.recipe, {
       ...observed, capabilities, tasks, submissions: record.submissions, decisions: record.decisions,
       authorizeHuman: command => {
         const { receiptHash, ...gate } = command;
@@ -274,6 +292,7 @@ export class WorkflowService {
         );
       },
     });
+    return this.authorizationSnapshot && record.decisions.length ? this.authorizationSnapshot(evaluate) : evaluate();
   }
   private snapshot(record: StoredWorkflow, readOnly = false): WorkflowSnapshot {
     if (record.state !== 'active' || record.operation) {
@@ -496,6 +515,8 @@ export class WorkflowService {
     this.open();
     if (this.busy) fail('WORKFLOW_BUSY', 'A coordinator operation is already in progress.');
     this.busy = true;
+    let settled: () => void = () => {};
+    this.verificationSettled = new Promise<void>(done => { settled = done; });
     try {
       const a = object(input, ['workflowId', 'stepKey', 'idempotencyKey']);
       const id = identifier(a.workflowId), stepKey = identifier(a.stepKey), key = identifier(a.idempotencyKey);
@@ -513,7 +534,7 @@ export class WorkflowService {
       record.attempts.push({ stepKey, number: attempts.length + 1, subjectDigest, state: 'running' });
       const command = this.begin(record, key, 'verify', requestHash, null, stepKey);
       try {
-        const result = await verifier(freeze({
+        const result = await verifier.verify(freeze({
           projectId: this.projectId, projectPath: this.journal.projectPath, workflowId: id, recipeId: record.recipe.id,
           step: clone(step), subjectDigest, inputArtifacts: this.inputArtifacts(record, step),
         }));
@@ -534,8 +555,10 @@ export class WorkflowService {
         last.state = 'submitted';
         return this.finish(record, command, 'submitted');
       } catch { return this.uncertain(record, command); }
-    } finally { this.busy = false; }
+    } finally { this.busy = false; settled(); this.verificationSettled = null; }
   }
+  /** Waits only for this owned verifier; does not interrupt, retry or close borrowed resources. */
+  waitForIdle(): Promise<void> { return this.verificationSettled ?? Promise.resolve(); }
   prepareReview(workflowId: string, stepKey: string, decision: HumanDecision['decision']): WorkflowHumanRequest {
     const record = this.load(workflowId); this.checked(record);
     if (!['approved', 'rejected'].includes(decision)) fail('WORKFLOW_INPUT', 'Expected an explicit review decision.');

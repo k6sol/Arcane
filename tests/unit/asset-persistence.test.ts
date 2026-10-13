@@ -131,6 +131,43 @@ function injectedFailure(directory: string, code: unknown) {
   });
 }
 
+test('asset startup rebuilds an empty advisory index from retained journal authority without replay', serial, async t => {
+  const f = await fixture(t);
+  const journal = JSON.parse(await realFs.readFile(join(f.jobDirectory, 'job.json'), 'utf8'));
+  const indexPath = join(f.outputRoot, 'index.json');
+  await realFs.writeFile(indexPath, Buffer.alloc(0));
+  assert.equal((await realFs.lstat(indexPath)).size, 0);
+
+  const service = await f.open();
+  const jobs = service.jobs();
+  assert.equal(jobs.length, 1, 'An empty advisory index cannot erase a retained job.');
+  const job = jobs[0]!;
+  assert.equal(job.jobId, JOB_ID);
+  assert.equal(job.directory, f.jobDirectory, 'Recovered paths come from the trusted directory, not stored path claims.');
+  assert.equal(job.state, journal.state);
+  assert.deepEqual(job.request, journal.request);
+  assert.deepEqual(job.error, journal.error);
+  assert.equal(job.startedAt, journal.startedAt);
+  assert.equal(job.finishedAt, journal.finishedAt);
+  assert.equal(job.manifestAvailable, false);
+  assert.equal(job.manifestPath, null);
+  assert.deepEqual(job.events, [], 'Lost advisory event observations must not be invented from terminal journal state.');
+  await f.retained();
+
+  const indexStat = await realFs.lstat(indexPath);
+  assert.ok(indexStat.isFile() && !indexStat.isSymbolicLink() && indexStat.nlink === 1 && indexStat.size > 0);
+  assert.deepEqual(JSON.parse(await realFs.readFile(indexPath, 'utf8')), {
+    schemaVersion: 1, jobs: [{ jobId: JOB_ID, events: [] }]
+  });
+  assert.deepEqual((await realFs.readdir(f.outputRoot)).sort(), [basename(f.jobDirectory), 'index.json'].sort());
+  await service.close();
+  const reopened = await f.open();
+  assert.deepEqual(reopened.jobs(), jobs);
+  await f.retained();
+  await reopened.close();
+  // fixture() asserts zero native spawns across both opens and closes.
+});
+
 const faults: { phase: Phase; code: unknown; publicCode: string }[] = [
   { phase: 'write', code: 'ENOSPC', publicCode: 'ENOSPC' },
   { phase: 'write', code: 'EIO', publicCode: 'EIO' },

@@ -1,3 +1,4 @@
+import { workflowCodeHostConfiguration } from './workflow-code-host.js';
 import { createLearningService } from './learning-service.js';
 import { resolve, join, dirname, relative, isAbsolute, sep, parse } from 'node:path';
 import { mkdir, writeFile, unlink, readFile, lstat, realpath, opendir } from 'node:fs/promises';
@@ -8,6 +9,7 @@ import { createAssetService } from './asset-service.js';
 // The desktop host keeps immutable application resources separate from its owned writable cwd.
 // These environment values come only from a trusted local launcher, never HTTP/MCP input.
 const runtimeRoot = resolve(process.cwd());
+const workflowCodeVerification = workflowCodeHostConfiguration(process.env);
 const resourceOverride = process.env.ARCANE_RESOURCE_DIRECTORY;
 const cwd = resourceOverride === undefined ? runtimeRoot : resolve(resourceOverride);
 const stateOverride = process.env.ARCANE_STATE_DIRECTORY;
@@ -85,7 +87,7 @@ let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
 catch (error) { await assets.close(); work.close(); store.close(); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
-try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, assetService: assets, learningService: learning, projectPath, port }); }
+try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, assetService: assets, learningService: learning, projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
 catch (error) { learning.close(); await assets.close(); work.close(); store.close(); throw error; }
 await mkdir(directory, { recursive: true });
 const descriptor = join(directory, 'daemon.json');

@@ -15,7 +15,7 @@ import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-
 import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
 import {
   WorkflowService, type WorkflowHumanCommand, type WorkflowHumanRequest,
-  type WorkflowServiceOptions, type WorkflowJournalReceipt, type WorkflowSnapshot, type PinnedWorkflowArtifact, WORKFLOW_RECEIPT_LIMITS,
+  type WorkflowServiceOptions, type WorkflowJournalReceipt, type WorkflowSnapshot, type PinnedWorkflowArtifact, WORKFLOW_RECEIPT_LIMITS, type WorkflowCommandResult,
 } from './workflow-service.js';
 
 export const WORKFLOW_DRAFT_BYTES = 64 * 1024;
@@ -162,6 +162,7 @@ class ReceiptKey {
   private readonly directory: string;
   private readonly file: string;
   private readonly key: Buffer;
+  private inSnapshot = false;
   constructor(parent: string, projectId: string) {
     parent = workflowReceiptParent(directPath(parent), projectId);
     if (!lstatSync(parent).isDirectory()) fail('WORKFLOW_RECEIPT_STORAGE');
@@ -191,8 +192,8 @@ class ReceiptKey {
     // Existing directory with missing/damaged key is never silently regenerated.
     this.key = this.read();
   }
-  private read(): Buffer {
-    privateWorkflowReceiptStorage(dirname(this.directory), false, true);
+  private read(validateAcl = true): Buffer {
+    if (validateAcl) privateWorkflowReceiptStorage(dirname(this.directory), false, true);
     directPath(this.file);
     privateMode(lstatSync(this.directory), true);
     const selected = lstatSync(this.file);
@@ -218,8 +219,26 @@ class ReceiptKey {
       return Buffer.from(bytes.subarray(0, 32));
     } finally { bytes.fill(0); closeSync(fd); }
   }
+  /** One synchronous assessment only; never retained across await, event turns or requests. */
+  withSnapshot<T>(evaluate: () => T): T {
+    if (this.inSnapshot) fail('WORKFLOW_RECEIPT_STORAGE');
+    const validate = () => {
+      const current = this.read();
+      try { if (!timingSafeEqual(current, this.key)) fail('WORKFLOW_RECEIPT_STORAGE'); }
+      finally { current.fill(0); }
+    };
+    validate(); this.inSnapshot = true;
+    try {
+      const result = evaluate();
+      if (result instanceof Promise) { void result.catch(() => undefined); fail('WORKFLOW_RECEIPT_STORAGE'); }
+      validate();
+      return result;
+    } finally { this.inSnapshot = false; }
+  }
   private tag(prepared: WorkflowHumanRequest, nonce: string, conversation?: NativeConversation): string {
-    const current = this.read();
+    // Each MAC still reopens/pins the direct single-link key and checks exact bytes.
+    // The complete native ACL check brackets the enclosing synchronous assessment.
+    const current = this.read(!this.inSnapshot);
     try { if (!timingSafeEqual(current, this.key)) fail('WORKFLOW_RECEIPT_STORAGE'); }
     finally { current.fill(0); }
     return createHmac('sha256', this.key).update(DOMAIN).update(nonce).update('\0')
@@ -249,13 +268,22 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
   const { directory, projectPath, policyContext } = options;
   const borrowed = fields(options.workStore, ['store', 'projectPath']);
   const workStore = { store: options.workStore.store, projectPath: borrowed.projectPath as string };
-  let selected: WorkflowService | undefined, receipts: ReceiptKey | undefined, closed = false;
+  let selected: WorkflowService | undefined, receipts: ReceiptKey | undefined, closed = false, closing = false;
+  let cleanup: Promise<void> | null = null;
   function close(): void {
-    closed = true;
-    try { selected?.close(); } finally { selected = undefined; receipts?.close(); receipts = undefined; }
+    // A synchronous busy refusal must retain the service/key so the host can drain it.
+    selected?.close(); closed = true;
+    try { receipts?.close(); } finally { selected = undefined; receipts = undefined; }
+  }
+  function closeAsync(): Promise<void> {
+    if (cleanup) return cleanup;
+    closing = true;
+    const service = selected;
+    cleanup = (async () => { await service?.waitForIdle(); close(); })();
+    return cleanup;
   }
   function opened(): WorkflowService {
-    if (closed) fail('WORKFLOW_CLOSED');
+    if (closed || closing) fail('WORKFLOW_CLOSED');
     if (!selected) {
       const identity = workflowProjectIdentity(projectPath);
       if(options.workAssociations&&options.workAssociations.projectId!==identity.projectId)fail('WORKFLOW_PROJECT');
@@ -266,6 +294,7 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
           directory, projectPath, workStore,
           ...(policyContext ? { policyContext } : {}),
           ...(options.verifiers ? {verifiers:options.verifiers} : {}),
+          authorizationSnapshot: evaluate => receipts!.withSnapshot(evaluate),
           authorizeHuman: command => receipts?.verify(representation(command), command.receiptHash, currentConversation() ?? undefined) === true,
         });
       } catch (error) { receipts.close(); receipts = undefined; throw error; }
@@ -469,6 +498,26 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
       bounded(result,[authority.controlToken,authority.agentToken]);return result;
     });
   }
+  async function verifySafe(input: unknown, request: IncomingMessage, authority: WorkflowHttpAuthority): Promise<WorkflowCommandResult & {conversation?: NativeConversation}> {
+    human(request, authority); bounded(input, [authority.controlToken, authority.agentToken]);
+    const a = fields(input, ['workflowId', 'stepKey', 'idempotencyKey']);
+    const workflowId = id(a.workflowId), stepKey = id(a.stepKey), idempotencyKey = id(a.idempotencyKey);
+    inConversation(workflowId);
+    const service = opened();
+    try {
+      const result = await service.verify({workflowId, stepKey, idempotencyKey});
+      // A changed native chat can never receive the old operation's output.
+      // The journal keeps the original outcome; this path does not bind or retry.
+      inConversation(workflowId);
+      return attested(result);
+    } catch (error) {
+      if (!(error instanceof ArcaneError) || ['WORKFLOW_RECEIPT_STORAGE', 'WORKFLOW_STORAGE',
+        'WORKFLOW_OWNER', 'WORKFLOW_PROJECT', 'MIGRATION'].includes(error.code)) {
+        try { close(); } catch { /* Preserve generic storage outcome. */ }
+      }
+      throw error;
+    }
+  }
   function receipt(input: unknown, request: IncomingMessage, authority: WorkflowHttpAuthority): WorkflowReceiptResponse {
     human(request, authority);
     bounded(input, [authority.controlToken, authority.agentToken]);
@@ -530,10 +579,10 @@ export function createWorkflowHost(options: WorkflowHostOptions) {
       const record = service.list().find(item => item.state !== 'halted' && bound(item.id));
       return record ? attested(service.get(record.id)) : null;
     }),
-    preview, execute, receipt,
+    preview, execute, receipt, verifySafe,
     prepareEvidence:(input:unknown,request:IncomingMessage,authority:WorkflowHttpAuthority)=>assistance(input,request,authority,'evidence') as WorkflowEvidencePreparationResponse,
     prepareDraft:(input:unknown,request:IncomingMessage,authority:WorkflowHttpAuthority)=>assistance(input,request,authority,'draft') as WorkflowDraftResponse,
-    close,
+    close, closeAsync,
   };
 }
 export type WorkflowHost = ReturnType<typeof createWorkflowHost>;

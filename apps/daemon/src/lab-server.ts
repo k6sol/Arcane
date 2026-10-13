@@ -1,3 +1,4 @@
+import { createWorkflowCodeHostVerifier, type WorkflowCodeHostConfiguration } from './workflow-code-host.js';
 import { createAssetConversationHost } from './asset-conversation-host.js';
 import { workflowNativeModel } from './workflow-native-model.js';
 import { mkdir } from 'node:fs/promises';
@@ -35,6 +36,8 @@ interface Options {
   learningService?: LearningService;
   /** Test-only service seam. Production creates the trusted personal-local service. */
   codexService?: CodexService;
+  /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
+  workflowCodeVerification?: WorkflowCodeHostConfiguration;
 }
 export async function createConnectionLab(options: Options) {
   const token = randomBytes(32).toString('hex');
@@ -72,10 +75,13 @@ export async function createConnectionLab(options: Options) {
         throw new ArcaneError('ASSET_CONVERSATION_PROJECT', 'The asset service and conversation store must attest the same project.');
       const workflowDirectory = join(options.stateDirectory, 'workflows');
       await mkdir(workflowDirectory, { recursive: true, mode: 0o700 });
+      const codeVerifier = options.workflowCodeVerification
+        ? await createWorkflowCodeHostVerifier(associations.projectPath, options.workflowCodeVerification) : null;
       workflow = createWorkflowHost({
         directory: workflowDirectory, projectPath: options.projectPath ?? options.cwd,
         workStore: { store: options.workStore, projectPath: options.projectPath ?? options.cwd },
         workAssociations: associations,
+        ...(codeVerifier ? { verifiers: [codeVerifier] } : {}),
         conversation: () => {
           const state = codex?.state(), thread = state?.snapshot?.thread;
           const identity = thread?.configured ? thread : state?.nativeHistory;
@@ -84,19 +90,19 @@ export async function createConnectionLab(options: Options) {
         modelSelection: () => workflowNativeModel(codex?.state()??null)?.proof.selection??null,
         policyContext: () => {
           const current=workflowNativeModel(codex?.state()??null);
-          return {connections:current?[current.connection,...connections.filter(c=>c.provider!=='codex')]:connections.filter(c=>c.provider!=='codex'),capabilities:[]};
+          return {connections:current?[current.connection,...connections.filter(c=>c.provider!=='codex')]:connections.filter(c=>c.provider!=='codex'),capabilities:[{id:'local.patch',state:'available',safety:'human-handoff'}]};
         },
       });
     }
-      conversationAssets = options.assetService && associations ? createAssetConversationHost({
-    projectPath: associations.projectPath, workAssociations: associations,
-    conversation: () => {
-      const state = codex?.state(), thread = state?.snapshot?.thread;
-      const identity = thread?.configured ? thread : state?.nativeHistory;
-      return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
-    },
-    start: async request => (await options.assetService!.start(request)).jobId,
-  }) : null;
+    conversationAssets = options.assetService && associations ? createAssetConversationHost({
+      projectPath: associations.projectPath, workAssociations: associations,
+      conversation: () => {
+        const state = codex?.state(), thread = state?.snapshot?.thread;
+        const identity = thread?.configured ? thread : state?.nativeHistory;
+        return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
+      },
+      start: async request => (await options.assetService!.start(request)).jobId,
+    }) : null;
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
@@ -199,7 +205,7 @@ export async function createConnectionLab(options: Options) {
           .catch(error => error as Error);
         server.closeAllConnections();
         const errors: unknown[] = [];
-        try { workflow?.close(); } catch (error) { errors.push(error); }
+        try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
         try { associations?.close(); } catch (error) { errors.push(error); }
         try { await codex?.close(); } catch (error) { errors.push(error); }
         const listenerError = await listenerClosed;

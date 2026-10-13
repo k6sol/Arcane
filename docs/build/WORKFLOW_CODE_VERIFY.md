@@ -57,13 +57,17 @@ const workflow = new WorkflowService({
 });
 ~~~
 
-The named host dependencies in this example belong to the parent integration.
-Register only after preflight reports available. The current service synthesizes
-`available` for registered verifier actions and filters matching observations from
-`policyContext`; the parent registry/host must preserve the adapter's observations
-if it needs to display runtime capability invalidation. The adapter itself refuses
-execution after compiler invalidation or unconfirmed child cleanup. Passing an
-unavailable compiler label from a browser cannot enable it.
+The host can now supply a synchronous `available` observer on a registration.
+Only exact true permits dispatch; invalidation, throws, asynchronous results and
+truthy nonbooleans deny. A policy-context label cannot override this observation.
+The production wrapper in [workflow-code-host.ts](../../apps/daemon/src/workflow-code-host.ts)
+binds the adapter's actual preflight/invalidation state to that observer. The raw
+adapter keeps its two-member action/verify contract; unrelated trusted fixed
+verifiers without an observer remain backward compatible. A browser cannot
+register a verifier or assert compiler availability.
+
+The real human-only route, configuration, shutdown drain and desktop limitations
+are documented in [WORKFLOW_CODE_HOST.md](WORKFLOW_CODE_HOST.md).
 
 The output directory must already exist and be covered by the same exact recipe
 scope as the inputs, for example scope `['src/feature']`. The adapter creates no

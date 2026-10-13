@@ -62,10 +62,10 @@ function assetRequest(value: unknown): AssetRequest {
     if (++nodes > 100000 || depth > 12) fail('INPUT');
     if (typeof item === 'string') {
       if (item.length > CUSTOM_REQUEST_BYTES) fail('INPUT');
-      bytes += Buffer.byteLength(item);
+      bytes += Buffer.byteLength(JSON.stringify(item));
     } else if (item === null || typeof item === 'boolean' ||
         (typeof item === 'number' && Number.isFinite(item))) {
-      bytes += 8;
+      bytes += Buffer.byteLength(JSON.stringify(item));
     } else if (item && typeof item === 'object' && !types.isProxy(item)) {
       const array = Array.isArray(item), prototype: unknown = Object.getPrototypeOf(item);
       if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) fail('INPUT');
@@ -76,12 +76,16 @@ function assetRequest(value: unknown): AssetRequest {
       const output: unknown[] = [];
       const length = array ? descriptors.length?.value as unknown : null;
       if (array && (typeof length !== 'number' || length > 100000 || keys.length !== length + 1)) fail('INPUT');
+      bytes += 2; // JSON container brackets/braces.
+      let count = 0;
       for (const key of keys as string[]) {
         if (array && key === 'length') continue;
         const descriptor = descriptors[key]!;
         if (!Object.hasOwn(descriptor, 'value') || !descriptor.enumerable ||
             (array && (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= (length as number)))) fail('INPUT');
-        bytes += Buffer.byteLength(key) + 3;
+        if (count++) bytes++; // Comma between serialized values.
+        // Array property names are not serialized as JSON object keys.
+        if (!array) bytes += Buffer.byteLength(JSON.stringify(key)) + 1;
         if (bytes > CUSTOM_REQUEST_BYTES) fail('INPUT');
         const child = copy(descriptor.value as unknown, depth + 1);
         if (array) output[Number(key)] = child;

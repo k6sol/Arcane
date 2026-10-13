@@ -34,6 +34,10 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     'Use the repository Playwright test runtime.');
   assert.ok(existsSync(EDGE));
   const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-browser-'));
+  const fixtureStarted = Date.now();
+  let lastPhase = 'setup';
+  const mark = (phase: string) => { lastPhase = phase; t.diagnostic('Fixture phase: ' + phase + ' elapsedMs=' + (Date.now() - fixtureStarted)); };
+  t.after(() => t.diagnostic('Final fixture phase: ' + lastPhase + ' elapsedMs=' + (Date.now() - fixtureStarted)));
   const projectPath = join(root, 'project'), resources = join(root, 'resources'), stateDirectory = join(root, 'connection-lab');
   const profile = join(root, 'edge-profile');
   const verification = join(SOURCE, 'runtime/verification', 'workflow-browser-' + randomUUID());
@@ -151,6 +155,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
       state.fixtureCspViolations.push(event.effectiveDirective + ': ' + event.blockedURI);
     });
   });
+  mark('initial-navigation');
   const navigation = await page.goto(app.origin + '/studio#' + app.token, { waitUntil: 'domcontentloaded' });
   assert.ok(navigation);
   const csp = navigation.headers()['content-security-policy']!;
@@ -192,8 +197,9 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   const executedResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/workflows/execute');
   await page.locator('[data-workflow-action="confirm"]').click();
   const commandResponse = await executedResponse;
-  assert.equal(commandResponse.status(), 200);
   const created = await commandResponse.json() as WorkflowSnapshot & { conversation: NativeConversation };
+  assert.equal(commandResponse.status(), 200, 'Workflow execute response: ' + JSON.stringify(created));
+  mark('workflow-created');
   assert.deepEqual(created.conversation, native);
   await page.waitForFunction(() => document.querySelector('#workflow-panel [role="status"]')?.textContent?.includes('recorded: created'));
   assert.equal(work.runs().length, 1);
@@ -281,6 +287,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     assert.equal(counters.nativeActions, 0);
     return body;
   };
+  mark('submit-evidence');
   const handedOff = await confirmDecision('submit-evidence', 'submitted', 'prompt', prepared => {
     assert.deepEqual(prepared.prepared.submission, preparedFiles.submission);
   });
@@ -289,6 +296,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.deepEqual(handedOff.workflow.submissions.find(s => s.key === 'prompt'), preparedFiles.submission);
   assert.equal(work.task(requirementsTaskId).state, 'pending');
 
+  mark('review-evidence');
   await page.locator('#workflow-action').selectOption('review');
   await page.locator('#workflow-decision').selectOption('approved');
   const reviewed = await confirmDecision('review-evidence', 'reviewed', 'prompt', prepared => {
@@ -309,6 +317,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   await page.locator('#workflow-gate').selectOption('model-handoff');
   await page.locator('#workflow-decision').selectOption('approved');
   assert.equal(await page.locator('[data-workflow-action="draft"]').isDisabled(), true);
+  mark('model-gate');
   const gated = await confirmDecision('recipe-gate', 'decided', 'requirements', prepared => {
     assert.equal(prepared.prepared.decision, 'approved');
     assert.equal(prepared.prepared.recipeGate!.gate, 'model-handoff');
@@ -335,6 +344,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   const textResponse = await draftReply;
   assert.equal(textResponse.status(), 200);
   assert.deepEqual(textResponse.request().postDataJSON(), { workflowId: created.workflow.id, stepKey: 'requirements' });
+  mark('draft-returned');
   const serverDraft = await textResponse.json() as WorkflowDraftResponse;
   assert.equal(serverDraft.workflowId, created.workflow.id);
   assert.equal(serverDraft.projectId, created.workflow.projectId);
@@ -378,6 +388,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     return !!warning&&!warning.hidden&&submit?.disabled;
   });
   assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
+  mark('native-draft-review');
   await page.locator('#codex-draft-review-button').click();
   await page.waitForFunction(() => (document.getElementById('codex-confirm') as HTMLDialogElement|null)?.open);
   const draftReview=await page.locator('#codex-confirm-preview').textContent();
@@ -395,14 +406,21 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
   assert.equal(counters.nativeActions, 0);
   assert.deepEqual(await page.evaluate(() => (window as typeof window & { fixtureCspViolations: string[] }).fixtureCspViolations), []);
-  const reloadStart = Date.now();
-  const currentResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/workflows/current-flow' && response.request().timing().startTime >= reloadStart)
-    .then(response => response.json() as Promise<WorkflowSnapshot & { conversation: NativeConversation }>);
+  // Read a response from an explicit post-navigation refresh. A timing-only
+  // filter can still select an old-document poll queued immediately before reload,
+  // whose response body Chromium correctly discards on navigation.
+  mark('reload');
   await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('#workflow-details > summary').click();
+  await page.waitForFunction(id => (document.getElementById('workflow-stored') as HTMLSelectElement | null)?.value === id, created.workflow.id);
+  const currentResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/workflows/current-flow')
+    .then(response => response.json() as Promise<WorkflowSnapshot & {conversation?: NativeConversation}>);
+  mark('post-reload-refresh');
+  await page.locator('[data-workflow-action="refresh"]').click();
+  mark('await-post-reload-response');
   const current = await currentResponse;
   assert.deepEqual(current.conversation, native);
   assert.equal(current.workflow.id, created.workflow.id);
-  await page.locator('#workflow-details > summary').click();
   await page.waitForFunction(id => {
     const action = document.getElementById('workflow-action') as HTMLSelectElement | null;
     return document.getElementById('workflow-stored') instanceof HTMLSelectElement &&
@@ -432,6 +450,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.ok(!visible.includes(app.token) && !visible.includes(app.agentToken));
   assert.equal(new URL(page.url()).hash, '');
   await page.locator('#workflow-panel').scrollIntoViewIfNeeded();
+  mark('screenshot');
   await page.screenshot({ path: screenshot, fullPage: false });
   assert.ok(lstatSync(screenshot).size > 1000);
   t.diagnostic('Owned Edge renderer with borrowed synthetic installed-cli metadata; actual CLI integration untested; installedCliStarts=' + counters.installedCliStarts + '; nativeActions=' + counters.nativeActions + '; version=' + context.browser()!.version() + '; screenshot=' + screenshot);

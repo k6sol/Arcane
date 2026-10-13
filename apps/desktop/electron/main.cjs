@@ -1,10 +1,11 @@
 'use strict';
-const { app, BrowserWindow, Menu, dialog, nativeTheme } = require('electron');
+const { app, BrowserWindow, Menu, dialog, nativeTheme, ipcMain } = require('electron');
 const { spawn } = require('node:child_process');
 const { join, resolve, basename } = require('node:path');
 const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
 const policy = require('./policy.cjs');
+const { createCodeVerification } = require('./code-verification.cjs');
 app.setName('Arcane'); app.setAppUserModelId('com.arcane.desktop'); app.enableSandbox();
 app.commandLine.appendSwitch('disable-background-networking');
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
@@ -16,6 +17,7 @@ if (smokeRoot) app.setPath('userData', policy.prepareSmokeDirectory(smokeRoot));
 else { try { app.setPath('userData', policy.prepareUserDirectory(app.getPath('userData'), { appData: app.getPath('appData'), localAppData: process.env.LOCALAPPDATA })); } catch { profilePreparationFailed = true; } }
 const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
+let codeVerification, projectSession;
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
@@ -45,6 +47,9 @@ async function startDaemon(project) {
     savedPort = saved.port; env.ARCANE_PORT = String(savedPort);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const entry = await policy.directPath(join(productRoot, 'dist/apps/daemon/src/product-main.js'), 'file');
+  // Host-owned settings are the sole source of compiler configuration. No inherited overrides survive.
+  const verification = codeVerification.daemonConfiguration({ projectId: key, projectPath: canonical, stateRoot });
+  Object.assign(env, verification.environment);
   const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   child = owned;
   await new Promise((resolve, reject) => {
@@ -62,6 +67,7 @@ async function startDaemon(project) {
   if (savedPort === null) await writeFile(portFile, JSON.stringify({ protocolVersion: 1, port: assignedPort }) + '\n', { flag: 'wx', mode: 0o600 });
   else if (assignedPort !== savedPort) throw new Error('Listener identity changed unexpectedly.');
   daemonReadyMs = performance.now() - started; projectPath = canonical;
+  projectSession = Object.freeze({ projectId: key, projectPath: canonical, stateRoot, activeSettingsHash: verification.settingsHash });
   owned.once('exit', () => { if (child === owned && !closing && !switching) { token = ''; origin = ''; void failStartup('The local runtime stopped. Your project records have been retained.'); } });
 }
 function makeWindow() {
@@ -103,6 +109,10 @@ function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'File', submenu: [{ label: 'Open project...', accelerator: 'CmdOrCtrl+O', click: () => void chooseProject() }, { type: 'separator' }, { label: 'Quit Arcane', accelerator: 'Alt+F4', click: () => app.quit() }] },
     { label: 'View', submenu: [{ label: 'Reload workspace', accelerator: 'CmdOrCtrl+R', click: () => { if (window && !switching && origin && token) window.webContents.reload(); } }, { role: 'togglefullscreen' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }] },
+    { label: 'Tool', submenu: [{ label: 'Configure Luau verification...', enabled: !smoke, click: () => {
+      void codeVerification.configure().catch(() => { if (window && !closing && !switching) void dialog.showMessageBox(window,
+        { type: 'error', title: 'Luau verification', message: 'Luau verification configuration is unavailable. Saved settings were retained.' }); });
+    } }] },
     { label: 'Help', submenu: [{ label: 'About Arcane', click: () => { if (window) void dialog.showMessageBox(window, { type: 'info', title: 'Arcane', message: 'Arcane 0.1.0 - Local development preview', detail: 'Your tools. Your workspace.\nThis build is unsigned. It does not automatically connect providers, edit Studio, publish, or train model weights.' }); } }] }
   ]));
 }
@@ -149,6 +159,11 @@ else {
   app.whenReady().then(async () => {
     try {
       nativeTheme.themeSource = 'dark';
+      codeVerification = createCodeVerification({ dialog, smoke, getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token) return null;
+        return { ...projectSession, window, origin, epoch: projectSession };
+      } });
+      codeVerification.installIpc(ipcMain);
       // Electron can create the profile before ready, so validate the report before the app launches (runner owns the empty root).
       if (smokeRoot) await policy.directPath(smokeRoot);
       userRoot = await ownedDirectory(app.getPath('userData'));

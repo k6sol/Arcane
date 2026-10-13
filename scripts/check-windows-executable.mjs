@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -43,6 +43,13 @@ export async function runBoundedChild(command, args, options = {}) {
     });
   });
 }
+/** Product build is required for actual EXE verification; importing the bounded
+ * subprocess helper alone does not load compiled product modules. Reuse the same
+ * checked metadata writer so cloud sharing locks cannot mask the original phase. */
+export async function writeVerificationProgress(directory, record) {
+  const { atomicAssetJson } = await import('../dist/packages/asset-pipeline/src/atomic-json.js');
+  await atomicAssetJson(directory, 'progress.json', JSON.stringify(record, null, 2) + '\n');
+}
 export async function checkWindowsExecutable(directory) {
   if (process.platform !== 'win32' || process.arch !== 'x64' || !isAbsolute(directory)) throw new Error('Use a Windows x64 host and an absolute Arcane bundle directory.');
   directory = await policy.directPath(directory);
@@ -54,8 +61,7 @@ export async function checkWindowsExecutable(directory) {
   async function progress(status, extra = {}) {
     const record = { schemaVersion: 1, kind: 'arcane-executable-verifier-progress', phase, status,
       elapsedMs: Date.now() - started, ...extra, inferenceStarted: false, studioOperations: 0 };
-    const target = join(reportDirectory, 'progress.json'), partial = join(reportDirectory, 'progress.partial');
-    await writeFile(partial, JSON.stringify(record,null,2)+'\n', { flag: 'wx' }); await rename(partial, target);
+    await writeVerificationProgress(reportDirectory, record);
     console.log(JSON.stringify({ phase, status, reportDirectory }));
   }
   async function integrity(stage) {
@@ -120,8 +126,12 @@ export async function checkWindowsExecutable(directory) {
     await writeFile(join(reportDirectory,'verification.json'),JSON.stringify(proof,null,2)+'\n',{flag:'wx'});
     phase = 'complete'; await progress('passed'); return proof;
   } catch (error) {
-    await progress('failed', { error: error instanceof Error ? error.message.slice(0,512) : 'Verification failed.' });
-    throw new Error('Executable verification failed in '+phase+'. Inspect '+reportDirectory+'. No retry or protection change was attempted.');
+    let progressSaved = true;
+    try { await progress('failed', { error: error instanceof Error ? error.message.slice(0,512) : 'Verification failed.' }); }
+    catch { progressSaved = false; } // Never replace the first failure with a second diagnostic-write error.
+    throw new Error('Executable verification failed in '+phase+'. Inspect '+reportDirectory+
+      (progressSaved ? '.' : '. Failure progress could not be saved; retained snapshots remain.')+
+      ' No process replay or protection change was attempted.', { cause: error });
   }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

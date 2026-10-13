@@ -176,6 +176,8 @@ export function readWorkflowSubmission(value: unknown): WorkflowSubmission {
   return normalized;
 }
 export interface WorkflowStepInput { workflowId: string; stepKey: string }
+export interface WorkflowSafeVerificationInput extends WorkflowStepInput { idempotencyKey: string }
+export type WorkflowSafeVerificationResult = WorkflowSnapshot & { result: 'submitted' | 'busy' | 'unsupported' | 'uncertain' };
 export interface WorkflowEvidenceInput extends WorkflowStepInput { files: { path: string; role: WorkflowSubmission['artifacts'][number]['role'] }[] }
 interface HelperScope extends WorkflowStepInput { workflowRevision: number; projectId: string; conversation: NativeWorkflowConversation | null }
 export interface WorkflowEvidenceResponse extends WorkflowStepInput {
@@ -232,7 +234,12 @@ export function readWorkflowSnapshot(value: unknown, projectId: string): Workflo
   const result = jsonCopy(value), r = row(result), w = row(r.workflow);
   if (hash(w.projectId) !== projectId) invalid(); identifier(w.id); recipe(w.recipe); member(w.state, STATES); hash(w.creationReceiptHash); integer(w.revision, 0, Number.MAX_SAFE_INTEGER);
   if (w.runId !== null) identifier(w.runId);
-  row(w.taskIds); row(w.taskStates); array(w.decisions, 256); array(w.attempts, 48);
+  row(w.taskIds); row(w.taskStates); array(w.decisions, 256);
+  array(w.attempts, 48).forEach(value => {
+    const a = exact(value, ['stepKey', 'number', 'subjectDigest', 'state']);
+    identifier(a.stepKey); integer(a.number, 1, 48); hash(a.subjectDigest);
+    member(a.state, ['running', 'busy', 'submitted', 'unsupported', 'uncertain']);
+  });
   array(w.submissions, 24).forEach(readWorkflowSubmission);
   if (w.operation !== null) { const op = row(w.operation); identifier(op.key); string(op.kind, 64); if (op.stepKey !== null) identifier(op.stepKey); }
   array(r.tasks, 24).forEach(value => { const t = row(value); identifier(t.key); string(t.state, 64); });
@@ -248,6 +255,40 @@ export function readWorkflowSnapshot(value: unknown, projectId: string): Workflo
     }
   }
   return result as WorkflowSnapshot;
+}
+/** An acknowledged report is evidence awaiting review, including partial unsupported checks. */
+export function readWorkflowSafeVerification(value: unknown, before: WorkflowSnapshot, input: WorkflowSafeVerificationInput,
+  conversation: NativeWorkflowConversation | null = null): WorkflowSafeVerificationResult {
+  const command = exact(input, ['workflowId', 'stepKey', 'idempotencyKey']);
+  identifier(command.workflowId); identifier(command.stepKey); identifier(command.idempotencyKey);
+  const snapshot = readWorkflowSnapshot(value, before.workflow.projectId);
+  const r = exact(snapshot, ['workflow', 'tasks', 'assessment', 'result'], ['conversation']);
+  const result = member(r.result, ['submitted', 'busy', 'unsupported', 'uncertain']) as WorkflowSafeVerificationResult['result'];
+  const w = snapshot.workflow, previous = before.workflow;
+  if (w.id !== input.workflowId || w.id !== previous.id || canonical(w.recipe) !== canonical(previous.recipe) ||
+      w.creationReceiptHash !== previous.creationReceiptHash || w.runId !== previous.runId ||
+      canonical(w.taskIds) !== canonical(previous.taskIds) || w.revision <= previous.revision) invalid();
+  if (conversation) {
+    const actual = nativeConversation(exact(r.conversation, ['provider', 'threadId', 'sessionId']) as unknown as NativeWorkflowConversation);
+    if (actual.provider !== conversation.provider || actual.threadId !== conversation.threadId || actual.sessionId !== conversation.sessionId) invalid();
+  } else if (r.conversation !== undefined) invalid();
+  const step = previous.recipe.steps.find(s => s.key === input.stepKey);
+  if (!step || step.execution !== 'local-verification' || step.provider || step.studio || step.gates.length) invalid();
+  if (w.attempts.length !== previous.attempts.length + 1 || canonical(w.attempts.slice(0, -1)) !== canonical(previous.attempts)) invalid();
+  const last = w.attempts.at(-1)!;
+  if (last.stepKey !== input.stepKey || last.number !== previous.attempts.filter(a => a.stepKey === input.stepKey).length + 1 || last.state !== result) invalid();
+  for (const key of Object.keys(previous.taskStates)) if (key !== input.stepKey && w.taskStates[key] !== previous.taskStates[key]) invalid();
+  if ((result === 'busy' || result === 'unsupported') && w.taskStates[input.stepKey] !== previous.taskStates[input.stepKey]) invalid();
+  if (result === 'uncertain') {
+    if (w.state !== 'uncertain' || w.operation?.key !== input.idempotencyKey || w.operation.kind !== 'verify' || w.operation.stepKey !== input.stepKey) invalid();
+  } else if (w.state !== 'active' || w.operation !== null) invalid();
+  if (result === 'submitted') {
+    const submission = w.submissions.find(s => s.key === input.stepKey), assessed = snapshot.assessment?.steps.find(s => s.key === input.stepKey);
+    if (w.taskStates[input.stepKey] !== 'needs_review' || !submission || !assessed || assessed.state === 'complete' || assessed.disposition === 'complete' ||
+        !submission.artifacts.some(a => a.role === 'report')) invalid();
+    assertEvidenceScope(submission.artifacts.map(a => a.path), step.scope);
+  } else if (result !== 'uncertain' && canonical(w.submissions) !== canonical(previous.submissions)) invalid();
+  return snapshot as WorkflowSafeVerificationResult;
 }
 export function readWorkflowPreview(value: unknown, input: WorkflowPreviewInput, projectId: string): PanelWorkflowPreview {
   // Preserve the entire returned object, including optional attested extensions.
@@ -275,13 +316,13 @@ export function readWorkflowPreview(value: unknown, input: WorkflowPreviewInput,
   return result as PanelWorkflowPreview;
 }
 
-/** Same-origin bounded transport; execute is never retried, even after cancellation. */
+/** Same-origin bounded transport; mutations are never retried, even after cancellation. */
 export class WorkflowPanelApi {
   constructor(private readonly token: string, private readonly transport: typeof fetch = globalThis.fetch, private readonly timeoutMs = 10000) {
     if (!token || /[\r\n]/.test(token) || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000) invalid();
   }
   private async request(path: string, method: 'GET' | 'POST', payload?: unknown, signal?: AbortSignal, responseLimit = WORKFLOW_RESPONSE_BYTES): Promise<unknown> {
-    const execute = path === '/execute';
+    const execute = path === '/execute' || path === '/verify-safe';
     const body = payload === undefined ? undefined : JSON.stringify(jsonCopy(payload, WORKFLOW_REQUEST_BYTES, 16, 16000));
     if (body?.normalize('NFKC').includes(this.token)) throw new WorkflowPanelError('Workflow content contains the control token.');
     if (signal?.aborted) throw new WorkflowPanelError('Request cancelled.');
@@ -344,6 +385,12 @@ export class WorkflowPanelApi {
   execute(preview: PanelWorkflowPreview, idempotencyKey: string, signal?: AbortSignal): Promise<unknown> {
     return this.request('/execute', 'POST', { preview, idempotencyKey: identifier(idempotencyKey) }, signal);
   }
+  verifySafe(input: WorkflowSafeVerificationInput, signal?: AbortSignal): Promise<unknown> {
+    const r = exact(input, ['workflowId', 'stepKey', 'idempotencyKey']);
+    return this.request('/verify-safe', 'POST', {
+      workflowId: identifier(r.workflowId), stepKey: identifier(r.stepKey), idempotencyKey: identifier(r.idempotencyKey),
+    }, signal);
+  }
 }
 
 /** A receipt check observes the original command; it never replays it. */
@@ -379,6 +426,11 @@ export function readWorkflowReceipt(value: unknown, preview: PanelWorkflowPrevie
 
 interface Context { token: string; path: string; native: NativeWorkflowConversation | null; model: RequestedModel | null; fingerprint: string; owner: string }
 interface Receipt { preview: PanelWorkflowPreview; idempotencyKey: string; state: 'confirmed' | 'unknown' | 'recorded' | 'refused' | 'reconciled'; workflowId: string | null; owner: string; result?: string }
+interface VerificationRequest {
+  input: WorkflowSafeVerificationInput; before: WorkflowSnapshot; owner: string;
+  conversation: NativeWorkflowConversation | null;
+  state: 'pending' | 'unknown' | 'observed' | 'refused'; result?: string;
+}
 const panels = new WeakMap<Document, WorkflowPanelController>();
 
 /** Builds only its owned subtree inside the parent's mount. Construction makes no request. */
@@ -422,6 +474,9 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   const stepSelect = field(actionFields, 'Step', 'select', 'step');
   const draftButton = button('Add step to chat draft', 'draft', actionFields);
   const draftHelp = make('p'); actionFields.append(draftHelp);
+  const verifyButton = button('Run pinned verification', 'verify-safe', actionFields);
+  const verifyHelp = make('p', 'Runs the registered verifier against pinned evidence and creates a report within the reviewed file scope. No model or Studio is called. A report does not complete or approve the step.');
+  actionFields.append(verifyHelp);
   const actionSelect = field(actionFields, 'Action', 'select', 'action'); choices(actionSelect, [['gate', 'Gate decision'], ['handoff', 'Submit actual evidence'], ['review', 'Review submitted evidence'], ['reconcile', 'Reconcile interrupted operation']]);
   const gateSelect = field(actionFields, 'Gate', 'select', 'gate');
   const decision = field(actionFields, 'Decision', 'select', 'decision'); choices(decision, [['approved', 'Approve'], ['rejected', 'Reject']]);
@@ -449,6 +504,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   let preview: { value: PanelWorkflowPreview; context: Context; generation: number } | null = null;
   let pendingController: AbortController | null = null;
   const receipts: Receipt[] = [], ownedFlows = new Map<string, string>();
+  const verificationRequests: VerificationRequest[] = [];
   const transport = options.fetch ?? doc.defaultView?.fetch.bind(doc.defaultView) ?? globalThis.fetch;
   const removers: (() => void)[] = [];
   const announce = (message: string): void => { notice.textContent = message; };
@@ -464,6 +520,11 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
     return { token, path, native: native ? jsonCopy(native) : null, model, owner, fingerprint: canonical({ token, path, native, model }) };
   };
   const unknownReceipt = (): Receipt | undefined => receipts.find(r => r.owner === context?.owner && (r.state === 'unknown' || r.state === 'confirmed'));
+  const unknownVerification = (): VerificationRequest | undefined => verificationRequests.find(r => r.owner === context?.owner && (r.state === 'pending' || r.state === 'unknown'));
+  const unknownCommand = (): boolean => !!unknownReceipt() || !!unknownVerification();
+  const unknownMessage = (): string => unknownVerification()
+    ? 'Verification outcome remains unknown. Refresh or inspect its workflow to observe the durable attempt. Nothing will be replayed.'
+    : 'Outcome remains unknown. Inspect the receipt and workflow, then explicitly reconcile.';
   const belongs = (value: WorkflowSnapshot | PanelWorkflowPreview, allowNew = false): boolean => {
     if (!context) return false;
     if (!options.getNativeConversation) return true;
@@ -505,6 +566,13 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       }
       receiptView.append(item);
     }
+    for (const request of verificationRequests.filter(r => r.owner === context?.owner)) {
+      const item = make('details');
+      item.append(make('summary', 'Pinned verification: ' + request.state + (request.result ? ' (' + request.result + ')' : '')),
+        make('p', 'Workflow: ' + request.input.workflowId + '\nStep: ' + request.input.stepKey + '\nIdempotency key: ' + request.input.idempotencyKey));
+      if (request.state === 'unknown') item.append(make('p', 'Refresh workflows or inspect this workflow to observe the original attempt. Verification will not be replayed.'));
+      receiptView.append(item);
+    }
   };
   const selectedStep = () => current?.workflow.recipe.steps.find(s => s.key === stepSelect.value);
   let evidenceOwner = '';
@@ -535,30 +603,40 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   };
   const draftReady = (): boolean => {
     const step = selectedStep(), a = current?.assessment?.steps.find(s => s.key === step?.key), model = context?.model, native = context?.native;
-    return !!current && current.workflow.state === 'active' && !current.workflow.operation && belongs(current) && !unknownReceipt() &&
+    return !!current && current.workflow.state === 'active' && !current.workflow.operation && belongs(current) && !unknownCommand() &&
       !!options.getModelSelection && !!options.appendToDraft && !!native && !!model &&
       step?.execution === 'native-handoff' && a?.disposition === 'human-handoff' && a.state === 'pending' && !a.blockers.length &&
       canonical(step.provider?.selection ?? null) === canonical(model) && (native.provider === 'codex' ? model.provider === 'codex' : model.provider === 'claude');
   };
+  const verificationReady = (): boolean => {
+    const step = selectedStep(), a = current?.assessment?.steps.find(s => s.key === step?.key);
+    if (!current || !listing || current.workflow.state !== 'active' || current.workflow.operation || !belongs(current) ||
+        unknownCommand() || preview || step?.execution !== 'local-verification' || step.provider || step.studio || step.gates.length ||
+        a?.disposition !== 'verify' || a.state !== 'pending' || a.blockers.length || current.workflow.attempts.length >= 48) return false;
+    const attempts = current.workflow.attempts.filter(a => a.stepKey === step.key), last = attempts.at(-1);
+    return attempts.length === 0 || (last?.state === 'busy' && step.retry.reason === 'evidence-read-busy' &&
+      Number.isSafeInteger(step.retry.maxAttempts) && attempts.length < step.retry.maxAttempts);
+  };
   const controls = (): void => {
     syncEvidenceOwner(); renderFileInputs(); const active = running && !disposed && !busy;
     refreshButton.disabled = !active; inspectButton.disabled = !active || !selectedFlow.value; selectedFlow.disabled = !active;
-    fields.disabled = !active || !!unknownReceipt() || !!preview || !!(options.getNativeConversation && !context?.native);
+    fields.disabled = !active || unknownCommand() || !!preview || !!(options.getNativeConversation && !context?.native);
     recipeButton.disabled = fields.disabled || !listing;
     const editable = !!current && belongs(current) && current.workflow.state !== 'halted';
     actionFields.disabled = !active || !editable || !!preview;
     const step = current?.workflow.recipe.steps.find(s => s.key === stepSelect.value), mode = actionSelect.value;
     const uncertain = current?.workflow.state === 'uncertain' && !!current.workflow.operation;
-    actionButton.disabled = actionFields.disabled || !listing || (mode === 'reconcile' ? !uncertain : !!unknownReceipt() || uncertain || !step) ||
+    actionButton.disabled = actionFields.disabled || !listing || (mode === 'reconcile' ? !uncertain : unknownCommand() || uncertain || !step) ||
       (mode === 'handoff' && step?.execution === 'local-verification') || (mode === 'gate' && !gateSelect.value) ||
       (mode === 'review' && current?.workflow.taskStates[stepSelect.value] !== 'needs_review');
     stepSelect.parentElement!.hidden = mode === 'reconcile'; gateSelect.parentElement!.hidden = mode !== 'gate';
     decision.parentElement!.hidden = mode !== 'gate' && mode !== 'review';
     manualEvidence.hidden = mode !== 'handoff'; evidence.parentElement!.hidden = mode !== 'handoff'; evidenceHelp.hidden = mode !== 'handoff';
-    const canReadFiles = !!step && step.execution !== 'local-verification' && current?.workflow.state === 'active' && !current.workflow.operation && !unknownReceipt() && current.assessment?.steps.find(s => s.key === step.key)?.disposition === 'human-handoff';
+    const canReadFiles = !!step && step.execution !== 'local-verification' && current?.workflow.state === 'active' && !current.workflow.operation && !unknownCommand() && current.assessment?.steps.find(s => s.key === step.key)?.disposition === 'human-handoff';
     fileFields.hidden = mode !== 'handoff' || step?.execution === 'local-verification';
     evidenceButton.hidden = fileFields.hidden; evidenceButton.disabled = actionFields.disabled || !listing || !canReadFiles;
     draftButton.disabled = actionFields.disabled || !listing || mode === 'reconcile' || !draftReady();
+    verifyButton.disabled = actionFields.disabled || mode === 'reconcile' || !verificationReady();
     draftHelp.textContent = !options.appendToDraft ? 'Chat draft integration is unavailable.' : !context?.model || !options.getModelSelection ? 'An exact active model observation is required to prepare a chat draft.' : !draftReady() ? 'Select a native handoff step whose reported readiness is human-handoff.' : 'Adds the server-prepared step to the existing draft. Review and submit it explicitly.';
     resolution.parentElement!.hidden = mode !== 'reconcile';
     const needsMapping = mode === 'reconcile' && resolution.value === 'accept-observed' && current?.workflow.operation?.kind === 'create-recipe';
@@ -582,6 +660,12 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       detail.append(make('summary', 'Scope, evidence and gates'), make('p', 'Execution: ' + step.execution + '\nScope: ' + step.scope.join(', ') + '\nGates: ' + (step.gates.join(', ') || 'None') + '\nDependencies: ' + (step.dependencies.join(', ') || 'None')),
         make('p', step.instructions), make('p', step.acceptance), make('pre', JSON.stringify({ quality: step.quality, provider: step.provider, studio: step.studio, retry: step.retry }, null, 2)));
       item.append(detail); steps.append(item);
+      const submission = workflow.submissions.find(s => s.key === step.key);
+      if (step.execution === 'local-verification' && submission) {
+        const checks = make('ul');
+        for (const check of submission.checks) checks.append(make('li', check.id + ': ' + check.outcome));
+        item.append(make('p', 'Verification report: ' + submission.artifacts.filter(a => a.role === 'report').map(a => a.path).join(', ') + '. Evidence requires review; report creation is not step completion.'), checks);
+      }
     }
     flowView.append(steps);
     const previous = stepSelect.value; choices(stepSelect, workflow.recipe.steps.map(s => [s.key, s.title] as const));
@@ -592,6 +676,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
   const invalidate = (message: string, clear = true): void => {
     generation++; pendingController?.abort(); pendingController = null; busy = false; erasePreview();
     for (const r of receipts) if (r.state === 'confirmed') r.state = 'unknown';
+    for (const r of verificationRequests) if (r.state === 'pending') r.state = 'unknown';
     if (clear) { clearEvidence(); evidenceOwner = ''; current = null; listing = null; context = null; title.value = ''; prompt.value = ''; scope.value = ''; plannedEvidence.value = ''; evidence.value = ''; mapping.value = ''; fileStep = ''; fileInputs.clear(); fileFields.replaceChildren(); evidenceSummary.textContent = ''; evidenceSummary.hidden = true; choices(selectedFlow, [['', 'Refresh to load workflows']]); flowView.replaceChildren(); contextLine.textContent = ''; }
     announce(message); controls();
   };
@@ -618,6 +703,27 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
         // Refresh locates the workflow; it never declares an unknown command successful.
       }
     }
+    if (!belongs(snapshot)) return;
+    for (const request of verificationRequests) {
+      if (request.owner !== context?.owner || request.state !== 'unknown' || request.input.workflowId !== snapshot.workflow.id ||
+          request.before.workflow.projectId !== snapshot.workflow.projectId || canonical(request.before.workflow.recipe) !== canonical(snapshot.workflow.recipe) ||
+          snapshot.workflow.revision <= request.before.workflow.revision ||
+          canonical(snapshot.workflow.attempts.slice(0, request.before.workflow.attempts.length)) !== canonical(request.before.workflow.attempts)) continue;
+      if (request.conversation) {
+        try {
+          const native = nativeConversation(exact((snapshot as unknown as Row).conversation, ['provider', 'threadId', 'sessionId']) as unknown as NativeWorkflowConversation);
+          if (native.provider !== request.conversation.provider || native.threadId !== request.conversation.threadId || native.sessionId !== request.conversation.sessionId) continue;
+        } catch { continue; }
+      }
+      const attempt = snapshot.workflow.attempts[request.before.workflow.attempts.length];
+      if (attempt?.stepKey === request.input.stepKey && attempt.number === request.before.workflow.attempts.filter(a => a.stepKey === request.input.stepKey).length + 1 &&
+          ['busy', 'submitted', 'unsupported', 'uncertain'].includes(attempt.state)) {
+        request.state = 'observed'; request.result = attempt.state;
+      } else if (snapshot.workflow.state === 'uncertain' && snapshot.workflow.operation?.key === request.input.idempotencyKey &&
+          snapshot.workflow.operation.kind === 'verify' && snapshot.workflow.operation.stepKey === request.input.stepKey) {
+        request.state = 'observed'; request.result = 'uncertain';
+      }
+    }
   };
   const refresh = async (): Promise<void> => {
     if (!running || disposed || busy) return;
@@ -639,7 +745,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
         if (snapshot) observeReceipt(snapshot);
         choices(selectedFlow, [['', 'Select a stored workflow'], ...listValue.workflows.map(w => [w.id, w.id + ' (' + w.state + ')'] as const)]);
         if (snapshot) selectedFlow.value = snapshot.workflow.id;
-        showFlow(); announce(unknownReceipt() ? 'Outcome remains unknown. Inspect the receipt and workflow, then explicitly reconcile.' : 'Workflow state read.');
+        showFlow(); announce(unknownCommand() ? unknownMessage() : 'Workflow state read.');
       } finally { end(op.epoch); }
     } catch (error) { if (refreshEpoch === generation && running && !disposed) invalidate(error instanceof WorkflowPanelError ? error.message : 'Workflow state could not be read. Refresh explicitly.'); }
   };
@@ -650,12 +756,12 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       const id = identifier(selectedFlow.value), value = readWorkflowSnapshot(await api(op.ctx).get(id, op.controller.signal), listing.projectId);
       if (value.workflow.id !== id) invalid();
       if (!live(op)) return;
-      current = value; observeReceipt(value); showFlow(); announce(unknownReceipt() ? 'Outcome remains unknown. Inspect the interrupted operation before reconciliation.' : 'Selected workflow read.');
+      current = value; observeReceipt(value); showFlow(); announce(unknownCommand() ? unknownMessage() : 'Selected workflow read.');
     } finally { end(op.epoch); }
   };
   const helperExpected = (ctx: Context): HelperScope => {
     const step = selectedStep();
-    if (!listing || !current || !step || current.workflow.state !== 'active' || current.workflow.operation || !belongs(current) || unknownReceipt()) throw new WorkflowPanelError('Inspect a current workflow linked to this conversation before preparing files or a draft.');
+    if (!listing || !current || !step || current.workflow.state !== 'active' || current.workflow.operation || !belongs(current) || unknownCommand()) throw new WorkflowPanelError('Inspect a current workflow linked to this conversation before preparing files or a draft.');
     return { projectId: listing.projectId, workflowId: current.workflow.id, stepKey: step.key, workflowRevision: current.workflow.revision, conversation: ctx.native };
   };
   const helperCurrent = (expected: HelperScope): void => {
@@ -722,7 +828,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
     } finally { end(op.epoch); }
   };
   const recipeInput = (): WorkflowPreviewInput => {
-    if (unknownReceipt()) throw new WorkflowPanelError('Reconcile the unknown command before creating more work.');
+    if (unknownCommand()) throw new WorkflowPanelError('Inspect and resolve the unknown command before creating more work.');
     if (options.getNativeConversation && !context?.native) throw new WorkflowPanelError('Use an observed native conversation before preparing work.');
     const paths = scope.value.split(/\r?\n/).map(p => p.trim()).filter(Boolean).map(relativePath);
     if (!paths.length || paths.length > 20) throw new WorkflowPanelError('Enter 1–20 relative file scopes.');
@@ -752,7 +858,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       }
       return { action: 'reconcile', workflowId, resolution: resolve, ...(observedRun ? { observedRun } : {}) };
     }
-    if (unknownReceipt() || current.workflow.state !== 'active') throw new WorkflowPanelError('Refresh and reconcile before another decision.');
+    if (unknownCommand() || current.workflow.state !== 'active') throw new WorkflowPanelError('Refresh and reconcile before another decision.');
     const step = current.workflow.recipe.steps.find(s => s.key === stepSelect.value); if (!step) invalid();
     if (action === 'handoff') {
       if (step.execution === 'local-verification') throw new WorkflowPanelError('Verification evidence must come from the host verifier.');
@@ -831,6 +937,40 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       if (live(op)) announce(receipt?.state === 'unknown' ? 'Outcome unknown. Refresh and explicitly reconcile. Nothing was retried.' : error instanceof WorkflowPanelError ? error.message : 'Workflow command could not be confirmed.');
     } finally { end(op.epoch); }
   };
+  const runVerification = async (): Promise<void> => {
+    checkContext();
+    if (!verificationReady() || !current) throw new WorkflowPanelError('Select a local verification step with current host readiness. Refresh before running it.');
+    const before = freezeData(jsonCopy(current)), stepKey = identifier(stepSelect.value), op = begin();
+    let request: VerificationRequest | undefined, dispatched = false;
+    try {
+      if (verificationRequests.length >= 32) {
+        const removable = verificationRequests.findIndex(r => r.state === 'observed' || r.state === 'refused');
+        if (removable < 0) throw new WorkflowPanelError('Inspect pending verification requests before running another verifier.');
+        verificationRequests.splice(removable, 1);
+      }
+      const input = { workflowId: before.workflow.id, stepKey, idempotencyKey: identifier((doc.defaultView?.crypto ?? globalThis.crypto).randomUUID()) };
+      request = { input, before, owner: op.ctx.owner, conversation: op.ctx.native, state: 'pending' };
+      verificationRequests.push(request); showReceipts(); announce('Running pinned verification. Awaiting report creation…');
+      dispatched = true;
+      const raw = await api(op.ctx).verifySafe(input, op.controller.signal);
+      if (!live(op)) { request.state = 'unknown'; return; }
+      const snapshot = readWorkflowSafeVerification(raw, before, input, op.ctx.native);
+      if (!belongs(snapshot)) invalid();
+      request.state = 'observed'; request.result = snapshot.result; current = snapshot; showFlow();
+      const messages = {
+        submitted: 'Verification report created. Review measured checks and blockers before accepting the evidence.',
+        busy: 'Pinned evidence read was busy. No report was submitted. Another run requires an explicit click and current host readiness.',
+        unsupported: 'Pinned verification is unsupported. No report was submitted. Inspect the reported blockers.',
+        uncertain: 'Verification outcome is uncertain. Inspect the original attempt and explicitly reconcile the workflow.',
+      };
+      announce(messages[snapshot.result]);
+    } catch (error) {
+      const stillLive = live(op);
+      if (request) request.state = !stillLive || (dispatched && !(error instanceof WorkflowPanelError && !error.unknownOutcome &&
+        error.message === 'Workflow request refused. Refresh before preparing another decision.')) ? 'unknown' : 'refused';
+      if (stillLive) announce(request?.state === 'unknown' ? unknownMessage() : error instanceof WorkflowPanelError ? error.message : 'Pinned verification could not be confirmed.');
+    } finally { end(op.epoch); }
+  };
   const checkReceipt = async (key: string): Promise<void> => {
     const receipt = receipts.find(r => r.idempotencyKey === key && r.owner === context?.owner && r.state === 'unknown');
     if (!receipt) throw new WorkflowPanelError('Inspect an unknown original receipt first.');
@@ -874,6 +1014,7 @@ export function startWorkflowPanel(doc: Document, options: WorkflowPanelOptions)
       else if (action === 'inspect') await inspect();
       else if (action === 'evidence-files') await prepareFiles();
       else if (action === 'draft') await addDraft();
+      else if (action === 'verify-safe') await runVerification();
       else if (action === 'recipe') await prepare(recipeInput());
       else if (action === 'decision') await prepare(decisionInput());
       else if (action === 'confirm') await confirm();

@@ -27,10 +27,11 @@
       "evidence": [
         "tests/plugin/package.test.mjs",
         "tests/plugin/runtime.test.mjs",
-        "plugin/build/manifest.json"
+        "plugin/build/manifest.json",
+        "runtime/verification/plugin-current-NzqkeW/checks.json"
       ],
       "priorAgentId": "01a12ce4-48a7-7b22-a52c-7d98d076cd16",
-      "note": "16 package/compiler/VM tests passed, 263 checks on explicit engine doubles per module/bundle path; actual installed-plugin acceptance deferred by user."
+      "note": "Current rebuiltpluginmanifest/sourcecheck and16/16 package/officialcompiler/realLuauVM checks passed with263logic cases each on explicitmodule/bundle engine+GUI doubles. No skips in configuredfollowup. Actual Studio loading/keyHTTP/dirtyeditor/restore acceptance remainsuserdeferred; no nativeengine operations or installation."
     },
     {
       "id": "UI-01",
@@ -85,7 +86,7 @@
         "tests/unit/asset-persistence.test.ts"
       ],
       "priorAgentId": "01a12ce4-58e5-7123-a8c4-2ea0d168b0c5",
-      "note": "Original retained failed index replacement was byte-identical to the later index (1436 bytes/hash recorded). Implemented checked atomic writes/coalescing/tail flush/shared-close; parent27/27 deterministic faults pass. Original errno is unknown: no antivirus/OneDrive cause claim. Fresh broad regression and actual current asset production/EXE verification remain open."
+      "note": "Checked atomic metadata writes, event-index coalescing, stable-tail cancellation flush and shared shutdown barrier are implemented. Parent29/29 persistence/atomic checks and original recipe-history cancellation passed; original failed duplicate index snapshot/unknown errno evidence remains. The sealed 48-file compiled run finished922 tests:910pass2 HTTP fixture timeouts10 explicitskips; no compiledtestchanged. It is not a green regression. General artistic production, rig/import and live engine acceptance remain incomplete."
     },
     {
       "id": "NATIVE-01",
@@ -291,9 +292,10 @@
         "runtime/verification/desktop-final-BLpPDQ/verification.json",
         "runtime/verification/windows-executable-PkH94q/verification.json",
         "runtime/verification/windows-executable-yIouOo/verification.json",
-        "runtime/verification/workflow-browser-987af8d5-23a8-4159-9fe7-c8727f1d12b7/workflow.png"
+        "runtime/verification/workflow-browser-987af8d5-23a8-4159-9fe7-c8727f1d12b7/workflow.png",
+        "runtime/verification/windows-executable-MTy15F/verification.json"
       ],
-      "note": "Fresh q8SmAm portable EXE contains merged reference palette/navigation, exact conversation workflows, authenticated receipt recovery, host-attested active model selection and safe same-thread model switching. Actual EXE17/17 launch/isolation/lifecycle checks passed, before/after manifest853fd8ae5c95efd39e6339b44531bfa5596b3fefd840ff9ecef10ab58e4cd6d5 identical; daemon2397ms/firstdisplay3674ms. Offline UI inventory/accessibility/verifier53/53; focused model/controller/nativeNode fixtures137pass/4browseropt-in-skips, separate realEdge/Node21/21; previously contended receipt case3/3 serialized. No live Studio or further installed-CLI model inference. Unsigned directory, not installer; full-product acceptance remains open. Latest HXzXob candidate has integrity-only proof; do not distribute it as verified. q8SmAm remains the previous sealed launch-verified build. Current asset history failure must be resolved and candidate retested first."
+      "note": "Immutable HGIS8g portable local test build is actual launch-verified: 17/17 idle/startup/import/isolation/shutdown/parent-loss checks, unchanged manifest ff3d530d7b719423a825fbf630f23a9092eee2dbc29ed5c44ee3ce8bf99d3946. First UI 3931ms. Unsigned directory, not installer/full product/native acceptance. The newer bounded page optimization is not in this sealed bundle and requires later repack. Original bOLbNs progress.partial failure retained; fixed verifier writer regressions11/11."
     },
     {
       "id": "WORKFLOW-RECIPES-01",
@@ -362,7 +364,7 @@
         "tests/unit/conversation-work-store.test.ts",
         "docs/build/CONVERSATION_WORK.md"
       ],
-      "note": "Durable workflow/native associations plus new host-side asset adapter; agent54/54 adapter/storage checks pass with zero skipped. Production human-only conversation-start/jobs routes now wired, UI/HTTP verification still in progress. Legacy/global/agent asset jobs remain unscoped and are never backfilled."
+      "note": "Parent54/54 real association storage/asset-adapter checks passed. Production workflow and human asset lifecycles use exact canonical project/provider/thread/session bindings. Global/legacy/agent-token jobs remain explicitly unscoped; absence never backfills. Native MCP job creation still needs per-turn host-attested conversation authority rather than inferring current UI chat."
     },
     {
       "id": "WORKFLOW-ASSISTANCE-01",
@@ -400,13 +402,70 @@
         "apps/daemon/src/asset-conversation-host.ts",
         "tests/unit/asset-conversation-host.test.ts",
         "apps/daemon/src/asset-routes.ts",
-        "docs/build/ASSET_CONVERSATION_HOST.md"
+        "docs/build/ASSET_CONVERSATION_HOST.md",
+        "apps/desktop/src/studio.ts",
+        "apps/desktop/public/studio.html",
+        "tests/unit/asset-conversation-ui.test.ts",
+        "tests/unit/asset-conversation-http.test.ts",
+        "runtime/verification/asset-repair-08c6ba5b-218e-41c7-8f76-c640d00a46e6/runner.mjs",
+        "runtime/verification/asset-repair-08c6ba5b-218e-41c7-8f76-c640d00a46e6/focused.json",
+        "runtime/verification/workflow-browser-8797f444-c066-4f8c-b67e-87837c7e6bbd/workflow.png",
+        "apps/daemon/src/asset-conversation-page.ts",
+        "tests/unit/asset-conversation-page.test.ts",
+        "tests/unit/asset-conversation-page-review.test.ts",
+        "runtime/verification/windows-executable-MTy15F/verification.json"
       ],
-      "note": "Adapter/corestorageagent54/54; real daemonroutes implemented; UI/HTTP tests and current executable not yet verified."
+      "note": "Production human-only start/history and same-chat UI are wired. Parent58/58 page/HTTP/UI checks,26/26 boundary cases including independent cursor-growth reproduction, and2/2 strict original8s HTTP cases passed. Native associations use one regular or at most one verified prefix metadata read, complete512KiB records,1..64 binding count, exact stored cursors and no rebind/replay. Isolated owned browser workflow1/1 passed; borrowed synthetic provider only. The sealed original compiled inventory finished922/910pass2HTTPtimeouts10skips; original proofs retained, source has advanced since; actual native provider/engine and refreshed bundle acceptance remain open."
+    },
+    {
+      "id": "WORKFLOW-CODE-HOST-01",
+      "title": "Production human-triggered Luau verification",
+      "owner": "parent",
+      "state": "in_progress",
+      "dependsOn": [
+        "WORKFLOW-RECIPES-01"
+      ],
+      "acceptance": "Actual fixed compiler on pinned scoped code through production human-only exact-native-chat route and UI; live capability invalidation and durable no-replay outcomes; syntax evidence never claims type/security/regression approval.",
+      "evidence": [
+        "apps/daemon/src/workflow-code-host.ts",
+        "apps/daemon/src/workflow-service.ts",
+        "apps/daemon/src/lab-server.ts",
+        "apps/daemon/src/product-main.ts",
+        "apps/daemon/src/workflow-host.ts",
+        "apps/daemon/src/workflow-routes.ts",
+        "tests/unit/workflow-code-host.test.ts",
+        "tests/unit/workflow-verifier-availability.test.ts",
+        "docs/build/WORKFLOW_CODE_HOST.md",
+        "runtime/verification/code-host-current-9DYI98/unit.json",
+        "runtime/verification/code-host-optimized-gyfnaL/official.json",
+        "apps/desktop/src/workflow-panel.ts",
+        "tests/unit/workflow-safe-verify-ui.test.ts",
+        "runtime/verification/authorization-snapshot-sidecar-f6265a61/unit.json",
+        "tests/unit/workflow-http.test.ts",
+        "runtime/verification/verifier-ui-current-KbOqo2/unit.json",
+        "C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/authorization-parent-sNqGiA/checks.json"
+      ],
+      "note": "ActualproductionHTTP→officialLuau acceptance1/1passed in158622ms for38ownedHTTPactions (verify-safe6993ms), syntheticnative metadata only, no provider/Studio. Outputhashes/no-source-execution/duplicatecommandno-repeat/fullqualityblocked confirmed. Parentfreshcombined157/157 UI/panel/availability/shutdown/page checks passed withno skips; unchangedcompiledpins recorded. Parentavailability/shutdown26checks pass on separatecompiledsnapshot; Parent7/7 passed:5 permissionboundary/keymutation/freshness checks +2 originalHTTP cases, unchanged8s/5s deadlines. FullnativeACLrules/5000ms+perMACpinsunchanged. Original120s totalcancel/15sHTTPtimeout proofskept. Secondfreshcompile128passed aftersecuritytestupload; currentTSsources integrated. CLIhostconfig only—Electronsettings notwired; unsignedEXEoldsnapshotstill17checks. Partialsyntax is notfullcodequality orproductcompletion."
+    },
+    {
+      "id": "DESKTOP-RUNNER-01",
+      "title": "Durable bounded desktop verification automation",
+      "owner": "parent",
+      "state": "verified_component",
+      "dependsOn": [
+        "DESKTOP-EXE-01"
+      ],
+      "acceptance": "Stage-specific budgets cover actualinventory, logs/progress survivefailure, ownchildcleanup requires terminalacknowledgement, no automaticretry or false native/fullproductclaim.",
+      "evidence": [
+        "scripts/desktop-pipeline.mjs",
+        "tests/release/desktop-pipeline-runner.test.mjs",
+        "runtime/verification/desktop-write-count-sidecar-2k3sQc/summary.json"
+      ],
+      "note": "Independent18/18casespass including8invalidwrite-count boundarydoublecases afterreproducedpre-fix boundedfailure. Compile5min/plugin2min/unitbrowser45min/offline15min whole-stage bounds only; securitychecker/fixturedeadlinesunchanged. Parentreviewcaughtzero-write infinite-looprisk andguardadded. Realupdatedfullpipeline notyetexecuted; stageonlyproofdoesnotverifychildnativebehavior."
     }
   ],
-  "updatedAt": "2026-10-12",
-  "previousTurnClassification": "progress: prior ETA/workflow advice turns alone were no progress; current continuation inspected authoritative worktree, retained original failed index and precise hashes. Implemented checked atomic metadata replacement, index coalescing, cancellation tail draining and shared-close barrier; 27/27 deterministic parent fault checks pass. Parallel actual conversation/asset adapter and strict identity-bound storage complete (agent54/54), production route/UI integration and further verification in progress. No actual Studio/provider turns, antivirus changes, commits or pushes.",
+  "updatedAt": "2026-10-13",
+  "previousTurnClassification": "progress: actualofficialLuau productionroute1/1passed, report/source/compilerpinsanddurableno-replay/blockedqualityverified. CompleteUI+liveavailability+shutdown source integrated/rootcompile128. Independentsecuritybracketing5denialchecks andUI26+79pass. Parentfreshcombined157/157 passed; secondcompile128 andparent7/7denial/originalHTTPpairpassed; sourceproofsretain originalfailedtimeouts. Durablepipeline budget/loglifecycle sidecarongoing, actualnativeprovider/Studio remainuserdeferred. No gitpublishing. Rebuiltplugin16/16actualcompiler/VMdoublespass; durablepipeline18checks andzero-writeguardintegrated. DoctorreadyToLaunch true onlylocalfiles/dependencies; liveprovider/Studio/runtimeartacceptance notinferred.",
   "requiredCompletionStillOpen": [
     "native-plugin-key-only-widget-and-http",
     "dirty-editor-and-selective-restore-native",

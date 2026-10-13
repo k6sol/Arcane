@@ -12,7 +12,7 @@ const STATUS: Record<string, number> = {
   WORKFLOW_RECORD: 404, WORKFLOW_BINDING: 409, WORKFLOW_EVIDENCE: 409,
   WORKFLOW_STATE: 409, WORKFLOW_BLOCKED: 409, WORKFLOW_MAPPING: 409,
   WORKFLOW_IDEMPOTENCY: 409, WORKFLOW_CONFLICT: 409, WORKFLOW_UNCERTAIN: 202,
-  WORKFLOW_BUSY: 409, WORKFLOW_CAPACITY: 429, WORKFLOW_VERIFIER: 409,
+  WORKFLOW_BUSY: 409, WORKFLOW_RETRY: 409, WORKFLOW_CAPACITY: 429, WORKFLOW_VERIFIER: 409,
   WORKFLOW_CLOSED: 503, WORKFLOW_CONTEXT: 503, WORKFLOW_PROJECT: 503,
   WORKFLOW_OWNER: 503, WORKFLOW_STORAGE: 503, WORKFLOW_RECEIPT_STORAGE: 503,
   MIGRATION: 503,
@@ -169,14 +169,15 @@ export function workflowRoutes(host: WorkflowHost) {
       if (request.url !== url.pathname || url.pathname.length > 160) throw new LearningHttpError('TARGET', 400);
       const endpoint = url.pathname === PREFIX ? '' : url.pathname.slice(PREFIX.length + 1);
       const authority = { controlToken, origin, agentToken };
-      if (endpoint === 'preview' || endpoint === 'execute' || endpoint === 'receipt' || endpoint === 'evidence' || endpoint === 'draft') {
+      if (endpoint === 'preview' || endpoint === 'execute' || endpoint === 'receipt' || endpoint === 'evidence' || endpoint === 'draft' || endpoint === 'verify-safe') {
         if (request.method !== 'POST') throw new LearningHttpError('METHOD', 405);
         const input = await body(request);
-        const result = endpoint === 'preview' ? host.preview(input, request, authority) :
+        const result = endpoint === 'verify-safe' ? await host.verifySafe(input, request, authority) :
+          endpoint === 'preview' ? host.preview(input, request, authority) :
           endpoint === 'receipt' ? host.receipt(input, request, authority) :
           endpoint === 'evidence' ? host.prepareEvidence(input,request,authority) :
           endpoint === 'draft' ? host.prepareDraft(input,request,authority) : host.execute(input, request, authority);
-        send(200, result); return true;
+        send(endpoint === 'verify-safe' && (result as {result?:unknown}).result === 'uncertain' ? 202 : 200, result); return true;
       }
       if (endpoint !== '' && endpoint !== 'current-flow' && !/^[a-zA-Z0-9_-]{1,64}$/.test(endpoint)) {
         throw new LearningHttpError('NOT_FOUND', 404);

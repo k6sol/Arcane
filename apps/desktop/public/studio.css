@@ -200,5 +200,11 @@ button{background:var(--action)}
 #workflow-panel .arcane-workflow [hidden]{display:none!important}
 #workflow-panel .arcane-workflow .workflow-preview{border-top:2px solid #b73737;margin-top:16px;padding-top:16px}
 
+/* A compact native setup disclosure within the existing charcoal/red settings. */
+.desktop-verification{padding:8px 4px 12px;max-width:70ch;min-width:0}
+.desktop-verification p{overflow-wrap:anywhere}
+.desktop-verification .button-row{display:flex;flex-wrap:wrap;gap:10px}
+.desktop-verification button{min-height:44px;max-width:100%;white-space:normal}
+.desktop-verification [hidden]{display:none!important}
 /* Keep this universal preference reset last, after every responsive override. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

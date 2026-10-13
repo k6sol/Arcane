@@ -240,3 +240,16 @@ The separately owned Codex history service can use the official
 [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
 This coordinator has no app-server transport dependency.
 
+
+## Live verifier registration and shutdown
+
+A host registration may supply `available: () => boolean`. It is sampled for
+current readiness; only synchronous exact true is usable. The coordinator captures
+callback references, ignores forged policy labels for local verifier IDs and never
+dispatches a false/throwing/async observer. Existing fixed host registrations remain
+compatible. An observer grants no human gate or file authority.
+
+`waitForIdle()` awaits the one owned async verification. It does not cancel/retry it
+or close a borrowed WorkStore. Synchronous `close()` still refuses while busy. The
+production host uses `closeAsync()` to quiesce new opens, await settlement and then
+close journal/key before the daemon closes its conversation association store.

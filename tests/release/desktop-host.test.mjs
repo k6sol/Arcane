@@ -163,7 +163,7 @@ test('missing leaf allowance still rejects unsafe existing ancestors and hardlin
   await assert.rejects(checked.directPath('C:\\Smoke\\new-empty\\missing', 'directory', true));
 });
 
-test('preload exposes only immutable identity with no host capabilities', () => {
+test('preload exposes immutable identity and only the bounded Luau verification intents', () => {
   let exposed;
   vm.runInNewContext(preloadSource, {
     require(name) {
@@ -171,9 +171,11 @@ test('preload exposes only immutable identity with no host capabilities', () => 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['platform', 'runtime', 'version']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['codeVerification', 'platform', 'runtime', 'version']);
   assert.equal(exposed.runtime, 'desktop');
   assert.equal(Object.isFrozen(exposed), true);
+  assert.equal(Object.isFrozen(exposed.codeVerification), true);
+  assert.deepEqual(Object.keys(exposed.codeVerification).sort(), ['configure', 'status', 'version']);
 });
 
 test('source contract: renderer isolation, exact navigation and deny-by-default permissions', () => {
@@ -284,6 +286,7 @@ test('regression: empty smoke fixture creates its profile before Electron setPat
       if (name === 'node:fs') return fs.sync;
       if (name === 'node:crypto') return { createHash() { assert.fail('Fixture must not start runtime work.'); } };
       if (name === './policy.cjs') return windowsPolicy(fs);
+      if (name === './code-verification.cjs') return { createCodeVerification() { assert.fail('Fixture must not start runtime work.'); } };
       throw new Error('Unexpected host dependency: ' + name);
     },
     process: { argv: ['C:\\Arcane\\Arcane.exe', '--arcane-smoke', 'C:\\Smoke\\new-empty'], platform: 'win32', resourcesPath: 'C:\\Arcane\\resources', env: {} },

@@ -46,8 +46,11 @@ async function pin(path: string, optional = false): Promise<FilePin | null> {
   let before: BigIntStats;
   try { before = await lstat(path, { bigint: true }); }
   catch (error) { if (optional && errno(error) === 'ENOENT') return null; throw error; }
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size < 1n || before.size > BigInt(BYTES)) unsafe();
-  const bytes = await readRegularFile(path, BYTES);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size < (optional ? 0n : 1n) || before.size > BigInt(BYTES)) unsafe();
+  // A crashed advisory index may be empty. Its empty bytes are still pinned by
+  // the same single-link inode and high-resolution metadata checks. New sources
+  // remain nonempty, and authoritative journal recovery is handled by the caller.
+  const bytes = before.size === 0n ? Buffer.alloc(0) : await readRegularFile(path, BYTES);
   const after = await lstat(path, { bigint: true });
   if (!sameFile(before, after) || bytes.length !== Number(before.size)) unsafe();
   return { stat: after, sha256: digest(bytes) };

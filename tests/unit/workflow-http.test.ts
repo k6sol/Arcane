@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import {
@@ -14,6 +16,7 @@ import { workflowRoutes } from '../../apps/daemon/src/workflow-routes.js';
 import type { WorkflowSnapshot } from '../../apps/daemon/src/workflow-service.js';
 import type { WorkflowRecipeRequest, WorkflowSubmission } from '../../packages/core/src/workflow-recipes.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
+import { ConversationWorkStore, type NativeConversation } from '../../packages/storage/src/conversation-work-store.js';
 import { workflowProjectIdentity } from '../../packages/storage/src/workflow-store.js';
 import type { Connection } from '../../packages/protocol/src/providers.js';
 
@@ -36,17 +39,19 @@ interface WireOptions {
   method?: string; token?: string; origin?: string | null; host?: string;
   headers?: Record<string, string | string[]>; raw?: string | Buffer; chunks?: Buffer[]; target?: string;
 }
-async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; token?: string; stateInsideProject?: boolean } = {}) {
+async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; token?: string; stateInsideProject?: boolean; conversation?: () => NativeConversation | null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-http-'));
   const projectPath = join(root, 'project'), directory = settings.stateInsideProject ? join(projectPath, 'state') : join(root, 'state');
   mkdirSync(projectPath); mkdirSync(join(projectPath, 'src'));
   const work = new WorkStore({ directory, projectPath });
+  const associations = settings.conversation ? new ConversationWorkStore({ directory: join(root, 'associations'), projectPath }) : undefined;
   const receiptParent = workflowReceiptParent(directory, workflowProjectIdentity(projectPath).projectId);
   const keyFile = join(receiptParent, 'workflow-human-receipts', 'key-v1');
   const token = settings.token ?? 'fixture-human-' + randomUUID();
   const agentToken = settings.equalTokens ? token : 'fixture-agent-' + randomUUID();
   let contextFailure = false;
-  const options = { directory, projectPath, workStore: { store: work, projectPath }, policyContext: () => {
+  const options = { directory, projectPath, workStore: { store: work, projectPath },
+    ...(associations ? { workAssociations: associations, conversation: settings.conversation! } : {}), policyContext: () => {
     if (contextFailure) throw new Error('PRIVATE-CONTEXT-' + token + projectPath);
     return { connections: [connection()], capabilities: [{ id: 'local.patch', state: 'available' as const, safety: 'human-handoff' as const }] };
   } };
@@ -59,7 +64,7 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = 'http://127.0.0.1:' + (server.address() as AddressInfo).port;
   t.after(async () => {
-    host.close(); work.close(); server.closeAllConnections();
+    host.close(); work.close(); associations?.close(); server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     const target = resolve(root), boundary = resolve(tmpdir()), part = relative(boundary, target);
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
@@ -135,6 +140,149 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
     keyFile };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+/** Native ACL DOUBLE only: observe real private preparation first, then double exactly
+ * that fixture's fixed Windows checker. Key bytes, paths, links and file pins stay real.
+ * This proves authorization boundaries, not real Windows ACL latency or protection. */
+async function nativeAclDoubleFixture(t: test.TestContext, settings: Parameters<typeof fixture>[1] = {}) {
+  const f = await fixture(t, settings);
+  const original = childProcess.spawnSync;
+  const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const parent = dirname(dirname(f.keyFile));
+  let script: string | undefined, enabled = false, realChecks = 0, checks = 0;
+  let allow: (check: number) => boolean = () => true;
+  const mocked = t.mock.method(childProcess, 'spawnSync', (command: string, args: readonly string[], options: childProcess.SpawnSyncOptionsWithStringEncoding) => {
+    if (command !== executable || options.env?.ARCANE_WORKFLOW_ACL_ROOT !== parent) return original(command, args, options);
+    assert.ok(args.length === 5 && args.slice(0, 4).join('|') === '-NoLogo|-NoProfile|-NonInteractive|-Command', 'Only the fixed native ACL command may be doubled.');
+    if (script === undefined) script = args[4];
+    assert.ok(typeof script === 'string' && script.length > 0 && args[4] === script, 'Native ACL script must match the actual preparation command.');
+    assert.equal(options.timeout, 5000); assert.equal(options.maxBuffer, 16384);
+    assert.equal(options.shell, false); assert.equal(options.windowsHide, true);
+    assert.equal(options.encoding, 'utf8'); assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+    assert.ok(options.env.ARCANE_WORKFLOW_ACL_PREPARE === '0' || options.env.ARCANE_WORKFLOW_ACL_PREPARE === '1');
+    assert.ok(options.env.ARCANE_WORKFLOW_ACL_KEY === '0' || options.env.ARCANE_WORKFLOW_ACL_KEY === '1');
+    if (!enabled) { realChecks++; return original(command, args, options); }
+    assert.equal(options.env.ARCANE_WORKFLOW_ACL_PREPARE, '0', 'The double cannot prepare private storage.');
+    const accepted = allow(++checks);
+    const stdout = accepted ? JSON.stringify({ version: 1, created: false, directoryPrivate: true,
+      keyPrivate: options.env.ARCANE_WORKFLOW_ACL_KEY === '1', ancestorsSafe: true }) : '';
+    const stderr = accepted ? '' : 'NATIVE-ACL-DOUBLE-DENIED';
+    return { pid: 0, status: accepted ? 0 : 1, signal: null, stdout, stderr, output: [null, stdout, stderr] };
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  const creation = await f.preview({ action: 'recipe', request: recipe() });
+  assert.ok(realChecks >= 3, 'Private preparation and initial key checks must execute the real native checker.');
+  enabled = true;
+  const created = await f.execute(creation); assert.equal(created.status, 200, created.text);
+  const id = json<WorkflowSnapshot>(created).workflow.id;
+  const reset = (permit: (check: number) => boolean = () => true) => { checks = 0; allow = permit; };
+  return { f, id, reset, count: () => checks };
+}
+
+async function approveNativeStep(f: Fixture, id: string, key: string) {
+  const p = await f.preview({ action: 'gate', workflowId: id, stepKey: key, gate: 'model-handoff', decision: 'approved' });
+  const reply = await f.execute(p); assert.equal(reply.status, 200, reply.text);
+}
+async function oneSavedApproval(f: Fixture, id: string) {
+  await f.handoff(id); await f.review(id); await approveNativeStep(f, id, 'requirements');
+}
+
+test('native ACL double: authorization snapshot brackets one and multiple saved approvals with two full checks', { skip: process.platform !== 'win32' }, async t => {
+  const acl = await nativeAclDoubleFixture(t), { f, id } = acl;
+  await oneSavedApproval(f, id);
+  acl.reset();
+  const one = await f.get(id);
+  assert.equal(one.workflow.decisions.length, 1); assert.equal(acl.count(), 2);
+  assert.equal(one.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'human-handoff');
+  await f.handoff(id, 'requirements'); await f.review(id, 'requirements');
+  await approveNativeStep(f, id, 'plan');
+  acl.reset();
+  const many = await f.get(id);
+  assert.equal(many.workflow.decisions.length, 2); assert.equal(acl.count(), 2);
+  assert.equal(many.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'complete');
+  assert.equal(many.assessment!.steps.find(s => s.key === 'plan')!.disposition, 'human-handoff');
+});
+
+test('native ACL double: failed closing snapshot check refuses an otherwise permitted HTTP assessment', { skip: process.platform !== 'win32' }, async t => {
+  const acl = await nativeAclDoubleFixture(t), { f, id } = acl;
+  await oneSavedApproval(f, id);
+  const baseline = await f.get(id), workBefore = JSON.stringify(f.work.runs());
+  assert.equal(baseline.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'human-handoff');
+  acl.reset(check => check !== 2);
+  const reply = await f.call('/v1/workflows/' + id);
+  assert.equal(acl.count(), 2); assert.equal(reply.status, 503);
+  assert.equal(json(reply).error, 'WORKFLOW_RECEIPT_STORAGE');
+  assert.equal(json(reply).assessment, undefined); assert.equal(json(reply).workflow, undefined);
+  assert.ok(!reply.text.includes(f.token) && !reply.text.includes(f.keyFile) && !reply.text.includes('NATIVE-ACL-DOUBLE-DENIED'));
+  assert.equal(JSON.stringify(f.work.runs()), workBefore);
+});
+
+test('native ACL double: authorization snapshots never cache native approval across HTTP requests', { skip: process.platform !== 'win32' }, async t => {
+  const acl = await nativeAclDoubleFixture(t), { f, id } = acl;
+  await oneSavedApproval(f, id);
+  for (let read = 0; read < 2; read++) {
+    acl.reset();
+    const snapshot = await f.get(id);
+    assert.equal(acl.count(), 2);
+    assert.equal(snapshot.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'human-handoff');
+  }
+  const before = JSON.stringify(f.work.runs());
+  acl.reset(() => false);
+  const refusedRead = await f.call('/v1/workflows/' + id);
+  assert.equal(acl.count(), 1); assert.equal(refusedRead.status, 503);
+  assert.equal(json(refusedRead).error, 'WORKFLOW_RECEIPT_STORAGE');
+  assert.equal(JSON.stringify(f.work.runs()), before);
+});
+
+test('native ACL double: direct human commands still perform full native checks after a successful assessment', { skip: process.platform !== 'win32' }, async t => {
+  const acl = await nativeAclDoubleFixture(t), { f, id } = acl;
+  await oneSavedApproval(f, id);
+  const p = await f.preview({ action: 'gate', workflowId: id, stepKey: 'requirements', gate: 'model-handoff', decision: 'approved' });
+  acl.reset(); await f.get(id); assert.equal(acl.count(), 2);
+  const before = JSON.stringify(f.work.runs());
+  acl.reset(() => false);
+  const refused = await f.execute(p);
+  assert.equal(acl.count(), 1); assert.equal(refused.status, 503);
+  assert.equal(json(refused).error, 'WORKFLOW_RECEIPT_STORAGE');
+  assert.equal(JSON.stringify(f.work.runs()), before);
+});
+
+test('native ACL double: transient key mutation inside assessment denies its MAC despite successful boundary checks', { skip: process.platform !== 'win32' }, async t => {
+  let observeConversation = () => {};
+  const acl = await nativeAclDoubleFixture(t, { conversation: () => {
+    observeConversation(); return { provider: 'codex', threadId: 'offline-snapshot-fixture', sessionId: null };
+  } }), { f, id } = acl;
+  await oneSavedApproval(f, id);
+  await f.handoff(id, 'requirements'); await f.review(id, 'requirements'); await approveNativeStep(f, id, 'plan');
+  const baseline = await f.get(id);
+  assert.equal(baseline.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'complete');
+  assert.equal(baseline.assessment!.steps.find(s => s.key === 'plan')!.disposition, 'human-handoff');
+  const originalKey = readFileSync(f.keyFile), changedKey = Buffer.from(originalKey);
+  changedKey[0] = changedKey[0]! ^ 0xff;
+  let mutations = 0;
+  acl.reset();
+  observeConversation = () => {
+    // The fixed host conversation callback runs before each saved approval's MAC.
+    // One native check has completed; the closing check has not yet started.
+    if (acl.count() === 1 && mutations < 2) {
+      writeFileSync(f.keyFile, mutations++ === 0 ? changedKey : originalKey);
+    }
+  };
+  let reply: Reply;
+  try { reply = await f.call('/v1/workflows/' + id); }
+  finally { observeConversation = () => {}; writeFileSync(f.keyFile, originalKey); originalKey.fill(0); changedKey.fill(0); }
+  assert.equal(mutations, 2); assert.equal(acl.count(), 2); assert.equal(reply.status, 200, reply.text);
+  const changed = json<WorkflowSnapshot>(reply);
+  assert.equal(changed.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'pending');
+  assert.equal(changed.assessment!.steps.find(s => s.key === 'plan')!.disposition, 'pending');
+  assert.equal(changed.workflow.taskStates.requirements, 'complete');
+  acl.reset();
+  const recovered = await f.get(id);
+  assert.equal(acl.count(), 2);
+  assert.equal(recovered.assessment!.steps.find(s => s.key === 'requirements')!.disposition, 'complete');
+  assert.equal(recovered.assessment!.steps.find(s => s.key === 'plan')!.disposition, 'human-handoff');
+});
 
 test('lazy host borrows existing WorkStore; preview and metadata never create a run', async t => {
   const f = await fixture(t);

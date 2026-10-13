@@ -84,7 +84,7 @@ async function fixture(t) {
   await write('toolchains/electron/dist/electron.exe', pe());
   await write('toolchains/electron/dist/version', '44.7.0');
   await write('toolchains/electron/dist/resources/default_app.asar', 'Never package the default application.');
-  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
+  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
   await write('apps/desktop/electron/icon.png', png);
   await write('apps/desktop/electron/node-LICENSE.txt', fixtureLicense);
   const nodeExecutable = join(root, 'toolchains/node/node.exe');
@@ -121,6 +121,7 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
     name: 'arcane-desktop', productName: 'Arcane', version: '0.1.0', private: true, main: 'main.cjs', type: 'commonjs',
   });
   assert.ok(data.files.some(file => file.path === 'resources/app/icon.png'));
+  assert.ok(data.files.some(file => file.path === 'resources/app/code-verification.cjs'));
   assert.deepEqual(data.dependencies.map(dep => dep.path), [
     'node_modules/@modelcontextprotocol/sdk', 'node_modules/@modelcontextprotocol/sdk/node_modules/helper-a',
     'node_modules/helper-a', 'node_modules/zod',
@@ -223,6 +224,9 @@ test('Electron must match exact installed and lockfile pins and Windows x64', as
 
 test('missing host, missing transitive package and stale installed package fail instead of falling back', async t => {
   const { root, writeJson, options, locked } = await fixture(t);
+  await rm(join(root, 'apps/desktop/electron/code-verification.cjs'));
+  await assert.rejects(packageWindows(options), /ENOENT/);
+  await writeJson('apps/desktop/electron/code-verification.cjs', {}); // Fixture host bytes are not executed.
   await rm(join(root, 'apps/desktop/electron/preload.cjs'));
   await assert.rejects(packageWindows(options), /ENOENT/);
   await writeJson('apps/desktop/electron/preload.cjs', {}); // Fixture host bytes are not executed.
@@ -268,15 +272,17 @@ test('optional host icon is copied only when present; unknown Electron payloads 
 
 
 test('host code must equal its source snapshot even if an outer file descriptor is rehashed', async t => {
-  const { options } = await fixture(t), result = await packageWindows(options);
-  const path = 'resources/app/policy.cjs', bytes = Buffer.from('// Changed host policy fixture.\n');
-  await writeFile(join(result.directory, path), bytes);
-  await mutateManifest(result.directory, data => {
-    const entry = data.files.find(file => file.path === path);
-    data.totalBytes += bytes.length - entry.bytes;
-    entry.bytes = bytes.length; entry.sha256 = hash(bytes);
-  });
-  await assert.rejects(verifyWindowsBundle(result.directory), /Host differs from the verified product snapshot/);
+  const { options } = await fixture(t);
+  for (const path of ['resources/app/policy.cjs', 'resources/app/code-verification.cjs']) {
+    const result = await packageWindows(options), bytes = Buffer.from('// Changed host policy fixture.\n');
+    await writeFile(join(result.directory, path), bytes);
+    await mutateManifest(result.directory, data => {
+      const entry = data.files.find(file => file.path === path);
+      data.totalBytes += bytes.length - entry.bytes;
+      entry.bytes = bytes.length; entry.sha256 = hash(bytes);
+    });
+    await assert.rejects(verifyWindowsBundle(result.directory), /Host differs from the verified product snapshot/);
+  }
 });
 
 
