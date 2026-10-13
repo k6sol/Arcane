@@ -169,8 +169,8 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const browserSource = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), 'utf8');
   assert.match(browserSource, /from ['"]\.\/codex-chat\.js['"]/);
   const dynamicImports=[...browserSource.matchAll(/\bimport\s*\(([^)]+)\)/g)].map(match=>match[1]!.trim());
-  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./chat-tabs.js'"],'Only the fixed workflow and chat tabs browser modules may load dynamically.');
-  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|chat-tabs)\.js\1\s*\)/g,'');
+  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./chat-tabs.js'", "'./chat-attachments.js'"],'Only fixed reviewed workflow, chat and attachment modules may load dynamically.');
+  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|chat-tabs|chat-attachments)\.js\1\s*\)/g,'');
   assert.doesNotMatch(withoutApprovedWorkflow, /\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
   // Parse the emitted module without linking/evaluating it; prose/string payloads
   // containing `from '...'` are not runtime dependencies.
@@ -377,6 +377,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
   assets.set('/studio-key-settings.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-key-settings.js'));
   assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
+  assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));
   assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
@@ -688,6 +689,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
   assets.set('/studio-key-settings.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-key-settings.js'));
   assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
+  assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));
   assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));

@@ -109,11 +109,8 @@ export class WorkspaceShell {
     // Restore presentation context on pageshow without touching the native thread or draft.
     this.tool = workspaceTool(doc.getElementById('workspace-stage')?.getAttribute('data-workspace-tool') ?? null) ?? 'all';
     this.renderTool();
-    const addContext = doc.getElementById('workspace-add-context');
-    if (addContext) this.button(addContext, () => {
-      this.openComposer(TOOL_CONTEXT[this.tool].draft +
-        '\nThis is supplemental context. It does not grant permission to run tools or change files.');
-    });
+    // File attachments are handled by the scoped chat controller. Selecting a
+    // workspace tool must never inject generic instructions into the draft.
     this.bindSearch();
     this.bindSettingsDrawer();
     this.bindToolSwitcher();

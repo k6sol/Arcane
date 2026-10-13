@@ -85,6 +85,8 @@ test('portable bundle has one enabled Script and all strict ModuleScripts as chi
   items.forEach((item, index) => assert.equal(item.source, files[index].source.replace(/\r\n?/g, '\n')));
   assert.equal(manifest.format, 'roblox-xml-v4');
   assert.equal(manifest.protocolVersion, 1);
+  assert.equal(manifest.pluginVersion, '0.1.3');
+  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.3"$/m);
   assert.equal(manifest.artifacts[0].sha256, createHash('sha256').update(xml).digest('hex'));
 });
 
@@ -258,9 +260,13 @@ test('Main exposes the red Arcane brand, editable key, Connect/Reconnect/Connect
 
 test('native Main auto-opens a compact floating popup with an unobstructed standard key input', () => {
   const main = byFile['Main.server.luau'];
-  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, true, true, 260, 200, 230, 185\)/);
+  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, true, true, 260, 184, 230, 176\)/);
   assert.match(main, /panelPadding\.PaddingBottom = UDim\.new\(0, 18\)/);
-  assert.match(main, /CreateDockWidgetPluginGuiAsync\("ArcaneLocalBridgeFloatingV2", info\)/);
+  assert.match(main, /content = frame\("Content", panel, UDim2\.new\(0, 0, 0\.5, -71\), UDim2\.new\(1, 0, 0, 152\)/);
+  assert.match(main, /panelPadding\.Parent = content/);
+  assert.match(main, /connectButton\.Parent = content/);
+  assert.doesNotMatch(main, /ScrollingFrame|AutomaticCanvasSize|CanvasSize/);
+  assert.match(main, /CreateDockWidgetPluginGuiAsync\("ArcaneLocalBridgeFloatingV3", info\)/);
   assert.match(main, /keyInput\.Position = UDim2\.new\(\)/);
   assert.match(main, /keyInput\.Size = UDim2\.fromScale\(1, 1\)/);
   for (const property of ['ZIndex = 3', 'Active = true', 'Selectable = true', 'TextEditable = true']) assert.ok(main.includes('keyInput.' + property), property);

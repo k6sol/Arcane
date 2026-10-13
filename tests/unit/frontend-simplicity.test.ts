@@ -72,6 +72,10 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
           import { StudioKeySettings } from '/studio-key-settings.js';
           import { CodexChat, CodexChatApi } from '/codex-chat.js';
           const counters = { fetches: 0, submits: 0, transport: 0 };
+          // Layout-only fixture: deliberately show the dormant conversation.
+          // This is not signed-in evidence; native model controls remain disabled.
+          document.getElementById('workspace-stage').classList.remove('provider-required');
+          document.getElementById('provider-login-gate').hidden=true;
           window.fetch = async () => { counters.fetches++; throw new Error('No network in presentation fixture'); };
           document.addEventListener('submit', event => { counters.submits++; event.preventDefault(); }, true);
           const keys = new StudioKeySettings(document, 'http://127.0.0.1:1');
@@ -131,7 +135,7 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
     assert.equal(await page.locator('#settings-key-generate').evaluate(node => node === document.activeElement), false, 'Disabled generation cannot gain focus or grant access.');
     await page.keyboard.press('Escape');
     await page.locator('#go-assets').click();
-    assert.equal(await page.locator('.composer-tool-context').isVisible(), true);
+    assert.equal(await page.locator('.composer-tool-context').isVisible(), false, 'Chat needs no manual tool context badge.');
     assert.equal(await page.locator('#workspace-tool-label').textContent(), 'Blender');
     assert.equal(await drawer.isVisible(), false);
     assert.equal(await page.locator('#codex-composer').inputValue(), draft);
@@ -140,12 +144,10 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
       const f = (window as unknown as { simplicityFixture: { startChat(): Promise<void>; rebind(): void } }).simplicityFixture;
       f.rebind(); await f.startChat();
     });
-    await page.locator('#codex-model-trigger').click();
-    assert.equal(await page.locator('#codex-model-popover').isVisible(), true);
+    assert.equal(await page.locator('#codex-model-trigger').isDisabled(), true, 'No model actions before actual authenticated native metadata.');
+    assert.equal(await page.locator('#codex-model-popover').isVisible(), false);
     assert.equal(await page.locator('#codex-model-options').locator('button').count(), 0);
     assert.equal(await page.locator('#codex-picker-apply').isDisabled(), true);
-    await page.keyboard.press('Escape');
-    assert.equal(await page.locator('#codex-model-trigger').evaluate(node => node === document.activeElement), true);
     assert.equal(await page.locator('#codex-composer').inputValue(), draft);
     await page.locator('#codex-composer').evaluate(node => {
       (node as HTMLTextAreaElement).value = 'é'.repeat(65537);

@@ -159,6 +159,7 @@ export async function createConnectionLab(options: Options) {
           ['/studio.js', [join(options.cwd, 'dist/apps/desktop/src/studio.js'), 'text/javascript']],
           ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
           ['/chat-tabs.js', [join(options.cwd, 'dist/apps/desktop/src/chat-tabs.js'), 'text/javascript']],
+          ['/chat-attachments.js', [join(options.cwd, 'dist/apps/desktop/src/chat-attachments.js'), 'text/javascript']],
           ['/task-usage.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage.js'), 'text/javascript']],
           ['/task-usage-ui.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage-ui.js'), 'text/javascript']],
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],

@@ -16,7 +16,7 @@ test('remembered provider accepts only bounded presentation metadata, never auth
  }
  assert.equal(readProviderPresentation('{"version":1,"provider":"codex","__proto__":{"auth":"subscription"}}'),null);
 });
-test('real Edge setup: explicit status/login/install, no startup probes, auth gate and draft preserved',{skip:!process.env.ARCANE_UI_BROWSER_MODULE,timeout:30000},async t=>{
+test('real Edge setup: bounded startup status, explicit login/install, auth gate and draft preserved',{skip:!process.env.ARCANE_UI_BROWSER_MODULE,timeout:30000},async t=>{
  const {chromium}=await import(pathToFileURL(resolve(process.env.ARCANE_UI_BROWSER_MODULE!)).href);const browser=await chromium.launch({headless:true,executablePath:process.env.ARCANE_UI_BROWSER_EXE});t.after(()=>browser.close());
  const build=process.env.ARCANE_UI_BUILD_DIR??resolve('dist'),html=await readFile('apps/desktop/public/studio.html','utf8'),js=await readFile(join(build,'apps/desktop/src/provider-setup.js'),'utf8'),css=await readFile('apps/desktop/public/studio.css','utf8');
  const server=createServer((req,res)=>{const p=req.url?.split('?')[0],value=p==='/fixture'?html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g,''):p==='/provider-setup.js'?js:p==='/studio.css'?css:'';res.writeHead(value?200:404,{'Content-Type':p==='/fixture'?'text/html':p==='/studio.css'?'text/css':'text/javascript'});res.end(value);});await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));t.after(async()=>{server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});const port=(server.address() as {port:number}).port;
@@ -26,29 +26,37 @@ test('real Edge setup: explicit status/login/install, no startup probes, auth ga
  w.controller=m.startProviderSetup(document,{chat:{providerConnectionStatus:()=>w.account,subscribeProviderStateChange:(fn:()=>void)=>{w.subscriber=fn;return()=>{};}},nativeBridge:bridge});
  let p=document.getElementById('provider-setup-panel')!.parentElement;while(p){if(p.tagName==='DETAILS')(p as HTMLDetailsElement).open=true;p=p.parentElement;}
  });
- assert.deepEqual(await page.evaluate(()=>(window as any).calls),[]);assert.equal(await page.locator('#provider-login-gate').isVisible(),true);
+ await page.waitForFunction(()=>!(document.getElementById('provider-setup-refresh') as HTMLButtonElement).disabled);
+ assert.deepEqual(await page.evaluate(()=>(window as any).calls),[{action:'status',provider:'codex'}]);assert.equal(await page.locator('#provider-login-gate').isVisible(),true);
  assert.equal(await page.locator('#provider-login-codex').getAttribute('aria-pressed'),'true');
  assert.equal(await page.locator('#provider-login-claude').getAttribute('aria-pressed'),'false');
  await page.locator('#provider-login-claude').click();
+ await page.waitForFunction(()=>(window as any).calls.length===2&&!(document.getElementById('provider-setup-refresh') as HTMLButtonElement).disabled);
  assert.equal(await page.locator('#provider-login-claude').getAttribute('aria-pressed'),'true');
  assert.equal(await page.locator('#provider-login-codex').getAttribute('aria-pressed'),'false');
  await page.locator('#provider-login-codex').click();
+ await page.waitForFunction(()=>(window as any).calls.length===3&&!(document.getElementById('provider-setup-refresh') as HTMLButtonElement).disabled);
  assert.equal(await page.locator('#provider-login-codex').getAttribute('aria-pressed'),'true');
- assert.deepEqual(await page.evaluate(()=>(window as any).calls),[]);
- await page.locator('#codex-composer').fill('Keep my unsent draft');await page.locator('#provider-setup-refresh').evaluate((b:HTMLElement)=>b.click());assert.deepEqual(await page.evaluate(()=>(window as any).calls),[]);
+ assert.deepEqual(await page.evaluate(()=>(window as any).calls.map((v:any)=>v.action)),['status','status','status']);
+ assert.equal(await page.locator('#codex-composer').isVisible(),false,'Signed-out gate hides unavailable chat actions.');
+ await page.locator('#codex-composer').evaluate((input:HTMLTextAreaElement)=>{input.value='Keep my unsent draft';}); // A previously restored draft, not signed-out user typing.
+ await page.locator('#provider-setup-refresh').evaluate((b:HTMLElement)=>b.click());assert.equal(await page.evaluate(()=>(window as any).calls.length),3);
  const exposePane=async(id:string)=>page.evaluate((id:string)=>{for(const pane of document.querySelectorAll<HTMLElement>('[data-settings-section]'))pane.hidden=pane.id!==id;const d=document.getElementById('settings-drawer') as HTMLDialogElement;if(!d.open)d.showModal();},id);
- await exposePane('workspace-settings');await page.locator('#provider-setup-refresh').click();await page.waitForFunction(()=>(window as any).calls.length===1);assert.match(await page.locator('#provider-setup-status').innerText(),/Sign in with ChatGPT/);
- await page.locator('#provider-setup-login').click();await page.waitForFunction(()=>(window as any).calls.length===2);await exposePane('settings-connections');await page.locator('#provider-setup-install').click();await page.waitForFunction(()=>(window as any).calls.length===3);
+ await exposePane('workspace-settings');await page.locator('#provider-setup-refresh').click();await page.waitForFunction(()=>(window as any).calls.length===4);assert.match(await page.locator('#provider-setup-status').innerText(),/Sign in with ChatGPT/);
+ await page.locator('#provider-setup-login').click();await page.waitForFunction(()=>(window as any).calls.length===5);
+ await page.evaluate(()=>Object.assign((window as any).providerFixtureState,{installed:false,auth:'unknown',cliVersion:null}));
+ await page.locator('#provider-setup-refresh').click();await page.waitForFunction(()=>(window as any).calls.length===6);
+ await exposePane('settings-connections');await page.locator('#provider-setup-install').click();await page.waitForFunction(()=>(window as any).calls.length===7);
  await page.evaluate(()=>{(document.getElementById('settings-drawer') as HTMLDialogElement).close();const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.subscriber();});assert.equal(await page.locator('#provider-login-gate').isVisible(),false);
- assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');assert.deepEqual(await page.evaluate(()=>(window as any).calls.map((v:any)=>v.action)),['status','login','install']);assert.deepEqual(errors,[]);
+ assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');assert.deepEqual(await page.evaluate(()=>(window as any).calls.map((v:any)=>v.action)),['status','status','status','status','login','status','install']);assert.deepEqual(errors,[]);
  // Fresh native authentication does not silently reuse a stale signed-out client.
- await page.evaluate(()=>{const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'signed-out'};w.providerFixtureState.auth='subscription';w.sessionActions=[];
+ await page.evaluate(()=>{const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'signed-out'};Object.assign(w.providerFixtureState,{installed:true,auth:'subscription',cliVersion:'1.0.0'});w.sessionActions=[];
  const disconnect=document.getElementById('codex-disconnect') as HTMLButtonElement,connect=document.getElementById('codex-connect') as HTMLButtonElement;disconnect.disabled=false;connect.disabled=true;
  disconnect.addEventListener('click',()=>{w.sessionActions.push('disconnect');w.account={connected:false,ready:false,fresh:true,auth:'unknown'};connect.disabled=false;disconnect.disabled=true;w.subscriber();});connect.addEventListener('click',()=>w.sessionActions.push('connect'));w.subscriber();});
- await exposePane('workspace-settings');await page.locator('#provider-setup-refresh').click();await page.waitForFunction(()=>(window as any).calls.length===4);
+ await exposePane('workspace-settings');await page.locator('#provider-setup-refresh').click();await page.waitForFunction(()=>(window as any).calls.length===8);
  await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).close());assert.match(await page.locator('#provider-login-start').innerText(),/Disconnect old session/);assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),[]);
  await page.locator('#provider-login-start').click();assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),['disconnect']);
- await page.locator('#provider-login-start').click();assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),['disconnect','connect']);assert.equal(await page.evaluate(()=>(window as any).calls.length),4);
+ await page.locator('#provider-login-start').click();assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),['disconnect','connect']);assert.equal(await page.evaluate(()=>(window as any).calls.length),8);
  assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
- await page.evaluate(()=>{const w=window as any;w.controller.stop();w.controller.resume();});assert.equal(await page.evaluate(()=>(window as any).calls.length),4);
+ await page.evaluate(()=>{const w=window as any;w.controller.stop();w.controller.resume();});await page.waitForFunction(()=>(window as any).calls.length===9);assert.equal(await page.evaluate(()=>(window as any).calls.length),9);
 });

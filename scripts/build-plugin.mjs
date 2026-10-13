@@ -92,7 +92,7 @@ export function renderPlugin(sources) {
   const manifest = {
     schemaVersion: 1,
     protocolVersion: 1,
-    pluginVersion: '0.1.2',
+    pluginVersion: '0.1.3',
     format: 'roblox-xml-v4',
     preferredArtifact: 'ArcaneLocalBridge.lua',
     entry: 'ArcaneLocalBridge',

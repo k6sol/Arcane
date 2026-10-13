@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startProviderSetup, type ProviderSetupState } from '../../apps/desktop/src/provider-setup.js';
+import { startProviderSetup, PROVIDER_PRESENTATION_KEY, type ProviderSetupState, type SetupProvider } from '../../apps/desktop/src/provider-setup.js';
 import type { ProviderConnectionStatus } from '../../apps/desktop/src/codex-chat.js';
 
 // In-memory DOM/bridge doubles only: no browser, native CLI, network or credentials.
@@ -22,26 +22,30 @@ class Control {
   }
   click() { this.emit('click', false); }
 }
-function fixture() {
+function fixture(options: { preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: () => Promise<void>; noBridge?: boolean } = {}) {
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
     'provider-setup-login', 'provider-setup-install', 'provider-setup-launch', 'workspace-stage', 'codex-connect'].map(id => [id, new Control()]));
   const doc = new EventTarget() as EventTarget & { getElementById(id: string): Control | null; defaultView: unknown };
   doc.getElementById = id => elements.get(id) ?? null;
-  doc.defaultView = { CustomEvent, location: { protocol: 'file:' } };
+  const stored = new Map<string, string>();
+  if (options.preferred) stored.set(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider: options.preferred }));
+  doc.defaultView = { CustomEvent, location: { protocol: 'http:', origin: 'http://fixture.test' },
+    localStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value) } };
   let connection: ProviderConnectionStatus | null = null, subscriber = () => {};
   let state: ProviderSetupState = { version: 1, provider: 'codex', installed: true,
-    auth: 'signed-out', cliVersion: '0.162.0-alpha.17.2', busy: false, message: null };
+    auth: 'signed-out', cliVersion: '0.162.0-alpha.17.2', busy: false, message: null, ...options.state };
   const calls: string[] = [];
   let reply: (() => Promise<unknown>) | null = null;
   const native = Object.freeze({ version: 1, ...Object.fromEntries(['status', 'login', 'install', 'launch'].map(action =>
     [action, async (provider: string) => { calls.push(action + ':' + provider); return reply ? reply() : { ...state, provider }; }])) });
-  const controller = startProviderSetup(doc as unknown as Document, { nativeBridge: native, chat: {
+  const controller = startProviderSetup(doc as unknown as Document, { nativeBridge: options.noBridge ? null : native, chat: {
     providerConnectionStatus: () => connection,
     subscribeProviderStateChange(listener) { subscriber = listener; return () => { subscriber = () => {}; }; },
+    ...(options.connectSavedLogin ? { connectForSavedLogin: options.connectSavedLogin } : {}),
   } });
-  return { controller, calls, doc, elements,
+  return { controller, calls, doc, elements, stored,
     control: (id: string) => elements.get(id)!,
     choose(provider: string) { doc.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider } })); },
     connection(value: ProviderConnectionStatus | null) { connection = value; subscriber(); },
@@ -55,8 +59,9 @@ const connected: ProviderConnectionStatus = { connected: true, ready: true, fres
 test('sign-in observer requires actual fresh ready Codex connection and not a preference or login snapshot', async t => {
   const f = fixture(); t.after(() => f.controller.cleanup());
   const changes: boolean[] = [], unsubscribe = f.controller.subscribeSignInChange(() => changes.push(f.controller.isSignedIn()));
-  f.choose('claude'); f.choose('codex'); f.controller.resume();
-  assert.equal(f.controller.isSignedIn(), false); assert.deepEqual(f.calls, []); assert.deepEqual(changes, []);
+  await settled();
+  f.choose('codex'); f.controller.resume();
+  assert.equal(f.controller.isSignedIn(), false); assert.deepEqual(f.calls, ['status:codex']); assert.deepEqual(changes, []);
   f.state({ auth: 'subscription' }); f.control('provider-setup-refresh').emit('click'); await settled();
   assert.equal(f.controller.isSignedIn(), false); assert.deepEqual(changes, []);
   for (const value of [{ ...connected, ready: false }, { ...connected, connected: false },
@@ -67,14 +72,14 @@ test('sign-in observer requires actual fresh ready Codex connection and not a pr
   f.connection({ ...connected }); assert.deepEqual(changes, [true], 'unchanged renders do not notify');
   f.connection({ ...connected, fresh: false }); assert.deepEqual(changes, [true, false]);
   unsubscribe(); f.connection(connected); assert.deepEqual(changes, [true, false]);
-  assert.deepEqual(f.calls, ['status:codex']);
+  assert.deepEqual(f.calls, ['status:codex', 'status:codex']);
 });
 
 test('Claude sign-in requires a fresh non-busy native status ACK; expiry notifies without polling', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
-  const f = fixture(); t.after(() => f.controller.cleanup()); f.choose('claude');
+  const f = fixture({ preferred: 'claude', state: { auth: 'subscription', busy: true } }); t.after(() => f.controller.cleanup());
   const changes: boolean[] = []; f.controller.subscribeSignInChange(() => changes.push(f.controller.isSignedIn()));
-  f.state({ auth: 'subscription', busy: true }); f.control('provider-setup-refresh').emit('click'); await settled();
+  await settled();
   assert.equal(f.controller.isSignedIn(), false); assert.deepEqual(changes, []);
   f.state({ busy: false }); f.control('provider-setup-refresh').emit('click'); await settled();
   assert.equal(f.controller.isSignedIn(), true); assert.deepEqual(changes, [true]);
@@ -85,23 +90,23 @@ test('Claude sign-in requires a fresh non-busy native status ACK; expiry notifie
 
 test('cached auth from install cannot extend Claude metadata freshness or establish sign-in', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
-  const f = fixture(); t.after(() => f.controller.cleanup()); f.choose('claude'); f.state({ auth: 'subscription' });
+  const f = fixture({ preferred: 'claude' }); t.after(() => f.controller.cleanup()); await settled(); f.state({ auth: 'subscription' });
   f.control('provider-setup-install').emit('click'); await settled(); assert.equal(f.controller.isSignedIn(), false);
   f.control('provider-setup-refresh').emit('click'); await settled(); assert.equal(f.controller.isSignedIn(), true);
   t.mock.timers.tick(50000); f.control('provider-setup-install').emit('click'); await settled();
   t.mock.timers.tick(10001); assert.equal(f.controller.isSignedIn(), false);
   f.control('provider-setup-install').emit('click'); await settled(); assert.equal(f.controller.isSignedIn(), false);
   f.state({ auth: 'api-or-cloud' }); f.control('provider-setup-refresh').emit('click'); await settled();
-  assert.equal(f.controller.isSignedIn(), false); assert.equal(f.calls.length, 5);
+  assert.equal(f.controller.isSignedIn(), false); assert.equal(f.calls.length, 6);
 });
 
-test('provider/lifecycle changes notify, unsubscribe detaches, and missing mount has the same inert contract', t => {
-  const f = fixture(); t.after(() => f.controller.cleanup()); const changes: boolean[] = [];
+test('provider/lifecycle changes notify, unsubscribe detaches, and missing mount has the same inert contract', async t => {
+  const f = fixture(); t.after(() => f.controller.cleanup()); await settled(); const changes: boolean[] = [];
   f.controller.subscribeSignInChange(() => changes.push(f.controller.isSignedIn()));
-  f.connection(connected); f.choose('claude'); f.choose('codex');
-  f.controller.stop(); assert.equal(f.controller.isSignedIn(), false); f.controller.resume();
+  f.connection(connected); f.choose('claude'); await settled(); f.choose('codex'); await settled();
+  f.controller.stop(); assert.equal(f.controller.isSignedIn(), false); f.controller.resume(); await settled();
   f.controller.cleanup(); f.controller.resume(); f.connection(connected);
-  assert.deepEqual(changes, [true, false, true, false, true, false]); assert.deepEqual(f.calls, []);
+  assert.deepEqual(changes, [true, false, true, false, true, false]); assert.deepEqual(f.calls, ['status:codex', 'status:claude', 'status:codex', 'status:codex']);
   const missing = startProviderSetup({ getElementById: () => null } as unknown as Document, {
     chat: { providerConnectionStatus: () => connected, subscribeProviderStateChange: () => () => {} },
   });
@@ -110,23 +115,149 @@ test('provider/lifecycle changes notify, unsubscribe detaches, and missing mount
 });
 
 test('late Claude status replies and malformed states cannot notify sign-in after a provider epoch change', async t => {
-  const f = fixture(); t.after(() => f.controller.cleanup()); f.choose('claude');
+  const f = fixture({ preferred: 'claude' }); t.after(() => f.controller.cleanup()); await settled();
   const changes: boolean[] = []; f.controller.subscribeSignInChange(() => changes.push(f.controller.isSignedIn()));
   let release!: (value: unknown) => void;
   f.reply(() => new Promise(resolve => { release = resolve; })); f.control('provider-setup-refresh').emit('click');
   f.choose('codex'); f.choose('claude');
+  f.reply(async () => ({ version: 1, provider: 'claude', installed: true, auth: 'signed-out', busy: false, cliVersion: '1.0.0', message: null }));
   release({ version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1.0.0', message: null });
   await settled(); assert.equal(f.controller.isSignedIn(), false); assert.deepEqual(changes, []);
   f.reply(async () => ({ version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1.0.0', message: null, token: 'fixture' }));
   f.control('provider-setup-refresh').emit('click'); await settled(); assert.equal(f.controller.isSignedIn(), false); assert.deepEqual(changes, []);
 });
 
+test('mount recognizes saved CLI login and calls the optional metadata hook once per connection snapshot', async t => {
+  let connections = 0;
+  const f = fixture({ state: { auth: 'subscription' }, connectSavedLogin: async () => { connections++; } });
+  t.after(() => f.controller.cleanup());
+  assert.deepEqual(f.calls, ['status:codex']); assert.equal(connections, 0);
+  await settled();
+  assert.equal(connections, 1); assert.equal(f.control('provider-setup-status').textContent, 'ChatGPT signed in.');
+  assert.equal(f.control('provider-setup-login').hidden, true);
+  assert.equal(f.controller.isSignedIn(), false, 'CLI auth does not forge a ready native session');
+  assert.equal(f.control('provider-login-gate').hidden, false);
+  f.choose('codex'); f.controller.resume();
+  for (let i = 0; i < 5; i++) { f.doc.dispatchEvent(new Event('input')); f.connection(null); }
+  assert.deepEqual(f.calls, ['status:codex']); assert.equal(connections, 1);
+  f.control('provider-setup-refresh').emit('click'); await settled(); assert.equal(connections, 1);
+  f.connection({ connected: false, ready: false, fresh: true, auth: 'unknown' });
+  assert.equal(connections, 1, 'a chat render cannot start a connection');
+  f.control('provider-setup-refresh').emit('click'); await settled(); assert.equal(connections, 2);
+  f.connection(connected); assert.equal(f.controller.isSignedIn(), true); assert.equal(f.control('provider-login-gate').hidden, true);
+  f.control('provider-setup-refresh').emit('click'); await settled(); assert.equal(connections, 2);
+  assert.ok(f.calls.every(call => call === 'status:codex'));
+  assert.equal(f.stored.size, 1); assert.deepEqual(JSON.parse(f.stored.get(PROVIDER_PRESENTATION_KEY)!), { version: 1, provider: 'codex' });
+});
+
+test('remembered Claude preference probes only Claude and never invokes the Codex metadata hook', async t => {
+  let connections = 0;
+  const f = fixture({ preferred: 'claude', state: { auth: 'subscription' }, connectSavedLogin: async () => { connections++; } });
+  t.after(() => f.controller.cleanup()); await settled();
+  assert.deepEqual(f.calls, ['status:claude']); assert.equal(connections, 0);
+  assert.equal(f.controller.isSignedIn(), true); assert.equal(f.control('provider-setup-launch').hidden, false);
+  f.choose('claude'); assert.deepEqual(f.calls, ['status:claude']);
+});
+
+test('selection coalesces in-flight status to the latest provider and discards stale authentication', async t => {
+  let connections = 0;
+  const f = fixture({ connectSavedLogin: async () => { connections++; } }); t.after(() => f.controller.cleanup()); await settled();
+  let release!: (value: unknown) => void;
+  f.reply(() => new Promise(resolve => { release = resolve; }));
+  f.control('provider-setup-refresh').emit('click');
+  f.choose('claude'); f.choose('codex'); f.choose('claude');
+  assert.deepEqual(f.calls, ['status:codex', 'status:codex']);
+  f.reply(async () => ({ version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1.0.0', message: null }));
+  release({ version: 1, provider: 'codex', installed: true, auth: 'subscription', busy: false, cliVersion: '1.0.0', message: null });
+  await settled();
+  assert.deepEqual(f.calls, ['status:codex', 'status:codex', 'status:claude']); assert.equal(connections, 0);
+  assert.equal(f.controller.isSignedIn(), true); assert.equal(f.control('provider-setup-provider').value, 'claude');
+});
+
+test('busy, API/cloud, signed-out, unavailable and hostile status cannot connect saved login', async t => {
+  for (const state of [{ auth: 'subscription' as const, busy: true }, { auth: 'api-or-cloud' as const },
+    { auth: 'signed-out' as const }, { installed: false, cliVersion: null, auth: 'unknown' as const }]) {
+    let connections = 0;
+    const f = fixture({ state, connectSavedLogin: async () => { connections++; } });
+    await settled(); assert.equal(connections, 0); assert.equal(f.controller.isSignedIn(), false);
+    assert.equal(f.control('provider-setup-launch').hidden, true);
+    assert.equal(f.control('provider-setup-install').hidden, state.installed !== false);
+    f.reply(async () => ({ version: 1, provider: 'codex', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null, token: 'fixture' }));
+    f.control('provider-setup-refresh').emit('click'); await settled();
+    assert.equal(connections, 0); assert.match(f.control('provider-setup-status').textContent, /Setup unavailable/);
+    f.controller.cleanup();
+  }
+  const browser = fixture({ noBridge: true }); t.after(() => browser.controller.cleanup());
+  browser.choose('claude'); browser.controller.stop(); browser.controller.resume(); await settled();
+  assert.deepEqual(browser.calls, []); assert.equal(browser.control('provider-login-start').disabled, true);
+  assert.equal(browser.control('provider-setup-login').hidden, true);
+  assert.equal(browser.control('provider-setup-install').hidden, true);
+});
+
+test('status expiry updates controls locally and resume performs exactly one new read', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
+  const f = fixture({ preferred: 'claude', state: { auth: 'subscription' } }); t.after(() => f.controller.cleanup());
+  const changes: boolean[] = []; f.controller.subscribeSignInChange(() => changes.push(f.controller.isSignedIn()));
+  await settled(); assert.deepEqual(changes, [true]);
+  t.mock.timers.tick(60001);
+  assert.equal(f.controller.isSignedIn(), false); assert.equal(f.control('provider-setup-launch').hidden, true);
+  assert.deepEqual(changes, [true, false]); assert.deepEqual(f.calls, ['status:claude']);
+  f.controller.stop(); f.controller.resume(); f.controller.resume(); await settled();
+  assert.deepEqual(f.calls, ['status:claude', 'status:claude']); assert.equal(f.controller.isSignedIn(), true);
+  assert.deepEqual(changes, [true, false, true]);
+});
+
+test('status is bounded and late responses after timeout, stop or cleanup cannot connect', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
+  let connections = 0;
+  const f = fixture({ connectSavedLogin: async () => { connections++; } }); t.after(() => f.controller.cleanup()); await settled();
+  let release!: (value: unknown) => void;
+  const saved = { version: 1, provider: 'codex', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null };
+  f.reply(() => new Promise(resolve => { release = resolve; })); f.control('provider-setup-refresh').emit('click');
+  t.mock.timers.tick(35000); await settled();
+  assert.equal(f.control('provider-login-start').disabled, false); assert.equal(f.control('provider-login-start').textContent, 'Check sign-in');
+  release(saved); await settled(); assert.equal(connections, 0); assert.match(f.control('provider-setup-status').textContent, /Setup unavailable/);
+  f.control('provider-setup-refresh').emit('click'); f.controller.stop(); release(saved); await settled(); assert.equal(connections, 0);
+  f.reply(async () => ({ ...saved, auth: 'signed-out' })); f.controller.resume(); await settled();
+  f.reply(() => new Promise(resolve => { release = resolve; })); f.control('provider-setup-refresh').emit('click');
+  f.controller.cleanup(); release(saved); await settled(); assert.equal(connections, 0); assert.equal(f.controller.isSignedIn(), false);
+});
+
+test('metadata connection failure preserves observed auth and never loops on renders or refresh', async t => {
+  let connections = 0;
+  const f = fixture({ state: { auth: 'subscription' }, connectSavedLogin: async () => { connections++; throw Error('unavailable'); } });
+  t.after(() => f.controller.cleanup()); await settled();
+  assert.equal(connections, 1); assert.equal(f.controller.isSignedIn(), false);
+  assert.match(f.control('provider-login-message').textContent, /Signed in\. Connection unavailable/);
+  f.connection(null); f.control('provider-setup-refresh').emit('click'); await settled();
+  assert.equal(connections, 1); assert.equal(f.control('provider-setup-status').textContent, 'ChatGPT signed in.');
+});
+
+test('pending saved-login metadata connects once, does not offer an extra Connect action, and ignores stale failure', async t => {
+  let connections = 0, fail!: (reason: Error) => void;
+  const f = fixture({ state: { auth: 'subscription' }, connectSavedLogin: () => {
+    connections++; return new Promise((_resolve, reject) => { fail = reject; });
+  } });
+  t.after(() => f.controller.cleanup()); await settled();
+  assert.equal(connections, 1); assert.equal(f.control('provider-login-start').textContent, 'Connecting Codex…');
+  assert.equal(f.control('provider-login-start').disabled, true);
+  f.connection({ connected: false, ready: false, fresh: true, auth: 'unknown' });
+  f.control('provider-setup-refresh').emit('click'); await settled(); assert.equal(connections, 1, 'no overlapping hooks');
+  f.choose('claude'); await settled(); fail(Error('previous connection unavailable')); await settled();
+  assert.equal(f.control('provider-setup-status').textContent, 'Claude Code signed in.');
+  assert.equal(f.control('provider-login-start').textContent, 'Open Claude Code');
+  assert.deepEqual(f.calls, ['status:codex', 'status:codex', 'status:claude']);
+});
+
 test('ChatGPT browser labels and sanitized native pending/failure messages remain visible in the sign-in card', async t => {
   const f = fixture(); t.after(() => f.controller.cleanup());
+  assert.equal(f.control('provider-login-start').textContent, 'Checking sign-in…');
+  assert.equal(f.control('provider-login-start').disabled, true);
+  await settled();
   assert.equal(f.control('provider-login-start').textContent, 'Sign in with ChatGPT');
   assert.equal(f.control('provider-setup-login').textContent, 'Sign in with ChatGPT');
   assert.match(f.control('provider-login-message').textContent, /ChatGPT in your browser/);
-  f.control('provider-login-start').emit('click', false); assert.deepEqual(f.calls, []);
+  f.control('provider-login-start').emit('click', false); assert.deepEqual(f.calls, ['status:codex']);
   const pending = 'Complete ChatGPT sign-in in your browser. Authentication is not yet verified.';
   f.state({ auth: 'unknown', busy: true, message: pending }); f.control('provider-login-start').emit('click'); await settled();
   assert.equal(f.control('provider-login-message').textContent, pending); assert.equal(f.controller.isSignedIn(), false);

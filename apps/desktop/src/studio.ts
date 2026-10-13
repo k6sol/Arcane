@@ -1664,6 +1664,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true });
+    const attachments=await import('./chat-attachments.js');
+    codexChat.enableTextAttachments(attachments.startChatAttachments(document,{
+      getScope:()=>codexChat.textAttachmentScope(),onChange:()=>codexChat.attachmentPresentationChanged(),
+    }));
     if (workflowsStopped) chatTabController.stop();
   }).catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Chat could not be opened. Your saved history is unchanged.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });

@@ -643,5 +643,216 @@ body.arcane-app {
 .arcane-app .settings-key-card .settings-secret-row {align-items:center}
 .arcane-app .settings-key-card #settings-key-copy {min-width:68px}
 .arcane-app [hidden] {display:none!important}
+/* Arcane composer contract: static ambient light, quiet controls, one red action.
+   Summary/list visibility and all action guards remain owned by the controller. */
+body.arcane-app {
+  --bg:#09090b;
+  --panel:#151518;
+  --raised:#202024;
+  --line:#34343b;
+  --text:#f5f5f7;
+  --muted:#b2b2bd;
+  --accent:#ff4556;
+  --action:#d92338;
+  --focus-ring:#ff8692;
+}
+.arcane-app .app-main {
+  background:
+    radial-gradient(ellipse at 68% 88%,#a5263612,transparent 54%),
+    radial-gradient(ellipse at 92% 20%,#7551b110,transparent 48%),
+    var(--bg);
+}
+.arcane-app .app-sidebar {
+  background:
+    repeating-linear-gradient(135deg,#ffffff02 0 1px,transparent 1px 9px),
+    #101013;
+  border-color:#29292f;
+}
+.arcane-app .workspace-topbar {background:#0d0d10;border-color:#29292f}
+.arcane-app .new-chat {background:#1b1b20;border-color:#3b3b43;color:var(--text)}
+.arcane-app .nav-link {color:#d8d8e0}
+.arcane-app .nav-link[aria-pressed=true],
+.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true] {background:#232329;border-color:#3b3b43}
+.arcane-app .wordmark small,.arcane-app .nav-link small,.arcane-app .sidebar-label,
+.arcane-app .sidebar-secondary .icon,.arcane-app .chat-topline p,
+.arcane-app .workspace-welcome p,.arcane-app #provider-login-message {color:var(--muted)}
+.arcane-app .sidebar-secondary {border-color:#29292f}
+.arcane-app .workspace-search {background:#17171b;border-color:#34343b}
+.arcane-app .workspace-stage .codex-message.human {background:#202024;border-color:#34343b}
+.arcane-app .workspace-stage .composer {
+  padding:15px 14px 11px;
+  border:1px solid #46464f;
+  border-radius:18px;
+  background:linear-gradient(180deg,#1c1c20,#18181c);
+  box-shadow:0 8px 28px #00000024;
+}
+.arcane-app .workspace-stage .composer:focus-within {
+  border-color:#b36570;
+  box-shadow:0 0 0 1px #ff455614,0 8px 28px #00000024;
+}
+.arcane-app .workspace-stage .composer textarea {
+  display:block;
+  width:100%;
+  min-height:62px;
+  max-height:180px;
+  padding:2px 4px;
+  margin:0 0 10px;
+  border-radius:5px;
+  font:14px/1.7 "Segoe UI",system-ui,sans-serif;
+  caret-color:var(--accent);
+}
+.arcane-app .composer textarea::placeholder {color:#b2b2bd;opacity:1}
+.arcane-app .composer-controls {display:grid;grid-template-columns:36px minmax(32px,1fr) minmax(0,max-content) 36px;gap:8px;align-items:center}
+.arcane-app #workspace-add-context {
+  display:inline-flex;align-items:center;justify-content:center;
+  grid-column:1;grid-row:1;
+  order:0;flex:0 0 auto;width:36px;height:36px;min-height:36px;
+  padding:8px;border:1px solid transparent;border-radius:50%;
+  background:transparent;color:#dedee5;
+}
+.arcane-app #workspace-add-context .icon {width:18px;height:18px}
+/* Text-only legacy fallback stays legible until the attachment button is mounted. */
+.arcane-app #workspace-add-context:not(:has(svg)) {width:auto;border-radius:8px;font-size:12px}
+.arcane-app .composer-tool-context,
+.arcane-app :is(.composer-task-indicator,#codex-task-indicator) {
+  grid-column:2;grid-row:1;order:1;min-width:0;max-width:100%;
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:11px;color:var(--muted);line-height:1.5;
+}
+.arcane-app .composer-tool-context>span:last-child {
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.arcane-app .context-dot {flex-shrink:0;width:5px;height:5px;background:#b2b2bd}
+.arcane-app .composer-controls[data-task-active=true] .composer-tool-context {display:inline-flex}
+.arcane-app .composer-controls[data-task-active=true] :is(.composer-tool-context,.composer-task-indicator,#codex-task-indicator) {color:#f0bdc5}
+.arcane-app .composer-controls[data-task-active=true] .context-dot {background:var(--accent)}
+.arcane-app .composer-model-picker {
+  grid-column:3;grid-row:1;order:2;min-width:0;max-width:100%;margin-left:0;
+}
+.arcane-app .composer-model-trigger {
+  width:auto;min-height:34px;padding:6px 9px;gap:6px;
+  border:1px solid transparent;border-radius:8px;
+  background:transparent;color:var(--text);font-size:11px;font-weight:500;
+}
+.arcane-app .composer-model-trigger .picker-provider {display:none}
+.arcane-app #codex-model-label {flex:0 1 auto;max-width:180px}
+.arcane-app .picker-effort {flex-shrink:0;max-width:72px;color:#bdbdc8;border-color:#50505a;padding-left:6px}
+.arcane-app .composer-model-trigger .icon {width:12px;height:12px}
+.arcane-app .composer-model-trigger:hover:not(:disabled),
+.arcane-app .composer-model-trigger[aria-expanded=true] {background:#27272d;border-color:#4c4c56}
+.arcane-app .workspace-stage #codex-submit {
+  grid-column:4;grid-row:1;
+  order:3;flex:0 0 36px;width:36px;height:36px;min-width:36px;min-height:36px;
+  margin:0;padding:8px;border-radius:50%;border:1px solid #ed5264;
+  background:var(--action);color:#fff;box-shadow:none;
+}
+.arcane-app .workspace-stage #codex-submit .icon {width:18px;height:18px}
+.arcane-app .workspace-stage #codex-submit:disabled {background:#3b252c;border-color:#72515b;color:#d8bdc4;opacity:1}
+.arcane-app .composer-controls[data-task-active=true] #codex-submit:not(:disabled) {background:#be2437;border-color:#ed5264}
+.arcane-app .codex-task-usage {grid-column:1/-1;grid-row:2;order:4;border-color:#34343b;font-size:11px;padding-top:8px}
+.arcane-app .composer-attachments {display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px;min-width:0}
+.arcane-app .composer-attachment {display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 8px;border:1px solid #45454f;border-radius:7px;background:#24242a;color:#dedee5;font-size:11px;overflow-wrap:anywhere}
+.arcane-app .composer-attachment button {display:grid;place-items:center;min-width:28px;min-height:28px;padding:5px;border-radius:5px;background:transparent;color:#c6c6d0}
+.arcane-app #codex-attachment-status {margin:0 3px 8px;font-size:11px;color:var(--muted)}
+.arcane-app .composer-model-popover {
+  width:min(300px,calc(100vw - 24px));max-height:min(480px,calc(100svh - 24px));
+  padding:12px;gap:10px;border:1px solid #494952;border-radius:14px;
+  background:#1b1b20;box-shadow:0 12px 40px #0009;color:var(--text);
+}
+.arcane-app .composer-model-popover:has(#codex-picker-summary) {width:min(240px,calc(100vw - 24px))}
+.arcane-app .composer-model-popover:has(#codex-picker-model-list:not([hidden])) {width:min(300px,calc(100vw - 24px))}
+.arcane-app #codex-picker-summary {display:flex;flex-direction:column;gap:12px;min-width:0}
+.arcane-app .picker-summary-heading {display:flex;align-items:center;gap:8px;min-width:0}
+.arcane-app .picker-summary-heading>.icon {width:16px;height:16px;flex-shrink:0;color:#c6c6d0}
+.arcane-app #codex-picker-summary h2 {font-size:12px;font-weight:500;color:var(--muted);line-height:1.5}
+.arcane-app #codex-picker-effort-value {display:block;color:var(--text);font-size:18px;font-weight:600;letter-spacing:-.3px;line-height:1.4;overflow-wrap:anywhere}
+.arcane-app .picker-summary-heading #codex-picker-effort-value {flex:1;min-width:0;font-size:13px;letter-spacing:0}
+.arcane-app #codex-picker-current-model {
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  width:100%;min-width:0;min-height:36px;padding:8px 10px;
+  background:#25252b;border:1px solid #41414b;border-radius:8px;
+  color:var(--text);font-size:12px;font-weight:500;text-align:left;overflow-wrap:anywhere;
+}
+.arcane-app #codex-picker-current-model .icon {width:14px;height:14px;flex-shrink:0;color:var(--muted)}
+.arcane-app #codex-picker-effort-slider {
+  appearance:auto;display:block;width:100%;min-width:0;height:24px;min-height:24px;
+  margin:2px 0;padding:0;border:0;border-radius:0;background:transparent;
+  accent-color:var(--accent);cursor:pointer;
+}
+.arcane-app #codex-picker-effort-slider:disabled {cursor:not-allowed}
+.arcane-app .native-effort {min-width:0;color:var(--muted);font-size:11px}
+.arcane-app :is(#codex-picker-reset,#codex-picker-back) {
+  align-self:flex-start;min-height:32px;padding:6px 2px;
+  background:transparent;border:0;border-radius:4px;color:#c6c6d0;
+  font-size:11px;font-weight:500;text-align:left;
+}
+.arcane-app #codex-picker-reset {text-decoration:underline;text-underline-offset:3px;text-decoration-color:#686875}
+.arcane-app .picker-summary-heading #codex-picker-reset {width:28px;min-width:28px;height:28px;min-height:28px;padding:6px;border-radius:6px;text-decoration:none}
+.arcane-app .picker-summary-heading #codex-picker-reset .icon {width:16px;height:16px}
+.arcane-app #codex-picker-back {display:inline-flex;align-items:center;gap:6px;margin-bottom:6px}
+.arcane-app #codex-picker-back .icon {width:14px;height:14px}
+.arcane-app #codex-picker-model-list {min-width:0}
+.arcane-app .picker-model-list-heading {display:flex;align-items:center;gap:8px;margin-bottom:8px;color:#c6c6d0;font-size:12px}
+.arcane-app .picker-model-list-heading #codex-picker-back {width:28px;min-width:28px;height:28px;min-height:28px;margin:0;padding:6px}
+.arcane-app .composer-model-popover input[type=search] {
+  min-height:36px;padding:8px 10px;font-size:12px;border-radius:8px;
+  border-color:#45454f;background:#121216;
+}
+.arcane-app .picker-model-options {gap:3px;max-height:240px;margin-top:6px}
+.arcane-app .picker-model-option {min-height:36px;padding:8px 10px;font-size:12px;border-radius:7px}
+.arcane-app .picker-model-option small {color:var(--muted);font-size:11px}
+.arcane-app .picker-model-option[aria-selected=true] {background:#33252d;border-color:#965564}
+.arcane-app .picker-effort-section {border-color:#3c3c45}
+.arcane-app .composer-model-popover:has(#codex-picker-summary) :is(.picker-effort-section,#codex-picker-efforts,.picker-setup-actions) {display:none}
+.arcane-app #codex-picker-apply {width:100%;min-height:34px;padding:7px 10px;border-radius:8px;background:#292930;border-color:#484853;color:var(--text);font-size:12px}
+.arcane-app #codex-picker-apply:disabled {color:#b2b2bd;background:#202025;border-color:#3b3b43;opacity:1}
+.arcane-app #provider-login-gate .secondary {background:#1d1d23;border-color:#494952}
+.arcane-app #provider-login-gate button[aria-pressed=true] {background:#302129;border-color:#c26978}
+.arcane-app #provider-login-gate .provider-next button:disabled {background:#29232a;border-color:#59424d;color:#cec1c8}
+/* A signed-out workspace offers the sign-in gate without dormant workspace actions. */
+.arcane-app .composer-attachments {display:flex;flex-wrap:wrap;gap:6px;padding:0 4px 8px}
+.arcane-app .codex-attachment-chip {display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 8px;border:1px solid #44444f;border-radius:8px;background:#25252c;font-size:12px}
+.arcane-app .codex-attachment-chip>span {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
+.arcane-app .composer-attachments button {min-height:24px;padding:2px 5px;background:transparent;border:0;color:var(--muted);font-size:12px}
+.arcane-app #codex-attachment-status {margin:0 4px 8px;font-size:12px;color:var(--muted)}
+.arcane-app:has(.workspace-stage.provider-required) :is(.new-chat,.sidebar-links,.sidebar-secondary,.workspace-topbar,.shell-notice) {display:none}
+.arcane-app .workspace-stage.provider-required :is(.chat-heading,.chat-topline,.composer,.artifact-panel,#codex-model-popover) {display:none!important}
+.arcane-app .workspace-stage.provider-required .conversation-scroll {display:flex;align-items:center;justify-content:center;padding:0}
+.arcane-app .workspace-stage.provider-required .conversation-scroll>:not(#provider-login-gate) {display:none!important}
+.arcane-app .workspace-stage.provider-required #provider-login-gate {min-height:0;padding:36px 20px}
+.arcane-app .workspace-stage.provider-required .provider-choices button:disabled {display:none}
+@media(hover:hover) and (pointer:fine) {
+  .arcane-app :is(.nav-link,.icon-button):hover {background:#25252b;color:var(--text)}
+  .arcane-app .new-chat:hover {background:#25252b;border-color:#555560}
+  .arcane-app #workspace-add-context:hover {background:#2a2a32;border-color:#4c4c56;color:#fff}
+  .arcane-app .picker-model-option:hover:not([aria-selected=true]) {background:#2a2a32}
+  .arcane-app #codex-picker-current-model:hover:not(:disabled) {background:#303039;border-color:#686875}
+  .arcane-app :is(#codex-picker-reset,#codex-picker-back):hover {color:#fff}
+  .arcane-app .workspace-stage #codex-submit:hover:not(:disabled) {background:#e52b40;border-color:#ff7989}
+}
+@media(max-width:760px) {
+  .arcane-app .workspace-stage .composer {padding:12px 10px 10px;border-radius:16px}
+  .arcane-app .workspace-stage .composer textarea {font-size:16px;min-height:52px;max-height:110px;margin-bottom:8px}
+  .arcane-app .composer-controls {gap:5px}
+  .arcane-app .composer-model-picker {order:2;max-width:100%}
+  .arcane-app .composer-model-trigger {width:auto;min-height:36px;padding-inline:5px;gap:4px;font-size:11px}
+  .arcane-app #codex-model-label {max-width:120px;flex:0 1 auto}
+  .arcane-app .picker-effort {max-width:48px;padding-left:4px;font-size:10px}
+  .arcane-app .composer-tool-context {order:1;max-width:100%;font-size:10px}
+  .arcane-app #workspace-add-context {order:0;min-height:36px}
+  .arcane-app .workspace-stage #codex-submit {order:3;width:36px;height:36px;min-height:36px;margin:0}
+}
+@media(max-width:360px) {
+  .arcane-app #codex-model-label {max-width:88px}
+}
+@media(forced-colors:active) {
+  .arcane-app .app-main,.arcane-app .app-sidebar,.arcane-app .workspace-stage .composer {background:Canvas;box-shadow:none}
+  .arcane-app .workspace-stage #codex-submit,
+  .arcane-app #codex-picker-current-model {border-color:ButtonText}
+  .arcane-app .context-dot {background:CanvasText}
+  .arcane-app .workspace-stage .composer:focus-within {border-color:Highlight;box-shadow:none}
+}
+/* No ambient or idle animation; motion is limited to explicit interaction feedback. */
+.arcane-app *,.arcane-app *::before,.arcane-app *::after {animation:none}
 /* Keep this universal preference reset last, after every responsive override. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

@@ -44,7 +44,7 @@ local key = "arcane_local_v1_45871_" .. string.rep("a", 64)
 local otherKey = "arcane_local_v1_45872_" .. string.rep("b", 64)
 local green = Color3.fromRGB(71, 203, 133)
 local inputs, controls = {}, {}
-local brand, header, inputPanel, mark
+local brand, header, inputPanel, mark, content
 for _, instance in ipairs(fixture.created) do
   if instance:IsA("TextBox") then table.insert(inputs, instance) end
   if instance:IsA("TextButton") then table.insert(controls, instance) end
@@ -53,6 +53,7 @@ for _, instance in ipairs(fixture.created) do
   if instance.Name == "Header" then header = instance end
   if instance.Name == "KeyInput" then inputPanel = instance end
   if instance.Name == "ArcaneMark" then mark = instance end
+  if instance.Name == "Content" then content = instance end
   assert(not table.find({"WhiteStroke", "OrangeStroke", "Subtitle", "ConnectionStatus", "ConnectionDot", "Divider", "Footer", "Grants", "Detail"}, instance.Name), "only the requested minimal UI")
 end
 assert(#inputs == 1 and #controls == 1 and inputs[1].Name == "ApiKey", "exactly one key field and one connection control")
@@ -63,7 +64,8 @@ assert(keyInput.ZIndex == 3 and keyInput.TextEditable, "native input has its own
 assert(keyInput.Active and keyInput.Selectable and keyInput.TextEditable, "key input accepts native focus and editing")
 assert(keyInput.Position[1] == 0 and keyInput.Position[2] == 0 and keyInput.Position[3] == 0 and keyInput.Position[4] == 0 and keyInput.Size[1] == 1 and keyInput.Size[2] == 0 and keyInput.Size[3] == 1 and keyInput.Size[4] == 0, "the entire key entry is an editable hit area")
 assert(fixture.widgetInfo[1] == Enum.InitialDockState.Float and fixture.widgetInfo[2] == true and fixture.widgetInfo[3] == true, "startup opens a floating popup even after a previously hidden session")
-assert(fixture.widgetInfo[4] == 260 and fixture.widgetInfo[5] >= 190 and fixture.widgetInfo[5] <= 205, "compact width with a taller default content area")
+assert(fixture.widgetInfo[4] == 260 and fixture.widgetInfo[5] == 184 and fixture.widgetInfo[6] == 230, "compact default content area and minimum width")
+assert(__arcaneRequire("Validation").VERSION == "0.1.3", "runtime advertises plugin 0.1.3")
 local bottomPadding
 for _, child in ipairs(control.Parent:GetChildren()) do
   if child:IsA("UIPadding") then bottomPadding = child.PaddingBottom.Offset end
@@ -78,8 +80,18 @@ for _, strip in ipairs(mark:GetChildren()) do
   assert(strip.Size[3] == 1 / 64 and strip.Size[1] > 0 and strip.Position[2] == 0 and strip.Position[4] == 0, "logo uses sixty-four bounded fractional rows")
   assert(strip.BackgroundTransparency == (if string.sub(strip.Name, 1, 9) == "LogoFacet" then 0.2 else 0), "scanline opacity preserves the desktop facet")
 end
-assert(fixture.widgetInfo[7] >= 185 and fixture.widgetInfo[7] <= fixture.widgetInfo[5], "minimum height preserves the taller panel")
+assert(fixture.widgetInfo[7] == 176, "compact minimum content height")
 assert(fixture.widgetInfo[7] >= control.Position[4] + control.Size[4] + bottomPadding, "minimum content bounds fit the entire button and bottom padding without assuming host chrome height")
+assert(content and header.Parent == content and inputPanel.Parent == content and control.Parent == content, "all controls share the centered content frame")
+assert(content.Parent:IsA("Frame") and content.Size[3] == 0, "fixed content needs no scrolling canvas")
+for _, height in ipairs({fixture.widgetInfo[7], fixture.widgetInfo[5], 240}) do
+  local top = height * content.Position[3] + content.Position[4]
+  local bottom = top + control.Position[4] + control.Size[4]
+  assert(top >= 0 and top + content.Size[4] <= height, "entire content frame stays inside the widget")
+  assert(bottom + bottomPadding <= height, "button and bottom padding are never cropped")
+  assert(top + mark.Position[4] == height - bottom, "logo and button have balanced outer margins")
+  assert(top + header.Size[4] <= top + inputPanel.Position[4] and inputPanel.Position[4] + inputPanel.Size[4] < control.Position[4], "header, key and button never overlap")
+end
 assert(#fixture.workers == 1 and #fixture.transports == 1, "exactly one transport worker")
 local client = fixture.transports[1]
 local worker = coroutine.create(fixture.workers[1])
@@ -192,7 +204,9 @@ async function runLuauFixture({ setup = '', checks, core = false, format = 'gene
     assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
     const [prelude, gui, logic, editing] = await Promise.all([
       readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8'),
-      readFile(path.join(repository, 'plugin/fixtures/MockPlugin.luau'), 'utf8'),
+      // Adapt only the GUI double's old identity assertion to the compact widget.
+      readFile(path.join(repository, 'plugin/fixtures/MockPlugin.luau'), 'utf8')
+        .then(source => source.replace('id == "ArcaneLocalBridgeFloatingV2"', 'id == "ArcaneLocalBridgeFloatingV3"')),
       core ? readFile(path.join(repository, 'plugin/fixtures/Logic.spec.luau'), 'utf8') : Promise.resolve(''),
       editingCase ? readFile(path.join(repository, 'plugin/fixtures/KeyInput.spec.luau'), 'utf8') : Promise.resolve(''),
     ]);

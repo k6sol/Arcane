@@ -4,6 +4,7 @@ import type { RequestedModel } from '../../../packages/core/src/workflow-recipes
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
 import type { Approval, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsController } from './chat-tabs.js';
+import type { ChatAttachmentsController } from './chat-attachments.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
 export const CODEX_INPUT_BYTES = 131072;
@@ -304,6 +305,7 @@ export class CodexChat {
   private selectionSignature=''; private pickerSignature='';
   private readonly pickerCleanup: (() => void)[] = [];
   private reasoningOpen=false;
+  private pickerModelsOpen=false;
   private draftDirty=false;
   private draftTimer:ReturnType<typeof setTimeout>|undefined;
   private readonly draftCleanup:(()=>void)[]=[];
@@ -319,7 +321,23 @@ export class CodexChat {
   private contextSignature = '';
   private preferencesLoadingProject: string | null = null;
   private preferenceController: ChatTabsController | null = null;
+  private attachments: ChatAttachmentsController | null = null;
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
+  /** Presentation-only attachment mount; it creates no native thread or task. */
+  enableTextAttachments(controller:ChatAttachmentsController):void {
+    this.attachments?.cleanup();this.attachments=controller;
+    if(this.stopped)controller.stop();else controller.syncScope();
+  }
+  /** Only authoritative native state may bind file copies to a conversation. */
+  textAttachmentScope():string|null {
+    const s=this.snapshot(),active=this.tabs?.active();
+    if(this.stopped||!this.fresh||!this.providerAllowsCodex()||this.tabTransition||this.state?.displayLimited||
+      !s?.connected||!s.ready||s.account?.auth!=='subscription'||!s.account.requiresOpenaiAuth||
+      this.state?.connecting||this.state?.closing||this.tabs&&(!active||active.kind==='native'&&!this.tabs.bound(this.state)))return null;
+    return JSON.stringify([this.state?.projectPath,active?.key??null,s.connectionId,
+      active?.kind==='draft'?null:s.thread?.threadId??null,active?.kind==='draft'?null:s.thread?.sessionId??null]);
+  }
+  attachmentPresentationChanged():void {if(!this.stopped)this.renderComposer();}
   private el<T extends HTMLElement=HTMLElement>(id:string) {const e=this.doc.getElementById(id);if(!e)throw new Error('Missing Codex UI '+id);return e as T;}
   private make<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string) {const e=this.doc.createElement(tag);if(text!==undefined)e.textContent=this.api.safe(text);if(className)e.className=className;return e;}
   private text(id:string,value:string){this.el(id).textContent=this.api.safe(value);}
@@ -369,6 +387,7 @@ export class CodexChat {
   }
   subscribeStateChange(listener:()=>void):()=>void {this.stateListeners.add(listener);return()=>{this.stateListeners.delete(listener);};}
   private publishState():void {
+    this.attachments?.syncScope();
     const signature=JSON.stringify([this.state?.projectPath??null,this.tabs?.active()?.key??null,this.workflowConversation(),this.workflowModelSelection()]);
     if(signature!==this.contextSignature){this.contextSignature=signature;for(const listener of this.workflowContextListeners){try{listener();}catch{}}}
     for(const listener of this.stateListeners){try{listener();}catch{}}
@@ -521,6 +540,13 @@ export class CodexChat {
     const snapshot = this.snapshot();
     return { connected: snapshot?.connected === true, ready: snapshot?.ready === true,
       fresh: this.fresh && !this.stopped, auth: snapshot?.account?.auth ?? 'unknown' };
+  }
+  /** User-requested startup connection discovery; never starts a chat or model turn. */
+  async connectForSavedLogin(): Promise<void> {
+    if(this.stopped||!this.providerAllowsCodex())return;
+    await this.refresh();
+    if(this.stopped||!this.providerAllowsCodex()||!this.fresh||this.snapshot()||this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing)return;
+    await this.dispatch('connect');
   }
   subscribeProviderStateChange(listener: () => void): () => void {
     this.providerStateListeners.add(listener);
@@ -689,13 +715,14 @@ export class CodexChat {
   private pickerCanOpen() {
     return !this.stopped && !this.pending.size && !this.uncertain.size && !this.state?.busy &&
       !this.state?.connecting && !this.state?.closing && !this.state?.displayLimited &&
-      (!this.snapshot() || this.canSelectModel());
+      this.providerAllowsCodex() && this.snapshot()?.account?.auth==='subscription' && this.canSelectModel();
   }
   private closePicker(restore = false) {
     const popover = this.picker(); if (!popover) return;
     const wasOpen = !popover.hidden; popover.hidden = true;
     this.el('codex-model-trigger').setAttribute('aria-expanded', 'false');
     this.setReasoningOpen(false);
+    this.showPickerModels(false);
     if (restore && wasOpen) {
       const trigger = this.el<HTMLButtonElement>('codex-model-trigger');
       (trigger.disabled ? this.el('codex-composer') : trigger).focus({ preventScroll: true });
@@ -708,7 +735,7 @@ export class CodexChat {
     const leftEdge = (viewport?.offsetLeft ?? 0) + margin, topEdge = (viewport?.offsetTop ?? 0) + margin;
     const width = Math.max(0, (viewport?.width ?? view.innerWidth) - margin * 2);
     const bottomEdge = topEdge + Math.max(0, (viewport?.height ?? view.innerHeight) - margin * 2);
-    const rect = this.el('codex-model-trigger').getBoundingClientRect(), panelWidth = Math.min(360, width);
+    const rect = this.el('codex-model-trigger').getBoundingClientRect(), panelWidth = Math.min(this.pickerModelsOpen?300:240, width);
     const above = Math.max(0, rect.top - topEdge - gap), below = Math.max(0, bottomEdge - rect.bottom - gap);
     const useAbove = above >= below;
     popover.style.width = panelWidth + 'px';
@@ -722,7 +749,20 @@ export class CodexChat {
     if (!popover || !this.pickerCanOpen()) return;
     popover.hidden = false; this.el('codex-model-trigger').setAttribute('aria-expanded', 'true');
     this.el<HTMLInputElement>('codex-model-search').value = ''; this.pickerSignature = '';
-    this.renderPicker(); this.el('codex-model-search').focus({ preventScroll: true }); this.positionPicker();
+    this.showPickerModels(false);this.renderPicker();
+    (this.doc.getElementById('codex-picker-effort-slider')??this.reasoningTrigger())?.focus({preventScroll:true});this.positionPicker();
+  }
+  private showPickerModels(open:boolean):void {
+    this.pickerModelsOpen=open;
+    const summary=this.doc.getElementById('codex-picker-summary'),list=this.doc.getElementById('codex-picker-model-list');
+    if(summary)summary.hidden=open;if(list)list.hidden=!open;
+    this.doc.getElementById('codex-picker-current-model')?.setAttribute('aria-expanded',String(open));
+    if(this.picker())this.picker()!.dataset.view=open?'models':'reasoning';
+    this.positionPicker();
+  }
+  private applyPickerSelection():void {
+    const button=this.el<HTMLButtonElement>('codex-select');
+    if(this.canSelectModel()&&!this.picker()!.hidden&&!button.disabled)button.click();
   }
   private reasoningTrigger():HTMLButtonElement|null {
     return this.doc.getElementById('codex-picker-reasoning-trigger') as HTMLButtonElement|null;
@@ -767,6 +807,25 @@ export class CodexChat {
       this.openPicker();
     });
     listen(this.el('codex-model-search'), 'input', () => this.renderPicker());
+    const currentModel=this.doc.getElementById('codex-picker-current-model');
+    if(currentModel)listen(currentModel,'click',()=>{if(this.pickerCanOpen()&&!this.picker()!.hidden){this.showPickerModels(true);this.el('codex-model-search').focus({preventScroll:true});}});
+    const back=this.doc.getElementById('codex-picker-back');
+    if(back)listen(back,'click',()=>{this.showPickerModels(false);currentModel?.focus({preventScroll:true});});
+    const slider=this.doc.getElementById('codex-picker-effort-slider') as HTMLInputElement|null;
+    if(slider){
+      listen(slider,'input',()=>{
+        const efforts=this.snapshot()?.models.find(item=>item.model===this.value('codex-model'))?.efforts??[];
+        const index=Number(slider.value);if(!this.canSelectModel()||this.picker()!.hidden||!Number.isInteger(index)||index<0||index>=efforts.length)return;
+        this.el<HTMLSelectElement>('codex-effort').value=efforts[index]!;this.renderControls();
+      });
+      listen(slider,'change',()=>this.applyPickerSelection());
+    }
+    const reset=this.doc.getElementById('codex-picker-reset');
+    if(reset)listen(reset,'click',()=>{
+      const item=this.snapshot()?.models.find(item=>item.model===this.value('codex-model'));
+      if(!this.canSelectModel()||this.picker()!.hidden||!item?.defaultEffort||!item.efforts.includes(item.defaultEffort))return;
+      this.el<HTMLSelectElement>('codex-effort').value=item.defaultEffort;this.renderControls();this.applyPickerSelection();
+    });
     listen(reasoning,'click',()=>{if(this.canSelectModel()&&!this.picker()!.hidden&&!reasoning!.disabled)this.setReasoningOpen(!this.reasoningOpen,true);});
     listen(this.el('codex-model-options'),'focusin',event=>{
       const target=event.target as HTMLElement;
@@ -791,7 +850,7 @@ export class CodexChat {
       if (key.isComposing || key.altKey || key.ctrlKey || key.metaKey) return;
       if (key.key === 'Escape') {
         event.preventDefault();
-        if(this.reasoningOpen){this.setReasoningOpen(false);this.reasoningTrigger()?.focus({preventScroll:true});}else this.closePicker(true);
+        if(this.pickerModelsOpen){this.showPickerModels(false);currentModel?.focus({preventScroll:true});}else this.closePicker(true);
         return;
       }
       const target = event.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts');
@@ -860,10 +919,16 @@ export class CodexChat {
         row.dataset.pickerModel = item.model; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item.model === model)); row.disabled = !enabled;
         row.title=this.api.safe(item.model);row.append(this.make('span', item.displayName),this.pickerCheck(item.model===model));
         row.addEventListener('click', () => {
-          if (!this.canSelectModel() || this.picker()!.hidden || !this.snapshot()?.models.some(current => current.model === item.model)) return;
-          if (this.value('codex-model') !== item.model) { this.el<HTMLSelectElement>('codex-model').value = item.model; this.populateEfforts(); }
+          const current=this.snapshot()?.models.find(current=>current.model===item.model);
+          if (!this.canSelectModel() || this.picker()!.hidden || !current) return;
+          if (this.value('codex-model') !== item.model) {
+            this.el<HTMLSelectElement>('codex-model').value = item.model; this.populateEfforts();
+            // Choose only an effort from this fresh native catalogue. The reset
+            // control separately requires a reported default (not a guessed one).
+            this.el<HTMLSelectElement>('codex-effort').value=current.defaultEffort&&current.efforts.includes(current.defaultEffort)?current.defaultEffort:current.efforts[0]??'';
+          }
           this.renderControls();
-          this.setReasoningOpen(true,true);
+          this.showPickerModels(false);this.applyPickerSelection();
         }); host.append(row);
       }
       this.el('codex-model-empty').hidden = models.length > 0;
@@ -886,6 +951,13 @@ export class CodexChat {
     const reasoning=this.reasoningTrigger();
     if(reasoning){reasoning.textContent=this.api.safe('Reasoning'+(effort?' · '+effort:''));reasoning.disabled=!enabled||!snapshot?.models.some(item=>item.model===model);}
     this.el<HTMLButtonElement>('codex-picker-apply').disabled = this.el<HTMLButtonElement>('codex-select').disabled;
+    const selected=snapshot?.models.find(item=>item.model===model);
+    const displayEffort=effort?effort.charAt(0).toUpperCase()+effort.slice(1):'Reasoning';
+    const effortValue=this.doc.getElementById('codex-picker-effort-value');if(effortValue)effortValue.textContent=this.api.safe(displayEffort);
+    const modelValue=this.doc.getElementById('codex-picker-current-model-label');if(modelValue)modelValue.textContent=this.api.safe(selected?.displayName??'Choose model');
+    const slider=this.doc.getElementById('codex-picker-effort-slider') as HTMLInputElement|null;
+    if(slider){const efforts=selected?.efforts??[],index=efforts.indexOf(effort);slider.max=String(Math.max(0,efforts.length-1));slider.value=String(Math.max(0,index));slider.disabled=!enabled||efforts.length<2||index<0;slider.setAttribute('aria-valuetext',displayEffort);slider.style.setProperty('--effort-position',String(efforts.length>1?Math.max(0,index)/(efforts.length-1)*100:0)+'%');}
+    const reset=this.doc.getElementById('codex-picker-reset') as HTMLButtonElement|null;if(reset)reset.disabled=!enabled||!selected?.defaultEffort||!selected.efforts.includes(selected.defaultEffort);
     this.positionPicker();
   }
 
@@ -910,7 +982,17 @@ export class CodexChat {
     this.on('codex-interrupt','click',()=>{const t=this.snapshot()?.thread;if(t?.turnId)void this.dispatch('turn-interrupt',{threadId:t.threadId,turnId:t.turnId});});
     this.on('codex-composer','input',()=>this.composerInput());
     this.on('codex-draft-review-button','click',event=>{if(event.isTrusted)this.openDraftReview();});
-    this.on('codex-compose','submit',e=>{e.preventDefault();const t=this.snapshot()?.thread;if(this.providerAllowsCodex()&&t&&(!this.tabs||this.tabs.bound(this.state)))void this.dispatch('turn-start',{threadId:t.threadId,text:this.value('codex-composer')});});
+    this.on('codex-compose','submit',e=>{
+      e.preventDefault();const t=this.snapshot()?.thread;
+      if(!this.providerAllowsCodex()||!t||this.tabs&&!this.tabs.bound(this.state))return;
+      let message:string;try {message=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
+      catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be prepared.');return;}
+      void this.dispatch('turn-start',{threadId:t.threadId,text:message});
+    });
+    this.on('codex-submit','click',()=>{
+      const thread=this.snapshot()?.thread;
+      if(this.providerAllowsCodex()&&thread?.configured&&thread.turnId&&['starting','inProgress'].includes(thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state)))void this.dispatch('turn-interrupt',{threadId:thread.threadId,turnId:thread.turnId});
+    });
     this.on('codex-reconcile','click',()=>void this.refresh());
     this.on('codex-acknowledge','click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Recorded action IDs and native state reviewed. No request was retried.');this.render();});
     this.on('codex-confirm-check','change',()=>this.renderControls());
@@ -921,6 +1003,7 @@ export class CodexChat {
     this.renderControls();await this.refresh();this.schedule();
   }
   stop() {
+    this.attachments?.stop();
     this.preferenceController?.stop();this.stashTabDraft();this.tabs?.stop();
     this.stopped=true;this.generation++;this.readVersion++;this.readController?.abort();if(this.timer)clearTimeout(this.timer);
     for(const input of this.pending.values())this.uncertain.set(input.requestId,{input,read:false});
@@ -928,7 +1011,7 @@ export class CodexChat {
     for(const cleanup of this.draftCleanup.splice(0))cleanup();
     this.closeConfirmation();this.fresh=false;this.transcript.reset();this.messageSignature='';this.el('codex-messages').replaceChildren();this.renderControls();this.publishProviderState();this.publishState();
   }
-  resume(){this.stopped=false;this.tabs?.mount();this.preferenceController?.resume();this.bindPicker();this.bindDraftLifecycle();void this.refresh().finally(()=>this.schedule());}
+  resume(){this.stopped=false;this.attachments?.resume();this.tabs?.mount();this.preferenceController?.resume();this.bindPicker();this.bindDraftLifecycle();void this.refresh().finally(()=>this.schedule());}
   private schedule() {
     if(this.stopped)return;if(this.timer)clearTimeout(this.timer);
     this.timer=setTimeout(()=>{const active=!this.doc.hidden&&(this.el<HTMLDetailsElement>('codex-panel').open||this.pending.size>0||this.uncertain.size>0||!!this.confirmation);if(active)void this.refresh().finally(()=>this.schedule());else this.schedule();},1500);
@@ -1004,7 +1087,7 @@ export class CodexChat {
     if(action==='disconnect')this.fresh=false;
     const epoch=this.generation, assetScope=this.assetScope();
     this.pending.set(input.requestId,input);this.text('codex-notice','Waiting for confirmation…');
-    if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.el<HTMLTextAreaElement>('codex-composer').value='';this.clearDraftOrigins();this.stashTabDraft();}
+    if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.el<HTMLTextAreaElement>('codex-composer').value='';this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
     this.render();this.publishState();
     try {
       const outcome=await this.api.action(input);
@@ -1145,7 +1228,16 @@ export class CodexChat {
     const s=this.snapshot(),t=(!this.tabs||this.tabs.bound(this.state))?s?.thread:null;
     const normal=this.normal()&&!this.tabTransition,message=this.value('codex-composer'),size=utf8(message),draftBlocked=this.draftNeedsReview();
     const disabled=(id:string,value:boolean)=>{const button=this.el<HTMLButtonElement>(id);if(button.disabled!==value)button.disabled=value;};
-    disabled('codex-submit',!this.providerAllowsCodex()||!normal||!t?.configured||!IDLE.includes(t.turnStatus)||!message.trim()||size>CODEX_INPUT_BYTES||s?.account?.auth!=='subscription'||!s.account.requiresOpenaiAuth||draftBlocked);
+    const active=!!t&&['starting','inProgress','cancelling'].includes(t.turnStatus);
+    const submit=this.el<HTMLButtonElement>('codex-submit');submit.type=active?'button':'submit';
+    const taskState=active?'active':'idle';
+    if(submit.dataset.taskState!==taskState){
+      submit.dataset.taskState=taskState;submit.setAttribute('aria-label',active?'Stop task':'Send message');
+      const path=submit.querySelector?.('svg path');path?.setAttribute('d',active?'M7 7h10v10H7Z':'M12 19V5m-6 6 6-6 6 6');
+      path?.setAttribute('fill',active?'currentColor':'none');
+    }
+    const controls=submit.closest?.<HTMLElement>('.composer-controls');if(controls)controls.dataset.taskActive=String(active);
+    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'):!this.providerAllowsCodex()||!normal||!t?.configured||!IDLE.includes(t.turnStatus)||!message.trim()||size>CODEX_INPUT_BYTES||s?.account?.auth!=='subscription'||!s.account.requiresOpenaiAuth||draftBlocked);
     this.el('codex-draft-review').hidden=!draftBlocked;
     const notice=draftBlocked?this.restoredWorkflowDraft?'Restored draft. Review it for this conversation and model before sending.':'Workflow draft context changed. Your unsent text is preserved; review it for this conversation before sending.':'';
     if(this.el('codex-draft-review-notice').textContent!==notice)this.text('codex-draft-review-notice',notice);

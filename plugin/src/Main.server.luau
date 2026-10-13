@@ -26,8 +26,8 @@ local button = toolbar:CreateButton("ArcaneBridge", "Open Arcane", "", "Arcane")
 button.ClickableWhenViewportHidden = true
 -- A new stable widget identity migrates the old docked layout once. Studio
 -- owns floating-window placement; opening the UI never connects a place.
-local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 260, 200, 230, 185)
-local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV2", info)
+local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 260, 184, 230, 176)
+local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV3", info)
 widget.Title = "Arcane"
 widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
@@ -38,18 +38,12 @@ local colors = {
 	red = Color3.fromRGB(255, 51, 64),
 	green = Color3.fromRGB(71, 203, 133), amber = Color3.fromRGB(225, 166, 68),
 }
-local panel = Instance.new("ScrollingFrame")
+local panel = Instance.new("Frame")
 panel.Name = "ArcanePanel"
 panel.Size = UDim2.fromScale(1, 1)
 panel.BackgroundColor3 = colors.body
 panel.BorderSizePixel = 0
-panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
-panel.CanvasSize = UDim2.new()
-panel.ScrollBarThickness = 2
 panel.Parent = widget
-local panelPadding = Instance.new("UIPadding")
-panelPadding.PaddingBottom = UDim.new(0, 18)
-panelPadding.Parent = panel
 
 local function frame(name: string, parent: Instance, position: UDim2, size: UDim2, color: Color3): Frame
 	local item = Instance.new("Frame")
@@ -78,7 +72,14 @@ local function label(name: string, parent: Instance, text: string, position: UDi
 	return item
 end
 
-local header = frame("Header", panel, UDim2.new(), UDim2.new(1, 0, 0, 48), colors.header)
+-- Center the visible logo-to-button bounds (8..134) at every widget height.
+-- All 152px of content, including bottom padding, fit the 176px minimum.
+local content = frame("Content", panel, UDim2.new(0, 0, 0.5, -71), UDim2.new(1, 0, 0, 152), colors.body)
+content.BackgroundTransparency = 1
+local panelPadding = Instance.new("UIPadding")
+panelPadding.PaddingBottom = UDim.new(0, 18)
+panelPadding.Parent = content
+local header = frame("Header", content, UDim2.new(), UDim2.new(1, 0, 0, 48), colors.header)
 local mark = frame("ArcaneMark", header, UDim2.new(0, 14, 0, 8), UDim2.new(0, 32, 0, 32), colors.header)
 mark.BackgroundTransparency = 1
 -- Exact polygons from the desktop's 64x64 SVG, as bounded native scanlines.
@@ -116,10 +117,10 @@ connectButton.Text, connectButton.TextColor3 = if savedKey then "Reconnect" else
 connectButton.Font = Enum.Font.GothamMedium
 connectButton.TextSize = 14
 connectButton.RichText = false
-connectButton.Parent = panel
+connectButton.Parent = content
 corner(connectButton, 6)
 
-local inputPanel = frame("KeyInput", panel, UDim2.new(0, 14, 0, 54), UDim2.new(1, -28, 0, 36), colors.input)
+local inputPanel = frame("KeyInput", content, UDim2.new(0, 14, 0, 54), UDim2.new(1, -28, 0, 36), colors.input)
 corner(inputPanel, 5)
 local stroke = Instance.new("UIStroke")
 stroke.Color, stroke.Thickness = colors.divider, 1
