@@ -165,8 +165,8 @@ test('factory and install are inert; the actual preload exposes a frozen version
   assert.equal(f.disk.reads, 0); assert.equal(f.disk.writes.length, 0); assert.deepEqual(f.safeStorage.calls, []);
   assert.equal(Object.isFrozen(f.exposed), true); assert.equal(Object.isFrozen(f.exposed.studioKeys), true);
   assert.equal(f.exposed.studioKeys.version, 1);
-  assert.deepEqual(Object.keys(f.exposed.studioKeys).sort(), ['copy', 'forget', 'list', 'remember', 'reveal', 'version']);
-  assert.deepEqual([...f.handlers.keys()].sort(), ['copy', 'forget', 'list', 'remember', 'reveal'].map(a => 'arcane:studio-keys-' + a));
+  assert.deepEqual(Object.keys(f.exposed.studioKeys).sort(), ['copy', 'forget', 'list', 'remember', 'replace', 'reveal', 'version']);
+  assert.deepEqual([...f.handlers.keys()].sort(), ['copy', 'forget', 'list', 'remember', 'replace', 'reveal'].map(a => 'arcane:studio-keys-' + a));
 });
 
 test('encrypted TEST DOUBLE: remember persists only ciphertext; reload/restart reveals and list contains IDs only', async () => {
@@ -347,5 +347,21 @@ test('copy uses the validated project vault, not renderer strings or clipboard p
   f.setState({ switching: true });
   await assert.rejects(f.call('copy', { keyId: id(1) }), ERROR);
   assert.deepEqual(f.copied, [secret('a')]);
+  assert.equal(f.disk.descriptors.size, 0);
+});
+
+test('replace saves exactly one key and removes the previous vault secret atomically', async () => {
+  const f = fixture();
+  await f.call('remember', { keyId: id(1), apiKey: secret('a') });
+  await f.call('remember', { keyId: id(2), apiKey: secret('b') });
+  assert.deepEqual(json(await f.call('replace', { keyId: id(3), apiKey: secret('c') })), { remembered: true });
+  assert.deepEqual(json(await f.call('list')), { available: true, items: [{ keyId: id(3) }] });
+  await assert.rejects(f.call('reveal', { keyId: id(1) }), ERROR);
+  await assert.rejects(f.call('copy', { keyId: id(2) }), ERROR);
+  const before = Buffer.from(f.disk.node(f.full).bytes);
+  f.disk.filesystem.renameSync = () => { throw new Error('Owned fixture write failure'); };
+  await assert.rejects(f.call('replace', { keyId: id(4), apiKey: secret('d') }), ERROR);
+  assert.ok(f.disk.node(f.full).bytes.equals(before));
+  assert.deepEqual(json(await f.call('reveal', { keyId: id(3) })), { apiKey: secret('c') });
   assert.equal(f.disk.descriptors.size, 0);
 });

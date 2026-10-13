@@ -56,7 +56,11 @@ async function fixture(t:test.TestContext,storage=memoryStorage(),tabs=true,init
 }
 
 test('typing bursts do no catalogue/tab rendering, persistence serialization or state publication',async t=>{
-  const f=await fixture(t);t.mock.timers.enable({apis:['setTimeout']});
+  const loaded=reportedState();
+  for(let i=1;i<512;i++)loaded.snapshot!.models.push({model:'reported-fixture-'+i,id:'reported-id-'+i,displayName:'Reported fixture '+i,efforts:['low','ultra'],defaultEffort:'low',entitlement:'unverified'});
+  loaded.snapshot!.events=Array.from({length:128},(_,index)=>({type:'delta',seq:index+1,threadId:'fixture-thread',turnId:'fixture-turn',itemId:'item-'+index,text:'Public fixture text. '.repeat(400)}));
+  loaded.snapshot!.lastEventSeq=128;
+  const f=await fixture(t,memoryStorage(),true,loaded);t.mock.timers.enable({apis:['setTimeout']});
   const internals=f.chat as unknown as {tabs:ChatTabs;render:()=>void;renderControls:()=>void;renderPicker:()=>void};
   let renders=0,tabUpdates=0,publications=0,serializations=0;
   for(const method of ['render','renderControls','renderPicker'] as const){const original=internals[method].bind(f.chat);internals[method]=()=>{renders++;original();};}
@@ -65,11 +69,12 @@ test('typing bursts do no catalogue/tab rendering, persistence serialization or 
   f.chat.subscribeStateChange(()=>publications++);
   const writes=f.storage.writes,requests=f.calls.length,originalStringify=JSON.stringify;
   JSON.stringify=((...args:Parameters<typeof JSON.stringify>)=>{serializations++;return originalStringify(...args);}) as typeof JSON.stringify;
-  try{for(let i=0;i<100;i++)f.input('Exact draft 🧩\n'+i+'  ');}finally{JSON.stringify=originalStringify;}
+  const prefix='Exact draft 🧩\n'+'x'.repeat(32768);
+  try{for(let i=0;i<100;i++)f.input(prefix+i+'  ');}finally{JSON.stringify=originalStringify;}
   assert.equal(renders,0);assert.equal(tabUpdates,0);assert.equal(publications,0);assert.equal(serializations,0);
   assert.equal(f.storage.writes,writes);assert.equal(f.calls.length,requests);
-  assert.equal(f.chat.currentStateView().activeChat!.draft,'Exact draft 🧩\n99  ');
-  assert.equal(f.chat.chatTabsView()[0]!.draft,'Exact draft 🧩\n99  ');
+  assert.equal(f.chat.currentStateView().activeChat!.draft,prefix+'99  ');
+  assert.equal(f.chat.chatTabsView()[0]!.draft,prefix+'99  ');
   assert.equal(f.chat.currentStateView().preferencesSaved,false);
   t.mock.timers.tick(CODEX_DRAFT_SAVE_DELAY_MS-1);assert.equal(tabUpdates,0);
   t.mock.timers.tick(1);assert.equal(tabUpdates,1);assert.equal(publications,1);assert.equal(renders,0);
@@ -117,4 +122,22 @@ test('input validation is immediate at exact UTF-8 limits and never submits on c
   f.input(f.doc.getElementById('codex-composer').value+'x');assert.equal(f.doc.getElementById('codex-submit').disabled,true);
   f.doc.getElementById('codex-composer').dispatchEvent(new Event('compositionend'));
   assert.equal(f.calls.length,requests);assert.equal(f.doc.getElementById('codex-composer').value.length,CODEX_INPUT_BYTES/2+1);
+});
+
+test('edits made while a saved-chat resume is pending stay in the outgoing draft',async t=>{
+  const initial=reportedState(),selection={model:'reported-fixture',effort:'low'};
+  initial.snapshot!.thread={threadId:'thread-a',sessionId:null,selection,configured:true,writeGranted:false,turnId:null,turnStatus:'idle'};
+  initial.nativeHistory={projectPath:initial.projectPath,threadId:'thread-a',sessionId:null,recorded:null};
+  initial.nativeThreads=['thread-a','thread-b'].map(threadId=>({provider:'codex',projectPath:initial.projectPath,threadId,sessionId:null,selection}));
+  const f=await fixture(t,memoryStorage(),true,initial);t.mock.timers.enable({apis:['setTimeout']});
+  assert.equal(await f.chat.newChat(),true);const outgoing=f.chat.currentStateView().activeChat!.key;
+  const controller=f.chat as unknown as {tabs:ChatTabs;bindNativeChat:()=>Promise<boolean>};
+  const target=controller.tabs.ensureSaved('thread-b')!;let release!:()=>void;
+  const receipt=new Promise<void>(done=>{release=done;});controller.bindNativeChat=async()=>{await receipt;return true;};
+  f.input('Before resume');const switching=f.chat.selectChat(target.key);
+  const bound=structuredClone(initial);bound.snapshot!.thread!.threadId='thread-b';bound.nativeHistory!.threadId='thread-b';
+  f.set(bound);await f.chat.refresh();
+  const latest='Last edit during resume 🧩\nTrailing spaces.  ';f.input(latest);release();
+  assert.equal(await switching,true);assert.equal(f.doc.getElementById('codex-composer').value,'');
+  assert.equal(await f.chat.selectChat(outgoing),true);assert.equal(f.doc.getElementById('codex-composer').value,latest);
 });

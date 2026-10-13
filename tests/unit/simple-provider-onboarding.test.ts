@@ -21,7 +21,7 @@ test('production onboarding keeps empty chat/usage mounts, one next action and r
   assert.match(html, /id="provider-login-heading">Sign in<\/h2>/);
   const gate = html.slice(html.indexOf('<section id="provider-login-gate"'), html.indexOf('</section>', html.indexOf('<section id="provider-login-gate"')));
   assert.match(gate, /aria-describedby="provider-login-message"/);
-  assert.match(gate, /id="provider-login-start"[^>]*disabled>Sign in with Codex/);
+  assert.match(gate, /id="provider-login-start"[^>]*disabled>Sign in with ChatGPT/);
   assert.match(gate, /id="provider-login-refresh"[^>]*disabled hidden/);
   assert.equal((gate.match(/class="button-row provider-next"/g) ?? []).length, 1);
   assert.doesNotMatch(gate, /type="password"|type="email"|install|Version|token|model catalogue/);
@@ -162,7 +162,7 @@ test('Edge native-contract fixture: explicit login/status/connect, Claude handof
     await page.evaluate(() => { const f = (window as any).providerUI; f.account.fresh = false; f.refresh(); });
     assert.equal(await page.locator('#provider-login-gate').isVisible(), true);
     await page.evaluate(() => { const f = (window as any).providerUI; f.account = null; const original = Date.now; Date.now = () => original() + 60001; f.refresh(); });
-    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with Codex', 'Expired native metadata cannot authorize reuse');
+    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with ChatGPT', 'Expired native metadata cannot authorize reuse');
     await page.locator('#provider-login-claude').click();
     assert.equal(await page.locator('#provider-login-message').innerText(), 'Claude Code opens in its native terminal.');
     await page.evaluate(() => (window as any).providerUI.response.auth = 'unknown');
@@ -210,7 +210,7 @@ test('Edge setup guards: late provider/lifecycle responses, exact preference res
     await page.locator('#provider-login-start').click(); await page.waitForFunction(() => typeof (window as any).providerUI.release === 'function');
     await page.evaluate(() => { const f = (window as any).providerUI; f.controller.stop(); f.controller.resume(); f.release(); });
     await page.waitForFunction(() => document.getElementById('provider-login-gate')?.getAttribute('aria-busy') === 'false');
-    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with Codex');
+    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with ChatGPT');
     await page.evaluate(() => { const f = (window as any).providerUI; f.hold = false; f.response.token = 'not-allowed'; });
     await page.locator('#provider-login-start').click();
     await page.waitForFunction(() => document.getElementById('provider-login-message')?.textContent?.includes('Setup unavailable'));

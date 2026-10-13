@@ -95,6 +95,38 @@ test('mount, preference restoration, cached status and resume never start login,
   assert.deepEqual((await view(page)).calls.map((call:any)=>call.action),['status']);assert.deepEqual((await view(page)).effects,[]);
 });
 
+test('sign-in contract expires Claude metadata and notifies subscribers without a render request or native polling',{skip:!enabled,timeout:30000},async t=>{
+  const page=await fixture(t);
+  await page.evaluate(()=>{
+    const w=window as any;w.signInChanges=[];
+    if(typeof w.controller.isSignedIn!=='function'||typeof w.controller.subscribeSignInChange!=='function')throw new Error('Missing sign-in contract');
+    w.unsubscribeSignIn=w.controller.subscribeSignInChange(()=>w.signInChanges.push(w.controller.isSignedIn()));
+  });
+  await page.locator('#provider-login-claude').click();
+  await page.evaluate(()=>{
+    for(const pane of document.querySelectorAll<HTMLElement>('[data-settings-section]'))pane.hidden=pane.id!=='workspace-settings';
+    (document.getElementById('settings-drawer') as HTMLDialogElement).showModal();
+  });
+  await set(page,{auth:'subscription',busy:true});
+  await page.locator('#provider-setup-refresh').click();await settled(page);
+  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false);
+  assert.deepEqual(await page.evaluate(()=>(window as any).signInChanges),[]);
+  await set(page,{busy:false});await page.locator('#provider-setup-refresh').click();await settled(page);
+  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),true);
+  assert.deepEqual(await page.evaluate(()=>(window as any).signInChanges),[true]);
+  const before=await view(page);
+  await advance(page,60000);
+  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),true);
+  await advance(page,1);
+  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false);
+  assert.deepEqual(await page.evaluate(()=>(window as any).signInChanges),[true,false]);
+  assert.deepEqual(await view(page),before,'The owned TTL timer must not call native status or connect');
+  await page.evaluate(()=>(window as any).unsubscribeSignIn());
+  await page.locator('#provider-setup-refresh').click();await settled(page);
+  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),true);
+  assert.deepEqual(await page.evaluate(()=>(window as any).signInChanges),[true,false]);
+});
+
 test('login completion never disconnects an old client or connects through a disabled native control',{skip:!enabled,timeout:30000},async t=>{
   const page=await fixture(t);
   await page.evaluate(()=>{(window as any).connection={fresh:true,connected:true,ready:true,auth:'signed-out'};});

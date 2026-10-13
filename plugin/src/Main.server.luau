@@ -211,6 +211,13 @@ transport = Transport.new(game, function(status: any)
 	else rememberState(false) end
 	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
 end)
+-- A deferred Text signal must also be caught inside an already dispatched
+-- editor callback. Keep the transport's original lifetime/lease checks intact.
+local guard = transport.guard
+transport.guard = function(client: any, command: any, pair: any): ()
+	invalidateInput()
+	guard(client, command, pair)
+end
 local connections: {RBXScriptConnection} = {}
 table.insert(connections, button.Click:Connect(function() widget.Enabled = not widget.Enabled end))
 table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(function() button:SetActive(widget.Enabled) end))
@@ -233,8 +240,9 @@ table.insert(connections, connectButton.Activated:Connect(function()
 	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, value) end)
 	savedKey, storageFailed = value, not stored
 	refreshHint()
+	connectButton.Text, connectButton.BackgroundColor3 = "Reconnect", colors.red
 	local ok = pcall(function() transport:requestConnect(value) end)
-	if not ok then rememberState(false); connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red end
+	if not ok then transport:requestDisconnect(); rememberState(false); stroke.Color = colors.red end
 	entered, value = nil, ""
 end))
 table.insert(connections, plugin.Unloading:Connect(function()

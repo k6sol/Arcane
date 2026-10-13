@@ -1090,7 +1090,7 @@
   "currentPluginFloatingInput": {
     "state": "standard-native-textbox-installed-81-fixture-tests-passed-human-confirmed-native-typing",
     "nativeTypingVerified": true,
-    "nativeTypingEvidence": "Direct human reply to latest standard-textbox question: Yes, typing works. Applies to freshly reopened disposable Studio baseplate; not simulated keyboard input or edit/restore proof.",
+    "nativeTypingEvidence": "Direct human reply: Yes, typing works. User was asked about a disposable baseplate; actual latest Studio inventory only exposed Hunted, so the window identity is not independently corroborated. No native pairing/edit/restore proof or Hunted edits.",
     "forceCentered": false,
     "artifactSha256": "524fdda174202d3555db8fc1df42b15f69c8266337e098547c2d14a089ae283d",
     "proof": "runtime/verification/plugin-floating-input-20261013/standard-native-input-fixed.tap",
@@ -1098,13 +1098,49 @@
   },
   "currentChatFirstUpgrade": {
     "state": "focused-integration-passed-current-full-regression-and-new-executable-pending",
-    "requirements": ["Minimal EXE/provider sign-in", "Saved provider choices without cached authorization", "Open-chat top tabs", "Per-chat drafts and native binding separation", "Elapsed time, reported tokens and honest cost estimates", "Canonical preview entry shares desktop HTML"],
-    "owners": {"providerUi": "Bernoulli", "chatTabs": "Faraday", "taskMetrics": "Sagan", "integration": "parent"},
+    "requirements": [
+      "Minimal EXE/provider sign-in",
+      "Saved provider choices without cached authorization",
+      "Open-chat top tabs",
+      "Per-chat drafts and native binding separation",
+      "Elapsed time, reported tokens and honest cost estimates",
+      "Canonical preview entry shares desktop HTML"
+    ],
+    "owners": {
+      "providerUi": "Bernoulli",
+      "chatTabs": "Faraday",
+      "taskMetrics": "Sagan",
+      "integration": "parent"
+    },
     "currentCompileSources": 167,
-    "focusedProductChecks": {"tests": 54, "passed": 54, "failed": 0, "skipped": 0, "proof": "runtime/verification/plugin-floating-input-20261013/chat-first-focused-integration-2.tap"},
-    "hostProviderChecks": {"tests": 124, "passed": 124, "failed": 0, "skipped": 0, "proof": "runtime/verification/plugin-floating-input-20261013/host-provider-integrated-3.tap"},
-    "sharedBrowserChecks": {"tests": 106, "passed": 106, "failed": 0, "skipped": 0, "proof": "runtime/verification/chat-first-fixture-integration-20261013/proof.json"},
-    "sharedIpcChecks": {"tests": 21, "passed": 21, "failed": 0, "skipped": 0, "proof": "runtime/verification/chat-first-fixture-integration-20261013/proof.json"},
+    "focusedProductChecks": {
+      "tests": 54,
+      "passed": 54,
+      "failed": 0,
+      "skipped": 0,
+      "proof": "runtime/verification/plugin-floating-input-20261013/chat-first-focused-integration-2.tap"
+    },
+    "hostProviderChecks": {
+      "tests": 124,
+      "passed": 124,
+      "failed": 0,
+      "skipped": 0,
+      "proof": "runtime/verification/plugin-floating-input-20261013/host-provider-integrated-3.tap"
+    },
+    "sharedBrowserChecks": {
+      "tests": 106,
+      "passed": 106,
+      "failed": 0,
+      "skipped": 0,
+      "proof": "runtime/verification/chat-first-fixture-integration-20261013/proof.json"
+    },
+    "sharedIpcChecks": {
+      "tests": 21,
+      "passed": 21,
+      "failed": 0,
+      "skipped": 0,
+      "proof": "runtime/verification/chat-first-fixture-integration-20261013/proof.json"
+    },
     "nativePreferenceRestartProof": "runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/runner.json",
     "note": "Focused suites overlap and are not a total completion score. Native Windows encrypted preferences recovered across a fresh process/port change; full packaged frontend hydration remains open. Old executable predates these changes. No additional inference permission consumed.",
     "fullProductVerified": false
@@ -1115,15 +1151,48 @@
     "evidenceDirectory": "runtime/verification/frozen-release-followup-w8e7Ut",
     "canonicalUnitProof": "runtime/verification/native-ready-regression-NjZ3JW/unit-browser-tEhc2p/result.json",
     "unchangedEmissionFiles": 336,
-    "retainedOfflineAttempt": {"proof": "runtime/verification/native-ready-regression-NjZ3JW/failed.json", "tests": 459, "passed": 458, "failed": 1, "skipped": 0, "cancelled": 0, "elapsedMs": 280016, "terminalAcknowledged": true},
+    "retainedOfflineAttempt": {
+      "proof": "runtime/verification/native-ready-regression-NjZ3JW/failed.json",
+      "tests": 459,
+      "passed": 458,
+      "failed": 1,
+      "skipped": 0,
+      "cancelled": 0,
+      "elapsedMs": 280016,
+      "terminalAcknowledged": true
+    },
     "followupScope": "docs/build/FROZEN_RELEASE_FOLLOWUP_20261013.md",
     "compiledSources": 168,
     "compileElapsedMs": 12634,
-    "unitCounts": {"tests": 1415, "passed": 1415, "failed": 0, "skipped": 0, "cancelled": 0},
+    "unitCounts": {
+      "tests": 1415,
+      "passed": 1415,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
     "unitElapsedMs": 565697,
     "unitTerminalAcknowledged": true,
-    "retainedAttempt": {"proof": "runtime/verification/native-ready-regression-Gip8Wd/failed.json", "compileElapsedMs": 15085, "unitElapsedMs": 640982, "tests": 1415, "passed": 1407, "failed": 8, "skipped": 0, "cancelled": 0, "terminalAcknowledged": true},
-    "repairChecks": {"tests": 60, "passed": 60, "failed": 0, "skipped": 0, "cancelled": 0, "elapsedMs": 45250, "proof": "runtime/verification/plugin-floating-input-20261013/canonical-fixture-repair-focused-3.tap"},
+    "retainedAttempt": {
+      "proof": "runtime/verification/native-ready-regression-Gip8Wd/failed.json",
+      "compileElapsedMs": 15085,
+      "unitElapsedMs": 640982,
+      "tests": 1415,
+      "passed": 1407,
+      "failed": 8,
+      "skipped": 0,
+      "cancelled": 0,
+      "terminalAcknowledged": true
+    },
+    "repairChecks": {
+      "tests": 60,
+      "passed": 60,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "elapsedMs": 45250,
+      "proof": "runtime/verification/plugin-floating-input-20261013/canonical-fixture-repair-focused-3.tap"
+    },
     "followup": "docs/build/CHAT_FIRST_CANONICAL_REPAIR_20261013.md",
     "automaticRetries": 0,
     "providerInferenceRuns": 0,
@@ -1183,5 +1252,34 @@
     "missing": 95,
     "proof": "runtime/verification/requirements-audit-20261013.json",
     "scope": "Full original catalogue retained; not a product completion percentage. Goal local delivery gates remain authoritative."
+  },
+  "currentSimplifiedKeyAndPerformanceUpgrade": {
+    "state": "implementation-complete-focused-validation-in-progress",
+    "requested": "One Generate API key step after sign-in; only Regenerate afterwards; full supported Studio roots and writes; desktop copy and encrypted key persistence; editable visible saved plugin key; Connected ACK / red Reconnect / failed replacement; taller plugin; compact catalogue-only model/reasoning; lower typing hot-path work",
+    "nativeClipboardHostTests": {
+      "tests": 38,
+      "passed": 38,
+      "skipped": 0
+    },
+    "installedPlugin": {
+      "sha256": "38e2fd7b2c8bd057572774baf744345fd57034fa9c4605fd8d5365f2e8de5463",
+      "path": "C:/Users/alexk/AppData/Local/Roblox/Plugins/ArcaneLocalBridge.lua",
+      "fixtureTests": 107,
+      "nativeAcceptance": false,
+      "reloadRequired": true
+    },
+    "performance": {
+      "scope": "Chromium synthetic controller fixture; not native EXE paint latency",
+      "inputs": 120,
+      "tabCount": 16,
+      "savedThreads": 256,
+      "preferenceWritesBefore": 120,
+      "preferenceWritesAfter": 2,
+      "p95HandlerMsBefore": 10.3,
+      "p95HandlerMsAfter": 0.1,
+      "source": "runtime/chat-tabs-perf-1791922195305/after-realview.json",
+      "trailingSaveApproxMs": 400
+    },
+    "fullProductVerified": false
   }
 }

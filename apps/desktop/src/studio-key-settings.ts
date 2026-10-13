@@ -12,6 +12,7 @@ interface StudioKeyBridge {
   reveal(input: { keyId: string }): Promise<unknown>;
   forget(input: { keyId: string }): Promise<unknown>;
   copy?(input: { keyId: string }): Promise<unknown>;
+  replace?(input: { keyId: string; apiKey: string }): Promise<unknown>;
 }
 const MASK = '••••••••••••••••••••••••';
 const keyIdValid = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
@@ -32,10 +33,11 @@ export function readStudioKeyBridge(doc: Document): StudioKeyBridge | null {
     if (!root || !Object.hasOwn(root, 'value') || !root.value) return null;
     const entry = Object.getOwnPropertyDescriptor(root.value, 'studioKeys');
     if (!entry || !Object.hasOwn(entry, 'value')) return null;
-    const hasCopy = Object.hasOwn(entry.value, 'copy');
-    const bridge = fields(entry.value, ['version', 'list', 'remember', 'reveal', 'forget', ...(hasCopy ? ['copy'] : [])]);
+    const hasCopy = Object.hasOwn(entry.value, 'copy'), hasReplace = Object.hasOwn(entry.value, 'replace');
+    const bridge = fields(entry.value, ['version', 'list', 'remember', 'reveal', 'forget', ...(hasCopy ? ['copy'] : []), ...(hasReplace ? ['replace'] : [])]);
     return bridge?.version === 1 && Object.isFrozen(entry.value) && ['list', 'remember', 'reveal', 'forget'].every(name => typeof bridge[name] === 'function')
       && (!hasCopy || typeof bridge.copy === 'function')
+      && (!hasReplace || typeof bridge.replace === 'function')
       ? entry.value as StudioKeyBridge : null;
   } catch { return null; }
 }
@@ -124,10 +126,10 @@ export class StudioKeySettings {
     this.fresh = { keyId: key.keyId, apiKey: key.apiKey }; this.selected = key.keyId; this.render();
     if (!this.native || !project) return;
     try {
-      const response = fields(await this.native.remember({ keyId: key.keyId, apiKey: key.apiKey }), ['remembered']);
+      const response = fields(await (this.native.replace ?? this.native.remember)({ keyId: key.keyId, apiKey: key.apiKey }), ['remembered']);
       if (generation !== this.epoch || project !== this.projectId || this.stopped) return;
       if (response?.remembered !== true) throw new Error();
-      this.available = true; this.saved.add(key.keyId); this.render();
+      this.available = true; if (this.native.replace) this.saved.clear(); this.saved.add(key.keyId); this.render();
     } catch {
       if (generation === this.epoch && project === this.projectId) { this.notice('Desktop storage unavailable. This fresh key is temporary.'); this.render(); }
     }
@@ -195,12 +197,17 @@ export class StudioKeySettings {
         if (result?.copied !== true) throw new Error();
         this.notice('API key copied.'); return;
       }
-      const value = this.secret || (this.fresh?.keyId === key.keyId ? this.fresh.apiKey : '');
-      if (!this.validSecret(value)) { await this.show(); if (!this.validSecret(this.secret)) throw new Error(); }
+      let value = this.secret || (this.fresh?.keyId === key.keyId ? this.fresh.apiKey : '');
+      if (!this.validSecret(value)) {
+        if (!this.native || !this.available || !this.saved.has(key.keyId)) throw new Error();
+        const response = fields(await this.native.reveal({ keyId: key.keyId }), ['apiKey']);
+        if (!response || !this.validSecret(response.apiKey)) throw new Error();
+        value = response.apiKey;
+      }
       if (generation !== this.epoch || project !== this.projectId || !this.open() || this.active()?.keyId !== key.keyId) return;
       const clipboard = this.doc.defaultView?.navigator.clipboard;
       if (!clipboard) throw new Error();
-      await clipboard.writeText(value || this.secret);
+      await clipboard.writeText(value);
       if (generation === this.epoch) this.notice('API key copied.');
     } catch { if (generation === this.epoch) this.notice('Clipboard unavailable. Select the shown key to copy it.'); }
   }

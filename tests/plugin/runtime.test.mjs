@@ -361,7 +361,7 @@ enter(key); clickConnect(); ack(); unload()
 
 for (const format of ['source', 'generated']) {
   test(`${format} official Luau GUI fixtures fence connected editing and genuinely yielding old work`, { skip: !runtime || !compile }, async t => {
-    for (const editingCase of ['select all delete', 'select all replace', 'queued edit', 'late connect ACK', 'deferred text ACK', 'late poll replacement', 'editor replacement', 'late receipt ACK', 'saved key reload', 'unload in-flight ACK']) {
+    for (const editingCase of ['select all delete', 'select all replace', 'queued edit', 'late connect ACK', 'deferred text ACK', 'late poll replacement', 'editor replacement', 'deferred editor replacement', 'late receipt ACK', 'saved key reload', 'unload in-flight ACK', 'play refuses reconnect']) {
       await t.test(editingCase, async () => runLuauFixture({ format, checks: '', editingCase }));
     }
   });

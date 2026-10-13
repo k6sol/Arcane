@@ -39,9 +39,10 @@ const studioKeyInvoke = async (action, args) => {
     if (action === 'list') { if (args.length) studioKeyError(); }
     else {
       if (args.length !== 1) studioKeyError();
-      const value = studioKeyFields(args[0], action === 'remember' ? ['keyId', 'apiKey'] : ['keyId']);
-      if (!studioKeyId(value.keyId) || (action === 'remember' && !studioApiKey(value.apiKey))) studioKeyError();
-      input = action === 'remember' ? { keyId: value.keyId, apiKey: value.apiKey } : { keyId: value.keyId };
+      const remembers = action === 'remember' || action === 'replace';
+      const value = studioKeyFields(args[0], remembers ? ['keyId', 'apiKey'] : ['keyId']);
+      if (!studioKeyId(value.keyId) || (remembers && !studioApiKey(value.apiKey))) studioKeyError();
+      input = remembers ? { keyId: value.keyId, apiKey: value.apiKey } : { keyId: value.keyId };
     }
     const value = await ipcRenderer.invoke('arcane:studio-keys-' + action, ...(input ? [input] : []));
     if (action === 'list') {
@@ -56,7 +57,7 @@ const studioKeyInvoke = async (action, args) => {
     } else if (action === 'reveal') {
       studioKeyFields(value, ['apiKey']); if (!studioApiKey(value.apiKey)) studioKeyError();
     } else {
-      const field = action === 'remember' ? 'remembered' : action === 'copy' ? 'copied' : 'forgotten';
+      const field = ['remember', 'replace'].includes(action) ? 'remembered' : action === 'copy' ? 'copied' : 'forgotten';
       studioKeyFields(value, [field]); if (value[field] !== true) studioKeyError();
     }
     return value;
@@ -66,6 +67,7 @@ const studioKeys = Object.freeze({ version: 1,
   list: (...args) => studioKeyInvoke('list', args), remember: (...args) => studioKeyInvoke('remember', args),
   reveal: (...args) => studioKeyInvoke('reveal', args), forget: (...args) => studioKeyInvoke('forget', args),
   copy: (...args) => studioKeyInvoke('copy', args),
+  replace: (...args) => studioKeyInvoke('replace', args),
 });
 const workspacePreferenceError = () => { throw new Error('Arcane workspace preferences are unavailable.'); };
 const workspacePreferenceFields = (value, names) => {

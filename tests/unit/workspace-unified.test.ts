@@ -340,7 +340,9 @@ test('markup has one composer, closed advanced settings, live review notices and
   assert.match(general, /id="settings-key-heading"/); assert.match(general, /id="provider-setup-panel"/);
   assert.doesNotMatch(general, /id="(?:native-conversation-settings|key-issue|key-writes|codex-model|codex-select)"/);
   const advancedAt = html.indexOf('<section id="settings-advanced"');
-  for (const id of ['native-conversation-settings', 'codex-model', 'codex-select', 'key-issue', 'key-writes']) assert.ok(html.indexOf('id="' + id + '"') > advancedAt);
+  for (const id of ['native-conversation-settings', 'codex-model', 'codex-select', 'key-issue']) assert.ok(html.indexOf('id="' + id + '"') > advancedAt);
+  assert.doesNotMatch(html, /id="key-writes"|name="key-root"|id="key-roots"/);
+  assert.match(general, /id="settings-key-generate"/);
   assert.doesNotMatch(html, /medieval|house|Download All|Model generated/);
   assert.doesNotMatch(html, /class="eyebrow"|class="badge /);
   assert.doesNotMatch(html, /LOCAL STUDIO BRIDGE v1|Session grants · editor baselines/);

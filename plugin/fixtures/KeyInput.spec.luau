@@ -95,11 +95,23 @@ elseif mode == "late connect ACK" or mode == "deferred text ACK" then
 	expectKey = otherKey; clickConnect(); ack(); unload()
 else
 	-- The remaining cases begin with an actual current ACK.
-	if mode == "editor replacement" then fixture.uiHttpHook = connectReply end
+	if mode == "editor replacement" or mode == "deferred editor replacement" then fixture.uiHttpHook = connectReply end
 	ack()
 	fixture.uiHttpHook = nil
 	local oldPair, oldOperations = client.pair, client.operations
-	if mode == "saved key reload" then
+	if mode == "play refuses reconnect" then
+		local epoch, requests = client.generation, fixture.requests
+		fixture.edit = false
+		control.Activated:Fire()
+		assert(client.generation > epoch and client.desiredPair == nil and client.disconnectRequested
+			and oldPair.generation ~= client.generation and fixture.requests == requests,
+			"locally refused reconnect fences the previous ACK without launching HTTP")
+		assert(control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.Text == key
+			and fixture.pluginSettings[keySetting] == key and not fixture.pluginSettings[lastSetting].connected,
+			"refused connect keeps the saved raw key and red Reconnect status")
+		fixture.edit = true
+		clickConnect(); ack(); unload()
+	elseif mode == "saved key reload" then
 		reloadSavedKey()
 		worker = coroutine.create(fixture.workers[#fixture.workers])
 		local requests = fixture.requests
@@ -146,7 +158,7 @@ else
 		assert(client.pair ~= oldPair and client.operations ~= oldOperations and client.highEpoch == 0
 			and client.pending == nil and next(client.cache) == nil, "new connection starts fresh without old dispatched work")
 		unload()
-	elseif mode == "editor replacement" then
+	elseif mode == "editor replacement" or mode == "deferred editor replacement" then
 		local target = Instance.new("Script")
 		target.Parent = game:GetService("Workspace")
 		fixture.sources[target] = "before"
@@ -160,7 +172,10 @@ else
 		end
 		cycle()
 		assert(fixture.sources[target] == "before" and control.Text == "Connected", "production editor update is suspended before proposing a write")
-		enter(otherKey); edited(); cycle()
+		if mode == "deferred editor replacement" then
+			keyInput.Text = otherKey -- Deliberately withhold the fixture's Text signal.
+			cycle(); edited()
+		else enter(otherKey); edited(); cycle() end
 		local receipt = client.pending
 		assert(fixture.sources[target] == "before" and receipt.body.state == "failed"
 			and string.find(receipt.body.error, "SESSION", 1, true), "new text fences an already dispatched editor callback")

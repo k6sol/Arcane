@@ -89,7 +89,7 @@ export class ChatTabs {
     return this.options.preferences ? this.nativeError?'native-error':this.nativeReady?'native':'native-loading' : this.storage?'browser-origin':'memory';
   }
   providerPreference(): 'codex'|'claude' {return this.preferredProvider;}
-  preferencesSaved():boolean {return !this.preferencesDirty&&!this.nativeError&&this.persistenceStatus()!=='native-loading'&&this.persistenceStatus()!=='memory';}
+  preferencesSaved():boolean {return !this.preferencesDirty&&!this.persistenceDirty&&!this.nativeSaving&&this.nativeQueued===null&&!this.nativeError&&this.persistenceStatus()!=='native-loading'&&this.persistenceStatus()!=='memory';}
   setProviderPreference(provider:'codex'|'claude'):void {
     if(provider!=='codex'&&provider!=='claude')return;
     if(this.preferredProvider!==provider){this.preferredProvider=provider;this.persistenceDirty=true;}this.persist();
@@ -141,20 +141,24 @@ export class ChatTabs {
     if (this.projectPath !== state.projectPath) {
       this.persist(); this.projectPath = state.projectPath; this.rows = []; this.activeKey = null; this.recordings.clear();
       this.presentationRevision++;this.persistenceDirty=true;
-      if(this.options.preferences&&this.nativeProject!==state.projectPath)this.nativeReady=false;
+      if(this.options.preferences&&this.nativeProject!==state.projectPath){this.nativeReady=false;this.nativeQueued=null;this.nativeGeneration++;}
       this.restore(state.projectPath);
     }
     const binding = state.nativeHistory ? validateHistoryBinding(state.nativeHistory,state.projectPath) : null;
     const catalogue = state.nativeThreads !== undefined ? validateSavedThreads(state.nativeThreads,state.projectPath) : binding ? [{provider:'codex' as const,projectPath:state.projectPath,threadId:binding.threadId,sessionId:binding.sessionId,selection:state.snapshot?.thread?.threadId===binding.threadId?state.snapshot.thread.selection:null}] : [];
     if(catalogue.length!==this.catalogue.length||catalogue.some((row,index)=>row.threadId!==this.catalogue[index]?.threadId))this.catalogueRevision++;
-    this.catalogue=catalogue;this.catalogueByKey=new Map(catalogue.map(row=>[nativeChatKey(row),row]));
-    this.rows = this.rows.map(row=>{
-      if(row.kind==='draft'||this.owns(row))return row;
+    if(catalogue.length!==this.catalogue.length||catalogue.some((row,index)=>{
+      const previous=this.catalogue[index];return !previous||nativeChatKey(row)!==nativeChatKey(previous)||!sameSelection(row.selection,previous.selection);
+    })) {
+      this.catalogue=catalogue;this.catalogueByKey=new Map(catalogue.map(row=>[nativeChatKey(row),row]));
+    }
+    for(const [index,row] of this.rows.entries()) {
+      if(row.kind==='draft'||this.owns(row))continue;
       // An advisory ID that cannot be confirmed never authorizes resume, but its unsent text is retained.
       const recovered:Tab={...row,key:'draft:'+row.localId,kind:'draft',threadId:null,sessionId:null,title:'Recovered draft',workflowDraft:!!row.draft};
       this.presentationRevision++;this.persistenceDirty=true;
-      if(this.activeKey===row.key)this.activeKey=recovered.key;return recovered;
-    });
+      if(this.activeKey===row.key)this.activeKey=recovered.key;this.rows[index]=recovered;
+    }
     for (const row of this.rows) if (row.kind==='native') {
       const selection=this.catalogueByKey.get(row.key)!.selection;
       if(!sameSelection(row.selection,selection)){row.selection=structuredClone(selection);this.persistenceDirty=true;selectionChanged=true;}
@@ -185,7 +189,7 @@ export class ChatTabs {
     const tab: Tab = {key,localId:crypto.randomUUID(),title:'Chat',tool:'all',previewOpen:false,kind:'native',provider:'codex',projectPath:saved.projectPath,threadId:saved.threadId,sessionId:saved.sessionId,selection:structuredClone(saved.selection),draft:'',workflowDraft:false};
     this.rows.push(tab);this.presentationRevision++;this.persistenceDirty=true; return tab;
   }
-  needsNativePreferences(projectPath:string):boolean {return !!this.options.preferences&&this.nativeProject!==projectPath&&!this.nativeError;}
+  needsNativePreferences(projectPath:string):boolean {return !!this.options.preferences&&(!this.nativeReady||this.nativeProject!==projectPath)&&!this.nativeError;}
   reloadPreferences(state:ChatState):void {
     if(this.nativeProject!==state.projectPath)return;
     this.rows=[];this.activeKey=null;this.presentationRevision++;this.persistenceDirty=true;this.restore(state.projectPath);this.sync(state);
@@ -215,8 +219,9 @@ export class ChatTabs {
     this.activeKey = replacement.key;this.presentationRevision++;this.persistenceDirty=true; this.persist(); return true;
   }
   updateDraft(value: string, selection?: ChatSelection | null, workflowDraft?: boolean): void {
-    const active = this.rows.find(row=>row.key===this.activeKey); if (!active || bytes(value)>CHAT_TAB_LIMITS.draftBytes) return;
+    const active = this.rows.find(row=>row.key===this.activeKey); if (!active) return;
     if(active.draft===value&&(selection===undefined||sameSelection(active.selection,selection))&&(workflowDraft===undefined||active.workflowDraft===workflowDraft))return;
+    if(bytes(value)>CHAT_TAB_LIMITS.draftBytes)return;
     const selectionChanged=selection!==undefined&&!sameSelection(active.selection,selection);
     active.draft = value;
     if (selection!==undefined) active.selection=structuredClone(selection);
@@ -266,8 +271,8 @@ export class ChatTabs {
       if(queued.generation!==this.nativeGeneration||!this.nativeReady||queued.value.projectPath!==this.nativeProject||queued.value.projectPath!==this.projectPath)continue;
       try {
         await this.options.preferences!.save(queued.value);
-        if(queued.generation===this.nativeGeneration&&queued.value.projectPath===this.projectPath){this.nativeSaved=queued.serialized;this.preferencesDirty=this.persistenceDirty||this.nativeSaved!==this.nativeLast;}
-      } catch {if(queued.generation===this.nativeGeneration&&queued.value.projectPath===this.projectPath){this.nativeError=true;this.nativeQueued=null;}}
+        if(queued.generation===this.nativeGeneration&&this.nativeReady&&queued.value.projectPath===this.nativeProject&&queued.value.projectPath===this.projectPath){this.nativeSaved=queued.serialized;this.preferencesDirty=this.persistenceDirty||this.nativeSaved!==this.nativeLast;}
+      } catch {if(queued.generation===this.nativeGeneration&&this.nativeReady&&queued.value.projectPath===this.nativeProject&&queued.value.projectPath===this.projectPath){this.nativeError=true;this.nativeQueued=null;}}
     }}
     finally {this.nativeSaving=false;}
   }
@@ -319,13 +324,13 @@ export class ChatTabs {
       const focusKey = (this.doc.activeElement as HTMLElement|null)?.dataset.chatKey;
       mount.replaceChildren();
       for (const [index,row] of this.rows.entries()) {
-      const wrap=this.doc.createElement('span');wrap.setAttribute('role','presentation');wrap.className='chat-tab';
-      const button=this.doc.createElement('button');button.type='button';button.setAttribute('role','tab');button.dataset.chatKey=row.key;
-      button.textContent=this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);button.title=this.safe(row.kind==='draft'?'Unsent local draft':row.threadId!);
-      button.setAttribute('aria-selected',String(row.key===this.activeKey));button.setAttribute('aria-controls','codex-messages');button.tabIndex=row.key===this.activeKey?0:-1;
-      button.disabled=blocked&&row.key!==this.activeKey;button.addEventListener('click',()=>void this.callbacks.select(row.key));
-      const close=this.doc.createElement('button');close.type='button';close.textContent='×';close.setAttribute('aria-label','Close '+button.textContent);close.disabled=blocked&&row.key===this.activeKey;
-      close.addEventListener('click',()=>void this.callbacks.close(row.key));wrap.append(button,close);mount.append(wrap);
+        const wrap=this.doc.createElement('span');wrap.setAttribute('role','presentation');wrap.className='chat-tab';
+        const button=this.doc.createElement('button');button.type='button';button.setAttribute('role','tab');button.dataset.chatKey=row.key;
+        button.textContent=this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);button.title=this.safe(row.kind==='draft'?'Unsent local draft':row.threadId!);
+        button.setAttribute('aria-selected',String(row.key===this.activeKey));button.setAttribute('aria-controls','codex-messages');button.tabIndex=row.key===this.activeKey?0:-1;
+        button.disabled=blocked&&row.key!==this.activeKey;button.addEventListener('click',()=>void this.callbacks.select(row.key));
+        const close=this.doc.createElement('button');close.type='button';close.textContent='×';close.setAttribute('aria-label','Close '+button.textContent);close.disabled=blocked&&row.key===this.activeKey;
+        close.addEventListener('click',()=>void this.callbacks.close(row.key));wrap.append(button,close);mount.append(wrap);
       }
       if (focusKey) Array.from(mount.querySelectorAll<HTMLElement>('[role=tab]')).find(button=>button.dataset.chatKey===focusKey)?.focus({preventScroll:true});
       const create=this.doc.getElementById('workspace-new-chat') as HTMLButtonElement|null;

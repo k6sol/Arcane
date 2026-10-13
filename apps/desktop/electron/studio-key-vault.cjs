@@ -211,7 +211,7 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
     }
   }
   function installIpc(ipcMain) {
-    for (const action of ['list', 'remember', 'reveal', 'forget', 'copy']) {
+    for (const action of ['list', 'remember', 'replace', 'reveal', 'forget', 'copy']) {
       ipcMain.handle('arcane:studio-keys-' + action, async (event, ...args) => {
         let ownsBusy = false, snapshot;
         try {
@@ -220,9 +220,9 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
           if (action === 'list') { if (args.length) fail(); }
           else {
             if (args.length !== 1) fail();
-            const value = fields(args[0], action === 'remember' ? ['keyId', 'apiKey'] : ['keyId']);
+            const value = fields(args[0], ['remember', 'replace'].includes(action) ? ['keyId', 'apiKey'] : ['keyId']);
             input = { keyId: keyId(value.keyId) };
-            if (action === 'remember') input.apiKey = apiKey(value.apiKey, scope.origin);
+            if (['remember', 'replace'].includes(action)) input.apiKey = apiKey(value.apiKey, scope.origin);
           }
           if (busy) fail(); busy = true; ownsBusy = true;
           const usable = available(); guard(scope, event);
@@ -243,9 +243,13 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
             clipboard.writeText(found.apiKey);
             guard(scope, event); return { copied: true };
           }
-          if (action === 'remember') {
+          if (action === 'remember' || action === 'replace') {
             // Immutable UUID binding: another value must never replace a remembered credential.
             if (found && found.apiKey !== input.apiKey) fail();
+            if (action === 'replace') {
+              persist(scope, event, snapshot, [input]);
+              guard(scope, event); return { remembered: true };
+            }
             if (!found) {
               if (snapshot.items.length >= MAX_ITEMS) fail();
               persist(scope, event, snapshot, [...snapshot.items, input].sort((a, b) => a.keyId.localeCompare(b.keyId)));

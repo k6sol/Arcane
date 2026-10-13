@@ -10,6 +10,8 @@ test('chat tabs/workspace Chromium fixture profiles input, saves, snapshots and 
   skip: !process.env.ARCANE_PERF_EMIT,
 }, async t => {
   const root = resolve(process.env.ARCANE_PERF_EMIT);
+  // Point both comparisons at the same frozen CodexChat emit to isolate this ownership.
+  const viewRoot = resolve(process.env.ARCANE_PERF_VIEW_EMIT ?? root);
   const origin = 'https://arcane.fixture.invalid';
   const browser = await chromium.launch({
     headless: true,
@@ -23,6 +25,7 @@ test('chat tabs/workspace Chromium fixture profiles input, saves, snapshots and 
       const url = new URL(route.request().url());
       if (url.origin !== origin) { await route.abort(); return; }
       if (url.pathname === '/') { await route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Arcane performance fixture</title>' }); return; }
+      if (url.pathname === '/fixture-public-view.js') { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(viewRoot, 'apps/desktop/src/codex-chat.js')) }); return; }
       const path = resolve(root, '.' + url.pathname), child = relative(root, path);
       if (isAbsolute(child) || child.startsWith('..')) { await route.abort(); return; }
       try { await route.fulfill({ contentType: 'text/javascript', body: await readFile(path) }); }
@@ -36,6 +39,7 @@ test('chat tabs/workspace Chromium fixture profiles input, saves, snapshots and 
     const report = await page.evaluate(async () => {
       const { ChatTabs, connectChatTabPreferences } = await import('/apps/desktop/src/chat-tabs.js');
       const { startWorkspaceShell } = await import('/apps/desktop/src/workspace-shell.js');
+      const { CodexChat, CodexChatApi } = await import('/fixture-public-view.js');
       const add = (tag, id, parent = document.body) => { const node = document.createElement(tag); node.id = id; parent.append(node); return node; };
       const mount = add('div', 'workspace-chat-tabs'); mount.setAttribute('role', 'tablist');
       add('button', 'workspace-new-chat');
@@ -49,20 +53,27 @@ test('chat tabs/workspace Chromium fixture profiles input, saves, snapshots and 
         { select: async () => true, close: async () => true, newChat: async () => true, openSaved: async () => true },
         { storage: { getItem: key => data.get(key) ?? null, setItem: (key, value) => { counts.writes++; data.set(key, value); } } });
       const state = { provider: 'codex', use: 'personal-local', projectPath: '/fixture/arcane', snapshot: null,
-        lastSnapshot: null, connecting: false, closing: false, busy: false, actions: [], nativeHistory: null,
+        lastSnapshot: null, connecting: false, closing: false, busy: false, actions: [], nativeHistory: null, nativeTools: { configured: true, verified: false },
         nativeThreads: Array.from({ length: 256 }, (_, i) => ({ provider: 'codex', projectPath: '/fixture/arcane', threadId: 'fixture-' + i, sessionId: null, selection: { model: 'fixture-model', effort: 'low' } })) };
       counts = { writes: 0, cleanCalls: 0, snapshotReads: 0, snapshotMs: 0, tabRebuilds: 0, previewAttributeWrites: 0, inputs: 0, syncs: 0 };
       tabs.sync(state); for (let i = 1; i < 16; i++) { tabs.createDraft(); tabs.updateDraft('Fixture inactive draft '.repeat(200)); }
       tabs.activate(tabs.active().key); // Flush setup before the measured typing burst.
       tabs.mount(); tabs.render(false);
       const shell = startWorkspaceShell(document);
-      // Models the public view's full clone/serialization cost; it is explicitly fixture data.
-      const largeView = { state: { ...state, snapshot: { events: Array.from({ length: 1000 }, (_, i) => ({ seq: i, text: 'Fixture public history '.repeat(40) })) } }, fresh: true, persistence: 'browser-origin', preferredProvider: 'codex' };
+      // Seed only this isolated fixture's private state; never start the chat/transport.
+      // Both runs use the frozen real public-view implementation and bounded valid events.
+      const publicChat = new CodexChat(document, new CodexChatApi('b'.repeat(64), async () => { throw new Error('Forbidden fixture transport'); }));
+      publicChat.state = { ...state, snapshot: { connectionId: crypto.randomUUID(), provenance: 'spawned-node-fixture', connected: true, ready: true,
+        account: { auth: 'signed-out', plan: null, requiresOpenaiAuth: true }, models: [], selection: null, thread: null, operations: [], approvals: [],
+        events: Array.from({ length: 256 }, (_, i) => ({ type: 'delta', seq: i + 1, threadId: 'fixture-history', turnId: 'fixture-turn', itemId: 'fixture-item-' + i, text: 'Fixture public history '.repeat(160) })),
+        droppedEvents: 0, lastEventSeq: 256, failureCode: null } };
+      publicChat.fresh = true;
+      publicChat.stopped = false;
       const listeners = new Set();
       const preferences = connectChatTabPreferences(document, {
         currentStateView() {
           counts.snapshotReads++; const start = performance.now();
-          const value = JSON.parse(JSON.stringify(structuredClone(largeView)));
+          const value = publicChat.currentStateView();
           counts.snapshotMs += performance.now() - start; return value;
         },
         setChatProviderPreference() {}, subscribeStateChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -98,7 +109,7 @@ test('chat tabs/workspace Chromium fixture profiles input, saves, snapshots and 
       for (let i = 0; i < 50; i++) { summary.textContent = 'Fixture observed asset status ' + i; await new Promise(resolve => setTimeout(resolve, 0)); }
       const previewAttributeWrites = counts.previewAttributeWrites;
       const percentile = (values, fraction) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * fraction))];
-      const result = { fixture: true, historyEvents: 1000, tabs: 16, savedThreads: 256, input, idle, selectionTabRebuilds, previewAttributeWrites,
+      const result = { fixture: true, historyEvents: 256, tabs: 16, savedThreads: 256, input, idle, selectionTabRebuilds, previewAttributeWrites,
         inputHandlerP50Ms: percentile(durations, .5), inputHandlerP95Ms: percentile(durations, .95), inputHandlerMaxMs: Math.max(...durations),
         inputToRafP95Ms: percentile(frames, .95), elapsedMs: performance.now() - start };
       preferences.cleanup(); shell.cleanup(); tabs.stop(); Element.prototype.setAttribute = setAttribute;

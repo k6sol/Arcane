@@ -318,7 +318,7 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   const malformed = /if not valid then([\s\S]*?)\n\tend/.exec(click)?.[1];
   assert.ok(malformed);
   assert.match(malformed, /rejectKey\(\)[\s\S]*transport:requestDisconnect\(\)[\s\S]*return/);
-  assert.equal((main.match(/requestDisconnect\(/g) ?? []).length, 2, 'Text edits and invalid clicks fence old access; there is no Disconnect control.');
+  assert.equal((main.match(/requestDisconnect\(/g) ?? []).length, 3, 'Text edits, invalid keys and locally refused connects fence old access; there is no Disconnect control.');
   const rejection = main.slice(main.indexOf('local function rejectKey()'), main.indexOf('local transport:'));
   assert.match(rejection, /savedKey, hint = true, nil, "Enter a new API key"/);
   assert.match(rejection, /plugin:SetSetting\(KEY_SETTING, ""\)/);
@@ -327,6 +327,7 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.match(invalidation, /keyInput\.Text == inputText then return false/);
   assert.match(invalidation, /savedKey = nil[\s\S]*SetSetting\(KEY_SETTING, ""\)[\s\S]*requestDisconnect\(\)/);
   assert.match(main, /if invalidateInput\(\) then return end[\s\S]*status\.state == "failed"/);
+  assert.match(main, /local guard = transport\.guard[\s\S]*transport\.guard = function[\s\S]*invalidateInput\(\)[\s\S]*guard\(client, command, pair\)/, 'Deferred input still advances generation before the original editor callback guard.');
   assert.match(main, /pcall\(function\(\) V\.keyOrigin\(previousKey\) end\)/);
   assert.match(main, /previousKey = nil/);
   assert.match(main, /count == 1 and type\(previousState\.connected\) == "boolean"/);

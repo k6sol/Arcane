@@ -455,6 +455,7 @@ export class CodexChat {
       if(!await this.bindNativeChat('thread-resume',target.selection,target.threadId!))return false;
     }
     if(this.state?.projectPath!==target.projectPath||target.kind==='native'&&!this.tabs!.owns(target))return false;
+    this.flushDraft(); // Capture edits made while the explicit native resume was awaiting a receipt.
     if(!this.tabs!.activate(key))return false;
     this.loadTabDraft();this.render();this.publishState();return true;
   }
@@ -1032,7 +1033,8 @@ export class CodexChat {
   private displaySelection():ChatSelection|null {
     if(this.tabs) {
       const active=this.tabs.active();if(!active)return null;
-      return active.kind==='native'&&this.tabs.bound(this.state)?this.snapshot()!.thread!.selection:active.selection;
+      const selection=active.kind==='native'&&this.tabs.bound(this.state)?this.snapshot()!.thread!.selection:active.selection;
+      return selection&&this.snapshot()?.models.some(model=>model.model===selection.model&&model.efforts.includes(selection.effort))?selection:null;
     }
     const s=this.snapshot();return s?.thread?.configured?s.thread.selection:s?.selection??null;
   }

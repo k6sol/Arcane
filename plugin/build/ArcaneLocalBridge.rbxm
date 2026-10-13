@@ -35,7 +35,7 @@ local button = toolbar:CreateButton("ArcaneBridge", "Open Arcane", "", "Arcane")
 button.ClickableWhenViewportHidden = true
 -- A new stable widget identity migrates the old docked layout once. Studio
 -- owns floating-window placement; opening the UI never connects a place.
-local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 260, 156, 230, 150)
+local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 260, 200, 230, 185)
 local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV2", info)
 widget.Title = "Arcane"
 widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -56,6 +56,9 @@ panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
 panel.CanvasSize = UDim2.new()
 panel.ScrollBarThickness = 2
 panel.Parent = widget
+local panelPadding = Instance.new("UIPadding")
+panelPadding.PaddingBottom = UDim.new(0, 18)
+panelPadding.Parent = panel
 
 local function frame(name: string, parent: Instance, position: UDim2, size: UDim2, color: Color3): Frame
 	local item = Instance.new("Frame")
@@ -131,9 +134,8 @@ local stroke = Instance.new("UIStroke")
 stroke.Color, stroke.Thickness = colors.divider, 1
 stroke.Parent = inputPanel
 
--- Use an ordinary native editable textbox: hidden glyphs made actual typing
--- indistinguishable from a dead input. Saved secrets are NEVER prefilled;
--- only the user's current edit is visible and is cleared before exchange.
+-- Keep Studio's ordinary text editing and selection. The user's own saved
+-- Arcane key remains visible here, including while connected.
 local keyInput = Instance.new("TextBox")
 keyInput.Name = "ApiKey"
 keyInput.Position = UDim2.new()
@@ -143,7 +145,7 @@ keyInput.BorderSizePixel = 0
 keyInput.ZIndex = 3
 keyInput.Active = true
 keyInput.Selectable = true
-keyInput.Text = ""
+keyInput.Text = savedKey or ""
 keyInput.TextColor3 = colors.white
 keyInput.TextTransparency = 0
 keyInput.MaxVisibleGraphemes = -1
@@ -161,10 +163,12 @@ inputPadding.Parent = keyInput
 keyInput.PlaceholderColor3 = colors.muted
 local hint = "Arcane API key"
 local keyFailed = false
+local inputText = keyInput.Text
 local function refreshHint(): ()
-	keyInput.PlaceholderText = if savedKey ~= nil then "••••••••" else hint
+	keyInput.PlaceholderText = hint
 end
 local function clearInput(): ()
+	inputText = "" -- Programmatic cleanup is not a new user edit.
 	keyInput.Text = ""
 	refreshHint()
 end
@@ -183,36 +187,60 @@ local function rejectKey(): ()
 	rememberState(false)
 	connectButton.Text = "Failed"
 	connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red
-	refreshHint()
+	clearInput()
 end
-local transport = Transport.new(game, function(status: any)
+local transport: any
+local function invalidateInput(): boolean
+	if keyInput.Text == inputText then return false end
+	inputText = keyInput.Text
+	keyFailed, hint = false, "Arcane API key"
+	if savedKey ~= nil then
+		savedKey = nil
+		local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
+		if not ok then storageFailed = true end
+	end
+	rememberState(false)
+	-- Advance the transport generation on every edit, before another click.
+	-- This forgets queued keys and fences yielding polls/editor callbacks.
+	transport:requestDisconnect()
+	refreshHint()
+	return true
+end
+transport = Transport.new(game, function(status: any)
+	-- Studio may defer the Text signal. Inspect the actual field before a late
+	-- ACK/rejection or dispatch status can adopt the previous input's outcome.
+	if invalidateInput() then return end
 	if status.state == "failed" then rejectKey(); return end
-	local live = status.sessionId ~= nil and (status.state == "connected" or status.state == "executing")
+	local live = savedKey ~= nil and keyInput.Text == savedKey and status.sessionId ~= nil
+		and (status.state == "connected" or status.state == "executing")
 	-- Cached history never establishes a current session or green status.
 	connectButton.BackgroundColor3 = if live and not keyFailed then colors.green else colors.red
-	connectButton.Text = if keyFailed then "Failed" elseif savedKey then "Reconnect" else "Connect"
+	connectButton.Text = if keyFailed then "Failed" elseif live then "Connected" elseif savedKey then "Reconnect" else "Connect"
 	if live then rememberState(true)
-	elseif table.find({"disconnected", "retrying", "reconciliation"}, status.state) then rememberState(false) end
+	else rememberState(false) end
 	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
 end)
+-- A deferred Text signal must also be caught inside an already dispatched
+-- editor callback. Keep the transport's original lifetime/lease checks intact.
+local guard = transport.guard
+transport.guard = function(client: any, command: any, pair: any): ()
+	invalidateInput()
+	guard(client, command, pair)
+end
 local connections: {RBXScriptConnection} = {}
 table.insert(connections, button.Click:Connect(function() widget.Enabled = not widget.Enabled end))
 table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(function() button:SetActive(widget.Enabled) end))
 button:SetActive(widget.Enabled)
 table.insert(connections, keyInput:GetPropertyChangedSignal("Text"):Connect(function()
-	if keyFailed and keyInput.Text ~= "" then
-		keyFailed, hint = false, "Arcane API key"
-		connectButton.Text, stroke.Color = "Connect", colors.divider
-	end
-	refreshHint()
+	invalidateInput()
 end))
 table.insert(connections, connectButton.Activated:Connect(function()
-	local entered = if keyInput.Text ~= "" then keyInput.Text else savedKey
-	clearInput()
+	invalidateInput()
+	local entered = keyInput.Text -- Deleting the field never falls back to an old key.
 	local valid = pcall(function() V.keyOrigin(entered) end)
 	if not valid then
 		rejectKey()
-		-- Explicit failed replacement also fences an older live connection.
+		-- Explicit failed input also fences any queued or live connection.
 		transport:requestDisconnect()
 		return
 	end
@@ -221,9 +249,9 @@ table.insert(connections, connectButton.Activated:Connect(function()
 	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, value) end)
 	savedKey, storageFailed = value, not stored
 	refreshHint()
+	connectButton.Text, connectButton.BackgroundColor3 = "Reconnect", colors.red
 	local ok = pcall(function() transport:requestConnect(value) end)
-	if not ok then rememberState(false); connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red end
-	connectButton.Text = "Reconnect"
+	if not ok then transport:requestDisconnect(); rememberState(false); stroke.Color = colors.red end
 	entered, value = nil, ""
 end))
 table.insert(connections, plugin.Unloading:Connect(function()

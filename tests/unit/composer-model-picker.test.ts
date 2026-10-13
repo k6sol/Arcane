@@ -341,4 +341,11 @@ test('compact reasoning menus expose only reported efforts and restore exact per
   assert.equal(await page.locator('#codex-composer').inputValue(),'Final reload text 🧩  ');
   assert.equal(await page.locator('#codex-effort-label').textContent(),'reported-balanced');
   assert.equal(await page.locator('#codex-model').inputValue(),'fixture-custom');assert.equal(f.posts.length,0);
+  const unavailable=f.observed();unavailable.snapshot!.models=unavailable.snapshot!.models.filter(model=>model.model!=='fixture-custom');
+  f.set(unavailable);await f.refresh();
+  assert.equal(await page.locator('#codex-model-label').textContent(),'Choose model');
+  assert.equal(await page.locator('#codex-effort-label').isVisible(),false);
+  assert.equal(await page.locator('#codex-model').inputValue(),'','An unavailable saved pair never falls back to another model');
+  f.set(initial);await f.refresh();assert.equal(await page.locator('#codex-effort-label').textContent(),'reported-balanced');
+  assert.equal(await page.locator('#codex-model').inputValue(),'fixture-custom');assert.equal(f.posts.length,0);
 });

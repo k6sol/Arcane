@@ -24,6 +24,14 @@ import { NATIVE_READ_METHODS, NATIVE_HTTP_RESULT_BYTES, NATIVE_DISPLAY_BYTES, re
 import { ROOTS, READ_METHODS, WRITE_METHODS, type StudioSession, type StudioCommand, type InstanceRef, type Json } from '../../packages/protocol/src/studio.js';
 
 const TOKEN = 'a'.repeat(64);
+function syntheticProviderState(projectPath: string) {
+  return { provider: 'codex', use: 'personal-local', projectPath, connecting: false, closing: false, busy: false,
+    actions: [], lastSnapshot: null, nativeTools: { configured: false, verified: false },
+    snapshot: { connectionId: '11111111-1111-4111-8111-111111111111', provenance: 'spawned-node-fixture', connected: true, ready: true,
+      account: { auth: 'subscription', plan: 'fixture', requiresOpenaiAuth: true },
+      models: [{ model: 'fixture-sol', id: 'fixture-model-id', displayName: 'Synthetic model', efforts: ['low'], defaultEffort: 'low', entitlement: 'unverified' }],
+      selection: null, thread: null, operations: [], approvals: [], events: [], droppedEvents: 0, lastEventSeq: 0, failureCode: null } };
+}
 function session(writes = false, id = 'session-read'): StudioSession {
   return { id, clientSessionId: 'client-' + id, placeId: 777, universeId: 888, name: 'Fixture place', pluginVersion: 'fixture-only', protocolVersion: 1, allowedRoots: ['Workspace', 'ServerScriptService'], allowWrites: writes, capabilities: [...READ_METHODS, ...WRITE_METHODS], connectedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), revokedAt: null };
 }
@@ -149,7 +157,9 @@ test('Studio shell is CSP-compatible, has safe defaults and treats untrusted con
   const html = await readFile(resolve('apps/desktop/public/studio.html'), 'utf8'), source = await readFile(resolve('apps/desktop/src/studio.ts'), 'utf8');
   assert.match(html, /src="\/studio.js"/); assert.match(html, /href="\/studio.css"/);
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>|\bstyle=|\bon(?:click|load|error)=/i);
-  assert.doesNotMatch(html, /id="key-writes"[^>]*checked/);
+  assert.doesNotMatch(html, /id="key-writes"|name="key-root"/);
+  assert.match(html, /id="settings-key-generate"[^>]*type="button"[^>]*disabled>Generate API key/);
+  assert.match(html, /id="key-setup-gate"[^>]*hidden/);
   assert.doesNotMatch(source, /\.innerHTML|\.outerHTML|\beval\s*\(|new Function\s*\(/);
   assert.doesNotMatch(html, /id="pair-|id="daemon-url"|daemon URL|pairing code/i); assert.match(html, /Paste the issued Arcane API key/);
   assert.match(source, /textContent/); assert.match(html, /id="build-heading"/); assert.match(html, /id="build-tasks"/); assert.match(html, /not a live worker runtime/);
@@ -240,15 +250,15 @@ test('API key issuance validates exact daemon port and grants; key records retai
   assert.throws(() => readStudioKeyRecords([{ ...metadata, lastUsedAt: 'invented' }]), /timestamp/);
 });
 
-test('API key transport uses human control routes and never automatically replays lost issuance', async () => {
+test('API key rotation uses the exact empty human request and never automatically replays a lost response', async () => {
   const calls: { path: string; init: RequestInit | undefined }[] = [];
   const api = new StudioApi(TOKEN, async function (this: unknown, path, init) { assert.equal(this, undefined); calls.push({ path: String(path), init }); return Response.json({}); });
-  await api.keys(); await api.issueKey(prepareStudioKeyGrant(['Workspace'], false)); await api.revokeKey('key-1');
-  assert.deepEqual(calls.map(c => [c.path, c.init?.method]), [['/v1/studio/keys', 'GET'], ['/v1/studio/keys', 'POST'], ['/v1/studio/keys/revoke', 'POST']]);
-  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { allowedRoots: ['Workspace'], allowWrites: false }); assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), { keyId: 'key-1' });
+  await api.keys(); await api.rotateKey(); await api.revokeKey('key-1');
+  assert.deepEqual(calls.map(c => [c.path, c.init?.method]), [['/v1/studio/keys', 'GET'], ['/v1/studio/keys/rotate', 'POST'], ['/v1/studio/keys/revoke', 'POST']]);
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {}); assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), { keyId: 'key-1' });
   assert.ok(calls.every(c => new Headers(c.init?.headers).get('Authorization') === 'Bearer ' + TOKEN));
   let sends = 0; const lost = new StudioApi(TOKEN, async () => { sends++; throw new Error('lost key response'); });
-  await assert.rejects(lost.issueKey(prepareStudioKeyGrant(['Workspace'], false)), (error: unknown) => error instanceof StudioRequestError && error.outcome === 'unknown'); assert.equal(sends, 1);
+  await assert.rejects(lost.rotateKey(), (error: unknown) => error instanceof StudioRequestError && error.outcome === 'unknown'); assert.equal(sends, 1);
 });
 
 function nativeFixtureObservation(): NativeObservation {
@@ -356,6 +366,8 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const readonly = session(), writer = session(true, 'session-writer'), sessions = [readonly, writer];
   let commands: StudioCommand[] = [], sequence = 0, nextState: StudioCommand['state'] = 'succeeded', loseNextResponse = false, conflict = false, failSessions = false;
   const fixtureKeys: StudioKeyRecord[] = []; let loseNextKeyResponse = false;
+  const keySessions = new Map<string, StudioSession[]>();
+  const fixtureProject = resolve('runtime/synthetic-studio-ui-project');
   const fixtureAssetJobs: AssetJobRecord[] = [], fixturePng = png(); let corruptPreview = false;
   const fixtureRuntime = { executable: 'HTTP-fixture-only-no-Blender', version: 'fixture', pythonVersion: 'fixture', background: true, capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } };
   const posted: { path: string; body: Record<string, unknown>; authorization: string }[] = [];
@@ -375,6 +387,9 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
     const send = (data: unknown, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(data)); };
     if (request.headers.authorization !== 'Bearer ' + TOKEN) { send({ error: 'AUTH', message: 'Fixture requires control token.' }, 401); return; }
     if (request.method === 'GET') {
+      if (url.pathname === '/v1/codex/state') { send({ state: syntheticProviderState(fixtureProject) }); return; }
+      if (['/v1/codex/history', '/v1/learning/state', '/v1/workflows'].includes(url.pathname)) { send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic fixture only.' }, 503); return; }
+      if (url.pathname === '/v1/assets/conversation-jobs') { send({ error: 'NO_NATIVE_THREAD', message: 'No native thread in this fixture.' }, 409); return; }
       if (url.pathname === '/v1/studio/keys') { send({ keys: fixtureKeys }); return; }
       if (url.pathname === '/v1/work/runs') { send({ runs: [] }); return; }
       if (url.pathname === '/v1/work/ready') { send({ tasks: [] }); return; }
@@ -385,7 +400,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
       }
       if (url.pathname === '/v1/assets/preview') { const bytes = Buffer.from(fixturePng); if (corruptPreview) bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1; response.writeHead(200, { 'Content-Type': 'image/png' }); response.end(bytes); return; }
       if (url.pathname === '/v1/studio/sessions') { if (failSessions) { send({ error: 'FIXTURE_DOWN', message: 'Fixture session service unavailable.' }, 503); return; } sessions.forEach(s => { s.lastSeenAt = new Date().toISOString(); }); send({ sessions }); return; }
-      if (url.pathname === '/v1/product/state') { send({ projectPath: 'HTTP fixture project — no native Studio', protocolVersion: 1, studioSessions: sessions, commandCounts: { succeeded: commands.filter(c => c.state === 'succeeded').length }, features: [{ id: 'fixture', state: 'fixture-only' }], buildTasks: [{ id: 'FIXTURE-01', title: 'Authored fixture board', state: 'pending', owner: 'fixture', acceptance: 'Browser UI contract only', evidence: [] }] }); return; }
+      if (url.pathname === '/v1/product/state') { send({ projectPath: fixtureProject, projectId: 'b'.repeat(64), protocolVersion: 1, studioSessions: sessions, commandCounts: { succeeded: commands.filter(c => c.state === 'succeeded').length }, features: [{ id: 'fixture', state: 'fixture-only' }], buildTasks: [{ id: 'FIXTURE-01', title: 'Authored fixture board', state: 'pending', owner: 'fixture', acceptance: 'Browser UI contract only', evidence: [] }] }); return; }
       if (url.pathname === '/v1/studio/commands') { send({ commands: commands.filter(c => c.sessionId === url.searchParams.get('sessionId')) }); return; }
       const c = commands.find(c => '/v1/studio/commands/' + c.id === url.pathname); if (c) { send({ command: c }); return; }
     }
@@ -397,13 +412,16 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
       const job: AssetJobRecord = { schemaVersion: 1, jobId: '11111111-1111-4111-8111-' + String(fixtureAssetJobs.length + 1).padStart(12, '0'), request, directory: 'HTTP fixture output only', manifestPath: null, manifestAvailable: false, state: 'running', stage: 'fixture-stage', startedAt: now, updatedAt: now, events: [], error: null }; fixtureAssetJobs.unshift(job); send({ job }, 202); return;
     }
     if (url.pathname === '/v1/assets/cancel') { const job = fixtureAssetJobs.find(j => j.jobId === body.jobId)!; job.state = 'cancelled'; send({ job }); return; }
-    if (url.pathname === '/v1/studio/keys') {
-      const key = { keyId: 'fixture-key-' + (fixtureKeys.length + 1), ...prepareStudioKeyGrant(body.allowedRoots, body.allowWrites), issuedAt: new Date().toISOString(), revokedAt: null, lastUsedAt: null }; fixtureKeys.unshift(key);
+    if (url.pathname === '/v1/studio/keys/rotate') {
+      assert.deepEqual(body, {});
+      const now = new Date().toISOString();
+      for (const previous of fixtureKeys) if (!previous.revokedAt) { previous.revokedAt = now; for (const paired of keySessions.get(previous.keyId) ?? []) paired.revokedAt = now; }
+      const key = { keyId: 'fixture-key-' + (fixtureKeys.length + 1), allowedRoots: [...STUDIO_ROOTS], allowWrites: true, issuedAt: now, revokedAt: null, lastUsedAt: null }; fixtureKeys.unshift(key);
       const apiKey = 'arcane_local_v1_' + new URL('http://' + request.headers.host).port + '_' + fixtureKeys.length.toString(16).padStart(64, 'c');
       if (loseNextKeyResponse) { loseNextKeyResponse = false; response.writeHead(200, { 'Content-Type': 'application/json' }); response.end('{unreadable key receipt'); return; }
       send({ ...key, apiKey }); return;
     }
-    if (url.pathname === '/v1/studio/keys/revoke') { fixtureKeys.find(key => key.keyId === body.keyId)!.revokedAt = new Date().toISOString(); send({ revoked: true }); return; }
+    if (url.pathname === '/v1/studio/keys/revoke') { const now = new Date().toISOString(); fixtureKeys.find(key => key.keyId === body.keyId)!.revokedAt = now; for (const paired of keySessions.get(String(body.keyId)) ?? []) paired.revokedAt = now; send({ revoked: true }); return; }
     if (url.pathname === '/v1/studio/revoke') { const s = sessions.find(s => s.id === body.sessionId)!; s.revokedAt = new Date().toISOString(); send({ revoked: true }); return; }
     if (url.pathname === '/v1/studio/commands' || url.pathname === '/v1/studio/restore') {
       const old = commands.find(c => c.requestId === body.requestId); if (old) { send({ command: old }); return; }
@@ -435,7 +453,12 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   await expectText('#key-status', 'Key service responding');
   await page.evaluate(() => { let copied = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied = text; }, readText: async () => copied } }); });
   const fixtureKey = 'arcane_local_v1_' + address.port + '_' + 'c'.repeat(63) + '1';
-  assert.equal(await page.locator('#key-writes').isChecked(), false); await page.locator('#key-issue').click(); await expectText('#key-grants', 'fixture-key-1'); assert.deepEqual(posted.at(-1)?.body, { allowedRoots: ['Workspace'], allowWrites: false });
+  assert.equal(await page.locator('#key-writes, input[name="key-root"]').count(), 0);
+  await page.waitForFunction(() => !(document.getElementById('key-issue') as HTMLButtonElement).disabled);
+  await page.locator('#key-issue').click(); await expectText('#key-grants', 'fixture-key-1'); assert.deepEqual(posted.at(-1), { path: '/v1/studio/keys/rotate', body: {}, authorization: 'Bearer ' + TOKEN });
+  assert.deepEqual(fixtureKeys[0]?.allowedRoots, [...STUDIO_ROOTS]); assert.equal(fixtureKeys[0]?.allowWrites, true);
+  assert.equal(await page.locator('#key-secret').textContent(), fixtureKey, 'The explicit successful generation exposes the fresh key in Advanced.');
+  await page.locator('#key-reveal').click();
   assert.equal((await page.locator('body').textContent()).includes(fixtureKey), false); assert.equal(await page.evaluate(() => navigator.clipboard.readText()), '');
   if (process.env.ARCANE_UI_SCREENSHOT) {
     await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
@@ -446,17 +469,22 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   assert.equal(await page.evaluate((key: string) => [...Object.values(sessionStorage), ...Object.values(localStorage)].some(value => String(value).includes(key)), fixtureKey), false);
   await page.locator('#key-dismiss').click(); assert.equal(await page.locator('#key-secret').textContent(), '');
   await page.waitForFunction(() => !(document.getElementById('key-issue') as HTMLButtonElement).disabled);
-  await page.locator('#key-writes').check(); await page.locator('input[name="key-root"][value="ServerScriptService"]').check(); await page.locator('#key-issue').click(); await expectText('#key-grants', 'fixture-key-2'); assert.deepEqual(posted.at(-1)?.body, { allowedRoots: ['Workspace', 'ServerScriptService'], allowWrites: true });
-  await page.locator('#key-reveal').click(); await page.locator('#go-work').click(); assert.equal(await page.locator('#key-secret').textContent(), '');
-  await page.locator('.key-history-details > summary').click(); await page.locator('#key-history button[data-key-id="fixture-key-1"]').click(); await expectText('#confirm-title', 'Revoke this Arcane API key'); await page.locator('#confirm-cancel').click(); assert.equal(fixtureKeys.find(k => k.keyId === 'fixture-key-1')!.revokedAt, null);
-  await page.locator('#key-history button[data-key-id="fixture-key-1"]').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#key-history', 'Revoked'); assert.deepEqual(posted.at(-1)?.body, { keyId: 'fixture-key-1' });
-  loseNextKeyResponse = true; await page.locator('#key-issue').click(); await expectText('#key-unknown-message', 'outcome unknown'); assert.equal(await page.locator('#key-issue').isDisabled(), true); assert.equal(posted.filter(p => p.path === '/v1/studio/keys').length, 3);
+  const previousSession = session(true, 'old-key-session'); sessions.push(previousSession); keySessions.set('fixture-key-1', [previousSession]);
+  await page.locator('#key-issue').click(); await expectText('#key-grants', 'fixture-key-2'); assert.deepEqual(posted.at(-1)?.body, {});
+  assert.ok(fixtureKeys.find(k => k.keyId === 'fixture-key-1')!.revokedAt); assert.ok(previousSession.revokedAt);
+  assert.equal(fixtureKeys.filter(k => !k.revokedAt).length, 1); assert.equal(readonly.revokedAt, null); assert.equal(writer.revokedAt, null);
+  await page.locator('[data-settings-close]').click(); await page.locator('#go-assets').click(); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await openAdvancedSettings(page, 'key-heading');
+  assert.equal(await page.locator('.key-history-details').isVisible(), false);
+  const revokeResponse = await page.request.post(origin + '/v1/studio/keys/revoke', { headers: { Authorization: 'Bearer ' + TOKEN }, data: { keyId: 'fixture-key-2' } });
+  assert.equal(revokeResponse.status(), 200); await page.locator('#refresh').click(); await expectText('#key-history', 'Revoked'); assert.deepEqual(posted.at(-1)?.body, { keyId: 'fixture-key-2' });
+  loseNextKeyResponse = true; await page.locator('#key-issue').click(); await expectText('#key-unknown-message', 'outcome unknown'); assert.equal(await page.locator('#key-issue').isDisabled(), true); assert.equal(posted.filter(p => p.path === '/v1/studio/keys/rotate').length, 3);
   await page.locator('#key-refresh').click(); await page.waitForFunction(() => !(document.getElementById('key-acknowledge') as HTMLButtonElement).disabled); await page.locator('#key-acknowledge').click(); assert.equal(fixtureKeys.length, 3); assert.equal(posted.some(p => p.path === '/v1/studio/pairing'), false);
   let releaseKey: () => void = () => {}, keyAccepted: () => void = () => {};
   const keyHeld = new Promise<void>(resolve => { releaseKey = resolve; }), keyStored = new Promise<void>(resolve => { keyAccepted = resolve; });
-  await page.route('**/v1/studio/keys', async (route: any) => { if (route.request().method() !== 'POST') { await route.continue(); return; } const response = await route.fetch(); keyAccepted(); await keyHeld; await route.fulfill({ response }); });
+  await page.route('**/v1/studio/keys/rotate', async (route: any) => { const response = await route.fetch(); keyAccepted(); await keyHeld; await route.fulfill({ response }); });
   await page.locator('#key-issue').click(); await keyStored; await page.locator('[data-settings-close]').click(); await page.locator('#go-assets').click(); releaseKey(); await expectText('#key-notice', 'secret was cleared by navigation');
-  assert.equal(await page.locator('#key-secret').textContent(), ''); assert.equal(await page.locator('#key-result').isVisible(), false); await page.unroute('**/v1/studio/keys');
+  assert.equal(await page.locator('#key-secret').textContent(), ''); assert.equal(await page.locator('#key-result').isVisible(), false); await page.unroute('**/v1/studio/keys/rotate');
   await expectText('#build-tasks', 'Authored fixture board'); assert.equal(await page.locator('#providers-link').getAttribute('href'), '/#' + TOKEN);
   await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(readonly.id); await openAdvancedSettings(page); await expectText('#session-mode', 'Read-only'); await expectText('#command-status', 'Read ready');
   await page.locator('#method').selectOption('scene.create'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#command-validation', 'read-only');
@@ -508,7 +536,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   corruptPreview = true; await page.locator('#asset-load-manifest').click(); await expectText('#asset-notice', 'previews failed'); assert.equal(await page.locator('#asset-previews canvas').count(), 0); corruptPreview = false;
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   if (process.env.ARCANE_UI_SCREENSHOT) { await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT, fullPage: true }); await page.locator('section').filter({ has: page.locator('#asset-heading') }).last().screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.assets-panel.png' }); }
-  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes').isChecked(), false); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await page.reload(); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes, input[name="key-root"]').count(), 0); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
   await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await page.locator('#revoke').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#session-mode', 'Revoked'); assert.equal(await page.locator('#send').isDisabled(), true);
   assert.deepEqual(errors, []); assert.ok(posted.every(p => p.authorization === 'Bearer ' + TOKEN));
 });
@@ -528,6 +556,12 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   const playwright = await import(pathToFileURL(resolve(browserModule!)).href);
   const browser = await playwright.chromium.launch({ headless: true, args: ["--disable-gpu"], ...(process.env.ARCANE_UI_BROWSER_EXE ? { executablePath: process.env.ARCANE_UI_BROWSER_EXE } : {}) }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  // Validated GET metadata supplies synthetic sign-in evidence. No native
+  // provider executable, connection action, thread or inference is started.
+  await page.route('**/v1/codex/state', async (route: any) => {
+    assert.equal(route.request().method(), 'GET'); assert.equal(route.request().headers().authorization, 'Bearer ' + app.token);
+    await route.fulfill({ json: { state: syntheticProviderState(directory) } });
+  });
   if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'chat-tabs', 'task-usage', 'task-usage-ui']) {
     await page.route('**/' + name + '.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/' + name + '.js'), 'utf8') }); });
   }
@@ -547,19 +581,33 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   assert.equal((await post('/v1/work/review', {}, app.token)).status, 403);
   await text('#key-status', 'Key service responding');
   assert.equal((await post('/v1/studio/keys', { allowedRoots: ['Workspace'], allowWrites: false }, app.agentToken, app.origin)).status, 403);
+  assert.equal((await post('/v1/studio/keys/rotate', {}, app.agentToken, app.origin)).status, 403);
   assert.equal((await fetch(app.origin + '/v1/studio/keys', { headers: { Authorization: 'Bearer ' + app.agentToken } })).status, 403);
   assert.equal((await post('/v1/studio/keys/revoke', { keyId: 'cannot-revoke' }, app.agentToken, app.origin)).status, 403);
-  const keyResponse = page.waitForResponse((response: any) => response.url() === app.origin + '/v1/studio/keys' && response.request().method() === 'POST');
+  const keyResponse = page.waitForResponse((response: any) => response.url() === app.origin + '/v1/studio/keys/rotate' && response.request().method() === 'POST');
+  await page.waitForFunction(() => !(document.getElementById('key-issue') as HTMLButtonElement).disabled);
   await page.locator('#key-issue').click(); const issued = await (await keyResponse).json(); await text('#key-grants', issued.keyId);
-  assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false); assert.equal(studioStore.keys()[0]?.allowWrites, false);
+  assert.equal(await page.locator('#key-secret').textContent(), issued.apiKey); await page.locator('#key-reveal').click();
+  assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false); assert.equal(studioStore.keys()[0]?.allowWrites, true);
+  assert.deepEqual(studioStore.keys()[0]?.allowedRoots, [...STUDIO_ROOTS]);
   assert.equal(JSON.stringify(studioStore.keys()).includes(issued.apiKey), false);
   assert.equal(await page.evaluate((key: string) => [...Object.values(sessionStorage), ...Object.values(localStorage)].some(value => String(value).includes(key)), issued.apiKey), false);
   const pluginResponse = await fetch(app.origin + '/v1/plugin/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: issued.apiKey, protocolVersion: 1, identity: { clientSessionId: 'real-http-key-contract-fixture', placeId: 0, universeId: 0, name: 'HTTP key fixture (not native Studio)', pluginVersion: 'fixture' }, capabilities: [...READ_METHODS, ...WRITE_METHODS] }) });
-  assert.equal(pluginResponse.status, 200); const connected = await pluginResponse.json() as { sessionId: string };
+  assert.equal(pluginResponse.status, 200); const connected = await pluginResponse.json() as { sessionId: string; token: string };
   await page.locator('#key-dismiss').click(); await refresh(); assert.notEqual(studioStore.keys()[0]?.lastUsedAt, null);
-  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(connected.sessionId); await text('#session-mode', 'Read-only'); await openAdvancedSettings(page);
-  await page.locator('.key-history-details > summary').click(); await page.locator('#key-history button[data-key-id="' + issued.keyId + '"]').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#key-history', 'Revoked'); await text('#session-mode', 'Revoked');
-  assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal(await page.locator('#key-secret').textContent(), '');
+  await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(connected.sessionId); await text('#session-mode', 'Writes granted');
+  await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'workspace-settings' } })));
+  const rotatedResponse = page.waitForResponse((response: any) => response.url() === app.origin + '/v1/studio/keys/rotate' && response.request().method() === 'POST');
+  await page.locator('#settings-key-generate').click(); const rotated = await (await rotatedResponse).json();
+  assert.notEqual(rotated.keyId, issued.keyId); assert.deepEqual(rotated.allowedRoots, [...STUDIO_ROOTS]); assert.equal(rotated.allowWrites, true);
+  assert.equal(studioStore.keys().filter(key => !key.revokedAt).length, 1);
+  assert.notEqual(studioStore.keys().find(key => key.keyId === issued.keyId)?.revokedAt, null);
+  assert.notEqual(studioStore.sessions().find(s => s.id === connected.sessionId)?.revokedAt, null);
+  assert.equal((await post('/v1/plugin/connect', { apiKey: issued.apiKey }, '')).status, 401);
+  assert.equal((await post('/v1/plugin/poll', { sessionId: connected.sessionId }, connected.token)).status, 409);
+  assert.equal((await post('/v1/studio/keys/revoke', { keyId: rotated.keyId }, app.token, app.origin)).status, 200);
+  await openAdvancedSettings(page); await refresh(); await text('#session-mode', 'Revoked');
+  assert.equal(await page.locator('#send').isDisabled(), true); assert.equal(await page.locator('#key-secret').textContent(), '');
   await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(''); await openAdvancedSettings(page);
   await page.locator('.work-create > summary').click(); await page.locator('#work-title').fill('Real durable UI run'); await page.locator('#work-objective').fill('Review hashes and dependencies through actual daemon routes');
   const fillTask = async (index: number, key: string, dependencies: string) => {
@@ -592,7 +640,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   studioStore = new StudioStore({ directory: join(directory, 'studio') }); workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
   await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); await text('#work-tasks', 'complete');
-  assert.equal(studioStore.keys()[0]?.keyId, issued.keyId); assert.notEqual(studioStore.keys()[0]?.revokedAt, null); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
+  assert.equal(studioStore.keys().length, 2); assert.ok(studioStore.keys().find(key => key.keyId === issued.keyId)?.revokedAt); assert.ok(studioStore.keys().find(key => key.keyId === rotated.keyId)?.revokedAt); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
   assert.equal(workStore.runs().length, 2); assert.equal(workStore.task(first.id).reviewNote, 'Reviewed the revised proof and acceptance criteria');
   await page.locator('[data-task-id="' + first.id + '"]').click(); await text('#work-task-evidence', 'Revised proof');
   if (process.env.ARCANE_UI_SCREENSHOT) await page.screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.work-desktop.png', fullPage: true });
