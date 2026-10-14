@@ -70,26 +70,31 @@
       "path": "src/AssetMaterials.luau",
       "bytes": 14271,
       "sha256": "7278b7d49da25dd89f57248c0287c073ef59cf5ee3d327c06c5f0160b63e2066"
+    },
+    {
+      "path": "src/AssetUpload.luau",
+      "bytes": 18420,
+      "sha256": "120ad1486b9671b8675788c5cfeaf404d4bc0941b130d6951dc7bdb856072eae"
     }
   ],
   "artifacts": [
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 157603,
-      "sha256": "676e4dc84dc98500d915483127dadf6e74ca13f413c9580fa1f5f2b0d3f8ce65"
+      "bytes": 176248,
+      "sha256": "fb353832aedf2d74bb203cfb24a60e4610b0557d4e19fa100abfb47f50542bb4"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 157603,
-      "sha256": "676e4dc84dc98500d915483127dadf6e74ca13f413c9580fa1f5f2b0d3f8ce65"
+      "bytes": 176248,
+      "sha256": "fb353832aedf2d74bb203cfb24a60e4610b0557d4e19fa100abfb47f50542bb4"
     },
     {
       "name": "ArcaneLocalBridge.lua",
       "format": "luau-source",
-      "bytes": 156519,
-      "sha256": "e7df90a822ac699a9e1f2fe684c31bf148cd2594aa4ff0f7812d6b275bf9176a"
+      "bytes": 175030,
+      "sha256": "216df1d46728b8dfa74e82a36d69223034f6f5632f5719a12a9a8aa792318122"
     }
   ]
 }
