@@ -12,6 +12,18 @@ type Row = Record<string, string | number | bigint | Uint8Array | null>;
 interface Options { directory: string; now?: () => number }
 export interface ArcaneKeySummary {keyId:string;allowedRoots:StudioSession['allowedRoots'];allowWrites:boolean;issuedAt:string;revokedAt:string|null;lastUsedAt:string|null}
 export type ArcaneKeyIssue = ArcaneKeySummary & { apiKey: string };
+export interface AssetUploadIntent {
+  projectId: string; jobId: string; sourceId: string; sourceSha256: string; assetType: 'Mesh' | 'Image';
+  sessionId: string; clientLifetimeId: string; pluginArtifactHash: string; playEpoch: number;
+  placeId: number; universeId: number; creator: {kind: 'user' | 'group'; id: number}; uploaderId: number;
+  rightsGrantId: string; name: string; description: string;
+}
+export interface AssetUploadJournalRecord {
+  attemptId: string; resourceKey: string; intent: AssetUploadIntent; intentSha256: string;
+  state: 'intent' | 'succeeded' | 'needs_reconciliation'; assetId: number | null; createdAt: string; updatedAt: string;
+}
+/** Opaque host fact-recording handle. It is NOT permission to upload. */
+export interface AssetUploadJournalTicket {readonly kind: 'asset-upload-journal-ticket'}
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 // Paths are display metadata: a rename is not a different opaque Instance.
@@ -33,6 +45,7 @@ export class StudioStore {
   // (including those in a restoration receipt) never authorize execution.
   #activationAdmissions = new WeakMap<object, ScriptSourceVerification>();
   #assetStageAdmissions = new WeakSet<object>();
+  #uploadTickets = new WeakMap<object, string>();
   #testOwners = new Map<string, string>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
@@ -62,12 +75,20 @@ export class StudioStore {
         CREATE INDEX IF NOT EXISTS commands_session ON commands(session_id,created);
         CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL, kind TEXT NOT NULL, entity_id TEXT NOT NULL, detail TEXT NOT NULL) STRICT;
         CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY,hash TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT;
+        CREATE TABLE IF NOT EXISTS asset_uploads (attempt_id TEXT PRIMARY KEY,resource_key TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT;
         PRAGMA user_version=2;`);
       const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Row[];
       if (!columns.some(c=>c.name==='key_id')) this.db.exec('ALTER TABLE sessions ADD COLUMN key_id TEXT');
       this.transaction(() => {
         for (const row of this.db.prepare('SELECT payload FROM sessions').all() as Row[]) { const session=JSON.parse(row.payload as string) as StudioSession; if (!session.revokedAt) this.revoke(session.id, 'daemon_restart'); }
         this.db.prepare('DELETE FROM grants').run();
+        for (const row of this.db.prepare('SELECT payload FROM asset_uploads').all() as Row[]) {
+          const record = JSON.parse(row.payload as string) as AssetUploadJournalRecord;
+          if (record.state === 'intent') {
+            record.state = 'needs_reconciliation'; record.updatedAt = this.iso();
+            this.db.prepare('UPDATE asset_uploads SET payload=? WHERE attempt_id=?').run(JSON.stringify(record), record.attemptId);
+          }
+        }
         this.event('daemon_started', 'local', { protocolVersion: STUDIO_PROTOCOL });
       });
     } catch (error) { try { this.db!.close(); } catch {} closeSync(this.lockFd); unlinkSync(this.lockPath); throw error; }
@@ -310,6 +331,71 @@ export class StudioStore {
   command(id: string): StudioCommand {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return JSON.parse(row.payload as string) as StudioCommand;
+  }
+  /** Durable intent before an irreversible engine call. Admission/rights are
+   * checked by the trusted native controller, never inferred from these fields.
+   * Only a FRESH insertion receives an opaque, process-owned outcome ticket. */
+  beginAssetUpload(attemptId: string, value: AssetUploadIntent, guard: () => void): {fresh: boolean; record: AssetUploadJournalRecord; ticket: AssetUploadJournalTicket | null} {
+    guard();
+    if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(attemptId)) throw new ArcaneError('INPUT', 'Expected a fixed upload attempt UUID.');
+    const input = jsonObject(value, 8192);
+    const fields = ['projectId', 'jobId', 'sourceId', 'sourceSha256', 'assetType', 'sessionId', 'clientLifetimeId', 'pluginArtifactHash', 'playEpoch', 'placeId', 'universeId', 'creator', 'uploaderId', 'rightsGrantId', 'name', 'description'];
+    if (Object.keys(input).length !== fields.length || Object.keys(input).some(k => !fields.includes(k))) throw new ArcaneError('INPUT', 'Expected exact upload intent fields.');
+    for (const field of ['projectId', 'sourceSha256', 'pluginArtifactHash']) if (typeof input[field] !== 'string' || !/^[a-f0-9]{64}$/.test(input[field])) throw new ArcaneError('INPUT', 'Expected upload intent SHA-256 fields.');
+    if (typeof input.jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(input.jobId)
+      || input.assetType !== 'Mesh' && input.assetType !== 'Image') throw new ArcaneError('INPUT', 'Invalid upload job or resource type.');
+    for (const field of ['sourceId', 'sessionId', 'clientLifetimeId', 'rightsGrantId']) textField(input[field], field, 256);
+    textField(input.name, 'asset name', 100);
+    if (typeof input.description !== 'string' || input.description.length > 1000 || input.description.includes('\0')) throw new ArcaneError('INPUT', 'Invalid asset description.');
+    for (const field of ['placeId', 'universeId', 'playEpoch', 'uploaderId']) if (!Number.isSafeInteger(input[field]) || (input[field] as number) < (field === 'uploaderId' ? 1 : 0)) throw new ArcaneError('INPUT', 'Invalid upload identity.');
+    const creator = object(input.creator);
+    if (Object.keys(creator).length !== 2 || Object.keys(creator).some(k => !['kind', 'id'].includes(k)) || creator.kind !== 'user' && creator.kind !== 'group'
+      || !Number.isSafeInteger(creator.id) || (creator.id as number) < 1) throw new ArcaneError('INPUT', 'Invalid observed upload creator.');
+    // Detached snapshot before callback boundaries. Changing target/account
+    // cannot hide an unknown prior upload of this same job/source resource.
+    const intent = JSON.parse(JSON.stringify(input)) as AssetUploadIntent;
+    const resourceKey = hash(canonical({projectId: intent.projectId, jobId: intent.jobId, sourceId: intent.sourceId, sourceSha256: intent.sourceSha256, assetType: intent.assetType}));
+    const intentSha256 = hash(canonical(intent));
+    let fresh = false;
+    const record = this.transaction(() => {
+      guard();
+      const prior = this.db.prepare('SELECT payload FROM asset_uploads WHERE attempt_id=? OR resource_key=?').get(attemptId, resourceKey) as Row | undefined;
+      if (prior) {
+        const record = JSON.parse(prior.payload as string) as AssetUploadJournalRecord;
+        if (record.attemptId !== attemptId || record.resourceKey !== resourceKey || record.intentSha256 !== intentSha256) throw new ArcaneError('UPLOAD_CONFLICT', 'This resource already has an upload outcome to inspect; do not create another attempt.');
+        return record;
+      }
+      const time = this.iso();
+      const record: AssetUploadJournalRecord = {attemptId, resourceKey, intent, intentSha256, state: 'intent', assetId: null, createdAt: time, updatedAt: time};
+      this.db.prepare('INSERT INTO asset_uploads(attempt_id,resource_key,payload) VALUES(?,?,?)').run(attemptId, resourceKey, JSON.stringify(record));
+      this.event('asset_upload_intent', attemptId, {resourceKey, intentSha256}); guard(); fresh = true; return record;
+    });
+    if (!fresh) return {fresh: false, record, ticket: null};
+    const ticket = Object.freeze({kind: 'asset-upload-journal-ticket' as const}); this.#uploadTickets.set(ticket, attemptId);
+    return {fresh: true, record, ticket};
+  }
+  /** Record only the outcome of a host-owned ticket. This logging may retain a
+   * known asset ID after native authority retires; it authorizes no new effect. */
+  finishAssetUpload(ticket: AssetUploadJournalTicket, outcome: {state: 'succeeded'; assetId: number} | {state: 'needs_reconciliation'; assetId: null}): AssetUploadJournalRecord {
+    const attemptId = this.#uploadTickets.get(ticket);
+    if (!attemptId) throw new ArcaneError('UPLOAD_TICKET', 'Upload outcome requires the original host-owned recording handle.');
+    if (!outcome || Object.keys(outcome).length !== 2 || Object.keys(outcome).some(k => !['state', 'assetId'].includes(k))
+      || !(outcome.state === 'succeeded' && Number.isSafeInteger(outcome.assetId) && outcome.assetId > 0 || outcome.state === 'needs_reconciliation' && outcome.assetId === null)) throw new ArcaneError('INPUT', 'Invalid observed upload outcome.');
+    return this.transaction(() => {
+      const record = this.assetUpload(attemptId);
+      if (record.state !== 'intent') {
+        if (record.state !== outcome.state || record.assetId !== outcome.assetId) throw new ArcaneError('UPLOAD_CONFLICT', 'Observed upload outcomes are immutable.');
+        return record;
+      }
+      record.state = outcome.state; record.assetId = outcome.assetId; record.updatedAt = this.iso();
+      this.db.prepare('UPDATE asset_uploads SET payload=? WHERE attempt_id=?').run(JSON.stringify(record), attemptId);
+      this.event('asset_upload_' + outcome.state, attemptId, {assetId: record.assetId}); return record;
+    });
+  }
+  assetUpload(attemptId: string): AssetUploadJournalRecord {
+    const row = this.db.prepare('SELECT payload FROM asset_uploads WHERE attempt_id=?').get(attemptId) as Row | undefined;
+    if (!row) throw new ArcaneError('UPLOAD_NOT_FOUND', 'Unknown upload attempt.');
+    return JSON.parse(row.payload as string) as AssetUploadJournalRecord;
   }
   /** Host-only queue entry. Routes and generic MCP commands use enqueue(), which
    * cannot mint this capability. The controller owns SAME-actor/job checks. */
