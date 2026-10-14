@@ -643,6 +643,7 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
     async cancel(jobId) { assert.equal(jobId, ASSET_JOB_ID); current = { ...current, state: 'cancelled', stage: 'complete' }; return current; },
     async manifest(jobId) { assert.equal(jobId, ASSET_JOB_ID); return manifestFixture(ASSET_JOB_ID); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in this service fixture.'); },
+    async prepareStudioImportPayload() { throw new Error('Payload staging must not be called by this public service fixture.'); },
     async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
     async preview() { throw new Error('MCP exposes no asset preview path endpoint.'); }, async close() {},
   };
@@ -742,6 +743,7 @@ async function customAssetLabFixture(t: test.TestContext) {
     async cancel(jobId) { const job = jobs.find(job=>job.jobId === jobId)!;job.state = 'cancelled';return structuredClone(job); },
     async manifest(jobId) { return deliveredManifest ?? customManifestFixture(inputs[jobs.findIndex(job=>job.jobId === jobId)]!,String(jobId)); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in this service fixture.'); },
+    async prepareStudioImportPayload() { throw new Error('Payload staging must not be called by this public service fixture.'); },
     async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
     async preview() { throw new Error('No native preview bytes in this fixture.'); }, async close() {},
   };

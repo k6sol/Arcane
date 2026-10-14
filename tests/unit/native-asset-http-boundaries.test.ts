@@ -63,6 +63,7 @@ async function fixture(t: test.TestContext) {
       return { observedAt: now, available: false, blender: null, python: null, attempts: [], fixtureMarker: MARKER };
     },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in the native HTTP fixture.'); },
+    async prepareStudioImportPayload() { throw new Error('Payload staging must not be called by this public service fixture.'); },
     async preview() { throw new Error('No fixture previews'); }, async artifact() { throw new Error('No fixture artifacts'); }, async close() {},
   };
   const host = createAssetConversationHost({ projectPath, workAssociations: store,

@@ -12,6 +12,17 @@ import { createStudioImportManifestAuthority, snapshotStudioImportSelection, STU
 import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImportHostOptions } from './asset-import-adapter.js';
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor } from './native-asset-authority.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
+import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
+
+
+export interface PreparedStudioImportPayload {
+  readonly prepared: PreparedStudioImport;
+  readonly payload: StudioImportPayload;
+}
+interface StudioImportReaders {
+  manifest(jobId: unknown): Promise<AssetManifest>;
+  artifact(jobId: unknown, path: unknown): Promise<{ bytes: Buffer; filename: string; contentType: string }>;
+}
 
 export interface AssetServiceOptions {
   /** Trusted repository installation root, independent of the selected project. */
@@ -193,6 +204,87 @@ export async function createAssetService(options: AssetServiceOptions) {
     persist(); await flushed();
   } catch (e) { outputOwners.delete(ownerKey); throw e; }
 
+  function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: false): Promise<PreparedStudioImport>;
+  function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: true): Promise<PreparedStudioImportPayload>;
+  async function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: boolean): Promise<PreparedStudioImport | PreparedStudioImportPayload> {
+    ensureOpen();
+    if (!importHost) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Studio import host target/receipt selection has not been configured.');
+    const requested = id(jobId);
+    const end = Date.now() + ARTIFACT_DOWNLOAD_TIMEOUT_MS;
+    let selected: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').StudioImportSelection | undefined;
+    // Child host/store operations validate their own exact durable binding
+    // around every await. Pass only the service lifetime/actor/target guard to
+    // them, rather than performing the same expensive store scan twice at
+    // each boundary. The service still rechecks its binding after every wait.
+    const guard = () => {
+      ensureOpen();
+      if (Date.now() >= end) throw new ArcaneError('STUDIO_IMPORT_TIMEOUT', 'Studio import preparation exceeded its 30 second deadline.');
+      assertNativeAssetActor(actor, 'mutate');
+      const scope = nativeAssetActorScope(actor);
+      if (selected && importHost.validateTarget) synchronousAdmissionResult(importHost.validateTarget(scope, requested, selected));
+    };
+    const check = () => { guard(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
+    const originalScope = check();
+    const e = entry(requested);
+    if (e.job.state !== 'succeeded' || !e.job.manifestAvailable || active.has(requested)) throw new ArcaneError('JOB_STATE', 'Import preparation requires a verified completed job.');
+    if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
+    studioImportActive = true;
+    // Bounds waits as well as reads; late host callbacks cannot expose a result.
+    const wait = async <T>(promise: T | Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([Promise.resolve(promise), new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new ArcaneError('STUDIO_IMPORT_TIMEOUT', 'Studio import preparation exceeded its 30 second deadline.')), Math.max(1, end - Date.now()));
+        })]);
+        check(); return result;
+      } finally { if (timer) clearTimeout(timer); }
+    };
+    const payloadFiles = new Map<string, Uint8Array>();
+    const authority = createStudioImportManifestAuthority({ loadGeneratedFiles: async value => {
+      if (value !== requested) throw new ArcaneError('STUDIO_IMPORT_SCOPE', 'Import job identity changed.');
+      const scope = check();
+      // Tighten import size BEFORE the service's existing complete manifest proof.
+      for (const name of ['asset.glb', 'collision.glb'] as const) await wait(regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
+      const manifest = await wait(readers.manifest(requested));
+      if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
+      const selection = snapshotStudioImportSelection(await wait(importHost.selectTarget(scope, requested, actor, guard)));
+      selected = selection;
+      check();
+      const exports = new Map<'asset.glb' | 'collision.glb', Buffer>();
+      for (const name of ['asset.glb', 'collision.glb'] as const) {
+        const result = await wait(readers.artifact(requested, name));
+        const pinned = manifest.artifacts.find(a => a.path === name && a.role === 'export');
+        if (!pinned || result.contentType !== 'model/gltf-binary' || pinned.bytes !== result.bytes.length || pinned.sha256 !== sha256(result.bytes)) throw new AssetError('HASH', 'Import exports changed since the pinned manifest.');
+        exports.set(name, result.bytes);
+        if (includePayload) payloadFiles.set(name === 'asset.glb' ? 'render-export' : 'collision-export', Buffer.from(result.bytes));
+      }
+      // Validate producer IDs BEFORE looking up previous mappings.
+      const generated = adaptCompletedStudioImport(manifest, exports, scope.projectId, selection, null);
+      const baseline = importHost.loadObservedBaseline ? await wait(importHost.loadObservedBaseline(scope, generated.assetId, selection.target)) : null;
+      check();
+      return { ...generated, baseline };
+    } });
+    try {
+      const admission = await wait(authority.admit(requested));
+      check();
+      const prepared = authority.prepare(admission);
+      const payload = includePayload ? decodeStudioImportPayload(prepared, payloadFiles) : null;
+      check();
+      if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard));
+      check();
+      if (includePayload) {
+        if (!payload) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
+        return Object.freeze({ prepared, payload });
+      }
+      return prepared;
+    } finally {
+      authority.close();
+      payloadFiles.clear();
+      try { if (importHost.releaseTarget) synchronousAdmissionResult(importHost.releaseTarget(originalScope, requested)); }
+      finally { studioImportActive = false; }
+    }
+  }
+
   return {
     outputRoot: root,
     projectPath,
@@ -294,74 +386,14 @@ export async function createAssetService(options: AssetServiceOptions) {
      * native actor enter here; files, target and baseline come from host evidence.
      * Host context reads and pending metadata persistence do not upload, import,
      * verify an engine result or authorize a Studio write. */
-    async prepareStudioImport(jobId: unknown, actor: NativeAssetActor): Promise<PreparedStudioImport> {
-      ensureOpen();
-      if (!importHost) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Studio import host target/receipt selection has not been configured.');
-      const requested = id(jobId);
-      const end = Date.now() + ARTIFACT_DOWNLOAD_TIMEOUT_MS;
-      let selected: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').StudioImportSelection | undefined;
-      // Child host/store operations validate their own exact durable binding
-      // around every await. Pass only the service lifetime/actor/target guard to
-      // them, rather than performing the same expensive store scan twice at
-      // each boundary. The service still rechecks its binding after every wait.
-      const guard = () => {
-        ensureOpen();
-        if (Date.now() >= end) throw new ArcaneError('STUDIO_IMPORT_TIMEOUT', 'Studio import preparation exceeded its 30 second deadline.');
-        assertNativeAssetActor(actor, 'mutate');
-        const scope = nativeAssetActorScope(actor);
-        if (selected && importHost.validateTarget) synchronousAdmissionResult(importHost.validateTarget(scope, requested, selected));
-      };
-      const check = () => { guard(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
-      const originalScope = check();
-      const e = entry(requested);
-      if (e.job.state !== 'succeeded' || !e.job.manifestAvailable || active.has(requested)) throw new ArcaneError('JOB_STATE', 'Import preparation requires a verified completed job.');
-      if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
-      studioImportActive = true;
-      // Bounds waits as well as reads; late host callbacks cannot expose a result.
-      const wait = async <T>(promise: T | Promise<T>): Promise<T> => {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const result = await Promise.race([Promise.resolve(promise), new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => reject(new ArcaneError('STUDIO_IMPORT_TIMEOUT', 'Studio import preparation exceeded its 30 second deadline.')), Math.max(1, end - Date.now()));
-          })]);
-          check(); return result;
-        } finally { if (timer) clearTimeout(timer); }
-      };
-      const authority = createStudioImportManifestAuthority({ loadGeneratedFiles: async value => {
-        if (value !== requested) throw new ArcaneError('STUDIO_IMPORT_SCOPE', 'Import job identity changed.');
-        const scope = check();
-        // Tighten import size BEFORE the service's existing complete manifest proof.
-        for (const name of ['asset.glb', 'collision.glb'] as const) await wait(regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
-        const manifest = await wait(this.manifest(requested));
-        if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
-        const selection = snapshotStudioImportSelection(await wait(importHost.selectTarget(scope, requested, actor, guard)));
-        selected = selection;
-        check();
-        const exports = new Map<'asset.glb' | 'collision.glb', Buffer>();
-        for (const name of ['asset.glb', 'collision.glb'] as const) {
-          const result = await wait(this.artifact(requested, name));
-          const pinned = manifest.artifacts.find(a => a.path === name && a.role === 'export');
-          if (!pinned || result.contentType !== 'model/gltf-binary' || pinned.bytes !== result.bytes.length || pinned.sha256 !== sha256(result.bytes)) throw new AssetError('HASH', 'Import exports changed since the pinned manifest.');
-          exports.set(name, result.bytes);
-        }
-        // Validate producer IDs BEFORE looking up previous mappings.
-        const generated = adaptCompletedStudioImport(manifest, exports, scope.projectId, selection, null);
-        const baseline = importHost.loadObservedBaseline ? await wait(importHost.loadObservedBaseline(scope, generated.assetId, selection.target)) : null;
-        check();
-        return { ...generated, baseline };
-      } });
-      try {
-        const admission = await wait(authority.admit(requested));
-        check();
-        const prepared = authority.prepare(admission);
-        if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard));
-        check();
-        return prepared;
-      } finally {
-        authority.close();
-        try { if (importHost.releaseTarget) synchronousAdmissionResult(importHost.releaseTarget(originalScope, requested)); }
-        finally { studioImportActive = false; }
-      }
+    prepareStudioImport(jobId: unknown, actor: NativeAssetActor): Promise<PreparedStudioImport> {
+      return prepareImport(jobId, actor, this, false);
+    },
+    /** Trusted host-only staging from the SAME completed-job admission and owned
+     * bytes. The returned data does not authorize uploads or editor writes and
+     * is never exposed by the native HTTP/MCP preparation endpoint. */
+    prepareStudioImportPayload(jobId: unknown, actor: NativeAssetActor): Promise<PreparedStudioImportPayload> {
+      return prepareImport(jobId, actor, this, true);
     },
     async preview(jobId: unknown, path: unknown): Promise<Buffer> {
       ensureOpen();

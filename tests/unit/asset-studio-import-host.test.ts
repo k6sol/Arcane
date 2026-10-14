@@ -39,6 +39,7 @@ async function harness(t: test.TestContext, old = false) {
   incarnation.dispatched({ ...binding, operationId: 'fixture-intent' });
   const actor = registry.capture(incarnation.credential(), 'mutate');
   let choose = async () => selection, load = async (): Promise<StudioImportBaseline | null> => null;
+  let persist = async (): Promise<void> => {};
   let selections = 0, baselines = 0;
   let service: AssetService | undefined;
   t.after(async () => {
@@ -50,9 +51,10 @@ async function harness(t: test.TestContext, old = false) {
     }
   });
   service = await createAssetService({ cwd: project, projectPath: project, outputRoot, studioImport: { workAssociations: store,
-    selectTarget: async () => { selections++; return choose(); }, loadObservedBaseline: async () => { baselines++; return load(); } } });
+    selectTarget: async () => { selections++; return choose(); }, loadObservedBaseline: async () => { baselines++; return load(); },
+    recordPrepared: async () => persist() } });
   return { service, store, registry, incarnation, actor, manifest, jobDirectory, nextDirectory,
-    selection: (fn: typeof choose) => { choose = fn; }, baseline: (fn: typeof load) => { load = fn; }, counts: () => ({ selections, baselines }) };
+    selection: (fn: typeof choose) => { choose = fn; }, baseline: (fn: typeof load) => { load = fn; }, persist: (fn: typeof persist) => { persist = fn; }, counts: () => ({ selections, baselines }) };
 }
 function baseline(prepared: PreparedStudioImport): StudioImportBaseline {
   return { manifest: structuredClone(prepared.manifest) as StudioImportBaseline['manifest'], receipt: {
@@ -107,13 +109,15 @@ test('older completed jobs remain downloadable but are explicitly unsupported fo
   await assert.rejects(f.service.prepareStudioImport(JOB, f.actor), code('STUDIO_IMPORT_UNSUPPORTED'));
   assert.deepEqual(f.counts(), { selections: 0, baselines: 0 });
 });
-for (const stage of ['manifest', 'target', 'artifact', 'baseline'] as const) test('same native capture is fenced after awaited ' + stage, async t => {
+for (const method of ['prepareStudioImport', 'prepareStudioImportPayload'] as const)
+for (const stage of ['manifest', 'target', 'artifact', 'baseline', 'persistence'] as const) test(method + ' fences the same native capture after awaited ' + stage, async t => {
   const f = await harness(t);
   if (stage === 'manifest') { const fn = f.service.manifest.bind(f.service); f.service.manifest = async job => { const result = await fn(job); f.incarnation.revokeGrant(); return result; }; }
   if (stage === 'target') f.selection(async () => { f.incarnation.revokeGrant(); return selection; });
   if (stage === 'artifact') { const fn = f.service.artifact.bind(f.service); f.service.artifact = async (job, path) => { const result = await fn(job, path); f.incarnation.revokeGrant(); return result; }; }
   if (stage === 'baseline') f.baseline(async () => { f.incarnation.revokeGrant(); return null; });
-  await assert.rejects(f.service.prepareStudioImport(JOB, f.actor), code('NATIVE_ASSET_AUTHORITY'));
+  if (stage === 'persistence') f.persist(async () => { f.incarnation.revokeGrant(); });
+  await assert.rejects(f.service[method](JOB, f.actor), code('NATIVE_ASSET_AUTHORITY'));
 });
 test('a pending selection is single-flight and service close fences the awaited result', async t => {
   const f = await harness(t), started = deferred(), gate = deferred();
@@ -155,4 +159,78 @@ test('host target selection cannot inject extra paths, baseline or getters into 
   f.selection(async () => malicious);
   await assert.rejects(f.service.prepareStudioImport(JOB, f.actor)); assert.equal(reads, 0);
   f.selection(async () => ({ ...selection, baseline: {} })); await assert.rejects(f.service.prepareStudioImport(JOB, f.actor));
+});
+
+for (const method of ['prepareStudioImport', 'prepareStudioImportPayload'] as const)
+test(method + ' refuses forged actors and caller-controlled targets', async t => {
+  const f = await harness(t);
+  await assert.rejects(f.service[method](JOB, { kind: 'native-asset-actor' } as NativeAssetActor), code('NATIVE_ASSET_AUTHORITY'));
+  await assert.rejects(f.service[method]({ jobId: JOB, target: selection.target }, f.actor), code('INPUT'));
+  await assert.rejects(f.service[method](JOB, f.registry.capture(f.incarnation.credential(), 'read')), code('NATIVE_ASSET_AUTHORITY'));
+  assert.deepEqual(f.counts(), { selections: 0, baselines: 0 });
+});
+
+test('payload staging and metadata preparation share single-flight and lifetime fencing', async t => {
+  const f = await harness(t), started = deferred(), gate = deferred();
+  f.selection(async () => { started.release(); await gate.promise; return selection; });
+  const pending = f.service.prepareStudioImportPayload(JOB, f.actor); await started.promise;
+  await assert.rejects(f.service.prepareStudioImport(NEXT, f.actor), code('BUSY'));
+  await assert.rejects(f.service.prepareStudioImportPayload(NEXT, f.actor), code('BUSY'));
+  await f.service.close(); gate.release(); await assert.rejects(pending, code('CLOSED'));
+});
+
+test('payload staging rejects changed owned bytes and unsupported historical producer jobs', async t => {
+  const f = await harness(t, true);
+  await assert.rejects(f.service.prepareStudioImportPayload(JOB, f.actor), code('STUDIO_IMPORT_UNSUPPORTED'));
+  assert.deepEqual(f.counts(), { selections: 0, baselines: 0 });
+  await saveStudioFixture(f.jobDirectory, JOB);
+  await writeFile(join(f.jobDirectory, 'asset.glb'), Buffer.from('tampered'));
+  await assert.rejects(f.service.prepareStudioImportPayload(JOB, f.actor), code('MANIFEST'));
+});
+
+test('owned payload intake preserves prepared identity, actual mesh streams and chunk checksums without dispatch', async t => {
+  const f = await harness(t), result = await f.service.prepareStudioImportPayload(JOB, f.actor);
+  assert.equal(result.prepared.manifest.engineVerification, 'pending');
+  assert.equal(result.payload.engineVerification, 'pending');
+  assert.equal(result.payload.manifestDigest, result.prepared.manifest.digest);
+  assert.equal(result.payload.preparedDigest, result.prepared.digest);
+  assert.equal(result.payload.projectId, result.prepared.manifest.projectId);
+  assert.equal(result.payload.revisionId, JOB);
+  assert.equal(result.payload.objects.length, 8);
+  assert.deepEqual(result.payload.files, result.prepared.manifest.files);
+  for (const item of result.payload.objects) {
+    assert.deepEqual(item.object, result.prepared.manifest.objects.find(o => o.sourceObjectId === item.object.sourceObjectId));
+    assert.equal(item.primitives.length, 1);
+    const primitive = item.primitives[0]!;
+    assert.equal(primitive.vertexCount, 4); assert.equal(primitive.triangleCount, 4);
+    assert.equal(primitive.attributes.POSITION!.bytes.byteLength, 48);
+    assert.equal(primitive.attributes.NORMAL!.bytes.byteLength, 48);
+    assert.equal(primitive.indices.bytes.byteLength, 12);
+    for (const stream of [primitive.attributes.POSITION!, primitive.attributes.NORMAL!, primitive.indices]) {
+      assert.equal(sha256(Buffer.from(stream.bytes)), stream.sha256);
+      for (const chunk of stream.chunks) {
+        const bytes = Buffer.from(chunk.data, 'base64');
+        assert.equal(bytes.length, chunk.byteLength); assert.equal(sha256(bytes), chunk.sha256);
+        assert.ok(Buffer.byteLength(JSON.stringify(chunk)) < 256 * 1024);
+      }
+    }
+  }
+  assert.ok(Object.isFrozen(result)); assert.ok(Object.isFrozen(result.payload));
+  assert.deepEqual(f.counts(), { selections: 1, baselines: 1 });
+});
+
+test('owned payload intake keeps emissive production material data rather than dropping it', async t => {
+  const f = await harness(t);
+  await saveStudioFixture(f.jobDirectory, JOB, { mutate: doc => {
+    if (doc.materials) {
+      doc.extensionsUsed = ['KHR_materials_emissive_strength'];
+      doc.materials[0].emissiveFactor = [0.2, 0.1, 0];
+      doc.materials[0].extensions = { KHR_materials_emissive_strength: { emissiveStrength: 2 } };
+    }
+  } });
+  const result = await f.service.prepareStudioImportPayload(JOB, f.actor);
+  const expected = result.prepared.manifest.materials[0]!.emission;
+  assert.deepEqual(expected, { factor: [0.2, 0.1, 0], strength: 2, map: null });
+  for (const o of result.payload.objects.filter(o => o.object.role === 'render')) assert.deepEqual(o.material!.emission, expected);
+  assert.equal(result.payload.engineVerification, 'pending');
 });
