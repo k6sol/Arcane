@@ -26,7 +26,7 @@ Codex supports in-app conversations. Claude Code currently uses a native-client 
 3. Open the Arcane plugin in Roblox Studio, paste the key and connect.
 4. Start a chat with what you want to build.
 
-Windows preview builds launch through **Arcane.exe**. Keep the complete build folder together; these builds are currently unsigned.
+On Windows, launch **Arcane.exe**. Keep the complete application folder together.
 
 ## Development
 
