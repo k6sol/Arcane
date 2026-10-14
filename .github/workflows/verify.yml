@@ -36,6 +36,11 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Strict type checking
         run: npm run typecheck
+      - name: Verify private storage on Windows
+        if: runner.os == 'Windows'
+        run: |
+          npm run build
+          node --test --test-concurrency=1 dist/tests/unit/workflow-normal-owner.test.js dist/tests/unit/workflow-permission-equivalence.test.js
       - name: Build and test metadata, HTTP and offline skill contracts
         run: npm test
       - name: Build and verify deterministic Studio plugin

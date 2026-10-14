@@ -1,4 +1,5 @@
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
+import { observePrivatePermissionRefusal } from './windows-private-permission-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -31,6 +32,7 @@ function fixture(t: test.TestContext) {
   const parent = workflowReceiptParent(directory, identity.projectId);
   const keyDirectory = join(parent, 'workflow-human-receipts');
   const key = join(keyDirectory, 'key-v1');
+  observePrivatePermissionRefusal(t, parent);
   const hosts: ReturnType<typeof createWorkflowHost>[] = [];
   const open = (borrowedProject = projectPath) => {
     const host = createWorkflowHost({ directory, projectPath,
