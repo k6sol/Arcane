@@ -1,8 +1,8 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { ArcaneError, type Connection } from '../../packages/protocol/src/providers.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -30,7 +30,7 @@ function connection(): Connection {
 }
 const code = (expected: string) => (error: unknown) => error instanceof ArcaneError && error.code === expected;
 function fixture(t: test.TestContext, extra: Partial<WorkflowServiceOptions> = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-service-'));
+  const root = makeFixtureDirectory('arcane-workflow-service-');
   const project = join(root, 'project'), directory = join(root, 'state');
   mkdirSync(project); mkdirSync(join(project, 'src'));
   const work = new WorkStore({ directory, projectPath: project });
@@ -63,7 +63,7 @@ function fixture(t: test.TestContext, extra: Partial<WorkflowServiceOptions> = {
   };
   t.after(() => {
     service.close(); work.close();
-    assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep));
+    assert.ok(resolve(root).startsWith(fixtureTempDirectory() + sep));
     rmSync(root, { recursive: true, force: true });
   });
   return f;

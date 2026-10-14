@@ -44,6 +44,8 @@ class FixtureElement extends FixtureTarget {
   readonly children: FixtureElement[] = [];
   parentElement: FixtureElement | null = null;
   value = '';
+  selectionStart = 0;
+  selectionEnd = 0;
   focusCount = 0;
   scrollCount = 0;
   requestFullscreen: (() => Promise<void>) | undefined;
@@ -215,6 +217,7 @@ function fixture() {
   const studioGroup = add('section', '', connections); add('h2', 'session-heading', studioGroup);
   const settingsButton = add('button', 'workspace-tool-settings', stage); settingsButton.setAttribute('data-workspace-target', settings.id);
   const context = add('button', 'workspace-add-context', form);
+  context.type = 'button'; context.setAttribute('aria-label', 'Attach text files'); context.setAttribute('title', 'Attach text files');
   const contextLabel = add('span', 'workspace-tool-label', stage);
   add('h2', 'workspace-context-heading', stage); add('p', 'workspace-context-description', stage);
   const newChat = add('button', 'new-chat', sidebar);
@@ -224,7 +227,7 @@ function fixture() {
   let inputs = 0, submissions = 0, nativeActions = 0, secretDismissals = 0, legacyScrolls = 0;
   composer.addEventListener('input', () => inputs++);
   form.addEventListener('submit', () => submissions++);
-  for (const id of ['codex-connect', 'codex-thread-start', 'codex-thread-resume', 'codex-submit', 'asset-start']) {
+  for (const id of ['codex-connect', 'codex-thread-start', 'codex-thread-resume', 'codex-submit', 'codex-select', 'codex-grant', 'codex-assets-grant', 'asset-start']) {
     add('button', id, form).addEventListener('click', () => nativeActions++);
   }
   // Installed BEFORE the shell to model a retained workbench handler on pageshow.
@@ -255,25 +258,97 @@ test('tool switching keeps one native conversation and its exact draft, owns leg
   assert.ok(f.secretDismissals >= 4); shell.cleanup();
 });
 
-test('human context additions append text once without submitting, granting permission or replacing a draft', () => {
+test('attachment clicks reach the chat hook without injecting context, submitting or granting permission', () => {
   const f = fixture(), shell = f.start(); const original = '<img src=x>\nUnsent draft 🧩 ';
-  f.composer.value = original; f.toolButtons.get('blender')!.click(); f.context.click();
-  assert.ok(f.composer.value.startsWith(original + '\n\n'));
-  assert.match(f.composer.value, /Blender models, materials, textures/);
-  assert.match(f.composer.value, /does not grant permission/); assert.equal(f.inputs, 1);
+  // The chat attachment controller owns this hook; file selection/read behavior
+  // is covered by its dedicated tests. The shell must leave its listener intact.
+  let attachmentClicks = 0;
+  f.context.addEventListener('click', () => attachmentClicks++);
+  f.composer.value = original;
+  for (const tool of ['all', 'blender', 'roblox']) {
+    f.toolButtons.get(tool)!.click(); f.context.click();
+    assert.equal(f.composer.value, original); assert.equal(f.inputs, 0);
+    assert.equal(f.drawer.open, false); f.untouched();
+  }
+  assert.equal(attachmentClicks, 3);
+  assert.equal(f.context.getAttribute('aria-label'), 'Attach text files');
   assert.equal(f.composer.children.length, 0);
-  const draft = f.composer.value; f.newChat.click(); assert.equal(f.composer.value, draft);
+  f.newChat.click(); assert.equal(f.composer.value, original);
   assert.equal(f.doc.activeElement, f.composer); f.untouched(); shell.cleanup();
+  const restored = f.start(); f.context.click();
+  assert.equal(attachmentClicks, 4); assert.equal(f.composer.value, original); assert.equal(f.inputs, 0);
+  f.untouched(); restored.cleanup();
 });
 
-test('draft limits reject the entire addition and preserve existing text and input count', () => {
+test('attachment clicks preserve empty, byte-limited and maxlength drafts without fake context or input events', () => {
   const f = fixture(), shell = f.start();
-  for (const draft of ['x'.repeat(131070), '🧩'.repeat(32767)]) {
+  for (const draft of ['', '  \n', 'x'.repeat(131070), '🧩'.repeat(32767)]) {
     f.composer.value = draft; f.context.click(); assert.equal(f.composer.value, draft); assert.equal(f.inputs, 0);
-    assert.match(f.notice.textContent, /limit.*preserved/);
+    assert.equal(f.notice.textContent, ''); f.untouched();
   }
   f.composer.setAttribute('maxlength', '16'); f.composer.value = 'short'; f.context.click();
   assert.equal(f.composer.value, 'short'); assert.equal(f.inputs, 0); f.untouched(); shell.cleanup();
+});
+
+test('legacy tool context never enters a draft or transcript, changes attachments or emits a draft input', () => {
+  const f = fixture();
+  const legacy = f.doc.createElement('button');
+  legacy.setAttribute('data-draft', 'Tool context: Blender models, materials and textures.');
+  f.composer.parentElement!.append(legacy);
+  const attachments = f.doc.createElement('div'); attachments.id = 'codex-attachments';
+  const attachment = f.doc.createElement('button'); attachment.textContent = 'scene.txt';
+  attachments.append(attachment); f.composer.parentElement!.append(attachments);
+  // A synthetic input would change the chat controller's draft revision/review
+  // state. Tool context must not impersonate an edit to a reviewed workflow draft.
+  f.composer.addEventListener('input', () => assert.fail('Tool context changed draft provenance'));
+  let shell = f.start();
+  for (const draft of ['', '  \n', 'Keep my draft 🧩\n```lua\nprint("keep")\n```  ',
+    'x'.repeat(131072), '🧩'.repeat(32768), 'Tool context: text deliberately written by the user.']) {
+    f.composer.value = draft; f.composer.selectionStart = 1; f.composer.selectionEnd = 3;
+    for (const context of ['Tool context: Blender models, materials and textures.',
+      ' \nTool context: Roblox Studio scenes and scripts.', 'tool context: All tools.']) {
+      legacy.setAttribute('data-draft', context);
+      assert.equal(legacy.click().defaultPrevented, true);
+      assert.equal(f.composer.value, draft); assert.equal(f.inputs, 0);
+      assert.equal(f.composer.selectionStart, 1); assert.equal(f.composer.selectionEnd, 3);
+      assert.equal(f.doc.activeElement, f.composer); assert.equal(f.notice.textContent, '');
+      assert.equal(attachments.children[0], attachment); assert.equal(attachments.textContent, 'scene.txt');
+      assert.equal(attachments.hidden, false); f.untouched();
+    }
+  }
+  f.composer.setAttribute('maxlength', '4'); f.composer.value = 'full'; legacy.click();
+  assert.equal(f.composer.value, 'full'); assert.equal(f.notice.textContent, '');
+  shell.cleanup(); shell = f.start(); legacy.click();
+  assert.equal(f.composer.value, 'full'); assert.equal(f.inputs, 0); f.untouched(); shell.cleanup();
+});
+
+test('legacy tool draft controls still select presentation context without rewriting the user request', () => {
+  const f = fixture(), events: { tool: string }[] = [];
+  for (const [tool, button] of f.toolButtons) button.setAttribute('data-draft', 'Tool context: ' + tool);
+  f.doc.addEventListener('workspace:toolchange', e => events.push((e as CustomEvent<{ tool: string }>).detail));
+  const shell = f.start(), draft = 'Use the right tools for this request.\n  ';
+  f.composer.value = draft; f.composer.focus();
+  for (const tool of ['blender', 'roblox', 'all']) {
+    f.toolButtons.get(tool)!.click();
+    assert.equal(shell.activeTool, tool); assert.equal(f.stage.getAttribute('data-workspace-tool'), tool);
+    assert.equal(f.composer.value, draft); assert.equal(f.doc.activeElement, f.composer);
+    assert.equal(f.inputs, 0); assert.equal(f.drawer.open, false); f.untouched();
+  }
+  assert.deepEqual(events, [{ tool: 'blender' }, { tool: 'roblox' }, { tool: 'all' }]);
+  assert.equal(f.legacyScrolls, 0); shell.cleanup();
+});
+
+test('shell tool metadata contains no public prompt while backend routing stays in developer instructions', async () => {
+  const [shell, native, routing] = await Promise.all([
+    readFile(resolve('apps/desktop/src/workspace-shell.ts'), 'utf8'),
+    readFile(resolve('packages/codex-client/src/session.ts'), 'utf8'),
+    readFile(resolve('packages/protocol/src/arcane-tools.ts'), 'utf8'),
+  ]);
+  assert.doesNotMatch(shell, /draft:\s*['"]Tool context:|sendToolContext/);
+  assert.match(native, /developerInstructions: ARCANE_TASK_INSTRUCTIONS/);
+  assert.match(native, /input: \[\{ type: 'text', text, text_elements: \[\] \}\]/);
+  assert.match(routing, /Call skills_recommend with the actual brief/);
+  assert.match(routing, /The user should not choose a tool or workflow/);
 });
 
 test('tool settings explicitly reveal the right group and never reset the active tool or draft', () => {
@@ -335,12 +410,15 @@ test('markup has one composer, closed advanced settings, live review notices and
   const settingsAt = html.indexOf('id="workspace-settings"');
   for (const id of ['codex-unknown', 'codex-approval-section']) assert.ok(html.indexOf('id="' + id + '"') < settingsAt);
   assert.match(html, /id="asset-previews" class="asset-previews"><\/div>/);
-  assert.ok(html.indexOf('id="codex-model"') > settingsAt); assert.ok(html.indexOf('id="codex-select"') > settingsAt);
+  const chatModels=html.match(/<div class="composer-model-state" hidden inert aria-hidden="true">([\s\S]*?)<\/div>/);
+  assert.ok(chatModels);assert.ok(html.indexOf(chatModels[0]) < settingsAt);
+  for(const id of ['codex-model','codex-effort','codex-select'])assert.match(chatModels[1]!,new RegExp('id="'+id+'"'));
   const general = html.slice(settingsAt, html.indexOf('id="settings-connections"'));
   assert.match(general, /id="settings-key-heading"/); assert.match(general, /id="provider-setup-panel"/);
   assert.doesNotMatch(general, /id="(?:native-conversation-settings|key-issue|key-writes|codex-model|codex-select)"/);
   const advancedAt = html.indexOf('<section id="settings-advanced"');
-  for (const id of ['native-conversation-settings', 'codex-model', 'codex-select', 'key-issue']) assert.ok(html.indexOf('id="' + id + '"') > advancedAt);
+  for (const id of ['native-conversation-settings', 'key-issue']) assert.ok(html.indexOf('id="' + id + '"') > advancedAt);
+  assert.doesNotMatch(html.slice(settingsAt),/id="(?:codex-model|codex-effort|codex-select)"/);
   assert.doesNotMatch(html, /id="key-writes"|name="key-root"|id="key-roots"/);
   assert.match(general, /id="settings-key-generate"/);
   assert.doesNotMatch(html, /medieval|house|Download All|Model generated/);
@@ -349,6 +427,12 @@ test('markup has one composer, closed advanced settings, live review notices and
   assert.match(html, /id="codex-status" class="status-text neutral"/);
   assert.ok(html.indexOf('class="conversation-scroll"') < html.indexOf('id="codex-unknown"'));
   assert.ok(html.indexOf('id="codex-approval-section"') < html.indexOf('id="codex-compose"'));
+  const composerAt = html.indexOf('<form id="codex-compose"');
+  const composer = html.slice(composerAt, html.indexOf('</form>', composerAt));
+  assert.match(composer, /<button\b[^>]*id="workspace-add-context"[^>]*type="button"[^>]*aria-label="Attach text files"[^>]*title="Attach text files"/);
+  assert.match(composer, /<input\b[^>]*id="codex-attachment-input"[^>]*type="file"[^>]*accept="\.txt,\.md,\.lua,\.luau,\.json,\.csv"[^>]*\bmultiple\b[^>]*\bhidden\b/);
+  assert.match(composer, /id="codex-attachments"[^>]*\bhidden><\/div>/);
+  assert.match(composer, /id="codex-attachment-status"[^>]*role="status"[^>]*aria-live="polite"[^>]*\bhidden/);
   const shell = await readFile(resolve('apps/desktop/src/workspace-shell.ts'), 'utf8');
   assert.doesNotMatch(shell, /\.innerHTML|\.outerHTML|\bfetch\s*\(|localStorage|sessionStorage|\.requestSubmit\s*\(|\.submit\s*\(/);
   const chat = await readFile(resolve('apps/desktop/src/codex-chat.ts'), 'utf8');
@@ -356,6 +440,10 @@ test('markup has one composer, closed advanced settings, live review notices and
   assert.match(chat, /card\.setAttribute\('aria-label',message\.role==='human'\?'Your message':'Assistant message'\)/);
   const workbench = await readFile(resolve('apps/desktop/src/studio.ts'), 'utf8');
   assert.doesNotMatch(workbench, /item\.className = 'badge '/);
+  assert.match(workbench, /import\('\.\/chat-attachments\.js'\)/);
+  assert.match(workbench, /codexChat\.enableTextAttachments\(attachments\.startChatAttachments\(document,/);
+  assert.match(workbench, /getScope:\s*\(\)\s*=>\s*codexChat\.textAttachmentScope\(\)/);
+  assert.match(workbench, /onChange:\s*\(\)\s*=>\s*codexChat\.attachmentPresentationChanged\(\)/);
 });
 
 

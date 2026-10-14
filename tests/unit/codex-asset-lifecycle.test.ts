@@ -4,17 +4,21 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectCodexClient } from '../../packages/codex-client/src/index.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import type { NativeAssetHooks, Operation, Snapshot } from '../../packages/codex-client/src/types.js';
+import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 
 const ROOT = resolve(process.cwd()), GENERIC = 'a4'.repeat(32), FINAL = 'c6'.repeat(32);
-const EMITTED = fileURLToPath(new URL('../../packages/codex-client/src/', import.meta.url));
-const MODULES = ['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history'];
+const EMITTED = fileURLToPath(new URL('../../packages/', import.meta.url));
+const MODULES = [
+  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history'].map(name => 'codex-client/src/' + name + '.js'),
+  'protocol/src/arcane-tools.js', // Imported by the unmodified production isolation module.
+];
 const hooks = (): NativeAssetHooks => Object.freeze({ finalCredential: () => FINAL, dispatched() {}, ended() {}, retired() {} });
 type Scenario = { mode?: string; action?: string; hooks?: boolean; profile?: boolean; maxOperations?: number; credential?: string; mutateProfile?: boolean };
 type Receipt = { event: string; launch?: number; args?: string[]; envKeys?: string[]; tokenHash?: string | null;
@@ -157,6 +161,9 @@ try {
           await interrupting;
         }
         if (scenario.mode === 'account' || scenario.mode === 'account-chatgpt') await until(() => rows().some(row => row.event === 'retired'));
+        // ACK and completion may arrive in separate pipe reads. Observe retirement
+        // from the completion notification before finally.close() can cause it.
+        if (scenario.mode === 'end-notification-throw') await until(() => rows().some(row => row.event === 'ended') && rows().some(row => row.event === 'retired'));
         if (scenario.mode === 'account-read') await client.readAccount();
         if (scenario.mode === 'exhaustion') { try { await client.startTurn(input); } catch (error) { record({ event: 'exhausted', code: error.code }); } }
         if (scenario.mode === 'lost-ack' || scenario.mode === 'unknown' || scenario.mode === 'hook-throw' || scenario.mode === 'end-throw' || scenario.mode === 'account-before-ack') {
@@ -177,11 +184,13 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}) {
     assert.ok(!isAbsolute(child) && child.startsWith('arcane-codex-assets-') && !child.includes(sep) && !child.includes('..'));
     await rm(actual, { recursive: true, force: true });
   });
-  const source = join(dir, 'packages', 'codex-client', 'src'), entry = join(dir, 'apps', 'mcp', 'src', 'main.js');
-  await mkdir(source, { recursive: true }); await mkdir(join(dir, 'apps', 'mcp', 'src'), { recursive: true });
+  const entry = join(dir, 'apps', 'mcp', 'src', 'main.js');
+  await mkdir(dirname(entry), { recursive: true });
   for (const name of MODULES) {
-    await copyFile(join(EMITTED, name + '.js'), join(source, name + '.js'));
-    assert.deepEqual(await readFile(join(source, name + '.js')), await readFile(join(EMITTED, name + '.js')));
+    const target = join(dir, 'packages', name);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(join(EMITTED, name), target);
+    assert.deepEqual(await readFile(target), await readFile(join(EMITTED, name)));
   }
   const command = join(dir, process.platform === 'win32' ? 'codex.exe' : 'codex');
   await writeFile(command, 'Synthetic validated path; never executed.'); await chmod(command, 0o700);
@@ -189,7 +198,7 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}) {
   await writeFile(join(dir, 'package.json'), '{"type":"module"}');
   await writeFile(join(dir, 'peer.cjs'), PEER);
   await writeFile(join(dir, 'harness.mjs'), HARNESS);
-  const options = { mode: 'normal', ...scenario };
+  const options = { mode: 'normal', ...scenario, arcaneToolNames: ARCANE_TOOL_NAMES };
   const boundary = String.raw`
 import { spawn as realSpawn } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';

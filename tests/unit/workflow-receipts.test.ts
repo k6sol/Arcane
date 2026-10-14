@@ -1,10 +1,11 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, linkSync, lstatSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -28,7 +29,7 @@ interface Reply { status: number; text: string; headers: IncomingHttpHeaders }
 const json = <T = Record<string, unknown>>(reply: Reply) => JSON.parse(reply.text) as T;
 interface Wire { method?: string; token?: string; origin?: string | null; headers?: Record<string, string | string[]>; raw?: string | Buffer; target?: string }
 async function fixture(t: test.TestContext, settings: { unscoped?: boolean; equalTokens?: boolean } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-receipts-')), projectPath = join(root, 'project'), directory = join(root, 'state');
+  const root = makeFixtureDirectory('arcane-workflow-receipts-'), projectPath = join(root, 'project'), directory = join(root, 'state');
   mkdirSync(projectPath); mkdirSync(join(projectPath, 'src'));
   let now = Date.now(), contextFailure = false, conversation: NativeConversation | null = structuredClone(native);
   const work = new WorkStore({ directory, projectPath, now: () => now });
@@ -55,7 +56,7 @@ async function fixture(t: test.TestContext, settings: { unscoped?: boolean; equa
       assert.match(part, /^[a-f0-9]{64}$/); assert.ok(!lstatSync(receiptParent).isSymbolicLink());
       rmSync(resolve(receiptParent), { recursive: true, force: true });
     }
-    const part = relative(resolve(tmpdir()), resolve(root));
+    const part = relative(fixtureTempDirectory(), resolve(root));
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink());
     rmSync(resolve(root), { recursive: true, force: true });
   });
@@ -311,9 +312,9 @@ test('receipt lookup retains existing strict single-link key protection', async 
 });
 
 test('core receipt lookup denies absent human authority rather than bypassing it', t => {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-core-receipt-')), projectPath = join(root, 'project'), directory = join(root, 'state');
+  const root = makeFixtureDirectory('arcane-core-receipt-'), projectPath = join(root, 'project'), directory = join(root, 'state');
   mkdirSync(projectPath); const work = new WorkStore({ directory, projectPath });
   const service = new WorkflowService({ directory, projectPath, workStore: { store: work, projectPath } });
-  t.after(() => { service.close(); work.close(); assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(resolve(root), { recursive: true, force: true }); });
+  t.after(() => { service.close(); work.close(); assert.ok(resolve(root).startsWith(fixtureTempDirectory() + sep)); rmSync(resolve(root), { recursive: true, force: true }); });
   assert.throws(() => service.receipt({ prepared: service.prepareCreation(recipe()), receiptHash: 'a'.repeat(64), idempotencyKey: 'unused' }), { code: 'WORKFLOW_HUMAN_REQUIRED' });
 });

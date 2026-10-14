@@ -263,7 +263,8 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     closeIdleConnections() {},
   };
   const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
-    server, workflow: null, associations: null, ArcaneError: Error,
+    server, workflow: null, associations: null, ArcaneError: Error, ownedTests: null,
+    ownedSourceVerifier: { dispose() { assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before compiler disposal'); } },
     nativeAssetRegistry: { close() { nativeAssetsFenced = true; } },
     codex: { close: () => { assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); return childCleanup; } },
   });

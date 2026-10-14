@@ -1,8 +1,9 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -32,9 +33,9 @@ function after(t: test.TestContext, action: () => Promise<unknown>) {
 }
 
 async function directory(t: test.TestContext) {
-  const parent = await mkdtemp(join(tmpdir(), 'arcane-mcp-skill-router-'));
+  const parent = makeFixtureDirectory('arcane-mcp-skill-router-');
   after(t, async () => {
-    const part = relative(resolve(tmpdir()), resolve(parent));
+    const part = relative(fixtureTempDirectory(), resolve(parent));
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
     await rm(parent, { recursive: true, force: true });
   });
@@ -149,6 +150,24 @@ test('router refuses tampered selected content and excludes quarantined/deprecat
   const result = await recommendSkills(f.registry, INPUT);
   assert.ok(!result.ids.includes('arcane-studio-context')); assert.ok(!result.ids.includes('arcane-safe-edits'));
   assert.deepEqual(await readFile(registryFile), before);
+});
+
+test('canonical fixture data reaches routing while raw Windows TEMP aliases retain the bundle guard', async t => {
+  const f = await dataFixture(t);
+  assert.equal(f.root, await realpath(f.root));
+  const expected = await recommendSkills(f.registry, INPUT);
+  assert.equal(expected.available, true);
+  const rawRoot = join(tmpdir(), basename(f.root));
+  const rawRegistry = new SkillRegistry({ fixtureRoot: rawRoot });
+  const samePath = process.platform === 'win32' ? rawRoot.toLowerCase() === f.root.toLowerCase() : rawRoot === f.root;
+  if (!samePath) {
+    assert.equal(await realpath(rawRoot), f.root);
+    await assert.rejects(() => recommendSkills(rawRegistry, INPUT), { code: 'BUNDLE_INTEGRITY' });
+    t.diagnostic('Actual TEMP canonical alias rejected by the bundle guard.');
+  } else {
+    assert.deepEqual(await recommendSkills(rawRegistry, INPUT), expected);
+    t.diagnostic('TEMP already has its physical spelling; canonical fixture routing validated.');
+  }
 });
 
 test('official stdio startup advertises mutation tools and router, uses only bundled guidance in a hostile workspace', { timeout: 20_000 }, async t => {

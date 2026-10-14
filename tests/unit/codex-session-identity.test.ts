@@ -10,6 +10,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { CodexClientError, type NativeAssetHooks, type NativeAssetIntent, type Snapshot } from '../../packages/codex-client/src/types.js';
+import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { createCodexService } from '../../apps/daemon/src/codex-service.js';
 import { createNativeAssetRegistry, assertNativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
 
@@ -34,7 +35,7 @@ function protocolPeer(): void {
   const { createInterface } = require('node:readline') as typeof import('node:readline');
   const { appendFileSync, existsSync, readFileSync } = require('node:fs') as typeof import('node:fs');
   const [encoded, audit, notifyFile, releaseFile] = process.argv.slice(1);
-  const scenario = JSON.parse(encoded!) as Scenario;
+  const scenario = JSON.parse(encoded!) as Scenario & { arcaneToolNames: readonly string[] };
   const threadId = 'fixture.thread:identity';
   let checks = 0, notified = false;
   const record = (value: object) => appendFileSync(audit!, JSON.stringify(value) + '\n');
@@ -82,7 +83,7 @@ function protocolPeer(): void {
       const second = params.cursor === 'second';
       const reply = () => send({ id, result: {
         data: [{ name: second ? 'inherited' : 'arcane', runtimeStatus: second ? 'disabled' : 'connected',
-          tools: {}, toolsError: null, pluginId: null }],
+          tools: second ? {} : Object.fromEntries(scenario.arcaneToolNames.map(name => [name, {}])), toolsError: null, pluginId: null }],
         nextCursor: scenario.holdSecondPage && !second ? 'second' : null,
       } });
       if (checks === scenario.holdInventory || scenario.holdSecondPage && second) held(reply); else reply();
@@ -124,7 +125,7 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}, options: {
     retired() { lifecycle.retired++; options.forward?.retired(); },
   });
   const session = new CodexSession({
-    command: process.execPath, args: ['-e', PEER, JSON.stringify({ ackSession: SESSION, ...scenario }), audit, notifyFile, releaseFile],
+    command: process.execPath, args: ['-e', PEER, JSON.stringify({ ackSession: SESSION, ...scenario, arcaneToolNames: ARCANE_TOOL_NAMES }), audit, notifyFile, releaseFile],
     cwd: directory, env: nativeEnvironment(),
   }, limits({ requestTimeoutMs: 6000, approvalTimeoutMs: 2000 }), 'spawned-node-fixture', policy, options.hooks === false ? undefined : hooks);
   t.after(async () => {

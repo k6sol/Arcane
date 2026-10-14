@@ -2,12 +2,14 @@
 // Studio, providers or Blender. Executable bytes and the Node probe are injected.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, lstat, link, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { packageWindows, verifyWindowsBundle, hasPrivateKeyMaterial } from '../../scripts/package-windows.mjs';
 import { REQUIRED_FRONTEND_FILES, BRAND_BITMAP_PATH } from '../../scripts/create-local-release.mjs';
+import { MANAGED_LUAU_FILES, REQUIRED_MANAGED_LUAU_FILES, MANAGED_LUAU_SHA256 } from '../../scripts/managed-luau-compiler.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWooAAAAASUVORK5CYII=', 'base64');
@@ -25,11 +27,13 @@ const fixtureLicense = 'Node.js is licensed for use as follows:\n' +
   'Synthetic offline fixture notice.\n'.repeat(2000);
 
 async function fixture(t) {
-  const scratch = await mkdtemp(join(tmpdir(), 'arcane-windows-test-'));
+  // Derive all package identities from the physical Windows TEMP spelling.
+  const boundary = realpathSync.native(tmpdir());
+  const scratch = realpathSync.native(await mkdtemp(join(boundary, 'arcane-windows-test-')));
   t.after(async () => {
     // Cleanup is confined to this freshly-owned test scratch tree; the packager
     // never removes or overwrites real release directories.
-    const target = resolve(scratch), boundary = resolve(tmpdir()), path = relative(boundary, target);
+    const target = resolve(scratch), path = relative(boundary, target);
     assert.ok(path.startsWith('arcane-windows-test-') && !path.includes(sep) && !isAbsolute(path));
     assert.equal((await lstat(target)).isSymbolicLink(), false);
     await rm(target, { recursive: true, force: true });
@@ -62,9 +66,10 @@ async function fixture(t) {
   for (const path of ['LICENSE', 'README.md']) await write(path, 'Fixture content.\n');
   for (const path of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua']) await write(path, '// Fixture only.\n');
   await writeJson('plugin/build/manifest.json', {});
+  for (const path of REQUIRED_MANAGED_LUAU_FILES) await write(path, await readFile(new URL('../../' + path, import.meta.url)));
   const ts = 'export const fixture = true;\n';
   for (const path of REQUIRED_FRONTEND_FILES) {
-    const content = path === BRAND_BITMAP_PATH ? png : path.endsWith('.map')
+    const content = path === BRAND_BITMAP_PATH ? png : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.map')
       ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [ts] })
       : path.endsWith('.ts') ? ts : '// Fixture only.\n';
     await write(path, content);
@@ -125,6 +130,8 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
   assert.ok(data.files.some(file => file.path === 'resources/app/studio-key-vault.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/workspace-preferences.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/provider-login.cjs'));
+  for (const path of REQUIRED_MANAGED_LUAU_FILES) assert.ok(data.files.some(file => file.path === 'resources/product/' + path), path);
+  assert.equal(hash(await readFile(join(result.directory, 'resources/product/' + MANAGED_LUAU_FILES[0]))), MANAGED_LUAU_SHA256);
   assert.ok(data.files.some(file => file.path === 'resources/product/dist/apps/desktop/src/studio-key-settings.js'));
   assert.deepEqual(data.dependencies.map(dep => dep.path), [
     'node_modules/@modelcontextprotocol/sdk', 'node_modules/@modelcontextprotocol/sdk/node_modules/helper-a',
@@ -154,6 +161,39 @@ test('tampered executables, product assets and dependency bytes fail integrity',
     await writeFile(join(result.directory, path), 'Tampered fixture.');
     await assert.rejects(verifyWindowsBundle(result.directory), /checksum/);
   }
+});
+
+test('managed binary/license/provenance cannot be removed or repinned by rehashing every source and Windows descriptor', async t => {
+  const { options } = await fixture(t), result = await packageWindows(options), directory = result.directory;
+  const metadataPaths = ['windows-manifest.json', 'resources/product/release-manifest.json', 'resources/source-manifest.json'];
+  const metadata = await Promise.all(metadataPaths.map(path => readFile(join(directory, path))));
+  for (const path of MANAGED_LUAU_FILES) {
+    const target = 'resources/product/' + path, original = await readFile(join(directory, target));
+    const windows = JSON.parse(metadata[0]);
+    windows.files = windows.files.filter(file => file.path !== target);
+    windows.fileCount = windows.files.length; windows.totalBytes = windows.files.reduce((sum, file) => sum + file.bytes, 0);
+    await rm(join(directory, target)); await writeFile(join(directory, metadataPaths[0]), JSON.stringify(windows));
+    await assert.rejects(verifyWindowsBundle(directory), /Missing required Windows bundle file/);
+    await writeFile(join(directory, target), original);
+    const changed = path.endsWith('manifest.json')
+      ? Buffer.from(original.toString().replace('"version": "0.742"', '"version": "0.741"')) : Buffer.alloc(original.length);
+    assert.equal(changed.length, original.length);
+    const deployed = JSON.parse(metadata[1]), source = JSON.parse(metadata[2]);
+    for (const manifest of [deployed, source]) manifest.files.find(file => file.path === path).sha256 = hash(changed);
+    const deployedBytes = Buffer.from(JSON.stringify(deployed, null, 2) + '\n'), sourceBytes = Buffer.from(JSON.stringify(source, null, 2) + '\n');
+    const rehashed = JSON.parse(metadata[0]);
+    rehashed.sourceRelease.manifestSha256 = hash(deployedBytes); rehashed.sourceRelease.originalManifestSha256 = hash(sourceBytes);
+    for (const [path, bytes] of [[target, changed], [metadataPaths[1], deployedBytes], [metadataPaths[2], sourceBytes]]) {
+      await writeFile(join(directory, path), bytes);
+      const entry = rehashed.files.find(file => file.path === path); entry.bytes = bytes.length; entry.sha256 = hash(bytes);
+    }
+    rehashed.totalBytes = rehashed.files.reduce((sum, file) => sum + file.bytes, 0);
+    await writeFile(join(directory, metadataPaths[0]), JSON.stringify(rehashed));
+    await assert.rejects(verifyWindowsBundle(directory), /Managed Luau compiler is unavailable/);
+    await writeFile(join(directory, target), original);
+    for (let index = 0; index < metadataPaths.length; index++) await writeFile(join(directory, metadataPaths[index]), metadata[index]);
+  }
+  await verifyWindowsBundle(directory);
 });
 
 test('unlisted payloads and mutable directories are rejected, including excluded release roots', async t => {

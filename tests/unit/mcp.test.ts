@@ -34,7 +34,8 @@ const SESSION_ID = 'fixture-studio-session';
 const REFERENCE: InstanceRef = { instanceId: 'opaque-1', sessionId: SESSION_ID, root: 'Workspace', pathSegments: ['Same', 'Same'], className: 'Part' };
 const TOOL_ACCESS = {
   sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true,
-  script_update: false, scene_create: false, scene_update: false, receipt_status: true, receipt_restore: false,
+  script_update: false, script_set_enabled: false, scene_create: false, scene_update: false, receipt_status: true, receipt_restore: false,
+  playtest_request:false,playtest_status:true,playtest_cancel:false,
   skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
   work_progress: false, work_submit: false, assets_probe: true, assets_jobs: true, assets_start: false, assets_cancel: false, assets_manifest: true,
 };
@@ -249,6 +250,8 @@ test('fixture SDK: unsafe or unbounded inputs are rejected before HTTP enqueue',
     ['scene_update',{...common,expected:{Parent:'Workspace'},properties:{Parent:'ServerStorage'}}],
     ['script_update',{...common,expectedSource:'',source:'🧩'.repeat(26000)}],
     ['script_update',{...common,expectedSource:'',source:'nul\0byte'}],
+    ['script_set_enabled',{...common,expectedSource:'print(1)',expectedEnabled:false,enabled:'true'}],
+    ['script_set_enabled',{...common,expectedSource:'print(1)',expectedEnabled:false,enabled:true,syntaxVerified:true}],
     ['receipt_restore',{commandId:'known',mutation:{kind:'script.update'}}], ['execute_luau',{code:'print(1)'}],
   ] as const) { assert.equal((await call(client,name,args)).result.isError,true,name); }
   assert.equal(f.state.posts,0);

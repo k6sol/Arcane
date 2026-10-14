@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { BRAND_BITMAP_PATH, REQUIRED_FRONTEND_FILES, createLocalRelease, verifyLocalRelease } from '../../scripts/create-local-release.mjs';
+import { REQUIRED_MANAGED_LUAU_FILES } from '../../scripts/managed-luau-compiler.mjs';
 import { productDoctor } from '../../scripts/product-doctor.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -15,7 +17,8 @@ const firstRunFiles = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 
 
 async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\n' } = {}) {
   // Retain this task's disposable fixtures in Temp; no checkout files are deleted.
-  const root = await mkdtemp(join(tmpdir(), 'arcane-ui-release-test-'));
+  // Canonicalize Windows TEMP aliases without weakening release path checks.
+  const root = realpathSync.native(await mkdtemp(join(realpathSync.native(tmpdir()), 'arcane-ui-release-test-')));
   const write = async (path, bytes) => { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), bytes); };
   const put = async (path, bytes) => { if (path !== omit) await write(path, bytes); };
   for (const path of ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skills', 'docs', 'tests', 'dist', '.github']) await mkdir(join(root, path));
@@ -24,7 +27,7 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   await write('tsconfig.json', '{}');
   for (const path of ['README.md', 'LICENSE']) await write(path, 'Offline fixture.\n');
   for (const path of REQUIRED_FRONTEND_FILES) {
-    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
+    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
     await put(path, bytes);
   }
   for (const path of firstRunFiles) await put(path, 'Offline first-run fixture; never executed.\n');
@@ -34,6 +37,7 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   await write('apps/desktop/electron/provider-setup.cjs', '// Offline native setup host fixture; never executed.\n');
   await write('workers/blender/asset_worker.py', '# Offline fixture only.\n');
   await write('skills/registry.json', '{}');
+  for (const path of REQUIRED_MANAGED_LUAU_FILES) await write(path, await readFile(new URL('../../' + path, import.meta.url)));
   const plugin = '--!strict\n-- Offline fixture only.\n';
   await write('plugin/src/Main.server.luau', plugin);
   await write('plugin/build/ArcaneLocalBridge.lua', plugin);
@@ -53,7 +57,7 @@ test('controlled brand PNG and named setup scripts are integrity-listed; unrelat
   const release = await createLocalRelease({ repository: root });
   const manifest = JSON.parse(await readFile(join(release.directory, 'release-manifest.json'), 'utf8'));
   const listed = new Set(manifest.files.map(file => file.path));
-  for (const path of [...REQUIRED_FRONTEND_FILES, ...firstRunFiles]) assert.ok(listed.has(path), path);
+  for (const path of [...REQUIRED_FRONTEND_FILES, ...REQUIRED_MANAGED_LUAU_FILES, ...firstRunFiles]) assert.ok(listed.has(path), path);
   for (const path of excluded) assert.equal(listed.has(path), false, path);
   assert.deepEqual(manifest.files.find(file => file.path === BRAND_BITMAP_PATH), { path: BRAND_BITMAP_PATH, bytes: png.length, sha256: hash(png) });
   assert.ok((await readFile(join(release.directory, BRAND_BITMAP_PATH))).equals(png));

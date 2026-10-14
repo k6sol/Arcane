@@ -1,9 +1,9 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve, sep } from 'node:path';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { ArcaneError, type Connection } from '../../packages/protocol/src/providers.js';
@@ -34,7 +34,7 @@ function connection(): Connection {
   };
 }
 function fixture(t: test.TestContext, extra: Pick<WorkflowServiceOptions, 'verifiers' | 'policyContext'> = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-verifier-availability-'));
+  const root = makeFixtureDirectory('arcane-verifier-availability-');
   const project = join(root, 'project'), directory = join(root, 'state');
   mkdirSync(project); mkdirSync(join(project, 'src'));
   const work = new WorkStore({ directory, projectPath: project });
@@ -45,7 +45,7 @@ function fixture(t: test.TestContext, extra: Pick<WorkflowServiceOptions, 'verif
     try { service?.close(); }
     finally {
       work.close();
-      assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep));
+      assert.ok(resolve(root).startsWith(fixtureTempDirectory() + sep));
       rmSync(root, { recursive: true, force: true });
     }
   });

@@ -18,6 +18,12 @@ const policy = require('../../apps/desktop/electron/policy.cjs');
 const source = name => fs.readFileSync(new URL('../../' + name, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const main = source('apps/desktop/electron/main.cjs');
 const start = main.slice(main.indexOf('async function startDaemon('), main.indexOf('function makeWindow()'));
+// This VM fixture tests port/state ownership, not compiler installation. Replace
+// only the trusted module-import boundary; the actual host algorithm is unchanged.
+// Managed inventory/default/custom precedence has its own real-compiler suite.
+const managedImport = "const { managedCodeVerificationConfiguration } = await import(require('node:url').pathToFileURL(join(productRoot, 'scripts/managed-luau-compiler.mjs')).href);";
+assert.equal(start.split(managedImport).length, 2, 'Expected exactly one trusted managed-compiler import.');
+const fixtureStart = start.replace(managedImport, 'const { managedCodeVerificationConfiguration } = { managedCodeVerificationConfiguration: globalThis.fixtureManagedConfiguration };');
 const stop = main.slice(main.indexOf('async function stopDaemon()'), main.indexOf('async function startDaemon('));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const id = project => hash(process.platform === 'win32' ? project.toLowerCase() : project);
@@ -52,6 +58,12 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
     performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, CODE_VERIFICATION_WARNING: 'Fixture warning.', console,
     providerSetup: { cancelPending() {} },
     codeVerification: { daemonConfiguration: () => ({ environment: {}, settingsHash: null, failure: null }) },
+    fixtureManagedConfiguration({codeVerification, project, productRoot}) {
+      assert.equal(productRoot, f.productRoot);
+      assert.equal(project.projectId, id(project.projectPath), 'The canonical host-owned project and identity agree.');
+      assert.equal(project.stateRoot, path.join(f.userRoot, 'runtime', 'projects', project.projectId));
+      return codeVerification.daemonConfiguration(project);
+    },
     ownedDirectory: async full => { await policy.directPath(full, 'directory', true); fs.mkdirSync(full, { recursive: true }); return policy.directPath(full); },
     setTimeout: real ? (fn, ms) => setTimeout(fn, Math.min(ms, 5000)) : fn => { timers.set(++timerId, fn); return timerId; },
     clearTimeout: real ? clearTimeout : timer => timers.delete(timer),
@@ -64,7 +76,7 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
       return owned;
     },
   };
-  vm.createContext(context); vm.runInContext(start + '\n' + stop + '\nglobalThis.start = startDaemon; globalThis.stop = stopDaemon;', context);
+  vm.createContext(context); vm.runInContext(fixtureStart + '\n' + stop + '\nglobalThis.start = startDaemon; globalThis.stop = stopDaemon;', context);
   return { context, calls, timers, start: project => context.start(project ?? f.project), stop: () => context.stop() };
 }
 
@@ -183,9 +195,9 @@ test('fresh and legacy state without a port record request 0 and do not inspect 
 
 test('owned Node loopback restart: exact persisted endpoint and original real-store key authenticate after busy failure', { timeout: 20000 }, async t => {
   const f = fixture(t);
-  // Compile only the four current store dependencies into this owned fixture,
+  // Compile only the current store dependencies into this owned fixture,
   // using Node's type erasure. Never import stale dist or execute product services.
-  for (const name of ['packages/storage/src/studio-store.ts', 'packages/protocol/src/providers.ts', 'packages/protocol/src/studio.ts', 'packages/core/src/studio-policy.ts']) {
+  for (const name of ['packages/storage/src/studio-store.ts', 'packages/protocol/src/providers.ts', 'packages/protocol/src/studio.ts', 'packages/core/src/studio-policy.ts', 'packages/core/src/native-property-outcomes.ts']) {
     const full = path.join(f.productRoot, name.replace(/\.ts$/, '.js')); fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, stripTypeScriptTypes(source(name), { mode: 'transform' }));
   }

@@ -1,10 +1,11 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model.js';
 import { codexRoutes } from '../../apps/daemon/src/codex-routes.js';
@@ -232,7 +233,7 @@ const recipe = (model: WorkflowRecipeRequest['model']): WorkflowRecipeRequest =>
 
 // Actual product dispatcher; both WorkStore and CodexService are doubles. No StudioStore or provider probe is opened.
 test('actual product proof drives exact model preview/execute; stale models deny while completed receipts remain read-only', { timeout: 60000 }, async t => {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-native-model-')), projectPath = join(root, 'project'), stateDirectory = join(root, 'state');
+  const root = makeFixtureDirectory('arcane-workflow-native-model-'), projectPath = join(root, 'project'), stateDirectory = join(root, 'state');
   mkdirSync(join(projectPath, 'src'), { recursive: true });
   let observed = state(projectPath); const work = workDouble(), counters = { actions: 0, closes: 0, probes: 0 };
   const lab = await createConnectionLab({ cwd: root, projectPath, stateDirectory, port: 0, workStore: work.store,
@@ -244,7 +245,7 @@ test('actual product proof drives exact model preview/execute; stale models deny
       const part = relative(resolve(homedir(), '.arcane-private-receipts-v1'), resolve(receiptParent));
       assert.match(part, /^[a-f0-9]{64}$/); assert.ok(!lstatSync(receiptParent).isSymbolicLink()); rmSync(resolve(receiptParent), { recursive: true, force: true });
     }
-    const part = relative(resolve(tmpdir()), resolve(root));
+    const part = relative(fixtureTempDirectory(), resolve(root));
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink()); rmSync(resolve(root), { recursive: true, force: true });
     assert.equal(counters.actions, 0); assert.equal(counters.probes, 0); assert.equal(work.counts.forbidden, 0); assert.equal(work.counts.closes, 0);
   });
@@ -300,7 +301,7 @@ test('actual product proof drives exact model preview/execute; stale models deny
 // No installed CLI is constructed or started: every CodexService action is forbidden.
 // The separate projection case above keeps spawned-node-fixture installed:false.
 test('actual host retains a gated recipe across metadata reconnect using borrowed synthetic installed-cli observations', { timeout: 60000 }, async t => {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-reconnect-')), projectPath = join(root, 'project'), stateDirectory = join(root, 'state');
+  const root = makeFixtureDirectory('arcane-workflow-reconnect-'), projectPath = join(root, 'project'), stateDirectory = join(root, 'state');
   mkdirSync(join(projectPath, 'src'), { recursive: true });
   const brief = Buffer.from('Owned offline brief: retain this exact project, native thread, model and human gate across reconnect.\n');
   writeFileSync(join(projectPath, 'src', 'brief.txt'), brief);
@@ -324,7 +325,7 @@ test('actual host retains a gated recipe across metadata reconnect using borrowe
           rmSync(resolve(receiptParent), { recursive: true, force: true });
         }
       } finally {
-        const part = relative(resolve(tmpdir()), resolve(root));
+        const part = relative(fixtureTempDirectory(), resolve(root));
         assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink());
         rmSync(resolve(root), { recursive: true, force: true });
       }

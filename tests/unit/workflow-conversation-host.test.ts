@@ -1,8 +1,9 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, lstatSync, readFileSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { mkdirSync, lstatSync, readFileSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -28,7 +29,7 @@ function canonical(value: unknown): string {
 interface Reply { status: number; value: Record<string, unknown> | null; text: string }
 interface Listing { projectId: string; workflows: { id: string; recipeId: string; state: string }[] }
 async function fixture(t: test.TestContext, settings: { unscoped?: boolean; homeProject?: boolean } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-conversation-'));
+  const root = makeFixtureDirectory('arcane-workflow-conversation-');
   const projectPath = settings.homeProject ? homedir() : join(root, 'project');
   if (!settings.homeProject) mkdirSync(projectPath);
   const directory = join(root, 'state');
@@ -62,7 +63,7 @@ async function fixture(t: test.TestContext, settings: { unscoped?: boolean; home
       assert.match(part, /^[a-f0-9]{64}$/); assert.ok(!lstatSync(receiptParent).isSymbolicLink());
       rmSync(resolve(receiptParent), { recursive: true, force: true });
     }
-    const part = relative(resolve(tmpdir()), resolve(root));
+    const part = relative(fixtureTempDirectory(), resolve(root));
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink());
     rmSync(resolve(root), { recursive: true, force: true });
   });

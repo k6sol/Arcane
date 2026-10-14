@@ -1,9 +1,10 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
 import {createServer,request as httpRequest} from 'node:http';
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,lstatSync,rmSync} from 'node:fs';
-import {tmpdir,homedir} from 'node:os';
+import {mkdirSync,writeFileSync,readFileSync,lstatSync,rmSync} from 'node:fs';
+import { homedir } from 'node:os';
 import {join,relative,resolve,isAbsolute,sep} from 'node:path';
 import type {AddressInfo} from 'node:net';
 import {WorkStore} from '../../packages/storage/src/work-store.js';
@@ -22,7 +23,7 @@ const connection:Connection={provider:'codex',installed:true,version:'fixture-on
   features:[{id:'coding',label:'Fixture handoff',state:'native-handoff',route:'native-client',reason:'Offline fixture only.'}],warnings:[],observedAt:'2026-10-12T00:00:00Z',revision:model.connectionRevision};
 interface Reply {status:number;value:Record<string,unknown>}
 async function fixture(t:test.TestContext){
-  const root=mkdtempSync(join(tmpdir(),'arcane-assistance-http-')),projectPath=join(root,'project'),directory=join(root,'state');
+  const root=makeFixtureDirectory('arcane-assistance-http-'),projectPath=join(root,'project'),directory=join(root,'state');
   mkdirSync(join(projectPath,'src'),{recursive:true});
   const work=new WorkStore({directory,projectPath}),associations=new ConversationWorkStore({directory:join(root,'associations'),projectPath});
   const receiptParent=workflowReceiptParent(directory,workflowProjectIdentity(projectPath).projectId);
@@ -33,7 +34,7 @@ async function fixture(t:test.TestContext){
   const server=createServer((request,response)=>{void routes(request,response,new URL(request.url??'/',origin),token,origin,agent).then(handled=>{if(!handled){response.writeHead(404);response.end();}});});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));origin='http://127.0.0.1:'+(server.address() as AddressInfo).port;
   t.after(async()=>{host.close();associations.close();work.close();server.closeAllConnections();await new Promise<void>((done,reject)=>server.close(error=>error?reject(error):done()));
-    const part=relative(resolve(tmpdir()),resolve(root));assert.ok(part&&!isAbsolute(part)&&part!=='..'&&!part.startsWith('..'+sep)&&!lstatSync(root).isSymbolicLink());
+    const part=relative(fixtureTempDirectory(),resolve(root));assert.ok(part&&!isAbsolute(part)&&part!=='..'&&!part.startsWith('..'+sep)&&!lstatSync(root).isSymbolicLink());
     if(process.platform==='win32'){assert.match(relative(resolve(homedir(),'.arcane-private-receipts-v1'),resolve(receiptParent)),/^[a-f0-9]{64}$/);assert.ok(!lstatSync(receiptParent).isSymbolicLink());rmSync(resolve(receiptParent),{recursive:true,force:true});}
     rmSync(resolve(root),{recursive:true,force:true});});
   const call=(path:string,input?:unknown,overrides:{token?:string;origin?:string;method?:string}={}):Promise<Reply>=>new Promise((done,reject)=>{

@@ -1,3 +1,4 @@
+import { makeFixtureDirectory } from './windows-fixture-paths.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
@@ -6,7 +7,6 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { syncBuiltinESMExports } from 'node:module';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   createWorkflowRecipe, evaluateWorkflowEvidence, workflowSubjectDigest, type WorkflowSubmission,
@@ -32,7 +32,7 @@ interface Fixture {
 }
 /** Own exact temporary files and remove each individually. No recursive delete, traversal or shared build output. */
 function fixture(t: TestContext): Fixture {
-  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'arcane-code-verifier-test-')));
+  const root = makeFixtureDirectory('arcane-code-verifier-test-');
   const ownedFiles = new Set<string>(), ownedDirectories = [root];
   const directory = (path: string): string => {
     let current = root;
@@ -125,7 +125,7 @@ function readReport(f: Fixture, result: WorkflowVerificationResult) {
   };
   return { s, a, bytes, report };
 }
-function mockFs(t: TestContext, method: 'readSync' | 'openSync' | 'writeSync', implementation: (...args: unknown[]) => unknown): void {
+function mockFs(t: TestContext, method: 'readSync' | 'openSync' | 'writeSync' | 'lstatSync', implementation: (...args: unknown[]) => unknown): void {
   const mocked = t.mock.method(fs, method, implementation);
   syncBuiltinESMExports();
   t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
@@ -492,9 +492,28 @@ test('compiler double: an executable mutation during compilation invalidates cap
   assert.equal(calls.length, 2);
 });
 
+test('compiler double: a sibling directory added after preflight invalidates POSIX ancestor link-count pins', async t => {
+  const f = fixture(t), calls = compilerDouble(t), originalStat = fs.lstatSync;
+  let added = false;
+  // Windows directory link counts stay constant. Model the POSIX transition
+  // there too, so the fixture ordering regression is covered on either runner.
+  mockFs(t, 'lstatSync', (...args: unknown[]) => {
+    const stat = Reflect.apply(originalStat, fs, args) as fs.BigIntStats;
+    if (args[0] === f.root && typeof stat.nlink === 'bigint' && added) stat.nlink++;
+    return stat;
+  });
+  const verifier = await createWorkflowCodeVerifier(f.options);
+  assert.equal(workflowCodeVerifierCapabilities(verifier)[0]!.state, 'available');
+  f.directory('state'); added = true;
+  assert.deepEqual(await verifier.verify(f.request()), { status: 'unsupported' });
+  assert.equal(calls.length, 1); assert.deepEqual(fs.readdirSync(f.evidence), []);
+});
+
 test('compiler double: WorkflowService accepts the genuine bounded adapter report and blocks human release on unsupported quality', async t => {
-  const f = fixture(t), calls = compilerDouble(t), verifier = await createWorkflowCodeVerifier(f.options);
-  const state = f.directory('state');
+  const f = fixture(t), state = f.directory('state'), calls = compilerDouble(t);
+  // Adding a sibling directory changes the POSIX ancestor link count. Finish
+  // the fixture topology before the verifier captures its directory identities.
+  const verifier = await createWorkflowCodeVerifier(f.options);
   for (const name of ['work.sqlite', 'workflow.sqlite'])
     for (const suffix of ['', '-wal', '-shm']) f.track(join(state, name + suffix));
   const selected = { provider: 'codex', model: 'offline-fixture', effort: 'high', connectionRevision: 'offline-v1' } as const;

@@ -8,6 +8,7 @@ import path, { win32 } from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
+import * as managedBootstrap from '../../scripts/managed-luau-compiler.mjs';
 
 const read = name => fs.readFileSync(new URL('../../' + name, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const hostSource = read('apps/desktop/electron/code-verification.cjs');
@@ -157,7 +158,7 @@ test('launch reads settings and validates compiler and evidence; only the three 
   Object.assign(filtered, configured.environment);
   for (const key of f.host.ENV_KEYS) assert.equal(filtered[key], configured.environment[key]);
   assert.equal('arcane_luau_compiler_sha256' in filtered, false);
-  assert.match(mainSource, /codeVerification\.daemonConfiguration[\s\S]*Object\.assign\(env, verification\.environment\)[\s\S]*spawn\(nodeExecutable/);
+  assert.match(mainSource, /managedCodeVerificationConfiguration\(\{ codeVerification,[\s\S]*Object\.assign\(env, verification\.environment\)[\s\S]*spawn\(nodeExecutable/);
 });
 
 test('missing compiler is isolated with explicit host-only metadata; persisted configuration remains readable', async () => {
@@ -243,7 +244,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
     process: { platform: 'win32', env: { ARCANE_LUAU_COMPILER_PATH: 'C:\\foreign.exe' } },
     performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, join: win32.join, resolve: win32.resolve, createHash: crypto.createHash, Buffer,
     fs: { ...f.disk.filesystem, writeFileSync(fd, bytes) { const value = Buffer.from(bytes); f.disk.filesystem.writeSync(fd, value, 0, value.length); } },
-    codeVerification: f.api, URL, setTimeout: () => 1, clearTimeout() {}, console: { warn: text => warnings.push(text) },
+    codeVerification: f.api, managedBootstrap, URL, setTimeout: () => 1, clearTimeout() {}, console: { warn: text => warnings.push(text) },
     policy: { ...f.policy, directPath: async value => value },
     ownedDirectory: async value => { assert.equal(value, f.stateRoot); return value; },
     readFile: async () => { throw Object.assign(new Error('Fixture has no saved listener.'), { code: 'ENOENT' }); },
@@ -255,7 +256,12 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
     }, failStartup() { assert.fail('Core startup must survive only this compiler-specific failure.'); },
   };
   vm.createContext(context);
-  vm.runInContext('const CODE_VERIFICATION_WARNING = ' + warning + ';\n' + mainSource.slice(begin, end) + '\nglobalThis.coldStart = startDaemon;', context);
+  // Substitute only the module loader in this VM; run the real managed resolver
+  // and existing host adapter. This fixture has saved settings, so no managed FS is touched.
+  const bootstrap = mainSource.slice(begin, end);
+  const moduleLoad = "await import(require('node:url').pathToFileURL(join(productRoot, 'scripts/managed-luau-compiler.mjs')).href)";
+  assert.ok(bootstrap.includes(moduleLoad));
+  vm.runInContext('const CODE_VERIFICATION_WARNING = ' + warning + ';\n' + bootstrap.replace(moduleLoad, 'managedBootstrap') + '\nglobalThis.coldStart = startDaemon;', context);
   await context.coldStart(f.projectPath);
   assert.equal(requested.length, 1, 'Only an in-memory core daemon spawn request is observed; no process executes.');
   for (const key of f.host.ENV_KEYS) assert.equal(Object.hasOwn(requested[0].options.env, key), false);

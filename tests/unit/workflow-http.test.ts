@@ -1,3 +1,4 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
@@ -6,10 +7,10 @@ import { syncBuiltinESMExports } from 'node:module';
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import {
-  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync,
   readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createWorkflowHost, workflowReceiptParent, WORKFLOW_HTTP_LIMITS, type WorkflowHost, type WorkflowPreview } from '../../apps/daemon/src/workflow-host.js';
 import { workflowRoutes } from '../../apps/daemon/src/workflow-routes.js';
@@ -40,7 +41,7 @@ interface WireOptions {
   headers?: Record<string, string | string[]>; raw?: string | Buffer; chunks?: Buffer[]; target?: string;
 }
 async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; token?: string; stateInsideProject?: boolean; conversation?: () => NativeConversation | null } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-http-'));
+  const root = makeFixtureDirectory('arcane-workflow-http-');
   const projectPath = join(root, 'project'), directory = settings.stateInsideProject ? join(projectPath, 'state') : join(root, 'state');
   mkdirSync(projectPath); mkdirSync(join(projectPath, 'src'));
   const work = new WorkStore({ directory, projectPath });
@@ -66,7 +67,7 @@ async function fixture(t: test.TestContext, settings: { equalTokens?: boolean; t
   t.after(async () => {
     host.close(); work.close(); associations?.close(); server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    const target = resolve(root), boundary = resolve(tmpdir()), part = relative(boundary, target);
+    const target = resolve(root), boundary = fixtureTempDirectory(), part = relative(boundary, target);
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
     if (process.platform === 'win32') {
       const privateRoot = resolve(homedir(), '.arcane-private-receipts-v1');

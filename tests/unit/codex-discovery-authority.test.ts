@@ -4,17 +4,21 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareCodexDiscoveryProcess, prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
+import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 // Include the exact public factory in scoped compiler inputs; importing it never launches a child.
 import '../../packages/codex-client/src/index.js';
 
 const TOKEN = 'a4'.repeat(32), AMBIENT = 'b5'.repeat(32);
 const DAEMON = 'http://127.0.0.1:47831';
-const MODULES = ['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history'];
-const EMITTED = fileURLToPath(new URL('../../packages/codex-client/src/', import.meta.url));
+const MODULES = [
+  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history'].map(name => 'codex-client/src/' + name + '.js'),
+  'protocol/src/arcane-tools.js', // Imported by the unmodified production isolation module.
+];
+const EMITTED = fileURLToPath(new URL('../../packages/', import.meta.url));
 type Mode = 'normal' | 'discovery-init-failure' | 'inventory-failure' | 'unsafe-key' |
   'arcane-active' | 'arcane-missing' | 'arcane-null' | 'arcane-plugin' | 'arcane-metadata' | 'final-init-failure' | 'final-inherited' | 'final-null';
 type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'invalid-id' | 'extra-field' | 'disconnected' | 'close-pending' | 'busy-pending';
@@ -46,7 +50,8 @@ record({ event: 'child', args, cwd: process.cwd(), envKeys: Object.keys(process.
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const result = (id, value) => send({ id, result: value });
 const reject = id => send({ id, error: { code: -32017, message: 'Synthetic refusal' } });
-const row = (name, runtimeStatus, pluginId = null) => ({ name, runtimeStatus, pluginId, toolsError: null, tools: {} });
+const row = (name, runtimeStatus, pluginId = null) => ({ name, runtimeStatus, pluginId, toolsError: null,
+  tools: name === 'arcane' && runtimeStatus === 'connected' ? Object.fromEntries(scenario.arcaneToolNames.map(name => [name, {}])) : {} });
 createInterface({ input: process.stdin }).on('line', line => {
   const { id, method, params = {} } = JSON.parse(line);
   record({ event: 'rpc', method, params });
@@ -181,12 +186,13 @@ async function privateDirectory(t: test.TestContext): Promise<string> {
 
 async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
   const dir = await privateDirectory(t), audit = join(dir, 'audit.jsonl');
-  const source = join(dir, 'packages', 'codex-client', 'src'), entry = join(dir, 'apps', 'mcp', 'src', 'main.js');
-  await mkdir(source, { recursive: true });
-  await mkdir(join(dir, 'apps', 'mcp', 'src'), { recursive: true });
+  const entry = join(dir, 'apps', 'mcp', 'src', 'main.js');
+  await mkdir(dirname(entry), { recursive: true });
   for (const name of MODULES) {
-    await copyFile(join(EMITTED, name + '.js'), join(source, name + '.js'));
-    assert.deepEqual(await readFile(join(source, name + '.js')), await readFile(join(EMITTED, name + '.js')));
+    const target = join(dir, 'packages', name);
+    await mkdir(dirname(target), { recursive: true });
+    await copyFile(join(EMITTED, name), target);
+    assert.deepEqual(await readFile(target), await readFile(join(EMITTED, name)));
   }
   const command = join(dir, process.platform === 'win32' ? 'codex.exe' : 'codex');
   await writeFile(command, 'Synthetic path-validation fixture; never executed.');
@@ -195,7 +201,7 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
   await writeFile(join(dir, 'package.json'), '{"type":"module"}');
   await writeFile(join(dir, 'peer.cjs'), PEER);
   await writeFile(join(dir, 'harness.mjs'), HARNESS);
-  const scenario = { mode: 'normal', profile: true, ...options };
+  const scenario = { mode: 'normal', profile: true, ...options, arcaneToolNames: ARCANE_TOOL_NAMES };
   const boundary = [
     "import { spawn as realSpawn } from 'node:child_process';",
     "import { appendFileSync, readFileSync } from 'node:fs';",

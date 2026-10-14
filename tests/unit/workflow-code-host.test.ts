@@ -1,8 +1,9 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ArcaneError } from '../../packages/protocol/src/providers.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -65,7 +66,7 @@ function nativeState(projectPath: string): CodexProductState {
 }
 
 async function fixture(t: test.TestContext, compiler?: string) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'arcane-code-host-'))), projectPath = join(root, 'project'), stateDirectory = join(root, 'state');
+  const root = makeFixtureDirectory('arcane-code-host-'), projectPath = join(root, 'project'), stateDirectory = join(root, 'state');
   const evidence = join(projectPath, 'src', 'proof'); mkdirSync(evidence, { recursive: true });
   const work = new WorkStore({ directory: join(stateDirectory, 'borrowed-work'), projectPath });
   const counters = { nativeActions: 0, probes: 0, closes: 0 };
@@ -81,7 +82,7 @@ async function fixture(t: test.TestContext, compiler?: string) {
       assert.match(relative(resolve(homedir(), '.arcane-private-receipts-v1'), resolve(receiptParent)), /^[a-f0-9]{64}$/);
       assert.ok(!lstatSync(receiptParent).isSymbolicLink()); rmSync(receiptParent, { recursive: true });
     }
-    const part = relative(resolve(tmpdir()), resolve(root)); assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
+    const part = relative(fixtureTempDirectory(), resolve(root)); assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
     assert.ok(!lstatSync(root).isSymbolicLink()); rmSync(root, { recursive: true });
     assert.equal(counters.nativeActions, 0); assert.equal(counters.probes, 0); assert.equal(counters.closes, 1);
   });

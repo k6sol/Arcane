@@ -1,3 +1,4 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -5,7 +6,7 @@ import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ArcaneError } from '../../packages/protocol/src/providers.js';
 import { WORKFLOW_LIMITS, createWorkflowRecipe, evaluateWorkflowEvidence, type ArtifactRole, type WorkflowStep } from '../../packages/core/src/workflow-recipes.js';
 import type { PinnedWorkflowArtifact } from '../../apps/daemon/src/workflow-service.js';
@@ -14,7 +15,7 @@ import { prepareWorkflowFileEvidence, type WorkflowFileEvidenceOptions } from '.
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const code = (expected: string) => (error: unknown) => error instanceof ArcaneError && error.code === expected;
 function fixture(t: test.TestContext) {
-  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'arcane-file-evidence-'))), project = join(root, 'project');
+  const root = makeFixtureDirectory('arcane-file-evidence-'), project = join(root, 'project');
   fs.mkdirSync(project); fs.mkdirSync(join(project, 'src'));
   const step = createWorkflowRecipe({ deliverable: 'code-change', engine: 'roblox', title: 'Offline evidence fixture',
     prompt: 'Hash actual bounded local evidence without executing anything.', scope: ['src'], model: null }).steps[0]!;
@@ -25,7 +26,7 @@ function fixture(t: test.TestContext) {
   };
   const main = file('src/brief.txt', 'Actual offline brief bytes.');
   t.after(() => {
-    assert.ok(fs.realpathSync(root).startsWith(fs.realpathSync(tmpdir()) + sep) && !fs.lstatSync(root).isSymbolicLink());
+    assert.ok(fs.realpathSync(root).startsWith(fixtureTempDirectory() + sep) && !fs.lstatSync(root).isSymbolicLink());
     fs.rmSync(root, { recursive: true, force: true });
   });
   const options = (): WorkflowFileEvidenceOptions => ({ projectPath: project, step: structuredClone(step), inputArtifacts: [],
@@ -42,6 +43,28 @@ function readHook(t: test.TestContext, hook: (fd: number, bytes: number, offset:
 function subject(f: ReturnType<typeof fixture>, stepKey = 'prompt', path = 'inputs/source.txt', bytes = 'Actual trusted source bytes.'): PinnedWorkflowArtifact {
   f.file(path, bytes); return { path, role: 'brief', stepKey, sha256: hash(bytes), bytes: Buffer.byteLength(bytes) };
 }
+
+test('native canonical fixture roots preserve rejection of raw Windows TEMP aliases before evidence reads', t => {
+  const f = fixture(t), options = f.options();
+  assert.equal(f.root, fs.realpathSync.native(f.root));
+  assert.equal(fixtureTempDirectory(), fs.realpathSync.native(tmpdir()));
+  const expected = prepareWorkflowFileEvidence(options);
+  const rawProject = join(tmpdir(), basename(f.root), 'project');
+  const samePath = process.platform === 'win32' ? rawProject.toLowerCase() === f.project.toLowerCase() : rawProject === f.project;
+  if (!samePath) {
+    assert.equal(fs.realpathSync.native(rawProject), f.project);
+    const reads = t.mock.method(fs, 'readSync', () => { throw Error('Alias must fail before content reads.'); });
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => prepareWorkflowFileEvidence({ ...options, projectPath: rawProject }), code('WORKFLOW_EVIDENCE'));
+      assert.equal(reads.mock.callCount(), 0);
+    } finally { reads.mock.restore(); syncBuiltinESMExports(); }
+    t.diagnostic('Actual TEMP canonical alias rejected before evidence reads.');
+  } else {
+    assert.deepEqual(prepareWorkflowFileEvidence({ ...options, projectPath: rawProject }), expected);
+    t.diagnostic('TEMP already has its physical spelling; canonical fixture evidence validated.');
+  }
+});
 
 test('actual file hashes/counts are detached and deeply immutable; no bytes, writes or process calls escape', t => {
   const f = fixture(t), options = f.options(), before = structuredClone(options), original = fs.openSync;

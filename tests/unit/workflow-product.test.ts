@@ -1,8 +1,9 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
@@ -63,7 +64,7 @@ interface Listing { projectId: string; workflows: { id: string; recipeId: string
 
 test('actual product lab serves workflow modules and human routes with exact native binding, restart and borrowed cleanup',
   { timeout: 60000 }, async t => {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-product-'));
+  const root = makeFixtureDirectory('arcane-workflow-product-');
   const projectPath = join(root, 'project'), resources = join(root, 'resources'), stateDirectory = join(root, 'connection-lab');
   mkdirSync(join(projectPath, 'src'), { recursive: true });
   const publicRoot = join(resources, 'apps/desktop/public'), moduleRoot = join(resources, 'dist/apps/desktop/src');
@@ -97,7 +98,7 @@ test('actual product lab serves workflow modules and human routes with exact nat
         assert.match(part, /^[a-f0-9]{64}$/); assert.ok(!lstatSync(receiptParent).isSymbolicLink());
         rmSync(resolve(receiptParent), { recursive: true, force: true });
       }
-      const part = relative(resolve(tmpdir()), resolve(root));
+      const part = relative(fixtureTempDirectory(), resolve(root));
       assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink());
       rmSync(resolve(root), { recursive: true, force: true });
     }
@@ -224,7 +225,7 @@ test('actual product lab serves workflow modules and human routes with exact nat
 
 test('product initialization failure closes owned resources even when synthetic cleanup throws and preserves borrowed WorkStore',
   { timeout: 15000 }, async t => {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-product-failure-'));
+  const root = makeFixtureDirectory('arcane-workflow-product-failure-');
   const projectPath = join(root, 'project'), stateDirectory = join(root, 'connection-lab');
   mkdirSync(projectPath); mkdirSync(stateDirectory);
   // Force failure after the real association store opens, without linking paths
@@ -236,7 +237,7 @@ test('product initialization failure closes owned resources even when synthetic 
   synthetic.service.close = async () => { counters.closes++; throw new Error('Synthetic cleanup failure'); };
   t.after(() => {
     work.close();
-    const part = relative(resolve(tmpdir()), resolve(root));
+    const part = relative(fixtureTempDirectory(), resolve(root));
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink());
     rmSync(resolve(root), { recursive: true, force: true });
   });

@@ -1,8 +1,8 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { linkSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { ArcaneError } from '../../packages/protocol/src/providers.js';
 import { createWorkflowRecipe } from '../../packages/core/src/workflow-recipes.js';
@@ -13,11 +13,11 @@ import {
 const sha = 'a'.repeat(64);
 const code = (expected: string) => (error: unknown) => error instanceof ArcaneError && error.code === expected;
 function fixture(t: test.TestContext) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-store-')), project = join(root, 'project'), directory = join(root, 'state');
+  const root = makeFixtureDirectory('arcane-workflow-store-'), project = join(root, 'project'), directory = join(root, 'state');
   mkdirSync(project);
   let store = new WorkflowStore({ directory, projectPath: project });
   t.after(() => {
-    store.close(); assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true });
+    store.close(); assert.ok(resolve(root).startsWith(fixtureTempDirectory() + sep)); rmSync(root, { recursive: true, force: true });
   });
   return { root, project, directory, get store() { return store; }, reopen() { store.close(); store = new WorkflowStore({ directory, projectPath: project }); } };
 }

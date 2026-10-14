@@ -1,11 +1,12 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, linkSync, lstatSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createWorkflowHost, workflowReceiptParent } from '../../apps/daemon/src/workflow-host.js';
 import { workflowRoutes } from '../../apps/daemon/src/workflow-routes.js';
@@ -17,7 +18,7 @@ import { workflowProjectIdentity } from '../../packages/storage/src/workflow-sto
 // No replacement native checker, fabricated descriptor, home override or model is used.
 const windows = { skip: process.platform !== 'win32', timeout: 30_000 };
 function fixture(t: test.TestContext) {
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-normal-owner-'));
+  const root = makeFixtureDirectory('arcane-workflow-normal-owner-');
   const profile = join(root, 'Roaming', 'Arcane');
   const projectPath = join(profile, 'projects', 'Untitled');
   mkdirSync(projectPath, { recursive: true });
@@ -45,7 +46,7 @@ function fixture(t: test.TestContext) {
     assert.match(basename(parent), /^[a-f0-9]{64}$/);
     assert.equal(lstatSync(parent).isSymbolicLink(), false);
     rmSync(parent, { recursive: true, force: true });
-    const part = relative(resolve(tmpdir()), resolve(root));
+    const part = relative(fixtureTempDirectory(), resolve(root));
     assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
     assert.equal(lstatSync(root).isSymbolicLink(), false);
     rmSync(root, { recursive: true, force: true });

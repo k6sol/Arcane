@@ -1,8 +1,9 @@
+import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { BrowserContext } from 'playwright-core';
@@ -33,7 +34,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.equal(resolve(browserModule!).toLowerCase(), resolve(SOURCE, 'node_modules/playwright-core/index.mjs').toLowerCase(),
     'Use the repository Playwright test runtime.');
   assert.ok(existsSync(EDGE));
-  const root = mkdtempSync(join(tmpdir(), 'arcane-workflow-browser-'));
+  const root = makeFixtureDirectory('arcane-workflow-browser-');
   const fixtureStarted = Date.now();
   let lastPhase = 'setup';
   const mark = (phase: string) => { lastPhase = phase; t.diagnostic('Fixture phase: ' + phase + ' elapsedMs=' + (Date.now() - fixtureStarted)); };
@@ -110,7 +111,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
           assert.match(part, /^[a-f0-9]{64}$/); assert.ok(!lstatSync(receiptParent).isSymbolicLink());
           rmSync(resolve(receiptParent), { recursive: true, force: true });
         }
-        const part = relative(resolve(tmpdir()), resolve(root));
+        const part = relative(fixtureTempDirectory(), resolve(root));
         assert.ok(part && !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep) && !lstatSync(root).isSymbolicLink());
         rmSync(resolve(root), { recursive: true, force: true });
       }
