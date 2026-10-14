@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -46,7 +47,10 @@ export async function fixture(options: {
   pages?: (cursor: string | undefined) => { tools: Tool[]; nextCursor?: string };
 } = {}) {
   const scheduler = options.scheduler ?? new ManualScheduler();
-  const root = await mkdtemp(join(tmpdir(), 'arcane-studio-controller-'));
+  // Windows TEMP can use an 8.3 alias. Canonicalize both boundaries before
+  // deriving ledger paths, and retain the canonical parent for safe cleanup.
+  const temporaryRoot = realpathSync.native(tmpdir());
+  const root = realpathSync.native(await mkdtemp(join(temporaryRoot, 'arcane-studio-controller-')));
   const ledger = await TestLedger.open(join(root, 'host-ledger'), root);
   const state = {
     binding: { ...BINDING }, mode: 'Edit' as 'Edit' | 'Play', epoch: 20, placeId: 0,
@@ -107,7 +111,7 @@ export async function fixture(options: {
   const effects = () => calls.filter(call => call.name === 'start_stop_play');
   const close = async () => {
     await control.lifecycle.shutdown(); await ledger.close(); await client.close(); await server.close();
-    assert.equal(dirname(resolve(root)), resolve(tmpdir())); assert.ok(root.includes('arcane-studio-controller-'));
+    assert.equal(dirname(resolve(root)), resolve(temporaryRoot)); assert.ok(root.includes('arcane-studio-controller-'));
     await rm(root, { recursive: true, force: true });
   };
   return { root, ledger, scheduler, state, calls, server, client, adapter, control, trustedHuman, confirmations, statuses, proposal, approve, launch, effects, close };

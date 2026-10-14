@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -178,7 +179,10 @@ finally { await client?.close(); }
 `;
 
 async function fixture(t: test.TestContext, scenario: Scenario = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'arcane-codex-assets-')), audit = join(dir, 'audit.jsonl');
+  // The transport seam receives this path directly, before client validation.
+  // Use the physical Windows spelling so an 8.3 TEMP alias cannot cause the
+  // synthetic spawn boundary to throw before the METHOD assertion is reached.
+  const dir = realpathSync.native(await mkdtemp(join(realpathSync.native(tmpdir()), 'arcane-codex-assets-'))), audit = join(dir, 'audit.jsonl');
   t.after(async () => {
     const actual = await realpath(dir), parent = await realpath(tmpdir()), child = relative(parent, actual);
     assert.ok(!isAbsolute(child) && child.startsWith('arcane-codex-assets-') && !child.includes(sep) && !child.includes('..'));

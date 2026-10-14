@@ -1,13 +1,66 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import os from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { BoundedStudioTestController, createStudioTestControl, digest, readTestLedger, StudioTestError, TestLedger, type TestEvent } from '../src/index.js';
 import { BINDING, fixture, ManualScheduler, pumpUntil, result } from './harness.js';
 
 const code = (expected: string) => (error: unknown) => error instanceof StudioTestError && error.code === expected;
 const waiting = (f: Awaited<ReturnType<typeof fixture>>) => pumpUntil(() => f.control.requests.status().phase === 'waiting');
 const tick = (f: Awaited<ReturnType<typeof fixture>>, ms: number) => { assert.ok(f.scheduler instanceof ManualScheduler); f.scheduler.advance(ms); };
+
+test('canonical fixture root supports durable ledger reopen and bounded cleanup on every platform', async t => {
+  const f = await fixture(); t.after(f.close);
+  assert.equal(f.root, fsSync.realpathSync.native(f.root));
+  assert.equal(dirname(f.root), fsSync.realpathSync.native(os.tmpdir()));
+  await f.approve(); await f.ledger.close();
+  const reopened = await TestLedger.open(join(f.root, 'host-ledger'), f.root);
+  try { assert.deepEqual(reopened.records(), f.ledger.records()); }
+  finally { await reopened.close(); }
+  assert.equal(f.effects().length, 0);
+  await f.close(); assert.equal(fsSync.existsSync(f.root), false);
+});
+
+test('synthetic Windows TEMP ~ alias is canonicalized before ledger use and cleanup; raw aliases stay refused', { concurrency: false }, async t => {
+  // Model 8.3 spelling through filesystem doubles, without links, privileges or
+  // relying on the host volume to have short-name generation enabled.
+  const native = fsSync.realpathSync.native, realLstat = fs.lstat, realRealpath = fs.realpath;
+  const temporaryRoot = native(os.tmpdir());
+  const createdRoot = native(await fs.mkdtemp(join(temporaryRoot, 'arcane-studio-controller-')));
+  const tempAlias = join(temporaryRoot, 'RUNNER~1'), rootAlias = join(tempAlias, basename(createdRoot));
+  const unalias = (path: fsSync.PathLike) => typeof path === 'string' && (path === tempAlias || path.startsWith(tempAlias + sep))
+    ? temporaryRoot + path.slice(tempAlias.length) : path;
+  let f: Awaited<ReturnType<typeof fixture>> | undefined;
+  t.after(async () => {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    try { await f?.close(); }
+    finally {
+      assert.equal(dirname(createdRoot), temporaryRoot); assert.ok(basename(createdRoot).startsWith('arcane-studio-controller-'));
+      await fs.rm(createdRoot, { recursive: true, force: true });
+    }
+  });
+  t.mock.method(os, 'tmpdir', () => tempAlias);
+  const canonicalize = t.mock.method(fsSync.realpathSync, 'native', (path: fsSync.PathLike) => native(unalias(path)));
+  const create = t.mock.method(fs, 'mkdtemp', async () => rootAlias);
+  t.mock.method(fs, 'lstat', (path: fsSync.PathLike) => realLstat(unalias(path)));
+  t.mock.method(fs, 'realpath', (path: fsSync.PathLike) => realRealpath(unalias(path)));
+  syncBuiltinESMExports();
+
+  await assert.rejects(TestLedger.open(join(rootAlias, 'rejected-ledger'), rootAlias), code('JOURNAL_FAILED'));
+  assert.equal(fsSync.existsSync(join(createdRoot, 'rejected-ledger')), false);
+  f = await fixture();
+  assert.equal(f.root, createdRoot);
+  assert.deepEqual(create.mock.calls.map(call => call.arguments), [[join(temporaryRoot, 'arcane-studio-controller-')]]);
+  assert.deepEqual(canonicalize.mock.calls.map(call => call.arguments), [[tempAlias], [rootAlias]]);
+  await f.approve();
+  assert.deepEqual(await readTestLedger(join(createdRoot, 'host-ledger'), createdRoot), f.ledger.records());
+  assert.equal(f.effects().length, 0);
+  await f.close(); assert.equal(fsSync.existsSync(createdRoot), false);
+});
 
 test('generic game starts, observes and automatically stops exact Studio without fixture objects or input', async t => {
   const f = await fixture(); t.after(f.close);
