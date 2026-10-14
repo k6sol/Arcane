@@ -12,6 +12,8 @@ import { createAssetService, type AssetService } from '../../apps/daemon/src/ass
 import { createAssetConversationHost, type NativeAssetConversationHost } from '../../apps/daemon/src/asset-conversation-host.js';
 import { createNativeAssetRegistry, assertNativeAssetActor, type NativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
 import { nativeAssetRoutes, parseNativeStudioImportResponse, NATIVE_STUDIO_IMPORT_RESPONSE_BYTES } from '../../apps/daemon/src/native-asset-routes.js';
+import {ArcaneError} from '../../packages/protocol/src/providers.js';
+import type {createStudioImportStagingController} from '../../apps/daemon/src/studio-import-staging-controller.js';
 import { DaemonClient, type AssetAudience } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
@@ -68,7 +70,12 @@ async function fixture(t: test.TestContext, configured = true) {
     start: () => { throw new Error('Asset generation is forbidden'); } });
   let lookup = host.bindingNative.bind(host);
   const routeHost: NativeAssetConversationHost = { ...host, bindingNative: (actor, id) => lookup(actor, id) };
-  const route = nativeAssetRoutes(routed, routeHost, registry);
+  let stage: ReturnType<typeof createStudioImportStagingController>['stage'] | null = null;
+  let staged = 0;
+  const route = nativeAssetRoutes(routed, routeHost, registry, {stage: (...args) => {
+    if (!stage) throw new ArcaneError('STUDIO_STAGE_UNAVAILABLE', 'Synthetic staging controller is not configured.');
+    staged++; return stage(...args);
+  }});
   let origin = '', requests = 0; const failures: unknown[] = [], releases: (() => void)[] = [];
   const server = createServer((request, response) => { requests++; void route(request, response, new URL(request.url ?? '/', origin), origin)
     .then(handled => { if (!handled) { response.writeHead(404); response.end('{}'); } })
@@ -108,6 +115,7 @@ async function fixture(t: test.TestContext, configured = true) {
     return { result, captured: async () => { await entered.promise; server.off('request', observe); }, finish: () => outgoing.end(bytes.subarray(1)) };
   };
   return { origin, credential, service, host, store, registry, incarnation, http,
+    setStage(fn: NonNullable<typeof stage>) {stage = fn;}, stageCalls: () => staged,
     setPrepare(fn: typeof prepare) { prepare = fn; }, setLookup(fn: typeof lookup) { lookup = fn; },
     setBaseline(value: StudioImportBaseline) { baseline = value; },
     counts: () => ({ preparations, selections, requests }), actor: () => lastActor,
@@ -148,6 +156,33 @@ test('native prepare route returns verified synthetic preparation; MCP preserves
   assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), reply.data);
   assert.deepEqual(f.counts(), { preparations: 2, selections: 2, requests: 2 });
   assert.equal(f.service.jobs().length, 2); assert.equal(f.service.jobs()[0]!.state, 'succeeded');
+});
+
+test('native staging ingress accepts only an owned job and the same mutating capture', async t => {
+  const f = await fixture(t), path = '/v1/assets/native/stage-studio-import';
+  f.setStage(async (id, actor) => {
+    assert.equal(id, JOB); assertNativeAssetActor(actor, 'mutate');
+    return {status: 'staged', imported: false, transferDigest: 'a'.repeat(64), packetCount: 1, byteLength: 4,
+      state: 'sealed', engineVerification: 'pending', commandIds: ['synthetic-stage-receipt']};
+  });
+  const response = await f.http({jobId: JOB}, {path}).result;
+  assert.equal(response.status, 200); assert.equal(response.data.imported, false); assert.equal(response.data.engineVerification, 'pending');
+  for (const input of [{jobId: JOB, target: SELECTION.target}, {jobId: JOB, packet: '{}'}, {jobId: JOB, permission: true}]) {
+    const refused = await f.http(input, {path}).result; assert.equal(refused.status, 400);
+  }
+  const missing = await f.http({jobId: '33333333-3333-4333-8333-333333333333'}, {path}).result;
+  assert.equal(missing.status, 404); assert.equal(f.stageCalls(), 1);
+});
+
+test('native staging ingress rejects a revoked capture after awaiting its controller result', async t => {
+  const f = await fixture(t), path = '/v1/assets/native/stage-studio-import';
+  f.setStage(async () => {
+    f.transition('revoke-regrant');
+    return {status: 'staged', imported: false, transferDigest: 'a'.repeat(64), packetCount: 1, byteLength: 4,
+      state: 'sealed', engineVerification: 'pending', commandIds: ['synthetic-stage-receipt']};
+  });
+  const response = await f.http({jobId: JOB}, {path}).result;
+  assert.equal(response.status, 403); assert.equal(response.data.error, 'NATIVE_ASSET_AUTHORITY'); assert.equal(response.data.state, undefined);
 });
 
 for (const phase of ['body', 'preparation'] as const) for (const transition of ['revoke-regrant', 'new-intent', 'replacement', 'close'] as const)

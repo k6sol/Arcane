@@ -21,7 +21,19 @@ export interface StudioContinuityProof {
 }
 export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'scene.import_context'] as const;
 export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'] as const;
-export type StudioMethod = typeof READ_METHODS[number] | typeof WRITE_METHODS[number];
+/** Host-owned binary intake. Not a generic agent scene command or reversible mutation. */
+export const ASSET_STAGE_METHODS = ['asset.stage_packet'] as const;
+export type StudioMethod = typeof READ_METHODS[number] | typeof WRITE_METHODS[number] | typeof ASSET_STAGE_METHODS[number];
+export interface StudioAssetStageArgs {
+  expected: { digest: string; payloadDigest: string; manifestDigest: string };
+  packet: string;
+  target: { sessionId: string; placeId: number; universeId: number; root: 'Workspace'; parentRef: string; creator: { kind: 'user' | 'group'; id: string } };
+  continuity: { clientLifetimeId: string; pluginArtifactHash: string; playEpoch: number };
+}
+export interface StudioAssetStageReceipt {
+  transferDigest: string; packetCount: number; byteLength: number;
+  state: 'receiving' | 'sealed'; engineVerification: 'pending';
+}
 export type CommandState = 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'cancelled' | 'needs_reconciliation';
 export interface StudioCommand {
   protocolVersion: 1; id: string; requestId: string; sessionId: string; clientSessionId: string;
@@ -64,9 +76,9 @@ export function roots(value: unknown): StudioRoot[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > ROOTS.length || value.some(r => !ROOTS.includes(r))) throw new ArcaneError('INPUT', 'Choose explicit supported Studio roots.');
   return [...new Set(value)] as StudioRoot[];
 }
-export function isWrite(method: StudioMethod): boolean { return (WRITE_METHODS as readonly string[]).includes(method); }
+export function isWrite(method: StudioMethod): boolean { return [...WRITE_METHODS, ...ASSET_STAGE_METHODS].includes(method as typeof WRITE_METHODS[number] | typeof ASSET_STAGE_METHODS[number]); }
 export function methodField(value: unknown): StudioMethod {
-  if (![...READ_METHODS, ...WRITE_METHODS].includes(value as StudioMethod)) throw new ArcaneError('METHOD', 'Unsupported Studio method. Raw Luau execution is not exposed.');
+  if (![...READ_METHODS, ...WRITE_METHODS, ...ASSET_STAGE_METHODS].includes(value as StudioMethod)) throw new ArcaneError('METHOD', 'Unsupported Studio method. Raw Luau execution is not exposed.');
   return value as StudioMethod;
 }
 export function instanceRef(value: unknown): InstanceRef {

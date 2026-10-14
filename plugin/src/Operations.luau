@@ -16,8 +16,8 @@ function Operations.new(pair: any, gameModel: any, http: any): Operations
 		collection = gameModel:GetService("CollectionService"), mutations = {}, restored = {}}, Operations)
 end
 
--- Host-only staging hooks. They are deliberately not exposed by execute until
--- the typed transport/controller can supply exact actor/job/target authority.
+-- Internal intake is also reached by the fixed host-owned asset.stage_packet
+-- queue entry. Generic agent enqueue cannot mint that host admission.
 -- No upload, parenting, undo record or engine baseline is created here.
 function Operations:receiveAssetPacket(expected: any, packet: string, guard: () -> ()): any
 	guard()
@@ -60,6 +60,38 @@ function Operations:cancelAssetTransfers(): ()
 		if not ok then failures += 1 end
 	end
 	if failures > 0 then V.fail("CLEANUP", "Owned asset staging resources could not all be released.") end
+end
+
+function Operations:stageAssetPacket(args: any, guard: () -> ()): any
+	V.fields(args, {"expected", "packet", "target", "continuity"}, "asset staging arguments")
+	local target = V.fields(args.target, {"sessionId", "placeId", "universeId", "root", "parentRef", "creator"}, "asset staging target")
+	local function current(): ()
+		guard() -- Transport checks same lifetime, artifact, mode and play epoch.
+		local context = self:importContext({})
+		local creator: any
+		if context.creator.status == "available" then creator = {kind = context.creator.kind, id = tostring(context.creator.id)}
+		elseif context.placeId == 0 and context.universeId == 0 and context.creator.id == 0 and context.studioUser.status == "available" then
+			creator = {kind = "user", id = tostring(context.studioUser.id)}
+		else V.fail("SCOPE", "Observed import creator is unavailable.") end
+		local observed = {sessionId = context.sessionId, placeId = context.placeId, universeId = context.universeId,
+			root = "Workspace", parentRef = context.parentRef.instanceId, creator = creator}
+		if context.mode ~= "Edit" or not V.equal(observed, target) then V.fail("SCOPE", "Import target, creator or Workspace changed.") end
+		guard()
+	end
+	current()
+	local packet = V.string(args.packet, "asset packet", V.ARGUMENT_BYTES)
+	local identity = V.fields(args.expected, {"digest", "payloadDigest", "manifestDigest"}, "asset transfer identity")
+	local owned = self.assetTransfers[identity.digest]
+	if owned then
+		if not owned.target or not V.equal(owned.target, target) then V.fail("SCOPE", "Staging target changed.") end
+	else
+		local first = V.object(self.http:JSONDecode(packet), "first asset packet")
+		if first.kind ~= "begin" or first.ordinal ~= 0 or not V.equal(first.target, target) then V.fail("SCOPE", "Initial packet does not name the observed target.") end
+	end
+	local result = self:receiveAssetPacket(identity, packet, current)
+	self.assetTransfers[identity.digest].target = V.immutable(target)
+	return {transferDigest = identity.digest, packetCount = result.packetCount, byteLength = result.byteLength,
+		state = result.state, engineVerification = "pending"}
 end
 
 function Operations:source(instance: any): string
@@ -360,6 +392,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	local method = command.method
 	local result: any
 	if method == "scene.children" then result = self:children(args)
+	elseif method == "asset.stage_packet" then result = self:stageAssetPacket(args, guard)
 	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "scene.inspect" then

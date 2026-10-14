@@ -182,7 +182,7 @@ function tsList(source, name) {
 
 test('method/root/class/material allowlists exactly match the shared protocol and daemon', () => {
   const validation = byFile['Validation.luau'];
-  for (const list of ['ROOTS', 'READ_METHODS', 'WRITE_METHODS']) assert.deepEqual(luaList(validation, `Validation.${list}`), tsList(protocol, list));
+  for (const list of ['ROOTS', 'READ_METHODS', 'WRITE_METHODS', 'ASSET_STAGE_METHODS']) assert.deepEqual(luaList(validation, `Validation.${list}`), tsList(protocol, list));
   assert.deepEqual(luaList(byFile['Properties.luau'], 'Properties.CLASSES'), tsList(policy, 'CREATE_CLASSES'));
   assert.deepEqual(luaList(byFile['Properties.luau'], 'Properties.MATERIALS'), tsList(policy, 'MATERIALS'));
   for (const route of ['/v1/plugin/pair', '/v1/plugin/poll', '/v1/plugin/result', '/v1/plugin/disconnect']) {

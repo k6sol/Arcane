@@ -4,6 +4,7 @@ import {isDeepStrictEqual} from 'node:util';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
 import {normalizeRequest,AssetError} from '../../../packages/asset-pipeline/src/index.js';
 import type {AssetService} from './asset-service.js';
+import type {createStudioImportStagingController} from './studio-import-staging-controller.js';
 import type {NativeAssetConversationHost} from './asset-conversation-host.js';
 import {nativeAssetConversationJobPage} from './asset-conversation-page.js';
 import {assertNativeAssetActor,nativeAssetActorScope,type NativeAssetRegistry} from './native-asset-authority.js';
@@ -11,7 +12,7 @@ import {parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/
 export {NATIVE_STUDIO_IMPORT_RESPONSE_BYTES,parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import {readAssetJson,discardRejectedAssetBody} from './asset-routes.js';
 const PREFIX='/v1/assets/native/';
-const METHODS=new Map([['start','POST'],['cancel','POST'],['prepare-studio-import','POST'],['probe','POST'],['jobs','GET'],['manifest','GET']]);
+const METHODS=new Map([['start','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['probe','POST'],['jobs','GET'],['manifest','GET']]);
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
 function jobId(value:unknown):string {if(typeof value!=='string'||!UUID.test(value))fail('INPUT');return value;}
@@ -34,7 +35,7 @@ function ingress(request:IncomingMessage,url:URL,origin:string):string {
 }
 /** Dedicated native audience. Generic/human bearers cannot acquire registry captures.
  * Caller payloads contain bounded recipe/job/page data only, never authority. */
-export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry) {
+export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'>) {
  return async(request:IncomingMessage,response:ServerResponse,url:URL,origin:string):Promise<boolean>=>{
   if(!url.pathname.startsWith(PREFIX))return false;
   const send=async(status:number,payload:unknown,serialized?:string)=>{
@@ -45,7 +46,7 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const credential=ingress(request,url,origin),route=url.pathname.slice(PREFIX.length),method=METHODS.get(route);
    if(!method){await send(404,{error:'NOT_FOUND',message:'Unknown native asset route.'});return true;}
    if(request.method!==method){response.setHeader('Allow',method);await send(405,{error:'METHOD',message:'Wrong native asset method.'});return true;}
-   const mutation=route==='start'||route==='cancel'||route==='prepare-studio-import';
+   const mutation=route==='start'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import';
    // Capture BEFORE body reads/queue waits. Never resolve again into a fresh generation.
    const actor=registry.capture(credential,mutation?'mutate':'read');
    const allowed=route==='manifest'?['jobId']:route==='jobs'?['limit','after']:[];
@@ -83,6 +84,15 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
     // No await between this final fence and the synchronous successful send.
     assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
     await send(200,result,serialized);return true;
+   }
+   if(route==='stage-studio-import'){
+    const id=jobId(body(input,['jobId']).jobId),binding=host.bindingNative(actor,id);if(!binding)fail('NOT_FOUND');
+    if(!staging)fail('STUDIO_STAGE_UNAVAILABLE');
+    const result=await staging.stage(id,actor);
+    assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    // Pending CPU intake is not upload/insertion. No caller supplies target,
+    // packet bytes, account IDs, permissions or baseline claims to this route.
+    await send(200,result);return true;
    }
    body(input,[]);assertNativeAssetActor(actor,'read');
    // Probe is an admitted metadata read, not generation or native write permission.

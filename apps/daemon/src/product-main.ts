@@ -8,6 +8,7 @@ import { ConversationWorkStore } from '../../../packages/storage/src/conversatio
 import { createConnectionLab } from './lab-server.js';
 import { createAssetService } from './asset-service.js';
 import { createStudioImportHost } from './studio-import-host.js';
+import {createStudioImportStagingController} from './studio-import-staging-controller.js';
 import { createStudioImportPreparationStore } from './studio-import-preparation-store.js';
 import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
 async function cleanupStartup(services: Array<() => void | Promise<void>>): Promise<void> {
@@ -97,6 +98,7 @@ try {
 let assets: Awaited<ReturnType<typeof createAssetService>>;
 let preparations: Awaited<ReturnType<typeof createStudioImportPreparationStore>>;
 let importHost: ReturnType<typeof createStudioImportHost>;
+let importStaging: ReturnType<typeof createStudioImportStagingController>;
 try {
   const pluginArtifactHash = await studioImportPluginArtifactHash(cwd);
   preparations = await createStudioImportPreparationStore({ projectPath: associations.projectPath,
@@ -107,11 +109,14 @@ try {
   } catch (error) { await cleanupStartup([() => preparations.close()]); throw error; }
 } catch (error) { await cleanupStartup([() => associations.close(), () => work.close(), () => store.close()]); throw error; }
 try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,studioImport:importHost.hooks,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await cleanupStartup([() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
+try {importStaging=createStudioImportStagingController({projectPath: associations.projectPath, workAssociations: associations, studio: store,
+  assets, host: importHost.hooks, pluginArtifactHash: await studioImportPluginArtifactHash(cwd)});}
+catch(error){await cleanupStartup([() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
 catch (error) { await cleanupStartup([() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
-try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
+try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
 catch (error) { await cleanupStartup([() => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 const descriptor = join(directory, 'daemon.json');
 try {
@@ -131,6 +136,7 @@ let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
+  importStaging.close();
   const deadline = setTimeout(() => process.exit(1), 15000); deadline.unref();
   let failed = false;
   // Each resource closes even if an earlier cleanup fails. Never remove another

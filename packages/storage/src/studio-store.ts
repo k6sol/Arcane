@@ -32,6 +32,7 @@ export class StudioStore {
   // Only trusted host verification can mint this one-use authority. JSON claims
   // (including those in a restoration receipt) never authorize execution.
   #activationAdmissions = new WeakMap<object, ScriptSourceVerification>();
+  #assetStageAdmissions = new WeakSet<object>();
   #testOwners = new Map<string, string>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
@@ -233,6 +234,9 @@ export class StudioStore {
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
     const method = methodField(a.method);
+    // Before idempotent lookup: a model cannot read/reuse a host staging receipt
+    // by guessing its request ID, even if its JSON is structurally identical.
+    if (method === 'asset.stage_packet' && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Binary staging requires the trusted native import controller.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     return this.transaction(() => {
       const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
@@ -307,6 +311,29 @@ export class StudioStore {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return JSON.parse(row.payload as string) as StudioCommand;
   }
+  /** Host-only queue entry. Routes and generic MCP commands use enqueue(), which
+   * cannot mint this capability. The controller owns SAME-actor/job checks. */
+  enqueueAssetStage(input: unknown, guard: () => void): StudioCommand {
+    guard();
+    const a = object(input);
+    if (a.method !== 'asset.stage_packet') throw new ArcaneError('METHOD', 'Expected the fixed asset staging method.');
+    const admission = Object.freeze({}); this.#assetStageAdmissions.add(admission);
+    try { return this.enqueue(a, false, admission); }
+    finally { this.#assetStageAdmissions.delete(admission); }
+  }
+  /** Retiring a native caller never replays a delivered packet. Preserve unknown
+   * plugin outcomes; a queued packet can be cancelled before delivery. */
+  abandonAssetStage(commandId: string): void {
+    this.transaction(() => {
+      const command = this.command(commandId);
+      if (command.method !== 'asset.stage_packet') throw new ArcaneError('METHOD', 'Expected an owned asset staging receipt.');
+      if (command.state !== 'queued' && command.state !== 'dispatched') return;
+      command.state = command.state === 'queued' ? 'cancelled' : 'needs_reconciliation';
+      command.error = 'Native asset staging stopped. No automatic replay.';
+      command.finishedAt = this.iso(); this.saveCommand(command);
+      this.event('command_' + command.state, command.id, {sessionId: command.sessionId, method: command.method});
+    });
+  }
   /** Host-only coordination, never a request-provided lock or permission. */
   reserveTest(sessionId: string, owner: string): void {
     const s=this.session(sessionId);if (!s.allowWrites) throw new ArcaneError('READ_ONLY','Playtesting requires a writable paired target and separate human test consent.');
@@ -363,7 +390,14 @@ export class StudioStore {
         if (c.state !== a.state || canonical(c.result) !== canonical(result) || c.error !== error) throw new ArcaneError('RECEIPT_CONFLICT', 'Completed receipt is immutable.'); return;
       }
       if (c.state !== 'dispatched' && c.state !== 'needs_reconciliation') throw new ArcaneError('COMMAND_STATE', 'Command was not delivered.');
-      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore') {
+      if (a.state === 'succeeded' && c.method === 'asset.stage_packet') {
+        const receipt = object(result), packet = object(JSON.parse(c.args.packet as string));
+        if (Object.keys(receipt).length !== 5 || Object.keys(receipt).some(k => !['transferDigest', 'packetCount', 'byteLength', 'state', 'engineVerification'].includes(k))
+          || receipt.transferDigest !== object(c.args.expected).digest || receipt.packetCount !== Number(packet.ordinal) + 1
+          || !Number.isSafeInteger(receipt.byteLength) || (receipt.byteLength as number) < Buffer.byteLength(c.args.packet as string) || (receipt.byteLength as number) > 48 * 1024 * 1024
+          || receipt.state !== (packet.kind === 'seal' ? 'sealed' : 'receiving') || receipt.engineVerification !== 'pending') throw new ArcaneError('RECEIPT', 'Asset staging receipt differs from its exact packet.');
+      }
+      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet') {
         const mutation = object(object(result).mutation, 'mutation receipt');
         if (mutation.kind !== c.method) throw new ArcaneError('RECEIPT', 'Mutation receipt kind mismatch.');
         const r = object(mutation.ref);
@@ -388,7 +422,7 @@ export class StudioStore {
   }
   private restoreInput(input: unknown): Record<string, Json> {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
-    if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
+    if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
     return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };
   }

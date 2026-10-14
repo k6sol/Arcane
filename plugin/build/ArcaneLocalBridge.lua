@@ -81,6 +81,7 @@ local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "scene.import_context"})
 Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore"})
+Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -632,8 +633,8 @@ function Operations.new(pair: any, gameModel: any, http: any): Operations
 		collection = gameModel:GetService("CollectionService"), mutations = {}, restored = {}}, Operations)
 end
 
--- Host-only staging hooks. They are deliberately not exposed by execute until
--- the typed transport/controller can supply exact actor/job/target authority.
+-- Internal intake is also reached by the fixed host-owned asset.stage_packet
+-- queue entry. Generic agent enqueue cannot mint that host admission.
 -- No upload, parenting, undo record or engine baseline is created here.
 function Operations:receiveAssetPacket(expected: any, packet: string, guard: () -> ()): any
 	guard()
@@ -676,6 +677,38 @@ function Operations:cancelAssetTransfers(): ()
 		if not ok then failures += 1 end
 	end
 	if failures > 0 then V.fail("CLEANUP", "Owned asset staging resources could not all be released.") end
+end
+
+function Operations:stageAssetPacket(args: any, guard: () -> ()): any
+	V.fields(args, {"expected", "packet", "target", "continuity"}, "asset staging arguments")
+	local target = V.fields(args.target, {"sessionId", "placeId", "universeId", "root", "parentRef", "creator"}, "asset staging target")
+	local function current(): ()
+		guard() -- Transport checks same lifetime, artifact, mode and play epoch.
+		local context = self:importContext({})
+		local creator: any
+		if context.creator.status == "available" then creator = {kind = context.creator.kind, id = tostring(context.creator.id)}
+		elseif context.placeId == 0 and context.universeId == 0 and context.creator.id == 0 and context.studioUser.status == "available" then
+			creator = {kind = "user", id = tostring(context.studioUser.id)}
+		else V.fail("SCOPE", "Observed import creator is unavailable.") end
+		local observed = {sessionId = context.sessionId, placeId = context.placeId, universeId = context.universeId,
+			root = "Workspace", parentRef = context.parentRef.instanceId, creator = creator}
+		if context.mode ~= "Edit" or not V.equal(observed, target) then V.fail("SCOPE", "Import target, creator or Workspace changed.") end
+		guard()
+	end
+	current()
+	local packet = V.string(args.packet, "asset packet", V.ARGUMENT_BYTES)
+	local identity = V.fields(args.expected, {"digest", "payloadDigest", "manifestDigest"}, "asset transfer identity")
+	local owned = self.assetTransfers[identity.digest]
+	if owned then
+		if not owned.target or not V.equal(owned.target, target) then V.fail("SCOPE", "Staging target changed.") end
+	else
+		local first = V.object(self.http:JSONDecode(packet), "first asset packet")
+		if first.kind ~= "begin" or first.ordinal ~= 0 or not V.equal(first.target, target) then V.fail("SCOPE", "Initial packet does not name the observed target.") end
+	end
+	local result = self:receiveAssetPacket(identity, packet, current)
+	self.assetTransfers[identity.digest].target = V.immutable(target)
+	return {transferDigest = identity.digest, packetCount = result.packetCount, byteLength = result.byteLength,
+		state = result.state, engineVerification = "pending"}
 end
 
 function Operations:source(instance: any): string
@@ -976,6 +1009,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	local method = command.method
 	local result: any
 	if method == "scene.children" then result = self:children(args)
+	elseif method == "asset.stage_packet" then result = self:stageAssetPacket(args, guard)
 	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "scene.inspect" then
@@ -1031,6 +1065,7 @@ Transport.MAX_RECOVERY_ATTEMPTS = 8
 -- creating a session, renewing a lease, dispatching work or returning a bearer.
 local ROUTES = table.freeze({connect = "/v1/plugin/connect", status = "/v1/plugin/status", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
 local IDENTITY_CHANGED = "Place identity changed; this session is fenced. Inspect receipts and explicitly connect again."
+local ASSET_CLEANUP_FAILED = "Owned asset staging resources could not all be released. Inspect staging resources before reloading the plugin."
 type Transport = any
 
 function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: string?): Transport
@@ -1042,7 +1077,7 @@ function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: stri
 		pair = nil, desiredPair = nil, disconnectRequested = false, stopped = false,
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
 		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil,
-		recovery = nil, checkInput = nil}, Transport)
+		recovery = nil, checkInput = nil, assetCleanupFailed = false}, Transport)
 end
 
 function Transport:isEdit(): boolean
@@ -1057,7 +1092,8 @@ function Transport:status(state: string, detail: string, commandId: string?)
 	if self.stopped then return end
 	local changed = self.identityFence and self.identityFence.changed
 	if changed and table.find({"connected", "executing", "retrying"}, state) then state, detail = "reconciliation", IDENTITY_CHANGED end
-	local pair = if self.pair and self.generation == self.pair.generation and not self.disconnectRequested and not changed then self.pair else nil
+	if self.assetCleanupFailed then state, detail = "reconciliation", "CLEANUP: " .. ASSET_CLEANUP_FAILED end
+	local pair = if self.pair and self.generation == self.pair.generation and not self.disconnectRequested and not changed and not self.assetCleanupFailed then self.pair else nil
 	self.onStatus({state = state, detail = detail, commandId = commandId,
 		sessionId = if pair then pair.sessionId else nil,
 		allowedRoots = if pair then table.clone(pair.allowedRoots) else {},
@@ -1121,8 +1157,29 @@ function Transport:forgetRecovery(): ()
 	self.recovery = nil
 end
 
+function Transport:checkAssetCleanup(): ()
+	if self.assetCleanupFailed then V.fail("CLEANUP", ASSET_CLEANUP_FAILED) end
+end
+
+function Transport:disposeOperations(): ()
+	local operations = self.operations
+	-- Detach before synchronous cancellation so retirement cannot dispose twice.
+	self.operations = nil
+	if not operations then return end
+	local ok = pcall(function() operations:cancelAssetTransfers() end)
+	if not ok then
+		-- Cancellation attempts every owned receiver, but cannot prove release on
+		-- failure. An empty transfer table or fresh session is not reconciliation.
+		self.assetCleanupFailed = true
+		self.blocked = true
+		self:forgetDesired()
+		self:forgetRecovery()
+	end
+end
+
 function Transport:requestConnect(apiKey: any, automatic: boolean?): ()
 	if self.stopped then return end
+	self:checkAssetCleanup()
 	local origin = V.keyOrigin(apiKey)
 	if not automatic and not self:isEdit() then V.fail("PLAY", "Stop playtesting before connecting.") end
 	self.generation += 1
@@ -1139,6 +1196,7 @@ end
 -- Compatibility entry point for legacy fixtures; never exposed by Main.
 function Transport:requestPair(url: any, code: any): ()
 	if self.stopped then return end
+	self:checkAssetCleanup()
 	local origin = V.url(url)
 	local pairingCode = V.string(code, "pairing code", 128)
 	if not self:isEdit() then V.fail("PLAY", "Stop playtesting before pairing.") end
@@ -1162,6 +1220,7 @@ end
 function Transport:stop(): ()
 	-- Unloading must not yield or launch a second network request. The daemon
 	-- observes heartbeat loss; no token or session state is saved anywhere.
+	if self.stopped then return end
 	self.generation += 1
 	self.stopped = true
 	self:forgetDesired()
@@ -1170,9 +1229,13 @@ function Transport:stop(): ()
 	if self.testProof then self.testProof:stop() end
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
-	self.operations = nil
+	self:disposeOperations()
 	self.pending = nil
 	self.cache = {}
+	self.cacheCount, self.cacheBytes, self.highEpoch = 0, 0, 0
+	-- UI callbacks are fenced on unload; report a bounded local diagnostic and
+	-- allow the rest of the unloading handler to finish even when release fails.
+	if self.assetCleanupFailed then warn("CLEANUP: " .. ASSET_CLEANUP_FAILED) end
 end
 
 function Transport:post(url: string, route: string, payload: any, token: string?): any
@@ -1239,17 +1302,20 @@ function Transport:clearSession(keepIdentity: boolean?): ()
 	if not keepIdentity then self:dropIdentityFence() end
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
-	self.operations = nil
+	self:disposeOperations()
 	self.pending = nil
 	self.cache = {}
 	self.cacheCount, self.cacheBytes, self.highEpoch = 0, 0, 0
-	self.blocked = false
+	self.blocked = self.assetCleanupFailed
+	if self.assetCleanupFailed then self:status("reconciliation", "CLEANUP: " .. ASSET_CLEANUP_FAILED) end
 end
 
 function Transport:exchange(desired: any): ()
 	if self.stopped or desired.generation ~= self.generation then desired.code = nil; desired.apiKey = nil; return end
+	self:checkAssetCleanup()
 	local capabilities = table.clone(V.READ_METHODS)
 	for _, method in ipairs(V.WRITE_METHODS) do table.insert(capabilities, method) end
+	for _, method in ipairs(V.ASSET_STAGE_METHODS or {}) do table.insert(capabilities, method) end
 	local isKey = desired.apiKey ~= nil
 	local payload: any = {
 		protocolVersion = V.PROTOCOL,
@@ -1323,7 +1389,8 @@ function Transport:envelope(command: any): ()
 	if #roots ~= #pair.allowedRoots then V.fail("GRANT", "Command root grants differ from pairing.") end
 	for _, root in ipairs(roots) do if not table.find(pair.allowedRoots, root) then V.fail("GRANT", "Command root is not granted.") end end
 	if command.allowWrites ~= pair.allowWrites then V.fail("GRANT", "Command write grant differs from pairing.") end
-	if not table.find(V.READ_METHODS, command.method) and not table.find(V.WRITE_METHODS, command.method) then V.fail("METHOD", "Unsupported Studio method.") end
+	if not table.find(V.READ_METHODS, command.method) and not table.find(V.WRITE_METHODS, command.method)
+		and not table.find(V.ASSET_STAGE_METHODS or {}, command.method) then V.fail("METHOD", "Unsupported Studio method.") end
 	V.string(command.expiresAt, "command expiry", 64)
 	V.object(command.args, "arguments")
 	if #V.encode(command.args, self.http) > V.ARGUMENT_BYTES then V.fail("BODY_LIMIT", "Arguments exceed 256 KiB.") end
@@ -1340,8 +1407,23 @@ function Transport:guard(command: any, pair: any): ()
 	if not string.match(command.expiresAt, "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d.*Z$") then V.fail("LEASE", "Expiry must be a UTC timestamp.") end
 	local ok, expires = pcall(function() return DateTime.fromIsoDate(command.expiresAt) end)
 	if not ok or not expires or expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis then V.fail("LEASE", "Command lease has expired.") end
-	if not self:isEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
-	if table.find(V.WRITE_METHODS, command.method) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end
+	local staging = table.find(V.ASSET_STAGE_METHODS or {}, command.method) ~= nil
+	if not staging and not self:isEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
+	if (table.find(V.WRITE_METHODS, command.method) or staging) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end
+	if staging then
+		-- One fresh snapshot per guard binds CPU staging to this exact Edit epoch.
+		-- A second snapshot could accidentally mix two play lifetimes.
+		local ok, proof = pcall(function(): any return if self.testProof then self.testProof:snapshot() else nil end)
+		local continuity = command.args.continuity
+		local identity = pair.identityFence.identity
+		if not ok or type(proof) ~= "table" or type(continuity) ~= "table"
+			or proof.sessionId ~= pair.sessionId or proof.mode ~= "Edit" or proof.connected ~= true or proof.continuitySupported ~= true
+			or proof.placeId ~= identity.placeId or proof.universeId ~= identity.universeId
+			or proof.clientLifetimeId ~= self.clientSessionId
+			or type(proof.clientLifetimeId) ~= "string" or type(proof.pluginArtifactHash) ~= "string" or type(proof.playEpoch) ~= "number"
+			or continuity.clientLifetimeId ~= proof.clientLifetimeId or continuity.pluginArtifactHash ~= proof.pluginArtifactHash
+			or continuity.playEpoch ~= proof.playEpoch or not self:isEdit() then V.fail("SCOPE", "Asset staging Edit continuity changed or is unavailable.") end
+	end
 end
 
 function Transport:dispatch(command: any): ()
@@ -1386,6 +1468,7 @@ end
 function Transport:recover(): number
 	local intent = self.recovery
 	if not intent or intent.generation ~= self.generation or self.stopped then return Transport.POLL_SECONDS end
+	self:checkAssetCleanup()
 	if not self:isEdit() then return Transport.MAX_BACKOFF_SECONDS end
 	if intent.attempts >= Transport.MAX_RECOVERY_ATTEMPTS then
 		self:forgetRecovery()
@@ -1434,6 +1517,7 @@ end
 function Transport:tick(): number
 	if self.stopped then return Transport.POLL_SECONDS end
 	if self.checkInput then self.checkInput() end
+	if self.assetCleanupFailed then return Transport.MAX_BACKOFF_SECONDS end
 	if self.disconnectRequested then
 		local old = self.pair
 		if old and old.token then
@@ -1444,6 +1528,7 @@ function Transport:tick(): number
 		self.disconnectRequested = false
 		if not self.desiredPair then self:status("disconnected", "Disconnected. Enter your Arcane API key and click Connect.") end
 	end
+	if self.assetCleanupFailed then return Transport.MAX_BACKOFF_SECONDS end
 	if self.desiredPair then
 		local desired = self.desiredPair
 		self.desiredPair = nil
@@ -1514,8 +1599,8 @@ function Transport:cycle(): number
 		-- old daemon for reconciliation and are never sent under replacement auth.
 		self:clearSession(safe == true)
 		self.generation += 1
-		if safe then intent.generation = self.generation; intent.needsStatus = true; intent.attempts = 0
-		else self:forgetRecovery(); self.blocked = wasBlocked end
+		if safe and not self.assetCleanupFailed then intent.generation = self.generation; intent.needsStatus = true; intent.attempts = 0
+		else self:forgetRecovery(); self.blocked = wasBlocked or self.assetCleanupFailed end
 		self:status(if self.blocked then "reconciliation" else "disconnected", V.safeError(delay))
 	elseif type(delay) == "table" and delay.code == "KEY_REJECTED" then
 		self:clearSession(); self:forgetRecovery(); self.generation += 1

@@ -70,6 +70,27 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   if (isWrite(method) && !session.allowWrites) throw new ArcaneError('READ_ONLY', 'This Studio pairing is read-only. Create an explicit writable pairing to edit.');
   if (!session.capabilities.includes(method)) throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
   switch (method) {
+    case 'asset.stage_packet': {
+      keys(a, ['expected', 'packet', 'target', 'continuity']);
+      const expected = object(a.expected), target = object(a.target), continuity = object(a.continuity);
+      keys(expected, ['digest', 'payloadDigest', 'manifestDigest']);
+      for (const key of ['digest', 'payloadDigest', 'manifestDigest']) if (typeof expected[key] !== 'string' || !/^[a-f0-9]{64}$/.test(expected[key])) throw new ArcaneError('INPUT', 'Expected complete asset staging digests.');
+      textField(a.packet, 'asset packet', 256 * 1024);
+      let packet: Record<string, unknown>;
+      try {packet = object(JSON.parse(a.packet as string));} catch {throw new ArcaneError('INPUT', 'Expected a bounded JSON asset packet.');}
+      if (packet.formatVersion !== 1 || packet.payloadDigest !== expected.payloadDigest || packet.manifestDigest !== expected.manifestDigest
+        || !Number.isInteger(packet.ordinal) || (packet.ordinal as number) < 0 || (packet.ordinal as number) >= 512
+        || !['begin', 'object', 'chunk', 'seal'].includes(packet.kind as string)) throw new ArcaneError('INPUT', 'Asset packet does not match its fixed staging envelope.');
+      keys(target, ['sessionId', 'placeId', 'universeId', 'root', 'parentRef', 'creator']); root(target.root, session);
+      if (target.root !== 'Workspace' || target.sessionId !== session.id || target.placeId !== session.placeId || target.universeId !== session.universeId) throw new ArcaneError('SCOPE', 'Asset staging targets another paired Workspace.');
+      textField(target.parentRef, 'parent reference');
+      const creator = object(target.creator); keys(creator, ['kind', 'id']);
+      if ((creator.kind !== 'user' && creator.kind !== 'group') || typeof creator.id !== 'string' || !/^[1-9][0-9]{0,15}$/.test(creator.id) || !Number.isSafeInteger(Number(creator.id))) throw new ArcaneError('INPUT', 'Invalid observed asset creator.');
+      keys(continuity, ['clientLifetimeId', 'pluginArtifactHash', 'playEpoch']);
+      const proof = session.proof;
+      if (!proof || continuity.clientLifetimeId !== session.clientSessionId || continuity.pluginArtifactHash !== proof.pluginArtifactHash || continuity.playEpoch !== proof.playEpoch || proof.mode !== 'Edit' || !proof.connected || !proof.continuitySupported) throw new ArcaneError('SCOPE', 'Asset staging requires exact Edit continuity.');
+      break;
+    }
     case 'scene.import_context':
       keys(a, []); root('Workspace', session); break;
     case 'scene.children':

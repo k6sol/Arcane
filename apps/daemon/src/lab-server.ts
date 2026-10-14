@@ -22,6 +22,7 @@ import type { StudioStore } from '../../../packages/storage/src/studio-store.js'
 import { studioRoutes } from './studio-routes.js';
 import type { WorkStore } from '../../../packages/storage/src/work-store.js';
 import type { AssetService } from './asset-service.js';
+import type {createStudioImportStagingController} from './studio-import-staging-controller.js';
 import { assetRoutes } from './asset-routes.js';
 import { nativeRoutes } from './native-routes.js';
 import { createCodexService, type CodexService, type CodexServiceOptions } from './codex-service.js';
@@ -76,6 +77,7 @@ interface Options {
   projectPath?: string;
   port?: number;
   assetService?: AssetService;
+  studioImportStaging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'>;
   /** Owned by the product launcher; absent in metadata-only labs. */
   learningService?: LearningService;
   /** Test-only service seam. Production creates the trusted personal-local service. */
@@ -222,7 +224,7 @@ export async function createConnectionLab(options: Options) {
   }
   const assets = options.assetService ? assetRoutes(options.assetService, conversationAssets ?? undefined) : null;
   const scopedAssets = options.assetService && conversationAssets && nativeAssetRegistry
-    ? nativeAssetRoutes(options.assetService,conversationAssets,nativeAssetRegistry) : null;
+    ? nativeAssetRoutes(options.assetService,conversationAssets,nativeAssetRegistry,options.studioImportStaging) : null;
   const workflowApi = workflow ? workflowRoutes(workflow) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
