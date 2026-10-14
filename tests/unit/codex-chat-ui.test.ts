@@ -157,7 +157,8 @@ async function browser(t:test.TestContext,origin:string) {
   const select=async()=>{
     const active=page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]');
     if(await active.count() && (await active.getAttribute('title'))!=='Unsent local draft') {
-      await page.locator('[data-settings-close]').click(); await page.locator('#workspace-new-chat').click();
+      if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+      await page.locator('#workspace-new-chat').click();
     }
     await openAdvancedSettings(page);await (await visibleControl(page,'#codex-model')).selectOption('fixture-sol');assert.equal(await page.locator('#codex-effort').inputValue(),'');await (await visibleControl(page,'#codex-effort')).selectOption('ultra');
     const before=posts.length;await (await visibleControl(page,'#codex-select')).click();
@@ -235,9 +236,11 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   await page.route('**/v1/codex/action',async(route:any)=>{const response=await route.fetch();replyReady();await heldReply;await route.fulfill({response});},{times:1});
   await (await visibleControl(page,'#codex-composer')).fill('Fixture old connection response');await b.ready('codex-submit');await (await visibleControl(page,'#codex-submit')).click();await acceptedReply;await b.ready('codex-disconnect');await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');const oldResponse=page.waitForResponse('**/v1/codex/action');releaseReply();await oldResponse;await b.ready('codex-connect');assert.equal(await page.locator('#codex-messages').textContent().then((v:string)=>v.includes('Fixture old connection response')),false);
   assert.equal(h.service.state().snapshot,null);
-  // Collapse pauses ordinary background reads, while reopening fetches current metadata.
-  await (await visibleControl(page,'#codex-panel>summary')).click();await page.waitForTimeout(1800);const collapsedGets=h.gets;await page.waitForTimeout(1700);assert.equal(h.gets,collapsedGets);await (await visibleControl(page,'#go-codex')).click();await page.waitForFunction(()=>Boolean((document.getElementById('codex-panel') as HTMLDetailsElement).open));await b.ready('codex-connect');
-  await b.connect();await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
+  // Signed-out presentation hides unavailable chat controls. Explicit metadata
+  // reconnect restores the header; collapsing still pauses ordinary reads.
+  await b.connect();
+  await (await visibleControl(page,'#codex-panel>summary')).click();await page.waitForTimeout(1800);const collapsedGets=h.gets;await page.waitForTimeout(1700);assert.equal(h.gets,collapsedGets);await (await visibleControl(page,'#go-codex')).click();await page.waitForFunction(()=>Boolean((document.getElementById('codex-panel') as HTMLDetailsElement).open));
+  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
   // A native timeout stays unknown after GET reconciliation and reload. No turn is replayed.
   const latest=h.clients.at(-1)!;latest.loseAck();await (await visibleControl(page,'#codex-composer')).fill('Synthetic native unknown acknowledgement');await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-unknown-requests','unknown');
   assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
