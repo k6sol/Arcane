@@ -71,6 +71,8 @@ interface Options {
   probe?: (cwd: string) => Promise<Connection[]>;
   studioStore?: StudioStore;
   workStore?: WorkStore;
+  /** Borrowed canonical store shared with the product's asset service. */
+  conversationWorkStore?: ConversationWorkStore;
   projectPath?: string;
   port?: number;
   assetService?: AssetService;
@@ -88,6 +90,14 @@ interface Options {
   studioTestService?: StudioTestService;
 }
 export async function createConnectionLab(options: Options) {
+  if (options.conversationWorkStore) {
+    const expected = workflowProjectIdentity(options.projectPath ?? options.cwd);
+    if (!options.workStore || !(options.conversationWorkStore instanceof ConversationWorkStore) ||
+      options.conversationWorkStore.projectPath !== expected.projectPath ||
+      options.conversationWorkStore.projectId !== expected.projectId) {
+      throw new ArcaneError('CONVERSATION_WORK_SCOPE', 'The shared conversation store must belong to this exact product project.');
+    }
+  }
   const token = randomBytes(32).toString('hex');
   const agentToken = randomBytes(32).toString('hex');
   const nativeAssetRegistry = options.assetService && options.workStore
@@ -121,6 +131,7 @@ export async function createConnectionLab(options: Options) {
   }) : null);
   const nativeChat = codex ? codexRoutes(codex, {workflowModels:true}) : null;
   let associations: ConversationWorkStore | null = null;
+  let ownsAssociations = false;
   let workflow: ReturnType<typeof createWorkflowHost> | null = null;
   let conversationAssets: ReturnType<typeof createAssetConversationHost> | null = null;
   try {
@@ -158,10 +169,11 @@ export async function createConnectionLab(options: Options) {
       if(tests)testApi=studioTestRoutes(tests,resolveTestActor);
     }
     if (options.workStore) {
-      associations = new ConversationWorkStore({
+      associations = options.conversationWorkStore ?? new ConversationWorkStore({
         directory: join(options.stateDirectory, 'conversation-work'),
         projectPath: options.projectPath ?? options.cwd,
       });
+      ownsAssociations = !options.conversationWorkStore;
       if (options.assetService && (process.platform === 'win32'
         ? options.assetService.projectPath.toLowerCase() !== associations.projectPath.toLowerCase()
         : options.assetService.projectPath !== associations.projectPath))
@@ -204,7 +216,7 @@ export async function createConnectionLab(options: Options) {
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
-    try { associations?.close(); } catch { /* Preserve original failure. */ }
+    try { if (ownsAssociations) associations?.close(); } catch { /* Preserve original failure. */ }
     try { await codex?.close(); } catch { /* Preserve original failure. */ }
     throw error;
   }
@@ -313,7 +325,7 @@ export async function createConnectionLab(options: Options) {
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
-    try { associations?.close(); } catch { /* Preserve listener failure. */ }
+    try { if (ownsAssociations) associations?.close(); } catch { /* Preserve listener failure. */ }
     try { await codex?.close(); } catch { /* Preserve listener failure. */ }
     throw error;
   }
@@ -334,7 +346,7 @@ export async function createConnectionLab(options: Options) {
         const errors: unknown[] = [];
         try { await ownedTests?.lifecycle.close(); } catch (error) { errors.push(error); }
         try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
-        try { associations?.close(); } catch (error) { errors.push(error); }
+        try { if (ownsAssociations) associations?.close(); } catch (error) { errors.push(error); }
         try { await codex?.close(); } catch (error) { errors.push(error); }
         const listenerError = await listenerClosed;
         if (listenerError) errors.push(listenerError);
