@@ -99,8 +99,9 @@ let assets: Awaited<ReturnType<typeof createAssetService>>;
 let preparations: Awaited<ReturnType<typeof createStudioImportPreparationStore>>;
 let importHost: ReturnType<typeof createStudioImportHost>;
 let importStaging: ReturnType<typeof createStudioImportStagingController>;
+let pluginArtifactHash: string;
 try {
-  const pluginArtifactHash = await studioImportPluginArtifactHash(cwd);
+  pluginArtifactHash = await studioImportPluginArtifactHash(cwd);
   preparations = await createStudioImportPreparationStore({ projectPath: associations.projectPath,
     directory: join(directory, 'studio-import-preparations'), workAssociations: associations, studio: store });
   try {
@@ -110,20 +111,20 @@ try {
 } catch (error) { await cleanupStartup([() => associations.close(), () => work.close(), () => store.close()]); throw error; }
 try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,studioImport:importHost.hooks,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await cleanupStartup([() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 try {importStaging=createStudioImportStagingController({projectPath: associations.projectPath, workAssociations: associations, studio: store,
-  assets, host: importHost.hooks, pluginArtifactHash: await studioImportPluginArtifactHash(cwd)});}
+  assets, host: importHost.hooks, pluginArtifactHash});}
 catch(error){await cleanupStartup([() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
-catch (error) { await cleanupStartup([() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
+catch (error) { await cleanupStartup([() => importStaging.close(), () => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
 try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
-catch (error) { await cleanupStartup([() => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
+catch (error) { await cleanupStartup([() => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 const descriptor = join(directory, 'daemon.json');
 try {
   await mkdir(directory, { recursive: true });
   await writeFile(descriptor, JSON.stringify({ origin: app.origin, pid: process.pid, protocolVersion: 1 }) + '\n', { mode: 0o600 });
 } catch (error) {
-  await cleanupStartup([() => app.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);
+  await cleanupStartup([() => app.close(), () => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);
   throw error;
 }
 console.log('Arcane local Studio workbench. An explicit Studio API-key connection and write grant are required before edits.');
@@ -136,12 +137,11 @@ let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
-  importStaging.close();
   const deadline = setTimeout(() => process.exit(1), 15000); deadline.unref();
   let failed = false;
   // Each resource closes even if an earlier cleanup fails. Never remove another
   // daemon's descriptor or promise a rollback for an interrupted Studio write.
-  for (const close of [() => app.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]) {
+  for (const close of [() => app.close(), () => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]) {
     try { await close(); } catch { failed = true; }
   }
   try {

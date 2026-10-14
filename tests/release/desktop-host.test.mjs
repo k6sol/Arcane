@@ -117,10 +117,19 @@ function productServiceFixture({ closeFailAt } = {}) {
       assert.equal(options.outputRoot,win32.join(directory,'assets'));
       return created('assets',{options,async close(){closed('assets',this);}});
     },
+    createStudioImportStagingController(options) {
+      assert.deepEqual(Object.keys(options).sort(), ['assets','host','pluginArtifactHash','projectPath','studio','workAssociations']);
+      assert.equal(options.assets,services.assets); assert.equal(options.host,services.host.hooks);
+      assert.equal(options.studio,services.studio); assert.equal(options.workAssociations,services.associations);
+      assert.equal(options.projectPath,projectPath); assert.equal(options.pluginArtifactHash,artifactHash);
+      assert.equal(events.filter(value=>value.resource==='artifact').length,1);
+      return created('staging',Object.freeze({stage(){assert.fail('Metadata fixture must never stage or upload.');},close(){closed('staging',this);}}));
+    },
     createLearningService() { return created('learning',{close(){closed('learning',this);}}); },
     async createConnectionLab(options) {
       assert.equal(options.studioStore,services.studio); assert.equal(options.workStore,services.work);
       assert.equal(options.conversationWorkStore,services.associations); assert.equal(options.assetService,services.assets); assert.equal(options.learningService,services.learning);
+      assert.equal(options.studioImportStaging,services.staging);
       return created('lab',{origin,async close(){closed('lab',this);}});
     },
   };
@@ -134,7 +143,7 @@ function productServiceFixture({ closeFailAt } = {}) {
     const descriptor=win32.join(directory,'daemon.json');
     await vm.runInNewContext(stripTypeScriptTypes('let closing=false;\n' + productSource.slice(shutdownBegin,shutdownEnd) + '\nshutdown();'),{
       ...context,app:services.lab,assets:services.assets,learning:services.learning,associations:services.associations,work:services.work,store:services.studio,
-      importHost:services.host,preparations:services.preparations,descriptor,
+      importHost:services.host,importStaging:services.staging,preparations:services.preparations,descriptor,
       setTimeout(){return {unref(){}};},clearTimeout(){},console:{error(message){assert.match(message,/cleanup had an error/);}},
       async readFile(path){assert.equal(path,descriptor);return JSON.stringify({pid:17,origin});},
       async unlink(path){assert.equal(path,descriptor);descriptorRemoved=true;},
@@ -152,13 +161,19 @@ test('product import wiring shares exact stores, awaited artifact, host hooks an
   await f.hostConfiguration.persistPreparation(...args);
   assert.equal(f.savedArgs.length,args.length); for(let i=0;i<args.length;i++) assert.equal(f.savedArgs[i],args[i]);
   await f.shutdown();
-  assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','studio','work']);
+  assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','staging','studio','work']);
   assert.equal(f.exitCode,0); assert.equal(f.descriptorRemoved,true);
 });
 
 test('product host close failure still closes the same ledger, assets and borrowed stores', async () => {
   const f=productServiceFixture({closeFailAt:'host'}); await f.initialize(); await f.shutdown();
-  assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','studio','work']);
+  assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','staging','studio','work']);
+  assert.equal(f.exitCode,1); assert.equal(f.descriptorRemoved,true);
+});
+
+test('staging close failure still drains every other product-owned service', async () => {
+  const f=productServiceFixture({closeFailAt:'staging'}); await f.initialize(); await f.shutdown();
+  assert.deepEqual(f.events.filter(value=>value.operation==='close').map(value=>value.resource).sort(),['assets','associations','host','lab','learning','preparations','staging','studio','work']);
   assert.equal(f.exitCode,1); assert.equal(f.descriptorRemoved,true);
 });
 

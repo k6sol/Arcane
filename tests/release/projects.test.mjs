@@ -63,7 +63,7 @@ async function fixture(t) {
   // Execute the unchanged product entry/configuration with services and compiler configuration replaced
   // by metadata-only fixtures. No HTTP listener, SQLite engine, compiler, provider or Studio.
   let productFixture = productSource;
-  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js', './studio-import-host.js', './studio-import-preparation-store.js', './studio-import-plugin-artifact.js']) {
+  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js', './studio-import-host.js', './studio-import-preparation-store.js', './studio-import-plugin-artifact.js', './studio-import-staging-controller.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
   }
@@ -74,7 +74,7 @@ async function fixture(t) {
     import {join} from 'node:path';
     const data = (directory, file) => existsSync(join(directory,file)) ? JSON.parse(readFileSync(join(directory,file),'utf8')) : [];
     const lifecycle = [], artifactHash = 'd'.repeat(64);
-    let sharedStudioStore, sharedConversationStore, sharedPreparations, sharedImportHost, persistPreparation, savedArgs;
+    let sharedStudioStore, sharedConversationStore, sharedPreparations, sharedImportHost, sharedAssets, sharedStaging, persistPreparation, savedArgs;
     const created = resource => {
       if (process.env.FIXTURE_SERVICE_FAIL === resource) throw new Error('Fixture startup failure: ' + resource);
       lifecycle.push({operation:'create',resource});
@@ -157,11 +157,23 @@ async function fixture(t) {
       assert.equal(savedArgs.length, args.length); for (let i=0;i<args.length;i++) assert.equal(savedArgs[i],args[i], 'Forward persistence arguments unchanged to the same ledger.');
       created('assets');
       const outputRoot = options.outputRoot ?? join(options.cwd,'runtime','assets');
-      return {options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{closed('assets');}};
+      sharedAssets={options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{closed('assets');}};
+      return sharedAssets;
+    }
+    export function createStudioImportStagingController(options) {
+      assert.deepEqual(Object.keys(options).sort(), ['assets','host','pluginArtifactHash','projectPath','studio','workAssociations']);
+      assert.equal(options.assets,sharedAssets); assert.equal(options.host,sharedImportHost.hooks);
+      assert.equal(options.studio,sharedStudioStore); assert.equal(options.workAssociations,sharedConversationStore);
+      assert.equal(options.projectPath,sharedConversationStore.projectPath); assert.equal(options.pluginArtifactHash,artifactHash);
+      assert.equal(lifecycle.filter(value=>value.operation==='create'&&value.resource==='artifact').length,1,'Use the same validated artifact hash, not a second read.');
+      created('staging');
+      sharedStaging=Object.freeze({stage(){assert.fail('Metadata startup must never stage packets or operate on Studio.');},close(){closed('staging');}});
+      return sharedStaging;
     }
     export function createLearningService() { created('learning'); return { close() { closed('learning'); } }; }
     export async function createConnectionLab(options) {
       assert.equal(options.conversationWorkStore, sharedConversationStore, 'LAB borrows the exact product store.');
+      assert.equal(options.studioImportStaging,sharedStaging,'LAB borrows the exact owned staging controller.');
       assert.equal(options.studioStore, sharedStudioStore); created('lab');
       if (process.env.FIXTURE_SHUTDOWN === '1') process.once('beforeExit', () => process.emit('SIGTERM'));
       mkdirSync(options.stateDirectory,{recursive:true});
@@ -429,17 +441,17 @@ test('product shutdown closes the same import host and ledger once alongside eve
   assert.equal(result.status, 0, result.stderr);
   const lifecycle = observed(result.stdout, 'fixture-lifecycle:');
   const created = lifecycle.filter(value => value.operation === 'create').map(value => value.resource);
-  assert.deepEqual([...created].sort(), ['artifact','assets','associations','host','lab','learning','preparations','studio','work']);
+  assert.deepEqual([...created].sort(), ['artifact','assets','associations','host','lab','learning','preparations','staging','studio','work']);
   assert.ok(created.indexOf('host') > created.indexOf('preparations'));
   assert.ok(created.indexOf('host') > created.indexOf('artifact'));
   assert.ok(created.indexOf('assets') > created.indexOf('host'));
   assert.deepEqual(lifecycle.filter(value => value.operation === 'close').map(value => value.resource).sort(),
-    ['assets','associations','host','lab','learning','preparations','studio','work']);
+    ['assets','associations','host','lab','learning','preparations','staging','studio','work']);
   const product = observed(result.stdout, 'fixture-product:');
   await assert.rejects(lstat(join(product.studioDirectory, 'daemon.json')), { code:'ENOENT' });
 });
 
-for (const stage of ['artifact','preparations','host','assets','learning','lab']) {
+for (const stage of ['artifact','preparations','host','assets','staging','learning','lab']) {
   test('product startup ' + stage + ' failure cleans every acquired host/store even when a close fails', async t => {
     const f = await fixture(t), result = f.runProduct(cleanEnv({ FIXTURE_SERVICE_FAIL:stage, FIXTURE_CLOSE_FAIL:'associations', FIXTURE_LIFECYCLE:'1' }));
     assert.equal(result.status, 1); assert.match(result.stderr, new RegExp('Fixture startup failure: ' + stage));
