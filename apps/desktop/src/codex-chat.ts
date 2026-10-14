@@ -764,6 +764,12 @@ export class CodexChat {
     const button=this.el<HTMLButtonElement>('codex-select');
     if(this.canSelectModel()&&!this.picker()!.hidden&&!button.disabled)button.click();
   }
+  private styleEffortRange(slider:HTMLInputElement,efforts:readonly string[],index:number):void {
+    const ratio=efforts.length>1&&index>=0?Math.min(1,index/(efforts.length-1)):0;
+    slider.style.setProperty('--effort-position',String(ratio*100)+'%');
+    slider.style.setProperty('--effort-offset',String(ratio*24)+'px');
+    slider.dataset.effortTone=efforts[index]==='ultra'?'ultra':'standard';
+  }
   private reasoningTrigger():HTMLButtonElement|null {
     return this.doc.getElementById('codex-picker-reasoning-trigger') as HTMLButtonElement|null;
   }
@@ -956,7 +962,7 @@ export class CodexChat {
     const effortValue=this.doc.getElementById('codex-picker-effort-value');if(effortValue)effortValue.textContent=this.api.safe(displayEffort);
     const modelValue=this.doc.getElementById('codex-picker-current-model-label');if(modelValue)modelValue.textContent=this.api.safe(selected?.displayName??'Choose model');
     const slider=this.doc.getElementById('codex-picker-effort-slider') as HTMLInputElement|null;
-    if(slider){const efforts=selected?.efforts??[],index=efforts.indexOf(effort);slider.max=String(Math.max(0,efforts.length-1));slider.value=String(Math.max(0,index));slider.disabled=!enabled||efforts.length<2||index<0;slider.setAttribute('aria-valuetext',displayEffort);slider.style.setProperty('--effort-position',String(efforts.length>1?Math.max(0,index)/(efforts.length-1)*100:0)+'%');}
+    if(slider){const efforts=selected?.efforts??[],index=efforts.indexOf(effort);slider.max=String(Math.max(0,efforts.length-1));slider.value=String(Math.max(0,index));slider.disabled=!enabled||efforts.length<2||index<0;slider.setAttribute('aria-valuetext',displayEffort);this.styleEffortRange(slider,efforts,index);}
     const reset=this.doc.getElementById('codex-picker-reset') as HTMLButtonElement|null;if(reset)reset.disabled=!enabled||!selected?.defaultEffort||!selected.efforts.includes(selected.defaultEffort);
     this.positionPicker();
   }

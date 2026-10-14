@@ -6,6 +6,7 @@ import { readFile, mkdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { inflateSync } from 'node:zlib';
 import type { Page } from 'playwright-core';
 import { CodexChat, CodexChatApi, type ChatState, type ChatAction, type ChatActionRecord } from '../../apps/desktop/src/codex-chat.js';
 import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model.js';
@@ -535,6 +536,71 @@ function activeState(status: 'starting' | 'inProgress' | 'cancelling' = 'inProgr
   initial.nativeThreads = [{ provider: 'codex', projectPath: initial.projectPath, threadId: 'fixture-thread', sessionId: 'fixture-session', selection: initial.snapshot!.thread!.selection }];
   return initial;
 }
+
+// Decode only the test's own browser PNG to verify rendered pixels. No image
+// dependency, install, product screenshot mutation or inferred pseudo style.
+function pngPixels(png: Buffer) {
+  assert.equal(png.subarray(1, 4).toString(), 'PNG');
+  const width = png.readUInt32BE(16), height = png.readUInt32BE(20), type = png[25];
+  assert.equal(png[24], 8); assert.equal(png[28], 0); assert.ok(type === 2 || type === 6);
+  const channels = type === 6 ? 4 : 3, chunks: Buffer[] = [];
+  for (let offset = 8; offset < png.length;) {
+    const length = png.readUInt32BE(offset), kind = png.toString('ascii', offset + 4, offset + 8);
+    if (kind === 'IDAT') chunks.push(png.subarray(offset + 8, offset + 8 + length)); offset += length + 12;
+  }
+  const raw = inflateSync(Buffer.concat(chunks)), stride = width * channels, pixels = Buffer.alloc(stride * height);
+  const paeth = (a: number, b: number, c: number) => { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)]!; assert.ok(filter <= 4);
+    for (let x = 0; x < stride; x++) {
+      const left = x >= channels ? pixels[y * stride + x - channels]! : 0, up = y ? pixels[(y - 1) * stride + x]! : 0;
+      const corner = y && x >= channels ? pixels[(y - 1) * stride + x - channels]! : 0;
+      const predictor = filter === 1 ? left : filter === 2 ? up : filter === 3 ? Math.floor((left + up) / 2) : filter === 4 ? paeth(left, up, corner) : 0;
+      pixels[y * stride + x] = (raw[y * (stride + 1) + x + 1]! + predictor) & 255;
+    }
+  }
+  return { width, height, rgb: (x: number, y: number) => [...pixels.subarray(y * stride + x * channels, y * stride + x * channels + 3)] };
+}
+
+test('actual Edge native range fills to the thumb centre with flat soft red, Ultra-only blue-purple and dark remainder', { skip: !browserModule, timeout: 30000 }, async t => {
+  const initial = state(); initial.snapshot!.models[0]!.efforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']; initial.workflowModel = workflowNativeModel(initial)!.proof;
+  const levels = initial.snapshot!.models[0]!.efforts, lastIndex = levels.length - 1;
+  const f = await browserFixture(t, initial), { page } = f;
+  for (const [index, effort] of levels.entries()) {
+    await f.open(); const slider = page.locator('#codex-picker-effort-slider');
+    if (index) { await slider.press('ArrowRight'); await f.settled(); await f.open(); }
+    const computed = await slider.evaluate(el => {
+      const input = el as HTMLInputElement, css = getComputedStyle(input), rect = input.getBoundingClientRect();
+      return { value: input.value, width: rect.width, height: rect.height, tone: input.dataset.effortTone,
+        position: css.getPropertyValue('--effort-position').trim(), offset: css.getPropertyValue('--effort-offset').trim(),
+        fill: css.getPropertyValue('--effort-fill').trim(), end: css.getPropertyValue('--effort-fill-end').trim(), rest: css.getPropertyValue('--effort-rest').trim() };
+    });
+    assert.equal(computed.value, String(index)); assert.equal(computed.height, 28);
+    assert.equal(computed.tone, effort === 'ultra' ? 'ultra' : 'standard');
+    const fraction = index / lastIndex, thumbCentre = 12 + (computed.width - 24) * fraction;
+    assert.ok(Math.abs(parseFloat(computed.position) / 100 - fraction) < 0.000001);
+    assert.equal(parseFloat(computed.offset), fraction * 24);
+    assert.ok(Math.abs(12 + computed.width * parseFloat(computed.position) / 100 - parseFloat(computed.offset) - thumbCentre) < 0.001);
+    assert.equal(computed.fill, effort === 'ultra' ? '#5772f4' : '#de7185'); assert.equal(computed.end, effort === 'ultra' ? '#aa6bea' : '#de7185'); assert.equal(computed.rest, '#303038');
+    const png = await slider.screenshot(), pixels = pngPixels(png), y = Math.floor(pixels.height / 2);
+    const near = (value: number[], expected: number[]) => assert.ok(value.every((channel, i) => Math.abs(channel - expected[i]!) <= 3), JSON.stringify({ value, expected, index }));
+    if (index < lastIndex) near(pixels.rgb(Math.floor((thumbCentre + 18 + pixels.width - 5) / 2), y), [48, 48, 56]);
+    if (index > 0 && effort !== 'ultra') {
+      near(pixels.rgb(18, y), [222, 113, 133]); near(pixels.rgb(Math.floor(thumbCentre - 18), y), [222, 113, 133]);
+    }
+    if (effort === 'ultra') {
+      const left = pixels.rgb(18, y), right = pixels.rgb(pixels.width - 30, y);
+      assert.ok(left[2]! > left[0]! && right[2]! > right[0]!); assert.ok(right[0]! > left[0]! + 30, 'Actual Ultra pixels progress from blue to purple');
+    }
+    if (process.env.ARCANE_UI_SCREENSHOT) {
+      await mkdir(resolve(process.env.ARCANE_UI_SCREENSHOT), { recursive: true });
+      await page.screenshot({ path: join(resolve(process.env.ARCANE_UI_SCREENSHOT), 'composer-effort-' + initial.snapshot!.models[0]!.efforts[index] + '.png') });
+    }
+    await page.keyboard.press('Escape');
+  }
+  assert.deepEqual(f.posts.map(input => input.action), levels.slice(1).map(() => 'select'));
+  t.diagnostic('Fresh headless Edge instance, real HTML/CSS, native range keys, measured thumb geometry and rendered PNG pixels; synthetic HTTP only.');
+});
 
 test('browser Stop interrupts the exact configured active chat once, preserves draft and cannot submit a new turn', { skip: !browserModule, timeout: 30000 }, async t => {
   const initial = activeState(), f = await browserFixture(t, initial), { page } = f;
