@@ -68,6 +68,27 @@ test('shipped binary has fixed PE identity, pin, version and exact primary licen
   assert.match(read(managed.MANAGED_LUAU_FILES[1]).toString(), /2019-2026 Roblox Corporation/);
 });
 
+test('Git checkout conversion preserves the pinned upstream licence under Windows line-ending settings', () => {
+  const path = managed.MANAGED_LUAU_FILES[1];
+  // Apply Git's actual checkout filters without changing the index or worktree.
+  // The positive Linux suite alone cannot detect core.autocrlf=true corruption.
+  for (const autocrlf of ['true', 'false']) {
+    const result = spawnSync('git', ['-c', 'core.autocrlf=' + autocrlf, '-c', 'core.eol=crlf',
+      'cat-file', '--filters', '--path=' + path, 'HEAD:' + path], {
+      cwd: repository, windowsHide: true, shell: false, timeout: 10_000, maxBuffer: 8192,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr?.toString());
+    assert.equal(result.stdout.length, managed.MANAGED_LUAU_MANIFEST.license.bytes);
+    assert.equal(hash(result.stdout), managed.MANAGED_LUAU_MANIFEST.license.sha256);
+  }
+  // Do not fix this by normalizing untrusted bytes or weakening the runtime pin.
+  const files = managed.REQUIRED_MANAGED_LUAU_FILES.map(path => ({ path, bytes: read(path) }));
+  const converted = files.map(file => file.path === path
+    ? { ...file, bytes: Buffer.from(file.bytes.toString().replace(/\r?\n/g, '\r\n')) } : file);
+  assert.throws(() => managed.validateManagedLuauFiles(converted), /unavailable/);
+});
+
 test('source text, padded text, wrong PE architecture, appended data and tampered native bytes cannot satisfy the pin', () => {
   const original = read(managed.MANAGED_LUAU_FILES[0]);
   const padded = Buffer.alloc(original.length); padded.write('--!strict\nreturn true\n');

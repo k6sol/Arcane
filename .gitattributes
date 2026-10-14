@@ -13,3 +13,7 @@
 *.css text eol=lf
 *.html text eol=lf
 *.yml text eol=lf
+
+# This upstream notice is pinned byte-for-byte alongside the managed compiler.
+# Its extensionless filename must not inherit Windows CRLF checkout conversion.
+apps/desktop/host-tools/luau/LICENSE text eol=lf
