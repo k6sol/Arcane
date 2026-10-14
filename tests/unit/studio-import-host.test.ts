@@ -18,7 +18,7 @@ import { saveStudioFixture } from '../../packages/asset-pipeline/testing/studio-
 const JOB = '11111111-1111-4111-8111-111111111111', HASH = 'a'.repeat(64);
 const conversation = { provider: 'codex' as const, threadId: 'fixture.import-host', sessionId: null };
 const refused = (code: string) => (error: unknown) => !!error && typeof error === 'object' && 'code' in error && error.code === code;
-async function fixture(t: test.TestContext, local = false) {
+async function fixture(t: test.TestContext, local = false, hostNow: () => number = Date.now) {
   const boundary = await realpath(tmpdir()), root = await mkdtemp(join(boundary, 'arcane-import-host-'));
   const projectPath = await realpath(root), studio = new StudioStore({ directory: join(root, 'studio') });
   const work = new ConversationWorkStore({ directory: join(root, 'work'), projectPath });
@@ -50,7 +50,7 @@ async function fixture(t: test.TestContext, local = false) {
       : { status: 'not_applicable', id: null, provenance: 'StudioService:GetUserId' } });
   const ledger = await createStudioImportPreparationStore({ projectPath, directory: join(root, 'preparations'), workAssociations: work, studio });
   let saved = 0, response = context, held = false, reads = 0;
-  const host = createStudioImportHost({ projectPath, workAssociations: work, studio, pluginArtifactHash: HASH,
+  const host = createStudioImportHost({ projectPath, workAssociations: work, studio, pluginArtifactHash: HASH, now: hostNow,
     persistPreparation: async (...args) => { await ledger.save(...args); saved++; } });
   let service: AssetService | undefined;
   const failures: unknown[] = [];
@@ -109,10 +109,21 @@ test('a second live pairing is ambiguous even when its plugin lacks the new capa
 test('all authoritative pairings are considered beyond the display page', async t => {
   const f = await fixture(t);
   for (let i = 0; i < 102; i++) { const p = f.pair('revoked-' + i, ['scene.children']); f.studio.revoke(p.sessionId, 'fixture'); }
+  // These synchronous fixture writes can outlast the normal freshness window
+  // on Windows. Deliver the synthetic plugin's heartbeat after setup; rowid
+  // ordering must still leave this live pairing beyond the display page.
+  f.studio.poll(f.paired.sessionId, f.proof());
   assert.equal(f.studio.sessions().some(s => s.id === f.paired.sessionId), false);
   assert.equal(f.studio.activeSessions().length, 1);
   const selected = await f.host.hooks.selectTarget(f.scope, JOB, f.actor, f.guard);
   assert.equal(selected.target.sessionId, f.paired.sessionId); f.host.hooks.releaseTarget?.(f.scope, JOB);
+});
+
+test('the same authoritative pairing is still refused once its production freshness window expires', async t => {
+  const f = await fixture(t, false, () => Date.now() + 31_000);
+  assert.equal(f.studio.activeSessions().length, 1);
+  await assert.rejects(async () => f.host.hooks.selectTarget(f.scope, JOB, f.actor, f.guard), refused('STUDIO_IMPORT_TARGET'));
+  assert.deepEqual(f.counts(), { saved: 0, reads: 0 });
 });
 
 test('changed creator between the initial and confirmation reads is refused without a saved record', async t => {
