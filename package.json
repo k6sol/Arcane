@@ -14,7 +14,7 @@
   "scripts": {
     "build": "node scripts/compile-product.mjs",
     "typecheck": "node scripts/compile-product.mjs --noEmit",
-    "test": "npm run build && node --test --test-concurrency=1 dist/tests/unit/*.test.js && node --test tests/skills/*.test.mjs && node --test tests/release/*.test.mjs",
+    "test": "npm run build && node --test --test-concurrency=1 dist/tests/unit/*.test.js && node --test tests/skills/*.test.mjs && node --test --test-concurrency=1 tests/release/*.test.mjs",
     "start:lab": "node dist/apps/daemon/src/main.js",
     "probe:providers": "node dist/apps/daemon/src/probe.js",
     "start:product": "node dist/apps/daemon/src/product-main.js",
