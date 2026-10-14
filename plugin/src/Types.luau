@@ -39,4 +39,8 @@ export type StudioImportContextObservation = {
 	creator: StudioPlaceCreatorObservation, studioUser: StudioUserObservation,
 }
 export type Outcome = {state: string, result: any?, error: string?, unsafe: boolean?}
+export type StudioUploadContextObservation = StudioImportContextObservation & {
+	uploader: {status: "available", id: number, provenance: "StudioService:GetUserId"}
+		| {status: "unavailable", id: nil, provenance: "StudioService:GetUserId"},
+}
 return {}

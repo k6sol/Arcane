@@ -19,7 +19,7 @@ export interface StudioContinuityProof {
   mode: 'Edit' | 'Play'; playEpoch: number; continuitySupported: boolean;
   connected: boolean; observedAt: string; expiresAt: string;
 }
-export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'scene.import_context'] as const;
+export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'scene.import_context', 'scene.upload_context'] as const;
 export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'] as const;
 /** Host-owned binary intake. Not a generic agent scene command or reversible mutation. */
 export const ASSET_STAGE_METHODS = ['asset.stage_packet'] as const;
@@ -55,6 +55,12 @@ export interface StudioImportContextObservation {
   placeId: number; universeId: number; mode: 'Edit' | 'Play';
   modeProvenance: 'StudioTestService.EditModeActive';
   creator: StudioPlaceCreatorObservation; studioUser: StudioUserObservation;
+}
+/** Uploader is observed separately even for published places. A place creator
+ * is never assumed to be the signed-in user, or evidence of upload permission. */
+export interface StudioUploadContextObservation extends StudioImportContextObservation {
+  uploader: {status: 'available'; id: number; provenance: 'StudioService:GetUserId'}
+    | {status: 'unavailable'; id: null; provenance: 'StudioService:GetUserId'};
 }
 export interface MutationReceipt {
   kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled'; ref: InstanceRef;
@@ -125,6 +131,26 @@ export function studioImportContextObservation(value: unknown): StudioImportCont
     modeProvenance: 'StudioTestService.EditModeActive',
     creator: { status: creator.status, kind: creator.kind, id: creatorId, provenance: creator.provenance } as StudioPlaceCreatorObservation,
     studioUser: { status: user.status, id: user.id, provenance: user.provenance } as StudioUserObservation };
+}
+export function studioUploadContextObservation(value: unknown): StudioUploadContextObservation {
+  const fields = ['sessionId', 'root', 'parentRef', 'placeId', 'universeId', 'mode', 'modeProvenance', 'creator', 'studioUser', 'uploader'];
+  const input = object(value, 'upload context'), prototype = Object.getPrototypeOf(input);
+  if ((prototype !== Object.prototype && prototype !== null) || Reflect.ownKeys(input).length !== fields.length
+    || Reflect.ownKeys(input).some(key => typeof key !== 'string' || !fields.includes(key))) throw new ArcaneError('INPUT', 'Unexpected upload context fields.');
+  const base: Record<string, unknown> = {};
+  for (const field of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, field);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new ArcaneError('INPUT', 'Upload context must contain plain observation data.');
+    if (field !== 'uploader') base[field] = descriptor.value;
+  }
+  const observation = studioImportContextObservation(base), uploader = object(Object.getOwnPropertyDescriptor(input, 'uploader')!.value, 'uploader');
+  const up = Object.getPrototypeOf(uploader), names = Reflect.ownKeys(uploader);
+  if ((up !== Object.prototype && up !== null) || names.length !== 3 || names.some(key => typeof key !== 'string' || !['status', 'id', 'provenance'].includes(key))
+    || names.some(key => !Object.hasOwn(Object.getOwnPropertyDescriptor(uploader, key)!, 'value'))
+    || uploader.provenance !== 'StudioService:GetUserId'
+    || !(uploader.status === 'available' && Number.isSafeInteger(uploader.id) && (uploader.id as number) > 0
+      || uploader.status === 'unavailable' && uploader.id === null)) throw new ArcaneError('INPUT', 'Invalid actual uploader observation.');
+  return {...observation, uploader: {status: uploader.status, id: uploader.id, provenance: uploader.provenance} as StudioUploadContextObservation['uploader']};
 }
 export function jsonObject(value: unknown, maxBytes = 256 * 1024): Record<string, Json> {
   const o = object(value);

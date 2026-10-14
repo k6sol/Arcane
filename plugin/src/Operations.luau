@@ -188,6 +188,26 @@ function Operations:importContext(args: any): any
 		modeProvenance = "StudioTestService.EditModeActive", creator = creator, studioUser = studioUser}
 end
 
+-- Separate uploader read: published place owner/group is NOT the active Studio
+-- account. This observes identity only and never certifies upload permissions.
+function Operations:uploadContext(args: any): any
+	V.fields(args, {}, "upload-context arguments")
+	local before = self:importContext({})
+	local function uploader(): any
+		local ok, userId = pcall(function(): number
+			return V.integer(self.gameModel:GetService("StudioService"):GetUserId(), 1, 9007199254740991, "Studio uploader ID")
+		end)
+		return if ok then {status = "available", id = userId, provenance = "StudioService:GetUserId"}
+			else {status = "unavailable", id = V.NULL, provenance = "StudioService:GetUserId"}
+	end
+	local first = uploader()
+	local after = self:importContext({})
+	local second = uploader()
+	if not V.equal(before, after) or not V.equal(first, second) then V.fail("CONTEXT_CHANGED", "Place or uploader changed during upload context observation.") end
+	after.uploader = second
+	return after
+end
+
 function Operations:search(args: any): any
 	V.fields(args, {"root", "query", "limit"}, "search arguments")
 	local root = self.registry:root(args.root)
@@ -394,6 +414,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	if method == "scene.children" then result = self:children(args)
 	elseif method == "asset.stage_packet" then result = self:stageAssetPacket(args, guard)
 	elseif method == "scene.import_context" then result = self:importContext(args)
+	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "scene.inspect" then
 		V.fields(args, {"ref"}, "inspect arguments")

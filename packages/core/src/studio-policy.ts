@@ -62,7 +62,7 @@ export function engineProperties(value: Record<string, Json>): Record<string, Js
   return result;
 }
 export function validateCommandArgs(method: StudioMethod, value: unknown, session: StudioSession, internalRestore = false): Record<string, Json> {
-  if (method === 'scene.import_context') {
+  if (method === 'scene.import_context' || method === 'scene.upload_context') {
     const input = object(value), prototype = Object.getPrototypeOf(input);
     if ((prototype !== Object.prototype && prototype !== null) || Reflect.ownKeys(input).length !== 0) throw new ArcaneError('INPUT', 'Import context arguments must be an empty JSON object.');
   }
@@ -91,7 +91,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       if (!proof || continuity.clientLifetimeId !== session.clientSessionId || continuity.pluginArtifactHash !== proof.pluginArtifactHash || continuity.playEpoch !== proof.playEpoch || proof.mode !== 'Edit' || !proof.connected || !proof.continuitySupported) throw new ArcaneError('SCOPE', 'Asset staging requires exact Edit continuity.');
       break;
     }
-    case 'scene.import_context':
+    case 'scene.import_context': case 'scene.upload_context':
       keys(a, []); root('Workspace', session); break;
     case 'scene.children':
       keys(a, ['root', 'ref', 'limit']); root(a.root, session);

@@ -69,3 +69,30 @@ local input=args(packets[1]);input.target=table.clone(target);input.target.paren
 rejects(function() ops:stageAssetPacket(input,guard) end,'SCOPE')
 assert(next(ops.assetTransfers)==nil and creates==0)
 `,true));
+
+test('uploader observation reads the current Studio account independently of published group ownership', options, async t=>run(t,stageSetup+`
+function gameModel:GetService(name)
+ assert(name=='StudioService');return {GetUserId=function() return 987 end}
+end
+function ops:importContext(_)
+ return {sessionId='synthetic-session',root='Workspace',parentRef={instanceId='synthetic-parent'},placeId=12,universeId=34,mode='Edit',
+ creator={status='available',kind='group',id=56},studioUser={status='not_applicable'}}
+end
+local result=ops:uploadContext({})
+assert(result.creator.id==56 and result.creator.kind=='group')
+assert(result.uploader.status=='available' and result.uploader.id==987 and result.uploader.provenance=='StudioService:GetUserId')
+assert(result.studioUser.status=='not_applicable' and result.uploadAllowed==nil and creates==0)
+`,true));
+test('uploader change during context observation refuses the receipt rather than substituting place ownership', options, async t=>run(t,stageSetup+`
+local calls=0
+function gameModel:GetService(name)
+ assert(name=='StudioService');return {GetUserId=function() calls+=1;return if calls==1 then 987 else 988 end}
+end
+rejects(function() ops:uploadContext({}) end,'CONTEXT_CHANGED')
+assert(creates==0)
+`,true));
+test('unavailable uploader stays unavailable even when a local place creator can be selected', options, async t=>run(t,stageSetup+`
+function gameModel:GetService(name) assert(name=='StudioService');return {GetUserId=function() return 0 end} end
+local result=ops:uploadContext({})
+assert(result.studioUser.id==123 and result.uploader.status=='unavailable' and creates==0)
+`,true));
