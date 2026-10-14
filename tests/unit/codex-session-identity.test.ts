@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, readFile, realpath, lstat, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, lstat, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -26,6 +26,7 @@ interface Scenario {
   holdInventory?: number;
   holdSecondPage?: boolean;
   activeTurn?: boolean;
+  observeNotificationPoll?: boolean;
 }
 interface Wire { event: string; method?: string; notification?: Notification }
 
@@ -52,6 +53,7 @@ function protocolPeer(): void {
       notified = true;
       send(notification(JSON.parse(readFileSync(notifyFile!, 'utf8')) as Notification));
     }
+    if (scenario.observeNotificationPoll) record({ event: 'notification-poll' });
   }, 5);
   const held = (reply: () => void) => {
     const timer = setInterval(() => { if (existsSync(releaseFile!)) { clearInterval(timer); reply(); } }, 5);
@@ -111,6 +113,14 @@ async function until(predicate: () => boolean | Promise<boolean>): Promise<void>
   const deadline = Date.now() + 4000;
   while (!await predicate()) { if (Date.now() >= deadline) assert.fail('Synthetic identity fixture timed out.'); await delay(5); }
 }
+async function publishNotification(file: string, value: Notification,
+  stage: (file: string, contents: string) => Promise<void> = writeFile): Promise<void> {
+  // Existence is the peer's readiness gate. Publish only after the sibling write
+  // closes; direct writeFile exposes an empty/partial JSON document to its poll.
+  const staged = file + '.pending';
+  await stage(staged, JSON.stringify(value));
+  await rename(staged, file);
+}
 async function fixture(t: test.TestContext, scenario: Scenario = {}, options: {
   policy?: 'native-config' | 'arcane-only'; hooks?: boolean; forward?: NativeAssetHooks;
 } = {}) {
@@ -141,7 +151,7 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}, options: {
   };
   await session.initialize(); session.selectModel({ ...HUMAN, ...PAIR });
   return { session, directory, lifecycle, receipts,
-    notify: (value: Notification) => writeFile(notifyFile, JSON.stringify(value)),
+    notify: (value: Notification, stage?: (file: string, contents: string) => Promise<void>) => publishNotification(notifyFile, value, stage),
     release: () => writeFile(releaseFile, ''),
   };
 }
@@ -161,6 +171,44 @@ async function assertFenced(f: Fixture, sessionId: string | null): Promise<void>
   await assert.rejects(() => f.session.startTurn({ ...HUMAN, threadId: THREAD, text: 'Must remain unsent.' }), code('DISCONNECTED'));
   await f.session.close(); assert.equal(f.lifecycle.retired, 1);
 }
+
+test('notification gate hides incomplete writes from the synthetic peer until atomic publication', OPTIONS, async t => {
+  const f = await fixture(t, { ackSession: null, before: [{}, { sessionId: null }, { sessionId: null }], observeNotificationPoll: true });
+  await open(f, 'start');
+  const polls = (wire: Wire[]) => wire.filter(row => row.event === 'notification-poll').length;
+  const notifications = (wire: Wire[]) => wire.filter(row => row.event === 'notification').length;
+  let staged = '';
+  await f.notify({}, async (file, contents) => {
+    staged = file;
+    for (const incomplete of ['', '{"sessionId":']) {
+      await writeFile(file, incomplete);
+      const before = polls(await f.receipts());
+      // Observe a completed peer poll during each incomplete write, rather than
+      // hoping a sleep or repeated fixture run happens to hit the interleaving.
+      await until(async () => {
+        assert.equal(f.session.snapshot().connected, true, 'Synthetic peer disconnected while notification was still staged.');
+        return polls(await f.receipts()) > before;
+      });
+      await assert.rejects(readFile(join(f.directory, 'notify.json')), { code: 'ENOENT' });
+      await f.session.readAccount();
+      assertCanonical(f.session.snapshot(), null);
+      assert.equal(f.session.snapshot().ready, true);
+      assert.equal(notifications(await f.receipts()), 3);
+    }
+    await writeFile(file, contents);
+  });
+  await assert.rejects(lstat(staged), { code: 'ENOENT' });
+  await until(async () => notifications(await f.receipts()) === 4);
+  await f.session.readAccount();
+  const snapshot = f.session.snapshot();
+  assertCanonical(snapshot, null);
+  assert.equal(snapshot.provenance, 'spawned-node-fixture');
+  assert.equal(snapshot.ready, true); assert.equal(snapshot.thread?.configured, true);
+  assert.equal(snapshot.failureCode, null);
+  assert.deepEqual(f.lifecycle, { dispatched: 0, ended: 0, retired: 0 });
+  assert.equal(calls(await f.receipts(), 'thread/start').length, 1);
+  assert.equal(calls(await f.receipts(), 'turn/start').length, 0);
+});
 
 for (const method of ['start', 'resume'] as const) {
   for (const ackSession of [SESSION, null]) test(method + ': matching and omitted notifications preserve canonical ACK ' + ackSession, OPTIONS, async t => {
