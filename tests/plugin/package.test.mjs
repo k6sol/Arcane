@@ -22,6 +22,7 @@ const expectedSources = [
   ['AssetMesh', 'ModuleScript', 'AssetMesh.luau'],
   ['Sha256Stream', 'ModuleScript', 'Sha256Stream.luau'],
   ['AssetTransfer', 'ModuleScript', 'AssetTransfer.luau'],
+  ['AssetMaterials', 'ModuleScript', 'AssetMaterials.luau'],
 ];
 const files = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) => ({ filename, source: await readFile(path.join(sourceDir, filename), 'utf8') })));
 const byFile = Object.fromEntries(files.map(({ filename, source }) => [filename, source]));

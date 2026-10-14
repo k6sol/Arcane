@@ -16,6 +16,7 @@ export const PLUGIN_SOURCES = Object.freeze([
   ['AssetMesh', 'ModuleScript', 'AssetMesh.luau'],
   ['Sha256Stream', 'ModuleScript', 'Sha256Stream.luau'],
   ['AssetTransfer', 'ModuleScript', 'AssetTransfer.luau'],
+  ['AssetMaterials', 'ModuleScript', 'AssetMaterials.luau'],
 ]);
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
