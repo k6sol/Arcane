@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ARCANE_TOOL_NAMES, missingArcaneTools, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
+import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES, missingArcaneTools, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
 import { requireArcaneBuildTools, arcaneThreadIsIsolated, type McpInventoryRow } from '../../packages/codex-client/src/mcp-isolation.js';
 
 const row=(toolNames:readonly string[]):McpInventoryRow=>({name:'arcane',runtimeStatus:'connected',toolNames:[...toolNames],toolsError:false,plugin:false,pluginId:null});
@@ -21,4 +21,23 @@ test('every reviewed build, recovery, skills and asset tool is required',()=>{
 test('native task instructions require automatic choice and evidence, not invented verification',()=>{
  for(const text of ['skills_recommend','scene_create','scene_update','script_update','user should not choose','exact session/root/edit-mode','mutation receipts'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text));
  assert.ok(!ARCANE_TASK_INSTRUCTIONS.includes('approvalPolicy=never'));
+});
+
+test('native asset readiness extends the entire generic inventory with prepare only',()=>{
+ assert.equal(Object.isFrozen(ARCANE_TOOL_NAMES),true);
+ assert.equal(Object.isFrozen(ARCANE_NATIVE_TOOL_NAMES),true);
+ assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_prepare_studio_import']);
+ assert.equal(new Set(ARCANE_NATIVE_TOOL_NAMES).size,ARCANE_NATIVE_TOOL_NAMES.length);
+ assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_prepare_studio_import']);
+ assert.deepEqual(missingArcaneTools(ARCANE_NATIVE_TOOL_NAMES,true),[]);
+ assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES)]));
+ assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_NATIVE_TOOL_NAMES)],true));
+ assert.throws(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES)],true),{code:'MCP_CAPABILITIES'});
+ for(const omitted of ARCANE_NATIVE_TOOL_NAMES){
+  const partial:readonly string[]=ARCANE_NATIVE_TOOL_NAMES.filter(name=>name!==omitted);
+  assert.deepEqual(missingArcaneTools(partial,true),[omitted]);
+  assert.throws(()=>requireArcaneBuildTools([row(partial)],true),{code:'MCP_CAPABILITIES'});
+ }
+ const inherited={...row(['assets_prepare_studio_import']),name:'inherited',runtimeStatus:'disabled'};
+ assert.throws(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES),inherited],true),{code:'MCP_CAPABILITIES'});
 });

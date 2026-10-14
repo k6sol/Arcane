@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createStudioImportManifestAuthority, StudioImportManifestError, STUDIO_IMPORT_LIMITS } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import type { HostGeneratedStudioImport, PreparedStudioImport, StudioImportAdmission, StudioImportBaseline } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { parseNativeStudioImportResponse } from '../../packages/asset-pipeline/src/studio-import-wire.js';
 
 // Typed, in-memory exported cubes and PNGs. No filesystem, native applications,
 // HTTP, provider, installed plugin, generated project or running bundle is used.
@@ -79,6 +80,34 @@ async function prepare(input: HostGeneratedStudioImport, limits?: Parameters<typ
   return host.prepare(await host.admit(input.revisionId));
 }
 const errorCode = (code: StudioImportManifestError['code']) => (error: unknown) => error instanceof StudioImportManifestError && error.code === code;
+
+test('emissive glTF lamp data survives preparation and native wire validation without engine acceptance', async () => {
+  const f = fixture({ texture: PNG });
+  f.doc.materials[0].emissiveFactor = [0.9, 0.3, 0.1];
+  f.doc.materials[0].emissiveTexture = { index: 0 };
+  f.doc.materials[0].extensions = { KHR_materials_emissive_strength: { emissiveStrength: 2.5 } };
+  f.doc.extensionsUsed = ['KHR_materials_emissive_strength']; f.update();
+  const prepared = await prepare(f.input), light = prepared.manifest.materials[0]!.emission!;
+  assert.deepEqual(light.factor, [0.9, 0.3, 0.1]); assert.equal(light.strength, 2.5);
+  assert.equal(light.map!.sha256, sha(PNG)); assert.equal(light.map!.channel, 'rgb');
+  assert.ok(prepared.manifest.objects.filter(o => o.role === 'render').every(o => o.textureSha256s.includes(sha(PNG))));
+  assert.deepEqual(parseNativeStudioImportResponse({ prepared }, JOB, f.input.projectId).prepared, prepared);
+  assert.equal(prepared.manifest.engineVerification, 'pending');
+});
+
+test('zero emission preserves existing material hashes while invalid emission and unsupported extensions remain refused', async () => {
+  const first = fixture(), plain = await prepare(first.input); first.doc.materials[0].emissiveFactor = [0, 0, 0]; first.update();
+  const zero = await prepare(first.input);
+  assert.equal(zero.manifest.materials[0]!.sha256, plain.manifest.materials[0]!.sha256);
+  assert.equal(Object.hasOwn(zero.manifest.materials[0]!, 'emission'), false);
+  for (const strength of [-1, 1001, '2']) {
+    const f = fixture(); f.doc.materials[0].extensions = { KHR_materials_emissive_strength: { emissiveStrength: strength } };
+    f.doc.extensionsUsed = ['KHR_materials_emissive_strength']; f.update(); await assert.rejects(prepare(f.input));
+  }
+  const unsupported = fixture(); unsupported.doc.extensionsUsed = ['KHR_materials_unlit'];
+  unsupported.doc.materials[0].extensions = { KHR_materials_unlit: {} }; unsupported.update();
+  await assert.rejects(prepare(unsupported.input));
+});
 function withText(png: Buffer): Buffer {
   const data = Buffer.from('revision\0two'), chunk = Buffer.alloc(12 + data.length); chunk.writeUInt32BE(data.length); chunk.write('tEXt', 4); data.copy(chunk, 8);
   let crc = 0xffffffff;
@@ -229,7 +258,7 @@ test('malformed binary, external resources (including unused), rigs, animations 
   const corrupt = fixture(); corrupt.input.files[0]!.bytes[0] = 0; corrupt.input.files[0]!.sha256 = sha(corrupt.input.files[0]!.bytes); await assert.rejects(prepare(corrupt.input), errorCode('EXPORT'));
   for (const mutate of [
     (d: Doc) => d.buffers[0].uri = 'https://example.invalid/data.bin', (d: Doc) => d.extras = { uri: 'file:///secret' },
-    (d: Doc) => d.nodes[0].scale = [-1, 1, 1], (d: Doc) => d.materials[0].emissiveFactor = [1, 0, 0],
+    (d: Doc) => d.nodes[0].scale = [-1, 1, 1], (d: Doc) => d.materials[0].emissiveFactor = [2, 0, 0],
     (d: Doc) => { d.extensionsUsed = ['KHR_materials_unlit']; d.materials[0].extensions = { KHR_materials_unlit: {} }; },
     (d: Doc) => d.nodes[0].weights = [1],
   ]) { const f = fixture(); mutate(f.doc); f.update(); await assert.rejects(prepare(f.input), StudioImportManifestError); }

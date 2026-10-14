@@ -1,5 +1,5 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { instanceRef, jsonObject, object, textField, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite } from '../../protocol/src/studio.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -62,10 +62,16 @@ export function engineProperties(value: Record<string, Json>): Record<string, Js
   return result;
 }
 export function validateCommandArgs(method: StudioMethod, value: unknown, session: StudioSession, internalRestore = false): Record<string, Json> {
+  if (method === 'scene.import_context') {
+    const input = object(value), prototype = Object.getPrototypeOf(input);
+    if ((prototype !== Object.prototype && prototype !== null) || Reflect.ownKeys(input).length !== 0) throw new ArcaneError('INPUT', 'Import context arguments must be an empty JSON object.');
+  }
   const a = jsonObject(value);
   if (isWrite(method) && !session.allowWrites) throw new ArcaneError('READ_ONLY', 'This Studio pairing is read-only. Create an explicit writable pairing to edit.');
   if (!session.capabilities.includes(method)) throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
   switch (method) {
+    case 'scene.import_context':
+      keys(a, []); root('Workspace', session); break;
     case 'scene.children':
       keys(a, ['root', 'ref', 'limit']); root(a.root, session);
       if (a.ref) { const r = ref(a.ref, session); if (r.root !== a.root) throw new ArcaneError('SCOPE', 'Root/ref mismatch.'); }
@@ -102,4 +108,21 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       ref(object(a.mutation).ref, session); break;
   }
   return a;
+}
+
+/** Consume only a completed command from the trusted host receipt store. The
+ * selector/ledger still owns freshness, continuity and permission admission. */
+export function validateStudioImportContextReceipt(command: StudioCommand, session: StudioSession): StudioImportContextObservation {
+  if (command.method !== 'scene.import_context' || command.protocolVersion !== 1 || command.state !== 'succeeded'
+    || command.error !== null || session.revokedAt !== null || command.sessionId !== session.id
+    || command.clientSessionId !== session.clientSessionId || command.allowWrites !== session.allowWrites
+    || canonical([...command.allowedRoots].sort()) !== canonical([...session.allowedRoots].sort())) {
+    throw new ArcaneError('SCOPE', 'Import context requires a succeeded receipt from this exact live Studio session.');
+  }
+  validateCommandArgs('scene.import_context', command.args, session);
+  const observation = studioImportContextObservation(command.result);
+  if (observation.sessionId !== session.id || observation.placeId !== session.placeId || observation.universeId !== session.universeId) {
+    throw new ArcaneError('SCOPE', 'Import context identity differs from the paired Studio session.');
+  }
+  return observation;
 }

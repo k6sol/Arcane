@@ -72,6 +72,96 @@ function windowsPolicy(fs = filesystemFixture()) {
 }
 const policy = windowsPolicy();
 
+function productServiceFixture({ closeFailAt } = {}) {
+  const directory = 'C:\\UserData\\runtime\\projects\\fixture', cwd = 'C:\\Arcane\\resources\\product', projectPath = 'C:\\Project';
+  const artifactHash = 'd'.repeat(64), services = {}, events = [];
+  let hostConfiguration, savedArgs, exitCode, descriptorRemoved = false;
+  const created = (resource, instance) => { assert.equal(services[resource], undefined); services[resource]=instance; events.push({operation:'create',resource}); return instance; };
+  const closed = (resource, instance) => {
+    assert.equal(instance, services[resource], 'Cleanup retains the exact owned instance.');
+    assert.equal(events.filter(value => value.operation === 'close' && value.resource === resource).length, 0);
+    events.push({operation:'close',resource});
+    if (resource === closeFailAt) throw new Error('Synthetic ' + resource + ' close failure');
+  };
+  const context = {
+    cwd, runtimeRoot:'C:\\UserData', directory, connectionDirectory:win32.join(directory,'connection-lab'),
+    stateOverride:directory, resourceOverride:cwd, port:0, workflowCodeVerification:undefined,
+    process:{env:{ARCANE_PROJECT:projectPath},pid:17,exit(code){exitCode=code;}},
+    join:win32.join, resolve:win32.resolve,
+    StudioStore:class { constructor(options) { assert.equal(options.directory,directory); created('studio',this); } close(){closed('studio',this);} },
+    WorkStore:class { constructor(options) { assert.equal(options.directory,directory); assert.equal(options.projectPath,projectPath); created('work',this); } close(){closed('work',this);} },
+    ConversationWorkStore:class { constructor(options) { assert.equal(options.directory,win32.join(directory,'connection-lab','conversation-work')); assert.equal(options.projectPath,projectPath); this.projectPath=projectPath; created('associations',this); } close(){closed('associations',this);} },
+    async studioImportPluginArtifactHash(root) { assert.equal(root,cwd); events.push({operation:'create',resource:'artifact'}); return artifactHash; },
+    async createStudioImportPreparationStore(options) {
+      assert.deepEqual(Object.keys(options).sort(), ['directory','projectPath','studio','workAssociations']);
+      assert.equal(options.projectPath,projectPath); assert.equal(options.directory,win32.join(directory,'studio-import-preparations'));
+      assert.equal(options.studio,services.studio); assert.equal(options.workAssociations,services.associations);
+      return created('preparations',Object.freeze({async save(...args){assert.equal(this,services.preparations);savedArgs=args;},
+        async get(){assert.fail('Metadata fixture never reads preparations.');},async close(){closed('preparations',this);}}));
+    },
+    createStudioImportHost(options) {
+      assert.deepEqual(Object.keys(options).sort(), ['persistPreparation','pluginArtifactHash','projectPath','studio','workAssociations']);
+      assert.equal(options.projectPath,projectPath); assert.equal(options.studio,services.studio); assert.equal(options.workAssociations,services.associations);
+      assert.equal(options.pluginArtifactHash,artifactHash,'Await the bundled artifact loader.');
+      assert.equal(events.filter(value => value.resource === 'artifact').length,1); assert.ok(services.preparations);
+      assert.equal(typeof options.persistPreparation,'function'); hostConfiguration=options;
+      const hooks=Object.freeze({workAssociations:services.associations,selectTarget(){assert.fail('Metadata fixture must not observe Studio.');},
+        validateTarget(){assert.fail('Metadata fixture must not read engine state.');},recordPrepared(){assert.fail('Metadata fixture must not prepare or upload.');},
+        releaseTarget(){assert.fail('Metadata fixture must not operate on an engine target.');}});
+      return created('host',Object.freeze({hooks,close(){closed('host',this);}}));
+    },
+    async createAssetService(options) {
+      assert.equal(options.projectPath,services.associations.projectPath); assert.equal(options.studioImport,services.host.hooks);
+      assert.equal(options.studioImport.workAssociations,services.associations);
+      assert.ok(options.studioImport.workAssociations instanceof context.ConversationWorkStore);
+      assert.equal(options.outputRoot,win32.join(directory,'assets'));
+      return created('assets',{options,async close(){closed('assets',this);}});
+    },
+    createLearningService() { return created('learning',{close(){closed('learning',this);}}); },
+    async createConnectionLab(options) {
+      assert.equal(options.studioStore,services.studio); assert.equal(options.workStore,services.work);
+      assert.equal(options.conversationWorkStore,services.associations); assert.equal(options.assetService,services.assets); assert.equal(options.learningService,services.learning);
+      return created('lab',{origin,async close(){closed('lab',this);}});
+    },
+  };
+  const cleanupBegin = productSource.indexOf('async function cleanupStartup('), cleanupEnd = productSource.indexOf('// The desktop host',cleanupBegin);
+  const begin = productSource.indexOf('const store = new StudioStore('), end = productSource.indexOf('const descriptor =',begin);
+  assert.ok(cleanupBegin >= 0 && cleanupEnd > cleanupBegin && begin >= 0 && end > begin,'Expected the trusted product composition boundary.');
+  const initialize = () => vm.runInNewContext(stripTypeScriptTypes('(async () => {\n' + productSource.slice(cleanupBegin,cleanupEnd) + productSource.slice(begin,end) + '\nreturn {store,work,associations,assets,learning,app};\n})()'),context);
+  const shutdown = async () => {
+    const shutdownBegin = productSource.indexOf('async function shutdown()'), shutdownEnd = productSource.indexOf('for (const signal',shutdownBegin);
+    assert.ok(shutdownBegin >= 0 && shutdownEnd > shutdownBegin,'Expected the product shutdown boundary.');
+    const descriptor=win32.join(directory,'daemon.json');
+    await vm.runInNewContext(stripTypeScriptTypes('let closing=false;\n' + productSource.slice(shutdownBegin,shutdownEnd) + '\nshutdown();'),{
+      ...context,app:services.lab,assets:services.assets,learning:services.learning,associations:services.associations,work:services.work,store:services.studio,
+      importHost:services.host,preparations:services.preparations,descriptor,
+      setTimeout(){return {unref(){}};},clearTimeout(){},console:{error(message){assert.match(message,/cleanup had an error/);}},
+      async readFile(path){assert.equal(path,descriptor);return JSON.stringify({pid:17,origin});},
+      async unlink(path){assert.equal(path,descriptor);descriptorRemoved=true;},
+    });
+  };
+  return {initialize,shutdown,services,events,get hostConfiguration(){return hostConfiguration;},get savedArgs(){return savedArgs;},get exitCode(){return exitCode;},get descriptorRemoved(){return descriptorRemoved;}};
+}
+
+test('product import wiring shares exact stores, awaited artifact, host hooks and ledger persistence', async () => {
+  const f=productServiceFixture(); await f.initialize();
+  const resources=f.events.filter(value => value.operation === 'create').map(value => value.resource);
+  assert.ok(resources.indexOf('host') > resources.indexOf('preparations'));
+  assert.ok(resources.indexOf('host') > resources.indexOf('artifact')); assert.ok(resources.indexOf('assets') > resources.indexOf('host'));
+  const args=[Object.freeze({fixture:'actor'}),'synthetic-job',Object.freeze({fixture:'plan'}),Object.freeze({fixture:'witness'}),()=>assert.fail('Forward the guard without invoking it.')];
+  await f.hostConfiguration.persistPreparation(...args);
+  assert.equal(f.savedArgs.length,args.length); for(let i=0;i<args.length;i++) assert.equal(f.savedArgs[i],args[i]);
+  await f.shutdown();
+  assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','studio','work']);
+  assert.equal(f.exitCode,0); assert.equal(f.descriptorRemoved,true);
+});
+
+test('product host close failure still closes the same ledger, assets and borrowed stores', async () => {
+  const f=productServiceFixture({closeFailAt:'host'}); await f.initialize(); await f.shutdown();
+  assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','studio','work']);
+  assert.equal(f.exitCode,1); assert.equal(f.descriptorRemoved,true);
+});
+
 test('origin accepts only canonical numeric IPv4 loopback and a valid port', () => {
   assert.equal(policy.validOrigin(origin), true);
   for (const value of [
@@ -319,10 +409,15 @@ test('regression: normal packaged asset state is accepted outside resources and 
   // Evaluate only the trusted constructor arguments, never the daemon entry.
   const constructor = /assets\s*=\s*await\s*createAssetService\(([\s\S]*?)\)\s*;\s*\}\s*catch/.exec(productSource);
   assert.ok(constructor, 'Expected product asset-service initialization.');
+  class ConversationWorkStore { constructor(projectPath) { this.projectPath=projectPath; } }
+  const associations = new ConversationWorkStore('C:\\Project');
+  const importHooks = Object.freeze({workAssociations:associations,selectTarget() { assert.fail('Asset path evaluation must not observe Studio.'); }});
   const options = await vm.runInNewContext('(async () => capture(' + constructor[1] + '))()', {
-    capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', associations: { projectPath: 'C:\\Project' }, stateOverride: directory,
-    resourceOverride: resources, directory, join: win32.join,
+    capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', associations, stateOverride: directory,
+    resourceOverride: resources, directory, join: win32.join, importHost: { hooks:importHooks },
   });
+  assert.equal(options.studioImport, importHooks, 'Packaged assets use the same owned production host hooks.');
+  assert.equal(options.studioImport.workAssociations, associations, 'The asset scope borrows the same conversation store.');
   const serviceSource = source('apps/daemon/src/asset-service.ts');
   const begin = serviceSource.indexOf('export async function createAssetService(');
   const end = serviceSource.indexOf('  const ownerKey', begin);
@@ -337,7 +432,7 @@ test('regression: normal packaged asset state is accepted outside resources and 
   for (const path of [resources, userData, directory, temp]) fs.sync.mkdirSync(path);
   const writes = [];
   const result = await vm.runInNewContext(stripTypeScriptTypes(rootPolicy + '\n' + validation), {
-    options, ...win32, process: { platform: 'win32' }, ArcaneError: Error, AssetError: Error,
+    options, ...win32, process: { platform: 'win32' }, ArcaneError: Error, AssetError: Error, ConversationWorkStore,
     realpath: fs.async.realpath, lstat: fs.async.lstat, noLinks: async () => {}, tmpdir: () => temp,
     within: (root, target) => key(root) === key(target) || policy.within(root, target),
     mkdir: async path => { writes.push(path); return fs.async.mkdir(path); },

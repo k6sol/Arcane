@@ -59,9 +59,12 @@ const fileManifest = generatedFile.omit({ bytes: true }).extend({ byteLength: z.
 const textureManifest = z.strictObject({ sha256: hash, byteLength: z.number().int().positive(), width: z.number().int().positive(), height: z.number().int().positive(),
   contentType: z.enum(['image/png', 'image/jpeg']), locations: z.array(z.strictObject({ fileId: id, imageIndex: z.number().int().nonnegative() })).min(1).max(128) });
 const textureUse = z.strictObject({ sha256: hash, channel: z.enum(['rgba', 'rgb', 'g', 'b']), texCoord: z.literal(0) });
+const emission = z.strictObject({ factor: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)]),
+  strength: z.number().min(0).max(1000), map: textureUse.nullable() });
 const materialContent = z.strictObject({ baseColor: z.tuple([number, number, number, number]), metallic: z.number().min(0).max(1), roughness: z.number().min(0).max(1),
   alphaMode: z.enum(['OPAQUE', 'MASK', 'BLEND']), alphaCutoff: z.number().min(0).max(1), doubleSided: z.boolean(), normalScale: number,
-  colorMap: textureUse.nullable(), normalMap: textureUse.nullable(), roughnessMap: textureUse.nullable(), metalnessMap: textureUse.nullable() });
+  colorMap: textureUse.nullable(), normalMap: textureUse.nullable(), roughnessMap: textureUse.nullable(), metalnessMap: textureUse.nullable(),
+  emission: emission.optional() });
 const materialManifest = materialContent.extend({ sha256: hash });
 const objectManifest = z.strictObject({ sourceObjectId: id, name: z.string().min(1).max(256), role: z.enum(['render', 'collision']), parentSourceObjectId: id.nullable(),
   exportFileId: id, nodeIndex: z.number().int().nonnegative(), meshExportSha256: hash, triangles: z.number().int().positive(),
@@ -86,6 +89,7 @@ const inputSchema = z.strictObject({ schemaVersion: z.literal(1), projectId: has
   files: z.array(generatedFile).min(1).max(32), models: z.array(sourceModel).min(1).max(32), anchors: z.array(anchor).max(128), baseline: baselineSchema.nullable() });
 
 export type HostGeneratedStudioImport = z.input<typeof inputSchema>;
+export type StudioImportSelection = Pick<HostGeneratedStudioImport, 'target' | 'placement' | 'studsPerMeter'>;
 export type StudioImportManifest = DeepReadonly<z.infer<typeof manifestSchema>>;
 export type StudioImportBaseline = z.input<typeof baselineSchema>;
 type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -188,6 +192,11 @@ function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   if (!result.success) fail('SCHEMA', 'Invalid import schema: ' + result.error.issues.slice(0, 3).map(i => i.path.join('.') + ' ' + i.message).join('; '));
   return result.data;
 }
+/** Detach trusted host target selection before awaits; never invoke accessors. */
+export function snapshotStudioImportSelection(value: unknown): StudioImportSelection {
+  return freeze(parse(inputSchema.pick({ target: true, placement: true, studsPerMeter: true }),
+    snapshot(value, { ...STUDIO_IMPORT_LIMITS }))) as StudioImportSelection;
+}
 type Obj = Record<string, any>; // Only JSON parsed and admitted by validateGlb below.
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 function json(bytes: Buffer, limits: Limits): Obj {
@@ -254,7 +263,8 @@ function readModel(model: z.infer<typeof sourceModel>, files: Map<string, z.infe
   const doc = json(bytes.subarray(20, 20 + bytes.readUInt32LE(12)), limits), start = 28 + bytes.readUInt32LE(12);
   const bin = bytes.subarray(start);
   if ((doc.skins?.length ?? 0) || (doc.animations?.length ?? 0)) fail('EXPORT', 'Rigged/animated assets require a separate engine-verified adapter.');
-  if ((doc.extensionsUsed?.length ?? 0) || (doc.extensionsRequired?.length ?? 0)) fail('EXPORT', 'Bake unsupported material/geometry extensions before static import.');
+  if ([...(doc.extensionsUsed ?? []), ...(doc.extensionsRequired ?? [])].some((name: string) => name !== 'KHR_materials_emissive_strength'))
+    fail('EXPORT', 'Bake unsupported material/geometry extensions before static import.');
   return { doc, bin };
 }
 function multiply(a: number[], b: number[]): number[] {
@@ -330,11 +340,18 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
       return { sha256: imageHashes[texture.source] as string, channel, texCoord: 0 as const };
     };
     const materialHashes = (doc.materials ?? []).map((m: Obj) => {
-      if (m.extensions || m.occlusionTexture || m.emissiveTexture || (m.emissiveFactor ?? []).some((n: number) => n !== 0)) fail('EXPORT', 'Bake unsupported occlusion/emission before static import.');
+      if (Object.keys(m.extensions ?? {}).some(name => name !== 'KHR_materials_emissive_strength') || m.occlusionTexture)
+        fail('EXPORT', 'Bake unsupported occlusion/material extensions before static import.');
       const p = m.pbrMetallicRoughness ?? {};
+      const factor = m.emissiveFactor ?? [0, 0, 0], strength = m.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1;
+      // Preserve glTF values, not an asserted engine conversion. SurfaceAppearance
+      // exposes EmissiveTint/Strength/MaskContent; actual readback stays pending.
+      // Omit zero/default emission to retain old non-emissive material digests.
+      const light = m.emissiveTexture || factor.some((n: number) => n !== 0) || m.extensions?.KHR_materials_emissive_strength
+        ? { emission: parse(emission, { factor, strength, map: use(m.emissiveTexture, 'rgb') }) } : {};
       const content = parse(materialContent, { baseColor: p.baseColorFactor ?? [1, 1, 1, 1], metallic: p.metallicFactor ?? 1, roughness: p.roughnessFactor ?? 1,
         alphaMode: m.alphaMode ?? 'OPAQUE', alphaCutoff: m.alphaCutoff ?? 0.5, doubleSided: m.doubleSided ?? false, normalScale: m.normalTexture?.scale ?? 1,
-        colorMap: use(p.baseColorTexture, 'rgba'), normalMap: use(m.normalTexture, 'rgb'), roughnessMap: use(p.metallicRoughnessTexture, 'g'), metalnessMap: use(p.metallicRoughnessTexture, 'b') });
+        colorMap: use(p.baseColorTexture, 'rgba'), normalMap: use(m.normalTexture, 'rgb'), roughnessMap: use(p.metallicRoughnessTexture, 'g'), metalnessMap: use(p.metallicRoughnessTexture, 'b'), ...light });
       const sha256 = digest(content); materials.set(sha256, { ...content, sha256 }); return sha256;
     });
     nodes.forEach((node, i) => (node.children ?? []).forEach((child: number) => parents.set(child, i)));
@@ -372,7 +389,7 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
       let parent = parents.get(source.nodeIndex);
       while (parent !== undefined && !sourceNodes.has(parent)) parent = parents.get(parent);
       const material = materialSha256 ? materials.get(materialSha256)! : null;
-      const textureSha256s = material ? sorted([material.colorMap, material.normalMap, material.roughnessMap, material.metalnessMap].flatMap(m => m ? [m.sha256] : [])) : [];
+      const textureSha256s = material ? sorted([material.colorMap, material.normalMap, material.roughnessMap, material.metalnessMap, material.emission?.map].flatMap(m => m ? [m.sha256] : [])) : [];
       objects.push(parse(objectManifest, { ...source, name: node.name ?? mesh.name ?? source.sourceObjectId, parentSourceObjectId: parent === undefined ? null : sourceNodes.get(parent),
         exportFileId: model.fileId, meshExportSha256: digest(geometry), triangles: count, materialSha256, textureSha256s, exportTransform: transform, scale,
         bounds: measuredBounds(positions), worldBounds: measuredBounds(positions.map(p => [0, 1, 2].map(i => transform[i]! * p[0]! + transform[4 + i]! * p[1]! + transform[8 + i]! * p[2]! + transform[12 + i]!))), collisionFor: sorted(source.collisionFor) }));
@@ -445,13 +462,13 @@ function revision(next: z.infer<typeof manifestSchema>, baseline: z.infer<typeof
     textures: resources(next.textures.map(t => t.sha256), previous?.textures.map(t => t.sha256) ?? []), preservation: 'preserve-all-scripts-attachments-constraints' as const });
 }
 
-/** Main integration seam (factory and admit MUST stay in the daemon closure):
- * loadGeneratedFiles(jobId) must recheck the same NativeAssetActor with
- * assertNativeAssetActor/nativeAssetActorScope, require its ConversationWorkStore
- * job binding, call AssetService.manifest(jobId) and AssetService.artifact for the
- * fixed asset.glb/collision.glb, and select stable source IDs from the host ledger
- * (never guess identity from names). Adapt verified MeshMetrics/SocketEvidence to
- * objects/pivots/anchors; pin source scene/request hashes and exporter versions.
+/** Production integration: AssetService.prepareStudioImport owns the loader and
+ * admission lifetime. It rechecks the same NativeAssetActor and exact durable
+ * ConversationWorkStore binding, reads fixed verified asset.glb/collision.glb,
+ * and validates bundled worker semantic IDs against actual exported extras.
+ * Its asset-import-adapter pins input/request/scene/worker hashes, measured
+ * anchor transforms and actual producer versions. Old jobs without emitted
+ * identities are explicitly unsupported; no host fallback IDs are generated.
  * Current AssetService does NOT admit arbitrary glTF paths: glTF bundles here
  * require an equivalent host-generated artifact reader before they can be used.
  * Load baseline ONLY from durable host-observed import mappings and exact Studio
@@ -459,6 +476,8 @@ function revision(next: z.infer<typeof manifestSchema>, baseline: z.infer<typeof
  * After EVERY await, recheck the same captured native/project/session grant in
  * that callback. Throw on revocation; a true/false result is not an attestation.
  * Expose only prepared data, never this factory, loader or admission token.
+ * Main wires trusted studioImport options into createAssetService and calls
+ * prepareStudioImport(jobId, actor) from the dedicated native audience only.
  * Main must persist the prepared digest/delta before a separately authorized
  * Model upload/import; preserve listed children, compare expectedOwnedStateSha256
  * inside the final engine mutation, retain removed objects for human review,

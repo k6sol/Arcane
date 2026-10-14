@@ -39,6 +39,27 @@ export type Command = {
 export type MutationReceipt = {
 	kind: string, ref: InstanceRef, before: any, after: {[string]: any},
 }
+-- Observation only; the host ledger selects a target and preserves provenance.
+export type StudioPlaceCreatorObservation = {
+	status: "available", kind: "user" | "group", id: number,
+	provenance: "game.CreatorType/CreatorId",
+} | {
+	status: "unavailable", kind: nil, id: number,
+	provenance: "game.CreatorType/CreatorId",
+}
+export type StudioUserObservation = {
+	status: "available", id: number,
+	provenance: "StudioService:GetUserId",
+} | {
+	status: "unavailable" | "not_applicable", id: nil,
+	provenance: "StudioService:GetUserId",
+}
+export type StudioImportContextObservation = {
+	sessionId: string, root: "Workspace", parentRef: InstanceRef,
+	placeId: number, universeId: number, mode: "Edit" | "Play",
+	modeProvenance: "StudioTestService.EditModeActive",
+	creator: StudioPlaceCreatorObservation, studioUser: StudioUserObservation,
+}
 export type Outcome = {state: string, result: any?, error: string?, unsafe: boolean?}
 return {}
 end
@@ -58,7 +79,7 @@ Validation.MAX_CACHE_BYTES = 16 * 1024 * 1024
 Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
-Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read"})
+Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "scene.import_context"})
 Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
@@ -658,6 +679,51 @@ function Operations:children(args: any): any
 	return {parentRef = self.registry:ref(parent), items = items, truncated = #children > limit}
 end
 
+-- Primary API docs verified 2026-10-14:
+-- https://create.roblox.com/docs/reference/engine/classes/DataModel (CreatorType/CreatorId/PlaceId/GameId)
+-- https://create.roblox.com/docs/reference/engine/enums/CreatorType
+-- https://create.roblox.com/docs/reference/engine/classes/StudioService#GetUserId (anonymous = 0)
+-- https://create.roblox.com/docs/reference/engine/classes/StudioTestService#EditModeActive
+-- Registry owns the actual granted service and GUID; no caller path or inferred ID.
+function Operations:importContext(args: any): any
+	V.fields(args, {}, "import-context arguments")
+	local workspace = self.registry:root("Workspace")
+	local gameModel = self.registry.gameModel
+	local function snapshot(): any
+		local ok, value = pcall(function(): any
+			local creatorType = gameModel.CreatorType
+			return {placeId = V.integer(gameModel.PlaceId, 0, 9007199254740991, "place ID"),
+				universeId = V.integer(gameModel.GameId, 0, 9007199254740991, "universe ID"),
+				creatorId = V.integer(gameModel.CreatorId, 0, 9007199254740991, "creator ID"),
+				creatorKind = if creatorType == Enum.CreatorType.User then "user"
+					else if creatorType == Enum.CreatorType.Group then "group" else V.NULL,
+				edit = V.boolean(gameModel:GetService("StudioTestService").EditModeActive, "Studio edit state")}
+		end)
+		if not ok then V.fail("CONTEXT_UNAVAILABLE", "Studio import identity or mode could not be observed exactly.") end
+		return value
+	end
+	local before = snapshot()
+	local creator: any = {status = "unavailable", kind = V.NULL, id = before.creatorId, provenance = "game.CreatorType/CreatorId"}
+	if before.creatorId > 0 and before.creatorKind ~= V.NULL then
+		creator.status, creator.kind = "available", before.creatorKind
+	end
+	local studioUser: any = {status = "not_applicable", id = V.NULL, provenance = "StudioService:GetUserId"}
+	-- Even a template/nonzero partial identity must never use the Studio user.
+	if before.placeId == 0 and before.universeId == 0 and before.creatorId == 0 then
+		studioUser.status = "unavailable"
+		local ok, userId = pcall(function(): number
+			return V.integer(gameModel:GetService("StudioService"):GetUserId(), 1, 9007199254740991, "Studio user ID")
+		end)
+		if ok then studioUser.status, studioUser.id = "available", userId end
+	end
+	local after = snapshot()
+	if not V.equal(before, after) then V.fail("CONTEXT_CHANGED", "Studio identity or mode changed during observation; request fresh context.") end
+	if workspace.Parent ~= gameModel or workspace.ClassName ~= "Workspace" then V.fail("REF", "The granted Workspace is unavailable.") end
+	return {sessionId = self.registry.sessionId, root = "Workspace", parentRef = self.registry:ref(workspace),
+		placeId = after.placeId, universeId = after.universeId, mode = if after.edit then "Edit" else "Play",
+		modeProvenance = "StudioTestService.EditModeActive", creator = creator, studioUser = studioUser}
+end
+
 function Operations:search(args: any): any
 	V.fields(args, {"root", "query", "limit"}, "search arguments")
 	local root = self.registry:root(args.root)
@@ -862,6 +928,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	local method = command.method
 	local result: any
 	if method == "scene.children" then result = self:children(args)
+	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "scene.inspect" then
 		V.fields(args, {"ref"}, "inspect arguments")

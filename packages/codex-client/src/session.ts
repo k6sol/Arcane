@@ -4,7 +4,7 @@ import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, 
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { JsonlTransport, type InternalProcess } from './transport.js';
 import { arcaneThreadIsIsolated, requireArcaneBuildTools, type McpInventoryRow } from './mcp-isolation.js';
-import { ARCANE_TASK_INSTRUCTIONS } from '../../protocol/src/arcane-tools.js';
+import { ARCANE_TASK_INSTRUCTIONS, ARCANE_NATIVE_TOOL_NAMES } from '../../protocol/src/arcane-tools.js';
 import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
@@ -176,6 +176,11 @@ export class CodexSession {
     if (hooks !== undefined) {
       this.#nativeAssetHooks = validateNativeAssetHooks(hooks);
       if (mcpPolicy !== 'arcane-only') fail('MCP_PROFILE', 'Native asset hooks require Arcane isolation.');
+      // Only validated host hooks select the final child's native surface. The
+      // discovery/history specs and sessions without hooks keep their inventory.
+      const toolKey = 'mcp_servers.arcane.enabled_tools=';
+      spec = { ...spec, args: spec.args.map((arg, index) => spec.args[index - 1] === '-c' && arg.startsWith(toolKey)
+        ? toolKey + JSON.stringify(ARCANE_NATIVE_TOOL_NAMES) : arg) };
     }
     this.#cwd = spec.cwd;
     this.#processSpec = { ...spec, args: [...spec.args], env: { ...spec.env } };
@@ -369,7 +374,7 @@ export class CodexSession {
         const rows = await this.#inspectMcpServers(thread.threadId, () => this.#checkTurnPreflight(preflight));
         this.#checkTurnPreflight(preflight);
         if (!arcaneThreadIsIsolated(rows)) fail('MCP_ISOLATION', 'The current native thread is not isolated to Arcane. No turn was sent.');
-        requireArcaneBuildTools(rows);
+        requireArcaneBuildTools(rows, this.#nativeAssetHooks !== undefined);
         this.#mcpIsolated = true;
       } catch (error) {
         this.#invalidateIsolation(error);
@@ -603,7 +608,7 @@ export class CodexSession {
           const inventory=await this.#inspectMcpServers(thread.threadId,check);
           check();
           if(!arcaneThreadIsIsolated(inventory))fail('MCP_ISOLATION','The native thread exposes an inherited tool server or Arcane is not connected. No turn can be started.');
-          requireArcaneBuildTools(inventory);
+          requireArcaneBuildTools(inventory, this.#nativeAssetHooks !== undefined);
           this.#mcpIsolated=true;thread.configured=true;
         } catch(error) { this.#invalidateIsolation(error);throw error; }
       }

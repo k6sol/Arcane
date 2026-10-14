@@ -180,6 +180,9 @@ test('compiled MCP stdio smoke from a disposable resources/product bundle serves
   await mkdir(join(bundle, 'dist/apps'), { recursive: true });
   await cp(join(compiled, 'apps/mcp'), join(bundle, 'dist/apps/mcp'), { recursive: true });
   await cp(join(compiled, 'apps/daemon'), join(bundle, 'dist/apps/daemon'), { recursive: true });
+  // Prepared asset wire validation shares the shipped GLB preflight module.
+  // Use the same compiled application closure as the actual desktop package.
+  await cp(join(compiled, 'apps/desktop'), join(bundle, 'dist/apps/desktop'), { recursive: true });
   await cp(join(compiled, 'packages'), join(bundle, 'dist/packages'), { recursive: true });
   await mkdir(join(bundle, 'scripts'));
   await copyFile(join(ROOT, 'scripts/skill-pack.mjs'), join(bundle, 'scripts/skill-pack.mjs'));

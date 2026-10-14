@@ -10,7 +10,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { CodexClientError, type NativeAssetHooks, type NativeAssetIntent, type Snapshot } from '../../packages/codex-client/src/types.js';
-import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
+import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { createCodexService } from '../../apps/daemon/src/codex-service.js';
 import { createNativeAssetRegistry, assertNativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
 
@@ -135,7 +135,8 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}, options: {
     retired() { lifecycle.retired++; options.forward?.retired(); },
   });
   const session = new CodexSession({
-    command: process.execPath, args: ['-e', PEER, JSON.stringify({ ackSession: SESSION, ...scenario, arcaneToolNames: ARCANE_TOOL_NAMES }), audit, notifyFile, releaseFile],
+    command: process.execPath, args: ['-e', PEER, JSON.stringify({ ackSession: SESSION, ...scenario,
+      arcaneToolNames: options.hooks === false ? ARCANE_TOOL_NAMES : ARCANE_NATIVE_TOOL_NAMES }), audit, notifyFile, releaseFile],
     cwd: directory, env: nativeEnvironment(),
   }, limits({ requestTimeoutMs: 6000, approvalTimeoutMs: 2000 }), 'spawned-node-fixture', policy, options.hooks === false ? undefined : hooks);
   t.after(async () => {

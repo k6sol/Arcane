@@ -9,6 +9,7 @@ import { command, session } from './schemas.js';
 import { workTask, workRun, workDefinition, leaseToken } from './work-schemas.js';
 import type { WorkTask, WorkRun } from '../../../packages/storage/src/work-store.js';
 import { assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel, nativeAssetJobId, nativeAssetCursorMatchesScope, type SafeAssetInput } from './asset-schemas.js';
+import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -93,7 +94,7 @@ export class DaemonClient {
     return { signal: controller.signal, dispose: () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); } };
   }
 
-  private async http(path: string, signal: AbortSignal, body?: object): Promise<unknown> {
+  private async http(path: string, signal: AbortSignal, body?: object, preparation = false): Promise<unknown> {
     signal.throwIfAborted();
     let response: Response;
     try {
@@ -103,11 +104,18 @@ export class DaemonClient {
         }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal,
       });
     } catch {
-      if (signal.aborted) throw new BridgeError('WAIT_ABORTED', 'The wait ended; any submitted command may still execute.');
+      if (signal.aborted) throw new BridgeError('WAIT_ABORTED', preparation
+        ? 'Studio import preparation ended without a verified plan. No Studio execution or acceptance is established.'
+        : 'The wait ended; any submitted command may still execute.');
       throw new BridgeError('DAEMON_UNREACHABLE', 'The local daemon connection failed. Redirects are refused.');
     }
-    const contentLength = Number(response.headers.get('content-length'));
-    if (contentLength > RESPONSE_LIMIT) { await response.body?.cancel(); throw new BridgeError('RESPONSE_LIMIT', 'Daemon response exceeds 1 MiB.'); }
+    const responseLimit = preparation ? NATIVE_STUDIO_IMPORT_RESPONSE_BYTES : RESPONSE_LIMIT;
+    const lengthHeader = response.headers.get('content-length');
+    if (preparation && lengthHeader !== null && !/^(0|[1-9][0-9]*)$/.test(lengthHeader)) {
+      await response.body?.cancel(); throw new BridgeError('PROTOCOL', 'Daemon response has invalid framing.');
+    }
+    const contentLength = Number(lengthHeader);
+    if (contentLength > responseLimit) { await response.body?.cancel(); throw new BridgeError('RESPONSE_LIMIT', 'Daemon response exceeds its byte bound.'); }
     const reader = response.body?.getReader();
     if (!reader) throw new BridgeError('PROTOCOL', 'Daemon returned an empty response.');
     const chunks: Uint8Array[] = [];
@@ -117,13 +125,13 @@ export class DaemonClient {
         const chunk = await reader.read();
         if (chunk.done) break;
         length += chunk.value.byteLength;
-        if (length > RESPONSE_LIMIT) throw new BridgeError('RESPONSE_LIMIT', 'Daemon response exceeds 1 MiB.');
+        if (length > responseLimit) throw new BridgeError('RESPONSE_LIMIT', 'Daemon response exceeds its byte bound.');
         chunks.push(chunk.value);
       }
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
     signal.throwIfAborted();
     let payload: unknown;
-    try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    try { payload = JSON.parse(preparation ? new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) : Buffer.concat(chunks).toString('utf8')); }
     catch { throw new BridgeError('PROTOCOL', 'Daemon response is not valid JSON.'); }
     if (!response.ok) {
       const error = z.object({ error: z.string().min(1).max(64), message: z.string().min(1).max(8192) }).safeParse(payload);
@@ -132,6 +140,9 @@ export class DaemonClient {
       throw new BridgeError('DAEMON_HTTP', `The local daemon rejected the request (HTTP ${response.status}).`, rejected);
     }
     if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json')) throw new BridgeError('PROTOCOL', 'Daemon response must be application/json.');
+    if (preparation && (response.status !== 200 || !/^application\/json(?:\s*;\s*charset=utf-8)?\s*$/i.test(response.headers.get('content-type')!))) {
+      throw new BridgeError('PROTOCOL', 'Daemon must return a JSON preparation plan with HTTP 200.');
+    }
     return payload;
   }
 
@@ -277,6 +288,17 @@ export class DaemonClient {
     (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);
     const schema = z.object({ manifest: assetManifest }).refine(value => value.manifest.jobId === jobId, 'Wrong asset manifest.');
     return this.readRecord(this.assetPath('manifest') + '?jobId=' + encodeURIComponent(jobId), schema, options);
+  }
+
+  async assetsPrepareStudioImport(jobId: string, options: WaitOptions = {}) {
+    if (this.assetAudience !== 'native-session') throw new BridgeError('ASSET_AUDIENCE', 'Studio import preparation requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);
+    const deadline = this.deadline(options);
+    try {
+      const value = await this.http('/v1/assets/native/prepare-studio-import', deadline.signal, { jobId }, true);
+      try { return parseNativeStudioImportResponse(value, jobId); }
+      catch { throw new BridgeError('PROTOCOL', 'Daemon returned invalid Studio import preparation evidence.'); }
+    } finally { deadline.dispose(); }
   }
 
   private async readRecord<T>(path: string, schema: z.ZodType<T>, options: WaitOptions): Promise<T> {

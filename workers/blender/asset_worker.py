@@ -8,7 +8,13 @@ import hashlib
 import json
 import math
 import random
+import struct
 import sys
+
+# Blender's isolated Python can ignore PYTHONDONTWRITEBYTECODE. Disable cache
+# writes explicitly before local audit/assembly imports in either worker mode.
+sys.dont_write_bytecode = True
+
 from pathlib import Path
 import bpy
 import bmesh
@@ -42,7 +48,7 @@ def material(name, color, metallic, roughness):
     return mat
 
 
-def box(collection, name, dimensions, center, mat=None, bevel=0.0, role="render"):
+def box(collection, name, dimensions, center, mat=None, bevel=0.0, role="render", source_key=None):
     mesh = bpy.data.meshes.new(name + "_Mesh")
     bm = bmesh.new()
     bmesh.ops.create_cube(bm, size=1)
@@ -59,6 +65,8 @@ def box(collection, name, dimensions, center, mat=None, bevel=0.0, role="render"
     for vert in mesh.vertices:
         vert.co += Vector(center)
     obj["arcane_role"] = role
+    if source_key is not None:
+        obj["arcane_source_key"] = source_key
     if mat:
         mesh.materials.append(mat)
     if bevel:
@@ -99,15 +107,15 @@ def hero(request, mats):
     x, y, z = request["sizeMeters"]
     group = collection("COL_HeroProp")
     rng = random.Random(request["seed"])
-    main = [box(group, "SM_" + request["name"] + "_body", (x, y, z * 0.8), (0, 0, z * 0.4), mats[0], min(x, y, z) * 0.035)]
+    main = [box(group, "SM_" + request["name"] + "_body", (x, y, z * 0.8), (0, 0, z * 0.4), mats[0], min(x, y, z) * 0.035, source_key="body")]
     # Raised lid, protected corner posts, inset plaque and a carrying handle.
-    main.append(box(group, "SM_" + request["name"] + "_lid", (x * 1.035, y * 1.035, z * 0.12), (0, 0, z * 0.85), mats[1], min(x, y, z) * 0.02))
+    main.append(box(group, "SM_" + request["name"] + "_lid", (x * 1.035, y * 1.035, z * 0.12), (0, 0, z * 0.85), mats[1], min(x, y, z) * 0.02, source_key="lid"))
     for i, (sx, sy) in enumerate([(-1, -1), (-1, 1), (1, -1), (1, 1)]):
-        main.append(box(group, "SM_" + request["name"] + "_post" + str(i), (x * 0.07, y * 0.07, z * 0.82), (sx * x * 0.47, sy * y * 0.47, z * 0.41), mats[1], min(x, y, z) * 0.008))
-    main.append(box(group, "SM_" + request["name"] + "_plaque", (x * 0.45, y * 0.035, z * 0.19), (0, -y * 0.508, z * (0.47 + rng.uniform(-0.025, 0.025))), mats[2], min(x, y, z) * 0.006))
-    main.append(box(group, "SM_" + request["name"] + "_handle", (x * 0.42, y * 0.08, z * 0.055), (0, 0, z * 0.973), mats[1], min(x, y, z) * 0.012))
+        main.append(box(group, "SM_" + request["name"] + "_post" + str(i), (x * 0.07, y * 0.07, z * 0.82), (sx * x * 0.47, sy * y * 0.47, z * 0.41), mats[1], min(x, y, z) * 0.008, source_key="post" + str(i)))
+    main.append(box(group, "SM_" + request["name"] + "_plaque", (x * 0.45, y * 0.035, z * 0.19), (0, -y * 0.508, z * (0.47 + rng.uniform(-0.025, 0.025))), mats[2], min(x, y, z) * 0.006, source_key="plaque"))
+    main.append(box(group, "SM_" + request["name"] + "_handle", (x * 0.42, y * 0.08, z * 0.055), (0, 0, z * 0.973), mats[1], min(x, y, z) * 0.012, source_key="handle"))
     for i, sx in enumerate([-1, 1]):
-        main.append(box(group, "SM_" + request["name"] + "_handle_support" + str(i), (x * 0.05, y * 0.08, z * 0.08), (sx * x * 0.18, 0, z * 0.925), mats[1], min(x, y, z) * 0.006))
+        main.append(box(group, "SM_" + request["name"] + "_handle_support" + str(i), (x * 0.05, y * 0.08, z * 0.08), (sx * x * 0.18, 0, z * 0.925), mats[1], min(x, y, z) * 0.006, source_key="handle_support" + str(i)))
     lod_group = collection("COL_LOD1")
     lods = []
     for obj in main:
@@ -122,7 +130,7 @@ def hero(request, mats):
         bpy.ops.object.modifier_apply(modifier=mod.name)
         lods.append(copy)
     collisions = collection("COL_Collision")
-    proxy = box(collisions, "COL_" + request["name"], (x * 1.035, y * 1.035, z), (0, 0, z / 2), role="collision")
+    proxy = box(collisions, "COL_" + request["name"], (x * 1.035, y * 1.035, z), (0, 0, z / 2), role="collision", source_key="body_proxy")
     return main, lods, [proxy]
 
 
@@ -139,8 +147,8 @@ def environment(request, mats):
     main, proxies = [], []
     collisions = collection("COL_Collision")
     for name, dimensions, center, index in parts:
-        main.append(box(group, "SM_" + request["name"] + "_" + name, dimensions, center, mats[index], min(dimensions) * 0.08))
-        proxies.append(box(collisions, "COL_" + request["name"] + "_" + name, dimensions, center, role="collision"))
+        main.append(box(group, "SM_" + request["name"] + "_" + name, dimensions, center, mats[index], min(dimensions) * 0.08, source_key=name))
+        proxies.append(box(collisions, "COL_" + request["name"] + "_" + name, dimensions, center, role="collision", source_key=name))
     return main, [], proxies
 
 
@@ -196,7 +204,101 @@ def lookdev(main, request):
 def export_glb(path, objects, with_materials=True):
     select(objects)
     bpy.ops.export_scene.gltf(filepath=str(path), export_format="GLB", use_selection=True,
-                              export_yup=True, export_extras=True, export_materials="EXPORT" if with_materials else "NONE")
+                              export_yup=True, export_extras=True, export_animations=False,
+                              export_materials="EXPORT" if with_materials else "NONE")
+
+
+def semantic_id(request, role, key):
+    # Explicit producer namespace, independent of display names, order and job UUID.
+    source = "\0".join(["arcane-semantic-v1", request["template"], request["name"], role, key])
+    return "arcane_" + hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def stamp_import_identity(request, main_objects, lods, collision, sockets):
+    seen = set()
+    for obj in main_objects + lods + collision:
+        key = obj.get("arcane_source_key")
+        if not isinstance(key, str) or not key or len(key) > 64:
+            raise ValueError("Missing explicit producer source key")
+        stable = semantic_id(request, obj["arcane_role"], key)
+        if stable in seen:
+            raise ValueError("Duplicate producer source identity")
+        seen.add(stable)
+        obj["arcane_source_object_id"] = stable
+        obj["arcane_identity_scheme"] = "arcane-semantic-v1"
+        # All bundled meshes bake their centers into geometry, preserving floor pivot.
+        obj["arcane_pivot"] = [0.0, 0.0, 0.0]
+    for obj in main_objects + collision:
+        # Custom recipes currently define model-level proxies, not per-part pairing.
+        # Environment-kit has explicit matching module keys; hero uses one model proxy.
+        targets = []
+        if obj["arcane_role"] == "collision":
+            targets = [p["arcane_source_object_id"] for p in main_objects
+                       if request["template"] != "environment-kit" or p["arcane_source_key"] == obj["arcane_source_key"]]
+        obj["arcane_collision_for"] = json.dumps(sorted(targets), separators=(",", ":"))
+    for obj in sockets:
+        if obj.parent not in main_objects:
+            raise ValueError("Import anchor must belong to a render part")
+        obj["arcane_source_anchor_id"] = semantic_id(request, "anchor", obj["arcane_socket_id"])
+        obj["arcane_identity_scheme"] = "arcane-semantic-v1"
+        obj["arcane_source_key"] = obj["arcane_socket_id"]
+        obj["arcane_source_object_id"] = obj.parent["arcane_source_object_id"]
+
+
+def exported_import_evidence(path, objects, sockets):
+    # Read only our two fixed exports. Bound allocation before parsing actual GLB JSON.
+    size = path.stat().st_size
+    if not 20 <= size <= 128 * 1024 * 1024:
+        raise ValueError("Import evidence GLB size exceeded")
+    with path.open("rb") as stream:
+        header = stream.read(20)
+        magic, version, length, json_size, chunk = struct.unpack("<IIIII", header)
+        if (magic, version, length, chunk) != (0x46546C67, 2, size, 0x4E4F534A) or not 1 <= json_size <= 1024 * 1024 or json_size % 4:
+            raise ValueError("Import evidence GLB header failed")
+        raw = stream.read(json_size)
+        doc = json.loads(raw.decode("utf-8"))
+        digest = hashlib.sha256(header + raw)
+        remaining = size - 20 - len(raw)
+        while remaining > 0:
+            block = stream.read(min(remaining, 64 * 1024))
+            if not block:
+                raise ValueError("Import evidence GLB changed during read")
+            digest.update(block)
+            remaining -= len(block)
+        if stream.read(1):
+            raise ValueError("Import evidence GLB grew during read")
+    nodes = doc.get("nodes", [])
+    if not isinstance(nodes, list) or len(nodes) > 4096:
+        raise ValueError("Import evidence node count exceeded")
+    rows, anchors = [], []
+    expected = {obj["arcane_source_object_id"]: obj for obj in objects}
+    expected_anchors = {obj["arcane_source_anchor_id"]: obj for obj in sockets}
+    for index, node in enumerate(nodes):
+        extra = node.get("extras", {})
+        if "mesh" in node:
+            stable = extra.get("arcane_source_object_id")
+            obj = expected.pop(stable, None)
+            if obj is None or extra.get("arcane_identity_scheme") != "arcane-semantic-v1" or extra.get("arcane_role") != obj["arcane_role"] or extra.get("arcane_source_key") != obj["arcane_source_key"] or extra.get("arcane_pivot") != list(obj["arcane_pivot"]) or extra.get("arcane_collision_for") != obj["arcane_collision_for"]:
+                raise ValueError("Export lost producer object identity")
+            rows.append({"sourceObjectId": stable, "sourceKey": obj["arcane_source_key"], "nodeIndex": index,
+                         "role": obj["arcane_role"], "pivot": list(obj["arcane_pivot"]),
+                         "collisionFor": json.loads(obj["arcane_collision_for"])})
+        if extra.get("arcane_source_anchor_id"):
+            stable = extra["arcane_source_anchor_id"]
+            obj = expected_anchors.pop(stable, None)
+            if obj is None or extra.get("arcane_source_object_id") != obj["arcane_source_object_id"]:
+                raise ValueError("Export lost producer anchor identity")
+            # Convert observed Blender world transform to glTF Y-up; column-major.
+            from mathutils import Matrix
+            convert = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, -1, 0, 0), (0, 0, 0, 1)))
+            world = convert @ obj.matrix_world @ convert.inverted()
+            anchors.append({"sourceAnchorId": stable, "sourceKey": obj["arcane_source_key"],
+                            "sourceObjectId": obj["arcane_source_object_id"], "nodeIndex": index,
+                            "kind": obj["arcane_socket_kind"], "transform": [float(world[r][c]) for c in range(4) for r in range(4)]})
+    if expected or expected_anchors:
+        raise ValueError("Export omitted producer identities")
+    return {"path": path.name, "sha256": digest.hexdigest(), "byteLength": size,
+            "generator": doc["asset"]["generator"], "objects": rows, "anchors": anchors}
 
 
 def export_metrics(path, expected, recipe=None):
@@ -282,6 +384,7 @@ def main():
                 material("MAT_Frame", (0.12, 0.15, 0.18), 0.8, 0.3),
                 material("MAT_Accent", (0.8, 0.43, 0.11), 0.45, 0.36)]
         main_objects, lods, collision = hero(request, mats) if request["template"] == "hero-prop" else environment(request, mats)
+    stamp_import_identity(request, main_objects, lods, collision, sockets)
     bpy.ops.wm.save_as_mainfile(filepath=str(directory / "blockout.blend"), check_existing=False)
     event("mesh-validation")
     for obj in main_objects + lods + collision:
@@ -311,6 +414,11 @@ def main():
     export_glb(directory / "collision.glb", collision, False)
     if lods:
         export_glb(directory / "asset-lod1.glb", lods)
+    import_evidence = {"schemaVersion": 1, "identityScheme": "arcane-semantic-v1",
+                       "assetId": semantic_id(request, "asset", "root"), "blenderVersion": bpy.app.version_string,
+                       "requestSha256": args.request_sha256,
+                       "models": [exported_import_evidence(directory / "asset.glb", main_objects, sockets),
+                                  exported_import_evidence(directory / "collision.glb", collision, [])]}
     event("export-roundtrip")
     exports = [export_metrics(directory / "asset.glb", totals["renderTriangles"], request.get("recipe")),
                export_metrics(directory / "asset.fbx", totals["renderTriangles"], request.get("recipe")),
@@ -324,7 +432,7 @@ def main():
     if again_errors or again_totals != totals or again != meshes:
         raise ValueError("Saved scene failed reopen validation")
     report = {"schemaVersion": 1, "template": request["template"], "meshes": meshes, "totals": totals,
-              "renders": renders, "exports": exports, "savedSceneReopened": True, "errors": [],
+              "renders": renders, "exports": exports, "studioImport": import_evidence, "savedSceneReopened": True, "errors": [],
               "warnings": ["UV overlap/texel density, inter-object intersections and visual quality require human review.",
                            "Roblox import, scale mapping and collision behavior are unverified."]}
     if request["template"] == "custom-assembly":

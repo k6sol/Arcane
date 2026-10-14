@@ -83,6 +83,11 @@ export class StudioStore {
   private saveSession(s: StudioSession): void { this.db.prepare('UPDATE sessions SET payload=? WHERE id=?').run(JSON.stringify(s), s.id); }
   private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); }
   sessions(): StudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => JSON.parse(r.payload as string) as StudioSession); }
+  /** Host selection must inspect every live pairing, never a display-limited page. */
+  activeSessions(): StudioSession[] {
+    return (this.db.prepare("SELECT payload FROM sessions WHERE json_extract(payload,'$.revokedAt') IS NULL ORDER BY rowid DESC").all() as Row[])
+      .map(row => JSON.parse(row.payload as string) as StudioSession);
+  }
   session(id: string, live = true): StudioSession {
     const row = this.db.prepare('SELECT payload FROM sessions WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('SESSION', 'Unknown Studio session.');

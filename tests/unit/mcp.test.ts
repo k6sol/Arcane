@@ -212,7 +212,9 @@ test('fixture SDK: every scene/selection/script read uses exact shared endpoints
     assert.match(data.requestId,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     if(name==='script_read') assert.equal(data.command.result.source,EDITOR_SOURCE);
   }
-  assert.deepEqual([...f.commands.values()].map(command=>command.method),READ_METHODS);
+  // Import context is a trusted host-only read, not a generic MCP tool.
+  assert.deepEqual([...f.commands.values()].map(command=>command.method),
+    ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read']);
   assert.equal(f.state.posts,5);
   assert.ok(f.requests.every(request=>request.auth===`Bearer ${TOKEN}` && request.origin===undefined));
   assert.equal((f.requests.find(request=>request.body?.method==='scene.children')!.body!.args as any).limit,7);
@@ -640,6 +642,7 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
     async start(input) { started++; current = { ...jobFixture(), request: normalizeRequest(input) }; return current; },
     async cancel(jobId) { assert.equal(jobId, ASSET_JOB_ID); current = { ...current, state: 'cancelled', stage: 'complete' }; return current; },
     async manifest(jobId) { assert.equal(jobId, ASSET_JOB_ID); return manifestFixture(ASSET_JOB_ID); },
+    async prepareStudioImport() { throw new Error('No generated import preparation evidence in this service fixture.'); },
     async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
     async preview() { throw new Error('MCP exposes no asset preview path endpoint.'); }, async close() {},
   };
@@ -738,6 +741,7 @@ async function customAssetLabFixture(t: test.TestContext) {
     },
     async cancel(jobId) { const job = jobs.find(job=>job.jobId === jobId)!;job.state = 'cancelled';return structuredClone(job); },
     async manifest(jobId) { return deliveredManifest ?? customManifestFixture(inputs[jobs.findIndex(job=>job.jobId === jobId)]!,String(jobId)); },
+    async prepareStudioImport() { throw new Error('No generated import preparation evidence in this service fixture.'); },
     async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
     async preview() { throw new Error('No native preview bytes in this fixture.'); }, async close() {},
   };

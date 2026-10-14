@@ -50,7 +50,23 @@ export interface AssetAudit {
   totals: { renderTriangles: number; lod1Triangles: number; collisionTriangles: number; materials: number };
   renders: RenderMetrics[]; exports: ExportMetrics[];
   assembly?: AssemblyEvidence;
+  /** Optional for old jobs. Import preparation requires this producer evidence. */
+  studioImport?: WorkerStudioImportEvidence;
   savedSceneReopened: boolean; errors: string[]; warnings: string[];
+}
+/** Emitted by the bundled worker from actual exported GLB nodes, never host-guessed names.
+ * Semantic IDs persist for the same template/name/part; renames are new identities. */
+export interface WorkerStudioImportEvidence {
+  schemaVersion: 1;
+  identityScheme: 'arcane-semantic-v1';
+  assetId: string;
+  blenderVersion: string;
+  requestSha256: string;
+  models: {
+    path: 'asset.glb' | 'collision.glb'; sha256: string; byteLength: number; generator: string;
+    objects: { sourceObjectId: string; sourceKey: string; nodeIndex: number; role: 'render' | 'collision'; pivot: Vec3; collisionFor: string[] }[];
+    anchors: { sourceAnchorId: string; sourceKey: string; sourceObjectId: string; nodeIndex: number; kind: 'socket' | 'attachment'; transform: number[] }[];
+  }[];
 }
 export interface Artifact {
   path: string; role: 'scene' | 'checkpoint' | 'export' | 'preview' | 'audit' | 'request' | 'worker'; bytes: number; sha256: string;

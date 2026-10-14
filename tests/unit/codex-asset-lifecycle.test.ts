@@ -12,7 +12,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import type { NativeAssetHooks, Operation, Snapshot } from '../../packages/codex-client/src/types.js';
-import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
+import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 
 const ROOT = resolve(process.cwd()), GENERIC = 'a4'.repeat(32), FINAL = 'c6'.repeat(32);
 const EMITTED = fileURLToPath(new URL('../../packages/', import.meta.url));
@@ -202,7 +202,7 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}) {
   await writeFile(join(dir, 'package.json'), '{"type":"module"}');
   await writeFile(join(dir, 'peer.cjs'), PEER);
   await writeFile(join(dir, 'harness.mjs'), HARNESS);
-  const options = { mode: 'normal', ...scenario, arcaneToolNames: ARCANE_TOOL_NAMES };
+  const options = { mode: 'normal', ...scenario, arcaneToolNames: scenario.hooks === false ? ARCANE_TOOL_NAMES : ARCANE_NATIVE_TOOL_NAMES };
   const boundary = String.raw`
 import { spawn as realSpawn } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -259,6 +259,8 @@ test('fresh final credential follows verified discovery close; exact final env/a
   assert.equal(final.daemonUrl, 'http://127.0.0.1:47831'); assert.equal(final.audience, 'native-session');
   assert.equal(final.args?.filter(arg => arg.startsWith('mcp_servers.arcane.env_vars=')).length, 1);
   assert.ok(final.args?.includes('mcp_servers.arcane.env_vars=["ARCANE_DAEMON_URL","ARCANE_LOCAL_TOKEN","ARCANE_ASSET_AUDIENCE"]'));
+  assert.deepEqual(final.args?.filter(arg => arg.startsWith('mcp_servers.arcane.enabled_tools=')),
+    ['mcp_servers.arcane.enabled_tools=' + JSON.stringify(ARCANE_NATIVE_TOOL_NAMES)]);
   for (const child of [children[0]!, children[2]!]) {
     assert.equal(child.tokenHash, null); assert.equal(child.daemonUrl, null); assert.equal(child.audience, null);
     assert.ok(!child.envKeys?.some(key => key.toLowerCase().startsWith('arcane_')));
@@ -354,6 +356,8 @@ for (const profile of [false, true]) test('no-hooks compatibility preserves ' + 
   assert.equal(events(rows, 'dispatched').length, 0);
   const children = events(rows, 'child'); assert.equal(children.length, profile ? 2 : 1);
   const final = children.at(-1)!; assert.equal(final.audience, null);
+  if (profile) assert.deepEqual(final.args?.filter(arg => arg.startsWith('mcp_servers.arcane.enabled_tools=')),
+    ['mcp_servers.arcane.enabled_tools=' + JSON.stringify(ARCANE_TOOL_NAMES)]);
   assert.equal(final.tokenHash, profile ? createHash('sha256').update(GENERIC).digest('hex') : null);
   assert.ok(!JSON.stringify(final.args).includes('ARCANE_ASSET_AUDIENCE'));
 });

@@ -100,6 +100,8 @@ def build_assembly(request, make_material, make_collection, select):
         obj = bpy.data.objects.new(prefix + part["name"], mesh)
         groups[part["role"]].objects.link(obj)
         obj["arcane_role"], obj["arcane_part_id"] = part["role"], part["name"]
+        # Explicit recipe identity, not a guessed/exporter-assigned Blender name.
+        obj["arcane_source_key"] = part["name"]
         if part.get("material"):
             mesh.materials.append(materials[part["material"]])
         if part.get("bevel"):

@@ -63,7 +63,7 @@ async function fixture(t) {
   // Execute the unchanged product entry/configuration with services and compiler configuration replaced
   // by metadata-only fixtures. No HTTP listener, SQLite engine, compiler, provider or Studio.
   let productFixture = productSource;
-  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js']) {
+  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js', './studio-import-host.js', './studio-import-preparation-store.js', './studio-import-plugin-artifact.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
   }
@@ -73,6 +73,18 @@ async function fixture(t) {
     import {existsSync, mkdirSync, readFileSync} from 'node:fs';
     import {join} from 'node:path';
     const data = (directory, file) => existsSync(join(directory,file)) ? JSON.parse(readFileSync(join(directory,file),'utf8')) : [];
+    const lifecycle = [], artifactHash = 'd'.repeat(64);
+    let sharedStudioStore, sharedConversationStore, sharedPreparations, sharedImportHost, persistPreparation, savedArgs;
+    const created = resource => {
+      if (process.env.FIXTURE_SERVICE_FAIL === resource) throw new Error('Fixture startup failure: ' + resource);
+      lifecycle.push({operation:'create',resource});
+    };
+    const closed = resource => {
+      assert.equal(lifecycle.filter(value => value.operation === 'close' && value.resource === resource).length, 0, 'Close each owned instance once.');
+      lifecycle.push({operation:'close',resource});
+      if (process.env.FIXTURE_CLOSE_FAIL === resource) throw new Error('Fixture close failure: ' + resource);
+    };
+    if (process.env.FIXTURE_LIFECYCLE === '1') process.once('exit', () => console.log('fixture-lifecycle:' + JSON.stringify(lifecycle)));
     // This path/state fixture keeps the optional compiler unconfigured; it never creates a verifier.
     export function workflowCodeHostConfiguration(environment) {
       for (const name of ['ARCANE_LUAU_COMPILER_PATH', 'ARCANE_LUAU_COMPILER_SHA256', 'ARCANE_LUAU_EVIDENCE_DIRECTORY']) {
@@ -81,37 +93,86 @@ async function fixture(t) {
       return undefined;
     }
     export class StudioStore {
-      constructor({directory}) { mkdirSync(directory,{recursive:true}); this.directory=directory; this.keys=data(directory,'studio.sqlite'); }
-      close() {}
+      constructor({directory}) {
+        assert.equal(sharedStudioStore, undefined); created('studio');
+        mkdirSync(directory,{recursive:true}); this.directory=directory; this.keys=data(directory,'studio.sqlite'); sharedStudioStore=this;
+      }
+      close() { assert.equal(this, sharedStudioStore); closed('studio'); }
     }
     export class WorkStore {
-      constructor({directory,projectPath}) { this.directory=directory; this.projectPath=projectPath; this.tasks=data(directory,'work.sqlite'); }
-      close() {}
+      constructor({directory,projectPath}) { created('work'); this.directory=directory; this.projectPath=projectPath; this.tasks=data(directory,'work.sqlite'); }
+      close() { closed('work'); }
     }
-    let sharedConversationStore;
     export class ConversationWorkStore {
       constructor({directory,projectPath}) {
         assert.equal(sharedConversationStore, undefined, 'Product creates one conversation store.');
+        created('associations');
         this.directory=directory; this.projectPath=projectPath; sharedConversationStore=this;
       }
-      close() {}
+      close() { assert.equal(this, sharedConversationStore); closed('associations'); }
+    }
+    export async function studioImportPluginArtifactHash(cwd) {
+      assert.equal(cwd, process.cwd(), 'The loader uses the bundled source root.');
+      created('artifact'); return artifactHash;
+    }
+    export async function createStudioImportPreparationStore(options) {
+      assert.deepEqual(Object.keys(options).sort(), ['directory','projectPath','studio','workAssociations']);
+      assert.equal(options.projectPath, sharedConversationStore.projectPath);
+      assert.equal(options.workAssociations, sharedConversationStore);
+      assert.equal(options.studio, sharedStudioStore);
+      assert.equal(options.directory, join(sharedStudioStore.directory,'studio-import-preparations'));
+      assert.equal(sharedPreparations, undefined); created('preparations');
+      sharedPreparations = Object.freeze({directory:options.directory,projectPath:options.projectPath,
+        async save(...args) { assert.equal(this,sharedPreparations); savedArgs=args; },
+        async get() { assert.fail('Metadata startup never reads a preparation.'); },
+        async close() { assert.equal(this,sharedPreparations); closed('preparations'); }
+      });
+      return sharedPreparations;
+    }
+    export function createStudioImportHost(options) {
+      assert.deepEqual(Object.keys(options).sort(), ['persistPreparation','pluginArtifactHash','projectPath','studio','workAssociations']);
+      assert.equal(options.projectPath, sharedConversationStore.projectPath);
+      assert.equal(options.workAssociations, sharedConversationStore);
+      assert.equal(options.studio, sharedStudioStore);
+      assert.equal(options.pluginArtifactHash, artifactHash, 'Await the validated bundled artifact loader.');
+      assert.equal(lifecycle.filter(value => value.operation === 'create' && value.resource === 'artifact').length, 1);
+      assert.ok(sharedPreparations); assert.equal(sharedImportHost, undefined); created('host');
+      assert.equal(typeof options.persistPreparation, 'function'); persistPreparation=options.persistPreparation;
+      sharedImportHost = Object.freeze({hooks:Object.freeze({
+        workAssociations:sharedConversationStore,
+        selectTarget() { assert.fail('Metadata fixture must not observe Studio.'); },
+        validateTarget() { assert.fail('Metadata fixture must not read engine state.'); },
+        recordPrepared() { assert.fail('Metadata fixture must not prepare or upload an asset.'); },
+        releaseTarget() { assert.fail('Metadata fixture must not operate on an engine target.'); }
+      }),close() { assert.equal(this,sharedImportHost); closed('host'); }});
+      return sharedImportHost;
     }
     export async function createAssetService(options) {
       assert.equal(options.projectPath, sharedConversationStore.projectPath);
+      assert.equal(options.studioImport, sharedImportHost.hooks, 'Assets receive the exact owned host hooks.');
+      assert.equal(options.studioImport.workAssociations, sharedConversationStore);
+      assert.ok(options.studioImport.workAssociations instanceof ConversationWorkStore);
+      const args = [Object.freeze({fixture:'actor'}), 'synthetic-job', Object.freeze({fixture:'plan'}), Object.freeze({fixture:'witness'}), () => assert.fail('Forward the guard without invoking it.')];
+      await persistPreparation(...args);
+      assert.equal(savedArgs.length, args.length); for (let i=0;i<args.length;i++) assert.equal(savedArgs[i],args[i], 'Forward persistence arguments unchanged to the same ledger.');
+      created('assets');
       const outputRoot = options.outputRoot ?? join(options.cwd,'runtime','assets');
-      return {options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{}};
+      return {options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{closed('assets');}};
     }
-    export function createLearningService() { return { close() {} }; }
+    export function createLearningService() { created('learning'); return { close() { closed('learning'); } }; }
     export async function createConnectionLab(options) {
       assert.equal(options.conversationWorkStore, sharedConversationStore, 'LAB borrows the exact product store.');
+      assert.equal(options.studioStore, sharedStudioStore); created('lab');
+      if (process.env.FIXTURE_SHUTDOWN === '1') process.once('beforeExit', () => process.emit('SIGTERM'));
       mkdirSync(options.stateDirectory,{recursive:true});
       console.log('fixture-product:' + JSON.stringify({cwd:options.cwd,projectPath:options.projectPath,port:options.port,
         studioDirectory:options.studioStore.directory,workDirectory:options.workStore.directory,
         connectionDirectory:options.stateDirectory,conversationDirectory:sharedConversationStore.directory,keys:options.studioStore.keys,tasks:options.workStore.tasks,
         assetProject:options.assetService.options.projectPath,assetCwd:options.assetService.options.cwd,
         assetOutputOverride:options.assetService.options.outputRoot??null,assetRoot:options.assetService.outputRoot,
-        assetJobs:options.assetService.jobs}));
-      return {origin:'http://127.0.0.1:49999',token:'offline-fixture',url:'offline-fixture',close:async()=>{}};
+        assetJobs:options.assetService.jobs,preparationDirectory:sharedPreparations.directory,preparationProject:sharedPreparations.projectPath,
+        importHostWired:options.assetService.options.studioImport===sharedImportHost.hooks,pluginArtifactHash:artifactHash}));
+      return {origin:'http://127.0.0.1:49999',token:'offline-fixture',url:'offline-fixture',close:async()=>{closed('lab');}};
     }
   `);
   const run = (args, env = cleanEnv()) => spawnSync(process.execPath, [join(repository, 'scripts', 'open-project.mjs'), ...args], {
@@ -262,6 +323,9 @@ test('product configuration preserves default product/lab/asset paths and defaul
   assert.equal(product.workDirectory, product.studioDirectory);
   assert.equal(product.connectionDirectory, join(f.repository, 'runtime', 'connection-lab'));
   assert.equal(product.conversationDirectory, join(product.connectionDirectory, 'conversation-work'));
+  assert.equal(product.preparationDirectory, join(product.studioDirectory, 'studio-import-preparations'));
+  assert.equal(product.preparationProject, f.repository); assert.equal(product.importHostWired, true);
+  assert.equal(product.pluginArtifactHash, 'd'.repeat(64));
   assert.equal(product.assetOutputOverride, null);
   assert.equal(product.assetRoot, join(f.repository, 'runtime', 'assets'));
   assert.deepEqual(product.assetJobs, ['legacy-asset-job']);
@@ -291,6 +355,8 @@ test('product isolates stores, lab, descriptor and asset root/history from legac
   assert.equal(product.studioDirectory, next.stateDirectory); assert.equal(product.workDirectory, next.stateDirectory);
   assert.equal(product.connectionDirectory, join(next.stateDirectory, 'connection-lab'));
   assert.equal(product.conversationDirectory, join(product.connectionDirectory, 'conversation-work'));
+  assert.equal(product.preparationDirectory, join(next.stateDirectory, 'studio-import-preparations'));
+  assert.equal(product.preparationProject, f.projectB); assert.equal(product.importHostWired, true);
   assert.deepEqual(product.keys, []); assert.deepEqual(product.tasks, []);
   assert.equal(product.assetProject, f.projectB); assert.equal(product.assetCwd, f.repository);
   assert.equal(product.assetOutputOverride, join(next.stateDirectory, 'assets'));
@@ -357,3 +423,30 @@ test('product state metadata inspection has a bounded depth', async t => {
   const result = f.runProduct(cleanEnv({ ARCANE_STATE_DIRECTORY: directory }));
   assert.equal(result.status, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /depth limit/);
 });
+
+test('product shutdown closes the same import host and ledger once alongside every owned service', async t => {
+  const f = await fixture(t), result = f.runProduct(cleanEnv({ FIXTURE_SHUTDOWN:'1', FIXTURE_LIFECYCLE:'1' }));
+  assert.equal(result.status, 0, result.stderr);
+  const lifecycle = observed(result.stdout, 'fixture-lifecycle:');
+  const created = lifecycle.filter(value => value.operation === 'create').map(value => value.resource);
+  assert.deepEqual([...created].sort(), ['artifact','assets','associations','host','lab','learning','preparations','studio','work']);
+  assert.ok(created.indexOf('host') > created.indexOf('preparations'));
+  assert.ok(created.indexOf('host') > created.indexOf('artifact'));
+  assert.ok(created.indexOf('assets') > created.indexOf('host'));
+  assert.deepEqual(lifecycle.filter(value => value.operation === 'close').map(value => value.resource).sort(),
+    ['assets','associations','host','lab','learning','preparations','studio','work']);
+  const product = observed(result.stdout, 'fixture-product:');
+  await assert.rejects(lstat(join(product.studioDirectory, 'daemon.json')), { code:'ENOENT' });
+});
+
+for (const stage of ['artifact','preparations','host','assets','learning','lab']) {
+  test('product startup ' + stage + ' failure cleans every acquired host/store even when a close fails', async t => {
+    const f = await fixture(t), result = f.runProduct(cleanEnv({ FIXTURE_SERVICE_FAIL:stage, FIXTURE_CLOSE_FAIL:'associations', FIXTURE_LIFECYCLE:'1' }));
+    assert.equal(result.status, 1); assert.match(result.stderr, new RegExp('Fixture startup failure: ' + stage));
+    const lifecycle = observed(result.stdout, 'fixture-lifecycle:');
+    const acquired = lifecycle.filter(value => value.operation === 'create' && value.resource !== 'artifact').map(value => value.resource).sort();
+    assert.deepEqual(lifecycle.filter(value => value.operation === 'close').map(value => value.resource).sort(), acquired);
+    assert.doesNotMatch(result.stdout, /fixture-product:/);
+    await assert.rejects(lstat(join(f.repository, 'runtime', 'product', 'daemon.json')), { code:'ENOENT' });
+  });
+}

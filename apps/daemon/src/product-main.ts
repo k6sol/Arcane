@@ -7,6 +7,9 @@ import { WorkStore } from '../../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { createConnectionLab } from './lab-server.js';
 import { createAssetService } from './asset-service.js';
+import { createStudioImportHost } from './studio-import-host.js';
+import { createStudioImportPreparationStore } from './studio-import-preparation-store.js';
+import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
 async function cleanupStartup(services: Array<() => void | Promise<void>>): Promise<void> {
   // Preserve the startup error, but do not leave another owned store locked
   // merely because one earlier service failed to close.
@@ -92,19 +95,30 @@ try {
   associations = new ConversationWorkStore({ directory: join(connectionDirectory, 'conversation-work'), projectPath });
 } catch (error) { await cleanupStartup([() => work.close(), () => store.close()]); throw error; }
 let assets: Awaited<ReturnType<typeof createAssetService>>;
-try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await cleanupStartup([() => associations.close(), () => work.close(), () => store.close()]);throw error;}
+let preparations: Awaited<ReturnType<typeof createStudioImportPreparationStore>>;
+let importHost: ReturnType<typeof createStudioImportHost>;
+try {
+  const pluginArtifactHash = await studioImportPluginArtifactHash(cwd);
+  preparations = await createStudioImportPreparationStore({ projectPath: associations.projectPath,
+    directory: join(directory, 'studio-import-preparations'), workAssociations: associations, studio: store });
+  try {
+    importHost = createStudioImportHost({ projectPath: associations.projectPath, workAssociations: associations, studio: store,
+      pluginArtifactHash, persistPreparation: (...args) => preparations.save(...args) });
+  } catch (error) { await cleanupStartup([() => preparations.close()]); throw error; }
+} catch (error) { await cleanupStartup([() => associations.close(), () => work.close(), () => store.close()]); throw error; }
+try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,studioImport:importHost.hooks,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await cleanupStartup([() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
-catch (error) { await cleanupStartup([() => assets.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
+catch (error) { await cleanupStartup([() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
 try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
-catch (error) { await cleanupStartup([() => assets.close(), () => learning.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
+catch (error) { await cleanupStartup([() => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 const descriptor = join(directory, 'daemon.json');
 try {
   await mkdir(directory, { recursive: true });
   await writeFile(descriptor, JSON.stringify({ origin: app.origin, pid: process.pid, protocolVersion: 1 }) + '\n', { mode: 0o600 });
 } catch (error) {
-  await cleanupStartup([() => app.close(), () => assets.close(), () => learning.close(), () => associations.close(), () => work.close(), () => store.close()]);
+  await cleanupStartup([() => app.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);
   throw error;
 }
 console.log('Arcane local Studio workbench. An explicit Studio API-key connection and write grant are required before edits.');
@@ -121,7 +135,7 @@ async function shutdown() {
   let failed = false;
   // Each resource closes even if an earlier cleanup fails. Never remove another
   // daemon's descriptor or promise a rollback for an interrupted Studio write.
-  for (const close of [() => app.close(), () => assets.close(), () => learning.close(), () => associations.close(), () => work.close(), () => store.close()]) {
+  for (const close of [() => app.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]) {
     try { await close(); } catch { failed = true; }
   }
   try {
