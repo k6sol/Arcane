@@ -10,6 +10,8 @@
 *.csv text eol=lf
 *.ts text eol=lf
 *.js text eol=lf
+*.luau text eol=lf
+*.lua text eol=lf
 *.css text eol=lf
 *.html text eol=lf
 *.yml text eol=lf

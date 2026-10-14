@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { buildPlugin, renderPlugin, PLUGIN_SOURCES } from '../../scripts/build-plugin.mjs';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -31,6 +32,24 @@ const allSource = files.map(({ source }) => source).join('\n');
 const contract = await readFile(path.join(repository, 'docs/build/BRIDGE_CONTRACT.md'), 'utf8');
 const protocol = await readFile(path.join(repository, 'packages/protocol/src/studio.ts'), 'utf8');
 const policy = await readFile(path.join(repository, 'packages/core/src/studio-policy.ts'), 'utf8');
+
+test('Git checkout keeps plugin source bytes intact with Windows line-ending settings', () => {
+  const git = args => {
+    const result = spawnSync('git', args, { cwd: repository, windowsHide: true,
+      shell: false, timeout: 10_000, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr?.toString());
+    return result.stdout;
+  };
+  for (const file of [...PLUGIN_SOURCES.map(([, , name]) => 'plugin/src/' + name), 'plugin/build/ArcaneLocalBridge.lua']) {
+    const original = git(['cat-file', 'blob', 'HEAD:' + file]);
+    for (const autocrlf of ['true', 'false']) {
+      const checkedOut = git(['-c', 'core.autocrlf=' + autocrlf, '-c', 'core.eol=crlf',
+        'cat-file', '--filters', '--path=' + file, 'HEAD:' + file]);
+      assert.deepEqual(checkedOut, original, file + ' must retain its exact committed bytes.');
+    }
+  }
+});
 
 // Independent XML subset reader. It checks nesting and reconstructs CDATA/source
 // rather than comparing the builder's output to its own rendering function.
