@@ -132,7 +132,8 @@ export class ChatTabs {
   saved(): readonly CodexSavedThread[] { return structuredClone(this.catalogue); }
   owns(tab: ChatTabView): boolean { return tab.kind === 'native' && tab.projectPath === this.projectPath && this.catalogueByKey.has(tab.key); }
   bound(state: ChatState | null): boolean {
-    const active = this.active(), thread = state?.snapshot?.thread;
+    // This predicate runs while typing; keep the full draft out of cloning work.
+    const active = this.rows.find(row=>row.key===this.activeKey), thread = state?.snapshot?.thread;
     return !!active && this.owns(active) && state?.projectPath===active.projectPath && !!thread?.configured && thread.threadId===active.threadId && thread.sessionId===active.sessionId;
   }
   recording(tab = this.active()): HistoryBinding | null { return tab && this.owns(tab) ? structuredClone(this.recordings.get(tab.key) ?? null) : null; }

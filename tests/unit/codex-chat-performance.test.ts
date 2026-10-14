@@ -81,6 +81,47 @@ test('typing bursts do no catalogue/tab rendering, persistence serialization or 
   assert.equal(f.storage.writes,writes+1);assert.equal(f.calls.length,requests);
 });
 
+test('typing in a saved chat copies its large draft only for the public active view, not binding checks',async t=>{
+  const initial=reportedState(),selection={model:'reported-fixture',effort:'low'};
+  initial.snapshot!.thread={threadId:'fixture-thread',sessionId:'fixture-session',configured:true,writeGranted:false,
+    selection,turnId:null,turnStatus:'idle'};
+  initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId:'fixture-thread',sessionId:'fixture-session',selection}];
+  const f=await fixture(t,memoryStorage(),true,initial);t.mock.timers.enable({apis:['setTimeout']});
+  const tabs=(f.chat as unknown as {tabs:ChatTabs}).tabs;
+  assert.equal(tabs.bound(initial),true);
+  const draft='Saved draft 🧩\n'+'x'.repeat(CODEX_INPUT_BYTES-512);
+  f.input(draft);t.mock.timers.tick(CODEX_DRAFT_SAVE_DELAY_MS);
+  assert.equal(tabs.active()!.draft,draft);
+  let copies=0,copiedBytes=0;
+  const originalClone=globalThis.structuredClone,requests=f.calls.length,writes=f.storage.writes;
+  globalThis.structuredClone=((value:unknown,options?:StructuredSerializeOptions)=>{
+    if(value&&typeof value==='object'&&'draft' in value&&typeof value.draft==='string'){
+      copies++;copiedBytes+=Buffer.byteLength(value.draft,'utf8');
+    }
+    return originalClone(value,options);
+  }) as typeof structuredClone;
+  try{for(let i=0;i<100;i++)f.input(draft+i);}finally{globalThis.structuredClone=originalClone;}
+  t.diagnostic('100 saved-chat edits: draft copies='+copies+'; copied UTF-8 bytes='+copiedBytes);
+  assert.equal(copies,100,'Boolean binding checks must not copy the saved draft on each keystroke.');
+  assert.equal(copiedBytes,100*Buffer.byteLength(draft,'utf8'));
+  assert.equal(f.calls.length,requests);assert.equal(f.storage.writes,writes);
+  assert.equal(f.doc.getElementById('codex-submit').disabled,false);
+  assert.equal(f.chat.currentStateView().activeChat!.draft,draft+'99');
+  t.mock.timers.tick(CODEX_DRAFT_SAVE_DELAY_MS);
+  assert.equal(tabs.active()!.draft,draft+'99');
+
+  // Binding still checks canonical project, ownership and exact configured identity.
+  const detached=tabs.active()!;Object.assign(detached,{threadId:'changed',draft:'changed'});
+  assert.equal(tabs.bound(initial),true);assert.equal(tabs.active()!.draft,draft+'99');
+  assert.equal(tabs.bound(null),false);
+  assert.equal(tabs.bound({...initial,projectPath:initial.projectPath+'-other'}),false);
+  for(const patch of [{threadId:'other'},{sessionId:'other'},{configured:false}]){
+    const next=structuredClone(initial);Object.assign(next.snapshot!.thread!,patch);assert.equal(tabs.bound(next),false);
+  }
+  const unowned=structuredClone(initial);unowned.nativeThreads=[];tabs.sync(unowned);
+  assert.equal(tabs.bound(initial),false);
+});
+
 test('an immediate chat switch and stop/reload preserve every draft byte before debounce fires',async t=>{
   const storage=memoryStorage(),f=await fixture(t,storage);t.mock.timers.enable({apis:['setTimeout']});
   const first=f.chat.chatTabsView()[0]!.key,draft='First chat 🧩\n\tTrailing spaces.  ';
