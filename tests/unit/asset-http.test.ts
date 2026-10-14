@@ -4,7 +4,7 @@ import { Agent, createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { mkdir, mkdtemp, open, readFile, writeFile, rm, symlink, link, rename } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, writeFile, rm, symlink, link, rename, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ARTIFACT_DOWNLOAD_BYTES, ARTIFACT_DOWNLOAD_TIMEOUT_MS, createAssetService } from '../../apps/daemon/src/asset-service.js';
 import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
@@ -15,7 +15,9 @@ import { sha256 } from '../../packages/asset-pipeline/src/validation.js';
 
 // Disposable fixtures should not share the checkout's cloud-sync lifecycle.
 // Containment and no-link checks still protect every recursive teardown.
-const ROOT = resolve(process.cwd()), TEMP = join(tmpdir(), 'arcane-asset-http-tests');
+// Windows may report TEMP through an 8.3 alias. Use the same real temp root
+// required by output admission rather than relaxing its containment policy.
+const ROOT = resolve(process.cwd()), TEMP = join(await realpath(tmpdir()), 'arcane-asset-http-tests');
 const TOKEN = 'synthetic-control-token-for-unit-tests';
 const AGENT_TOKEN = 'distinct-synthetic-agent-token-for-unit-tests';
 const missing = (dir: string) => ({ blenderExecutable: join(dir, 'not-installed-blender.exe'), pythonExecutable: join(dir, 'not-installed-python.exe') });
