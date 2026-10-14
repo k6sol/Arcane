@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Agent, createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { mkdir, mkdtemp, open, readFile, writeFile, rm, symlink, link, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ARTIFACT_DOWNLOAD_BYTES, ARTIFACT_DOWNLOAD_TIMEOUT_MS, createAssetService } from '../../apps/daemon/src/asset-service.js';
@@ -12,7 +13,9 @@ import { glb, manifestFixture } from '../../packages/asset-pipeline/testing/fixt
 import { noLinks, readRegularFile, within } from '../../packages/asset-pipeline/src/paths.js';
 import { sha256 } from '../../packages/asset-pipeline/src/validation.js';
 
-const ROOT = resolve(process.cwd()), TEMP = join(ROOT, 'packages', 'asset-pipeline', '.runtime', 'http-tests');
+// Disposable fixtures should not share the checkout's cloud-sync lifecycle.
+// Containment and no-link checks still protect every recursive teardown.
+const ROOT = resolve(process.cwd()), TEMP = join(tmpdir(), 'arcane-asset-http-tests');
 const TOKEN = 'synthetic-control-token-for-unit-tests';
 const AGENT_TOKEN = 'distinct-synthetic-agent-token-for-unit-tests';
 const missing = (dir: string) => ({ blenderExecutable: join(dir, 'not-installed-blender.exe'), pythonExecutable: join(dir, 'not-installed-python.exe') });

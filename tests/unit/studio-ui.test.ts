@@ -44,8 +44,9 @@ function command(s: StudioSession, overrides: Partial<StudioCommand> = {}): Stud
 test('UI method/root literals match the shared bridge contract, without exposing arbitrary restore payloads', () => {
   assert.deepEqual(STUDIO_ROOTS, ROOTS);
   assert.deepEqual([...BUILDER_METHODS].sort(),
-    [...READ_METHODS.filter(m => m !== 'scene.import_context'), ...WRITE_METHODS.filter(m => m !== 'scene.restore')].sort());
+    [...READ_METHODS.filter(m => m !== 'scene.import_context' && m !== 'scene.upload_context'), ...WRITE_METHODS.filter(m => m !== 'scene.restore')].sort());
   assert.equal((BUILDER_METHODS as readonly string[]).includes('scene.import_context'), false, 'Import context stays a host-only background read.');
+  assert.equal((BUILDER_METHODS as readonly string[]).includes('scene.upload_context'), false, 'Uploader context stays a host-only background read.');
 });
 
 test('launcher fragment is removed; only the local bearer persists in tab-scoped lab-compatible storage', () => {

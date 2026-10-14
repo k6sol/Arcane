@@ -168,10 +168,16 @@ export class BoundedStudioTestController {
       if (this.#controller.signal.aborted) fail('CANCELLED');
       await this.#operation(signal => this.#options.adapter.start(proposal.binding, this.#runId!, this.#status.deadline!, signal));
       await this.#event('start_result', 'OK');
+      const maximumObservations = Math.ceil(proposal.durationMs / proposal.observationIntervalMs);
       while (this.#scheduler.now() < this.#status.deadline!) {
-        this.#status.phase = 'observing'; await this.#observe(proposal, false);
+        // Timer callbacks may fire just before their requested boundary. Never
+        // let rounding/jitter add a native request beyond the admitted budget.
+        if (this.#status.observations < maximumObservations) {
+          this.#status.phase = 'observing'; await this.#observe(proposal, false);
+        }
         this.#status.phase = 'waiting'; this.#publish();
-        await delay(this.#scheduler, Math.min(proposal.observationIntervalMs, this.#status.deadline! - this.#scheduler.now()), this.#controller.signal);
+        const remaining = this.#status.deadline! - this.#scheduler.now();
+        await delay(this.#scheduler, this.#status.observations >= maximumObservations ? remaining : Math.min(proposal.observationIntervalMs, remaining), this.#controller.signal);
       }
     } catch (error) {
       code = codeOf(error);

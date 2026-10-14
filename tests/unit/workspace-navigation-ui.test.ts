@@ -16,13 +16,17 @@ test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, 
       ['/workspace-shell.js', [join(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
       ['/brand/arcane-ridges.png', ['apps/desktop/public/brand/arcane-ridges.png', 'image/png']],
     ]);
-    // Exercise the real markup and compiled shell in isolation. No native controller
-    // is mounted, so every navigation action can be checked for zero API traffic.
+    // Exercise the real markup and compiled shell with synthetic signed-in presentation.
+    // No native controller is mounted; navigation must still make zero API requests.
     const server = createServer((request, response) => {
       void (async () => {
         if (request.url === '/navigation-fixture.js') {
           response.writeHead(200, { 'content-type': 'text/javascript' });
-          response.end('import {startWorkspaceShell} from "/workspace-shell.js"; startWorkspaceShell(document);');
+          response.end(`import {startWorkspaceShell} from "/workspace-shell.js";
+            // Fixture presentation only; no authentication or native connection.
+            document.getElementById('provider-login-gate').hidden=true;
+            document.getElementById('workspace-stage').classList.remove('provider-required');
+            startWorkspaceShell(document);`);
           return;
         }
         const file = files.get(request.url ?? '');
@@ -47,6 +51,8 @@ test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, 
     page.on('request', (request: { url(): string }) => { if (new URL(request.url()).pathname.startsWith('/v1/')) apiRequests.push(request.url()); });
     await page.goto(origin + '/studio');
     await page.waitForFunction(() => document.getElementById('workspace-search')?.getAttribute('role') === 'combobox');
+    assert.equal(await page.locator('#provider-login-gate').isVisible(), false);
+    assert.equal(await page.locator('#codex-composer').isVisible(), true);
     const screenshotRoot = process.env.ARCANE_UI_SCREENSHOT ? dirname(resolve(process.env.ARCANE_UI_SCREENSHOT)) : null;
     const capture = async (name: string) => {
       if (screenshotRoot) { await mkdir(screenshotRoot, { recursive: true }); await page.screenshot({ path: join(screenshotRoot, name + '.png') }); }

@@ -89,6 +89,30 @@ test('human control is separate; caller claims and model credentials never grant
   assert.equal(f.effects().length, 0); assert.equal(f.ledger.records().length, 0);
 });
 
+test('early observation timers never exceed the admitted request budget or shorten the owned duration', async t => {
+  class EarlyTimerScheduler extends ManualScheduler {
+    override schedule(ms: number, callback: () => void): () => void {
+      return super.schedule(ms === 100 ? 99 : ms, callback);
+    }
+  }
+  const scheduler = new EarlyTimerScheduler(), f = await fixture({scheduler}); t.after(f.close);
+  const runId = await f.launch(); await waiting(f);
+  assert.equal(f.control.requests.status().observations, 1);
+  for (let count = 2; count <= 5; count++) {
+    scheduler.advance(99);
+    await pumpUntil(() => f.control.requests.status().phase === 'waiting' && f.control.requests.status().observations === count);
+  }
+  scheduler.advance(99); await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.control.requests.status().observations, 5);
+  assert.equal(f.control.requests.status().phase, 'waiting'); assert.equal(f.effects().length, 1, 'The owned Play run still lasts the full approved duration.');
+  scheduler.advance(5);
+  const review = await f.control.requests.wait({runId});
+  assert.equal(review.observations, 5); assert.equal(review.deadline! - review.startedAt!, 500);
+  assert.equal(review.outcome, 'succeeded'); assert.equal(review.cleanup, 'complete');
+  assert.equal(f.ledger.records().filter(record => record.event.kind === 'observe').length, 5);
+  assert.equal(f.effects().length, 2);
+});
+
 for (const extra of [{ trustedHuman: true }, { approval: true }, { actions: ['execute_luau'] },
   { code: 'return true' }, { openPath: 'Hunted.rbxl' }, { input: 'E' }, { durationMs: 60_001 }, { observationIntervalMs: 1 }]) {
   test(`strict requests reject unauthorized fields or bounds: ${Object.keys(extra).join(',')}`, async t => {

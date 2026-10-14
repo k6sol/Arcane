@@ -85,6 +85,7 @@ function resolveActor(request: IncomingMessage): StudioTestActor | null {
 async function httpFixture(t: TestContext) {
   const fake = fakeService();
   const route = studioTestRoutes(fake.service, resolveActor);
+  const clientSockets = new Map<Socket, Promise<void>>();
   let origin = '';
   const server = createServer((request, response) => {
     void route(request, response, new URL(request.url ?? '/', origin), origin).then(handled => {
@@ -94,7 +95,12 @@ async function httpFixture(t: TestContext) {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); assert.ok(address && typeof address === 'object');
   origin = 'http://127.0.0.1:' + address.port;
-  t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+  t.after(async () => {
+    const closed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    server.closeAllConnections();
+    await closed;
+    await Promise.all(clientSockets.values());
+  });
   const call = (options: { path: string; method?: string; body?: string | Buffer; token?: string | null; headers?: Record<string, string> }) =>
     new Promise<{ status: number; text: string; headers: Record<string, string | string[] | undefined>; json: unknown }>((resolve, reject) => {
       const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
@@ -110,6 +116,9 @@ async function httpFixture(t: TestContext) {
           const text = Buffer.concat(chunks).toString('utf8');
           resolve({ status: response.statusCode!, text, headers: response.headers, json: text ? JSON.parse(text) as unknown : null });
         });
+      });
+      outgoing.once('socket', socket => {
+        if (!clientSockets.has(socket)) clientSockets.set(socket, new Promise<void>(resolve => socket.once('close', resolve)));
       });
       outgoing.once('error', reject); outgoing.end(options.body);
     });
