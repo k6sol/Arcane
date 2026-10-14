@@ -9,6 +9,20 @@ import { buildPlugin, renderPlugin, PLUGIN_SOURCES } from '../../scripts/build-p
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const sourceDir = path.join(repository, 'plugin/src');
+const expectedSources = [
+  ['ArcaneLocalBridge', 'Script', 'Main.server.luau'],
+  ['Types', 'ModuleScript', 'Types.luau'],
+  ['Validation', 'ModuleScript', 'Validation.luau'],
+  ['Registry', 'ModuleScript', 'Registry.luau'],
+  ['Properties', 'ModuleScript', 'Properties.luau'],
+  ['Operations', 'ModuleScript', 'Operations.luau'],
+  ['Transport', 'ModuleScript', 'Transport.luau'],
+  ['TestProof', 'ModuleScript', 'TestProof.luau'],
+  ['Sha256', 'ModuleScript', 'Sha256.luau'],
+  ['AssetMesh', 'ModuleScript', 'AssetMesh.luau'],
+  ['Sha256Stream', 'ModuleScript', 'Sha256Stream.luau'],
+  ['AssetTransfer', 'ModuleScript', 'AssetTransfer.luau'],
+];
 const files = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) => ({ filename, source: await readFile(path.join(sourceDir, filename), 'utf8') })));
 const byFile = Object.fromEntries(files.map(({ filename, source }) => [filename, source]));
 const allSource = files.map(({ source }) => source).join('\n');
@@ -74,7 +88,8 @@ function parseBundle(xml) {
 test('portable bundle has one enabled Script and all strict ModuleScripts as children', () => {
   const { xml, manifest } = renderPlugin(files);
   const items = parseBundle(xml);
-  assert.equal(items.length, PLUGIN_SOURCES.length);
+  assert.deepEqual(PLUGIN_SOURCES, expectedSources);
+  assert.deepEqual(items.map(({ name, className }) => [name, className]), expectedSources.map(([name, className]) => [name, className]));
   assert.equal(items[0].className, 'Script');
   assert.equal(items[0].name, 'ArcaneLocalBridge');
   items.forEach((item, index) => { assert.equal(item.name, PLUGIN_SOURCES[index][0]); if (index) assert.equal(item.parent, items[0]); });
@@ -87,6 +102,17 @@ test('portable bundle has one enabled Script and all strict ModuleScripts as chi
   assert.equal(manifest.protocolVersion, 1);
   assert.equal(manifest.pluginVersion, '0.1.7');
   assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.7"$/m);
+  assert.deepEqual(manifest.sources, expectedSources.map(([, , filename], index) => ({
+    path: `src/${filename}`, bytes: Buffer.byteLength(items[index].source),
+    sha256: createHash('sha256').update(items[index].source).digest('hex'),
+  })));
+  for (const item of items) {
+    for (const match of item.source.matchAll(/require\(script(\.Parent)?\.([A-Za-z][A-Za-z0-9_]*)\)/g)) {
+      assert.equal(Boolean(match[1]), item.className === 'ModuleScript', `${item.name}: import owner`);
+      const owner = match[1] ? item.parent : item;
+      assert.ok(items.some(target => target.name === match[2] && target.className === 'ModuleScript' && target.parent === owner), `${item.name}: unresolved packaged module ${match[2]}`);
+    }
+  }
   assert.equal(manifest.artifacts[0].sha256, createHash('sha256').update(xml).digest('hex'));
 });
 
@@ -135,6 +161,7 @@ test('Rojo source map resolves the same Script/module hierarchy', async () => {
   const project = JSON.parse(await readFile(path.join(repository, 'plugin/default.project.json'), 'utf8'));
   assert.equal(project.tree.$className, 'Script');
   assert.equal(project.tree.$path, 'src/Main.server.luau');
+  assert.deepEqual(Object.keys(project.tree).filter(name => !name.startsWith('$')).sort(), expectedSources.slice(1).map(([name]) => name).sort());
   for (const [name, , filename] of PLUGIN_SOURCES.slice(1)) assert.equal(project.tree[name].$path, `src/${filename}`);
   for (const { filename, source } of files) {
     for (const match of source.matchAll(/require\(script(?:\.Parent)?\.([A-Za-z][A-Za-z0-9]*)\)/g)) {
@@ -165,7 +192,10 @@ test('method/root/class/material allowlists exactly match the shared protocol an
 
 test('packaged source has no arbitrary evaluation, asset insertion, unscoped persistence or publishing API', () => {
   assert.doesNotMatch(allSource, /\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
-  assert.doesNotMatch(allSource, /(?:InsertService|AssetService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
+  assert.doesNotMatch(allSource, /(?:InsertService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
+  // AssetMesh receives an injected mesh service; mentioning AssetService in
+  // its documentation grants no service acquisition, asset insertion or upload.
+  assert.doesNotMatch(allSource, /GetService\s*\(\s*["']AssetService["']|:CreateMeshPartAsync\s*\(/);
   assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
   assert.doesNotMatch(byFile['TestProof.luau'], /AddTag|SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
@@ -226,7 +256,7 @@ test('native Lua artifact contains the same trusted module bodies and Main with 
   assert.equal(output.manifest.preferredArtifact, 'ArcaneLocalBridge.lua');
   assert.ok(output.lua.startsWith('--!strict\n'));
   assert.doesNotMatch(output.lua, /\brequire\s*\(|\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
-  assert.doesNotMatch(output.lua, /\bscript(?:\.Parent)?\.(?:Validation|Transport|Registry|Properties|Operations|Types)\b/);
+  assert.doesNotMatch(output.lua, new RegExp(`\\bscript(?:\\.Parent)?\\.(?:${expectedSources.slice(1).map(([name]) => name).join('|')})\\b`));
   for (const [index, file] of files.entries()) {
     const body = output.lua.split('-- BEGIN ' + file.filename + '\n')[1]?.split('-- END ' + file.filename + '\n')[0];
     assert.ok(body, file.filename);
@@ -245,11 +275,16 @@ test('native Lua artifact contains the same trusted module bodies and Main with 
 });
 
 test('native bundle rejects dynamic, undeclared and incorrectly parented module imports at build time', () => {
-  for (const invalid of ['require(12345)', 'require(args.module)', 'require(script.Unknown)', 'require(script.Parent.Validation)']) {
-    const replacements = files.map((file, index) => index === 0
-      ? { ...file, source: '--!strict\nlocal dependency = ' + invalid + '\n' }
-      : file);
-    assert.throws(() => renderPlugin(replacements), /requires|require/);
+  for (const [filename, invalidImports] of [
+    ['Main.server.luau', ['require(12345)', 'require(args.module)', 'require(script.Unknown)', 'require(script.Parent.Validation)']],
+    ['AssetTransfer.luau', ['require(12345)', 'require(args.module)', 'require(script.Parent.Unknown)', 'require(script.AssetMesh)']],
+  ]) {
+    for (const invalid of invalidImports) {
+      const replacements = files.map(file => file.filename === filename
+        ? { ...file, source: '--!strict\nlocal dependency = ' + invalid + '\n' }
+        : file);
+      assert.throws(() => renderPlugin(replacements), /requires|require/);
+    }
   }
 });
 

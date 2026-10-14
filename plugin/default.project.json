@@ -10,6 +10,9 @@
     "Operations": { "$path": "src/Operations.luau" },
     "Transport": { "$path": "src/Transport.luau" },
     "TestProof": { "$path": "src/TestProof.luau" },
-    "Sha256": { "$path": "src/Sha256.luau" }
+    "Sha256": { "$path": "src/Sha256.luau" },
+    "AssetMesh": { "$path": "src/AssetMesh.luau" },
+    "Sha256Stream": { "$path": "src/Sha256Stream.luau" },
+    "AssetTransfer": { "$path": "src/AssetTransfer.luau" }
   }
 }

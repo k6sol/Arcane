@@ -3,15 +3,63 @@ local V = require(script.Parent.Validation)
 local LegacyProperties = require(script.Parent.Properties)
 local P = V.geometryProperties(LegacyProperties)
 local Registry = require(script.Parent.Registry)
+local AssetTransfer = require(script.Parent.AssetTransfer)
 local Operations = {}
 Operations.__index = Operations
 type Operations = any
 
 function Operations.new(pair: any, gameModel: any, http: any): Operations
 	return setmetatable({registry = Registry.new(pair.sessionId, pair.allowedRoots, gameModel, http),
+		gameModel = gameModel, assetTransfers = {},
 		http = http, editor = gameModel:GetService("ScriptEditorService"),
 		history = gameModel:GetService("ChangeHistoryService"), selection = gameModel:GetService("Selection"),
 		collection = gameModel:GetService("CollectionService"), mutations = {}, restored = {}}, Operations)
+end
+
+-- Host-only staging hooks. They are deliberately not exposed by execute until
+-- the typed transport/controller can supply exact actor/job/target authority.
+-- No upload, parenting, undo record or engine baseline is created here.
+function Operations:receiveAssetPacket(expected: any, packet: string, guard: () -> ()): any
+	guard()
+	V.fields(expected, {"digest", "payloadDigest", "manifestDigest"}, "asset transfer identity")
+	local id = V.string(expected.digest, "transfer digest", 64)
+	if #id ~= 64 or not string.match(id, "^[a-f0-9]+$") then V.fail("INPUT", "Expected transfer SHA-256.") end
+	local owned = self.assetTransfers[id]
+	if not owned then
+		local count = 0
+		for _ in pairs(self.assetTransfers) do count += 1 end
+		if count >= 2 then V.fail("BUSY", "At most two internal asset transfers may be staged.") end
+		owned = {guard = guard, expected = V.immutable(expected)}
+		owned.receiver = AssetTransfer.new(owned.expected, function(json: string): any
+			return self.http:JSONDecode(json)
+		end, function(): () owned.guard() end, function(): () task.wait() end)
+		self.assetTransfers[id] = owned
+	elseif owned.expected.payloadDigest ~= expected.payloadDigest or owned.expected.manifestDigest ~= expected.manifestDigest then
+		V.fail("SCOPE", "Transfer identity changed.")
+	end
+	owned.guard = guard
+	local ok, result = pcall(function(): any
+		local output = owned.receiver:accept(packet)
+		guard()
+		return output
+	end)
+	if not ok then
+		local cleaned = pcall(function() owned.receiver:cancel() end)
+		self.assetTransfers[id] = nil
+		if not cleaned then V.fail("CLEANUP", "Retired asset staging resources may remain.") end
+		error(result, 0)
+	end
+	return result
+end
+
+function Operations:cancelAssetTransfers(): ()
+	local failures = 0
+	for id, owned in pairs(self.assetTransfers) do
+		local ok = pcall(function() owned.receiver:cancel() end)
+		self.assetTransfers[id] = nil
+		if not ok then failures += 1 end
+	end
+	if failures > 0 then V.fail("CLEANUP", "Owned asset staging resources could not all be released.") end
 end
 
 function Operations:source(instance: any): string
