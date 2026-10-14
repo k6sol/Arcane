@@ -13,14 +13,14 @@ const hash=value=>createHash('sha256').update(value).digest('hex');
 
 // Static/native boundary DOUBLE proof. Actual Windows equivalence is the separate
 // comparison tool and retained verification.json, not this synthetic suite.
-test('approved read-inspector exact script and legacy policy roundtrip remain pinned',()=>{
-  assert.equal(hash(script),'f1e777b8885e769df7b0777223405105588650e8b34033cc61f0341fbee2c582');
+test('approved owner policy and legacy read-inspector roundtrip remain source pinned',()=>{
+  assert.equal(hash(script),'9e80f4b7b3563233fa936c57c2a50316eac345c5ef3eb79457caa4d1ffd52f3e');
   const legacy=inspectionOnlyLegacy(script);
-  assert.equal(hash(legacy),'4ac3ef479b87d10df06e9cbd75909038a13d2880625d6e34b8b075f5cd3aeaa8');
+  assert.equal(hash(legacy),'095214e83f2b94fdbade1f1086db4400aa2388d2198039f0aab87a8bd03637b8');
   assert.equal(inspectionOnlyCandidate(legacy),script);
 });
 
-test('native inspection keeps complete ancestry, protected owner/DACL rules and original new-child preparation',()=>{
+test('native inspection keeps strict ancestry/DACL rules and binds default ownership to one trusted host token',()=>{
   for(const predicate of [
     '$allowed=@($user.Value,\'S-1-5-18\',\'S-1-5-32-544\')',
     '[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles',
@@ -38,6 +38,18 @@ test('native inspection keeps complete ancestry, protected owner/DACL rules and 
   assert.ok(script.indexOf('Set-Acl')>script.indexOf('if(-not [IO.Directory]::Exists($dir))'));
   assert.ok(script.includes('[IO.Directory]::GetAccessControl($path)'));
   assert.ok(script.includes('[IO.File]::GetAccessControl($path)'));
+  assert.equal((script.match(/\[Security\.Principal\.WindowsIdentity\]::GetCurrent\(\)/g)??[]).length,1);
+  for(const predicate of [
+    '$user=$identity.User', '$defaultOwner=$identity.Owner',
+    "if($null -eq $user -or $null -eq $defaultOwner){throw 'token-owner'}",
+    "if($allowed -notcontains $defaultOwner.Value){throw 'token-owner'}",
+    '$prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value)',
+    "if(-not (IsDirectory $item) -or -not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-dir'}",
+    "if((IsDirectory $item) -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value)){throw 'private-key'}",
+  ]) assert.ok(script.includes(predicate),predicate);
+  assert.equal((script.match(/-notin @\(\$user.Value,\$defaultOwner.Value\)/g)??[]).length,2);
+  assert.ok(script.indexOf('if($allowed -notcontains $defaultOwner.Value)')<script.indexOf('[IO.Directory]::CreateDirectory'));
+  assert.ok(script.indexOf("throw 'private-dir-rule'")<script.indexOf('if($key)'));
 });
 
 function boundary(result={},pathFailure=false) {

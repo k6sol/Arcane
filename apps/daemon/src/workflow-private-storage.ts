@@ -18,9 +18,13 @@ export function parsePrivateReceiptDescriptor(value: unknown, prepare: boolean, 
 // comes from workflow text, HTTP JSON, an MCP tool, or provider configuration.
 // Read-only .NET inspection avoids filesystem-provider discovery; verified
 // against native attributes, owner/DACL/rules and rejection cases. The native
-// binary, complete predicates, preparation writes and 5000ms deadline are unchanged.
+// binary, ancestry/DACL predicates, preparation writes and 5000ms deadline stay fixed.
 // Only a new, empty, direct Arcane child receives a narrower DACL. An existing
 // directory is inspected, never "repaired". No ACL elsewhere is changed.
+// A Windows token's default object owner can differ from its user. Bind that
+// equivalence to one host identity and the existing trusted principals; the
+// final receipt directory still requires exact-user ownership. A key may keep
+// that captured default owner only under the verified exact-user private parent.
 const SCRIPT=String.raw`
 $ErrorActionPreference='Stop'
 try {
@@ -30,8 +34,12 @@ try {
   if([string]::IsNullOrEmpty($root) -or $root.Length -gt 4096 -or $root -match '[\x00-\x1f]' -or $root.StartsWith('\') -or -not [IO.Path]::IsPathRooted($root)){throw 'scope'}
   $full=[IO.Path]::GetFullPath($root)
   if($full -cne $root -or -not [IO.Directory]::Exists($root)){throw 'scope'}
-  $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+  $user=$identity.User
+  $defaultOwner=$identity.Owner
+  if($null -eq $user -or $null -eq $defaultOwner){throw 'token-owner'}
   $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')
+  if($allowed -notcontains $defaultOwner.Value){throw 'token-owner'}
   $danger=[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
   function Direct([string]$path) {
     $attributes=[IO.File]::GetAttributes($path)
@@ -68,7 +76,7 @@ try {
     $info=[IO.Directory]::CreateDirectory($dir)
     $item=Direct $dir
     $prior=Acl $dir
-    if(-not (IsDirectory $item) -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value -or @(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0){throw 'created-scope'}
+    if(-not (IsDirectory $item) -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value) -or @(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0){throw 'created-scope'}
     $acl=New-Object Security.AccessControl.DirectorySecurity
     $acl.SetOwner($user)
     $acl.SetAccessRuleProtection($true,$false)
@@ -88,7 +96,7 @@ try {
     $file=[IO.Path]::Combine($dir,'key-v1')
     $item=Direct $file
     $acl=Acl $file
-    if((IsDirectory $item) -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-key'}
+    if((IsDirectory $item) -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value)){throw 'private-key'}
     foreach($rule in (Rules $acl)){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private-key-rule'}}
   }
   [ordered]@{version=1;created=$created;directoryPrivate=$true;keyPrivate=$key;ancestorsSafe=$true} | ConvertTo-Json -Compress
