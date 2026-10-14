@@ -7,6 +7,13 @@ import { parseNativeStudioImportResponse } from './studio-import-wire.js';
 /** Data conversion only. Main must bind the SAME native actor, owned job and target.
  * Neither digests nor this pending payload grant upload/Studio/engine authority. */
 export const STUDIO_IMPORT_PAYLOAD_VERSION = 1;
+// Data provenance only; possession never grants upload/editor authority.
+const decodedPayloads = new WeakSet<object>();
+export function assertDecodedStudioImportPayload(value: StudioImportPayload): void {
+  if (!value || typeof value !== 'object' || !decodedPayloads.has(value)) {
+    throw new StudioImportPayloadError('SCHEMA', 'Expected a decoded payload from this process, not serialized claims.');
+  }
+}
 export const STUDIO_IMPORT_PAYLOAD_LIMITS = Object.freeze({
   chunkBytes: 180 * 1024, encodedChunkBytes: 256 * 1024 - 4096,
   binaryBytes: 32 * 1024 * 1024, encodedBytes: 48 * 1024 * 1024, chunks: 4096,
@@ -276,5 +283,7 @@ export function decodeStudioImportPayload(prepared: PreparedStudioImport, files:
     objects, sourceDocuments, binaryByteLength: binary, chunkCount: chunks };
   const metadataBytes=Buffer.byteLength(JSON.stringify(content,(k,v)=>k==='bytes'||k==='chunks'?undefined:v));
   const aggregateEncodedByteLength=bound(encoded+metadataBytes+4096,limits.encodedBytes,'Encoded payload aggregate');
-  const body={...content,aggregateEncodedByteLength}; return freeze({...body,digest:sha(canonical(body))});
+  const body={...content,aggregateEncodedByteLength};
+  const result = freeze({...body,digest:sha(canonical(body))});
+  decodedPayloads.add(result); return result;
 }

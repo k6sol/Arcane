@@ -197,6 +197,11 @@ test('owned payload intake preserves prepared identity, actual mesh streams and 
   assert.equal(result.payload.projectId, result.prepared.manifest.projectId);
   assert.equal(result.payload.revisionId, JOB);
   assert.equal(result.payload.objects.length, 8);
+  assert.equal(result.transfer.engineVerification, 'pending');
+  assert.equal(result.transfer.preparedDigest, result.prepared.digest);
+  assert.equal(result.transfer.payloadDigest, result.payload.digest);
+  assert.deepEqual(JSON.parse(result.transfer.packets[0]!.json).target, result.prepared.manifest.target);
+  assert.ok(result.transfer.packets.every(p => p.byteLength <= 256 * 1024));
   assert.deepEqual(result.payload.files, result.prepared.manifest.files);
   for (const item of result.payload.objects) {
     assert.deepEqual(item.object, result.prepared.manifest.objects.find(o => o.sourceObjectId === item.object.sourceObjectId));

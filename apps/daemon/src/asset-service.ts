@@ -13,11 +13,13 @@ import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImpo
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor } from './native-asset-authority.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
+import { createStudioImportTransfer, type StudioImportTransfer } from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
 
 
 export interface PreparedStudioImportPayload {
   readonly prepared: PreparedStudioImport;
   readonly payload: StudioImportPayload;
+  readonly transfer: StudioImportTransfer;
 }
 interface StudioImportReaders {
   manifest(jobId: unknown): Promise<AssetManifest>;
@@ -269,12 +271,13 @@ export async function createAssetService(options: AssetServiceOptions) {
       check();
       const prepared = authority.prepare(admission);
       const payload = includePayload ? decodeStudioImportPayload(prepared, payloadFiles) : null;
+      const transfer = payload ? createStudioImportTransfer(prepared, payload) : null;
       check();
       if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard));
       check();
       if (includePayload) {
-        if (!payload) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
-        return Object.freeze({ prepared, payload });
+        if (!payload || !transfer) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
+        return Object.freeze({ prepared, payload, transfer });
       }
       return prepared;
     } finally {

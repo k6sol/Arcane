@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createStudioImportManifestAuthority, type HostGeneratedStudioImport, type PreparedStudioImport } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { decodeStudioImportPayload, StudioImportPayloadError, STUDIO_IMPORT_PAYLOAD_LIMITS, type StudioImportPayload, type StudioImportPayloadBuffer } from '../../packages/asset-pipeline/src/studio-import-payload.js';
 import { adaptCompletedStudioImport } from '../../apps/daemon/src/asset-import-adapter.js';
+import { createStudioImportTransfer } from '../../packages/asset-pipeline/src/studio-import-transfer.js';
 import type { AssetManifest } from '../../packages/asset-pipeline/src/types.js';
 
 type Doc = Record<string, any>;
@@ -240,7 +241,7 @@ test('real default chunk ceiling: 60000 vertices/20000 triangles preserve ordere
     accessors.push({bufferView:index,componentType,type,count:60_000,...(index===0?{min:[0,0,0],max:[1,1,1]}:{})});parts.push(raw);offset+=raw.length;
   }
   f.doc.accessors=accessors;f.doc.bufferViews=views;f.bin=Buffer.concat(parts);
-  const g=f.generated(),p=await prepare(g),payload=decodeStudioImportPayload(p,new Map([['export',g.files[0]!.bytes]]));verifyChunks(payload);
+  const g=f.generated(),p=await prepare(g),payload=decodeStudioImportPayload(p,new Map([['export',g.files[0]!.bytes]]));verifyChunks(payload); const transfer=createStudioImportTransfer(p,payload);assert.ok(transfer.packets.every(packet=>packet.byteLength<=256*1024));
   assert.equal(payload.binaryByteLength,3_840_000);assert.ok(streams(payload).some(b=>b.chunks.length>1));
   const full=streams(payload).flatMap(b=>b.chunks).filter(c=>c.byteLength===STUDIO_IMPORT_PAYLOAD_LIMITS.chunkBytes);
   assert.ok(full.length>0);assert.ok(full.every(c=>Buffer.byteLength(JSON.stringify({chunk:c}))<256*1024));
