@@ -63,7 +63,7 @@ async function fixture(t) {
   // Execute the unchanged product entry/configuration with services and compiler configuration replaced
   // by metadata-only fixtures. No HTTP listener, SQLite engine, compiler, provider or Studio.
   let productFixture = productSource;
-  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js']) {
+  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
   }
@@ -88,16 +88,26 @@ async function fixture(t) {
       constructor({directory,projectPath}) { this.directory=directory; this.projectPath=projectPath; this.tasks=data(directory,'work.sqlite'); }
       close() {}
     }
+    let sharedConversationStore;
+    export class ConversationWorkStore {
+      constructor({directory,projectPath}) {
+        assert.equal(sharedConversationStore, undefined, 'Product creates one conversation store.');
+        this.directory=directory; this.projectPath=projectPath; sharedConversationStore=this;
+      }
+      close() {}
+    }
     export async function createAssetService(options) {
+      assert.equal(options.projectPath, sharedConversationStore.projectPath);
       const outputRoot = options.outputRoot ?? join(options.cwd,'runtime','assets');
       return {options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{}};
     }
     export function createLearningService() { return { close() {} }; }
     export async function createConnectionLab(options) {
+      assert.equal(options.conversationWorkStore, sharedConversationStore, 'LAB borrows the exact product store.');
       mkdirSync(options.stateDirectory,{recursive:true});
       console.log('fixture-product:' + JSON.stringify({cwd:options.cwd,projectPath:options.projectPath,port:options.port,
         studioDirectory:options.studioStore.directory,workDirectory:options.workStore.directory,
-        connectionDirectory:options.stateDirectory,keys:options.studioStore.keys,tasks:options.workStore.tasks,
+        connectionDirectory:options.stateDirectory,conversationDirectory:sharedConversationStore.directory,keys:options.studioStore.keys,tasks:options.workStore.tasks,
         assetProject:options.assetService.options.projectPath,assetCwd:options.assetService.options.cwd,
         assetOutputOverride:options.assetService.options.outputRoot??null,assetRoot:options.assetService.outputRoot,
         assetJobs:options.assetService.jobs}));
@@ -251,6 +261,7 @@ test('product configuration preserves default product/lab/asset paths and defaul
   assert.equal(product.studioDirectory, join(f.repository, 'runtime', 'product'));
   assert.equal(product.workDirectory, product.studioDirectory);
   assert.equal(product.connectionDirectory, join(f.repository, 'runtime', 'connection-lab'));
+  assert.equal(product.conversationDirectory, join(product.connectionDirectory, 'conversation-work'));
   assert.equal(product.assetOutputOverride, null);
   assert.equal(product.assetRoot, join(f.repository, 'runtime', 'assets'));
   assert.deepEqual(product.assetJobs, ['legacy-asset-job']);
@@ -279,6 +290,7 @@ test('product isolates stores, lab, descriptor and asset root/history from legac
   assert.equal(product.cwd, f.repository); assert.equal(product.projectPath, f.projectB); assert.equal(product.port, 0);
   assert.equal(product.studioDirectory, next.stateDirectory); assert.equal(product.workDirectory, next.stateDirectory);
   assert.equal(product.connectionDirectory, join(next.stateDirectory, 'connection-lab'));
+  assert.equal(product.conversationDirectory, join(product.connectionDirectory, 'conversation-work'));
   assert.deepEqual(product.keys, []); assert.deepEqual(product.tasks, []);
   assert.equal(product.assetProject, f.projectB); assert.equal(product.assetCwd, f.repository);
   assert.equal(product.assetOutputOverride, join(next.stateDirectory, 'assets'));

@@ -263,7 +263,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     closeIdleConnections() {},
   };
   const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
-    server, workflow: null, associations: null, ArcaneError: Error, ownedTests: null,
+    server, workflow: null, associations: null, ownsAssociations: false, ArcaneError: Error, ownedTests: null,
     ownedSourceVerifier: { dispose() { assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before compiler disposal'); } },
     nativeAssetRegistry: { close() { nativeAssetsFenced = true; } },
     codex: { close: () => { assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); return childCleanup; } },
@@ -320,7 +320,7 @@ test('regression: normal packaged asset state is accepted outside resources and 
   const constructor = /assets\s*=\s*await\s*createAssetService\(([\s\S]*?)\)\s*;\s*\}\s*catch/.exec(productSource);
   assert.ok(constructor, 'Expected product asset-service initialization.');
   const options = await vm.runInNewContext('(async () => capture(' + constructor[1] + '))()', {
-    capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', stateOverride: directory,
+    capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', associations: { projectPath: 'C:\\Project' }, stateOverride: directory,
     resourceOverride: resources, directory, join: win32.join,
   });
   const serviceSource = source('apps/daemon/src/asset-service.ts');
