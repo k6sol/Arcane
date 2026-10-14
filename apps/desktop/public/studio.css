@@ -828,8 +828,11 @@ body.arcane-app {
 .arcane-app #codex-attachment-status {margin:0 4px 8px;font-size:12px;color:var(--muted)}
 .arcane-app:has(.workspace-stage.provider-required) :is(.new-chat,.sidebar-links,.sidebar-secondary,.workspace-topbar,.shell-notice) {display:none}
 .arcane-app .workspace-stage.provider-required :is(.chat-heading,.chat-topline,.composer,.artifact-panel,#codex-model-popover) {display:none!important}
-.arcane-app .workspace-stage.provider-required .conversation-scroll {display:flex;align-items:center;justify-content:center;padding:0}
-.arcane-app .workspace-stage.provider-required .conversation-scroll>:not(#provider-login-gate) {display:none!important}
+.arcane-app .workspace-stage.provider-required .conversation-scroll {display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0}
+/* A signed-out user must still be able to review an uncertain recorded action.
+   This exposes only reconciliation, never chat, model or permission controls. */
+.arcane-app .workspace-stage.provider-required .conversation-scroll>:not(#provider-login-gate):not(#codex-unknown) {display:none!important}
+.arcane-app .workspace-stage.provider-required #codex-unknown {width:min(720px,100%);max-height:40svh;overflow:auto}
 .arcane-app .workspace-stage.provider-required #provider-login-gate {min-height:0;padding:36px 20px}
 .arcane-app .workspace-stage.provider-required .provider-choices button:disabled {display:none}
 @media(hover:hover) and (pointer:fine) {
@@ -865,5 +868,43 @@ body.arcane-app {
 }
 /* No ambient or idle animation; motion is limited to explicit interaction feedback. */
 .arcane-app *,.arcane-app *::before,.arcane-app *::after {animation:none}
+
+
+/* Verified, offline 3D assets: compact controls, the model owns the space. */
+.asset-viewer[hidden]{display:none!important}
+.asset-viewer{width:100%;min-width:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:radial-gradient(ellipse at 50% 0%,#321a23 0%,#111114 62%)}
+.viewer-canvas{width:100%;height:clamp(260px,44vh,520px);min-height:260px;position:relative}
+.viewer-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:10px;border-bottom:1px solid var(--line);background:#121214}
+.viewer-toolbar select,.viewer-toolbar button,.viewer-animation select,.viewer-animation button{min-height:34px;width:auto;font-size:12px;padding:6px 9px;border-radius:8px;background:#1b1b1f;border:1px solid #33333a;color:var(--text)}
+.viewer-toolbar button{margin-left:auto}
+.viewer-status,.viewer-metrics{padding:0 12px;margin:9px 0;font-size:12px;color:var(--muted);line-height:1.5}
+.viewer-metrics{font-variant-numeric:tabular-nums}
+.viewer-animation{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;border-top:1px solid var(--line)}
+.viewer-animation input[type=range]{flex:1;min-width:90px;width:120px;accent-color:var(--accent)}
+.viewer-animation select:first-child{max-width:180px}
+.viewer-loop{display:flex;flex-direction:row;align-items:center;gap:4px;font-size:12px}
+.viewer-loop input{width:14px;height:14px;accent-color:var(--accent)}
+.artifact-stage:has(.asset-viewer:not([hidden])) .artifact-empty{display:none}
+.artifact-stage:has(.asset-viewer:not([hidden])) .asset-previews{margin-top:12px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.artifact-stage:has(.asset-viewer:not([hidden])) .asset-previews figure.is-selected{grid-column:auto;order:0}
+.artifact-stage:has(.asset-viewer:not([hidden])) .asset-previews canvas{max-height:110px}
+@media(max-width:700px){.viewer-canvas{height:300px}.viewer-toolbar{gap:4px}.viewer-toolbar select,.viewer-toolbar button{min-height:40px;padding:6px;font-size:12px}.viewer-animation select:first-child{max-width:120px}}
+@media(forced-colors:active){.asset-viewer,.viewer-toolbar,.viewer-animation{border-color:CanvasText}.viewer-toolbar select,.viewer-toolbar button,.viewer-animation select,.viewer-animation button{border-color:ButtonText;background:Canvas;color:CanvasText}}
+.chat-assets[hidden]{display:none!important}
+.chat-assets{width:min(780px,100%);margin:18px auto;padding:0 4px}
+.chat-assets-heading{margin:0 0 9px;font-size:13px;font-weight:600;color:var(--muted)}
+.chat-asset-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.chat-asset-card{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:12px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(135deg,#211416,#151517 65%)}
+.chat-asset-card[data-selected=true]{border-color:#8d393d}
+.chat-asset-info{min-width:0;display:flex;flex-direction:column;gap:4px}
+.chat-asset-info strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:550}
+.chat-asset-state{font-size:12px;color:var(--muted)}
+.chat-asset-card button{flex-shrink:0;min-height:40px;min-width:54px;font-size:12px;padding:7px 11px}
+.chat-assets>.quiet{min-height:40px;padding:8px 0;margin-top:3px}
+.artifact-panel:has(.asset-viewer:not([hidden])) .preview-guide{display:none}
+@media(max-width:700px){.chat-asset-list{grid-template-columns:1fr}.chat-asset-card{padding:10px 12px}.chat-asset-card button{min-height:44px}}
+@media(forced-colors:active){.chat-asset-card{background:Canvas;border-color:CanvasText}.chat-asset-card[data-selected=true]{outline:2px solid Highlight;outline-offset:-2px}}
+/* Playtests stay part of the conversation: no console wall or tool picker. */
+.playtest-panel{display:grid;gap:10px;max-width:720px;margin:14px auto;padding:0 18px}.playtest-panel[hidden]{display:none}.playtest-row{padding:15px 17px;border:1px solid rgba(255,72,84,.2);border-radius:12px;background:linear-gradient(135deg,rgba(72,25,31,.26),rgba(22,22,25,.9));min-width:0}.playtest-panel h3{margin:0 0 5px;font-size:14px;font-weight:600}.playtest-panel p{font-size:12px;color:var(--muted);margin:5px 0;overflow-wrap:anywhere}.playtest-panel button{font-size:12px;padding:7px 12px;border-radius:7px;margin:8px 8px 0 0}.playtest-panel button[data-playtest-action=approve]{background:#d73341;color:#fff;border-color:#e34250}.playtest-panel details{margin-top:10px;color:var(--muted);font-size:11px}.playtest-panel summary{cursor:pointer}.playtest-panel dl{display:grid;grid-template-columns:130px minmax(0,1fr);gap:5px;margin:10px 0}.playtest-panel dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}.playtest-panel [role=status]{font-size:12px}.playtest-feedback{padding:10px 0}.playtest-panel button:focus-visible,.playtest-panel summary:focus-visible{outline:2px solid #ff5360;outline-offset:3px}@media(max-width:560px){.playtest-panel{padding:0 10px}.playtest-panel dl{grid-template-columns:1fr}}
 /* Keep this universal preference reset last, after every responsive override. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

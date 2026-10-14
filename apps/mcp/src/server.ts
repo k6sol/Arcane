@@ -55,12 +55,15 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'scene.search', args, { timeoutMs, signal }));
   register('selection_read', 'Read: return the current Studio selection only within this exact session’s granted roots.',
     z.strictObject(target), READ, ({ sessionId, timeoutMs }, signal) => client.execute(sessionId, 'selection.read', {}, { timeoutMs, signal }));
-  register('script_read', 'Read: obtain up to 100 KiB UTF-8 current editor source for an opaque script reference. Use this exact source as expectedSource for an authorized update.',
+  register('script_read', 'Read: obtain up to 100 KiB UTF-8 current editor source and Script/LocalScript enabled state for an opaque script reference. Use these exact baselines for an authorized update or activation. ModuleScripts have no enabled state.',
     z.strictObject({ ...target, ref }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.read', args, { timeoutMs, signal }));
   register('script_update', 'Write: user-authorized exact-baseline editor update. Requires this session’s write grant and Studio edit mode; refuses dirty-editor conflicts. Both sources are bounded to 100 KiB UTF-8. Returns immutable receipt or ambiguous command state; never auto-retry.',
     z.strictObject({ ...target, ref, expectedSource: source, source }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.update', args, { timeoutMs, signal }));
+  register('script_set_enabled', 'Write: activate or disable a Script/LocalScript using its exact current source and enabled baseline from script_read. New scripts start disabled. Enabling (including restoring a previously disabled script) requires the trusted host pinned Luau syntax compiler and matching persisted/editor source; empty, invalid or unsaved source is refused. Syntax verification is not a playtest. Requires exact paired write scope and edit mode; returns a recoverable receipt. Never auto-retry on timeout.',
+    z.strictObject({ ...target, ref, expectedSource: source, expectedEnabled: z.boolean(), enabled: z.boolean() }), WRITE,
+    ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.set_enabled', args, { timeoutMs, signal }));
   register('scene_create', sceneCreateDescription(),
     z.strictObject({ ...target, parent: ref, className: createClass, name: id.max(100), properties: properties.omit({ Name: true }).optional() }), { ...WRITE, destructiveHint: false },
     ({ sessionId, timeoutMs, ...args }, signal) => {
@@ -80,6 +83,13 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('receipt_restore', 'Write: user-authorized restoration from a succeeded mutation receipt commandId. The daemon constructs the inverse; the plugin requires the exact current after-state and refuses later-edit conflicts. Requires current write grant and edit mode. Do not supply an inverse or repeat on timeout.',
     z.strictObject({ commandId: id, timeoutMs }), WRITE,
     ({ commandId, timeoutMs }, signal) => client.restore(commandId, { timeoutMs, signal }));
+  register('playtest_request','Prepare a bounded real Studio playtest after building: inspect and independently bind the exact paired/native target, then request separate human approval in Arcane. Does not start play or turn write grants into test consent. Currently supports unpublished local places only, with fresh loaded-plugin continuity proof. No raw test code, tool choices or invented IDs. Returns needs_approval; use playtest_status, do not claim the game passed before terminal verified cleanup.',
+    z.strictObject({...target,nativeStudioId:id.optional(),durationMs:z.number().int().min(5000).max(60000).default(15000),observationIntervalMs:z.number().int().min(250).max(2000).default(1000),failOnRuntimeError:z.boolean().default(true)}),{...WRITE,destructiveHint:false},
+    ({timeoutMs,...input},signal)=>client.playtestRequest(input,{timeoutMs,signal}));
+  register('playtest_status','Read the actual current playtest request/report or caller-scoped pending requests. No effects or retries. Evidence records bounded state/console observations, not exhaustive gameplay correctness; fixture and native evidence remain distinct.',
+    z.strictObject({jobId:id.optional(),timeoutMs}),READ,({jobId,timeoutMs},signal)=>client.playtestStatus(jobId,{timeoutMs,signal}));
+  register('playtest_cancel','Cancel this caller-owned playtest request/run. Only the original verified owned play epoch can be stopped; foreign/manual play is refused. Cleanup can remain unknown and fenced. Never retry after an ambiguous response; read playtest_status.',
+    z.strictObject({jobId:id,timeoutMs}),WRITE,({jobId,timeoutMs},signal)=>client.playtestCancel(jobId,{timeoutMs,signal}));
   register(SKILLS_RECOMMEND_TOOL, 'Read locally: automatically select and load relevant bundled skill guidance from the actual task brief, including matching declared genre references, within a byte budget. Call before substantive inspect/plan/build/verify work; the user need not select skill IDs or tools. The product owner opted into experimental guidance, so allowExperimental defaults true for this router only; states remain honest and no skill is promoted to behavior-verified or approved. Quarantined/deprecated, tampered or escaped content is refused. Returns loaded IDs/status/context and explicitly deferred items; grants no permissions, calls no model or daemon, and scans no project.',
     z.strictObject({ request: boundedText(SKILL_ROUTER_LIMITS.requestCharacters).refine(value => value.trim().length > 0, 'Describe the actual task.'),
       limit: z.number().int().min(1).max(SKILL_ROUTER_LIMITS.skills).default(SKILL_ROUTER_LIMITS.skills),

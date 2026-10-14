@@ -3,10 +3,16 @@
 -- Provider credentials and session bearers are never saved.
 local V = require(script.Validation)
 local Transport = require(script.Transport)
+local Sha256 = require(script.Sha256)
+local artifactHash = if typeof(script) == "Instance" and script:IsA("Script") then Sha256(script.Source) else nil
 local KEY_SETTING = "Arcane.LocalApiKey.v1"
 local STATE_SETTING = "Arcane.LastConnection.v1"
 local savedKey: string? = nil
 local lastKnownConnected = false
+-- Legacy connected=false records describe transient health, not user intent.
+-- Only an explicit opt-out in this existing owned record suppresses startup.
+local autoConnect = true
+local storedOptOut = false
 local storageFailed = false
 local keyRead, previousKey = pcall(function() return plugin:GetSetting(KEY_SETTING) end)
 if keyRead and type(previousKey) == "string" then
@@ -18,7 +24,12 @@ local stateRead, previousState = pcall(function() return plugin:GetSetting(STATE
 if stateRead and type(previousState) == "table" and getmetatable(previousState) == nil then
 	local count = 0
 	for _ in pairs(previousState) do count += 1 end
-	if count == 1 and type(previousState.connected) == "boolean" then lastKnownConnected = previousState.connected end
+	if (count == 1 or (count == 2 and type(previousState.autoConnect) == "boolean"))
+		and type(previousState.connected) == "boolean" then
+		lastKnownConnected = previousState.connected
+		autoConnect = previousState.autoConnect ~= false
+		storedOptOut = not autoConnect
+	end
 end
 previousState = nil
 local toolbar = plugin:CreateToolbar("Arcane")
@@ -165,10 +176,16 @@ local function clearInput(): ()
 	refreshHint()
 end
 refreshHint()
-local function rememberState(connected: boolean): ()
-	if lastKnownConnected == connected then return end
-	local ok = pcall(function() plugin:SetSetting(STATE_SETTING, {connected = connected}) end)
-	if ok then lastKnownConnected = connected else storageFailed = true end
+local function rememberState(connected: boolean, allowed: boolean?): ()
+	if allowed ~= nil then autoConnect = allowed end
+	-- Key edits/rejections already remove saved auth. Persist an opt-out only
+	-- when a valid saved key remains (an explicit transport disconnect).
+	local optOut = not autoConnect and savedKey ~= nil
+	if lastKnownConnected == connected and storedOptOut == optOut then return end
+	local record: any = {connected = connected}
+	if optOut then record.autoConnect = false end
+	local ok = pcall(function() plugin:SetSetting(STATE_SETTING, record) end)
+	if ok then lastKnownConnected, storedOptOut = connected, optOut else storageFailed = true end
 end
 local function rejectKey(): ()
 	-- A rejected key must not become a persistent reconnect trap. Clearing this
@@ -176,7 +193,7 @@ local function rejectKey(): ()
 	keyFailed, savedKey, hint = true, nil, "Enter a new API key"
 	local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
 	if not ok then storageFailed = true end
-	rememberState(false)
+	rememberState(false, false)
 	connectButton.Text = "Failed"
 	connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red
 	clearInput()
@@ -203,6 +220,8 @@ transport = Transport.new(game, function(status: any)
 	-- ACK/rejection or dispatch status can adopt the previous input's outcome.
 	if invalidateInput() then return end
 	if status.state == "failed" then rejectKey(); return end
+	if status.state == "disconnecting" then rememberState(false, false)
+	elseif status.state == "connecting" then rememberState(false, true) end
 	local live = savedKey ~= nil and keyInput.Text == savedKey and status.sessionId ~= nil
 		and (status.state == "connected" or status.state == "executing")
 	-- Cached history never establishes a current session or green status.
@@ -211,7 +230,10 @@ transport = Transport.new(game, function(status: any)
 	if live then rememberState(true)
 	else rememberState(false) end
 	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
-end)
+end, artifactHash)
+-- Check deferred text edits before every worker cycle and after every yielding
+-- HTTP call, including status recovery that has not yet emitted a UI callback.
+transport.checkInput = invalidateInput
 -- A deferred Text signal must also be caught inside an already dispatched
 -- editor callback. Keep the transport's original lifetime/lease checks intact.
 local guard = transport.guard
@@ -254,11 +276,11 @@ table.insert(connections, plugin.Unloading:Connect(function()
 	widget:Destroy()
 	toolbar:Destroy()
 end))
--- Resume a previously successful user connection once in a fresh lifetime.
--- This only queues authentication; cached state is never proof of connection,
--- no session token/command is restored, and an ambiguous exchange is not replayed.
-if savedKey ~= nil and lastKnownConnected then
-	local ok = pcall(function() transport:requestConnect(savedKey) end)
+-- Queue safe recovery from any saved key unless the user explicitly opted out.
+-- Cached health never proves a connection. Status precedes authentication; no
+-- old session token, command, receipt or grant is restored in a new lifetime.
+if savedKey ~= nil and autoConnect then
+	local ok = pcall(function() transport:requestConnect(savedKey, true) end)
 	if not ok then rememberState(false) end
 end
 transport:start()

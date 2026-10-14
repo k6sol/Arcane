@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile, readdir, lstat, realpath, mkdir, mkdtemp } from 'node:fs/promises';
 import { resolve, join, relative, dirname, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MANAGED_LUAU_FILES, REQUIRED_MANAGED_LUAU_FILES, validateManagedLuauFiles, verifyManagedLuauCompiler } from './managed-luau-compiler.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT_FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'LICENSE', 'README.md'];
@@ -23,9 +24,15 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/workspace-shell.ts', 'dist/apps/desktop/src/workspace-shell.js',
   'dist/apps/desktop/src/workspace-shell.js.map', 'apps/desktop/src/asset-downloads.ts',
   'dist/apps/desktop/src/asset-downloads.js', 'dist/apps/desktop/src/asset-downloads.js.map',
+  'apps/desktop/src/asset-viewer.ts', 'dist/apps/desktop/src/asset-viewer.js', 'dist/apps/desktop/src/asset-viewer.js.map',
+  'apps/desktop/src/automatic-asset-previews.ts', 'dist/apps/desktop/src/automatic-asset-previews.js', 'dist/apps/desktop/src/automatic-asset-previews.js.map',
+  'apps/desktop/src/playtest-panel.ts', 'dist/apps/desktop/src/playtest-panel.js', 'dist/apps/desktop/src/playtest-panel.js.map',
+  'apps/desktop/src/glb-preflight.ts', 'dist/apps/desktop/src/glb-preflight.js', 'dist/apps/desktop/src/glb-preflight.js.map',
+  'apps/desktop/public/asset-viewer-runtime.mjs', 'apps/desktop/public/vendor/three/manifest.json', 'apps/desktop/public/vendor/three/LICENSE',
+  ...['build/three.module.js', 'build/three.core.js', 'examples/jsm/loaders/GLTFLoader.js', 'examples/jsm/controls/OrbitControls.js', 'examples/jsm/utils/BufferGeometryUtils.js', 'examples/jsm/utils/SkeletonUtils.js'].map(path => 'apps/desktop/public/vendor/three/' + path),
   'apps/desktop/src/learning-panel.ts', 'dist/apps/desktop/src/learning-panel.js', 'dist/apps/desktop/src/learning-panel.js.map', 'apps/desktop/src/codex-history.ts','apps/desktop/src/workflow-panel.ts', 'dist/apps/desktop/src/codex-history.js','dist/apps/desktop/src/workflow-panel.js', 'dist/apps/desktop/src/codex-history.js.map','dist/apps/desktop/src/workflow-panel.js.map', BRAND_BITMAP_PATH,
 ];
-const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'apps/desktop/public/vendor/three/LICENSE']);
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'apps/desktop/public/vendor/three/LICENSE', ...MANAGED_LUAU_FILES]);
 const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
 const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
 export function validateBrandBitmap(bytes) {
@@ -159,10 +166,12 @@ export async function createLocalRelease({ repository = REPOSITORY } = {}) {
   validateWorkspaceLock(files);
   const packageJson = JSON.parse(files.find(file => file.path === 'package.json').bytes.toString('utf8'));
   const firstRunDeclared = packageJson.scripts?.['setup:arcane'] !== undefined || files.some(file => FIRST_RUN_FILES.includes(file.path));
-  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json', ...REQUIRED_FRONTEND_FILES, ...(firstRunDeclared ? FIRST_RUN_FILES : [])]) {
+  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json', ...REQUIRED_FRONTEND_FILES, ...REQUIRED_MANAGED_LUAU_FILES, ...(firstRunDeclared ? FIRST_RUN_FILES : [])]) {
     if (!files.some(file => file.path === required)) throw new Error('Build the product and plugin before packaging: missing ' + required);
   }
   validateCompiledSources(files);
+  validateManagedLuauFiles(files);
+  verifyManagedLuauCompiler(repository);
   const outputRoot = join(repository, 'runtime', 'releases');
   if (!inside(repository, outputRoot)) throw new Error('Release output escapes the repository.');
   await noLinks(outputRoot); await mkdir(outputRoot, { recursive: true });
@@ -192,7 +201,7 @@ export async function verifyLocalRelease(directory) {
   const manifestBytes = await regularBytes(join(directory, 'release-manifest.json'));
   const manifest = JSON.parse(manifestBytes.toString('utf8'));
   if (manifest.schemaVersion !== 1 || manifest.kind !== 'arcane-local-source-release' || !Array.isArray(manifest.files) || manifest.files.length > MAX_FILES || manifest.fileCount !== manifest.files.length) throw new Error('Invalid release manifest.');
-  const seen = new Set(); let totalBytes = 0;
+  const seen = new Set(), verifiedFiles = []; let totalBytes = 0;
   for (const entry of manifest.files) {
     const path = validPath(entry.path);
     if (seen.has(path) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || entry.bytes > MAX_FILE_BYTES || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error('Invalid release file descriptor.');
@@ -200,6 +209,7 @@ export async function verifyLocalRelease(directory) {
     const target = join(directory, ...path.split('/')); if (!inside(directory, target)) throw new Error('Release path escapes package.');
     const bytes = await regularBytes(target); secretCheck(bytes, path);
     if (bytes.length !== entry.bytes || hash(bytes) !== entry.sha256) throw new Error('Release checksum mismatch: ' + path);
+    verifiedFiles.push({ path, bytes });
     totalBytes += bytes.length;
     if (totalBytes > MAX_BYTES) throw new Error('Release exceeds verification budget.');
   }
@@ -215,6 +225,7 @@ export async function verifyLocalRelease(directory) {
     }
   }
   await inventory();
+  validateManagedLuauFiles(verifiedFiles);
   if (manifest.totalBytes !== totalBytes) throw new Error('Release byte count mismatch.');
   return { files: seen.size, bytes: totalBytes, manifestSha256: hash(manifestBytes),
     integrityOnly: true, signed: false, runtimeVerified: false, mutableRootsNotVerified: MUTABLE_ROOTS };

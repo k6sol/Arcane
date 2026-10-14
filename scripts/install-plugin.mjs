@@ -11,7 +11,7 @@ export async function installPlugin({localAppData=process.env.LOCALAPPDATA,insta
  if(!localAppData&&!installDirectory)throw new Error('LOCALAPPDATA is unavailable.');
  const build=join(repository,'plugin','build');const manifest=JSON.parse(await readFile(join(build,'manifest.json'),'utf8'));
  if(manifest.schemaVersion!==1||manifest.protocolVersion!==1||manifest.entry!=='ArcaneLocalBridge')throw new Error('Unrecognized plugin manifest.');
- for(const source of manifest.sources){if(!/^src\/[A-Za-z]+(?:\.server)?\.luau$/.test(source.path))throw new Error('Invalid manifest source path.');const bytes=await readFile(join(repository,'plugin',source.path));const normalized=Buffer.from(bytes.toString('utf8').replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n'));if(hash(normalized)!==source.sha256)throw new Error('Build is stale; rebuild the plugin first.');}
+ for(const source of manifest.sources){if(!/^src\/[A-Za-z][A-Za-z0-9]*(?:\.server)?\.luau$/.test(source.path))throw new Error('Invalid manifest source path.');const bytes=await readFile(join(repository,'plugin',source.path));const normalized=Buffer.from(bytes.toString('utf8').replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n'));if(hash(normalized)!==source.sha256)throw new Error('Build is stale; rebuild the plugin first.');}
  const filename=manifest.preferredArtifact; if(filename!=='ArcaneLocalBridge.lua')throw new Error('Expected the reviewed native Lua bundle.');
  const artifact=manifest.artifacts.find(a=>a.name===filename);const bytes=await readFile(join(build,filename));
  if(!artifact||hash(bytes)!==artifact.sha256||bytes.length!==artifact.bytes||!bytes.toString('utf8').startsWith('--!strict')||!bytes.toString('utf8').includes('local __arcaneFactories'))throw new Error('Plugin artifact checksum failed.');

@@ -1,0 +1,453 @@
+/// <reference lib="dom" />
+import test, { type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { startPlaytestPanel } from '../../apps/desktop/src/playtest-panel.js';
+
+const NOW = 2_000_000_000_000, TOKEN = 'private-human-token', DIGEST = 'a'.repeat(64);
+function job(id = 'job-1', state = 'needs_approval') {
+  return {
+    id, targetName: 'Quiet garden', actor: 'private-actor-do-not-display', state, displayDigest: DIGEST,
+    display: {
+      proposal: {
+        binding: { pairedSessionId: 'paired-private-id', nativeStudioId: 'native-private-id', placeId: 0,
+          clientLifetimeId: 'lifetime-id', pluginArtifactHash: 'b'.repeat(64), scopeRevision: 'c'.repeat(64) },
+        durationMs: 5000, observationIntervalMs: 1000, failOnRuntimeError: true,
+        trustedPrivateTarget: { name: 'Quiet garden', source: 'Authenticated local pairing' },
+      },
+      cleanupGraceMs: 5000, requestTimeoutMs: 10000, proofMaxAgeMs: 6000, consentExpiresAt: NOW + 60_000,
+      guarantee: 'observed-non-atomic', actions: ['start', 'observe-state-and-console', 'stop-owned-play'],
+      raceDisclosure: 'Another Studio action can race these observations. Only owned play is stopped.',
+    },
+    review: { phase: 'prepared', outcome: null as string | null, code: null as string | null,
+      cleanup: 'not_started', observations: 0, requiresHumanReview: false,
+      logs: ['secret console text must not appear'] },
+    evidence: 'native', nativeAcceptance: false,
+  };
+}
+type JobFixture = ReturnType<typeof job>;
+function terminal(id = 'job-1', patch: Partial<JobFixture['review']> = {}): JobFixture {
+  const result = job(id, 'complete');
+  result.review = { ...result.review, phase: 'done', outcome: 'succeeded', code: 'OK', cleanup: 'complete', ...patch };
+  return result;
+}
+
+class Events {
+  private listeners = new Map<string, EventListener[]>();
+  addEventListener(type: string, listener: EventListener): void { this.listeners.set(type, [...this.listeners.get(type) ?? [], listener]); }
+  removeEventListener(type: string, listener: EventListener): void { this.listeners.set(type, (this.listeners.get(type) ?? []).filter(value => value !== listener)); }
+  count(): number { return [...this.listeners.values()].reduce((sum, values) => sum + values.length, 0); }
+  dispatchEvent(event: Event): boolean { for (const listener of [...this.listeners.get(event.type) ?? []]) listener(event); return !event.defaultPrevented; }
+  emit(type: string, trusted = false): void {
+    // Private offline fixture only. The production controller has no trust hook.
+    this.dispatchEvent({ type, isTrusted: trusted, target: this, preventDefault() {} } as unknown as Event);
+  }
+}
+class ElementFixture extends Events {
+  children: ElementFixture[] = []; parentElement: ElementFixture | null = null;
+  className = ''; type = ''; hidden = false; disabled = false; open = false; tabIndex = 0;
+  private content = ''; private attributes = new Map<string, string>();
+  constructor(readonly tagName: string, readonly ownerDocument: DocumentFixture) { super(); }
+  get textContent(): string { return this.content + this.children.map(child => child.textContent).join(''); }
+  set textContent(value: string) { this.replaceChildren(); this.content = value; }
+  get innerHTML(): never { throw new Error('HTML sink forbidden'); }
+  set innerHTML(_value: string) { throw new Error('HTML sink forbidden'); }
+  append(...children: ElementFixture[]): void { children.forEach(child => { child.parentElement = this; this.children.push(child); }); }
+  replaceChildren(...children: ElementFixture[]): void {
+    if (this.ownerDocument.activeElement && this.contains(this.ownerDocument.activeElement)) this.ownerDocument.activeElement = null;
+    this.children.forEach(child => { child.parentElement = null; }); this.children = []; this.content = ''; this.append(...children);
+  }
+  setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+  getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
+  contains(element: ElementFixture): boolean { return element === this || this.children.some(child => child.contains(element)); }
+  all(): ElementFixture[] { return this.children.flatMap(child => [child, ...child.all()]); }
+  focus(): void { this.ownerDocument.activeElement = this; }
+  click(): void { this.dispatchEvent(new Event('click')); }
+}
+class DocumentFixture extends Events {
+  visibilityState = 'visible'; activeElement: ElementFixture | null = null;
+  defaultView = new Events(); root = this.createElement('div');
+  createElement(tag: string): ElementFixture { return new ElementFixture(tag.toUpperCase(), this); }
+  visibility(state: string): void { this.visibilityState = state; this.emit('visibilitychange'); }
+}
+interface Call { path: string; init: RequestInit; body: unknown }
+type Handler = (call: Call) => Promise<Response>;
+function fixture(t: TestContext, initial: JobFixture[] = [job()], signedIn = true, visible = true) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW });
+  const doc = new DocumentFixture(), calls: Call[] = [];
+  if (!visible) doc.visibilityState = 'hidden';
+  let jobs = structuredClone(initial), token = TOKEN, authenticated = signedIn;
+  let handler: Handler = async call => {
+    if (call.init.method === 'GET') return Response.json({ jobs });
+    const input = call.body as { id: string };
+    const current = jobs.find(job => job.id === input.id)!;
+    current.state = call.path.endsWith('/approve') ? 'running' : 'cancelled';
+    return Response.json({ job: current });
+  };
+  const transport: typeof fetch = async (input, init) => {
+    const call = { path: String(input), init: init!, body: init?.body ? JSON.parse(String(init.body)) as unknown : undefined };
+    calls.push(call); return handler(call);
+  };
+  const panel = startPlaytestPanel({ root: doc.root as unknown as HTMLElement,
+    token: () => token, isSignedIn: () => authenticated, transport });
+  t.after(() => panel.stop());
+  return {
+    panel, doc, root: doc.root, calls,
+    handler(value: Handler) { handler = value; }, jobs(value: JobFixture[]) { jobs = structuredClone(value); },
+    auth(value: boolean, nextToken = token) { authenticated = value; token = nextToken; },
+    posts() { return calls.filter(call => call.init.method === 'POST'); },
+  };
+}
+type Fixture = ReturnType<typeof fixture>;
+const flush = async () => { for (let index = 0; index < 5; index++) await new Promise<void>(resolve => setImmediate(resolve)); };
+function button(f: Fixture, label: string): ElementFixture {
+  const result = f.root.all().find(element => element.tagName === 'BUTTON' && element.textContent === label);
+  assert.ok(result, 'Expected button: ' + label); return result;
+}
+function details(f: Fixture): ElementFixture { const value = f.root.all().find(element => element.tagName === 'DETAILS'); assert.ok(value); return value; }
+function deferred() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>(done => { resolve = done; }); return { promise, resolve };
+}
+function fieldValues(f: Fixture): Map<string, string> {
+  const children = details(f).all().filter(element => element.tagName === 'DT' || element.tagName === 'DD');
+  const result = new Map<string, string>();
+  for (let index = 0; index < children.length; index += 2) result.set(children[index]!.textContent, children[index + 1]!.textContent);
+  return result;
+}
+
+test('hidden before sign-in: no request, prefill, consent or empty panel', async t => {
+  const f = fixture(t, [job()], false);
+  assert.equal(f.root.hidden, true); assert.equal(f.root.children.length, 0);
+  await f.panel.refresh(); t.mock.timers.tick(10_000); await flush();
+  assert.equal(f.calls.length, 0); assert.equal(f.root.textContent, '');
+  f.auth(true); t.mock.timers.tick(250); await flush();
+  assert.equal(f.calls.length, 1); assert.equal(f.root.hidden, false); assert.equal(f.posts().length, 0);
+});
+
+test('empty jobs and historical terminal jobs do not create a panel', async t => {
+  const f = fixture(t, [terminal('old'), job('cancelled', 'cancelled')]);
+  await f.panel.refresh(); assert.equal(f.root.hidden, true);
+  f.jobs([]); await f.panel.refresh(); assert.equal(f.root.hidden, true); assert.equal(f.posts().length, 0);
+});
+
+test('renders the latest three actual active jobs with every exact read-only display field', async t => {
+  const actual = job(); const f = fixture(t, [job('old-1'), job('old-2'), job('recent'), actual]);
+  await f.panel.refresh();
+  assert.equal(f.root.all().filter(element => element.tagName === 'ARTICLE').length, 3);
+  assert.equal(f.root.all().filter(element => element.tagName === 'H3')[0]!.textContent, 'Playtest · Quiet garden');
+  assert.match(f.root.textContent, /5 s · Local, unpublished place/);
+  assert.ok(f.root.textContent.includes(actual.display.raceDisclosure));
+  const fields = fieldValues(f);
+  const expected = new Map<string, string>();
+  function flatten(value: unknown, path: string): void {
+    if (Array.isArray(value)) value.forEach((child, index) => flatten(child, path + '[' + index + ']'));
+    else if (value && typeof value === 'object') Object.entries(value).forEach(([key, child]) => flatten(child, path + '.' + key));
+    else expected.set(path, String(value));
+  }
+  flatten(actual.display, 'display'); expected.set('displayDigest', DIGEST);
+  assert.deepEqual(fields, expected); assert.equal(details(f).open, false);
+  assert.doesNotMatch(f.root.textContent, /private-actor-do-not-display|private-human-token|secret console/);
+  assert.ok(!f.root.all().some(element => ['INPUT', 'TEXTAREA', 'PRE', 'SELECT', 'IFRAME'].includes(element.tagName)));
+  assert.equal(f.root.getAttribute('aria-label'), 'Playtests'); assert.equal(f.root.getAttribute('aria-busy'), 'false');
+  assert.ok(f.root.all().filter(element => element.tagName === 'BUTTON').every(element => element.type === 'button'));
+});
+
+test('target text is never HTML and fields are captured independently of the returned object', async t => {
+  const target = '<img src=x onerror=send()>', actual = job(); actual.targetName = target;
+  const f = fixture(t, [actual]); await f.panel.refresh();
+  assert.equal(f.root.all().find(element => element.tagName === 'H3')!.textContent, 'Playtest · ' + target);
+  assert.equal(f.root.all().filter(element => element.tagName === 'IMG').length, 0);
+  actual.display.proposal.durationMs = 300_000;
+  assert.equal(fieldValues(f).get('display.proposal.durationMs'), '5000');
+});
+
+test('only a trusted current click sends the exact approval payload with browser-origin fetch', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const run = button(f, 'Run test');
+  run.click(); run.emit('click'); await flush(); assert.equal(f.posts().length, 0);
+  run.emit('click', true); run.emit('click', true);
+  assert.equal(f.posts().length, 1); assert.equal(f.root.getAttribute('aria-busy'), 'true');
+  assert.equal(button(f, 'Cancel').disabled, true);
+  const call = f.posts()[0]!;
+  assert.equal(call.path, '/v1/playtests/approve'); assert.deepEqual(call.body, { id: 'job-1', displayDigest: DIGEST });
+  assert.deepEqual(call.init.headers, { Authorization: 'Bearer ' + TOKEN, Accept: 'application/json', 'Content-Type': 'application/json' });
+  assert.equal(call.init.credentials, 'same-origin'); assert.equal(call.init.redirect, 'error'); assert.equal(call.init.cache, 'no-store');
+  assert.ok(!('Origin' in (call.init.headers as Record<string, string>)));
+  await flush(); assert.match(f.root.textContent, /Testing…/); assert.equal(button(f, 'Stop').disabled, false);
+  run.emit('click', true); assert.equal(f.posts().length, 1);
+});
+
+test('Cancel and running Stop are trusted, current, scoped POSTs', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const cancel = button(f, 'Cancel'); cancel.click(); assert.equal(f.posts().length, 0);
+  cancel.emit('click', true); await flush();
+  assert.equal(f.posts()[0]!.path, '/v1/playtests/cancel'); assert.deepEqual(f.posts()[0]!.body, { id: 'job-1' });
+  assert.match(f.root.textContent, /Test cancelled/); cancel.emit('click', true); assert.equal(f.posts().length, 1);
+  f.jobs([job('running-job', 'running')]); await f.panel.refresh();
+  button(f, 'Stop').emit('click', true); await flush();
+  assert.deepEqual(f.posts()[1]!.body, { id: 'running-job' });
+});
+
+test('changed ID, digest, scope or state invalidates detached approval and cancellation buttons', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  for (const variant of ['id', 'digest', 'scope', 'state']) {
+    f.jobs([job()]); await f.panel.refresh();
+    const oldRun = button(f, 'Run test'), oldCancel = button(f, 'Cancel'), changed = job();
+    if (variant === 'id') changed.id = 'replacement';
+    if (variant === 'digest') changed.displayDigest = 'd'.repeat(64);
+    if (variant === 'scope') changed.display.proposal.durationMs = 6000;
+    if (variant === 'state') changed.state = 'running';
+    f.jobs([changed]); await f.panel.refresh();
+    oldRun.emit('click', true); oldCancel.emit('click', true);
+    assert.equal(f.posts().length, 0, variant); assert.equal(oldRun.count(), 0); assert.equal(oldCancel.count(), 0);
+  }
+});
+
+test('ordinary polling preserves focus, the row and expanded consent details', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const original = button(f, 'Run test'), expanded = details(f); expanded.open = true; original.focus();
+  t.mock.timers.tick(1750); await flush(); assert.equal(f.calls.length, 1);
+  t.mock.timers.tick(250); await flush(); assert.equal(f.calls.length, 2);
+  assert.equal(button(f, 'Run test'), original); assert.equal(details(f), expanded); assert.equal(expanded.open, true);
+  assert.equal(f.doc.activeElement, original); assert.equal(f.posts().length, 0);
+  f.jobs([job('job-1', 'running')]); await f.panel.refresh();
+  assert.equal(details(f).open, true); assert.equal(f.doc.activeElement?.tagName, 'H3');
+});
+
+test('hidden tabs do not poll; visibility changes abort reads and fence late results', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const late = deferred(); f.handler(async () => late.promise);
+  const pending = f.panel.refresh(), call = f.calls.at(-1)!;
+  f.doc.visibility('hidden'); assert.equal(call.init.signal!.aborted, true); assert.equal(f.root.hidden, true);
+  t.mock.timers.tick(10_000); await flush(); assert.equal(f.calls.length, 2);
+  f.handler(async () => Response.json({ jobs: [job('fresh')] })); f.doc.visibility('visible'); await flush();
+  assert.equal(f.calls.length, 3);
+  late.resolve(Response.json({ jobs: [job('obsolete')] })); await pending; await flush();
+  button(f, 'Run test').emit('click', true); assert.deepEqual(f.posts()[0]!.body, { id: 'fresh', displayDigest: DIGEST });
+});
+
+test('initially hidden tabs make no requests until visible', async t => {
+  const f = fixture(t, [job()], true, false);
+  await f.panel.refresh(); t.mock.timers.tick(10_000); await flush();
+  assert.equal(f.calls.length, 0); assert.equal(f.root.hidden, true);
+  f.doc.visibility('visible'); await flush(); assert.equal(f.calls.length, 1);
+});
+
+test('auth loss and token rotation abort work and fence late responses', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const late = deferred(); f.handler(async () => late.promise);
+  const pending = f.panel.refresh(), call = f.calls.at(-1)!;
+  f.auth(false); t.mock.timers.tick(250); await flush();
+  assert.equal(call.init.signal!.aborted, true); assert.equal(f.root.hidden, true); assert.equal(f.root.textContent, '');
+  t.mock.timers.tick(10_000); await flush(); assert.equal(f.calls.length, 2);
+  const fresh = deferred(); f.handler(async () => fresh.promise); f.auth(true, 'rotated-token');
+  t.mock.timers.tick(250); await flush(); assert.equal(f.calls.length, 3);
+  late.resolve(Response.json({ jobs: [job('wrong-user-job')] })); await pending; await flush();
+  assert.equal(f.root.hidden, true); assert.equal(f.root.getAttribute('aria-busy'), 'true');
+  fresh.resolve(Response.json({ jobs: [job('current-user-job')] })); await flush();
+  assert.equal(f.root.hidden, false); assert.equal((f.calls[2]!.init.headers as Record<string, string>).Authorization, 'Bearer rotated-token');
+  const rotation = deferred(); f.handler(async () => rotation.promise); const rotating = f.panel.refresh();
+  const rotatingCall = f.calls.at(-1)!; f.auth(true, 'third-token'); const replacement = f.panel.refresh();
+  assert.equal(rotatingCall.init.signal!.aborted, true);
+  f.panel.stop(); rotation.resolve(Response.json({ jobs: [] })); await rotating; await replacement; await flush();
+  assert.equal(f.root.hidden, true);
+});
+
+test('click-time auth and visibility checks forbid stale commands before the watchdog runs', async t => {
+  const f = fixture(t); await f.panel.refresh(); const oldRun = button(f, 'Run test');
+  f.auth(false); oldRun.emit('click', true); assert.equal(f.posts().length, 0); assert.equal(f.root.hidden, true);
+  f.auth(true); await f.panel.refresh(); const current = button(f, 'Cancel');
+  f.doc.visibilityState = 'hidden'; current.emit('click', true); assert.equal(f.posts().length, 0); assert.equal(f.root.hidden, true);
+});
+
+test('stop cleans every listener and timer, aborts, hides and permanently fences late work', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const oldRun = button(f, 'Run test'), late = deferred(); f.handler(async () => late.promise);
+  const pending = f.panel.refresh(), call = f.calls.at(-1)!;
+  assert.equal(f.doc.count(), 1); assert.equal(f.doc.defaultView.count(), 2);
+  f.panel.stop(); f.panel.stop();
+  assert.equal(call.init.signal!.aborted, true); assert.equal(f.doc.count(), 0); assert.equal(f.doc.defaultView.count(), 0);
+  assert.equal(oldRun.count(), 0); assert.equal(f.root.hidden, true); assert.equal(f.root.children.length, 0);
+  t.mock.timers.tick(60_000); f.doc.visibility('visible'); f.doc.defaultView.emit('pageshow');
+  await f.panel.refresh(); oldRun.emit('click', true); assert.equal(f.calls.length, 2);
+  late.resolve(Response.json({ jobs: [job()] })); await pending; await flush(); assert.equal(f.root.textContent, '');
+});
+
+test('pagehide aborts a POST; pageshow only reads status and never replays consent', async t => {
+  const f = fixture(t); await f.panel.refresh(); const late = deferred();
+  f.handler(async call => call.init.method === 'POST' ? late.promise : Response.json({ jobs: [job()] }));
+  button(f, 'Run test').emit('click', true); const call = f.posts()[0]!;
+  f.doc.defaultView.emit('pagehide'); assert.equal(call.init.signal!.aborted, true); assert.equal(f.root.hidden, true);
+  t.mock.timers.tick(10_000); await flush(); assert.equal(f.calls.length, 2);
+  f.doc.defaultView.emit('pageshow'); await flush();
+  late.resolve(Response.json({ job: job('job-1', 'running') })); await flush();
+  assert.equal(f.posts().length, 1); assert.equal(button(f, 'Run test').disabled, true);
+});
+
+test('sign-out during a POST clears private data and a late receipt cannot change a new session', async t => {
+  const f = fixture(t); await f.panel.refresh(); const late = deferred();
+  f.handler(async call => call.init.method === 'POST' ? late.promise : Response.json({ jobs: [job('new-session-job')] }));
+  button(f, 'Run test').emit('click', true); const post = f.posts()[0]!;
+  f.auth(false); t.mock.timers.tick(250); await flush();
+  assert.equal(post.init.signal!.aborted, true); assert.equal(f.root.textContent, ''); assert.equal(f.root.hidden, true);
+  const callCount = f.calls.length; t.mock.timers.tick(5000); await flush(); assert.equal(f.calls.length, callCount);
+  f.auth(true, 'new-session-token'); await f.panel.refresh();
+  late.resolve(Response.json({ job: terminal('job-1') })); await flush();
+  assert.doesNotMatch(f.root.textContent, /Test finished/); assert.equal(button(f, 'Run test').disabled, false);
+  button(f, 'Run test').emit('click', true); assert.deepEqual(f.posts()[1]!.body, { id: 'new-session-job', displayDigest: DIGEST });
+});
+
+test('ambiguous approval failures show a bounded error, refresh status and never retry the POST', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  f.handler(async call => {
+    if (call.init.method === 'POST') throw new Error('private transport details ' + TOKEN);
+    return Response.json({ jobs: [job()] });
+  });
+  button(f, 'Run test').emit('click', true); await flush();
+  assert.equal(f.posts().length, 1); assert.equal(f.calls.at(-1)!.init.method, 'GET');
+  assert.match(f.root.textContent, /Couldn’t confirm the request/); assert.doesNotMatch(f.root.textContent, /private transport details|private-human-token/);
+  assert.equal(button(f, 'Run test').disabled, true); button(f, 'Run test').emit('click', true);
+  button(f, 'Refresh status').emit('click', true); await flush(); t.mock.timers.tick(2000); await flush();
+  assert.equal(f.posts().length, 1);
+  button(f, 'Cancel').emit('click', true); await flush(); assert.equal(f.posts().length, 2);
+  assert.equal(button(f, 'Cancel').disabled, true);
+});
+
+test('stale POST receipt IDs, digests, display scopes and states are refused', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  for (const variant of ['id', 'digest', 'scope', 'state', 'cancelled']) {
+    const id = 'job-' + variant, returned = job(id, 'running');
+    f.handler(async () => Response.json({ jobs: [job(id)] })); await f.panel.refresh();
+    if (variant === 'id') returned.id = 'foreign-job';
+    if (variant === 'digest') returned.displayDigest = 'b'.repeat(64);
+    if (variant === 'scope') returned.display.proposal.durationMs = 9000;
+    if (variant === 'state') returned.state = 'needs_approval';
+    if (variant === 'cancelled') returned.state = 'cancelled';
+    f.handler(async call => call.init.method === 'POST' ? Response.json({ job: returned }) : Response.json({ jobs: [job(id)] }));
+    button(f, 'Run test').emit('click', true); await flush();
+    assert.match(f.root.textContent, /Couldn’t confirm the request/, variant);
+    assert.doesNotMatch(f.root.textContent, /Testing…/); assert.equal(button(f, 'Run test').disabled, true, variant);
+  }
+  assert.equal(f.posts().length, 5);
+});
+
+test('cancellation refuses stale IDs, digests and active-state receipts without retry', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  for (const variant of ['id', 'digest', 'running', 'needs_approval']) {
+    const id = 'cancel-' + variant, returned = job(id, 'cancelled');
+    f.handler(async () => Response.json({ jobs: [job(id, 'running')] })); await f.panel.refresh();
+    if (variant === 'id') returned.id = 'another-job';
+    if (variant === 'digest') returned.displayDigest = 'f'.repeat(64);
+    if (variant === 'running' || variant === 'needs_approval') returned.state = variant;
+    f.handler(async call => call.init.method === 'POST' ? Response.json({ job: returned }) : Response.json({ jobs: [job(id, 'running')] }));
+    button(f, 'Stop').emit('click', true); await flush();
+    assert.match(f.root.textContent, /Couldn’t confirm the request/); assert.equal(button(f, 'Stop').disabled, true);
+    button(f, 'Stop').emit('click', true);
+  }
+  assert.equal(f.posts().length, 4);
+});
+
+test('expired consent disables approval without silently renewing or cancelling it', async t => {
+  const actual = job(); actual.display.consentExpiresAt = NOW + 500;
+  const f = fixture(t, [actual]); await f.panel.refresh();
+  assert.equal(button(f, 'Run test').disabled, false);
+  t.mock.timers.tick(500); await flush(); assert.equal(button(f, 'Run test').disabled, true);
+  button(f, 'Run test').emit('click', true); assert.equal(f.posts().length, 0); assert.equal(button(f, 'Cancel').disabled, false);
+});
+
+test('completion is neutral and evidence-labelled; failures and unknown cleanup require attention', async t => {
+  const f = fixture(t, [job('job-1', 'running')]); await f.panel.refresh();
+  f.jobs([terminal()]); await f.panel.refresh();
+  assert.match(f.root.textContent, /Test finished/); assert.match(f.root.textContent, /Native evidence · Native acceptance unverified/);
+  assert.ok(!f.root.all().some(element => /success|green/.test(element.className)));
+  const failed = terminal('job-1', { outcome: 'failed', code: 'RUNTIME_ERROR' }); failed.evidence = 'fixture';
+  f.jobs([failed]); await f.panel.refresh();
+  assert.match(f.root.textContent, /Fixture evidence · Native acceptance unverified/);
+  assert.ok(f.root.all().some(element => element.textContent === 'Test finished' && element.className.includes('danger')));
+  for (const patch of [{ cleanup: 'unknown' }, { requiresHumanReview: true }, { outcome: 'new-unknown-outcome' }, { phase: 'stopping' }, { code: 'RUNTIME_ERROR' }]) {
+    f.jobs([terminal('job-1', patch)]); await f.panel.refresh(); assert.match(f.root.textContent, /Needs review/);
+  }
+  assert.doesNotMatch(f.root.textContent, /perfect|all tests passed|secret console/);
+  f.jobs([]); await f.panel.refresh(); assert.equal(f.root.hidden, true);
+});
+
+test('malformed tiny fields, actions and private target metadata fail closed', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  const variants: ((value: Record<string, any>) => void)[] = [
+    value => { value.targetName = { name: 'coercion forbidden' }; },
+    value => { value.actor = {}; }, value => { value.targetName = 'x'.repeat(257); },
+    value => { value.displayDigest = 'g'.repeat(64); }, value => { value.state = 'prepared'; },
+    value => { value.display.proposal.binding.placeId = 123; },
+    value => { value.display.proposal.binding.pairedSessionId = {}; },
+    value => { value.display.proposal.durationMs = '5000'; },
+    value => { value.display.proposal.observationIntervalMs = -1; },
+    value => { value.display.proposal.failOnRuntimeError = 'true'; },
+    value => { value.display.proposal.trustedPrivateTarget.source = false; },
+    value => { value.display.proposal.binding.rawLogs = 'Not consent'; },
+    value => { value.display.proposal.script = 'do not render'; },
+    value => { value.display.path = 'private/path'; },
+    value => { value.display.raceDisclosure = ''; }, value => { delete value.display.proofMaxAgeMs; },
+    value => { value.display.guarantee = 'atomic'; }, value => { value.display.actions.push('run-code'); },
+    value => { value.display.actions.reverse(); }, value => { value.nativeAcceptance = true; },
+    value => { value.evidence = 'success'; }, value => { value.review.observations = {}; },
+  ];
+  const original = button(f, 'Run test');
+  for (const change of variants) {
+    const malformed = structuredClone(job()); change(malformed);
+    f.handler(async () => Response.json({ jobs: [malformed] })); await f.panel.refresh();
+    assert.equal(button(f, 'Run test'), original); assert.equal(original.disabled, true);
+    original.emit('click', true); assert.equal(f.posts().length, 0);
+  }
+  f.handler(async () => Response.json({ jobs: [job(), job()] })); await f.panel.refresh(); assert.equal(original.disabled, true);
+  f.handler(async () => Response.json({ jobs: [job()] })); await f.panel.refresh(); assert.equal(original.disabled, false);
+});
+
+test('response byte bounds apply while streaming, including unknown fields and error bodies', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(128 * 1024)); controller.enqueue(new Uint8Array(1)); },
+    cancel() { cancelled = true; },
+  });
+  f.handler(async () => new Response(stream, { headers: { 'Content-Type': 'application/json' } })); await f.panel.refresh();
+  assert.equal(cancelled, true); assert.equal(button(f, 'Run test').disabled, true);
+  for (const response of [
+    Response.json({ jobs: [job()] }, { headers: { 'Content-Length': String(128 * 1024 + 1) } }),
+    Response.json({ jobs: [job()], extra: 'é'.repeat(128 * 1024) }),
+    new Response(new Uint8Array([0xff]), { headers: { 'Content-Type': 'application/json' } }),
+    new Response('{}', { headers: { 'Content-Type': 'text/html' } }),
+    Response.json({ jobs: [job()] }, { status: 202 }),
+    Response.json({ error: TOKEN }, { status: 403 }),
+    new Response('{', { headers: { 'Content-Type': 'application/json' } }),
+  ]) {
+    f.handler(async () => response); await f.panel.refresh(); assert.equal(button(f, 'Run test').disabled, true);
+    assert.doesNotMatch(f.root.textContent, /private-human-token/);
+  }
+});
+
+test('body reads abort on visibility loss even after response headers arrive', async t => {
+  const f = fixture(t); await f.panel.refresh();
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({ start() {}, cancel() { cancelled = true; } });
+  f.handler(async () => new Response(stream, { headers: { 'Content-Type': 'application/json' } }));
+  const pending = f.panel.refresh(); await flush(); f.doc.visibility('hidden'); await pending; await flush();
+  assert.equal(cancelled, true); assert.equal(f.root.hidden, true);
+});
+
+test('a stalled POST times out, reports uncertainty and only starts a status read', async t => {
+  const f = fixture(t); await f.panel.refresh(); const late = deferred();
+  f.handler(async call => call.init.method === 'POST' ? late.promise : Response.json({ jobs: [job()] }));
+  button(f, 'Run test').emit('click', true); const post = f.posts()[0]!;
+  t.mock.timers.tick(15_000); await flush();
+  assert.equal(post.init.signal!.aborted, true); assert.equal(f.posts().length, 1);
+  assert.match(f.root.textContent, /Couldn’t confirm the request/); assert.equal(f.calls.at(-1)!.init.method, 'GET');
+  late.resolve(Response.json({ job: job('job-1', 'running') })); await flush();
+  assert.doesNotMatch(f.root.textContent, /Testing…/); assert.equal(button(f, 'Run test').disabled, true);
+});
+
+test('manual refresh coalesces an in-flight read and polling never overlaps it', async t => {
+  const f = fixture(t); await f.panel.refresh(); const late = deferred();
+  f.handler(async () => late.promise); const first = f.panel.refresh(), second = f.panel.refresh();
+  assert.equal(first, second); t.mock.timers.tick(5000); await flush(); assert.equal(f.calls.length, 2);
+  late.resolve(Response.json({ jobs: [job()] })); await first; await second; assert.equal(f.posts().length, 0);
+});

@@ -24,13 +24,10 @@ function assetActivity(value: unknown): WorkspaceAssetActivity | null {
 
 export type WorkspaceTool = 'all' | 'blender' | 'roblox';
 export interface WorkspaceToolChange { tool: WorkspaceTool }
-const TOOL_CONTEXT: Record<WorkspaceTool, { label: string; heading: string; description: string; settings: string; draft: string }> = {
-  all: { label: 'All tools', heading: 'Your workspace', description: 'Models and scenes.', settings: 'workspace-settings',
-    draft: 'Tool context: Blender models, materials and textures, and Roblox Studio scenes and scripts.' },
-  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Models, materials, textures and animation.', settings: 'asset-heading',
-    draft: 'Tool context: Blender models, materials, textures and animation.' },
-  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Scenes, scripts and game systems.', settings: 'session-heading',
-    draft: 'Tool context: Roblox Studio scenes, scripts and game systems.' },
+const TOOL_PRESENTATION: Record<WorkspaceTool, { label: string; heading: string; description: string; settings: string }> = {
+  all: { label: 'All tools', heading: 'Your workspace', description: 'Models and scenes.', settings: 'workspace-settings' },
+  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Models, materials, textures and animation.', settings: 'asset-heading' },
+  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Scenes, scripts and game systems.', settings: 'session-heading' },
 };
 const workspaceTool = (value: string | null): WorkspaceTool | null =>
   value === 'all' || value === 'blender' || value === 'roblox' ? value : null;
@@ -69,7 +66,7 @@ export class WorkspaceShell {
     this.navigation = Array.from(doc.querySelectorAll<HTMLElement>('[data-workspace-target]'));
     for (const control of this.navigation) {
       if (control.classList.contains('is-active')) control.setAttribute('aria-current', 'page');
-      if (['new-chat', 'sidebar-toggle', 'preview-expand', 'preview-settings', 'workspace-preview-toggle', 'workspace-preview-close'].includes(control.id) || control.hasAttribute('data-draft')) continue;
+      if (['new-chat', 'sidebar-toggle', 'preview-expand', 'preview-settings', 'workspace-preview-toggle', 'workspace-preview-close', 'preview-model-tab', 'preview-files-tab'].includes(control.id) || control.hasAttribute('data-draft')) continue;
       this.button(control, () => {
         const tool = workspaceTool(control.getAttribute('data-workspace-tool'));
         if (tool) this.selectTool(tool);
@@ -77,9 +74,11 @@ export class WorkspaceShell {
       }, control.hasAttribute('data-workspace-tool'));
     }
     for (const control of doc.querySelectorAll<HTMLElement>('[data-draft]')) this.button(control, () => {
+      const tool = workspaceTool(control.getAttribute('data-workspace-tool'));
+      if (tool) { this.selectTool(tool); return; }
       const draft = control.getAttribute('data-draft');
       if (draft !== null) this.openComposer(draft);
-    });
+    }, control.hasAttribute('data-workspace-tool'));
     const newChat = doc.getElementById('new-chat');
     if (newChat) {
       newChat.setAttribute('aria-label', 'Focus current conversation');
@@ -115,6 +114,7 @@ export class WorkspaceShell {
     this.bindSettingsDrawer();
     this.bindToolSwitcher();
     this.bindPreviewPresentation();
+    this.bindArtifactTabs();
     this.bindPreviews();
     this.bindShortcuts();
   }
@@ -319,12 +319,14 @@ export class WorkspaceShell {
     const composer = this.composer();
     if (!composer) return;
     this.onNavigate?.();
-    if (draft !== undefined && draft.length) {
+    // Old markup can retain canned tool hints. Routing already comes from native
+    // developer instructions; these hints must never become public message text.
+    if (draft !== undefined && draft.length && !/^\s*Tool context:/i.test(draft)) {
       const next = composer.value + (composer.value ? '\n\n' : '') + draft;
       const rawLimit = composer.getAttribute('maxlength');
       const limit = rawLimit !== null && /^\d+$/.test(rawLimit) ? Number(rawLimit) : 131072;
       if (next.length > limit || new TextEncoder().encode(next).length > 131072) {
-        this.notice('Tool context exceeds the message limit. Your draft was preserved.');
+        this.notice('This addition exceeds the message limit. Your draft was preserved.');
         this.focus(composer, false);
         return;
       }
@@ -338,7 +340,7 @@ export class WorkspaceShell {
   }
 
   private renderTool(): void {
-    const context = TOOL_CONTEXT[this.tool];
+    const context = TOOL_PRESENTATION[this.tool];
     this.doc.getElementById('workspace-stage')?.setAttribute('data-workspace-tool', this.tool);
     for (const [id, value] of [['workspace-tool-label', context.label], ['workspace-context-heading', context.heading],
       ['workspace-context-description', context.description]] as const) {
@@ -481,7 +483,8 @@ export class WorkspaceShell {
       // after appending its verified, decoded canvas, never for empty placeholders.
       if (activity.state === 'succeeded') {
         const canvases = this.doc.getElementById('asset-previews')?.querySelectorAll<HTMLCanvasElement>('figure canvas[role="img"]');
-        if (!canvases || !Array.from(canvases).some(canvas => canvas.width > 0 && canvas.height > 0)) return;
+        const model = this.doc.getElementById('asset-viewer')?.querySelector<HTMLCanvasElement>('canvas[role="img"]');
+        if ((!canvases || !Array.from(canvases).some(canvas => canvas.width > 0 && canvas.height > 0)) && (!model || model.width <= 0 || model.height <= 0)) return;
       }
       // Once observed, this identity cannot reopen a deliberately closed panel,
       // even after another job, repeated polls, canvas replacements or pageshow.
@@ -491,10 +494,51 @@ export class WorkspaceShell {
     sync();
   }
 
+  private bindArtifactTabs(): void {
+    const model = this.doc.getElementById('preview-model-tab'), files = this.doc.getElementById('preview-files-tab');
+    const stage = this.doc.getElementById('artifact-stage'), exports = this.doc.getElementById('artifact-files');
+    if (!model || !files || !stage || !exports) return;
+    let selected: 'preview' | 'files' = 'preview';
+    const seen = new Set<string>();
+    const sync = () => {
+      if (this.disposed) return;
+      if (exports.childElementCount === 0) {
+        const empty = this.doc.createElement('p'); empty.className = 'hint'; empty.textContent = 'Exports will appear here.'; exports.append(empty);
+      }
+      for (const [tab, name, panel] of [[model, 'preview', stage], [files, 'files', exports]] as const) {
+        const active = selected === name;
+        if (tab.getAttribute('aria-selected') !== String(active)) tab.setAttribute('aria-selected', String(active));
+        tab.setAttribute('tabindex', active ? '0' : '-1'); tab.classList.toggle('is-active', active);
+        if (panel.hidden !== !active) panel.hidden = !active;
+      }
+    };
+    const choose = (tab: 'preview' | 'files', focus = false) => { selected = tab; sync(); if (focus) this.focus(tab === 'preview' ? model : files); };
+    this.button(model, () => choose('preview')); this.button(files, () => choose('files'));
+    for (const tab of [model, files]) this.listen(tab, 'keydown', event => {
+      const key = event as KeyboardEvent;
+      if (key.altKey || key.ctrlKey || key.metaKey || key.isComposing || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key.key)) return;
+      event.preventDefault(); choose(key.key === 'Home' ? 'preview' : key.key === 'End' ? 'files' : selected === 'preview' ? 'files' : 'preview', true);
+    });
+    this.listen(this.doc, WORKSPACE_ASSET_ACTIVITY_EVENT, event => {
+      const activity = assetActivity((event as CustomEvent<unknown>).detail);
+      if (!activity || seen.has(activity.jobId) || seen.size >= PREVIEW_JOB_LIMIT) return;
+      seen.add(activity.jobId); choose('preview');
+    });
+    const Observer = this.doc.defaultView?.MutationObserver;
+    if (Observer) {
+      const observer = new Observer(sync);
+      // The download owner replaces content/visibility after each verified
+      // manifest. Keep that content in the selected tab; never issue reads.
+      observer.observe(exports, { childList: true, attributes: true, attributeFilter: ['hidden'] });
+      this.removers.push(() => observer.disconnect());
+    }
+    sync();
+  }
   private bindPreviews(): void {
     const previews = this.doc.getElementById('asset-previews');
     if (!previews) return;
     const summary = this.doc.getElementById('asset-job-summary'), status = this.doc.getElementById('preview-guide-status');
+    const emptyTitle = this.doc.getElementById('preview-empty-title'), emptyDescription = this.doc.getElementById('preview-empty-description');
     let selected: HTMLElement | null = null;
     let figures: HTMLElement[] = [];
     const sync = (refreshFigures = true) => {
@@ -508,13 +552,20 @@ export class WorkspaceShell {
         if(figure.classList.contains('is-selected')!==pressed)figure.classList.toggle('is-selected', pressed);
       }
       if (status) {
+        const building = summary?.getAttribute('data-asset-state') === 'running';
+        const slug = summary?.getAttribute('data-asset-name') ?? '';
+        const name = /^[a-z][a-z0-9-]{0,47}$/.test(slug) ? slug.replaceAll('-', ' ') : 'model';
+        const title = building ? 'Building ' + name : 'Preview your work';
+        if (emptyTitle && emptyTitle.textContent !== title) emptyTitle.textContent = title;
+        const description = building ? 'Your preview will appear here.' : 'Your completed models appear here.';
+        if (emptyDescription && emptyDescription.textContent !== description) emptyDescription.textContent = description;
         const text = figures.length ? (summary?.textContent ?? '')
           .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
           .replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g, '[REDACTED]')
           .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]')
           .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
           .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 2048)
-          : 'No model is selected. Nothing is generated automatically.';
+          : building ? 'Building ' + name + '…' : 'No model is selected. Nothing is generated automatically.';
         if (status.textContent !== text) status.textContent = text;
       }
     };

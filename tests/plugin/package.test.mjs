@@ -74,19 +74,19 @@ function parseBundle(xml) {
 test('portable bundle has one enabled Script and all strict ModuleScripts as children', () => {
   const { xml, manifest } = renderPlugin(files);
   const items = parseBundle(xml);
-  assert.equal(items.length, 7);
+  assert.equal(items.length, PLUGIN_SOURCES.length);
   assert.equal(items[0].className, 'Script');
   assert.equal(items[0].name, 'ArcaneLocalBridge');
   items.forEach((item, index) => { assert.equal(item.name, PLUGIN_SOURCES[index][0]); if (index) assert.equal(item.parent, items[0]); });
   assert.equal(items[0].depth, 1);
   assert.match(xml, /<bool name="Disabled">false<\/bool>/);
-  assert.equal(new Set(items.map(item => item.referent)).size, 7);
+  assert.equal(new Set(items.map(item => item.referent)).size, PLUGIN_SOURCES.length);
   items.slice(1).forEach(item => { assert.equal(item.className, 'ModuleScript'); assert.equal(item.depth, 2); });
   items.forEach((item, index) => assert.equal(item.source, files[index].source.replace(/\r\n?/g, '\n')));
   assert.equal(manifest.format, 'roblox-xml-v4');
   assert.equal(manifest.protocolVersion, 1);
-  assert.equal(manifest.pluginVersion, '0.1.3');
-  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.3"$/m);
+  assert.equal(manifest.pluginVersion, '0.1.7');
+  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.7"$/m);
   assert.equal(manifest.artifacts[0].sha256, createHash('sha256').update(xml).digest('hex'));
 });
 
@@ -137,7 +137,7 @@ test('Rojo source map resolves the same Script/module hierarchy', async () => {
   assert.equal(project.tree.$path, 'src/Main.server.luau');
   for (const [name, , filename] of PLUGIN_SOURCES.slice(1)) assert.equal(project.tree[name].$path, `src/${filename}`);
   for (const { filename, source } of files) {
-    for (const match of source.matchAll(/require\(script(?:\.Parent)?\.([A-Za-z]+)\)/g)) {
+    for (const match of source.matchAll(/require\(script(?:\.Parent)?\.([A-Za-z][A-Za-z0-9]*)\)/g)) {
       assert.equal(match[0].includes('.Parent.'), filename !== 'Main.server.luau', 'require resolves at actual script hierarchy');
       assert.ok(PLUGIN_SOURCES.some(([name]) => name === match[1]), `${filename}: unresolved module ${match[1]}`);
     }
@@ -166,7 +166,8 @@ test('method/root/class/material allowlists exactly match the shared protocol an
 test('packaged source has no arbitrary evaluation, asset insertion, unscoped persistence or publishing API', () => {
   assert.doesNotMatch(allSource, /\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
   assert.doesNotMatch(allSource, /(?:InsertService|AssetService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
-  assert.doesNotMatch(allSource, /(?:SetAttribute|AddTag)\s*\(/);
+  assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
+  assert.doesNotMatch(byFile['TestProof.luau'], /AddTag|SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
   assert.doesNotMatch(allSource, /require\(\s*(?:\d|args\.|command\.)/);
   assert.equal((allSource.match(/:RequestAsync\(/g) ?? []).length, 1);
@@ -185,17 +186,29 @@ test('packaged source has no arbitrary evaluation, asset insertion, unscoped per
     ['SetSetting', 'Arcane.LocalApiKey.v1'],
   ]);
   assert.equal((main.match(/\b(?:GetSetting|SetSetting)\b/g) ?? []).length, calls.length, 'No alias or dynamic setting access escapes the namespace checks.');
-  assert.match(main, /SetSetting\(STATE_SETTING, \{connected = connected\}\)/);
-  assert.match(main, /function rememberState\(connected: boolean\)/);
+  assert.match(main, /local record: any = \{connected = connected\}[\s\S]*if optOut then record\.autoConnect = false end[\s\S]*SetSetting\(STATE_SETTING, record\)/);
+  assert.match(main, /function rememberState\(connected: boolean, allowed: boolean\?\)/);
 });
 
 test('transport pins literal loopback routes, handles bounded backoff and fences sessions', () => {
   const transport = byFile['Transport.luau'];
   assert.match(byFile['Validation.luau'], /\^http:\/\/127%\.0%\.0%\.1:/);
-  for (const defense of ['self.inFlight', 'Timeout = 10', 'StatusCode >= 300', 'self.generation ~= pair.generation', 'command.clientSessionId ~= self.clientSessionId', 'command.leaseEpoch <= self.highEpoch', 'expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis', 'self.run:IsEdit()', 'MAX_CACHE_BYTES', 'MAX_RECEIPTS', 'cached.fingerprint ~= fingerprint', 'self.pending = cached', 'receipt.acknowledged = true', 'task.wait(delay)']) assert.ok(transport.includes(defense), defense);
+  for (const defense of ['self.inFlight', 'Timeout = 10', 'StatusCode >= 300', 'self.generation ~= pair.generation', 'command.clientSessionId ~= self.clientSessionId', 'command.leaseEpoch <= self.highEpoch', 'expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis', 'self:isEdit()', 'MAX_CACHE_BYTES', 'MAX_RECEIPTS', 'cached.fingerprint ~= fingerprint', 'self.pending = cached', 'receipt.acknowledged = true', 'task.wait(delay)']) assert.ok(transport.includes(defense), defense);
   assert.match(transport, /POLL_SECONDS = 2/);
   assert.match(transport, /MAX_BACKOFF_SECONDS = 30/);
   assert.doesNotMatch(transport, /table\.remove\(self\.cache|self\.cache\[command\.id\]\s*=\s*nil/);
+});
+
+test('panel visibility has no transport lifecycle path and saved health never overrides explicit reconnect intent', () => {
+  const main = byFile['Main.server.luau'];
+  const transport = byFile['Transport.luau'];
+  assert.match(main, /widget:GetPropertyChangedSignal\("Enabled"\):Connect\(function\(\) button:SetActive\(widget\.Enabled\) end\)/);
+  assert.match(main, /button\.Click:Connect\(function\(\) widget\.Enabled = not widget\.Enabled end\)/);
+  assert.doesNotMatch(transport, /widget|\.Enabled/);
+  assert.match(main, /autoConnect = previousState\.autoConnect ~= false/);
+  assert.match(main, /if savedKey ~= nil and autoConnect then/);
+  assert.doesNotMatch(main, /savedKey ~= nil and lastKnownConnected/);
+  assert.match(transport, /route == ROUTES\.poll or route == ROUTES\.result[\s\S]*StatusCode == 404 or response\.StatusCode == 410/);
 });
 
 test('mutation code uses editor baseline callback, immutable receipts and guarded history', () => {
@@ -218,7 +231,7 @@ test('native Lua artifact contains the same trusted module bodies and Main with 
     const body = output.lua.split('-- BEGIN ' + file.filename + '\n')[1]?.split('-- END ' + file.filename + '\n')[0];
     assert.ok(body, file.filename);
     const expected = file.source.replace(/\r\n?/g, '\n').replace(/^--!strict\n/, '')
-      .replace(/require\(script(?:\.Parent)?\.([A-Za-z]+)\)/g, '__arcaneRequire("$1")');
+      .replace(/require\(script(?:\.Parent)?\.([A-Za-z][A-Za-z0-9]*)\)/g, '__arcaneRequire("$1")');
     const wrapper = index === 0 ? 'local function __arcaneMain(): ()\n' : '__arcaneFactories["' + PLUGIN_SOURCES[index][0] + '"] = function()\n';
     assert.equal(body, wrapper + expected + (index === 0 ? 'end\n__arcaneMain()\n' : 'end\n'));
   }
@@ -255,7 +268,9 @@ test('Main exposes the red Arcane brand, editable key, Connect/Reconnect/Connect
   assert.doesNotMatch(main, /\b(?:print|warn)\s*\(/);
   assert.ok(byFile['Transport.luau'].includes('"/v1/plugin/connect"'));
   assert.ok(byFile['Validation.luau'].includes('^arcane_local_v1_'));
-  assert.doesNotMatch(allSource, /\/v1\/studio\/keys|SetAttribute/);
+  assert.doesNotMatch(allSource, /\/v1\/studio\/keys/);
+  assert.doesNotMatch(main, /SetAttribute/);
+  assert.doesNotMatch(byFile['TestProof.luau'], /SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
 });
 
 test('native Main auto-opens a compact floating popup with an unobstructed standard key input', () => {
@@ -320,8 +335,8 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.doesNotMatch(click, /clearInput\(\)|else savedKey/);
   assert.ok(click.indexOf('V.keyOrigin(entered)') < click.indexOf('plugin:SetSetting(KEY_SETTING, value)'));
   assert.ok(click.indexOf('plugin:SetSetting(KEY_SETTING, value)') < click.indexOf('transport:requestConnect(value)'));
-  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 2, 'Only explicit input and a previously successful saved connection queue authentication.');
-  assert.match(main, /if savedKey ~= nil and lastKnownConnected then[\s\S]*transport:requestConnect\(savedKey\)/);
+  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 2, 'Only explicit input and saved-key recovery queue authentication.');
+  assert.match(main, /if savedKey ~= nil and autoConnect then[\s\S]*transport:requestConnect\(savedKey, true\)/);
   const malformed = /if not valid then([\s\S]*?)\n\tend/.exec(click)?.[1];
   assert.ok(malformed);
   assert.match(malformed, /rejectKey\(\)[\s\S]*transport:requestDisconnect\(\)[\s\S]*return/);
@@ -337,8 +352,8 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.match(main, /local guard = transport\.guard[\s\S]*transport\.guard = function[\s\S]*invalidateInput\(\)[\s\S]*guard\(client, command, pair\)/, 'Deferred input still advances generation before the original editor callback guard.');
   assert.match(main, /pcall\(function\(\) V\.keyOrigin\(previousKey\) end\)/);
   assert.match(main, /previousKey = nil/);
-  assert.match(main, /count == 1 and type\(previousState\.connected\) == "boolean"/);
-  const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'), main.indexOf('-- Resume a previously successful user connection'));
+  assert.match(main, /count == 1 or[\s\S]*count == 2[\s\S]*type\(previousState\.autoConnect\) == "boolean"/);
+  const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'), main.indexOf('-- Queue safe recovery'));
   assert.match(unload, /savedKey = nil[\s\S]*clearInput\(\)[\s\S]*transport:stop\(\)/);
   assert.doesNotMatch(unload, /SetSetting|GetSetting|requestConnect|requestDisconnect/);
 });

@@ -27,7 +27,7 @@ end
 local function reloadSavedKey(): ()
 	local oldClient, requests, writes = client, fixture.requests, #fixture.setCalls
 	local state = fixture.pluginSettings[lastSetting]
-	local resume = state ~= nil and state.connected == true
+	local resume = state == nil or state.autoConnect ~= false
 	plugin.Unloading:Fire()
 	assert(oldClient.stopped and oldClient.pair == nil and keyInput.Text == ""
 		and fixture.pluginSettings[keySetting] == key, "unload clears lifetime memory while retaining the saved raw key")
@@ -40,10 +40,10 @@ local function reloadSavedKey(): ()
 	end
 	client = fixture.transports[#fixture.transports]
 	assert(client ~= oldClient and client.clientSessionId ~= oldClient.clientSessionId and client.pair == nil
-		and (client.desiredPair ~= nil) == resume and client.pending == nil and client.highEpoch == 0 and next(client.cache) == nil,
+		and (client.recovery ~= nil) == resume and client.pending == nil and client.highEpoch == 0 and next(client.cache) == nil,
 		"reloaded Main creates a fresh lifetime without any token, command or epoch")
 	assert(keyInput.Text == key and keyInput.TextEditable and control.Text == "Reconnect"
-		and control.BackgroundColor3 ~= green and fixture.requests == requests and #fixture.setCalls == writes + (if resume then 1 else 0),
+		and control.BackgroundColor3 ~= green and fixture.requests == requests and #fixture.setCalls == writes + (if state and state.connected then 1 else 0),
 		"successful saved connection queues one fresh authentication; no request or cached green before the worker")
 end
 idleMount()
@@ -64,8 +64,8 @@ if mode == "unload in-flight ACK" then
 		"unloaded lifetime ACK cannot adopt access or UI in the freshly mounted plugin")
 	fixture.uiHttpHook = nil
 	worker = coroutine.create(fixture.workers[#fixture.workers])
-	cycle(); cycle()
-	assert(connectCount == 1, "reload and old ACK never automatically authenticate the saved key")
+	cycle()
+	assert(connectCount == 2 and statusCount == 1 and control.Text == "Connected", "new lifetime reads status and authenticates once; old ACK never grants access")
 	control.Activated:Fire(); ack(); unload()
 elseif mode == "queued edit" then
 	local queued, epoch = client.desiredPair, client.generation
@@ -118,7 +118,7 @@ else
 		worker = coroutine.create(fixture.workers[#fixture.workers])
 		local requests = fixture.requests
 		ack()
-		assert(fixture.requests == requests + 1 and control.Text == "Connected", "successful history resumes with one real exchange and no click")
+		assert(fixture.requests == requests + 2 and statusCount == 1 and control.Text == "Connected", "saved key resumes with status then one exchange and no click")
 		unload()
 	elseif mode == "select all delete" or mode == "select all replace" then
 		local epoch, writes = client.generation, #fixture.setCalls

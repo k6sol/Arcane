@@ -315,6 +315,8 @@ export class CodexChat {
   private reviewedDraftTarget: ReviewedDraft | null = null;
   private tabs: ChatTabs | null = null;
   private tabTransition = false;
+  private preparingMessage = false;
+  private messageLifetime = 0;
   private restoredWorkflowDraft = false;
   private readonly tabDraftContexts = new Map<string,{origins:WorkflowDraftProvenance[];reviewed:ReviewedDraft|null;restored:boolean}>();
   private readonly stateListeners = new Set<()=>void>();
@@ -458,12 +460,13 @@ export class CodexChat {
     }
   }
   async newChat():Promise<boolean> {
-    if(!this.tabs)return false;
+    if(!this.tabs||this.preparingMessage)return false;
     const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     this.stashTabDraft();if(!this.tabs.createDraft()){this.text('codex-notice','Close an open tab before creating another draft. Saved native history is retained.');return false;}
     this.loadTabDraft();this.render();this.publishState();this.el('codex-composer').focus({preventScroll:true});return true;
   }
   async selectChat(key:string):Promise<boolean> {
+    if(this.preparingMessage)return false;
     const target=this.tabs?.views().find(row=>row.key===key);if(!target)return false;
     if(this.tabs!.active()?.key===key&&(target.kind==='draft'||this.tabs!.bound(this.state)))return true;
     const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
@@ -479,7 +482,7 @@ export class CodexChat {
     this.loadTabDraft();this.render();this.publishState();return true;
   }
   async closeChat(key:string):Promise<boolean> {
-    if(!this.tabs||!this.tabs.views().some(row=>row.key===key))return false;
+    if(this.preparingMessage||!this.tabs||!this.tabs.views().some(row=>row.key===key))return false;
     if(this.tabs.active()?.key===key) {
       const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
       const next=this.tabs.views().find(row=>row.key!==key);
@@ -489,7 +492,7 @@ export class CodexChat {
     this.render();this.publishState();return closed;
   }
   async openSavedChat(threadId:string):Promise<boolean> {
-    if(!this.tabs||!this.tabs.saved().some(row=>row.threadId===threadId))return false;
+    if(this.preparingMessage||!this.tabs||!this.tabs.saved().some(row=>row.threadId===threadId))return false;
     const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     const target=this.tabs.ensureSaved(threadId);if(!target){this.text('codex-notice','Close an open tab before opening another saved chat.');return false;}
     // A restored active tab still needs an explicit native resume after daemon/EXE restart.
@@ -681,10 +684,16 @@ export class CodexChat {
   private scope(){const s=this.snapshot();return JSON.stringify([s?.connectionId,s?.thread?.threadId,s?.thread?.turnId,this.state?.projectPath,s?.thread?.selection.model,s?.thread?.selection.effort]);}
   private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
   private canSelectModel() {
-    if(!this.providerAllowsCodex())return false;
-    const thread = this.snapshot()?.thread;
-    if(this.tabs?.active()?.kind==='native'&&!this.tabs.bound(this.state))return false;
-    return !this.tabTransition&&this.normal() && (!thread || thread.configured && IDLE.includes(thread.turnStatus));
+    if(this.preparingMessage||!this.providerAllowsCodex())return false;
+    const snapshot=this.snapshot(),active=this.tabs?.active(),thread=snapshot?.thread;
+    if(this.stopped||!this.fresh||this.tabTransition||this.uncertain.size||this.state?.displayLimited||this.state?.connecting||this.state?.closing||
+      !snapshot?.connected||!snapshot.ready||snapshot.account?.auth!=='subscription'||!snapshot.account.requiresOpenaiAuth)return false;
+    if(this.tabs&&(!active||active.kind==='native'&&!this.tabs.owns(active)))return false;
+    if(thread&&!thread.configured)return false;
+    if(!this.tabs)return this.normal()&&(!thread||IDLE.includes(thread.turnStatus));
+    // During a task or before a saved chat is resumed, changes are advisory
+    // preferences for the next user Send; no native operation starts here.
+    return true;
   }
   private canStartConversation() {
     if(!this.providerAllowsCodex())return false;
@@ -699,6 +708,46 @@ export class CodexChat {
       !!snapshot.models.some(model => model.model === selection.model && model.efforts.includes(selection.effort));
   }
   private canStartThread() { return this.canStartConversation() && this.startPairReady(); }
+  /** A user Send gesture may set up its exact chat, never a background turn. */
+  private messageTargetReady():boolean {
+    const snapshot=this.snapshot();
+    if(!this.providerAllowsCodex()||!this.normal()||this.tabTransition||snapshot?.account?.auth!=='subscription'||!snapshot.account.requiresOpenaiAuth)return false;
+    const active=this.tabs?.active();
+    if(this.tabs&&active?.kind==='native'&&!this.tabs.bound(this.state)) {
+      return !this.tabBlockReason()&&this.tabs.owns(active)&&!!active.selection&&
+        snapshot.models.some(row=>row.model===active.selection!.model&&row.efforts.includes(active.selection!.effort));
+    }
+    if(this.tabs&&active?.kind==='draft'||!this.tabs&&!snapshot.thread)return this.canStartThread();
+    return !!snapshot.thread?.configured&&IDLE.includes(snapshot.thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state));
+  }
+  private async submitMessage():Promise<void> {
+    if(this.preparingMessage||!this.messageTargetReady()||this.draftNeedsReview())return;
+    const draft=this.value('codex-composer');
+    let message:string;
+    try {message=this.attachments?.prepareText(draft)??draft;}
+    catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be prepared.');return;}
+    if(!message.trim()||utf8(message)>CODEX_INPUT_BYTES)return;
+    const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
+    const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
+    const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
+    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message});return;}
+    if(!selection)return;
+    this.preparingMessage=true;this.renderControls();
+    try {
+      const opened=applyPreferred?(await this.dispatch('select',{...selection},true))?.state==='acknowledged':this.tabs?source?.kind==='draft'?await this.startCurrentChat():
+        await this.bindNativeChat('thread-resume',selection,source?.threadId??undefined):
+        (await this.dispatch('thread-start'))?.state==='acknowledged';
+      const live=this.snapshot()?.thread;
+      if(!opened||this.stopped||lifetime!==this.messageLifetime||this.state?.projectPath!==project||!live?.configured||
+        live.selection.model!==selection.model||live.selection.effort!==selection.effort||
+        !this.messageTargetReady()||this.draftNeedsReview())return;
+      let current:string;
+      try {current=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
+      catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
+      if(this.value('codex-composer')!==draft||current!==message){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
+      await this.dispatch('turn-start',{threadId:live.threadId,text:message});
+    } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
+  }
   private startConversation(event: Event) {
     const input = event as MouseEvent;
     if (!event.isTrusted || event.defaultPrevented || input.button !== 0 || input.altKey || input.ctrlKey || input.metaKey || input.shiftKey || !this.canStartConversation()) return;
@@ -713,9 +762,7 @@ export class CodexChat {
     return popover?.getAttribute('role') === 'dialog' ? popover : null;
   }
   private pickerCanOpen() {
-    return !this.stopped && !this.pending.size && !this.uncertain.size && !this.state?.busy &&
-      !this.state?.connecting && !this.state?.closing && !this.state?.displayLimited &&
-      this.providerAllowsCodex() && this.snapshot()?.account?.auth==='subscription' && this.canSelectModel();
+    return this.canSelectModel();
   }
   private closePicker(restore = false) {
     const popover = this.picker(); if (!popover) return;
@@ -762,7 +809,7 @@ export class CodexChat {
   }
   private applyPickerSelection():void {
     const button=this.el<HTMLButtonElement>('codex-select');
-    if(this.canSelectModel()&&!this.picker()!.hidden&&!button.disabled)button.click();
+    if(this.canSelectModel()&&!this.picker()!.hidden&&!button.disabled)void this.dispatch('select',{model:this.value('codex-model'),effort:this.value('codex-effort')});
   }
   private styleEffortRange(slider:HTMLInputElement,efforts:readonly string[],index:number):void {
     const ratio=efforts.length>1&&index>=0?Math.min(1,index/(efforts.length-1)):0;
@@ -987,13 +1034,15 @@ export class CodexChat {
     this.on('codex-revoke','click',()=>{const t=this.snapshot()?.thread;if(t)void this.dispatch('revoke-writes',{threadId:t.threadId});});
     this.on('codex-interrupt','click',()=>{const t=this.snapshot()?.thread;if(t?.turnId)void this.dispatch('turn-interrupt',{threadId:t.threadId,turnId:t.turnId});});
     this.on('codex-composer','input',()=>this.composerInput());
+    this.on('codex-composer','keydown',event=>{
+      const key=event as KeyboardEvent;
+      if(key.key==='Enter'&&!key.shiftKey&&!key.altKey&&!key.ctrlKey&&!key.metaKey&&!key.isComposing&&key.keyCode!==229&&this.messageTargetReady()){
+        event.preventDefault();void this.submitMessage();
+      }
+    });
     this.on('codex-draft-review-button','click',event=>{if(event.isTrusted)this.openDraftReview();});
     this.on('codex-compose','submit',e=>{
-      e.preventDefault();const t=this.snapshot()?.thread;
-      if(!this.providerAllowsCodex()||!t||this.tabs&&!this.tabs.bound(this.state))return;
-      let message:string;try {message=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
-      catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be prepared.');return;}
-      void this.dispatch('turn-start',{threadId:t.threadId,text:message});
+      e.preventDefault();void this.submitMessage();
     });
     this.on('codex-submit','click',()=>{
       const thread=this.snapshot()?.thread;
@@ -1009,6 +1058,7 @@ export class CodexChat {
     this.renderControls();await this.refresh();this.schedule();
   }
   stop() {
+    this.messageLifetime++;
     this.attachments?.stop();
     this.preferenceController?.stop();this.stashTabDraft();this.tabs?.stop();
     this.stopped=true;this.generation++;this.readVersion++;this.readController?.abort();if(this.timer)clearTimeout(this.timer);
@@ -1072,7 +1122,7 @@ export class CodexChat {
     if(action==='thread-start'&&internal&&(!this.normal()||!!this.snapshot()?.thread||!this.snapshot()?.selection))return;
     if(action==='select'&&!internal) {
       if(!this.canSelectModel())return;
-      if(this.tabs?.active()?.kind==='draft') {
+      if(this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||!IDLE.includes(this.snapshot()?.thread?.turnStatus??''))) {
         try {prepareCodexAction(this.state,action,fields);}catch{return;}
         this.tabs.updateDraft(this.value('codex-composer'),{model:fields.model as string,effort:fields.effort as string},!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft);
         this.selectionSignature='';this.closePicker(true);this.render();this.publishState();return;
@@ -1122,7 +1172,7 @@ export class CodexChat {
   private displaySelection():ChatSelection|null {
     if(this.tabs) {
       const active=this.tabs.active();if(!active)return null;
-      const selection=active.kind==='native'&&this.tabs.bound(this.state)?this.snapshot()!.thread!.selection:active.selection;
+      const selection=active.kind==='native'&&this.tabs.bound(this.state)&&!this.tabs.hasPreferredSelection()?this.snapshot()!.thread!.selection:active.selection;
       return selection&&this.snapshot()?.models.some(model=>model.model===selection.model&&model.efforts.includes(selection.effort))?selection:null;
     }
     const s=this.snapshot();return s?.thread?.configured?s.thread.selection:s?.selection??null;
@@ -1205,11 +1255,11 @@ export class CodexChat {
     disable('codex-select',!this.canSelectModel()||pair||!reportedPair);
     disable('codex-model',!this.canSelectModel());disable('codex-effort',!this.canSelectModel());
     const subscription=s?.account?.auth==='subscription'&&s.account.requiresOpenaiAuth;
-    disable('codex-thread-start',!this.canStartThread());disable('codex-thread-resume',this.tabs?!!this.tabBlockReason()||!this.tabs.saved().some(row=>row.threadId===this.value('codex-resume-id')):!normal||!!t||!pair||!subscription||!text(this.value('codex-resume-id')));
+    disable('codex-thread-start',this.preparingMessage||!this.canStartThread());disable('codex-thread-resume',this.preparingMessage||(this.tabs?!!this.tabBlockReason()||!this.tabs.saved().some(row=>row.threadId===this.value('codex-resume-id')):!normal||!!t||!pair||!subscription||!text(this.value('codex-resume-id'))));
     const start = this.doc.getElementById('codex-conversation-start') as HTMLButtonElement | null;
     if (start) {
       start.hidden = !s?.connected || (this.tabs?this.tabs.active()?.kind!=='draft':!!t);
-      start.disabled = !this.canStartConversation();
+      start.disabled = this.preparingMessage||!this.canStartConversation();
       start.textContent = pending('thread-start') ? 'Starting conversation…' : 'Start conversation';
       start.setAttribute('aria-busy', String(pending('thread-start')));
     }
@@ -1243,7 +1293,7 @@ export class CodexChat {
       path?.setAttribute('fill',active?'currentColor':'none');
     }
     const controls=submit.closest?.<HTMLElement>('.composer-controls');if(controls)controls.dataset.taskActive=String(active);
-    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'):!this.providerAllowsCodex()||!normal||!t?.configured||!IDLE.includes(t.turnStatus)||!message.trim()||size>CODEX_INPUT_BYTES||s?.account?.auth!=='subscription'||!s.account.requiresOpenaiAuth||draftBlocked);
+    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'):this.preparingMessage||!this.messageTargetReady()||!message.trim()||size>CODEX_INPUT_BYTES||draftBlocked);
     this.el('codex-draft-review').hidden=!draftBlocked;
     const notice=draftBlocked?this.restoredWorkflowDraft?'Restored draft. Review it for this conversation and model before sending.':'Workflow draft context changed. Your unsent text is preserved; review it for this conversation before sending.':'';
     if(this.el('codex-draft-review-notice').textContent!==notice)this.text('codex-draft-review-notice',notice);

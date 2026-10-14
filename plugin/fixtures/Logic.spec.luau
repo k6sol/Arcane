@@ -385,8 +385,8 @@ do
 	client:requestConnect(key)
 	local queued = client.desiredPair
 	client:cycle(); client:cycle(); client:cycle()
-	check(fixture.requests == requests + 1 and client.pair == nil and queued.apiKey == nil, "uncertain connect never automatically retries or retains key")
-	check(statuses[#statuses].state == "disconnected" and not string.find(statuses[#statuses].detail, key, 1, true), "uncertain connection is visibly disconnected with redacted error")
+	check(fixture.requests == requests + 3 and client.pair == nil and queued.apiKey == nil and client.recovery.needsStatus, "uncertain connect only checks fresh status; the original handshake is never replayed")
+	check(statuses[#statuses].state == "retrying" and not string.find(statuses[#statuses].detail, key, 1, true), "uncertain connection keeps redacted recovery status")
 	for _, status in ipairs(statuses) do check(status.state ~= "failed", "network uncertainty is not a key rejection") end
 end
 
@@ -451,7 +451,7 @@ do
 	client:requestConnect("arcane_local_v1_45871_" .. string.rep("a", 64))
 	local requests = fixture.requests
 	client:cycle(); client:cycle()
-	check(fixture.requests == requests + 1 and statuses[#statuses].state == "disconnected", "HTTP 500 is an uncertain exchange, not a rejected key or automatic retry")
+	check(fixture.requests == requests + 2 and statuses[#statuses].state == "retrying" and client.pair == nil, "HTTP 500 is an uncertain exchange followed only by status, never key rejection")
 	client:stop()
 end
 do

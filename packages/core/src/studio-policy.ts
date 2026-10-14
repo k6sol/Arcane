@@ -76,6 +76,15 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
     case 'selection.read': keys(a, []); break;
     case 'scene.inspect': case 'script.read': keys(a, ['ref']); ref(a.ref, session); break;
     case 'script.update': keys(a, ['ref', 'expectedSource', 'source']); ref(a.ref, session); source(a.expectedSource); source(a.source); break;
+    case 'script.set_enabled': {
+      keys(a, ['ref', 'expectedSource', 'expectedEnabled', 'enabled']);
+      const r = ref(a.ref, session);
+      if (r.className !== 'Script' && r.className !== 'LocalScript') throw new ArcaneError('CLASS', 'Only Script and LocalScript have an execution state.');
+      source(a.expectedSource);
+      if (typeof a.expectedEnabled !== 'boolean' || typeof a.enabled !== 'boolean') throw new ArcaneError('INPUT', 'Execution state and its exact baseline must be booleans.');
+      if (a.enabled && !(a.expectedSource as string).trim()) throw new ArcaneError('SOURCE_EMPTY', 'An empty placeholder script cannot be activated.');
+      break;
+    }
     case 'scene.create': {
       keys(a, ['parent', 'className', 'name', 'properties']); ref(a.parent, session); textField(a.name, 'instance name', 100);
       if (!SAFE_CREATE_CLASSES.includes(a.className as typeof SAFE_CREATE_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported creation class.');

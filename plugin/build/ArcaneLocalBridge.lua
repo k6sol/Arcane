@@ -48,7 +48,7 @@ end
 __arcaneFactories["Validation"] = function()
 local Validation = {}
 Validation.PROTOCOL = 1
-Validation.VERSION = "0.1.3"
+Validation.VERSION = "0.1.7"
 Validation.ARGUMENT_BYTES = 256 * 1024
 Validation.RESULT_BYTES = 512 * 1024
 Validation.SOURCE_BYTES = 100 * 1024
@@ -59,7 +59,7 @@ Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read"})
-Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "scene.restore"})
+Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -191,6 +191,20 @@ function Validation.geometryProperties(legacy: any): any
 			if expected[name] == nil or instance[name] ~= decoded[name] then return false end
 		end
 		return true
+	end
+
+	function codec.assignedMatches(instance: any, name: string, requested: any): boolean
+		if name == "Orientation" then
+			-- Euler values wrap and can have equivalent gimbal representations.
+			-- Check the actual rotation, not a relaxed expected-baseline match.
+			local desired = {CFrame.fromOrientation(math.rad(requested.X), math.rad(requested.Y), math.rad(requested.Z)):GetComponents()}
+			local actual = {instance.CFrame:GetComponents()}
+			for index = 4, 12 do
+				if math.abs(actual[index] - desired[index]) > 0.000001 then return false end
+			end
+			return true
+		end
+		return legacy.assignedMatches(instance, name, requested)
 	end
 	return table.freeze(codec)
 end
@@ -557,6 +571,23 @@ function Properties.compare(instance: any, expected: any, names: {string}): bool
 	return true
 end
 
+-- Post-assignment verification only. Baseline comparison above stays exact.
+-- Native BasePart.Color stores RGB8: the engine multiplies float32 channels
+-- by 255 in float32, then truncates. Double arithmetic would corrupt some
+-- already-canonical byte values (for example 7/255).
+function Properties.assignedMatches(instance: any, name: string, requested: any): boolean
+	if name == "Color" then
+		local product = buffer.create(4)
+		local function channel(value: number): number
+			buffer.writef32(product, 0, value * 255)
+			return math.floor(buffer.readf32(product, 0))
+		end
+		local canonical = Color3.fromRGB(channel(requested.R), channel(requested.G), channel(requested.B))
+		return instance.Color == canonical
+	end
+	return instance[name] == requested
+end
+
 return table.freeze(Properties)
 end
 -- END Properties.luau
@@ -669,7 +700,7 @@ function Operations:updateProperties(command: any, args: any, guard: () -> ()): 
 			progress.touched = true
 			instance[name] = decoded[name]
 		end
-		for _, name in ipairs(names) do if instance[name] ~= decoded[name] then V.fail("VERIFY", "Property write did not match the requested value.") end end
+		for _, name in ipairs(names) do if not P.assignedMatches(instance, name, decoded[name]) then V.fail("VERIFY", "Property write did not match the requested value.") end end
 		return {ref = self.registry:ref(instance), mutation = {kind = "scene.update", ref = ref,
 			before = {properties = before}, after = {properties = P.snapshot(instance, names)}}}
 	end)
@@ -708,6 +739,38 @@ function Operations:updateSource(command: any, args: any, guard: () -> ()): any
 	end)
 end
 
+function Operations:setEnabled(command: any, args: any, guard: () -> ()): any
+	V.fields(args, {"ref", "expectedSource", "expectedEnabled", "enabled"}, "execution-state arguments")
+	local instance = self.registry:resolve(args.ref)
+	if not instance:IsA("BaseScript") then V.fail("CLASS", "Only Script and LocalScript have an execution state.") end
+	local expected = V.string(args.expectedSource, "expected source", V.SOURCE_BYTES, true)
+	if type(args.expectedEnabled) ~= "boolean" or type(args.enabled) ~= "boolean" then V.fail("INPUT", "Execution state and baseline must be booleans.") end
+	if args.enabled and not string.find(expected, "%S") then V.fail("SOURCE_EMPTY", "An empty placeholder cannot be activated.") end
+	local ref = self.registry:ref(instance)
+	local function matches(): boolean
+		return self:source(instance) == expected and not instance.Disabled == args.expectedEnabled
+	end
+	if not matches() then V.fail("CONFLICT", "Source or execution state differs from the exact baseline.") end
+	-- The host compiles this exact source before delivery. A dirty editor buffer
+	-- must not activate a different persisted implementation in the engine.
+	if args.enabled and instance.Source ~= expected then V.fail("UNSAVED_SOURCE", "Persisted source differs from the verified editor source. Save the script first.") end
+	local proposed = {ref = ref, mutation = {kind = "script.set_enabled", ref = ref,
+		before = {source = expected, enabled = args.expectedEnabled}, after = {source = expected, enabled = args.enabled}}}
+	if #V.encode(proposed, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Execution-state receipt would exceed 512 KiB; no change attempted.") end
+	return self:record(command, guard, function(progress: any): any
+		guard()
+		self.registry:resolve(ref)
+		if not matches() then V.fail("CONFLICT", "Source or execution state changed before activation.") end
+		if args.enabled and instance.Source ~= expected then V.fail("UNSAVED_SOURCE", "Persisted source changed before activation.") end
+		progress.ref = ref
+		progress.touched = true
+		instance.Disabled = not args.enabled
+		if not instance.Disabled ~= args.enabled or self:source(instance) ~= expected or (args.enabled and instance.Source ~= expected) then V.fail("VERIFY", "Script execution state/source did not match after assignment.") end
+		return {ref = self.registry:ref(instance), mutation = {kind = "script.set_enabled", ref = ref,
+			before = {source = expected, enabled = args.expectedEnabled}, after = {source = expected, enabled = not instance.Disabled}}}
+	end)
+end
+
 function Operations:create(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"parent", "className", "name", "properties"}, "create arguments")
 	local parent = self.registry:resolve(args.parent)
@@ -735,7 +798,7 @@ function Operations:create(command: any, args: any, guard: () -> ()): any
 			instance.Name = name
 			if instance:IsA("BaseScript") then instance.Disabled = true end
 			for key, value in pairs(decoded) do instance[key] = value end
-			for key, value in pairs(decoded) do if instance[key] ~= value then V.fail("VERIFY", "Created property differs from the requested value.") end end
+			for key, value in pairs(decoded) do if not P.assignedMatches(instance, key, value) then V.fail("VERIFY", "Created property differs from the requested value.") end end
 			guard()
 		end)
 		if not prepared then instance:Destroy(); error(prepareError, 0) end
@@ -746,6 +809,7 @@ function Operations:create(command: any, args: any, guard: () -> ()): any
 		local snapshot = P.snapshot(instance)
 		local source = if instance:IsA("LuaSourceContainer") then self:source(instance) else nil
 		self.registry.owned[instance] = {parent = parent, properties = V.immutable(snapshot), source = source,
+			enabled = if instance:IsA("BaseScript") then not instance.Disabled else nil,
 			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance))}
 		return {ref = ref, mutation = {kind = "scene.create", ref = ref, before = V.NULL, after = {properties = snapshot}}}
 	end)
@@ -769,6 +833,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 				and V.equal(instance:GetAttributes(), owned.attributes)
 				and V.equal(self.collection:GetTags(instance), owned.tags)
 				and (owned.source == nil or self:source(instance) == owned.source)
+				and (owned.enabled == nil or not instance.Disabled == owned.enabled)
 		end
 		if not matches() then V.fail("CONFLICT", "Created instance has changed, moved, or gained children; restoration refused.") end
 		self:record(command, guard, function(progress: any): any
@@ -784,6 +849,8 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 		self:updateProperties(command, {ref = original.ref, expected = original.after.properties, properties = original.before.properties}, guard)
 	elseif original.kind == "script.update" then
 		self:updateSource(command, {ref = original.ref, expectedSource = original.after.source, source = original.before.source}, guard)
+	elseif original.kind == "script.set_enabled" then
+		self:setEnabled(command, {ref = original.ref, expectedSource = original.after.source, expectedEnabled = original.after.enabled, enabled = original.before.enabled}, guard)
 	else V.fail("RECEIPT", "Unsupported mutation receipt.") end
 	self.restored[receiptId] = true
 	return {restored = true, ref = original.ref}
@@ -816,9 +883,11 @@ function Operations:execute(command: any, guard: () -> ()): any
 		V.fields(args, {"ref"}, "read arguments")
 		local instance = self.registry:resolve(args.ref)
 		result = {ref = self.registry:ref(instance), source = self:source(instance)}
+		if instance:IsA("BaseScript") then result.enabled = not instance.Disabled end
 	elseif method == "scene.create" then result = self:create(command, args, guard)
 	elseif method == "scene.update" then result = self:updateProperties(command, args, guard)
 	elseif method == "script.update" then result = self:updateSource(command, args, guard)
+	elseif method == "script.set_enabled" then result = self:setEnabled(command, args, guard)
 	elseif method == "scene.restore" then result = self:restore(command, args, guard)
 	else V.fail("METHOD", "Unsupported Studio method.") end
 	if not table.find(V.WRITE_METHODS, method) then guard() end
@@ -836,21 +905,37 @@ end
 __arcaneFactories["Transport"] = function()
 local V = __arcaneRequire("Validation")
 local Operations = __arcaneRequire("Operations")
+local TestProof = __arcaneRequire("TestProof")
 local Transport = {}
 Transport.__index = Transport
 Transport.POLL_SECONDS = 2
 Transport.MAX_BACKOFF_SECONDS = 30
-local ROUTES = table.freeze({connect = "/v1/plugin/connect", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
+Transport.MAX_RECOVERY_ATTEMPTS = 8
+-- Status is a read-only POST so the exact key never enters a URL. The daemon
+-- must authenticate that key and inspect this exact client/identity without
+-- creating a session, renewing a lease, dispatching work or returning a bearer.
+local ROUTES = table.freeze({connect = "/v1/plugin/connect", status = "/v1/plugin/status", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
 local IDENTITY_CHANGED = "Place identity changed; this session is fenced. Inspect receipts and explicitly connect again."
 type Transport = any
 
-function Transport.new(gameModel: any, onStatus: (any) -> ()): Transport
+function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: string?): Transport
 	local http = gameModel:GetService("HttpService")
+	local clientSessionId = http:GenerateGUID(false)
+	local proof = if artifactHash then TestProof.new(gameModel, clientSessionId, artifactHash) else nil
 	return setmetatable({gameModel = gameModel, http = http, run = gameModel:GetService("RunService"),
-		clientSessionId = http:GenerateGUID(false), onStatus = onStatus, generation = 0,
+		clientSessionId = clientSessionId, testProof = proof, onStatus = onStatus, generation = 0,
 		pair = nil, desiredPair = nil, disconnectRequested = false, stopped = false,
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
-		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil}, Transport)
+		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil,
+		recovery = nil, checkInput = nil}, Transport)
+end
+
+function Transport:isEdit(): boolean
+	-- Edit RunService remains Stopped while a separate Play DataModel runs.
+	-- Use the plugin-facing global lifecycle property for production admission.
+	local ok, active = pcall(function(): any return self.gameModel:GetService("StudioTestService").EditModeActive end)
+	if ok then return type(active) == "boolean" and active == true end
+	return false
 end
 
 function Transport:status(state: string, detail: string, commandId: string?)
@@ -862,7 +947,7 @@ function Transport:status(state: string, detail: string, commandId: string?)
 		sessionId = if pair then pair.sessionId else nil,
 		allowedRoots = if pair then table.clone(pair.allowedRoots) else {},
 		allowWrites = if pair then pair.allowWrites else false,
-		clientSessionId = self.clientSessionId, editMode = self.run:IsEdit()})
+		clientSessionId = self.clientSessionId, editMode = self:isEdit()})
 end
 
 function Transport:dropIdentityFence(): ()
@@ -916,13 +1001,22 @@ function Transport:forgetDesired(): ()
 	self.desiredPair = nil
 end
 
-function Transport:requestConnect(apiKey: any): ()
+function Transport:forgetRecovery(): ()
+	if self.recovery then self.recovery.apiKey = nil end
+	self.recovery = nil
+end
+
+function Transport:requestConnect(apiKey: any, automatic: boolean?): ()
 	if self.stopped then return end
 	local origin = V.keyOrigin(apiKey)
-	if not self.run:IsEdit() then V.fail("PLAY", "Stop playtesting before connecting.") end
+	if not automatic and not self:isEdit() then V.fail("PLAY", "Stop playtesting before connecting.") end
 	self.generation += 1
 	self:forgetDesired()
-	self.desiredPair = {url = origin, apiKey = apiKey, generation = self.generation}
+	self:forgetRecovery()
+	local intent = {url = origin, apiKey = apiKey, generation = self.generation,
+		needsStatus = automatic == true, attempts = 0, sessionId = nil, fence = nil}
+	self.recovery = intent
+	if not automatic then self.desiredPair = {url = origin, apiKey = apiKey, generation = self.generation} end
 	self.disconnectRequested = true
 	self:status("connecting", "Connecting to the Arcane workbench.")
 end
@@ -932,9 +1026,10 @@ function Transport:requestPair(url: any, code: any): ()
 	if self.stopped then return end
 	local origin = V.url(url)
 	local pairingCode = V.string(code, "pairing code", 128)
-	if not self.run:IsEdit() then V.fail("PLAY", "Stop playtesting before pairing.") end
+	if not self:isEdit() then V.fail("PLAY", "Stop playtesting before pairing.") end
 	self.generation += 1 -- Immediately fences callbacks already waiting on Studio.
 	self:forgetDesired()
+	self:forgetRecovery()
 	self.desiredPair = {url = origin, code = pairingCode, generation = self.generation}
 	self.disconnectRequested = true
 	self:status("pairing", "Pairing requested; waiting for the current request to finish.")
@@ -944,6 +1039,7 @@ function Transport:requestDisconnect(): ()
 	if self.stopped then return end
 	self.generation += 1
 	self:forgetDesired()
+	self:forgetRecovery()
 	self.disconnectRequested = true
 	self:status("disconnecting", "Local writes are fenced; disconnecting from the daemon.")
 end
@@ -954,7 +1050,9 @@ function Transport:stop(): ()
 	self.generation += 1
 	self.stopped = true
 	self:forgetDesired()
+	self:forgetRecovery()
 	self:dropIdentityFence()
+	if self.testProof then self.testProof:stop() end
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
 	self.operations = nil
@@ -964,7 +1062,7 @@ end
 
 function Transport:post(url: string, route: string, payload: any, token: string?): any
 	V.url(url)
-	if not table.find({ROUTES.connect, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect}, route) then V.fail("URL", "Unsupported plugin route.") end
+	if not table.find({ROUTES.connect, ROUTES.status, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect}, route) then V.fail("URL", "Unsupported plugin route.") end
 	if self.inFlight then V.fail("FLIGHT", "Another HTTP request is in flight.") end
 	if route == ROUTES.poll then self:checkIdentity(self.pair) end
 	local headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" }
@@ -976,6 +1074,7 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 		return self.http:RequestAsync({Url = url .. route, Method = "POST", Headers = headers, Body = body, Timeout = 10})
 	end)
 	self.inFlight = false
+	if self.checkInput and not self.stopped then self.checkInput() end
 	if self.identityFence then self:observeIdentity(self.identityFence) end
 	if not ok then V.fail("NETWORK", "Loopback request failed or timed out.") end
 	if type(response) ~= "table" or type(response.StatusCode) ~= "number" or type(response.Success) ~= "boolean" then V.fail("PROTOCOL", "Invalid HTTP response.") end
@@ -983,9 +1082,34 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 	-- RequestAsync documents Timeout, but no redirect-disable option. Native redirect
 	-- behavior still needs a disposable-fixture check; see docs/build/PLUGIN.md.
 	if response.StatusCode >= 300 and response.StatusCode < 400 then V.fail("REDIRECT", "Daemon returned a redirect; connection refused.") end
+	local errorCode = nil
+	if not response.Success and type(response.Body) == "string" and #response.Body <= 8192 then
+		local decoded, errorBody = pcall(function() return V.decode(response.Body, self.http) end)
+		if decoded and type(errorBody) == "table" then errorCode = errorBody.error end
+	end
 	if response.StatusCode == 401 or response.StatusCode == 403 then
-		if route == ROUTES.connect then V.fail("KEY_REJECTED", "Arcane API key was rejected. Enter a new API key.") end
+		if route == ROUTES.status and errorCode ~= "KEY_REJECTED" then
+			-- Older daemons route unknown plugin POSTs through bearer auth. Their
+			-- generic AUTH is not evidence that this saved API key is invalid.
+			V.fail("STATUS_UNAVAILABLE", "Daemon could not authenticate safe key status. Click Connect to connect explicitly.")
+		end
+		if route == ROUTES.connect or route == ROUTES.status then V.fail("KEY_REJECTED", "Arcane API key was rejected. Enter a new API key.") end
+		if errorCode == "ORIGIN" or errorCode == "SCOPE" then V.fail("RECONCILE", "Daemon refused the session scope; inspect the connection.") end
 		V.fail("REVOKED", "Session expired or was revoked; connect again.")
+	end
+	if route == ROUTES.status and (response.StatusCode == 400 or response.StatusCode == 404 or response.StatusCode == 405) then
+		V.fail("STATUS_UNAVAILABLE", "Daemon does not support safe session status. Click Connect to connect explicitly.")
+	end
+	if (route == ROUTES.poll or route == ROUTES.result) and (response.StatusCode == 404 or response.StatusCode == 410) then
+		V.fail("REVOKED", "Session no longer exists; checking fresh session status.")
+	end
+	-- The daemon reports restart/revocation as 409, not necessarily 401. Never
+	-- mistake an unrelated receipt conflict for definitive session loss, or echo
+	-- its untrusted message. Only inspect a bounded JSON error code.
+	if (response.StatusCode == 400 or response.StatusCode == 409) and route ~= ROUTES.connect and route ~= ROUTES.pair and route ~= ROUTES.status then
+		if table.find({"REVOKED", "EXPIRED", "SESSION"}, errorCode) then
+			V.fail("REVOKED", "Session expired or was lost; checking fresh session status.")
+		end
 	end
 	if response.StatusCode == 409 then V.fail("RECONCILE", "Daemon refused the session or receipt; inspect the command and connect again.") end
 	if not response.Success then V.fail("NETWORK", "Daemon request failed (HTTP " .. tostring(response.StatusCode) .. ").") end
@@ -995,8 +1119,9 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 	return V.object(data, "daemon response")
 end
 
-function Transport:clearSession(): ()
-	self:dropIdentityFence()
+function Transport:clearSession(keepIdentity: boolean?): ()
+	if self.testProof then self.testProof:disconnect() end
+	if not keepIdentity then self:dropIdentityFence() end
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
 	self.operations = nil
@@ -1018,10 +1143,16 @@ function Transport:exchange(desired: any): ()
 		capabilities = V.array(capabilities),
 	}
 	if isKey then payload.apiKey = desired.apiKey else payload.code = desired.code end
-	local fence = self:watchIdentity(payload.identity)
+	local intent = self.recovery
+	local fence = if intent and intent.fence then intent.fence else self:watchIdentity(payload.identity)
+	if intent then intent.fence = fence; intent.needsStatus = true end
+	if not self:observeIdentity(fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
+	-- Recovery keeps the original identity pin, never recaptures another place.
+	payload.identity = fence.identity
 	desired.apiKey, desired.code = nil, nil
-	local result = self:post(desired.url, if isKey then ROUTES.connect else ROUTES.pair, payload, nil)
+	local ok, result = pcall(function() return self:post(desired.url, if isKey then ROUTES.connect else ROUTES.pair, payload, nil) end)
 	payload.apiKey, payload.code = nil, nil
+	if not ok then error(result, 0) end
 	V.fields(result, {"sessionId", "token", "protocolVersion", "allowedRoots", "allowWrites"}, "pair result")
 	if result.protocolVersion ~= V.PROTOCOL then V.fail("PROTOCOL", "Unsupported daemon protocol.") end
 	V.string(result.sessionId, "session ID", 256)
@@ -1036,6 +1167,7 @@ function Transport:exchange(desired: any): ()
 	self.pair = result
 	self.failures = 0
 	if self.generation ~= desired.generation then self.disconnectRequested = true; return end
+	if intent and self.recovery == intent then intent.sessionId = result.sessionId; intent.needsStatus = false; intent.attempts = 0 end
 	self:checkIdentity(result) -- Before resolving any roots in the current engine.
 	self.operations = Operations.new(result, self.gameModel, self.http)
 	local editor = self.operations.editor
@@ -1053,6 +1185,12 @@ function Transport:exchange(desired: any): ()
 		end,
 	}
 	self:checkIdentity(result)
+	if self.testProof then
+		-- The mapping witness is editor metadata, but it is still an Instance.
+		-- Read-only or narrower legacy grants must not create it outside scope.
+		if result.allowWrites and table.find(result.allowedRoots, "ServerStorage") then self.testProof:bind(result.sessionId, true)
+		else self.testProof:disconnect() end
+	end
 	self:status("connected", "Connected to this Studio window. " .. (if result.allowWrites then "Writes granted." else "Read only."))
 end
 
@@ -1087,7 +1225,7 @@ function Transport:guard(command: any, pair: any): ()
 	if not string.match(command.expiresAt, "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d.*Z$") then V.fail("LEASE", "Expiry must be a UTC timestamp.") end
 	local ok, expires = pcall(function() return DateTime.fromIsoDate(command.expiresAt) end)
 	if not ok or not expires or expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis then V.fail("LEASE", "Command lease has expired.") end
-	if not self.run:IsEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
+	if not self:isEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
 	if table.find(V.WRITE_METHODS, command.method) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end
 end
 
@@ -1130,7 +1268,57 @@ function Transport:dispatch(command: any): ()
 	if unsafe then self.blocked = true end
 end
 
+function Transport:recover(): number
+	local intent = self.recovery
+	if not intent or intent.generation ~= self.generation or self.stopped then return Transport.POLL_SECONDS end
+	if not self:isEdit() then return Transport.MAX_BACKOFF_SECONDS end
+	if intent.attempts >= Transport.MAX_RECOVERY_ATTEMPTS then
+		self:forgetRecovery()
+		self:status("reconciliation", "Automatic recovery paused after eight attempts. Click Connect to try again.")
+		return Transport.MAX_BACKOFF_SECONDS
+	end
+	if not intent.fence then
+		intent.fence = self:watchIdentity({clientSessionId = self.clientSessionId, placeId = self.gameModel.PlaceId,
+			universeId = self.gameModel.GameId, name = V.string(self.gameModel.Name, "place name", 200), pluginVersion = V.VERSION})
+	end
+	if not self:observeIdentity(intent.fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
+	intent.attempts += 1
+	local payload = {protocolVersion = V.PROTOCOL, apiKey = intent.apiKey,
+		identity = intent.fence.identity, sessionId = intent.sessionId}
+	local ok, result = pcall(function() return self:post(intent.url, ROUTES.status, payload, nil) end)
+	payload.apiKey = nil
+	if self.stopped or self.recovery ~= intent or self.generation ~= intent.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
+	if not ok then error(result, 0) end
+	if not self:observeIdentity(intent.fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
+	V.fields(result, {"protocolVersion", "identity", "state", "sessionId"}, "session status")
+	if result.protocolVersion ~= V.PROTOCOL or not V.equal(result.identity, intent.fence.identity) then
+		V.fail("PROTOCOL", "Session status does not match the exact plugin identity.")
+	end
+	if result.state == "active" then
+		V.string(result.sessionId, "session ID", 256)
+		-- A lost connect ACK may have created this session. Status must never
+		-- reveal its bearer; wait for definitive loss, never supersede it blindly.
+		self:status("reconciliation", "A session already exists; checking status before another connection.")
+		return math.min(Transport.MAX_BACKOFF_SECONDS, Transport.POLL_SECONDS * 2 ^ intent.attempts)
+	end
+	if result.state == "reconciliation" then V.fail("RECONCILE", "Daemon requires command reconciliation before connecting.") end
+	if result.state == "lost" then
+		V.string(result.sessionId, "session ID", 256)
+		if intent.sessionId and result.sessionId ~= intent.sessionId then V.fail("PROTOCOL", "Session status targets another session.") end
+	elseif result.state == "absent" then
+		if result.sessionId ~= nil then V.fail("PROTOCOL", "Absent session status contains a session.") end
+	else V.fail("PROTOCOL", "Unsupported session status.") end
+	-- This status belongs to the current exact key and epoch, and was just read
+	-- by the single worker. No old command, receipt, grant or token is reused.
+	self:status("connecting", "Session loss confirmed; reconnecting to Arcane.")
+	if self.recovery ~= intent or self.generation ~= intent.generation or self.disconnectRequested or not self:isEdit() then return Transport.POLL_SECONDS end
+	self:exchange({url = intent.url, apiKey = intent.apiKey, generation = intent.generation})
+	return Transport.POLL_SECONDS
+end
+
 function Transport:tick(): number
+	if self.stopped then return Transport.POLL_SECONDS end
+	if self.checkInput then self.checkInput() end
 	if self.disconnectRequested then
 		local old = self.pair
 		if old and old.token then
@@ -1144,23 +1332,28 @@ function Transport:tick(): number
 	if self.desiredPair then
 		local desired = self.desiredPair
 		self.desiredPair = nil
-		-- Human-triggered exchanges are never automatically retried after an
-		-- uncertain response: a session may already exist at the daemon.
+		-- An uncertain exchange can only be followed by a fresh read-only status,
+		-- never by replaying this handshake.
 		local ok, err = pcall(function() self:exchange(desired) end)
 		desired.code, desired.apiKey = nil, nil
 		if not ok and desired.generation == self.generation then
 			if type(err) == "table" and err.code == "KEY_REJECTED" then
 				self:clearSession()
+				self:forgetRecovery()
 				self.generation += 1
 				self:status("failed", "Arcane API key was rejected. Enter a new API key.")
 			else
+				if type(err) ~= "table" or err.code ~= "NETWORK" then self:forgetRecovery() end
 				self:status(if type(err) == "table" and err.code == "IDENTITY" then "reconciliation" else "disconnected", V.safeError(err) .. " Click Connect to try again.")
 			end
 		end
-		return Transport.POLL_SECONDS
+		return if not ok then Transport.MAX_BACKOFF_SECONDS else Transport.POLL_SECONDS
 	end
 	local pair = self.pair
-	if not pair then return Transport.POLL_SECONDS end
+	if not pair then
+		if self.recovery and self.recovery.needsStatus and not self.blocked then return self:recover() end
+		return Transport.POLL_SECONDS
+	end
 	self:observeIdentity(pair.identityFence)
 	if self.pending then
 		local receipt = self.pending
@@ -1173,32 +1366,49 @@ function Transport:tick(): number
 		return Transport.POLL_SECONDS
 	end
 	if self.blocked then return Transport.POLL_SECONDS end
-	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId}, pair.token)
+	local observation = if self.testProof then self.testProof:snapshot() else nil
+	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = observation}, pair.token)
 	-- A poll that returns after disconnect/re-pair can never dispatch old work.
 	if self.stopped or self.pair ~= pair or self.generation ~= pair.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
 	self:checkIdentity(pair)
 	V.fields(response, {"commands"}, "poll response")
 	local commands = V.list(response.commands, 1, "command queue")
 	if #commands == 1 then self:dispatch(commands[1])
-	else self:status("connected", if self.run:IsEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.") end
+	else self:status("connected", if self:isEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.") end
 	return Transport.POLL_SECONDS
 end
 
 function Transport:cycle(): number
+	local generation = self.generation
 	local ok, delay = pcall(function() return self:tick() end)
 	if ok then self.failures = 0; return delay end
+	if self.stopped or generation ~= self.generation then return Transport.POLL_SECONDS end
 	if type(delay) == "table" and delay.code == "NETWORK" then
 		self.failures = math.min(self.failures + 1, 5)
 		local backoff = math.min(Transport.MAX_BACKOFF_SECONDS, Transport.POLL_SECONDS * 2 ^ self.failures)
-		self:status("retrying", "Loopback unavailable; retrying in " .. tostring(backoff) .. " seconds. Completed work will only resend its receipt.")
+		self:status("retrying", "Loopback unavailable; checking again in " .. tostring(backoff) .. " seconds. Commands are never replayed.")
 		return backoff
 	end
+	local wasBlocked = self.blocked
 	self.blocked = true
 	if type(delay) == "table" and delay.code == "REVOKED" then
-		self:clearSession()
+		local intent = self.recovery
+		local safe = intent and not wasBlocked and not (self.identityFence and self.identityFence.changed)
+			and not (self.pending and self.pending.unsafe)
+		-- Loss fences every old callback immediately. Pending receipts stay at the
+		-- old daemon for reconciliation and are never sent under replacement auth.
+		self:clearSession(safe == true)
 		self.generation += 1
-		self:status("disconnected", V.safeError(delay))
-	else self:status("reconciliation", V.safeError(delay)) end
+		if safe then intent.generation = self.generation; intent.needsStatus = true; intent.attempts = 0
+		else self:forgetRecovery(); self.blocked = wasBlocked end
+		self:status(if self.blocked then "reconciliation" else "disconnected", V.safeError(delay))
+	elseif type(delay) == "table" and delay.code == "KEY_REJECTED" then
+		self:clearSession(); self:forgetRecovery(); self.generation += 1
+		self:status("failed", "Arcane API key was rejected. Enter a new API key.")
+	else
+		self:forgetRecovery()
+		self:status("reconciliation", V.safeError(delay))
+	end
 	return Transport.MAX_BACKOFF_SECONDS
 end
 
@@ -1218,6 +1428,357 @@ return Transport
 end
 -- END Transport.luau
 
+-- BEGIN TestProof.luau
+__arcaneFactories["TestProof"] = function()
+-- Construct against the plugin's Edit DataModel, before starting a playtest.
+-- StudioTestService.EditModeActive is true while Edit is idle, false during a
+-- play/Team Test session, and true again on stop (PluginSecurity read):
+-- https://create.roblox.com/docs/reference/engine/classes/StudioTestService#EditModeActive
+-- https://create.roblox.com/docs/reference/engine/classes/Object#GetPropertyChangedSignal
+-- Each EditModeActive notification advances the epoch, including deferred ones.
+-- Pause/resume within the same test does not change EditModeActive or the epoch.
+-- Edit RunService.RunState stays Stopped during play; it cannot prove continuity.
+-- Native notification delivery and Edit DataModel persistence need Studio QA.
+-- Runtime ServerStorage receives a CLONE: its attributes are an identity witness,
+-- never an authoritative epoch. Use the authenticated plugin HTTP snapshot for that.
+local TestProof = {}
+
+export type Snapshot = {
+	read sessionId: string, read clientLifetimeId: string, read pluginArtifactHash: string, read markerName: string,
+	read placeId: number, read universeId: number, read placeName: string,
+	read playEpoch: number, read mode: "Edit" | "Play", read connected: boolean, read continuitySupported: boolean,
+}
+export type State = {
+	bind: (self: State, sessionId: string, allowWrites: boolean) -> Snapshot?,
+	snapshot: (self: State) -> Snapshot?,
+	disconnect: (self: State) -> (),
+	stop: (self: State) -> (),
+}
+type Attributes = {[string]: string | number | boolean}
+
+local MAX_NAME_ATTEMPTS = 4
+local MAX_COUNTER = 9007199254740991 -- Never wrap or lose monotonicity in a double.
+
+local function publicId(value: any): boolean
+	return type(value) == "string" and #value > 0 and #value <= 256 and not string.find(value, "%c")
+end
+
+function TestProof.new(gameModel: any, clientLifetimeId: string, pluginArtifactHash: string): State
+	assert(publicId(clientLifetimeId), "TestProof requires a public client lifetime ID.")
+	assert(type(pluginArtifactHash) == "string" and #pluginArtifactHash == 64
+		and not string.find(pluginArtifactHash, "[^%x]"), "TestProof requires the loaded artifact SHA-256.")
+	-- Keep exact Edit service references; never resolve a runtime copy by name.
+	local serviceAvailable, testService = pcall(function(): any return gameModel:GetService("StudioTestService") end)
+	if not serviceAvailable then testService = nil end
+	local storage = gameModel:GetService("ServerStorage")
+	local http = gameModel:GetService("HttpService")
+	local sessionId: string? = nil
+	local connected, allowWrites, stopped, fenced = false, false, false, false
+	local continuitySupported = false
+	local playEpoch = 0
+	local mode: "Edit" | "Play" = "Edit"
+	local observer: any = nil
+	local marker: any = nil
+	local markerName: string? = nil
+	local expected: Attributes? = nil
+	local state: State
+
+	local function readMode(): "Edit" | "Play"
+		assert(testService ~= nil, "StudioTestService is unavailable.")
+		local editModeActive = testService.EditModeActive
+		assert(type(editModeActive) == "boolean", "StudioTestService.EditModeActive must be a boolean.")
+		return if editModeActive then "Edit" else "Play"
+	end
+
+	local function dropObserver(): ()
+		continuitySupported, connected = false, false
+		local connection = observer
+		observer = nil
+		if connection then pcall(function(): () connection:Disconnect() end) end
+	end
+
+	local function observeMode(): ()
+		local ok, value = pcall(readMode)
+		if ok then
+			mode = value
+		else
+			dropObserver()
+			-- Retain the last known mode only as unavailable metadata. RunService
+			-- in the Edit model cannot provide a valid fallback during a test.
+		end
+		if observer then
+			local live, isConnected = pcall(function(): boolean return observer.Connected == true end)
+			if not live or not isConnected then dropObserver() end
+		end
+	end
+
+	local function attributes(): Attributes
+		return {
+			SessionId = sessionId or "", ClientLifetimeId = clientLifetimeId,
+			PluginArtifactHash = pluginArtifactHash, MarkerName = markerName or "", PlaceId = gameModel.PlaceId,
+			UniverseId = gameModel.GameId, PlaceName = gameModel.Name,
+			PlayEpoch = playEpoch, Mode = mode, Connected = connected,
+			ContinuitySupported = continuitySupported,
+		}
+	end
+
+	local function unchanged(): boolean
+		if not marker or not expected then return false end
+		local ok, matches = pcall(function(): boolean
+			if marker.ClassName ~= "Folder" or marker.Name ~= markerName or marker.Parent ~= storage
+				or marker.Archivable ~= true or storage.Parent ~= gameModel
+				or marker:FindFirstChildWhichIsA("Instance") ~= nil or #marker:GetTags() ~= 0 then
+				return false
+			end
+			local actual: Attributes = marker:GetAttributes()
+			for key, value in pairs(expected :: Attributes) do if actual[key] ~= value then return false end end
+			for key in pairs(actual) do if (expected :: Attributes)[key] == nil then return false end end
+			return true
+		end)
+		return ok and matches
+	end
+
+	local function invalidate(): ()
+		-- Sticky: retain at most one contested marker and never create replacements.
+		-- Only these revocation attributes may change after a foreign edit. Everything
+		-- else (including foreign children, tags, names and attributes) is preserved.
+		fenced, connected, allowWrites = true, false, false
+		if marker then
+			pcall(function(): () marker:SetAttribute("Connected", false) end)
+			pcall(function(): () marker:SetAttribute("Invalid", true) end)
+		end
+	end
+
+	local function publish(): ()
+		if not marker or fenced then return end
+		if not unchanged() then invalidate(); return end
+		local values = attributes()
+		local ownedAttributes = expected :: Attributes
+		local ok = pcall(function(): ()
+			for key, value in pairs(values) do
+				if ownedAttributes[key] ~= value then
+					assert(unchanged(), "TestProof witness changed during publication.")
+					marker:SetAttribute(key, value)
+					ownedAttributes[key] = value
+					-- Attribute listeners can edit another field synchronously. Detect
+					-- that before a subsequent planned write could overwrite it.
+					assert(unchanged(), "TestProof witness changed during publication.")
+				end
+			end
+		end)
+		if not ok then invalidate(); return end
+		expected = values
+		if not unchanged() then invalidate() end
+	end
+
+	local function retire(): ()
+		if not marker then return end
+		if fenced or not unchanged() then invalidate(); return end
+		-- Revoke before removal. If any operation/readback fails, keep the witness
+		-- invalid rather than deleting a marker whose contents are now uncertain.
+		publish()
+		if fenced then return end
+		local ok = pcall(function(): () marker:Destroy() end)
+		if not ok then invalidate(); return end
+		marker, markerName, expected = nil, nil, nil
+	end
+
+	local function install(): ()
+		if marker or fenced then return end
+		local chosen: string? = nil
+		local ok = pcall(function(): ()
+			assert(storage.Parent == gameModel, "Edit ServerStorage is unavailable.")
+			for _ = 1, MAX_NAME_ATTEMPTS do
+				local guid = http:GenerateGUID(false)
+				assert(type(guid) == "string" and #guid == 36 and not string.find(guid, "[^%x%-]"), "Invalid GUID.")
+				local name = "ArcaneTestProof_" .. guid
+				-- Keep a public candidate even if installation fails, so a bound
+				-- unavailable proof still satisfies the host's eleven-field schema.
+				markerName = name
+				if not storage:FindFirstChild(name) then chosen = name; break end
+			end
+			assert(chosen ~= nil, "TestProof name capacity reached.")
+		end)
+		if not ok then invalidate(); return end
+		markerName = chosen
+		-- A helper loaded during play can report an unavailable witness, but cannot
+		-- install into a runtime DataModel and mistake that clone for Edit ownership.
+		if mode ~= "Edit" then connected = false; return end
+		ok = pcall(function(): ()
+			marker = Instance.new("Folder")
+			marker.Name = chosen
+			marker.Archivable = true -- Allow native runtime identity witnesses to clone.
+			expected = attributes()
+			for key, value in pairs(expected :: Attributes) do marker:SetAttribute(key, value) end
+			marker.Parent = storage
+		end)
+		if not ok or not unchanged() then invalidate() end
+	end
+
+	state = {
+		snapshot = function(_self: State): Snapshot?
+			observeMode()
+			-- Sampling reports the current mode; it NEVER manufactures an epoch.
+			publish()
+			local boundSessionId, boundMarkerName = sessionId, markerName
+			if not boundSessionId or not boundMarkerName then return nil end
+			local result: Snapshot = {
+				sessionId = boundSessionId, clientLifetimeId = clientLifetimeId, pluginArtifactHash = pluginArtifactHash,
+				markerName = boundMarkerName,
+				placeId = gameModel.PlaceId, universeId = gameModel.GameId, placeName = gameModel.Name,
+				playEpoch = playEpoch, mode = mode, connected = connected,
+				continuitySupported = continuitySupported,
+			}
+			table.freeze(result)
+			return result
+		end,
+		bind = function(_self: State, nextSessionId: string, nextAllowWrites: boolean): Snapshot?
+			assert(publicId(nextSessionId), "TestProof requires a public session ID.")
+			assert(type(nextAllowWrites) == "boolean", "TestProof requires a boolean write grant.")
+			if stopped or fenced then return state:snapshot() end
+			observeMode()
+			if sessionId ~= nextSessionId or allowWrites ~= nextAllowWrites then
+				connected, allowWrites = false, false
+				retire()
+				if fenced then return state:snapshot() end
+				sessionId, connected, allowWrites = nextSessionId, continuitySupported, nextAllowWrites
+			end
+			-- This bounded internal witness exists for read-only sessions too.
+			-- Grant changes replace it; they never authorize writes to game content.
+			if not marker and mode == "Edit" then connected = continuitySupported end
+			install()
+			return state:snapshot()
+		end,
+		disconnect = function(_self: State): ()
+			connected, allowWrites = false, false
+			retire()
+			sessionId = nil
+			-- Keep the one lifetime observer across disconnect/re-pair gaps.
+		end,
+		stop = function(_self: State): ()
+			if stopped then return end
+			stopped = true -- Ignore callbacks already queued before Disconnect().
+			dropObserver()
+			state:disconnect()
+		end,
+	}
+
+	-- Fail closed if this genuine property observer cannot be installed. One
+	-- notification counts even if all deferred callbacks see the same boolean.
+	local ok = pcall(function(): ()
+		mode = readMode()
+		observer = testService:GetPropertyChangedSignal("EditModeActive"):Connect(function(): ()
+			if stopped or not continuitySupported then return end
+			if playEpoch >= MAX_COUNTER then dropObserver(); invalidate(); return end
+			playEpoch += 1
+			observeMode()
+			publish()
+		end)
+		assert(observer and observer.Connected == true, "EditModeActive observer is unavailable.")
+	end)
+	if ok then continuitySupported = true else dropObserver() end
+	observeMode()
+	return state
+end
+
+return TestProof
+end
+-- END TestProof.luau
+
+-- BEGIN Sha256.luau
+__arcaneFactories["Sha256"] = function()
+-- SHA-256 over raw string bytes (including UTF-8), per FIPS 180-4.
+-- Synchronous and bounded: no services, dependencies, or yielding.
+
+local MAX_BYTES = 512 * 1024
+local WORD_MASK = 0xffffffff
+local ROUND_CONSTANTS: {number} = table.freeze({
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+})
+
+local band, bxor, bnot = bit32.band, bit32.bxor, bit32.bnot
+local lshift, rshift, rrotate = bit32.lshift, bit32.rshift, bit32.rrotate
+
+local function compress(state: {number}, words: {number}, bytes: string, offset: number): ()
+	for index = 1, 16 do
+		local first = offset + (index - 1) * 4
+		local a, b, c, d = string.byte(bytes, first, first + 3)
+		words[index] = lshift(a, 24) + lshift(b, 16) + lshift(c, 8) + d
+	end
+	for index = 17, 64 do
+		local previous15, previous2 = words[index - 15], words[index - 2]
+		local sigma0 = bxor(rrotate(previous15, 7), rrotate(previous15, 18), rshift(previous15, 3))
+		local sigma1 = bxor(rrotate(previous2, 17), rrotate(previous2, 19), rshift(previous2, 10))
+		words[index] = band(words[index - 16] + sigma0 + words[index - 7] + sigma1, WORD_MASK)
+	end
+
+	local a, b, c, d, e, f, g, h = state[1], state[2], state[3], state[4], state[5], state[6], state[7], state[8]
+	for index = 1, 64 do
+		local sigma1 = bxor(rrotate(e, 6), rrotate(e, 11), rrotate(e, 25))
+		local choose = bxor(band(e, f), band(bnot(e), g))
+		local temporary1 = band(h + sigma1 + choose + ROUND_CONSTANTS[index] + words[index], WORD_MASK)
+		local sigma0 = bxor(rrotate(a, 2), rrotate(a, 13), rrotate(a, 22))
+		local majority = bxor(band(a, b), band(a, c), band(b, c))
+		local temporary2 = band(sigma0 + majority, WORD_MASK)
+		h = g
+		g = f
+		f = e
+		e = band(d + temporary1, WORD_MASK)
+		d = c
+		c = b
+		b = a
+		a = band(temporary1 + temporary2, WORD_MASK)
+	end
+	state[1] = band(state[1] + a, WORD_MASK)
+	state[2] = band(state[2] + b, WORD_MASK)
+	state[3] = band(state[3] + c, WORD_MASK)
+	state[4] = band(state[4] + d, WORD_MASK)
+	state[5] = band(state[5] + e, WORD_MASK)
+	state[6] = band(state[6] + f, WORD_MASK)
+	state[7] = band(state[7] + g, WORD_MASK)
+	state[8] = band(state[8] + h, WORD_MASK)
+end
+
+local function digest(bytes: string): string
+	if type(bytes) ~= "string" then
+		error("SHA-256 input must be a string.", 2)
+	end
+	local length = #bytes
+	if length > MAX_BYTES then
+		error("SHA-256 input exceeds the 524288-byte limit.", 2)
+	end
+
+	-- All mutable working storage belongs to this call; module reuse cannot leak state.
+	local state = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}
+	local words: {number} = table.create(64, 0)
+	local fullBytes = length - length % 64
+	for offset = 1, fullBytes, 64 do
+		compress(state, words, bytes, offset)
+	end
+
+	-- Actual padding bytes: 0x80, zeroes, then the original 64-bit big-endian bit length.
+	-- The input cap keeps that length below 2^32, so its high word is always zero.
+	local bitLength = length * 8
+	local tail = string.sub(bytes, fullBytes + 1) .. "\128" .. string.rep("\0", (55 - length) % 64)
+		.. string.char(0, 0, 0, 0, rshift(bitLength, 24), band(rshift(bitLength, 16), 0xff), band(rshift(bitLength, 8), 0xff), band(bitLength, 0xff))
+	for offset = 1, #tail, 64 do
+		compress(state, words, tail, offset)
+	end
+
+	return string.format("%08x%08x%08x%08x%08x%08x%08x%08x", state[1], state[2], state[3], state[4], state[5], state[6], state[7], state[8])
+end
+
+return digest
+end
+-- END Sha256.luau
+
 table.freeze(__arcaneFactories)
 
 -- BEGIN Main.server.luau
@@ -1226,10 +1787,16 @@ local function __arcaneMain(): ()
 -- Provider credentials and session bearers are never saved.
 local V = __arcaneRequire("Validation")
 local Transport = __arcaneRequire("Transport")
+local Sha256 = __arcaneRequire("Sha256")
+local artifactHash = if typeof(script) == "Instance" and script:IsA("Script") then Sha256(script.Source) else nil
 local KEY_SETTING = "Arcane.LocalApiKey.v1"
 local STATE_SETTING = "Arcane.LastConnection.v1"
 local savedKey: string? = nil
 local lastKnownConnected = false
+-- Legacy connected=false records describe transient health, not user intent.
+-- Only an explicit opt-out in this existing owned record suppresses startup.
+local autoConnect = true
+local storedOptOut = false
 local storageFailed = false
 local keyRead, previousKey = pcall(function() return plugin:GetSetting(KEY_SETTING) end)
 if keyRead and type(previousKey) == "string" then
@@ -1241,7 +1808,12 @@ local stateRead, previousState = pcall(function() return plugin:GetSetting(STATE
 if stateRead and type(previousState) == "table" and getmetatable(previousState) == nil then
 	local count = 0
 	for _ in pairs(previousState) do count += 1 end
-	if count == 1 and type(previousState.connected) == "boolean" then lastKnownConnected = previousState.connected end
+	if (count == 1 or (count == 2 and type(previousState.autoConnect) == "boolean"))
+		and type(previousState.connected) == "boolean" then
+		lastKnownConnected = previousState.connected
+		autoConnect = previousState.autoConnect ~= false
+		storedOptOut = not autoConnect
+	end
 end
 previousState = nil
 local toolbar = plugin:CreateToolbar("Arcane")
@@ -1388,10 +1960,16 @@ local function clearInput(): ()
 	refreshHint()
 end
 refreshHint()
-local function rememberState(connected: boolean): ()
-	if lastKnownConnected == connected then return end
-	local ok = pcall(function() plugin:SetSetting(STATE_SETTING, {connected = connected}) end)
-	if ok then lastKnownConnected = connected else storageFailed = true end
+local function rememberState(connected: boolean, allowed: boolean?): ()
+	if allowed ~= nil then autoConnect = allowed end
+	-- Key edits/rejections already remove saved auth. Persist an opt-out only
+	-- when a valid saved key remains (an explicit transport disconnect).
+	local optOut = not autoConnect and savedKey ~= nil
+	if lastKnownConnected == connected and storedOptOut == optOut then return end
+	local record: any = {connected = connected}
+	if optOut then record.autoConnect = false end
+	local ok = pcall(function() plugin:SetSetting(STATE_SETTING, record) end)
+	if ok then lastKnownConnected, storedOptOut = connected, optOut else storageFailed = true end
 end
 local function rejectKey(): ()
 	-- A rejected key must not become a persistent reconnect trap. Clearing this
@@ -1399,7 +1977,7 @@ local function rejectKey(): ()
 	keyFailed, savedKey, hint = true, nil, "Enter a new API key"
 	local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
 	if not ok then storageFailed = true end
-	rememberState(false)
+	rememberState(false, false)
 	connectButton.Text = "Failed"
 	connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red
 	clearInput()
@@ -1426,6 +2004,8 @@ transport = Transport.new(game, function(status: any)
 	-- ACK/rejection or dispatch status can adopt the previous input's outcome.
 	if invalidateInput() then return end
 	if status.state == "failed" then rejectKey(); return end
+	if status.state == "disconnecting" then rememberState(false, false)
+	elseif status.state == "connecting" then rememberState(false, true) end
 	local live = savedKey ~= nil and keyInput.Text == savedKey and status.sessionId ~= nil
 		and (status.state == "connected" or status.state == "executing")
 	-- Cached history never establishes a current session or green status.
@@ -1434,7 +2014,10 @@ transport = Transport.new(game, function(status: any)
 	if live then rememberState(true)
 	else rememberState(false) end
 	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
-end)
+end, artifactHash)
+-- Check deferred text edits before every worker cycle and after every yielding
+-- HTTP call, including status recovery that has not yet emitted a UI callback.
+transport.checkInput = invalidateInput
 -- A deferred Text signal must also be caught inside an already dispatched
 -- editor callback. Keep the transport's original lifetime/lease checks intact.
 local guard = transport.guard
@@ -1477,11 +2060,11 @@ table.insert(connections, plugin.Unloading:Connect(function()
 	widget:Destroy()
 	toolbar:Destroy()
 end))
--- Resume a previously successful user connection once in a fresh lifetime.
--- This only queues authentication; cached state is never proof of connection,
--- no session token/command is restored, and an ambiguous exchange is not replayed.
-if savedKey ~= nil and lastKnownConnected then
-	local ok = pcall(function() transport:requestConnect(savedKey) end)
+-- Queue safe recovery from any saved key unless the user explicitly opted out.
+-- Cached health never proves a connection. Status precedes authentication; no
+-- old session token, command, receipt or grant is restored in a new lifetime.
+if savedKey ~= nil and autoConnect then
+	local ok = pcall(function() transport:requestConnect(savedKey, true) end)
 	if not ok then rememberState(false) end
 end
 transport:start()

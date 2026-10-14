@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join, resolve, dirname, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRAND_BITMAP_PATH, validateBrandBitmap } from './create-local-release.mjs';
+import { BRAND_BITMAP_PATH, REQUIRED_FRONTEND_FILES, validateBrandBitmap } from './create-local-release.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -19,6 +19,7 @@ export async function productDoctor({ repository = REPOSITORY, nodeVersion = pro
     ['provider-setup-source','apps/desktop/src/provider-setup.ts'], ['provider-setup-entry','dist/apps/desktop/src/provider-setup.js'], ['provider-setup-host','apps/desktop/electron/provider-setup.cjs'],
     ['workspace-shell-source', 'apps/desktop/src/workspace-shell.ts'], ['workspace-shell-entry', 'dist/apps/desktop/src/workspace-shell.js'],
     ['workspace-shell-map', 'dist/apps/desktop/src/workspace-shell.js.map'],
+    ...REQUIRED_FRONTEND_FILES.filter(path => /automatic-asset|asset-viewer|glb-preflight|vendor\/three/.test(path)).map((path, index) => ['viewer-file-' + index, path]),
     ['asset-downloads-source', 'apps/desktop/src/asset-downloads.ts'], ['asset-downloads-entry', 'dist/apps/desktop/src/asset-downloads.js'], ['asset-downloads-map', 'dist/apps/desktop/src/asset-downloads.js.map'], ['learning-panel-source', 'apps/desktop/src/learning-panel.ts'], ['learning-panel-entry', 'dist/apps/desktop/src/learning-panel.js'], ['learning-panel-map', 'dist/apps/desktop/src/learning-panel.js.map'], ['workflow-panel-source', 'apps/desktop/src/workflow-panel.ts'], ['workflow-panel-entry', 'dist/apps/desktop/src/workflow-panel.js'], ['workflow-panel-map', 'dist/apps/desktop/src/workflow-panel.js.map'], ['codex-history-source', 'apps/desktop/src/codex-history.ts'], ['codex-history-entry', 'dist/apps/desktop/src/codex-history.js'], ['codex-history-map', 'dist/apps/desktop/src/codex-history.js.map'], ['codex-controller-entry', 'dist/apps/daemon/src/codex-service.js'],
     ['workbench-html', 'apps/desktop/public/studio.html'], ['workbench-css', 'apps/desktop/public/studio.css'],
     ['workbench-brand-bitmap', BRAND_BITMAP_PATH], ['blender-worker', 'workers/blender/asset_worker.py'], ['skills', 'skills/registry.json'],

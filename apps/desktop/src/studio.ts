@@ -8,6 +8,9 @@ import { startProviderSetup } from './provider-setup.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
+import { AssetViewerPanel } from './asset-viewer.js';
+import { AutomaticAssetPreviews } from './automatic-asset-previews.js';
+import { startPlaytestPanel } from './playtest-panel.js';
 import { StudioKeySettings, trustedKeyAction } from './studio-key-settings.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
@@ -19,7 +22,7 @@ import type { InstanceRef, Json, MutationReceipt, StudioCommand, StudioMethod, S
 // Runtime dependencies are deliberately browser-only; the shared protocol import
 // is erased by TypeScript. Keep these literals checked against its types.
 export const STUDIO_ROOTS = ['Workspace', 'ReplicatedStorage', 'ServerScriptService', 'ServerStorage', 'StarterGui', 'StarterPlayer', 'Lighting'] as const satisfies readonly StudioRoot[];
-export const BUILDER_METHODS = ['scene.children', 'scene.search', 'scene.inspect', 'selection.read', 'script.read', 'scene.create', 'scene.update', 'script.update'] as const satisfies readonly StudioMethod[];
+export const BUILDER_METHODS = ['scene.children', 'scene.search', 'scene.inspect', 'selection.read', 'script.read', 'scene.create', 'scene.update', 'script.update', 'script.set_enabled'] as const satisfies readonly StudioMethod[];
 const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'];
 const WRITABLE_PROPERTIES = ['Name', 'Size', 'Position', 'Color', 'Anchored', 'CanCollide', 'Transparency', 'Material'];
 const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric'];
@@ -27,7 +30,7 @@ const TOKEN_KEY = 'arcane-lab-session';
 const utf8 = (value: string) => new TextEncoder().encode(value).length;
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-export const isMutation = (method: StudioMethod) => ['scene.create', 'scene.update', 'script.update', 'scene.restore'].includes(method);
+export const isMutation = (method: StudioMethod) => ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'].includes(method);
 export const inProgress = (command: StudioCommand) => command.state === 'queued' || command.state === 'dispatched' || command.state === 'needs_reconciliation';
 
 export function readReference(value: unknown, session: StudioSession): InstanceRef {
@@ -37,7 +40,7 @@ export function readReference(value: unknown, session: StudioSession): InstanceR
   return { instanceId: value.instanceId, sessionId: session.id, root: value.root as StudioRoot, pathSegments: value.pathSegments as string[], className: value.className };
 }
 const sameRef = (a: InstanceRef, b: InstanceRef) => a.instanceId === b.instanceId && a.sessionId === b.sessionId && a.root === b.root;
-export interface Baseline { ref: InstanceRef; commandId: string; properties?: Record<string, Json>; source?: string }
+export interface Baseline { ref: InstanceRef; commandId: string; properties?: Record<string, Json>; source?: string; enabled?: boolean }
 export interface BuilderInput {
   root: string; limit: number; query: string; ref: InstanceRef | null; browseParent: boolean;
   className: string; name: string; properties: Record<string, Json>; source: string; baseline: Baseline | null;
@@ -119,6 +122,14 @@ export function prepareCommand(session: StudioSession | undefined, method: strin
       if (input.source.includes('\0') || input.baseline.source.includes('\0')) throw new Error('Source text cannot contain NUL bytes.');
       args = { ref: ref as unknown as Json, expectedSource: input.baseline.source, source: input.source }; break;
     }
+    case 'script.set_enabled': {
+      const ref = needRef(), baseline = input.baseline;
+      if (!['Script', 'LocalScript'].includes(ref.className)) throw new Error('Only Script and LocalScript have an execution state.');
+      if (!baseline || !sameRef(baseline.ref, ref) || typeof baseline.source !== 'string' || typeof baseline.enabled !== 'boolean') throw new Error('Read this exact script and use its source/execution receipt as the baseline.');
+      if (utf8(baseline.source) > 100 * 1024 || baseline.source.includes('\0')) throw new Error('The source baseline must be at most 100 KiB without NUL bytes.');
+      if (!baseline.enabled && !baseline.source.trim()) throw new Error('An empty placeholder cannot be activated.');
+      args = {ref: ref as unknown as Json, expectedSource:baseline.source, expectedEnabled:baseline.enabled, enabled:!baseline.enabled}; break;
+    }
     default: throw new Error('Use the receipt restore flow.');
   }
   if (utf8(JSON.stringify(args)) > 256 * 1024) throw new Error('Command arguments exceed 256 KiB.');
@@ -128,7 +139,8 @@ export function prepareCommand(session: StudioSession | undefined, method: strin
 export function mutationReceipt(command: StudioCommand): MutationReceipt | null {
   if (command.state !== 'succeeded' || !record(command.result) || !record(command.result.mutation)) return null;
   const m = command.result.mutation;
-  if (!['scene.create', 'scene.update', 'script.update'].includes(String(m.kind)) || m.kind !== command.method || !record(m.ref) || m.ref.sessionId !== command.sessionId || !record(m.after) || (m.before !== null && !record(m.before))) return null;
+  if (!['scene.create', 'scene.update', 'script.update', 'script.set_enabled'].includes(String(m.kind)) || m.kind !== command.method || !record(m.ref) || m.ref.sessionId !== command.sessionId || !record(m.after) || (m.before !== null && !record(m.before))) return null;
+  if (m.kind === 'script.set_enabled' && (!record(m.before) || m.before.source !== command.args.expectedSource || m.after.source !== command.args.expectedSource || typeof m.before.enabled !== 'boolean' || typeof m.after.enabled !== 'boolean' || m.before.enabled !== command.args.expectedEnabled || m.after.enabled !== command.args.enabled)) return null;
   return m as unknown as MutationReceipt;
 }
 export function prepareRestore(command: StudioCommand, session: StudioSession | undefined, requestId: string): { commandId: string; requestId: string } {
@@ -144,7 +156,7 @@ export function baselineFromReceipt(command: StudioCommand, session: StudioSessi
   const ref = readReference(command.result.ref, session), requested = readReference(command.args.ref, session);
   if (!sameRef(ref, requested) || ref.className !== requested.className) throw new Error('The read receipt does not match the requested reference.');
   if (command.method === 'scene.inspect' && record(command.result.properties)) return { ref, commandId: command.id, properties: command.result.properties as Record<string, Json> };
-  if (command.method === 'script.read' && typeof command.result.source === 'string') return { ref, commandId: command.id, source: command.result.source };
+  if (command.method === 'script.read' && typeof command.result.source === 'string') return { ref, commandId: command.id, source: command.result.source, ...(typeof command.result.enabled === 'boolean' ? {enabled:command.result.enabled} : {}) };
   throw new Error('This receipt does not contain an inspect or editor source baseline.');
 }
 
@@ -547,7 +559,8 @@ const HELP: Record<string, string> = {
   'script.read': 'Read current editor text through ScriptEditorService, including unsaved edits.',
   'scene.create': 'Create one supported instance inside the exact selected parent. Studio must be in edit mode.',
   'scene.update': 'Change checked properties only. The plugin compares every expected baseline value before writing.',
-  'script.update': 'Replace editor source only if it still matches the exact captured baseline. Conflicts are refused.'
+  'script.update': 'Replace editor source only if it still matches the exact captured baseline. Conflicts are refused.',
+  'script.set_enabled': 'Toggle the execution state from an exact script-read baseline. Enabling requires trusted syntax verification and saved source.'
 };
 const STATE_EXPLANATIONS: Record<StudioCommand['state'], string> = {
   queued: 'Accepted by the daemon; waiting for the exact paired plugin. This is not evidence of Studio execution.',
@@ -578,6 +591,7 @@ export class StudioWorkbench {
     const projectId = validPath && typeof identity === 'string' && identity.length === 64 && /^[a-f0-9]{64}$/.test(identity) ? identity : null;
     const path = validPath ? value : this.canonicalProjectPath;
     if (path === this.canonicalProjectPath && projectId === this.canonicalProjectId) return;
+    this.productMetadataEpoch++;
     this.dismissConnectionSecrets(); this.studioKeys = [];
     this.canonicalProjectPath = path; this.canonicalProjectId = projectId;
     this.keySettings.setProject(projectId);
@@ -595,6 +609,10 @@ export class StudioWorkbench {
   private assetJobs: AssetJobRecord[] = [];
   private assetJobId = '';
   private assetActivitySignature = '';
+  private readonly automaticAssets = new AutomaticAssetPreviews();
+  private assetCardsSignature = '';
+  private assetCardsEpoch = 0;
+  private assetCardsLimit = 8;
   private assetAvailable = false;
   private assetBusy = false;
   private assetProbed = false;
@@ -606,6 +624,7 @@ export class StudioWorkbench {
   private readonly assetContext: AssetConversationController;
   private removeAssetContext: (() => void) | null = null;
   private removeAssetProject: (() => void) | null = null;
+  private removeSignIn: (() => void) | null = null;
   private workRuns: WorkRun[] = [];
   private readyIds = new Set<string>();
   private workTaskId = '';
@@ -617,6 +636,9 @@ export class StudioWorkbench {
   private sessions: StudioSession[] = [];
   private commands: StudioCommand[] = [];
   private sessionId = '';
+  // Receipt recovery may outlive the writable target (including revocation).
+  private historySessionId = '';
+  private sessionSelectionEpoch = 0;
   private commandId = '';
   private ref: InstanceRef | null = null;
   private propertyBaseline: Baseline | null = null;
@@ -639,10 +661,12 @@ export class StudioWorkbench {
   private keySecretEpoch = 0;
   private confirmation: (() => Promise<void>) | null = null;
   private readonly assetDownloads: ArtifactDownloads;
+  private readonly assetViewer: AssetViewerPanel;
   private readonly keySettings: StudioKeySettings;
   constructor(private readonly doc: Document, private readonly api: StudioApi, private readonly origin: string, private readonly token: string, options: StudioWorkbenchOptions = {}) {
     this.keySettings = new StudioKeySettings(doc, origin);
     this.assetDownloads = new ArtifactDownloads(doc, token);
+    this.assetViewer = new AssetViewerPanel(doc, token);
     this.assetContext = new AssetConversationController({ ...options, getProjectPath: options.getProjectPath ?? (() => this.historyProjectPath() || null) });
     this.assetOptions = options;
   }
@@ -664,7 +688,7 @@ export class StudioWorkbench {
   private badge(id: string, label: string, tone = 'neutral') { const item = this.el(id); item.textContent = label; item.className = 'status-text ' + tone; }
   private notice(message: string, tone = '') { this.text('notice', message); this.el('notice').className = 'notice ' + tone; }
   private error(error: unknown) { this.notice(error instanceof Error ? error.message : String(error), 'error'); }
-  private active() { return this.sessions.find(s => s.id === this.sessionId); }
+  private active() { return this.sessions.find(s => s.id === this.sessionId && !s.revokedAt); }
   private chosenCommand() { return this.commands.find(c => c.id === this.commandId); }
   private option(select: HTMLSelectElement, value: string, label: string) { const o = this.make('option', label); o.value = value; select.append(o); }
   private identity(id: string, entries: [string, string][]) { const list = this.el(id); list.replaceChildren(); for (const [key, value] of entries) list.append(this.make('dt', key), this.make('dd', value)); }
@@ -689,7 +713,7 @@ export class StudioWorkbench {
     this.on('asset-form', 'input', () => this.renderAssetControls());
     this.on('asset-template', 'change', () => { this.el<HTMLInputElement>('asset-size').value = this.value('asset-template') === 'hero-prop' ? '1, 0.65, 0.7' : '3, 3, 2.8'; this.renderAssetControls(); });
     this.on('asset-probe', 'click', () => { void this.probeAsset(); });
-    this.on('asset-job-picker', 'change', () => { this.assetJobId = this.value('asset-job-picker'); this.clearAssetPreview(); this.renderAssetJob(); this.renderAssetControls(); });
+    this.on('asset-job-picker', 'change', () => { this.selectAssetJob(this.value('asset-job-picker'), true); });
     this.on('asset-cancel', 'click', () => { void this.cancelAsset(); });
     this.on('asset-load-manifest', 'click', () => { void this.loadAssetManifest(); });
     this.on('asset-history-scope', 'change', () => {
@@ -721,7 +745,7 @@ export class StudioWorkbench {
     for (const id of ['settings-key-generate', 'key-setup-generate']) {
       this.doc.getElementById(id)?.addEventListener('click', event => { if (trustedKeyAction(event)) void this.issueStudioKey(); });
     }
-    this.assetOptions.subscribeSignInChange?.(() => this.renderKeyControls());
+    this.subscribeSignIn();
     this.on('key-form', 'change', () => this.renderKeyControls());
     this.on('key-reveal', 'click', event => { if (!trustedKeyAction(event) || !this.issuedKey) return; this.keyRevealed = !this.keyRevealed; this.renderIssuedKey(); });
     this.on('key-copy', 'click', event => { if (trustedKeyAction(event) && this.issuedKey) void this.copy(this.issuedKey.apiKey); });
@@ -755,7 +779,7 @@ export class StudioWorkbench {
     await this.refresh();
     this.schedule();
   }
-  resume() { this.stopped = false; this.keySettings.resume(); this.subscribeAssetContext(); this.syncAssetContext(); this.renderNativeControls(); void this.refresh().finally(() => this.schedule()); }
+  resume() { this.stopped = false; this.keySettings.resume(); this.subscribeAssetContext(); this.subscribeSignIn(); this.syncAssetContext(); this.renderNativeControls(); void this.refresh().finally(() => this.schedule()); }
   dismissConnectionSecrets(): void {
     this.clearStudioKey(); this.nativeSecretEpoch++; this.nativeToken = '';
     this.text('native-token', ''); this.text('native-scopes', '');
@@ -765,13 +789,14 @@ export class StudioWorkbench {
   stop() {
     this.productMetadataEpoch++; this.observeProjectPath(null);
     this.removeAssetContext?.(); this.removeAssetContext = null; this.removeAssetProject?.(); this.removeAssetProject = null;
+    this.removeSignIn?.(); this.removeSignIn = null;
     this.assetContext.invalidate(); this.resetAssetContext();
     this.nativeViewEpoch++; this.nativeRequestEpoch++; this.nativeObserverBusy = false;
     this.nativeInventoryReady = false; this.nativeObservation = null; this.nativeStudioId = '';
     const picker = this.el<HTMLSelectElement>('diagnostics-studio'); picker.replaceChildren(); this.option(picker, '', 'Observe Studio choices first');
     this.el('diagnostics-tools').replaceChildren(); this.clearNativeReceipt('Native view cleared after page exit. Observe capabilities again.');
     this.text('diagnostics-request-status', 'Previous request discarded after page exit'); this.text('diagnostics-connection', 'No current request receipt');
-    this.dismissConnectionSecrets(); this.keySettings.stop(); this.assetDownloads.clear(); this.assetPreviewEpoch++; this.stopped = true;
+    this.dismissConnectionSecrets(); this.keySettings.stop(); this.assetDownloads.clear(); this.assetViewer.clear(); this.assetPreviewEpoch++; this.clearChatAssets(); this.automaticAssets.reset(); this.stopped = true;
     if (this.timer) clearTimeout(this.timer); this.renderNativeControls();
   }
 
@@ -780,19 +805,26 @@ export class StudioWorkbench {
     this.timer = setTimeout(() => { if (!this.doc.hidden && this.checked('auto-refresh')) void this.refresh().finally(() => this.schedule()); else this.schedule(); }, Math.min(30000, 3000 * 2 ** Math.min(this.refreshFailures, 3)));
   }
   async refresh(): Promise<void> {
-    if (this.refreshing || !this.token) return;
+    if (this.stopped || this.refreshing || !this.token) return;
     this.refreshing = true; this.el<HTMLButtonElement>('refresh').disabled = true;
-    const capturedSession = this.sessionId, productEpoch = this.productMetadataEpoch;
+    const capturedSession = this.historySessionId, selectionEpoch = this.sessionSelectionEpoch;
+    let productEpoch = this.productMetadataEpoch;
+    let projectId = this.canonicalProjectId, projectPath = this.canonicalProjectPath;
+    const current = () => !this.stopped && productEpoch === this.productMetadataEpoch && projectId === this.canonicalProjectId && projectPath === this.canonicalProjectPath;
+    const historyCurrent = () => current() && selectionEpoch === this.sessionSelectionEpoch && capturedSession === this.historySessionId;
     const workRead = Promise.allSettled([this.refreshWork(), this.refreshAssets()]);
     const reads = await Promise.allSettled([this.api.sessions(), this.api.product(), ...(capturedSession ? [this.api.commands(capturedSession)] : [])]);
     try {
+      if (!current()) return;
       // Project/chat metadata does not depend on Studio availability.
       const product = reads[1]!;
       if (!this.stopped && productEpoch === this.productMetadataEpoch) {
         if (product.status === 'fulfilled') this.renderProduct(product.value as ProductState);
         else this.observeProjectPath(null);
+        projectId = this.canonicalProjectId; projectPath = this.canonicalProjectPath; productEpoch = this.productMetadataEpoch;
       }
       if (!this.stopped && productEpoch === this.productMetadataEpoch) await this.refreshStudioKeys();
+      if (!current()) return;
       if (product.status === 'rejected') { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       const sessionRead = reads[0]!;
       if (sessionRead.status === 'rejected') throw sessionRead.reason;
@@ -801,17 +833,19 @@ export class StudioWorkbench {
       this.sessions = sessionData.sessions;
       this.online = true;
       this.renderSessions();
-      if (capturedSession && capturedSession === this.sessionId) {
+      if (capturedSession && historyCurrent()) {
         const commandRead = reads[2]!;
         if (commandRead.status === 'rejected') throw commandRead.reason;
         const data = commandRead.value as { commands: StudioCommand[] };
         if (!Array.isArray(data.commands) || data.commands.some(c => c.sessionId !== capturedSession)) throw new Error('The history endpoint returned records for a different session.');
-        this.commands = data.commands;
+        // A bounded history read cannot settle an omitted in-flight command.
+        this.commands = [...data.commands, ...this.commands.filter(c => inProgress(c) && !data.commands.some(next => next.id === c.id))];
         this.historyReady = true;
         // The selected receipt may have aged beyond the bounded history window.
-        if (this.commandId && !this.commands.some(c => c.id === this.commandId)) {
+        if (this.commandId && !data.commands.some(c => c.id === this.commandId)) {
           const receipt = await this.api.command(this.commandId);
-          if (this.sessionId === capturedSession && receipt.command.sessionId === capturedSession) this.commands.push(receipt.command);
+          if (!historyCurrent()) return;
+          if (receipt.command.sessionId === capturedSession) this.rememberCommand(receipt.command);
         }
         this.resolvePending();
         this.renderHistory(); this.renderReceipt();
@@ -821,12 +855,14 @@ export class StudioWorkbench {
       this.text('last-refresh', new Date().toLocaleTimeString());
       if (this.el('notice').textContent?.startsWith('Checking') || this.el('notice').textContent?.startsWith('Refresh unavailable')) this.notice('Local daemon responding. Choose an exact session to work in Studio.');
     } catch (error) {
+      if (!current() || selectionEpoch !== this.sessionSelectionEpoch) return;
       this.online = false; this.historyReady = false; this.refreshFailures++;
       this.badge('connection-status', 'Refresh unavailable', 'error');
       this.notice('Refresh unavailable: ' + (error instanceof Error ? error.message : String(error)) + ' Cached records may be stale. Command outcomes have not been inferred.', 'error');
     } finally {
       await workRead;
-      this.refreshing = false; this.el<HTMLButtonElement>('refresh').disabled = false; this.renderControls(); this.renderKeyControls();
+      this.refreshing = false;
+      if (!this.stopped) { this.el<HTMLButtonElement>('refresh').disabled = false; this.renderControls(); this.renderKeyControls(); }
     }
   }
 
@@ -852,16 +888,20 @@ export class StudioWorkbench {
     }
   }
   private renderSessions() {
+    const activeSessions = this.sessions.filter(session => !session.revokedAt);
     const picker = this.el<HTMLSelectElement>('session-picker'); picker.replaceChildren(); this.option(picker, '', 'Choose a session explicitly');
-    for (const session of this.sessions) this.option(picker, session.id, session.name + ' · place ' + session.placeId + ' · ' + session.id + (session.revokedAt ? ' · REVOKED' : session.allowWrites ? ' · writes' : ' · read-only'));
-    this.text('session-count', String(this.sessions.filter(s => !s.revokedAt).length) + ' active / ' + this.sessions.length + ' recorded');
-    if (this.sessionId && !this.active()) { this.sessionId = ''; this.clearTarget(); this.notice('The selected session is no longer reported. Choose a session explicitly; no window was substituted.', 'warning'); }
+    for (const session of activeSessions) this.option(picker, session.id, session.name + ' · place ' + session.placeId + ' · ' + session.id + (session.allowWrites ? ' · writes' : ' · read-only'));
+    this.text('session-count', String(activeSessions.length) + ' active');
+    if (this.sessionId && !this.active()) {
+      this.sessionId = ''; this.dismissConnectionSecrets(); this.setRef(null); this.renderReceipt();
+      this.notice('The selected session is revoked or no longer reported. Choose a session explicitly; its recorded history is retained.', 'warning');
+    }
     picker.value = this.sessionId;
     const session = this.active();
     if (!session) { this.badge('session-mode', 'No target'); this.text('session-summary', 'Connect the Arcane plugin with an API key, then choose its exact session.'); this.el('session-details').replaceChildren(); return; }
-    this.badge('session-mode', session.revokedAt ? 'Revoked' : session.allowWrites ? 'Writes granted' : 'Read-only', session.revokedAt ? 'error' : session.allowWrites ? 'warning' : 'good');
+    this.badge('session-mode', session.allowWrites ? 'Writes granted' : 'Read-only', session.allowWrites ? 'warning' : 'good');
     const age = Date.now() - Date.parse(session.lastSeenAt), heartbeat = Number.isFinite(age) ? Math.max(0, Math.floor(age / 1000)) + 's ago' : 'Unknown';
-    this.text('session-summary', session.name + ' · heartbeat ' + heartbeat + (age > 20000 ? ' · plugin may be disconnected' : '') + (session.revokedAt ? ' · revoked' : ''));
+    this.text('session-summary', session.name + ' · heartbeat ' + heartbeat + (age > 20000 ? ' · plugin may be disconnected' : ''));
     this.identity('session-details', [['Session', session.id], ['Client session', session.clientSessionId], ['Place / universe', session.placeId + ' / ' + session.universeId], ['Plugin', session.pluginVersion + ' · protocol ' + session.protocolVersion], ['Granted roots', session.allowedRoots.join(', ')], ['Last seen', session.lastSeenAt], ['Capabilities', session.capabilities.join(', ') || 'None reported']]);
     const root = this.el<HTMLSelectElement>('command-root'), previous = root.value; root.replaceChildren();
     for (const allowed of session.allowedRoots) this.option(root, allowed, allowed);
@@ -871,9 +911,11 @@ export class StudioWorkbench {
     this.commands = []; this.commandId = ''; this.historyReady = false; this.setRef(null); this.renderHistory(); this.renderReceipt();
   }
   private selectSession(id: string) {
-    if (this.busy || this.pending) { this.el<HTMLSelectElement>('session-picker').value = this.sessionId; return; }
-    this.clearStudioKey(); this.sessionId = id; this.clearTarget(); this.renderSessions(); this.renderForm(true);
-    this.notice(id ? 'Exact session selected: ' + id + '. Loading its command history…' : 'No Studio session selected.');
+    if (this.busy || this.pending || !this.sessionId && this.commands.some(inProgress)) { this.el<HTMLSelectElement>('session-picker').value = this.sessionId; return; }
+    this.clearStudioKey(); this.sessionId = this.sessions.find(session => session.id === id && !session.revokedAt)?.id ?? '';
+    this.historySessionId = this.sessionId; this.sessionSelectionEpoch++;
+    this.clearTarget(); this.renderSessions(); this.renderForm(true);
+    this.notice(this.sessionId ? 'Exact session selected: ' + this.sessionId + '. Loading its command history…' : 'No Studio session selected.');
     // If a previous refresh is finishing, the next scheduled refresh loads history.
     void this.refresh();
   }
@@ -895,7 +937,7 @@ export class StudioWorkbench {
     this.text('method-help', HELP[method] ?? 'Choose a supported operation.');
     this.text('properties-legend', method === 'scene.create' ? 'Optional Part properties' : 'Checked properties will be changed');
     this.text('property-baseline', this.propertyBaseline ? 'Baseline from inspect receipt ' + this.propertyBaseline.commandId + '. Current values must still match.' : method === 'scene.update' ? 'Inspect the target and use its receipt as a baseline before editing.' : 'Unchecked fields are omitted. The plugin validates all properties before creation.');
-    this.text('source-baseline', this.sourceBaseline ? 'Editor baseline: receipt ' + this.sourceBaseline.commandId + ' · ' + utf8(this.sourceBaseline.source ?? '') + ' UTF-8 bytes.' : 'Read the editor source, then use its receipt as a baseline.');
+    this.text('source-baseline', this.sourceBaseline ? 'Editor baseline: receipt ' + this.sourceBaseline.commandId + ' · ' + utf8(this.sourceBaseline.source ?? '') + ' UTF-8 bytes.' + (this.sourceBaseline.enabled === undefined ? '' : this.sourceBaseline.enabled ? ' Enabled.' : ' Disabled.') : 'Read the editor source, then use its receipt as a baseline.');
     this.text('expected-source', this.sourceBaseline?.source ?? 'No baseline captured.');
     if (rebuildProperties) this.renderProperties();
     this.renderControls();
@@ -937,7 +979,7 @@ export class StudioWorkbench {
       const value = control.inputs[0]!.value;
       properties[key] = ['Size', 'Position', 'Color'].includes(key) ? { type: key === 'Color' ? 'Color3' : 'Vector3', value: control.inputs.map(v => v.value.trim() ? Number(v.value) : NaN) } : ['Anchored', 'CanCollide'].includes(key) ? value === 'true' : key === 'Transparency' ? value.trim() ? Number(value) : NaN : value;
     }
-    return { root: this.value('command-root'), limit: Number(this.value('limit')), query: this.value('query'), ref: this.ref, browseParent: this.checked('browse-parent'), className: this.value('create-class'), name: this.value('create-name'), properties, source: this.value('source'), baseline: this.value('method') === 'script.update' ? this.sourceBaseline : this.propertyBaseline };
+    return { root: this.value('command-root'), limit: Number(this.value('limit')), query: this.value('query'), ref: this.ref, browseParent: this.checked('browse-parent'), className: this.value('create-class'), name: this.value('create-name'), properties, source: this.value('source'), baseline: ['script.update','script.set_enabled'].includes(this.value('method')) ? this.sourceBaseline : this.propertyBaseline };
   }
   private guard(): void {
     if (!this.online) throw new Error('Refresh the daemon successfully before sending a command.');
@@ -959,7 +1001,7 @@ export class StudioWorkbench {
     this.text('send', this.busy ? 'Sending…' : write ? 'Send write command' : 'Send read command');
     this.badge('command-status', this.pending ? 'Outcome unknown' : this.busy ? 'Sending request' : this.commands.some(inProgress) ? 'Awaiting / uncertain' : valid ? write ? 'Write ready' : 'Read ready' : 'Input required', this.pending || write && valid || this.commands.some(inProgress) ? 'warning' : valid ? 'good' : 'neutral');
     const active = this.active(), canAct = this.online && !this.busy && !this.pending;
-    this.el<HTMLSelectElement>('session-picker').disabled = this.busy || Boolean(this.pending);
+    this.el<HTMLSelectElement>('session-picker').disabled = this.busy || Boolean(this.pending) || !this.sessionId && this.commands.some(inProgress);
     this.el<HTMLButtonElement>('revoke').disabled = !canAct || !active || Boolean(active.revokedAt);
     let guarded = false; try { this.guard(); guarded = Boolean(active && !active.revokedAt); } catch { /* Status is displayed above. */ }
     this.el<HTMLButtonElement>('inspect-target').disabled = !guarded || !this.ref;
@@ -1080,7 +1122,7 @@ export class StudioWorkbench {
       const response = await this.api.request<{ command: StudioCommand }>(request.path, request.body);
       if (!response.command || response.command.sessionId !== request.sessionId || response.command.requestId !== request.requestId) throw new StudioRequestError('The daemon response did not identify the exact submitted request.', 'unknown');
       this.pending = null;
-      if (this.sessionId === request.sessionId) { this.rememberCommand(response.command); this.commandId = response.command.id; this.renderHistory(); this.renderReceipt(); }
+      if (this.historySessionId === request.sessionId) { this.rememberCommand(response.command); this.commandId = response.command.id; this.renderHistory(); this.renderReceipt(); }
       this.notice('Command ' + response.command.id + ' recorded as ' + response.command.state + '. ' + STATE_EXPLANATIONS[response.command.state], response.command.state === 'succeeded' ? '' : 'warning');
     } catch (error) {
       if (error instanceof StudioRequestError && error.outcome === 'unknown') { this.pending = request; this.notice(error.message + ' Outcome unknown. The identical request is retained for explicit recovery.', 'warning'); }
@@ -1090,7 +1132,7 @@ export class StudioWorkbench {
   }
   private rememberCommand(command: StudioCommand) { this.commands = [command, ...this.commands.filter(c => c.id !== command.id)]; }
   private resolvePending() {
-    if (!this.pending || this.pending.sessionId !== this.sessionId) return;
+    if (!this.pending || this.pending.sessionId !== this.historySessionId) return;
     const found = this.commands.find(c => c.requestId === this.pending!.requestId);
     if (found) { this.pending = null; this.commandId = found.id; this.notice('Recovered request receipt: ' + found.id + ' · ' + found.state + '. ' + STATE_EXPLANATIONS[found.state], found.state === 'succeeded' ? '' : 'warning'); }
   }
@@ -1102,7 +1144,7 @@ export class StudioWorkbench {
   private renderHistory() {
     const list = this.el('command-history'); list.replaceChildren(); const filter = this.value('history-filter');
     const commands = this.commands.filter(c => filter === 'all' || filter === 'active' && inProgress(c) || filter === 'succeeded' && c.state === 'succeeded' || filter === 'failed' && ['failed', 'cancelled'].includes(c.state));
-    if (!commands.length) list.append(this.make('p', !this.sessionId ? 'Select a session to load its history.' : !this.historyReady ? 'Loading exact session history…' : 'No commands match this filter. History is bounded to the latest 100 records.', 'empty'));
+    if (!commands.length) list.append(this.make('p', !this.historySessionId ? 'Select a session to load its history.' : !this.historyReady ? 'Loading exact session history…' : 'No commands match this filter. History is bounded to the latest 100 records.', 'empty'));
     for (const command of commands) {
       const button = this.make('button', undefined, 'history-item'); button.type = 'button'; button.setAttribute('aria-pressed', String(command.id === this.commandId)); button.append(this.make('span', command.method, 'history-title'), this.make('span', command.state.replaceAll('_', ' '), 'badge ' + stateTone(command.state)), this.make('span', new Date(command.createdAt).toLocaleString() + ' · ' + command.id, 'history-meta'));
       button.addEventListener('click', () => { this.commandId = command.id; this.renderHistory(); this.renderReceipt(); this.renderControls(); }); list.append(button);
@@ -1299,6 +1341,13 @@ export class StudioWorkbench {
     this.removeAssetContext ??= this.assetOptions.subscribeContextChange?.(changed) ?? null;
     this.removeAssetProject ??= this.subscribeProjectChange(changed);
   }
+  private subscribeSignIn(): void {
+    this.removeSignIn ??= this.assetOptions.subscribeSignInChange?.(() => {
+      if (this.stopped) return;
+      this.renderKeyControls(); this.assetContext.invalidate(); this.resetAssetContext();
+      if (this.assetSignedIn() && this.assetContext.ready()) queueMicrotask(() => { if (!this.stopped && this.assetSignedIn()) void this.refreshAssets(); });
+    }) ?? null;
+  }
   private syncAssetContext(refresh = true) {
     if (!this.assetContext.sync()) return;
     this.resetAssetContext();
@@ -1306,6 +1355,7 @@ export class StudioWorkbench {
   }
   private resetAssetContext() {
     this.assetReadEpoch++; this.assetNextCursor = null; this.assetJobs = []; this.assetJobId = '';
+    this.automaticAssets.reset(); this.clearChatAssets(); this.assetCardsLimit = 8;
     this.assetAvailable = false; this.assetBusy = false; this.assetProbed = false; this.assetUnknown = ''; this.assetReadAfterUnknown = false;
     this.clearAssetPreview(); this.renderAssetPicker(); this.renderAssetJob();
     this.text('asset-runtime', 'No runtime probe requested for this chat.');
@@ -1313,7 +1363,8 @@ export class StudioWorkbench {
     this.text('asset-status', 'No current asset history'); this.renderAssetControls();
   }
   private assetTicket() { this.syncAssetContext(false); return this.assetContext.capture(); }
-  private assetCurrent(ticket: AssetContextTicket) { return !this.stopped && this.assetContext.current(ticket); }
+  private assetCurrent(ticket: AssetContextTicket) { return !this.stopped && this.assetSignedIn() && this.assetContext.current(ticket); }
+  private assetSignedIn(): boolean { try { return !this.assetOptions.isSignedIn || this.assetOptions.isSignedIn() === true; } catch { return false; } }
   private renderAssetPicker() {
     const picker = this.el<HTMLSelectElement>('asset-job-picker'); picker.replaceChildren(); this.option(picker, '', 'Choose a recorded asset job');
     for (const job of this.assetJobs) {
@@ -1326,6 +1377,10 @@ export class StudioWorkbench {
   private async refreshAssets(more = false) {
     if (this.stopped) return;
     const ticket = this.assetTicket(), requestEpoch = ++this.assetReadEpoch, after = more ? this.assetNextCursor : null;
+    if (!this.assetSignedIn()) {
+      if (this.assetAvailable || this.assetJobs.length || this.assetJobId) { this.assetContext.invalidate(); this.resetAssetContext(); }
+      this.renderAssetControls(); return;
+    }
     if (!this.assetContext.ready() || (more && !after)) { this.renderAssetControls(); return; }
     try {
       let jobs: AssetJobRecord[], cursor: string | null = null;
@@ -1348,14 +1403,20 @@ export class StudioWorkbench {
       if (ticket.global) for (const item of this.assetContext.unknownDetails()) if (item.job && !combined.some(job => job.jobId === item.jobId)) combined.push(item.job);
       const unique = [...new Map(combined.map(job => [job.jobId, job])).values()];
       if (unique.length > 256 || utf8(JSON.stringify(unique)) > ASSET_CONVERSATION_BYTES) throw new Error('Asset history view reached its 256 job / 512 KiB bound. Refresh or inspect global history.');
+      // Only a current, matched native-chat receipt may drive presentation.
+      // Global and paginated history never turns an old asset into new work.
+      if (!ticket.global) this.automaticAssets.observe(jobs, more);
       this.assetJobs = unique; this.assetNextCursor = cursor; this.assetAvailable = true;
       if (this.assetUnknown) this.assetReadAfterUnknown = true;
       this.renderAssetPicker(); this.text('asset-status', ticket.global ? 'Global asset history' : 'Assets for this chat'); this.renderAssetJob();
+      this.renderChatAssets();
+      if (!ticket.global) this.presentAutomaticAsset(ticket);
     } catch (error) {
       if (!this.assetCurrent(ticket) || requestEpoch !== this.assetReadEpoch) return;
       this.assetAvailable = false; this.assetProbed = false; this.assetReadAfterUnknown = false;
       // Refused or mismatched history must not leave selectable cached jobs.
       this.assetJobs = []; this.assetJobId = ''; this.assetNextCursor = null; this.clearAssetPreview(); this.renderAssetPicker(); this.renderAssetJob();
+      this.clearChatAssets();
       this.text('asset-status', 'Asset history unavailable');
       this.text('asset-notice', error instanceof Error ? error.message : String(error));
     } finally { if (this.assetCurrent(ticket) && requestEpoch === this.assetReadEpoch) this.renderAssetControls(); }
@@ -1365,8 +1426,77 @@ export class StudioWorkbench {
     return prepareAssetInput({ template: this.value('asset-template'), name: this.value('asset-name'), seed: number('asset-seed'), sizeMeters: this.value('asset-size').split(',').map(s => s.trim() ? Number(s) : NaN), color: this.value('asset-color').split(',').map(s => s.trim() ? Number(s) : NaN), triangleBudget: number('asset-budget'), renderResolution: number('asset-resolution'), renderSamples: number('asset-samples') });
   }
   private currentAssetJob() { return this.assetJobs.find(j => j.jobId === this.assetJobId); }
+  private selectAssetJob(jobId: string, manual: boolean): void {
+    if (manual) this.automaticAssets.muteObserved();
+    this.assetJobId = this.assetJobs.some(job => job.jobId === jobId) ? jobId : '';
+    this.clearAssetPreview(); this.renderAssetJob(); this.renderAssetControls(); this.renderChatAssets();
+  }
+  private presentAutomaticAsset(ticket: AssetContextTicket): void {
+    if (!this.assetCurrent(ticket) || ticket.global || !ticket.conversation || !this.assetSignedIn() || !this.assetAvailable || this.assetBusy || this.assetUnknown) return;
+    const ready = this.automaticAssets.ready();
+    if (ready) {
+      const job = this.assetJobs.find(item => item.jobId === ready);
+      if (!job || job.state !== 'succeeded' || !job.manifestAvailable) return;
+      // Claim before any asynchronous read. Failed reads need an explicit
+      // human retry; polling cannot repeatedly download/allocate a model.
+      this.automaticAssets.markReady(ready);
+      this.selectAssetJob(ready, false); this.renderAssetPicker();
+      queueMicrotask(() => { if (this.assetCurrent(ticket) && this.assetJobId === ready && !this.assetBusy) void this.loadAssetManifest(); });
+      return;
+    }
+    const pending = this.automaticAssets.pending();
+    if (pending && this.assetJobs.some(job => job.jobId === pending && job.state === 'running')) {
+      this.automaticAssets.markPending(pending);
+      this.selectAssetJob(pending, false); this.renderAssetPicker();
+      // renderAssetJob opens the toggleable panel only for observed real work.
+    }
+  }
+  private clearChatAssets(): void {
+    this.assetCardsEpoch++; this.assetCardsSignature = '';
+    const host = this.doc.getElementById('chat-assets'); if (host) { host.replaceChildren(); host.hidden = true; }
+  }
+  private renderChatAssets(): void {
+    const host = this.doc.getElementById('chat-assets'); if (!host) return;
+    const ticket = this.assetContext.capture();
+    if (this.stopped || ticket.global || !ticket.conversation || !this.assetSignedIn() || !this.assetAvailable || !this.assetJobs.length) { this.clearChatAssets(); return; }
+    const jobs = this.assetJobs.slice(0, this.assetCardsLimit);
+    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, job.request.name])]);
+    if (signature === this.assetCardsSignature) return;
+    this.assetCardsSignature = signature; const epoch = ++this.assetCardsEpoch;
+    const section = this.make('div', undefined, 'chat-asset-list'); section.setAttribute('role', 'list');
+    const labels: Record<string, string> = { running: 'Building', succeeded: 'Ready', failed: 'Failed', cancelled: 'Cancelled', timed_out: 'Timed out', interrupted: 'Interrupted' };
+    const current = () => epoch === this.assetCardsEpoch && this.assetCurrent(ticket) && this.assetSignedIn() && this.assetAvailable && !this.assetUnknown;
+    for (const job of jobs) {
+      const card = this.make('article', undefined, 'chat-asset-card'); card.setAttribute('role', 'listitem'); card.setAttribute('data-job-id', job.jobId);
+      const name = job.request.name.replaceAll('-', ' '), title = this.make('strong', name.charAt(0).toUpperCase() + name.slice(1));
+      const state = this.make('span', job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state], 'chat-asset-state');
+      const info = this.make('div', undefined, 'chat-asset-info'); info.append(title, state); card.append(info);
+      if (job.state === 'succeeded' && job.manifestAvailable) {
+        const view = this.make('button', 'View', 'secondary'); view.type = 'button'; view.setAttribute('aria-label', 'View ' + name); view.disabled = this.assetBusy;
+        view.addEventListener('click', () => {
+          if (!current() || this.assetBusy || !this.assetJobs.some(item => item.jobId === job.jobId && item.state === 'succeeded' && item.manifestAvailable)) return;
+          this.selectAssetJob(job.jobId, true); this.renderAssetPicker();
+          this.doc.getElementById('preview-model-tab')?.click();
+          const toggle = this.doc.getElementById('workspace-preview-toggle');
+          if (toggle && toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
+          void this.loadAssetManifest();
+        }); card.append(view);
+      }
+      if (job.jobId === this.assetJobId) card.setAttribute('data-selected', 'true');
+      section.append(card);
+    }
+    const heading = this.make('h3', 'Assets', 'chat-assets-heading'); host.replaceChildren(heading, section); host.hidden = false;
+    if (this.assetJobs.length > this.assetCardsLimit || this.assetNextCursor) {
+      const more = this.make('button', 'More assets', 'quiet'); more.type = 'button'; more.disabled = this.assetBusy;
+      more.addEventListener('click', () => {
+        if (!current() || this.assetBusy) return;
+        this.assetCardsLimit = Math.min(256, this.assetCardsLimit + 8);
+        if (this.assetCardsLimit > this.assetJobs.length && this.assetNextCursor) void this.refreshAssets(true); else this.renderChatAssets();
+      }); host.append(more);
+    }
+  }
   private renderAssetControls() {
-    const ticket = this.assetContext.capture(), running = this.assetJobs.some(j => j.state === 'running'), interrupted = this.assetJobs.some(j => j.state === 'interrupted'), blocked = !this.assetAvailable || this.assetBusy || Boolean(this.assetUnknown) || !this.assetContext.ready();
+    const ticket = this.assetContext.capture(), running = this.assetJobs.some(j => j.state === 'running'), interrupted = this.assetJobs.some(j => j.state === 'interrupted'), blocked = !this.assetSignedIn() || !this.assetAvailable || this.assetBusy || Boolean(this.assetUnknown) || !this.assetContext.ready();
     let valid = false; try { this.text('asset-request-preview', json(this.assetInput())); valid = true; } catch (error) { this.text('asset-request-preview', error instanceof Error ? error.message : String(error)); }
     this.el<HTMLButtonElement>('asset-start').disabled = blocked || !valid || !this.assetProbed || running || interrupted || !this.assetContext.canStart();
     this.text('asset-start', ticket.global ? 'Start unscoped template job' : 'Start template job in this chat');
@@ -1385,9 +1515,11 @@ export class StudioWorkbench {
     this.el('asset-unknown').hidden = !this.assetUnknown; this.text('asset-unknown-message', this.assetUnknown);
     this.el<HTMLButtonElement>('asset-acknowledge').disabled = !this.assetAvailable || !this.assetReadAfterUnknown || this.assetBusy;
     this.text('asset-gate', !this.assetContext.ready() ? 'A native chat in this exact project is required.' : ticket.global && !this.assetContext.canStart() ? 'Global history is for inspection. Choose This chat to start a template job.' : interrupted ? 'Worker supervision was lost. Inspect retained output and resolve it through trusted host configuration.' : running ? 'A job is running. Its stage and final manifest are recorded below.' : !this.assetProbed ? 'Probe the installed Blender runtime before starting a template job.' : ticket.global ? 'This start is unscoped and will not be bound to a chat.' : 'Local runtime observed. Start runs only the selected fixed template in this chat.');
+    this.renderChatAssets();
   }
   private renderAssetJob() {
     const job = this.currentAssetJob(); this.text('asset-job-record', job ? json(job) : 'No asset job selected.');
+    const summary = this.el('asset-job-summary'); summary.setAttribute('data-asset-state', job?.state ?? ''); summary.setAttribute('data-asset-name', job?.request.name ?? '');
     if (job?.state === 'running' && this.assetAvailable) {
       const key = this.historyProjectPath() + '\0' + job.jobId;
       if (key !== this.assetActivitySignature) { this.assetActivitySignature = key;
@@ -1403,7 +1535,7 @@ export class StudioWorkbench {
   }
   private async probeAsset() {
     if (!this.assetAvailable || this.assetBusy || this.assetUnknown) return;
-    const ticket = this.assetTicket(); if (!this.assetContext.ready()) return;
+    const ticket = this.assetTicket(); if (!this.assetSignedIn() || !this.assetContext.ready()) return;
     this.assetBusy = true; this.assetProbed = false; this.text('asset-notice', 'Probing installed Blender capabilities…'); this.renderAssetControls();
     try {
       const data = await this.api.assetProbe(); if (!this.assetCurrent(ticket)) return;
@@ -1413,7 +1545,7 @@ export class StudioWorkbench {
     finally { if (this.assetCurrent(ticket)) { this.assetBusy = false; await this.refreshAssets(); if (this.assetCurrent(ticket)) this.renderAssetControls(); } }
   }
   private async startAsset() {
-    const ticket = this.assetTicket(); if (!this.assetContext.canStart()) return;
+    const ticket = this.assetTicket(); if (!this.assetSignedIn() || !this.assetContext.canStart()) return;
     if (!this.assetAvailable || !this.assetProbed || this.assetBusy || this.assetUnknown || this.assetJobs.some(j => j.state === 'running' || j.state === 'interrupted')) return;
     let input: AssetInput; try { input = this.assetInput(); } catch (error) { this.assetFailure(error, 'Validate template'); return; }
     this.assetBusy = true; this.assetReadEpoch++; this.renderAssetControls();
@@ -1432,6 +1564,7 @@ export class StudioWorkbench {
       if (!this.assetCurrent(ticket)) return;
       if (!data.job?.jobId || data.job.request?.name !== input.name || data.job.request?.template !== input.template) throw new StudioRequestError('Start returned no matching recorded job.', 'unknown', { code: 'ASSET_RECEIPT', status: 200, payload: data });
       this.assetJobs = [data.job, ...this.assetJobs.filter(job => job.jobId !== data.job.jobId)];
+      if (!ticket.global) this.automaticAssets.observe([data.job]);
       this.assetJobId = data.job.jobId; this.clearAssetPreview(); this.text('asset-notice', 'Asset job recorded: ' + data.job.jobId + '. Completion and preview evidence arrive through its manifest.');
     } catch (error) {
       if (!(error instanceof StudioRequestError) || error.outcome === 'unknown') this.assetContext.retainUnknown(ticket, error instanceof StudioRequestError ? error.details?.payload : null, 'Start outcome unknown. Inspect global history; do not retry or recreate the job.');
@@ -1441,23 +1574,24 @@ export class StudioWorkbench {
   }
   private async cancelAsset() {
     const ticket = this.assetTicket();
-    const job = this.currentAssetJob(); if (!job || job.state !== 'running' || !this.assetAvailable || this.assetBusy || this.assetUnknown) return;
+    const job = this.currentAssetJob(); if (!this.assetSignedIn() || !job || job.state !== 'running' || !this.assetAvailable || this.assetBusy || this.assetUnknown) return;
     this.assetBusy = true; this.assetReadEpoch++; this.renderAssetControls();
     try { const data = await this.api.assetCancel(job.jobId); if (!this.assetCurrent(ticket)) return; if (data.job?.jobId !== job.jobId) throw new StudioRequestError('Cancel did not identify the selected job.', 'unknown'); this.text('asset-notice', 'Recorded cancellation result: ' + data.job.state.replaceAll('_', ' ') + '. Inspect retained evidence.'); }
     catch (error) { if (this.assetCurrent(ticket)) this.assetFailure(error, 'Cancel job ' + job.jobId); }
     finally { if (this.assetCurrent(ticket)) { this.assetBusy = false; await this.refreshAssets(); if (this.assetCurrent(ticket)) this.renderAssetControls(); } }
   }
-  private clearAssetPreview() { this.assetDownloads.clear(); this.assetPreviewEpoch++; this.el('asset-previews').replaceChildren(); this.text('asset-manifest', 'Load a verified completed manifest for this exact job.'); }
+  private clearAssetPreview() { this.assetDownloads.clear(); this.assetViewer.clear(); this.assetPreviewEpoch++; this.el('asset-previews').replaceChildren(); this.text('asset-manifest', 'Load a verified completed manifest for this exact job.'); }
   private async loadAssetManifest() {
     const ticket = this.assetTicket();
-    const job = this.currentAssetJob(); if (!job || job.state !== 'succeeded' || !job.manifestAvailable || !this.assetAvailable || this.assetBusy) return;
-    this.assetBusy = true; this.assetDownloads.clear(); const epoch = ++this.assetPreviewEpoch; this.renderAssetControls(); this.el('asset-previews').replaceChildren();
+    const job = this.currentAssetJob(); if (!this.assetSignedIn() || !job || job.state !== 'succeeded' || !job.manifestAvailable || !this.assetAvailable || this.assetBusy) return;
+    this.assetBusy = true; this.assetDownloads.clear(); this.assetViewer.clear(); const epoch = ++this.assetPreviewEpoch; this.renderAssetControls(); this.el('asset-previews').replaceChildren();
     try {
       const { manifest } = await this.api.assetManifest(job.jobId);
       if (manifest.jobId !== job.jobId || manifest.request.template !== job.request.template || manifest.request.name !== job.request.name) throw new Error('Manifest identity does not match the selected job.');
       if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
       this.text('asset-manifest', json(manifest));
       this.assetDownloads.show(manifest, job.jobId);
+      const viewer = this.assetViewer.show(manifest, job.jobId, () => this.assetCurrent(ticket) && epoch === this.assetPreviewEpoch && this.assetJobId === job.jobId);
       const previews = manifest.artifacts.filter(a => a.role === 'preview' && ['preview-hero.png', 'preview-side.png'].includes(a.path));
       const reads = await Promise.allSettled(previews.map(async artifact => {
         const blob = await this.api.assetPreview(job.jobId, artifact.path);
@@ -1475,6 +1609,7 @@ export class StudioWorkbench {
           if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'succeeded'},bubbles:false}));
         } finally { bitmap.close(); }
       }));
+      await viewer;
       if (this.assetCurrent(ticket) && epoch === this.assetPreviewEpoch && this.assetJobId === job.jobId) this.text('asset-notice', reads.some(r => r.status === 'rejected') ? 'Manifest loaded; one or more previews failed authentication, decoding or integrity verification. Inspect the recorded manifest.' : 'Manifest and authenticated previews loaded. Review validation warnings and limitations before using exports.');
     } catch (error) { if (this.assetCurrent(ticket) && epoch === this.assetPreviewEpoch) this.assetFailure(error, 'Load manifest'); }
     finally { if (this.assetCurrent(ticket) && epoch === this.assetPreviewEpoch) { this.assetBusy = false; this.renderAssetControls(); } }
@@ -1637,6 +1772,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const codexChat = new CodexChat(document, new CodexChatApi(token));
   const providerSetup = startProviderSetup(document, {chat:codexChat});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
+  const playtestRoot=document.getElementById('playtest-panel');
+  const startTests=()=>playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn()}):null;
+  let playtests=startTests();
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
     isSignedIn: () => providerSetup.isSignedIn(),
     subscribeSignInChange: listener => providerSetup.subscribeSignInChange(listener),
@@ -1659,8 +1797,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workflowsStopped = true; chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume();playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true });

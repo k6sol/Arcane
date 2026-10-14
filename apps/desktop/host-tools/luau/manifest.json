@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "kind": "arcane-managed-luau-compiler",
+  "version": "0.742",
+  "platform": "win32",
+  "arch": "x64",
+  "repository": "https://github.com/luau-lang/luau",
+  "release": "https://github.com/luau-lang/luau/releases/tag/0.742",
+  "commit": "8387cfb461b38ce09e37c1e4c2811538ef1bf5cb",
+  "archive": {
+    "url": "https://github.com/luau-lang/luau/releases/download/0.742/luau-windows.zip",
+    "metadata": "https://api.github.com/repos/luau-lang/luau/releases/tags/0.742",
+    "publishedDigest": "https://github.com/luau-lang/luau/releases/expanded_assets/0.742",
+    "assetId": 626558808,
+    "bytes": 3190105,
+    "sha256": "1114966cd8198f407069f07e8b4e6bacf2ded933e4a57d6ddc75617969278c75",
+    "member": "luau-compile.exe",
+    "verification": "Existing local archive matches the official immutable release asset digest; its compiler member matches the compiler pin."
+  },
+  "compiler": {
+    "file": "luau-compile.exe",
+    "bytes": 1403904,
+    "sha256": "74cf7ed3621b8966bac6fec7f1a0caf13616655fa06d346133cd31f6aac439d8"
+  },
+  "license": {
+    "file": "LICENSE",
+    "spdx": "MIT",
+    "source": "https://raw.githubusercontent.com/luau-lang/luau/0.742/LICENSE.txt",
+    "bytes": 1124,
+    "sha256": "c7c6f287cc2594eec205aac1a5561d2a9d12c375483aff6b32f379da99544f84"
+  }
+}

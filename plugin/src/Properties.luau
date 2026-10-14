@@ -69,4 +69,21 @@ function Properties.compare(instance: any, expected: any, names: {string}): bool
 	return true
 end
 
+-- Post-assignment verification only. Baseline comparison above stays exact.
+-- Native BasePart.Color stores RGB8: the engine multiplies float32 channels
+-- by 255 in float32, then truncates. Double arithmetic would corrupt some
+-- already-canonical byte values (for example 7/255).
+function Properties.assignedMatches(instance: any, name: string, requested: any): boolean
+	if name == "Color" then
+		local product = buffer.create(4)
+		local function channel(value: number): number
+			buffer.writef32(product, 0, value * 255)
+			return math.floor(buffer.readf32(product, 0))
+		end
+		local canonical = Color3.fromRGB(channel(requested.R), channel(requested.G), channel(requested.B))
+		return instance.Color == canonical
+	end
+	return instance[name] == requested
+end
+
 return table.freeze(Properties)

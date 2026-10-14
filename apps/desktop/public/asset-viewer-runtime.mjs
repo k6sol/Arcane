@@ -8,6 +8,24 @@ const MAX_MATERIALS = 64;
 const MAX_DRAWS = 256;
 const MAX_COORDINATE = 1e12;
 const MAX_PIXELS = 4_000_000;
+const VIEWS = ['perspective', 'front', 'side', 'top'];
+const MODES = ['rendered', 'wireframe', 'clay'];
+const LIGHTING = {
+  studio: { hemisphere: 2.2, lights: [3.8, 2.4, 1.3], environment: 1, exposure: 1 },
+  soft: { hemisphere: 3, lights: [1.8, 1.4, 1.1], environment: 1.2, exposure: 1 },
+  dramatic: { hemisphere: .35, lights: [5, 2, .15], environment: .35, exposure: .9 },
+};
+const boolean = value => { if (typeof value !== 'boolean') throw new TypeError('Expected a boolean.'); };
+const number = (value, min, max) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new RangeError('Value is outside the supported range.');
+};
+const choice = (value, values) => { if (!values.includes(value)) throw new TypeError('Unsupported viewer option.'); };
+const vector = value => ({ x: value.x, y: value.y, z: value.z });
+// Only errors created here may contribute text to onStatus. Loader, decoder and
+// WebGL errors can contain local paths, URLs or source-controlled names.
+class PreviewError extends Error {}
+const previewError = message => new PreviewError(message);
+const safeReason = error => error instanceof PreviewError ? error.message : 'The asset could not be displayed safely.';
 const abortError = () => new DOMException('Asset preview cancelled.', 'AbortError');
 const finite = values => {
   for (const value of values) if (!Number.isFinite(value) || Math.abs(value) > MAX_COORDINATE) return false;
@@ -86,12 +104,12 @@ function validateScene(root, scanGeometry = false) {
   const materials = new Set(), geometries = new Set();
   let triangles = 0, meshes = 0, draws = 0, transmission = false;
   root.traverse(object => {
-    if (!finite(object.matrixWorld.elements)) throw new Error('Asset contains unbounded or non-finite world transforms.');
+    if (!finite(object.matrixWorld.elements)) throw previewError('Asset contains unbounded or non-finite world transforms.');
     if (!object.geometry) return;
     const geometry = object.geometry, position = geometry.getAttribute('position');
-    if (!position || !Number.isSafeInteger(position.count)) throw new Error('Asset has invalid geometry.');
+    if (!position || !Number.isSafeInteger(position.count)) throw previewError('Asset has invalid geometry.');
     const instances = object.isInstancedMesh ? object.count : 1;
-    if (!Number.isSafeInteger(instances) || instances < 0) throw new Error('Asset has invalid instance counts.');
+    if (!Number.isSafeInteger(instances) || instances < 0) throw previewError('Asset has invalid instance counts.');
     if (object.isMesh) {
       meshes++;
       triangles += Math.floor((geometry.index?.count ?? position.count) / 3) * instances;
@@ -105,7 +123,7 @@ function validateScene(root, scanGeometry = false) {
       draws += passes * (Array.isArray(object.material) ? geometry.groups.filter(group => group.count > 0 && objectMaterials[group.materialIndex] === material).length : 1);
     }
     if (triangles > MAX_TRIANGLES || draws > MAX_DRAWS || materials.size > MAX_MATERIALS) {
-      throw new Error('Asset exceeds preview limits (2M triangles, 64 materials, 256 draw calls).');
+      throw previewError('Asset exceeds preview limits (2M triangles, 64 materials, 256 draw calls).');
     }
     if (scanGeometry && !geometries.has(geometry)) {
       geometries.add(geometry);
@@ -113,11 +131,11 @@ function validateScene(root, scanGeometry = false) {
         // Read underlying interleaved arrays without allocating another large copy.
         const array = attribute.isInterleavedBufferAttribute ? attribute.data.array : attribute.array;
         for (let i = 0; i < array.length; i++) {
-          if (!Number.isFinite(array[i]) || Math.abs(array[i]) > MAX_COORDINATE) throw new Error('Asset contains invalid vertex data.');
+          if (!Number.isFinite(array[i]) || Math.abs(array[i]) > MAX_COORDINATE) throw previewError('Asset contains invalid vertex data.');
         }
       }
       if (geometry.index) {
-        for (const index of geometry.index.array) if (index >= position.count) throw new Error('Asset has out-of-range vertex indices.');
+        for (const index of geometry.index.array) if (index >= position.count) throw previewError('Asset has out-of-range vertex indices.');
       }
       // Do not trust accessor min/max supplied by the file.
       geometry.computeBoundingBox();
@@ -125,7 +143,7 @@ function validateScene(root, scanGeometry = false) {
     }
     if (object.isSkinnedMesh) {
       if (!finite(object.bindMatrix.elements) || !finite(object.bindMatrixInverse.elements) || object.skeleton.boneInverses.some(matrix => !finite(matrix.elements))) {
-        throw new Error('Asset contains invalid skin transforms.');
+        throw previewError('Asset contains invalid skin transforms.');
       }
       object.computeBoundingBox();
       object.computeBoundingSphere();
@@ -139,15 +157,15 @@ function validateScene(root, scanGeometry = false) {
       object.boundingSphere = box.getBoundingSphere(object.boundingSphere ?? new THREE.Sphere());
     }
     if (object.isInstancedMesh) {
-      if (!finite(object.instanceMatrix.array)) throw new Error('Asset contains invalid instance transforms.');
+      if (!finite(object.instanceMatrix.array)) throw previewError('Asset contains invalid instance transforms.');
       object.computeBoundingBox();
       object.computeBoundingSphere();
     }
   });
   // Transmission needs an additional scene pass; reserve its actual GPU cost.
-  if (transmission && draws * 2 > MAX_DRAWS) throw new Error('Asset exceeds the 256 draw-call preview limit.');
+  if (transmission && draws * 2 > MAX_DRAWS) throw previewError('Asset exceeds the 256 draw-call preview limit.');
   const box = new THREE.Box3().setFromObject(root);
-  if (!box.isEmpty() && (!finite(box.min.toArray()) || !finite(box.max.toArray()))) throw new Error('Asset has unbounded or non-finite bounds.');
+  if (!box.isEmpty() && (!finite(box.min.toArray()) || !finite(box.max.toArray()))) throw previewError('Asset has unbounded or non-finite bounds.');
   return { box, triangles, meshes, materials: materials.size };
 }
 
@@ -155,9 +173,19 @@ function validateScene(root, scanGeometry = false) {
  * Call only after preview intent and GLB prevalidation. onStatus receives readable
  * status strings. Animation starts paused; reduced motion also suspends playback.
  * Abort settles promptly, while late loader dependencies are still disposed.
+ * Mutators throw TypeError/RangeError for invalid input while alive, and become
+ * no-ops after disposal. Defaults: perspective/rendered/studio, first clip (or
+ * index -1), paused, speed 1, loop true. Axis views look from +Z/+X/+Y; top up is
+ * -Z. reset fits the current view/pose. orbit uses radians, pan CSS pixels, and
+ * zoom uses a factor in [.1, 10] (>1 moves closer). Seek accepts [0, duration].
+ * stats dimensions/bounds are the initial source scene's world-space AABB before
+ * normalization, including node transforms, in glTF meters (units: 'meters').
+ * Getters return detached snapshots; playing records intent during visibility
+ * and reduced-motion suspension, and becomes false at a nonlooping clip's end.
  */
 export async function createAssetViewer({ host, bytes, label, signal, onStatus }) {
-  if (!(host instanceof HTMLElement) || !(bytes instanceof ArrayBuffer) || !signal?.addEventListener) throw new TypeError('Asset viewer requires a host, ArrayBuffer and AbortSignal.');
+  if (!(host instanceof HTMLElement) || !(bytes instanceof ArrayBuffer) || !(signal instanceof AbortSignal)) throw new TypeError('Asset viewer requires a host, ArrayBuffer and AbortSignal.');
+  if ((label !== undefined && typeof label !== 'string') || (onStatus !== undefined && typeof onStatus !== 'function')) throw new TypeError('Asset viewer label and status callback are invalid.');
   if (signal.aborted) throw abortError();
   owners.get(host)?.dispose();
   const owned = resourceOwner(), urls = new Set(), listeners = [];
@@ -165,7 +193,9 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
   const document = host.ownerDocument, window = document.defaultView;
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   let disposed = false, epoch = 0, raf = null, lastTime = null, playing = false, dirty = true;
-  let renderer, controls, mixer, gltf, resizeObserver, intersectionObserver, mutationObserver, canvas;
+  let renderer, controls, controlsCleanup, mixer, action, gltf, resizeObserver, intersectionObserver, mutationObserver, canvas;
+  let view = 'perspective', mode = 'rendered', selectedIndex = -1, speed = 1, loop = true, stoppedTime = 0;
+  let clips = [], materialSlots = [], clayMaterials = new Map(), hemisphere, lights = [];
   let rejectPending, loadFailure, resolutionMedia, intersectionKnown = false, intersecting = false, lastVisible = false, width = 0, height = 0, fitNeeded = true, maxDimension = 8192;
   let scene, camera, model, normalizedBox, metrics = { triangles: 0, meshes: 0, materials: 0, animations: 0, renderFrames: 0 };
   const status = message => { try { onStatus?.(message); } catch { /* Consumer status must not break ownership. */ } };
@@ -183,13 +213,14 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
   function dispose() {
     if (disposed) return;
     disposed = true;
+    stoppedTime = action?.time ?? 0;
     stopFrame();
     rejectPending?.(abortError());
     resizeObserver?.disconnect();
     intersectionObserver?.disconnect();
     mutationObserver?.disconnect();
     listeners.splice(0).forEach(remove => remove());
-    controls?.dispose();
+    controlsCleanup?.();
     if (mixer && gltf) { mixer.stopAllAction(); mixer.uncacheRoot(gltf.scene); }
     manager.abort();
     owned.dispose();
@@ -199,6 +230,8 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     renderer?.forceContextLoss();
     canvas?.remove();
     scene?.clear();
+    action = controlsCleanup = hemisphere = null;
+    lights = []; materialSlots = []; clayMaterials.clear();
     gltf = renderer = controls = mixer = scene = camera = model = normalizedBox = null;
     if (owners.get(host)?.dispose === dispose) owners.delete(host);
   }
@@ -207,12 +240,12 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
   const cancelled = new Promise((_, reject) => { rejectPending = reject; });
   manager.setURLModifier(url => {
     if (disposed || !urls.has(url)) {
-      loadFailure = new Error('Asset preview only allows owned embedded texture blobs.');
+      loadFailure = previewError('Asset preview only allows owned embedded texture blobs.');
       throw loadFailure;
     }
     return url;
   });
-  manager.onError = () => { loadFailure = new Error('An embedded asset texture could not be decoded.'); };
+  manager.onError = () => { loadFailure = previewError('An embedded asset texture could not be decoded.'); };
   const loader = new GLTFLoader(manager);
   loader.register(parser => {
     // Use per-parser hooks, never global URL or fetch monkeypatches.
@@ -246,11 +279,11 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
       async beforeRoot() {
         checkActive();
         if ((parser.json.buffers ?? []).some(buffer => buffer.uri !== undefined) || (parser.json.images ?? []).some(image => image.uri !== undefined)) {
-          throw new Error('Asset preview requires embedded buffers and textures; external URLs are disabled.');
+          throw previewError('Asset preview requires embedded buffers and textures; external URLs are disabled.');
         }
-        if ((parser.json.materials?.length ?? 0) > MAX_MATERIALS) throw new Error('Asset exceeds the 64 material preview limit.');
+        if ((parser.json.materials?.length ?? 0) > MAX_MATERIALS) throw previewError('Asset exceeds the 64 material preview limit.');
         for (const image of parser.json.images ?? []) {
-          if (image.bufferView === undefined || !/^image\/(png|jpeg|webp|avif)$/.test(image.mimeType ?? '')) throw new Error('Asset has an unsupported embedded texture.');
+          if (image.bufferView === undefined || !/^image\/(png|jpeg|webp|avif)$/.test(image.mimeType ?? '')) throw previewError('Asset has an unsupported embedded texture.');
           const data = await parser.getDependency('bufferView', image.bufferView);
           checkActive();
           const url = URL.createObjectURL(new Blob([data], { type: image.mimeType }));
@@ -275,7 +308,7 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     }
     return true;
   }
-  const animate = () => playing && !!mixer && !motion.matches;
+  const animate = () => playing && !!action && clips[selectedIndex].duration > 0 && !motion.matches;
   function requestRender() {
     dirty = true;
     schedule();
@@ -295,15 +328,16 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
           mixer.update(lastTime === null ? 0 : Math.min((time - lastTime) / 1000, .1));
           lastTime = time;
           validateScene(gltf.scene);
+          if (!loop && action.paused) playing = false;
         } else lastTime = null;
         if (fitNeeded) { fitCamera(); fitNeeded = false; }
         updateClip();
         renderer.render(scene, camera);
         metrics.renderFrames++;
-        if (renderer.info.render.calls > MAX_DRAWS) throw new Error('Asset exceeds the 256 draw-call preview limit.');
+        if (renderer.info.render.calls > MAX_DRAWS) throw previewError('Asset exceeds the 256 draw-call preview limit.');
         dirty = false;
         schedule();
-      } catch (error) { status(`3D preview stopped: ${error.message}`); dispose(); }
+      } catch (error) { status(`3D preview stopped: ${safeReason(error)}`); dispose(); }
     });
   }
   function updateClip() {
@@ -315,23 +349,38 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     camera.updateProjectionMatrix();
   }
   function fitCamera() {
+    normalizedBox.setFromObject(model);
     const center = normalizedBox.getCenter(new THREE.Vector3());
     const half = normalizedBox.getSize(new THREE.Vector3()).multiplyScalar(.5);
-    const direction = new THREE.Vector3(1, .65, 1.2).normalize();
+    const direction = view === 'front' ? new THREE.Vector3(0, 0, 1) : view === 'side' ? new THREE.Vector3(1, 0, 0) : view === 'top' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, .65, 1.2).normalize();
     const right = new THREE.Vector3().crossVectors(camera.up, direction).normalize();
     const up = new THREE.Vector3().crossVectors(direction, right);
-    const tanY = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)), tanX = tanY * camera.aspect;
+    const aspect = width > 0 && height > 0 ? width / height : 1;
+    const tanY = Math.tan(THREE.MathUtils.degToRad(38 / 2)), tanX = tanY * aspect;
     let distance = 0;
+    let projectedX = 0, projectedY = 0;
     // Project all eight half-box corners in camera space, including their depth.
     for (const x of [-half.x, half.x]) for (const y of [-half.y, half.y]) for (const z of [-half.z, half.z]) {
       const corner = new THREE.Vector3(x, y, z);
       distance = Math.max(distance, Math.abs(corner.dot(right)) / tanX + corner.dot(direction), Math.abs(corner.dot(up)) / tanY + corner.dot(direction));
+      projectedX = Math.max(projectedX, Math.abs(corner.dot(right)));
+      projectedY = Math.max(projectedY, Math.abs(corner.dot(up)));
     }
     distance *= 1.18;
+    if (camera.isOrthographicCamera) {
+      const span = Math.max(projectedY, projectedX / aspect, .001) * 1.18;
+      camera.left = -span * aspect; camera.right = span * aspect;
+      camera.top = span; camera.bottom = -span;
+      camera.zoom = 1;
+    } else camera.aspect = aspect;
+    camera.updateProjectionMatrix();
     controls.target.copy(center);
     controls.cursor.copy(center);
     controls.minDistance = Math.max(.02, half.length() * .15);
     controls.maxDistance = Math.max(distance * 8, 10);
+    controls.maxTargetRadius = Math.max(half.length() * 5, 2);
+    controls.minZoom = .125;
+    controls.maxZoom = 50;
     camera.position.copy(center).addScaledVector(direction, distance);
     controls.update();
     controls.saveState();
@@ -351,19 +400,142 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(MAX_PIXELS / (width * height)), maxDimension / width, maxDimension / height);
       const pixelWidth = Math.max(1, Math.floor(width * dpr)), pixelHeight = Math.max(1, Math.floor(height * dpr));
       if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) { renderer.setSize(pixelWidth, pixelHeight, false); dirty = true; }
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
+      if (camera.isPerspectiveCamera) { camera.aspect = width / height; camera.updateProjectionMatrix(); }
     }
     schedule();
   }
-  function reset() { if (!disposed && controls) { fitCamera(); requestRender(); } }
+  function reset() { if (!disposed && controls) { fitCamera(); fitNeeded = false; requestRender(); } }
+  function configureControls() {
+    controlsCleanup?.();
+    controls = new OrbitControls(camera, canvas);
+    const controlsRoot = canvas.getRootNode(), ownedControls = controls;
+    controlsCleanup = () => {
+      ownedControls.removeEventListener('change', requestRender);
+      ownedControls.dispose();
+      // Vendor disconnect resolves getRootNode again; also remove from the
+      // original root when a host was detached or reparented.
+      controlsRoot.removeEventListener('keydown', ownedControls._interceptControlDown, { capture: true });
+      controlsRoot.removeEventListener('keyup', ownedControls._interceptControlUp, { capture: true });
+    };
+    controls.enableDamping = false;
+    controls.enablePan = true;
+    controls.autoRotate = false;
+    controls.cursorStyle = 'grab';
+    controls.addEventListener('change', requestRender);
+  }
+  function setView(value) {
+    if (disposed) return;
+    choice(value, VIEWS);
+    view = value;
+    camera = view === 'perspective' ? new THREE.PerspectiveCamera(38, 1, .01, 100) : new THREE.OrthographicCamera(-1, 1, 1, -1, .01, 100);
+    if (view === 'top') camera.up.set(0, 0, -1);
+    configureControls();
+    reset();
+  }
+  function setMode(value) {
+    if (disposed) return;
+    choice(value, MODES);
+    if (mode === value) return;
+    for (const slot of materialSlots) {
+      const convert = material => {
+        if (!material) return material;
+        if (value === 'clay') {
+          if (!clayMaterials.has(material)) {
+            clayMaterials.set(material, owned.capture(new THREE.MeshStandardMaterial({ color: 0xbfc3ca, roughness: .85, metalness: 0, side: material.side, flatShading: !!material.flatShading })));
+          }
+          return clayMaterials.get(material);
+        }
+        if ('wireframe' in material) {
+          const enabled = value === 'wireframe' || slot.wireframes.get(material);
+          if (material.wireframe !== enabled) { material.wireframe = enabled; material.needsUpdate = true; }
+        }
+        return material;
+      };
+      slot.object.material = Array.isArray(slot.material) ? slot.material.map(convert) : convert(slot.material);
+    }
+    mode = value;
+    requestRender();
+  }
+  function setLighting(value) {
+    if (disposed) return;
+    choice(value, Object.keys(LIGHTING));
+    const preset = LIGHTING[value];
+    hemisphere.intensity = preset.hemisphere;
+    lights.forEach((light, index) => { light.intensity = preset.lights[index]; });
+    scene.environmentIntensity = preset.environment;
+    renderer.toneMappingExposure = preset.exposure;
+    requestRender();
+  }
+  function orbit(horizontal, vertical) {
+    if (disposed) return;
+    number(horizontal, -Math.PI * 2, Math.PI * 2); number(vertical, -Math.PI * 2, Math.PI * 2);
+    controls.rotateLeft(horizontal); controls.rotateUp(vertical);
+  }
+  function pan(horizontal, vertical) {
+    if (disposed) return;
+    number(horizontal, -10_000, 10_000); number(vertical, -10_000, 10_000);
+    if (width > 0 && height > 0) controls.pan(horizontal, vertical);
+  }
+  function zoom(factor) {
+    if (disposed) return;
+    number(factor, .1, 10);
+    controls.dollyIn(1 / factor);
+  }
+  function animationState() {
+    return { index: selectedIndex, time: action?.time ?? stoppedTime, duration: clips[selectedIndex]?.duration ?? 0, playing: !disposed && playing, speed, loop };
+  }
+  function sampleAnimation(time) {
+    action.reset().setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1).setEffectiveTimeScale(speed).play();
+    action.clampWhenFinished = true;
+    action.time = time;
+    try { mixer.update(0); validateScene(gltf.scene); }
+    catch (error) { status(`3D preview stopped: ${safeReason(error)}`); dispose(); throw error; }
+    stopFrame();
+    requestRender();
+  }
+  function selectAnimation(index) {
+    if (disposed) return;
+    number(index, 0, clips.length - 1);
+    if (!Number.isInteger(index)) throw new RangeError('Animation index must be an integer.');
+    mixer.stopAllAction();
+    selectedIndex = index;
+    action = mixer.clipAction(gltf.animations[index]);
+    if (clips[index].duration === 0) playing = false;
+    sampleAnimation(0);
+  }
+  function seekAnimation(seconds) {
+    if (disposed) return;
+    number(seconds, 0, clips[selectedIndex]?.duration ?? 0);
+    if (!action) return;
+    sampleAnimation(seconds);
+  }
+  function setAnimationPlaying(enabled) {
+    if (disposed) return;
+    boolean(enabled);
+    playing = enabled && !!action && clips[selectedIndex].duration > 0;
+    if (playing && action.time >= clips[selectedIndex].duration) sampleAnimation(0);
+    stopFrame(); requestRender();
+  }
+  function setAnimationSpeed(value) {
+    if (disposed) return;
+    number(value, .25, 2);
+    speed = value;
+    action?.setEffectiveTimeScale(speed);
+    stopFrame(); requestRender();
+  }
+  function setAnimationLoop(enabled) {
+    if (disposed) return;
+    boolean(enabled);
+    loop = enabled;
+    if (action) sampleAnimation(action.time);
+  }
   function keyboard(event) {
     if (disposed || !controls || !hostVisible() || event.altKey || event.ctrlKey || event.metaKey) return;
     switch (event.key) {
-      case 'ArrowLeft': controls.rotateLeft(.12); break;
-      case 'ArrowRight': controls.rotateLeft(-.12); break;
-      case 'ArrowUp': controls.rotateUp(.12); break;
-      case 'ArrowDown': controls.rotateUp(-.12); break;
+      case 'ArrowLeft': event.shiftKey ? pan(-24, 0) : orbit(.12, 0); break;
+      case 'ArrowRight': event.shiftKey ? pan(24, 0) : orbit(-.12, 0); break;
+      case 'ArrowUp': event.shiftKey ? pan(0, -24) : orbit(0, .12); break;
+      case 'ArrowDown': event.shiftKey ? pan(0, 24) : orbit(0, -.12); break;
       case '+': case '=': controls.dollyOut(.85); break;
       case '-': case '_': controls.dollyIn(.85); break;
       case 'Home': case 'r': case 'R': reset(); break;
@@ -377,13 +549,20 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     checkActive();
     for (const root of gltf.scenes) validateScene(root, true);
     const validated = validateScene(gltf.scene);
-    if (!validated.meshes || validated.box.isEmpty()) throw new Error('Asset has no renderable mesh.');
+    if (!validated.meshes || validated.box.isEmpty()) throw previewError('Asset has no renderable mesh.');
     const size = validated.box.getSize(new THREE.Vector3()), extent = Math.max(size.x, size.y, size.z);
-    if (!(extent > 0) || !Number.isFinite(extent)) throw new Error('Asset has degenerate bounds.');
+    if (!(extent > 0) || !Number.isFinite(extent)) throw previewError('Asset has degenerate bounds.');
     for (const clip of gltf.animations) {
-      if (!Number.isFinite(clip.duration) || clip.duration < 0 || clip.tracks.some(track => !finite(track.times) || !finite(track.values))) throw new Error('Asset has invalid animation data.');
+      if (!finite([clip.duration]) || clip.duration < 0 || clip.tracks.some(track => !finite(track.times) || !finite(track.values))) throw previewError('Asset has invalid animation data.');
     }
-    metrics = { ...metrics, triangles: validated.triangles, meshes: validated.meshes, materials: validated.materials, animations: gltf.animations.length };
+    clips = gltf.animations.map((clip, index) => ({ index, name: clip.name, duration: clip.duration }));
+    metrics = { ...metrics, triangles: validated.triangles, meshes: validated.meshes, materials: validated.materials, animations: gltf.animations.length,
+      dimensions: vector(size), bounds: { min: vector(validated.box.min), max: vector(validated.box.max) }, units: 'meters' };
+    gltf.scene.traverse(object => {
+      if (!object.material) return;
+      const material = object.material, materials = Array.isArray(material) ? material : [material];
+      materialSlots.push({ object, material, wireframes: new Map(materials.map(value => [value, !!value?.wireframe])) });
+    });
     scene = new THREE.Scene();
     scene.background = new THREE.Color('#181b20');
     model = new THREE.Group();
@@ -394,21 +573,23 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     model.updateMatrixWorld(true);
     normalizedBox = new THREE.Box3().setFromObject(model);
     // Actual studio illumination only: no pedestal, grid, or replacement mesh.
-    scene.add(new THREE.HemisphereLight(0xdce6ff, 0x333945, 2.2));
+    hemisphere = new THREE.HemisphereLight(0xdce6ff, 0x333945, 2.2);
+    scene.add(hemisphere);
     for (const [color, intensity, position] of [[0xe8efff, 3.8, [3, 4, 5]], [0x9fbaff, 2.4, [-4, 1, -2]], [0xffffff, 1.3, [1, -2, 3]]]) {
       const light = new THREE.DirectionalLight(color, intensity);
       light.position.set(...position);
       scene.add(light);
+      lights.push(light);
     }
     camera = new THREE.PerspectiveCamera(38, 1, .01, 100);
     canvas = document.createElement('canvas');
     canvas.tabIndex = 0;
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', `${label || 'Asset'} — interactive 3D preview`);
-    canvas.setAttribute('aria-description', 'Drag to orbit. Scroll or press plus and minus to zoom. Arrow keys orbit. Home or R resets the view.');
+    canvas.setAttribute('aria-description', 'Drag to orbit. Right-drag or Shift and arrow keys pan. Scroll or press plus and minus to zoom. Arrow keys orbit. Home or R resets the view.');
     canvas.style.cssText = 'display:block;width:100%;height:100%;outline-offset:-3px;';
     const context = canvas.getContext('webgl2', { alpha: false, antialias: true, powerPreference: 'low-power' });
-    if (!context) throw new Error('WebGL2 is unavailable for this 3D preview.');
+    if (!context) throw previewError('WebGL2 is unavailable for this 3D preview.');
     maxDimension = Math.min(context.getParameter(context.MAX_RENDERBUFFER_SIZE), context.getParameter(context.MAX_TEXTURE_SIZE));
     renderer = new THREE.WebGLRenderer({ canvas, context, antialias: true, alpha: false });
     renderer.setPixelRatio(1); // Explicit capped backing size is managed by measure().
@@ -419,25 +600,11 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     // OrbitControls binds a key interceptor to getRootNode(). Attach first so
     // construction and disposal both resolve to the same document root.
     host.append(canvas);
-    controls = new OrbitControls(camera, canvas);
-    const controlsRoot = canvas.getRootNode(), ownedControls = controls;
-    // Three r186 disconnect() resolves getRootNode() again. Preserve cleanup of
-    // these vendor interceptors even when the host was detached or reparented.
-    listeners.push(() => {
-      controlsRoot.removeEventListener('keydown', ownedControls._interceptControlDown, { capture: true });
-      controlsRoot.removeEventListener('keyup', ownedControls._interceptControlUp, { capture: true });
-    });
-    controls.enableDamping = false;
-    controls.enablePan = false;
-    controls.autoRotate = false;
-    controls.cursorStyle = 'grab';
-    controls.addEventListener('change', requestRender);
-    listeners.push(() => controls.removeEventListener('change', requestRender));
+    configureControls();
     if (gltf.animations.length) {
       mixer = new THREE.AnimationMixer(gltf.scene);
       // Clips may be alternate takes; show the first rather than blending all takes.
-      mixer.clipAction(gltf.animations[0]).play();
-      mixer.update(0);
+      selectAnimation(0);
     }
     listen(canvas, 'keydown', keyboard);
     listen(canvas, 'webglcontextlost', event => { event.preventDefault(); status('WebGL context lost. Reopen the 3D preview to continue.'); dispose(); });
@@ -486,24 +653,18 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     checkActive();
     rejectPending = null;
     return {
-      reset,
-      setWireframe(enabled) {
-        if (disposed) return;
-        gltf.scene.traverse(object => {
-          for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
-            if (material && 'wireframe' in material) { material.wireframe = !!enabled; material.needsUpdate = true; }
-          }
-        });
-        requestRender();
-      },
-      setAnimationPlaying(enabled) { if (!disposed) { playing = !!enabled; stopFrame(); requestRender(); } },
+      reset, setView, setMode, setLighting, orbit, pan, zoom,
+      setWireframe(enabled) { if (!disposed) { boolean(enabled); setMode(enabled ? 'wireframe' : 'rendered'); } },
+      setAnimationPlaying, selectAnimation, seekAnimation, setAnimationSpeed, setAnimationLoop,
+      animations: () => clips.map(clip => ({ ...clip })),
+      animationState,
       dispose,
       hasAnimations: gltf.animations.length > 0,
-      stats: () => ({ ...metrics }),
+      stats: () => ({ ...metrics, dimensions: { ...metrics.dimensions }, bounds: { min: { ...metrics.bounds.min }, max: { ...metrics.bounds.max } } }),
     };
   } catch (error) {
     dispose();
-    if (error.name !== 'AbortError') status(`3D preview unavailable: ${error.message}`);
+    if (error.name !== 'AbortError') status(`3D preview unavailable: ${safeReason(error)}`);
     throw error;
   } finally { rejectPending = null; }
 }

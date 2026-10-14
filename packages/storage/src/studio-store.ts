@@ -3,8 +3,10 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, w
 import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { isWrite, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs } from '../../core/src/studio-policy.js';
+import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
+import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 interface Options { directory: string; now?: () => number }
@@ -12,6 +14,12 @@ export interface ArcaneKeySummary {keyId:string;allowedRoots:StudioSession['allo
 export type ArcaneKeyIssue = ArcaneKeySummary & { apiKey: string };
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+// Paths are display metadata: a rename is not a different opaque Instance.
+// Both references still require valid bounded paths and exact scope/class/ID.
+const sameReceiptRef = (a: unknown, b: unknown): boolean => {
+  const x=instanceRef(a), y=instanceRef(b);
+  return x.instanceId===y.instanceId && x.sessionId===y.sessionId && x.root===y.root && x.className===y.className;
+};
 
 /** Durable queue. Exactly-once outcomes cannot be promised across process/engine crashes.
  * Unknown outcomes are preserved for reconciliation, never automatically replayed. */
@@ -21,6 +29,10 @@ export class StudioStore {
   private lockFd: number;
   private now: () => number;
   private closed = false;
+  // Only trusted host verification can mint this one-use authority. JSON claims
+  // (including those in a restoration receipt) never authorize execution.
+  #activationAdmissions = new WeakMap<object, ScriptSourceVerification>();
+  #testOwners = new Map<string, string>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
@@ -164,6 +176,35 @@ export class StudioStore {
     key.lastUsedAt=this.iso();this.db.prepare('UPDATE api_keys SET payload=? WHERE id=?').run(JSON.stringify(key),key.keyId);
     this.event('arcane_key_connected',key.keyId,{sessionId:result.sessionId});return result;
   }
+  /** Key-authenticated metadata only. It cannot pair, renew a lease, return a
+   * bearer, clear unknown effects or dispatch/replay a command. */
+  connectionStatusWithKey(input:unknown,port:number): {protocolVersion:1;identity:Record<string,unknown>;state:'absent'|'active'|'lost'|'reconciliation';sessionId?:string} {
+    const a=object(input);
+    if(Object.keys(a).some(k=>!['protocolVersion','apiKey','identity','sessionId'].includes(k))||a.protocolVersion!==1)throw new ArcaneError('INPUT','Invalid plugin status envelope.');
+    const apiKey=textField(a.apiKey,'Arcane API key',160),match=/^arcane_local_v1_([1-9][0-9]{0,4})_([a-f0-9]{64})$/.exec(apiKey);
+    if(!match||Number(match[1])!==port||port>65535)throw new ArcaneError('KEY_REJECTED','Arcane API key is invalid, revoked or belongs to another local endpoint.');
+    const keyRow=this.db.prepare('SELECT id,payload FROM api_keys WHERE hash=?').get(hash(apiKey)) as Row|undefined;
+    if(!keyRow||(JSON.parse(keyRow.payload as string) as ArcaneKeySummary).revokedAt)throw new ArcaneError('KEY_REJECTED','Arcane API key is invalid, revoked or belongs to another local endpoint.');
+    const identity=object(a.identity),fields=['clientSessionId','placeId','universeId','name','pluginVersion'];
+    if(Object.keys(identity).length!==fields.length||Object.keys(identity).some(k=>!fields.includes(k)))throw new ArcaneError('IDENTITY','Invalid exact plugin identity.');
+    const clientSessionId=textField(identity.clientSessionId,'client session',100);
+    textField(identity.name,'Studio name',200);textField(identity.pluginVersion,'plugin version',80);
+    for(const k of ['placeId','universeId'])if(!Number.isSafeInteger(identity[k])||(identity[k] as number)<0)throw new ArcaneError('IDENTITY','Invalid place/universe identity.');
+    const requested=a.sessionId===undefined?null:textField(a.sessionId,'session ID',256);
+    const rows=this.db.prepare("SELECT id,payload FROM sessions WHERE key_id=? AND json_extract(payload,'$.clientSessionId')=? ORDER BY rowid DESC").all(keyRow.id as string,clientSessionId) as Row[];
+    if(requested&&!rows.some(row=>row.id===requested))throw new ArcaneError('AUTH','Requested status is not owned by this key and client lifetime.');
+    const scoped=rows.filter(row=>!requested||row.id===requested);
+    for(const row of scoped){const s=JSON.parse(row.payload as string) as StudioSession;
+      if(fields.some(k=>s[k as keyof StudioSession]!==identity[k]))throw new ArcaneError('IDENTITY','The recorded session has another exact place identity.');
+    }
+    const base={protocolVersion:1 as const,identity:{...identity}};
+    if(!scoped.length)return {...base,state:'absent'};
+    // Do not use the display-limited commands()/sessions() catalogues here.
+    for(const row of scoped)if(this.#testOwners.has(row.id as string)||this.db.prepare("SELECT 1 FROM commands WHERE session_id=? AND state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get(row.id as string))return {...base,state:'reconciliation',sessionId:row.id as string};
+    const active=scoped.find(row=>!(JSON.parse(row.payload as string) as StudioSession).revokedAt);
+    if(active)return {...base,state:'active',sessionId:active.id as string};
+    return {...base,state:'lost',sessionId:scoped[0]!.id as string};
+  }
   authenticate(sessionId: string, token: string): StudioSession {
     const row = this.db.prepare('SELECT token_hash FROM sessions WHERE id=?').get(sessionId) as Row | undefined;
     if (!row || !equal(row.token_hash as string, hash(token))) throw new ArcaneError('AUTH', 'Invalid plugin session bearer.');
@@ -182,7 +223,7 @@ export class StudioStore {
     }
     this.event('studio_revoked', id, { reason });
   }
-  enqueue(input: unknown, internalRestore = false): StudioCommand {
+  enqueue(input: unknown, internalRestore = false, admission?: object): StudioCommand {
     const a = object(input); const sessionId = textField(a.sessionId, 'session ID');
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
@@ -195,27 +236,97 @@ export class StudioStore {
         return JSON.parse(old.payload as string) as StudioCommand;
       }
       const s = this.session(sessionId);
+      if (this.#testOwners.has(sessionId)) throw new ArcaneError('BUSY', 'An owned playtest fences the Studio command queue until verified cleanup.');
       const args = validateCommandArgs(method, a.args, s, internalRestore);
+      const activating = this.activationSource(method, args);
+      const verification = admission ? this.#activationAdmissions.get(admission) : undefined;
+      if (activating !== null && (!verification || verification.sourceSha256 !== hash(activating)))
+        throw new ArcaneError('SOURCE_VERIFICATION', 'Activating a script requires the trusted host syntax verifier. No command was queued.');
+      if (admission) this.#activationAdmissions.delete(admission);
       const pending = this.db.prepare("SELECT count(*) AS n FROM commands WHERE session_id=? AND state IN ('queued','dispatched')").get(sessionId) as Row;
       if (Number(pending.n) >= 100) throw new ArcaneError('BUSY', 'Studio queue is full.');
       if (this.db.prepare("SELECT id FROM commands WHERE session_id=? AND state='needs_reconciliation' LIMIT 1").get(sessionId)) throw new ArcaneError('RECONCILIATION', 'Unknown previous outcome blocks new commands. Inspect receipts and re-pair; do not retry the mutation blindly.');
       const row = this.db.prepare('UPDATE sessions SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(sessionId) as Row;
       const c: StudioCommand = { protocolVersion: 1, id: randomUUID(), requestId, sessionId, clientSessionId: s.clientSessionId, method, args, allowedRoots: s.allowedRoots, allowWrites: s.allowWrites, leaseEpoch: Number(row.epoch), expiresAt: new Date(this.now() + 180000).toISOString(), state: 'queued', createdAt: this.iso(), finishedAt: null, result: null, error: null };
       this.db.prepare('INSERT INTO commands(id,request_id,session_id,fingerprint,state,payload,created) VALUES(?,?,?,?,?,?,?)').run(c.id, requestId, sessionId, fingerprint, c.state, JSON.stringify(c), this.now());
+      if (verification) this.event('script_syntax_verified', c.id, { ...verification });
       this.event('command_queued', c.id, { sessionId, method, leaseEpoch: c.leaseEpoch }); return c;
     });
+  }
+  private activationSource(method: StudioCommand['method'], args: Record<string, Json>): string | null {
+    if (method === 'script.set_enabled' && args.enabled === true) return args.expectedSource as string;
+    if (method === 'scene.restore') {
+      const mutation = object(args.mutation);
+      if (mutation.kind === 'script.set_enabled' && object(mutation.before).enabled === true) {
+        const source = object(mutation.before).source;
+        if (typeof source !== 'string') throw new ArcaneError('RECEIPT', 'Activation restoration has no exact source baseline.');
+        return source;
+      }
+    }
+    return null;
+  }
+  /** Normal command entry point. Awaited compilation never holds a SQLite
+   * transaction; caller authority and the exact session are fenced afterwards. */
+  async enqueueVerified(input: unknown, verifier: ScriptSourceVerifier | null, guard: () => void = () => {}, internalRestore = false): Promise<StudioCommand> {
+    guard();
+    const a = jsonObject(input, 600 * 1024);
+    const sessionId = textField(a.sessionId, 'session ID');
+    const requestId = textField(a.requestId, 'request ID', 128);
+    if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
+    const method = methodField(a.method);
+    const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
+    const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
+    if (old) {
+      if (!equal(old.fingerprint as string, fingerprint)) throw new ArcaneError('IDEMPOTENCY', 'Request ID was already used with different input.');
+      return JSON.parse(old.payload as string) as StudioCommand;
+    }
+    const session = this.session(sessionId);
+    const args = validateCommandArgs(method, a.args, session, internalRestore);
+    const source = this.activationSource(method, args);
+    if (source === null) return this.enqueue(a, internalRestore);
+    if (!verifier) throw new ArcaneError('SOURCE_VERIFICATION', 'The trusted Luau syntax verifier is unavailable. No script was activated.');
+    const identity = (s: StudioSession) => canonical({id:s.id,clientSessionId:s.clientSessionId,placeId:s.placeId,universeId:s.universeId,allowedRoots:s.allowedRoots,allowWrites:s.allowWrites,capabilities:s.capabilities,pluginVersion:s.pluginVersion,revokedAt:s.revokedAt});
+    let proof: ScriptSourceVerification;
+    try { proof = await verifier.verify(source); }
+    catch { throw new ArcaneError('SOURCE_VERIFICATION', 'Script syntax verification failed. Correct the source or repair the trusted compiler; no activation was queued.'); }
+    guard();
+    if (this.closed || identity(this.session(sessionId)) !== identity(session)) throw new ArcaneError('SCOPE', 'Studio authority changed during verification.');
+    if (!proof || proof.syntaxVerified !== true || proof.sourceSha256 !== hash(source) || !/^[a-f0-9]{64}$/.test(proof.compilerSha256) || !Number.isFinite(proof.elapsedMs) || proof.elapsedMs < 0)
+      throw new ArcaneError('SOURCE_VERIFICATION', 'The trusted verifier did not attest this exact source.');
+    const admission = Object.freeze({});
+    this.#activationAdmissions.set(admission, Object.freeze({...proof}));
+    try { return this.enqueue(a, internalRestore, admission); }
+    finally { this.#activationAdmissions.delete(admission); }
   }
   command(id: string): StudioCommand {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return JSON.parse(row.payload as string) as StudioCommand;
   }
+  /** Host-only coordination, never a request-provided lock or permission. */
+  reserveTest(sessionId: string, owner: string): void {
+    const s=this.session(sessionId);if (!s.allowWrites) throw new ArcaneError('READ_ONLY','Playtesting requires a writable paired target and separate human test consent.');
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(owner) || this.#testOwners.has(sessionId) || this.db.prepare("SELECT id FROM commands WHERE session_id=? AND state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get(sessionId)) throw new ArcaneError('BUSY','Finish or reconcile existing Studio work before starting a playtest.');
+    this.#testOwners.set(sessionId,owner);
+  }
+  releaseTest(sessionId: string, owner: string): void { if (this.#testOwners.get(sessionId)===owner) this.#testOwners.delete(sessionId); }
   commands(sessionId?: string): StudioCommand[] {
     const q = sessionId ? this.db.prepare('SELECT payload FROM commands WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 100').all(sessionId) : this.db.prepare('SELECT payload FROM commands ORDER BY created DESC,rowid DESC LIMIT 100').all();
     return (q as Row[]).map(r => JSON.parse(r.payload as string) as StudioCommand);
   }
-  poll(sessionId: string): StudioCommand[] {
+  poll(sessionId: string, observation?: unknown): StudioCommand[] {
     return this.transaction(() => {
       const s = this.session(sessionId); s.lastSeenAt = this.iso(); this.saveSession(s);
+      if (observation !== undefined) {
+        if (!s.allowWrites || !s.allowedRoots.includes('ServerStorage')) throw new ArcaneError('SCOPE','A continuity marker requires explicit writable ServerStorage scope.');
+        const p = jsonObject(observation, 4096);
+        const fields = ['sessionId','clientLifetimeId','pluginArtifactHash','markerName','placeId','universeId','placeName','mode','playEpoch','continuitySupported','connected'];
+        if (Object.keys(p).length !== fields.length || Object.keys(p).some(k=>!fields.includes(k)) || p.sessionId !== s.id || p.clientLifetimeId !== s.clientSessionId || p.placeId !== s.placeId || p.universeId !== s.universeId || p.placeName !== s.name || typeof p.pluginArtifactHash !== 'string' || !/^[a-f0-9]{64}$/.test(p.pluginArtifactHash) || typeof p.markerName !== 'string' || !/^ArcaneTestProof_[A-Za-z0-9_-]{1,128}$/.test(p.markerName) || !['Edit','Play'].includes(p.mode as string) || !Number.isSafeInteger(p.playEpoch) || (p.playEpoch as number)<0 || typeof p.continuitySupported !== 'boolean' || typeof p.connected !== 'boolean') throw new ArcaneError('IDENTITY','Plugin continuity proof does not match this exact authenticated lifetime.');
+        if (s.proof && (p.playEpoch as number)<s.proof.playEpoch) throw new ArcaneError('IDENTITY','Plugin play epoch moved backwards; inspect and reconnect.');
+        if (s.proof && p.pluginArtifactHash !== s.proof.pluginArtifactHash) throw new ArcaneError('IDENTITY','Loaded plugin source changed inside this lifetime.');
+        if (s.proof && (p.markerName !== s.proof.markerName || p.mode !== s.proof.mode && (p.playEpoch as number)<=s.proof.playEpoch)) throw new ArcaneError('IDENTITY','Marker or mode continuity changed without a latched play transition.');
+        s.proof={sessionId:s.id,clientLifetimeId:s.clientSessionId,pluginArtifactHash:p.pluginArtifactHash,markerName:p.markerName,placeId:s.placeId,universeId:s.universeId,placeName:s.name,mode:p.mode as 'Edit'|'Play',playEpoch:p.playEpoch as number,continuitySupported:p.continuitySupported,connected:p.connected,observedAt:this.iso(),expiresAt:new Date(this.now()+6000).toISOString()};
+        this.saveSession(s);
+      }
       const active = this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state IN ('dispatched','needs_reconciliation') ORDER BY created,rowid LIMIT 1").get(sessionId) as Row | undefined;
       if (active) {
         const c = JSON.parse(active.payload as string) as StudioCommand;
@@ -235,7 +346,9 @@ export class StudioStore {
     const a = object(input); const sessionId = textField(a.sessionId, 'session ID'); const commandId = textField(a.commandId, 'command ID');
     if (a.state !== 'succeeded' && a.state !== 'failed') throw new ArcaneError('INPUT', 'Invalid completion state.');
     const completedState = a.state;
-    const result = a.result === undefined ? null : jsonObject({ value: a.result }, 512 * 1024).value ?? null;
+    // The validation wrapper is exactly ten bytes; the actual result limit below
+    // remains 512 KiB, including JSON escaping. It must not reject a legal ACK.
+    const result = a.result === undefined ? null : jsonObject({ value: a.result }, 512 * 1024 + 10).value ?? null;
     const error = a.state === 'failed' ? textField(a.error ?? 'Plugin operation failed.', 'plugin error', 2000) : null;
     if (Buffer.byteLength(JSON.stringify(result)) > 512 * 1024) throw new ArcaneError('BODY_LIMIT', 'Plugin result exceeds 512 KiB.');
     this.transaction(() => {
@@ -251,8 +364,10 @@ export class StudioStore {
         const r = object(mutation.ref);
         if (r.sessionId !== sessionId || !c.allowedRoots.includes(r.root as StudioSession['allowedRoots'][number])) throw new ArcaneError('RECEIPT', 'Mutation receipt reference out of scope.');
         const after = jsonObject(mutation.after);
+        if ((c.method === 'script.update' || c.method === 'scene.update') && !sameReceiptRef(mutation.ref, c.args.ref)) throw new ArcaneError('RECEIPT', 'Mutation receipt does not name the exact changed reference.');
         if (c.method === 'script.update' && (after.source !== c.args.source || object(mutation.before).source !== c.args.expectedSource)) throw new ArcaneError('RECEIPT', 'Script receipt does not match the intended baseline/change.');
-        if (c.method === 'scene.update' && (canonical(after.properties) !== canonical(c.args.properties) || canonical(object(mutation.before).properties) !== canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
+        if (c.method === 'scene.update' && (!nativePropertiesMatch(object(c.args.properties) as Record<string, Json>, after.properties, r.className as string) || canonical(object(mutation.before).properties) !== canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
+        if (c.method === 'script.set_enabled' && (!sameReceiptRef(mutation.ref,c.args.ref) || canonical(mutation.before) !== canonical({ source:c.args.expectedSource,enabled:c.args.expectedEnabled }) || canonical(after) !== canonical({source:c.args.expectedSource,enabled:c.args.enabled}))) throw new ArcaneError('RECEIPT', 'Execution-state receipt does not match the exact source/state baseline.');
         if (c.method === 'scene.create' && mutation.before !== null) throw new ArcaneError('RECEIPT', 'Creation receipt must have a null baseline.');
       }
       c.state = completedState === 'failed' && result && typeof result === 'object' && !Array.isArray(result) && result.partial === true ? 'needs_reconciliation' : completedState;
@@ -261,10 +376,16 @@ export class StudioStore {
     });
   }
   restore(input: unknown): StudioCommand {
+    return this.enqueue(this.restoreInput(input), true);
+  }
+  async restoreVerified(input: unknown, verifier: ScriptSourceVerifier | null, guard: () => void = () => {}): Promise<StudioCommand> {
+    return this.enqueueVerified(this.restoreInput(input), verifier, guard, true);
+  }
+  private restoreInput(input: unknown): Record<string, Json> {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
     if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
-    return this.enqueue({ sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } }, true);
+    return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };
   }
   counts(): Record<string, number> { return Object.fromEntries((this.db.prepare('SELECT state,count(*) AS n FROM commands GROUP BY state').all() as Row[]).map(r => [r.state, Number(r.n)])); }
   events(limit = 100): Json[] { return (this.db.prepare('SELECT sequence,occurred_at,kind,entity_id,detail FROM events ORDER BY sequence DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))) as Row[]).map(r => ({ sequence: Number(r.sequence), occurredAt: r.occurred_at as string, kind: r.kind as string, entityId: r.entity_id as string, detail: JSON.parse(r.detail as string) as Json })); }

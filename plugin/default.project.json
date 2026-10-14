@@ -8,6 +8,8 @@
     "Registry": { "$path": "src/Registry.luau" },
     "Properties": { "$path": "src/Properties.luau" },
     "Operations": { "$path": "src/Operations.luau" },
-    "Transport": { "$path": "src/Transport.luau" }
+    "Transport": { "$path": "src/Transport.luau" },
+    "TestProof": { "$path": "src/TestProof.luau" },
+    "Sha256": { "$path": "src/Sha256.luau" }
   }
 }

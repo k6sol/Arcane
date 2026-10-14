@@ -13,6 +13,50 @@ const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dir
 const LOCAL_KEY_SETTING = 'Arcane.LocalApiKey.v1';
 const LAST_CONNECTION_SETTING = 'Arcane.LastConnection.v1';
 
+// Adapt the standalone fixture in memory: Color3 channels are float32 and a
+// BasePart.Color setter stores RGB8. This models the supplied native probe;
+// it never changes the production codec or quantizes GUI colour properties.
+const colorEngineFixture = `
+local colorScratch = buffer.create(4)
+local function colorFloat32(value: number): number
+  buffer.writef32(colorScratch, 0, value)
+  return buffer.readf32(colorScratch, 0)
+end
+Color3.new = triple
+Color3.fromRGB = function(r: number, g: number, b: number): any return Color3.new(r / 255, g / 255, b / 255) end
+local function storedColor(value: any): any
+  return Color3.fromRGB(math.floor(colorFloat32(value.R * 255)), math.floor(colorFloat32(value.G * 255)), math.floor(colorFloat32(value.B * 255)))
+end
+-- Independent Y-X-Z rotation double, including the nine float32 matrix cells.
+local CFrame: any = {}
+function CFrame.fromOrientation(x: number, y: number, z: number): any
+  local sx, cx, sy, cy, sz, cz = math.sin(x), math.cos(x), math.sin(y), math.cos(y), math.sin(z), math.cos(z)
+  local components = {0, 0, 0, cy * cz + sy * sx * sz, -cy * sz + sy * sx * cz, sy * cx,
+    cx * sz, cx * cz, -sx, -sy * cz + cy * sx * sz, sy * sz + cy * sx * cz, cy * cx}
+  for index = 4, 12 do components[index] = colorFloat32(components[index]) end
+  return {GetComponents = function(_self: any): ...number return table.unpack(components) end}
+end
+local colorOriginalIndex = instanceMetatable.__index
+instanceMetatable.__index = function(self: any, key: string): any
+  if key == "CFrame" and self:IsA("BasePart") then
+    return CFrame.fromOrientation(math.rad(self.Orientation.X), math.rad(self.Orientation.Y), math.rad(self.Orientation.Z))
+  end
+  return colorOriginalIndex(self, key)
+end
+local colorOriginalSetter = instanceMetatable.__newindex
+instanceMetatable.__newindex = function(self: any, key: string, value: any): ()
+  if key == "Color" and self:IsA("BasePart") then value = storedColor(value) end
+  if key == "Orientation" and self:IsA("BasePart") and fixture.orientationReadback then value = fixture.orientationReadback end
+  colorOriginalSetter(self, key, value)
+end
+local colorOriginalNew = Instance.new
+Instance.new = function(className: string): any
+  local instance = colorOriginalNew(className)
+  if instance:IsA("BasePart") then instance._properties.Color = storedColor(instance.Color) end
+  return instance
+end
+`;
+
 // Capture the real transport constructed by Main. All exchanges, status callbacks
 // and worker cycles still run the production methods against the engine doubles.
 const captureTransport = `
@@ -65,7 +109,7 @@ assert(keyInput.Active and keyInput.Selectable and keyInput.TextEditable, "key i
 assert(keyInput.Position[1] == 0 and keyInput.Position[2] == 0 and keyInput.Position[3] == 0 and keyInput.Position[4] == 0 and keyInput.Size[1] == 1 and keyInput.Size[2] == 0 and keyInput.Size[3] == 1 and keyInput.Size[4] == 0, "the entire key entry is an editable hit area")
 assert(fixture.widgetInfo[1] == Enum.InitialDockState.Float and fixture.widgetInfo[2] == true and fixture.widgetInfo[3] == true, "startup opens a floating popup even after a previously hidden session")
 assert(fixture.widgetInfo[4] == 260 and fixture.widgetInfo[5] == 184 and fixture.widgetInfo[6] == 230, "compact default content area and minimum width")
-assert(__arcaneRequire("Validation").VERSION == "0.1.3", "runtime advertises plugin 0.1.3")
+assert(__arcaneRequire("Validation").VERSION == "0.1.7", "runtime advertises plugin 0.1.7")
 local bottomPadding
 for _, child in ipairs(control.Parent:GetChildren()) do
   if child:IsA("UIPadding") then bottomPadding = child.PaddingBottom.Offset end
@@ -107,8 +151,8 @@ local function storageBoundaries(): ()
     else
       assert(call.key == lastSetting and type(call.value) == "table" and type(call.value.connected) == "boolean", "only primitive last connection status is persisted")
       local count = 0
-      for name in pairs(call.value) do count += 1; assert(name == "connected", "session tokens, identity and grants cannot be persisted") end
-      assert(count == 1, "last connection status has exactly one primitive field")
+      for name in pairs(call.value) do count += 1; assert(name == "connected" or (name == "autoConnect" and call.value.autoConnect == false), "only transient health and explicit opt-out can be persisted") end
+      assert(count == 1 or (count == 2 and call.value.autoConnect == false), "no session token, identity or grants are persisted")
     end
   end
   assert(fixture.pluginSettings["Provider.ApiKey"] == "unrelated-provider-secret", "unrelated provider key is untouched")
@@ -129,16 +173,26 @@ local function noSecretText(): ()
     end
   end
 end
-local connectCount, disconnectCount, pollCount = 0, 0, 0
+local connectCount, disconnectCount, pollCount, statusCount = 0, 0, 0, 0
 local expectKey = key
 http.RequestAsync = function(_self: any, request: any): any
   fixture.requests += 1
   if fixture.uiHttpHook then return fixture.uiHttpHook(request) end
+  if string.find(request.Url, "/v1/plugin/status", 1, true) then
+    statusCount += 1
+    local v = __arcaneRequire("Validation")
+    local payload = v.decode(request.Body, http)
+    assert(request.Headers.Authorization == nil and payload.apiKey == expectKey, "status authenticates only the exact saved Arcane key")
+    return {StatusCode = 200, Success = true, Body = v.encode({protocolVersion = 1, identity = payload.identity,
+      state = if payload.sessionId then "lost" else "absent", sessionId = payload.sessionId}, http)}
+  end
   if string.find(request.Url, "/v1/plugin/connect", 1, true) then
     connectCount += 1
     local payload = __arcaneRequire("Validation").decode(request.Body, http)
     assert(request.Headers.Authorization == nil and payload.apiKey == expectKey, "actual Main explicit key exchange")
-    return {StatusCode = 200, Success = true, Body = '{"sessionId":"ui-session","token":"ui-token","protocolVersion":1,"allowedRoots":["Workspace"],"allowWrites":false}'}
+    local v = __arcaneRequire("Validation")
+    return {StatusCode = 200, Success = true, Body = v.encode({sessionId = if connectCount == 1 then "ui-session" else "ui-session-" .. tostring(connectCount),
+      token = "ui-token", protocolVersion = 1, allowedRoots = v.array({"Workspace"}), allowWrites = false}, http)}
   end
   assert(request.Headers.Authorization == "Bearer ui-token", "live session token is transport-only")
   if string.find(request.Url, "/v1/plugin/disconnect", 1, true) then
@@ -191,7 +245,7 @@ fixture.pluginSettings = {
 }
 `;
 
-async function runLuauFixture({ setup = '', checks, core = false, format = 'generated', editingCase }) {
+async function runLuauFixture({ setup = '', checks, core = false, format = 'generated', editingCase, reconnectCase }) {
   const outDir = await mkdtemp(path.join(tmpdir(), 'arcane-plugin-luau-ui-'));
   try {
     const sources = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) =>
@@ -202,13 +256,14 @@ async function runLuauFixture({ setup = '', checks, core = false, format = 'gene
     const compiled = spawnSync(compile, ['--null', bundlePath], { encoding: 'utf8', timeout: 10000 });
     assert.ifError(compiled.error);
     assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
-    const [prelude, gui, logic, editing] = await Promise.all([
+    const [prelude, gui, logic, editing, reconnect] = await Promise.all([
       readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8'),
       // Adapt only the GUI double's old identity assertion to the compact widget.
       readFile(path.join(repository, 'plugin/fixtures/MockPlugin.luau'), 'utf8')
         .then(source => source.replace('id == "ArcaneLocalBridgeFloatingV2"', 'id == "ArcaneLocalBridgeFloatingV3"')),
       core ? readFile(path.join(repository, 'plugin/fixtures/Logic.spec.luau'), 'utf8') : Promise.resolve(''),
       editingCase ? readFile(path.join(repository, 'plugin/fixtures/KeyInput.spec.luau'), 'utf8') : Promise.resolve(''),
+      reconnectCase ? readFile(path.join(repository, 'plugin/fixtures/Reconnect.spec.luau'), 'utf8') : Promise.resolve(''),
     ]);
     let instrumented;
     if (format === 'source') {
@@ -232,7 +287,7 @@ local script: any = {Parent = {}}
       instrumented += '\nfixture.reloadMain = __arcaneMain\n';
     }
     const harness = path.join(outDir, 'ui-harness.luau');
-    await writeFile(harness, prelude + '\n' + unrelatedSettings + setup + '\n' + gui + '\n' + instrumented + '\n' + uiFixture + checks + (editingCase ? `\nfixture.keyInputCase = "${editingCase}"\n${editing}\n` : '') + `
+    await writeFile(harness, prelude + '\n' + unrelatedSettings + setup + '\n' + gui + '\n' + colorEngineFixture + '\n' + instrumented + '\n' + uiFixture + checks + (editingCase ? `\nfixture.keyInputCase = "${editingCase}"\n${editing}\n` : '') + (reconnectCase ? `\nfixture.reconnectCase = "${reconnectCase}"\n${reconnect}\n` : '') + `
 fixtureTransport.new = originalTransportNew
 print = fixturePrint
 ` + logic + '\nprint("Arcane minimal UI fixture passed")\n');
@@ -263,14 +318,14 @@ test('real Luau executes validation, mutation, restoration and transport failure
   try {
     const prelude = await readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8');
     const modules = [];
-    for (const module of ['Validation', 'Registry', 'Properties', 'Operations', 'Transport']) {
+    for (const module of ['Validation', 'Registry', 'Properties', 'Operations', 'Transport', 'TestProof']) {
       const source = (await readFile(path.join(repository, `plugin/src/${module}.luau`), 'utf8'))
         .replace(/require\(script\.Parent\.([A-Za-z]+)\)/g, '$1');
       modules.push(`local ${module} = (function()\n${source}\nend)()\n`);
     }
     const checks = await readFile(path.join(repository, 'plugin/fixtures/Logic.spec.luau'), 'utf8');
     const filename = path.join(outDir, 'contract-harness.luau');
-    await writeFile(filename, prelude + '\n' + modules.join('\n') + '\n' + checks);
+    await writeFile(filename, prelude + '\n' + colorEngineFixture + '\n' + modules.join('\n') + '\n' + checks);
     const result = spawnSync(runtime, [filename], { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
     assert.ifError(result.error);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -282,6 +337,47 @@ test('real Luau executes validation, mutation, restoration and transport failure
     await rm(outDir, { recursive: true, force: true });
   }
 });
+
+for (const format of ['source', 'generated']) {
+  test(`${format} runtime records RGB8 and equivalent Orientation readbacks and restores exact after-state`, { skip: !runtime || !compile }, async () => {
+    await runLuauFixture({ format, checks: `
+idleMount()
+local codec = __arcaneRequire("Validation").geometryProperties(__arcaneRequire("Properties"))
+local assignmentOps = __arcaneRequire("Operations").new({sessionId = "runtime-assignment", allowedRoots = {"Workspace"}}, game, http)
+local assignmentSerial = 0
+local function assignmentRun(method: string, args: any): (any, string)
+  assignmentSerial += 1
+  local id = "runtime-assignment-" .. assignmentSerial
+  return assignmentOps:execute({id = id, method = method, args = args}, function() end), id
+end
+local colorInput = {type = "Color3", value = {0.15, 0.45, 0.8}}
+fixture.orientationReadback = Vector3.new(0, 0, 0)
+local created, createId = assignmentRun("scene.create", {parent = assignmentOps.registry:ref(game:GetService("Workspace")), className = "Part", name = "RuntimeAssignment", properties = {Color = colorInput, Orientation = {type = "Vector3", value = {360, 0, 0}}}})
+fixture.orientationReadback = nil
+local instance = assignmentOps.registry:resolve(created.ref)
+local stored = created.mutation.after.properties.Color.value
+assert(stored[1] == 0.14901961386203766 and stored[2] == 0.4470588266849518 and stored[3] == 0.800000011920929, "runtime receipt contains native-probe RGB8 float32 values")
+assert(instance.Color == Color3.fromRGB(38, 114, 204) and instance.Orientation == Vector3.new(0, 0, 0), "runtime setter stores canonical Colour and wrapped Orientation")
+assert(not codec.compare(instance, {Color = colorInput}, {"Color"}) and not codec.compare(instance, {Orientation = {type = "Vector3", value = {360, 0, 0}}}, {"Orientation"}), "runtime baselines remain strict despite equivalent post-writes")
+local inspected = assignmentRun("scene.inspect", {ref = created.ref})
+assert(__arcaneRequire("Validation").equal(inspected.properties, created.mutation.after.properties), "runtime inspection reflects the exact actual receipt")
+fixture.orientationReadback = Vector3.new(90, -30, 0)
+local updated, updateId = assignmentRun("scene.update", {ref = created.ref,
+  expected = {Color = inspected.properties.Color, Orientation = inspected.properties.Orientation},
+  properties = {Color = {type = "Color3", value = {0.1, 0.5, 0.9}}, Orientation = {type = "Vector3", value = {90, 30, 60}}}})
+fixture.orientationReadback = nil
+stored = updated.mutation.after.properties.Color.value
+assert(stored[1] == colorFloat32(25 / 255) and stored[2] == colorFloat32(127 / 255) and stored[3] == colorFloat32(229 / 255), "runtime update returns RGB8 readback")
+assert(instance.Orientation == Vector3.new(90, -30, 0) and codec.assignedMatches(instance, "Orientation", Vector3.new(90, 30, 60)), "runtime update verifies actual gimbal-equivalent matrix")
+assert(codec.compare(instance, updated.mutation.after.properties, {"Color", "Orientation"}), "runtime restore uses exact canonical expected-after")
+local restored = assignmentRun("scene.restore", {receiptCommandId = updateId, mutation = updated.mutation})
+assert(restored.restored and instance.Color == Color3.fromRGB(38, 114, 204) and instance.Orientation == Vector3.new(0, 0, 0), "runtime update restores exact before-state")
+restored = assignmentRun("scene.restore", {receiptCommandId = createId, mutation = created.mutation})
+assert(restored.restored and instance._destroyed and instance.Parent == nil, "runtime unchanged create is destroyed after restoration")
+unload()
+` });
+  });
+}
 
 test('generated Luau bundle compiles and executes cold Main, reconnects, cached factories and the extended logic suite', { skip: !runtime || !compile }, async () => {
   await runLuauFixture({ core: true, checks: `
@@ -323,7 +419,7 @@ http.RequestAsync = function(_self: any, request: any): any fixture.requests += 
 ` });
 });
 
-test('saved successful connection resumes once; other saved keys wait for a click and all remain red until ACK', { skip: !runtime || !compile }, async t => {
+test('any valid saved key queues status recovery regardless of transient connected history and remains red until ACK', { skip: !runtime || !compile }, async t => {
   for (const connected of [true, false]) await t.test('cached connected=' + connected, async () => {
     await runLuauFixture({
       setup: `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)
@@ -332,12 +428,10 @@ fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = ${connected}
 assert(keyInput.Text == key and keyInput.PlaceholderText == "Arcane API key" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
 assert(control.BackgroundColor3 == Color3.fromRGB(255, 51, 64), "cached true or false is red until current ACK")
 assert(#fixture.getCalls == 2, "reload reads exactly the two owned keys")
-if ${connected} then
-  assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == 1, "successful history queues exactly one fresh authentication and clears cached connected state")
+  assert(client.recovery ~= nil and client.desiredPair == nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == ${connected ? 1 : 0}, "saved key queues status recovery and clears cached connected state")
   assert(fixture.pluginSettings[lastSetting].connected == false, "restart truth stays disconnected until the new exchange ACK")
   ack(); cycle()
-  assert(connectCount == 1 and pollCount == 1 and client.desiredPair == nil, "auto resume uses the one worker without duplicate exchanges")
-else idleMount(); clickConnect(); ack() end
+  assert(statusCount == 1 and connectCount == 1 and pollCount == 1 and client.desiredPair == nil, "auto resume reads status before one exchange on the one worker")
 storageBoundaries(); noSecretText()
 assert(connectCount == 1 and fixture.pluginSettings[keySetting] == key, "both paths establish one actual connection and retain the raw key")
 unload()
@@ -379,6 +473,27 @@ enter(key); clickConnect(); ack(); unload()
 });
 
 for (const format of ['source', 'generated']) {
+  test(`${format} pinned Luau VM recovery observes status, exact key, hidden panel and lifecycle fences`, { skip: (!runtime || !compile) && 'Pinned standalone Luau tools are not configured; no Studio or runtime is installed.' }, async t => {
+    const saved = `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)\n`;
+    const cases = [
+      ['hidden connection'], ['explicit disconnect'], ['loss during play'],
+      ['receipt never crosses session'], ['unsafe receipt'], ['receipt conflict'], ['wrong lost session'], ['late revoked poll'],
+      ['unknown handshake active'], ['unknown handshake absent'],
+      ['bootstrap absent history', saved], ['bootstrap play', saved + 'fixture.edit = false\n'],
+      ['saved opt-out', saved + `fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false, autoConnect = false}\n`],
+      ['status network bound', saved],
+      ...[400, 401, 403, 404, 405].map(code => ['status unsupported', saved + `fixture.reconnectCode = ${code}\n`, String(code)]),
+      ...[401, 403].map(code => ['status key rejected', saved + `fixture.reconnectCode = ${code}\n`, String(code)]),
+      ...['identity', 'bearer', 'commands'].map(fault => ['status malformed', saved + `fixture.reconnectMalformed = "${fault}"\n`, fault]),
+      ...['edit', 'deferred edit', 'new click', 'disconnect', 'identity', 'play', 'unload'].map(action => ['late status ' + action, saved]),
+      ...[[401, 'AUTH'], [403, 'AUTH'], [404, 'NOT_FOUND'], [410, 'GONE'], [409, 'REVOKED'], [409, 'EXPIRED'], [400, 'SESSION']]
+        .map(([code, error]) => ['definitive loss', `fixture.reconnectCode = ${code}; fixture.reconnectError = "${error}"\n`, `${code} ${error}`]),
+      ...[404, 410].map(code => ['definitive loss', `fixture.reconnectCode = ${code}; fixture.reconnectError = "SESSION"; fixture.reconnectPending = true\n`, `${code} pending receipt`]),
+    ];
+    for (const [reconnectCase, setup = '', label = ''] of cases) await t.test(`${reconnectCase} ${label}`.trim(), () =>
+      runLuauFixture({ format, setup, checks: '', reconnectCase }));
+  });
+
   test(`${format} official Luau GUI fixtures fence connected editing and genuinely yielding old work`, { skip: !runtime || !compile }, async t => {
     for (const editingCase of ['select all delete', 'select all replace', 'queued edit', 'late connect ACK', 'deferred text ACK', 'late poll replacement', 'editor replacement', 'deferred editor replacement', 'late receipt ACK', 'saved key reload', 'unload in-flight ACK', 'play refuses reconnect']) {
       await t.test(editingCase, async () => runLuauFixture({ format, checks: '', editingCase }));
@@ -392,14 +507,14 @@ for (const format of ['source', 'generated']) {
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = true}` : '',
         checks: `
 if ${saved} then
-  assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and control.Text == "Reconnect" and control.BackgroundColor3 ~= green, "saved successful history queues only one current authentication, without cached green")
+  assert(client.recovery ~= nil and client.pair == nil and fixture.requests == 0 and control.Text == "Reconnect" and control.BackgroundColor3 ~= green, "saved key queues only safe recovery, without cached green")
 else idleMount(); enter(key); clickConnect() end
 assert(fixture.pluginSettings[keySetting] == key, "save-before-click exchange contract remains in force")
-local rejected = client.desiredPair
+local rejected = client.desiredPair or client.recovery
 fixture.uiHttpHook = function(request: any): any
-  connectCount += 1
-  assert(string.find(request.Url, "/v1/plugin/connect", 1, true) and __arcaneRequire("Validation").decode(request.Body, http).apiKey == key, "only the submitted wellformed bad key is exchanged")
-  return {StatusCode = ${status}, Success = false, Body = "untrusted rejection body unrelated-session-secret"}
+  assert(string.find(request.Url, "/v1/plugin/${saved ? 'status' : 'connect'}", 1, true) and __arcaneRequire("Validation").decode(request.Body, http).apiKey == key, "only the exact wellformed bad key is authenticated")
+  connectCount += 1 -- Count this rejected authentication, including read-only status.
+  return {StatusCode = ${status}, Success = false, Body = ${saved ? `' {"error":"KEY_REJECTED","message":"untrusted unrelated-session-secret"}'` : '"untrusted rejection body unrelated-session-secret"'}}
 end
 cycle()
 assert(rejected.apiKey == nil and client.desiredPair == nil and client.pair == nil and client.operations == nil and client.identityFence == nil, "rejection clears queued key and transport session state")
@@ -493,7 +608,7 @@ cycle()
 assert(client.pair == nil and client.desiredPair == nil and control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane API key" and keyInput.Text == key, "uncertain exchange retains visible saved-key reconnect UI")
 assert(fixture.pluginSettings[keySetting] == key and fixture.statuses[#fixture.statuses].state == "disconnected", "uncertainty retains the saved key and is not KEY_REJECTED")
 local requests = fixture.requests; cycle(); cycle()
-assert(fixture.requests == requests, "uncertain exchange never retries automatically")
+assert(fixture.requests == requests + 2 and client.pair == nil, "uncertain exchange only retries read-only status while unavailable")
 fixture.uiHttpHook = nil; clickConnect(); ack(); unload()
 ` });
     });
@@ -508,9 +623,10 @@ end
 cycle()
 assert(pair.token == nil and client.pair == nil and fixture.statuses[#fixture.statuses].state == "disconnected", "poll 401/403 remains REVOKED and clears only the session bearer")
 assert(control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane API key" and keyInput.Text == key and fixture.pluginSettings[keySetting] == key and fixture.pluginSettings[lastSetting].connected == false, "poll revocation retains the saved human key and never displays Failed")
-local requests = fixture.requests; cycle(); cycle()
-assert(fixture.requests == requests and #fixture.workers == 1, "revoked poll never reconnects automatically")
-fixture.uiHttpHook = nil; clickConnect(); ack(); unload()
+fixture.uiHttpHook = nil
+ack()
+assert(statusCount == 1 and connectCount == 2 and #fixture.workers == 1, "revoked poll reads status and reconnects through the original worker")
+unload()
 ` });
     });
   });
@@ -523,7 +639,7 @@ test('settings read/write faults do not leak credentials, broaden persistence or
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = true}
 fixture.getSettingFaults = {["${setting}"] = "settings fault unrelated-provider-secret"}`,
       checks: `
-idleMount(); noSecretText()
+${setting === LOCAL_KEY_SETTING ? 'idleMount()' : 'assert(client.recovery ~= nil and fixture.requests == 0, "failed health read still queues recovery from the independently valid key")'}; noSecretText()
 assert(control.BackgroundColor3 ~= green, "failed settings reads never authenticate a credential")
 ${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "Arcane API key", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "Arcane API key" and keyInput.Text == key, "status read failure does not discard an independently valid local key")'}
 enter(key); clickConnect(); ack(); unload()
@@ -551,21 +667,22 @@ test('failed live exchanges and identity scope changes persist only connected fa
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = true}`;
   await t.test('failed initial exchange', async () => {
     await runLuauFixture({ setup: saved, checks: `
-assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and control.BackgroundColor3 ~= green, "auto resume only queues a fresh exchange")
+assert(client.recovery ~= nil and client.pair == nil and fixture.requests == 0 and control.BackgroundColor3 ~= green, "auto resume only queues fresh status")
 fixture.uiHttpHook = function(_request: any): any error("network fault unrelated-session-secret") end
 cycle()
 assert(client.pair == nil and client.desiredPair == nil and control.BackgroundColor3 ~= green, "failed exchange cannot establish live green")
 assert(fixture.pluginSettings[lastSetting].connected == false and fixture.pluginSettings[keySetting] == key, "failure saves only connected false and retains local key")
 local requests = fixture.requests
 cycle(); cycle()
-assert(fixture.requests == requests and #fixture.workers == 1, "uncertain key exchange is never automatically retried")
+assert(fixture.requests == requests + 2 and #fixture.workers == 1 and connectCount == 0, "unavailable status never sends a handshake")
 fixture.uiHttpHook = nil
 clickConnect(); ack(); unload()
 ` });
   });
   for (const field of ['PlaceId', 'GameId', 'Name']) await t.test('identity fence: ' + field, async () => {
     await runLuauFixture({ setup: saved, checks: `
-assert(client.desiredPair ~= nil and client.pair == nil and fixture.requests == 0 and control.BackgroundColor3 ~= green, "auto resume only queues a fresh exchange")
+assert(client.recovery ~= nil and client.pair == nil and fixture.requests == 0 and control.BackgroundColor3 ~= green, "auto resume only queues fresh status")
+clickConnect() -- Exercise the direct exchange identity fence separately from status.
 fixture.uiHttpHook = function(request: any): any
   assert(string.find(request.Url, "/v1/plugin/connect", 1, true), "only the explicit exchange is pending")
   local original = game["${field}"]

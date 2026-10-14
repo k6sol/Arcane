@@ -99,8 +99,11 @@ async function startDaemon(project) {
   const priorPortRecord = readPortRecord();
   if (priorPortRecord) { savedPort = priorPortRecord.port; env.ARCANE_PORT = String(savedPort); }
   const entry = await policy.directPath(join(productRoot, 'dist/apps/daemon/src/product-main.js'), 'file');
-  // Host-owned settings are the sole source of compiler configuration. No inherited overrides survive.
-  const verification = codeVerification.daemonConfiguration({ projectId: key, projectPath: canonical, stateRoot });
+  // Saved host settings are authoritative; only absent settings use the pinned product compiler.
+  // Both paths populate the normal trusted adapter fields. No inherited overrides survive.
+  const { managedCodeVerificationConfiguration } = await import(require('node:url').pathToFileURL(join(productRoot, 'scripts/managed-luau-compiler.mjs')).href);
+  const verification = managedCodeVerificationConfiguration({ codeVerification,
+    project: { projectId: key, projectPath: canonical, stateRoot }, productRoot });
   Object.assign(env, verification.environment);
   const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   child = owned;

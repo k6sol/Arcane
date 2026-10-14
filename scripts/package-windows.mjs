@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { resolve, join, relative, dirname, isAbsolute, sep, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLocalRelease, verifyLocalRelease, inside, REQUIRED_FRONTEND_FILES } from './create-local-release.mjs';
+import { REQUIRED_MANAGED_LUAU_FILES } from './managed-luau-compiler.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const run = promisify(execFile);
@@ -395,7 +396,7 @@ export async function verifyWindowsBundle(directory) {
   for (const path of [...ELECTRON_REQUIRED, 'resources/app/package.json', ...HOST_FILES.map(file => 'resources/app/' + file),
     'resources/node/node.exe', 'resources/node/LICENSE', 'resources/product/release-manifest.json',
     'resources/product/dist/apps/daemon/src/product-main.js', 'resources/product/dist/apps/mcp/src/main.js',
-    ...REQUIRED_FRONTEND_FILES.map(file => 'resources/product/' + file)]) {
+    ...[...REQUIRED_FRONTEND_FILES, ...REQUIRED_MANAGED_LUAU_FILES].map(file => 'resources/product/' + file)]) {
     if (!seen.has(path.toLowerCase())) throw new Error('Missing required Windows bundle file: ' + path);
   }
   if (!manifest.files.some(file => file.path.startsWith('locales/'))) throw new Error('Missing Electron locales.');

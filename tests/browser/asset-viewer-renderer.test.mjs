@@ -66,7 +66,7 @@ function glb(options = {}) {
   const normal = accessor(geometry.attributes.normal.array, 'VEC3');
   const uv = accessor(geometry.attributes.uv.array, 'VEC2');
   const primitive = { attributes: { POSITION: position, NORMAL: normal, TEXCOORD_0: uv }, material: 0 };
-  const nodes = [{ name: 'FixtureAsset', mesh: 0, scale: [options.units ?? 1, options.units ?? 1, options.units ?? 1], translation: options.translation ?? [0, 0, 0] }];
+  const nodes = [{ name: 'FixtureAsset', mesh: 0, scale: options.scale ?? [options.units ?? 1, options.units ?? 1, options.units ?? 1], translation: options.translation ?? [0, 0, 0], ...(options.rotation ? { rotation: options.rotation } : {}) }];
   const sceneNodes = [0];
   const json = {
     asset: { version: '2.0', generator: 'Arcane owned renderer fixture' },
@@ -81,6 +81,12 @@ function glb(options = {}) {
     json.materials[0].pbrMetallicRoughness.baseColorTexture = { index: 0 };
   }
   if (options.materials) json.materials = Array.from({ length: options.materials }, () => structuredClone(json.materials[0]));
+  if (options.doubleSided) json.materials[0].doubleSided = true;
+  if (options.transparent) json.materials[0].alphaMode = 'BLEND';
+  if (options.transmission) {
+    json.extensionsUsed = ['KHR_materials_transmission'];
+    json.materials[0].extensions = { KHR_materials_transmission: { transmissionFactor: 1 } };
+  }
   if (options.draws) {
     while (nodes.length < options.draws) { sceneNodes.push(nodes.length); nodes.push({ mesh: 0 }); }
   }
@@ -110,7 +116,23 @@ function glb(options = {}) {
     let values = new Float32Array([0, 0, 0, 1, 0, .8660254, 0, .5, 0, 0, 0, 1]), type = 'VEC4', node = 0, path = 'rotation';
     if (options.morph) { values = new Float32Array([0, 1, 0]); type = 'SCALAR'; path = 'weights'; }
     if (options.skin) { values = new Float32Array([0, 0, 0, 0, .8, 0, 0, 0, 0]); type = 'VEC3'; node = 1; path = 'translation'; }
+    if (options.invalidAnimation) values[0] = NaN;
     json.animations = [{ name: 'Fixture motion', samplers: [{ input: times, output: accessor(values, type), interpolation: 'LINEAR' }], channels: [{ sampler: 0, target: { node, path } }] }];
+    if (options.multipleAnimations) {
+      const input = accessor(new Float32Array([0, 1, 3]), 'SCALAR', 5126, { min: [0], max: [3] });
+      const output = accessor(new Float32Array([0, 0, 0, .3, .4, 0, 0, 0, 0]), 'VEC3');
+      json.animations.push({ name: 'Alternate translation', samplers: [{ input, output, interpolation: 'LINEAR' }], channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }] });
+    }
+    if (options.zeroDuration) {
+      json.animations[0].samplers[0].input = accessor(new Float32Array([0]), 'SCALAR', 5126, { min: [0], max: [0] });
+      json.animations[0].samplers[0].output = accessor(new Float32Array([0, 0, 0, 1]), 'VEC4');
+    }
+    // The normalizing parent magnifies this otherwise bounded source animation.
+    // Seeking must enforce the same world-transform limit as advancing frames.
+    if (options.unboundedPose) {
+      json.animations[0].samplers[0].output = accessor(new Float32Array([0, 0, 0, 1e12, 0, 0, 0, 0, 0]), 'VEC3');
+      json.animations[0].channels[0].target.path = 'translation';
+    }
   }
   json.buffers = [{ byteLength: offset, ...(options.externalBuffer ? { uri: options.externalBuffer } : {}) }];
   const text = Buffer.from(JSON.stringify(json)), jsonLength = Math.ceil(text.length / 4) * 4;
@@ -198,6 +220,19 @@ async function fixture(browser, t, sources, options = {}) {
       return remove.call(this, type, fn, opts);
     };
     window.THREE = await import('/vendor/three/build/three.module.js');
+    // Observe the real scene/camera without substituting any rendering logic.
+    const update = THREE.Scene.prototype.updateMatrixWorld;
+    THREE.Scene.prototype.updateMatrixWorld = function (...args) {
+      if (this.background?.isColor) {
+        meter.scene = this;
+        this.traverse(object => {
+          for (const material of Array.isArray(object.material) ? object.material : [object.material]) if (material) meter.materials.add(material);
+        });
+      }
+      return update.apply(this, args);
+    };
+    const updateCamera = THREE.Camera.prototype.updateMatrixWorld;
+    THREE.Camera.prototype.updateMatrixWorld = function (...args) { meter.camera = this; return updateCamera.apply(this, args); };
     for (const [name, key] of [['BufferGeometry', 'geometries'], ['Material', 'materials'], ['Texture', 'textures'], ['Skeleton', 'skeletons']]) {
       const prototype = THREE[name].prototype, dispose = prototype.dispose;
       prototype.dispose = function () { meter.disposed[key]++; meter[key].delete(this); return dispose.call(this); };
@@ -234,8 +269,10 @@ const stats = page => page.evaluate(() => viewer.stats());
 async function idleFrames(page) {
   await page.waitForTimeout(100);
   const before = await stats(page);
+  const animation = await page.evaluate(() => viewer.animationState());
   await page.waitForTimeout(200);
   assert.equal((await stats(page)).renderFrames, before.renderFrames, 'no idle render loop');
+  assert.deepEqual(await page.evaluate(() => viewer.animationState()), animation, 'suspended animation time does not advance');
   assert.equal(await page.evaluate(() => meter.pendingFrames.size), 0, 'no idle pending RAF');
 }
 async function clean(page) {
@@ -253,7 +290,7 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
   const sources = new Map(await Promise.all(['/asset-viewer-runtime.mjs', ...vendorPaths].map(async path => [path, await readFile(resolve(root, 'apps/desktop/public', '.' + path))])));
   sources.set('/', '<!doctype html><html><head><title>Owned asset renderer fixture</title></head><body style="margin:0;background:#181b20"><div id="host" style="width:640px;height:480px"></div></body></html>');
   const browser = await chromium.launch({ headless: true,
-    ...(process.env.ARCANE_VIEWER_BROWSER ? { executablePath: process.env.ARCANE_VIEWER_BROWSER } : process.platform === 'win32' ? { channel: 'msedge' } : {}),
+    ...(process.env.ARCANE_VIEWER_BROWSER ? { executablePath: process.env.ARCANE_VIEWER_BROWSER } : process.platform === 'win32' ? { executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' } : {}),
     args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-background-networking'],
   });
   t.after(() => browser.close());
@@ -265,7 +302,8 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
     const { page, requests, errors } = await fixture(browser, t, sources);
     assert.equal(await page.evaluate(() => meter.contexts), 0, 'import allocates no WebGL context');
     const initial = await page.evaluate(data => start(data), glb({ metal: true }));
-    assert.deepEqual(initial, { triangles: 12, meshes: 1, materials: 1, animations: 0, renderFrames: 0 });
+    assert.deepEqual(initial, { triangles: 12, meshes: 1, materials: 1, animations: 0, renderFrames: 0,
+      dimensions: { x: 2, y: 1, z: Math.fround(.7) }, bounds: { min: { x: -1, y: -.5, z: -Math.fround(.35) }, max: { x: 1, y: .5, z: Math.fround(.35) } }, units: 'meters' });
     await page.waitForFunction(() => viewer.stats().renderFrames > 0);
     const canvas = page.locator('#host canvas');
     assert.equal(await canvas.getAttribute('role'), 'img');
@@ -297,6 +335,169 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
     assert.ok(disposal.disposed.geometries > 0 && disposal.disposed.materials > 0 && disposal.disposed.textures > 0);
     if (proofDir) for (const [name, bytes] of [['rendered', first], ['orbit', orbit], ['zoom', zoom], ['wireframe', wireframe]]) await writeFile(resolve(proofDir, name + '.png'), bytes);
     proof.checks.push({ name: 'visible PBR + mouse/keyboard controls + idle/dispose', pixels, renderer, disposal });
+  });
+
+  await t.test('axis views, bounded programmatic and pointer pan/orbit/zoom, modes and local lighting', async t => {
+    const { page, requests, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => start(data), glb({ texture: true, metal: true }));
+    await page.waitForFunction(() => viewer.stats().renderFrames > 0);
+    const canvas = page.locator('canvas'), initial = await canvas.screenshot();
+    const change = async (method, ...args) => {
+      const frames = await page.evaluate(({ method, args }) => { const frames = viewer.stats().renderFrames; viewer[method](...args); return frames; }, { method, args });
+      await page.waitForFunction(frames => viewer.stats().renderFrames > frames, frames);
+      return canvas.screenshot();
+    };
+    const views = new Map([['perspective', initial]]);
+    for (const view of ['front', 'side', 'top', 'perspective']) {
+      const shot = await change('setView', view), pixels = screenshotPixels(shot);
+      views.set(view, shot);
+      assert.ok(pixels.modelPixels > 10_000, view);
+      assert.ok(pixels.bounds.minX > 5 && pixels.bounds.minY > 5 && pixels.bounds.maxX < pixels.width - 5 && pixels.bounds.maxY < pixels.height - 5, `fitted ${view}`);
+      const camera = await page.evaluate(() => ({ type: meter.camera.type, position: meter.camera.position.toArray(), up: meter.camera.up.toArray() }));
+      assert.equal(camera.type, view === 'perspective' ? 'PerspectiveCamera' : 'OrthographicCamera');
+      if (view !== 'perspective') {
+        const axis = { front: 2, side: 0, top: 1 }[view];
+        assert.ok(camera.position[axis] > 0);
+        for (const i of [0, 1, 2].filter(i => i !== axis)) assert.ok(Math.abs(camera.position[i]) < .0001, view);
+      }
+      if (view === 'top') assert.deepEqual(camera.up, [0, 0, -1]);
+    }
+    assert.ok(views.get('perspective').equals(initial), 'perspective restored');
+    assert.ok(!views.get('front').equals(views.get('side')) && !views.get('top').equals(views.get('front')));
+    const orbited = await change('orbit', .3, .15); assert.ok(!orbited.equals(initial));
+    const panned = await change('pan', 50, 25); assert.ok(!panned.equals(orbited));
+    const zoomed = await change('zoom', 1.2); assert.ok(!zoomed.equals(panned));
+    assert.ok((await change('reset')).equals(initial));
+    const bounds = await canvas.boundingBox();
+    await page.mouse.move(bounds.x + 280, bounds.y + 220); await page.mouse.down({ button: 'right' });
+    await page.mouse.move(bounds.x + 330, bounds.y + 240, { steps: 4 }); await page.mouse.up({ button: 'right' });
+    assert.ok(!(await canvas.screenshot()).equals(initial), 'right drag pans');
+    await change('reset');
+    await canvas.focus(); await page.keyboard.press('Shift+ArrowRight');
+    assert.ok(!(await canvas.screenshot()).equals(initial), 'Shift-arrow pans');
+    await page.evaluate(() => document.querySelector('canvas').blur()); await change('reset');
+    await page.evaluate(() => { window.sourceMaterial = meter.scene.getObjectByName('FixtureAsset').material; });
+    const clay = await change('setMode', 'clay'); assert.ok(!clay.equals(initial));
+    assert.deepEqual(await page.evaluate(() => { const material = meter.scene.getObjectByName('FixtureAsset').material; window.clayMaterial = material; return { type: material.type, map: material.map, metalness: material.metalness }; }), { type: 'MeshStandardMaterial', map: null, metalness: 0 });
+    const wireframe = await change('setMode', 'wireframe'); assert.ok(!wireframe.equals(clay));
+    assert.equal(await page.evaluate(() => meter.scene.getObjectByName('FixtureAsset').material === sourceMaterial && sourceMaterial.wireframe), true);
+    assert.ok((await change('setWireframe', false)).equals(initial), 'legacy false restores source rendering');
+    await change('setMode', 'clay');
+    assert.equal(await page.evaluate(() => meter.scene.getObjectByName('FixtureAsset').material === clayMaterial), true, 'bounded clay cache');
+    await change('setMode', 'rendered');
+    const soft = await change('setLighting', 'soft'), dramatic = await change('setLighting', 'dramatic');
+    assert.ok(!soft.equals(initial) && !dramatic.equals(soft));
+    assert.ok((await change('setLighting', 'studio')).equals(initial), 'studio restored');
+    await change('setView', 'front');
+    await change('zoom', 10); await change('zoom', 10); await page.evaluate(() => viewer.zoom(10));
+    assert.ok(await page.evaluate(() => meter.camera.zoom <= 50), 'orthographic zoom cap');
+    await change('pan', 10_000, 10_000);
+    assert.ok(await page.evaluate(() => meter.camera.position.length() < 20), 'pan target bounded');
+    await change('reset');
+    await page.evaluate(() => { document.querySelector('#host').style.cssText = 'width:180px;height:560px'; });
+    await page.waitForTimeout(100);
+    for (const view of ['front', 'side', 'top']) {
+      const pixels = screenshotPixels(await change('setView', view));
+      assert.ok(pixels.modelPixels > 500 && pixels.bounds.minX > 3 && pixels.bounds.maxX < pixels.width - 3, `portrait ${view}`);
+    }
+    await idleFrames(page);
+    assert.ok(requests.every(url => url.startsWith(origin + '/')));
+    assert.ok((await page.evaluate(() => meter.fetches)).every(url => url.startsWith('blob:')));
+    assert.deepEqual(errors, []);
+    await page.evaluate(() => viewer.dispose()); await clean(page);
+    proof.checks.push({ name: 'real fitted orthographic axes, pan/orbit/zoom caps, reversible clay/wireframe, local lighting and portrait fit' });
+  });
+
+  await t.test('source bounds and dimensions include node world transforms in glTF meters before normalization', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => start(data), glb({ scale: [3, 4, 5], rotation: [0, 0, Math.SQRT1_2, Math.SQRT1_2], translation: [10, 20, 30] }));
+    await page.waitForFunction(() => viewer.stats().renderFrames > 0);
+    const source = await stats(page);
+    assert.equal(source.units, 'meters');
+    for (const [axis, extent, center] of [['x', 4, 10], ['y', 6, 20], ['z', Math.fround(.7) * 5, 30]]) {
+      assert.ok(Math.abs(source.dimensions[axis] - extent) < 1e-6);
+      assert.ok(Math.abs(source.bounds.min[axis] - (center - extent / 2)) < 1e-6);
+      assert.ok(Math.abs(source.bounds.max[axis] - (center + extent / 2)) < 1e-6);
+    }
+    const detached = await page.evaluate(() => {
+      const snapshot = viewer.stats(); snapshot.dimensions.x = -999; snapshot.bounds.min.x = -999;
+      viewer.setView('top'); viewer.setMode('clay'); viewer.pan(20, 20);
+      return viewer.stats();
+    });
+    assert.deepEqual(detached.dimensions, source.dimensions); assert.deepEqual(detached.bounds, source.bounds);
+    await page.evaluate(() => viewer.dispose()); await clean(page); assert.deepEqual(errors, []);
+    proof.checks.push({ name: 'source/world AABB, nonuniform scale, rotation, translated origin, glTF meters, detached stats' });
+  });
+
+  await t.test('alternate clips, exact seconds seek, speed, looping, nonloop end, paused poses and detached snapshots', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => start(data), glb({ animation: true, multipleAnimations: true }));
+    await page.waitForFunction(() => viewer.stats().renderFrames > 0);
+    const source = await stats(page), canvas = page.locator('canvas'), initial = await canvas.screenshot();
+    assert.deepEqual(await page.evaluate(() => viewer.animations()), [{ index: 0, name: 'Fixture motion', duration: 2 }, { index: 1, name: 'Alternate translation', duration: 3 }]);
+    assert.deepEqual(await page.evaluate(() => viewer.animationState()), { index: 0, time: 0, duration: 2, playing: false, speed: 1, loop: true });
+    await page.evaluate(() => { const clips = viewer.animations(); clips[0].duration = 999; viewer.animationState().time = 999; viewer.setAnimationSpeed(2); viewer.seekAnimation(1); });
+    await page.waitForFunction(() => viewer.stats().renderFrames > 1);
+    assert.equal(await page.evaluate(() => viewer.animationState().time), 1, 'seek seconds independent of speed');
+    assert.ok(!(await canvas.screenshot()).equals(initial), 'seek renders real rotated pose');
+    await idleFrames(page);
+    await page.evaluate(() => viewer.selectAnimation(1));
+    assert.deepEqual(await page.evaluate(() => viewer.animationState()), { index: 1, time: 0, duration: 3, playing: false, speed: 2, loop: true });
+    assert.equal(await page.evaluate(() => meter.scene.getObjectByName('FixtureAsset').quaternion.angleTo(new THREE.Quaternion())), 0, 'alternate clip restores previous rotation track');
+    await page.evaluate(() => viewer.seekAnimation(1));
+    assert.deepEqual(await page.evaluate(() => meter.scene.getObjectByName('FixtureAsset').position.toArray()), [Math.fround(.3), Math.fround(.4), 0]);
+    await page.evaluate(() => { viewer.seekAnimation(2.9); viewer.setAnimationPlaying(true); });
+    await page.waitForFunction(() => viewer.animationState().time < 1);
+    assert.equal(await page.evaluate(() => viewer.animationState().playing), true, 'loop wraps');
+    await page.evaluate(() => { viewer.setAnimationLoop(false); viewer.seekAnimation(2.9); });
+    await page.waitForFunction(() => !viewer.animationState().playing);
+    assert.equal(await page.evaluate(() => viewer.animationState().time), 3, 'nonloop clamps at duration');
+    await idleFrames(page);
+    await page.evaluate(() => viewer.setAnimationPlaying(true));
+    assert.ok(await page.evaluate(() => viewer.animationState().time < 3), 'playing at end restarts');
+    await page.evaluate(() => { viewer.selectAnimation(0); viewer.setAnimationSpeed(.25); });
+    assert.equal(await page.evaluate(() => viewer.animationState().index), 0);
+    assert.equal(await page.evaluate(() => viewer.animationState().playing), true, 'selection preserves playback intent');
+    await page.waitForFunction(() => viewer.animationState().time > 0);
+    await page.evaluate(() => viewer.setAnimationPlaying(false));
+    const paused = await page.evaluate(() => viewer.animationState()); await idleFrames(page);
+    assert.deepEqual(await page.evaluate(() => viewer.animationState()), paused);
+    assert.deepEqual((await stats(page)).dimensions, source.dimensions);
+    await page.evaluate(() => viewer.dispose()); await clean(page); assert.deepEqual(errors, []);
+    proof.checks.push({ name: 'real alternate clips, exact paused seek, speed range, loop wrap, nonloop completion/restart and immutable metadata' });
+  });
+
+  await t.test('strict validation, no-animation and zero-duration states, disposed mutators are no-ops', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => start(data), glb({ animation: true }));
+    await idleFrames(page);
+    const invalid = await page.evaluate(() => {
+      const calls = [() => viewer.setView('diagonal'), () => viewer.setMode('solid'), () => viewer.setLighting('__proto__'),
+        () => viewer.setWireframe(1), () => viewer.setAnimationPlaying('true'), () => viewer.setAnimationLoop(null),
+        () => viewer.selectAnimation(-1), () => viewer.selectAnimation(.5), () => viewer.selectAnimation(1),
+        () => viewer.seekAnimation(-1), () => viewer.seekAnimation(2.01), () => viewer.seekAnimation(NaN),
+        () => viewer.setAnimationSpeed(.24), () => viewer.setAnimationSpeed(2.01), () => viewer.setAnimationSpeed('1'),
+        () => viewer.orbit(Infinity, 0), () => viewer.orbit(0, 7), () => viewer.pan(10_001, 0), () => viewer.pan(0, NaN),
+        () => viewer.zoom(0), () => viewer.zoom(11), () => viewer.zoom(undefined)];
+      const before = viewer.animationState(), frames = viewer.stats().renderFrames;
+      const failures = calls.map(call => { try { call(); return 'accepted'; } catch (error) { return error.name; } });
+      const after = viewer.animationState();
+      viewer.dispose();
+      const disposed = calls.map(call => { try { call(); return 'no-op'; } catch { return 'threw'; } });
+      viewer.reset(); viewer.dispose();
+      return { before, after, frames, finalFrames: viewer.stats().renderFrames, failures, disposed };
+    });
+    assert.deepEqual(invalid.after, invalid.before); assert.equal(invalid.frames, invalid.finalFrames);
+    assert.ok(invalid.failures.every(name => name === 'TypeError' || name === 'RangeError'));
+    assert.ok(invalid.disposed.every(result => result === 'no-op')); await clean(page);
+    await page.evaluate(data => start(data), glb());
+    assert.deepEqual(await page.evaluate(() => { viewer.setAnimationPlaying(true); viewer.seekAnimation(0); return { clips: viewer.animations(), state: viewer.animationState(), has: viewer.hasAnimations }; }),
+      { clips: [], state: { index: -1, time: 0, duration: 0, playing: false, speed: 1, loop: true }, has: false });
+    await idleFrames(page); await page.evaluate(() => viewer.dispose()); await clean(page);
+    await page.evaluate(data => start(data), glb({ animation: true, zeroDuration: true }));
+    assert.deepEqual(await page.evaluate(() => { viewer.setAnimationPlaying(true); viewer.seekAnimation(0); return viewer.animationState(); }), { index: 0, time: 0, duration: 0, playing: false, speed: 1, loop: true });
+    await idleFrames(page); await page.evaluate(() => viewer.dispose()); await clean(page); assert.deepEqual(errors, []);
+    proof.checks.push({ name: 'strict input validation before mutation, no/zero-duration animation, invalid disposed calls harmless' });
   });
 
   await t.test('play/pause, host visibility, zero size, intersection, reduced motion and document visibility', async t => {
@@ -351,6 +552,12 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
       await page.waitForFunction(() => viewer.stats().renderFrames > 0);
       const canvas = page.locator('canvas'), before = await canvas.screenshot();
       assert.ok(screenshotPixels(before).modelPixels > 10_000);
+      await page.evaluate(() => viewer.setMode('clay'));
+      const clay = await canvas.screenshot();
+      await page.evaluate(() => viewer.seekAnimation(1));
+      assert.ok(!(await canvas.screenshot()).equals(clay), `clay preserves native deformation ${JSON.stringify(options)}`);
+      await page.evaluate(() => { viewer.setMode('rendered'); viewer.seekAnimation(0); });
+      assert.ok((await canvas.screenshot()).equals(before), 'source material and initial deformation restored');
       await page.evaluate(() => viewer.setAnimationPlaying(true)); await page.waitForTimeout(320);
       const after = await canvas.screenshot(); assert.ok(!before.equals(after), JSON.stringify(options));
       await page.evaluate(() => viewer.dispose());
@@ -394,7 +601,10 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
       [{ translation: [1e14, 0, 0] }, /world transforms/],
       [{ materials: 65 }, /64 material/],
       [{ draws: 257 }, /preview limits/],
+      [{ draws: 129, transparent: true, doubleSided: true }, /preview limits/],
+      [{ draws: 129, transmission: true }, /256 draw-call/],
       [{ tooManyTriangles: true }, /preview limits/],
+      [{ animation: true, invalidAnimation: true }, /invalid animation/],
     ];
     for (const [options, pattern] of cases) {
       const result = await page.evaluate(async data => { try { await start(data); return 'accepted'; } catch (error) { return error.message; } }, glb(options));
@@ -420,6 +630,57 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
     await page.waitForFunction(() => meter.disposed.bitmaps === 1);
     await clean(page); assert.deepEqual(errors, []);
     proof.checks.push({ name: 'abort pending native decode, immediate AbortError, late bitmap close, no canvas/RAF/listener/observer/blob leak' });
+  });
+
+  await t.test('a new host owner cancels a slow parse and releases its late embedded bitmap', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => {
+      const decode = window.createImageBitmap.bind(window);
+      window.createImageBitmap = async (...args) => { const bitmap = await decode(...args); window.bitmapReady = true; await new Promise(resolve => { window.releaseBitmap = resolve; }); return bitmap; };
+      window.pending = start(data).then(() => 'accepted', error => error.name);
+    }, glb({ texture: true }));
+    await page.waitForFunction(() => bitmapReady);
+    await page.evaluate(data => start(data), glb());
+    assert.equal(await page.evaluate(() => pending), 'AbortError', 'replaced parse settles promptly');
+    await page.waitForFunction(() => viewer.stats().renderFrames > 0);
+    await page.evaluate(() => releaseBitmap());
+    await page.waitForFunction(() => meter.disposed.bitmaps === 1);
+    assert.equal(await page.locator('#host canvas').count(), 1);
+    await page.evaluate(() => viewer.dispose()); await clean(page); assert.deepEqual(errors, []);
+    proof.checks.push({ name: 'slow parse host replacement, prompt cancellation, late native bitmap disposal, surviving new owner' });
+  });
+
+  await t.test('status callbacks expose only human-safe reasons for loader/render errors and unsafe sought poses', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    const marker = 'C:/private/project/secret.glb?token=fixture-private';
+    const failure = await page.evaluate(async ({ data, marker }) => {
+      const compute = THREE.BufferGeometry.prototype.computeBoundingBox;
+      THREE.BufferGeometry.prototype.computeBoundingBox = () => { throw new Error(marker); };
+      try { await start(data); return 'accepted'; } catch (error) { return error.message; }
+      finally { THREE.BufferGeometry.prototype.computeBoundingBox = compute; }
+    }, { data: glb(), marker });
+    assert.equal(failure, marker);
+    assert.equal(await page.evaluate(() => statuses.at(-1)), '3D preview unavailable: The asset could not be displayed safely.');
+    await clean(page);
+    await page.evaluate(data => start(data), glb());
+    await page.waitForFunction(() => viewer.stats().renderFrames > 0);
+    await page.evaluate(marker => {
+      window.updateScene = THREE.Scene.prototype.updateMatrixWorld;
+      THREE.Scene.prototype.updateMatrixWorld = function (...args) { if (this === meter.scene) throw new Error(marker); return updateScene.apply(this, args); };
+      viewer.setLighting('soft');
+    }, marker);
+    await page.waitForFunction(() => statuses.some(message => message === '3D preview stopped: The asset could not be displayed safely.'));
+    await page.evaluate(() => { THREE.Scene.prototype.updateMatrixWorld = updateScene; });
+    await clean(page);
+    await page.evaluate(data => start(data), glb({ animation: true, units: 1e-6, unboundedPose: true }));
+    await page.waitForFunction(() => viewer.stats().renderFrames > 0);
+    const unsafe = await page.evaluate(() => { try { viewer.seekAnimation(1); return 'accepted'; } catch (error) { return error.message; } });
+    assert.match(unsafe, /world transforms/);
+    assert.equal(await page.evaluate(() => viewer.animationState().playing), false);
+    await clean(page);
+    assert.ok((await page.evaluate(() => statuses)).every(message => !message.includes(marker) && !message.includes('private') && !message.includes('token=')));
+    assert.deepEqual(errors, []);
+    proof.checks.push({ name: 'raw loader/render path redaction, synchronous seek world-bound enforcement, full failure cleanup' });
   });
 
   await t.test('owned host replacement, already aborted signals and WebGL context loss', async t => {

@@ -1,7 +1,7 @@
 --!strict
 local Validation = {}
 Validation.PROTOCOL = 1
-Validation.VERSION = "0.1.3"
+Validation.VERSION = "0.1.7"
 Validation.ARGUMENT_BYTES = 256 * 1024
 Validation.RESULT_BYTES = 512 * 1024
 Validation.SOURCE_BYTES = 100 * 1024
@@ -12,7 +12,7 @@ Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read"})
-Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "scene.restore"})
+Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -144,6 +144,20 @@ function Validation.geometryProperties(legacy: any): any
 			if expected[name] == nil or instance[name] ~= decoded[name] then return false end
 		end
 		return true
+	end
+
+	function codec.assignedMatches(instance: any, name: string, requested: any): boolean
+		if name == "Orientation" then
+			-- Euler values wrap and can have equivalent gimbal representations.
+			-- Check the actual rotation, not a relaxed expected-baseline match.
+			local desired = {CFrame.fromOrientation(math.rad(requested.X), math.rad(requested.Y), math.rad(requested.Z)):GetComponents()}
+			local actual = {instance.CFrame:GetComponents()}
+			for index = 4, 12 do
+				if math.abs(actual[index] - desired[index]) > 0.000001 then return false end
+			end
+			return true
+		end
+		return legacy.assignedMatches(instance, name, requested)
 	end
 	return table.freeze(codec)
 end

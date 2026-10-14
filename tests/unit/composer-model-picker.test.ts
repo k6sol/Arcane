@@ -7,7 +7,6 @@ import { createServer } from 'node:http';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
-import type { Page } from 'playwright-core';
 import { CodexChat, CodexChatApi, type ChatState, type ChatAction, type ChatActionRecord } from '../../apps/desktop/src/codex-chat.js';
 import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model.js';
 
@@ -101,6 +100,10 @@ test('markup exposes exact setup/preview hooks and a hidden nonmodal picker with
   assert.doesNotMatch(gate, /\bhidden\b/); assert.match(gate, /aria-labelledby="provider-login-heading"/);
   assert.match(html, /id="provider-login-start"[^>]*disabled/);
   assert.match(html, /id="codex-model-popover"[^>]*role="dialog"[^>]*aria-modal="false"[^>]*hidden/);
+  const implementation = html.match(/<div[^>]*class="composer-model-state"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(implementation); assert.match(implementation[0], /\bhidden\s+inert\s+aria-hidden="true"/);
+  for (const id of ['codex-model', 'codex-effort', 'codex-select']) assert.match(implementation[1]!, new RegExp('id="' + id + '"'));
+  assert.ok(html.indexOf(implementation[0]) > html.indexOf('id="codex-model-popover"'));
   assert.match(html, /id="codex-picker-effort-slider"[^>]*type="range"[^>]*step="1"/);
   assert.match(html, /id="codex-picker-model-list"[^>]*hidden/);
   assert.match(html, /id="codex-picker-apply"[^>]*hidden/);
@@ -197,12 +200,6 @@ async function browserFixture(t: test.TestContext, initial = state()) {
     fail: (value: boolean) => { readFailed = value; }, handler: (value: typeof handler) => { handler = value; } };
 }
 
-async function previewEffort(page: Page, index: number) {
-  await page.locator('#codex-picker-effort-slider').evaluate((slider: HTMLInputElement, value: number) => {
-    slider.value = String(value); slider.dispatchEvent(new Event('input', { bubbles: true }));
-  }, index);
-}
-
 test('browser chip opens reasoning; model list searches reported rows and returns to summary with guarded autoapply', { skip: !browserModule, timeout: 30000 }, async t => {
   const f = await browserFixture(t), { page } = f;
   const draft = 'Unsent draft 🧩\nKeep whitespace.  '; await page.locator('#codex-composer').fill(draft);
@@ -263,13 +260,9 @@ test('browser chip opens reasoning; model list searches reported rows and return
   assert.equal(await page.locator('#codex-composer').inputValue(), draft); assert.deepEqual(f.posts.map(input => input.action), ['select']);
 });
 
-test('browser model click autoapplies an exact staged pair through the existing select action', { skip: !browserModule, timeout: 30000 }, async t => {
+test('browser native reasoning change applies an exact pair once and rechoosing it is a no-op after resume', { skip: !browserModule, timeout: 30000 }, async t => {
   const f = await browserFixture(t), { page } = f;
-  await f.open(); await previewEffort(page, 1);
-  assert.equal(await page.locator('#codex-picker-effort-value').textContent(), 'Ultra');
-  assert.equal(await page.locator('#codex-effort-label').textContent(), 'low');
-  assert.equal(f.posts.length, 0);
-  await f.list(); await page.locator('[data-picker-model="fixture-alpha"]').click(); await f.settled();
+  await f.open(); await page.locator('#codex-picker-effort-slider').press('End'); await f.settled();
   assert.equal(f.posts.length, 1);
   assert.deepEqual(f.posts[0], { requestId: f.posts[0]!.requestId, connectionId: f.observed().snapshot!.connectionId, action: 'select', model: 'fixture-alpha', effort: 'ultra' });
   assert.equal(await page.locator('#codex-effort-label').textContent(), 'ultra');
@@ -279,7 +272,7 @@ test('browser model click autoapplies an exact staged pair through the existing 
   assert.equal(f.posts.length, 1, 'Rechoosing the acknowledged pair is a no-op');
   await page.keyboard.press('Escape');
   await page.evaluate(() => { (window as any).fixtureChat.stop(); (window as any).fixtureChat.resume(); }); await f.refresh();
-  await f.open(); await previewEffort(page, 0); await f.list(); await page.locator('[data-picker-model="fixture-alpha"]').click(); await f.settled();
+  await f.open(); await page.locator('#codex-picker-effort-slider').press('Home'); await f.settled();
   assert.equal(f.posts.length, 2, 'Resume binds a single model selection handler');
 });
 
@@ -338,7 +331,7 @@ test('browser select waits for ACK, preserves grants/drafts and requires provena
   assert.equal(f.posts.length, 1, 'Draft context review never submits a turn');
 });
 
-test('browser pre-thread model choice starts no thread and the settings fallback shares the applied display', { skip: !browserModule, timeout: 30000 }, async t => {
+test('browser pre-thread model choice uses only the visible chat picker and starts no thread', { skip: !browserModule, timeout: 30000 }, async t => {
   const initial = state(); initial.snapshot!.thread = null; initial.snapshot!.selection = null; delete initial.workflowModel;
   const f = await browserFixture(t, initial), { page } = f;
   await page.locator('#codex-composer').fill('A draft before the thread exists.');
@@ -353,11 +346,12 @@ test('browser pre-thread model choice starts no thread and the settings fallback
   assert.equal(await page.locator('#settings-drawer').evaluate((drawer: HTMLDialogElement) => drawer.matches(':modal')), true);
   assert.equal(await page.locator('#settings-drawer [data-settings-section]:visible').count(), 1);
   assert.equal(await page.locator('#settings-advanced').isVisible(), true);
-  assert.equal(await page.locator('#codex-model').isVisible(), true);
+  for (const id of ['codex-model', 'codex-effort', 'codex-select']) {
+    assert.equal(await page.locator('#' + id).isVisible(), false, id + ' is an implementation field');
+  }
   assert.equal(await page.evaluate(() => document.activeElement?.id), 'native-conversation-heading');
-  await page.locator('#codex-model').selectOption('fixture-beta'); await page.locator('#codex-effort').selectOption('high');
-  await page.locator('#codex-select').click(); await f.settled();
   await page.locator('[data-settings-close]').click();
+  await f.choose('fixture-beta'); await f.settled();
   assert.equal(await page.locator('#codex-model-trigger').isVisible(), true);
   assert.match((await page.locator('#codex-model-label').textContent())!, /Fixture Beta/);
   assert.equal(await page.locator('#codex-effort-label').textContent(), 'high');
@@ -379,7 +373,6 @@ test('browser rejects optimistic labels and blocks busy, unconfigured, stale and
     else if (guard === 'notReady') next.snapshot!.ready = false; else if (guard === 'connecting') next.connecting = true; else if (guard === 'closing') next.closing = true;
     else next.snapshot!.thread!.turnStatus = guard;
     f.set(next); await f.refresh(); assert.equal(await page.locator('#codex-model-trigger').isDisabled(), true, guard);
-    await page.locator('#codex-select').dispatchEvent('click');
     await page.locator('#codex-model-trigger').dispatchEvent('click');
     assert.equal(await page.locator('#codex-model-popover').isVisible(), false, guard);
     assert.equal(f.posts.length, 1, guard);
@@ -537,6 +530,47 @@ function activeState(status: 'starting' | 'inProgress' | 'cancelling' = 'inProgr
   return initial;
 }
 
+test('browser visible picker stages active and restored unbound owned preferences without changing actual task model or starting native work', { skip: !browserModule, timeout: 30000 }, async t => {
+  const initial = activeState(), f = await browserFixture(t, initial), { page } = f;
+  await page.evaluate(() => (window as any).fixtureChat.enableChatTabs());
+  const actualTaskModel = await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection());
+  let draft = 'Active task next-message draft 🧩\n  '; await page.locator('#codex-composer').fill(draft);
+  await f.choose();
+  assert.match((await page.locator('#codex-model-label').textContent())!, /Fixture Beta/);
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.currentStateView().activeChat.selection), { model: 'fixture-beta', effort: 'high' });
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection()), actualTaskModel);
+  assert.deepEqual(f.observed().snapshot!.thread!.selection, initial.snapshot!.thread!.selection);
+  assert.equal(await page.locator('#codex-submit').getAttribute('aria-label'), 'Stop task');
+  await f.open(); await page.locator('#codex-picker-effort-slider').press('Home');
+  assert.equal(await page.locator('#codex-effort-label').textContent(), 'medium');
+  await page.locator('#codex-composer').press('Enter');
+  draft += '\n'; // An active task leaves Enter as native textarea editing.
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft); assert.deepEqual(f.posts, []);
+  await f.refresh();
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection()), actualTaskModel);
+  assert.deepEqual(f.observed().nativeAssets, initial.nativeAssets); assert.equal(f.observed().snapshot!.thread!.writeGranted, true);
+  if (process.env.ARCANE_UI_SCREENSHOT) {
+    await mkdir(resolve(process.env.ARCANE_UI_SCREENSHOT), { recursive: true });
+    await f.open(); await page.screenshot({ path: join(resolve(process.env.ARCANE_UI_SCREENSHOT), 'composer-active-preference.png') }); await page.keyboard.press('Escape');
+  }
+  const unbound = f.observed(); unbound.busy = false; unbound.snapshot!.thread = null; delete unbound.workflowModel;
+  unbound.nativeAssets = { available: true, sealed: true, granted: false, admissionOpen: false }; f.set(unbound);
+  await page.reload(); await page.waitForFunction(() => (window as any).fixtureReady === true);
+  await page.evaluate(() => (window as any).fixtureChat.enableChatTabs());
+  assert.equal(await page.evaluate(() => (window as any).fixtureChat.currentStateView().activeChat.kind), 'native');
+  assert.equal(await page.evaluate(() => (window as any).fixtureChat.currentStateView().nativeBoundToActiveChat), false);
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+  assert.equal(await page.locator('#codex-effort-label').textContent(), 'medium');
+  assert.equal(await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection()), null);
+  await f.choose('fixture-alpha'); assert.equal(await page.locator('#codex-effort-label').textContent(), 'low');
+  assert.equal(f.observed().snapshot!.thread, null); assert.deepEqual(f.posts, []);
+  await f.open();
+  for (const id of ['codex-model', 'codex-effort', 'codex-select']) {
+    assert.equal(await page.locator('#' + id).isVisible(), false, id + ' remains hidden even while the picker is open');
+    assert.equal(await page.locator('#' + id).evaluate(el => !!el.closest('[hidden][inert][aria-hidden="true"]')), true);
+  }
+});
+
 // Decode only the test's own browser PNG to verify rendered pixels. No image
 // dependency, install, product screenshot mutation or inferred pseudo style.
 function pngPixels(png: Buffer) {
@@ -612,7 +646,7 @@ test('browser Stop interrupts the exact configured active chat once, preserves d
   assert.equal(await page.locator('#codex-submit').getAttribute('data-task-state'), 'active');
   assert.equal(await page.locator('.composer-controls').getAttribute('data-task-active'), 'true');
   assert.equal(await page.locator('#codex-submit').isDisabled(), false, 'Busy native work remains interruptible');
-  assert.equal(await page.locator('#codex-model-trigger').isDisabled(), true);
+  assert.equal(await page.locator('#codex-model-trigger').isDisabled(), false,'An active task may stage a preference while Stop retains its target');
   assert.equal(await page.locator('#codex-submit svg path').getAttribute('fill'), 'currentColor');
   let release!: () => void; const held = new Promise<void>(done => { release = done; }); t.after(() => release());
   f.handler(async input => {

@@ -188,6 +188,11 @@ function http:RequestAsync(request: any): any
 end
 services.HttpService = http
 services.RunService = {IsEdit = function(_self: any): boolean return fixture.edit end}
+-- The plugin-facing property is distinct from Edit RunService.RunState.
+services.StudioTestService = setmetatable({}, {__index = function(_self: any, key: string): any
+	if key == "EditModeActive" then return fixture.edit end
+	return nil
+end})
 services.Selection = {Get = function(_self: any): {any} return fixture.selection or {} end}
 services.CollectionService = {GetTags = function(_self: any, instance: any): {string} return instance._tags or {} end}
 local editor: any = {}

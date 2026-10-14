@@ -4,14 +4,15 @@ import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-
 import { createWorkflowCodeHostVerifier, type WorkflowCodeHostConfiguration } from './workflow-code-host.js';
 import { createAssetConversationHost } from './asset-conversation-host.js';
 import { workflowNativeModel } from './workflow-native-model.js';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
+import { createScriptSourceVerifier, type ScriptSourceVerifier } from '../../../packages/core/src/script-source-verifier.js';
 import { createWorkflowHost } from './workflow-host.js';
 import { workflowRoutes } from './workflow-routes.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { learningRoutes } from './learning-routes.js';
 import type { LearningService } from './learning-service.js';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type ServerResponse } from 'node:http';
+import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ArcaneError, type Connection, type Selection } from '../../../packages/protocol/src/providers.js';
@@ -25,6 +26,44 @@ import { assetRoutes } from './asset-routes.js';
 import { nativeRoutes } from './native-routes.js';
 import { createCodexService, type CodexService, type CodexServiceOptions } from './codex-service.js';
 import { codexRoutes } from './codex-routes.js';
+import {createStudioTestService, type StudioTestService} from './studio-test-service.js';
+import {studioTestRoutes, STUDIO_TEST_HTTP_LIMITS, type StudioTestActorResolver, type StudioTestRouteService} from './studio-test-routes.js';
+
+const unavailableTestMessages = {
+  UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
+  FENCED: 'Playtests are fenced because the retained test journal could not be safely opened. Have a human inspect and reconcile the retained playtest state before restarting Arcane. Do not delete the journal or writer lock to bypass this fence.',
+} as const;
+
+function unavailableStudioTestRoutes(code: keyof typeof unavailableTestMessages, resolveActor: StudioTestActorResolver) {
+  const refuse = (): never => { throw new ArcaneError(code, unavailableTestMessages[code]); };
+  const service: StudioTestRouteService = {
+    requests: { async prepare() { refuse(); }, status: refuse, list: refuse, async cancel() { refuse(); } },
+    humanControl: { async approve(_input, guard) { guard(); refuse(); } },
+    lifecycle: { async close() {} },
+  };
+  const route = studioTestRoutes(service, resolveActor);
+  const status = code === 'FENCED' ? 409 : 503;
+  const json = JSON.stringify({ error: code, message: unavailableTestMessages[code] });
+  const bytes = Buffer.byteLength(json);
+  if (bytes > STUDIO_TEST_HTTP_LIMITS.responseBytes) throw new ArcaneError('RESPONSE_LIMIT', 'Playtest recovery guidance exceeds the response bound.');
+  return (request: IncomingMessage, response: ServerResponse, url: URL, origin: string) => {
+    // Keep all route validation and refusal contracts. Only this rejecting
+    // service's fixed error gets host recovery guidance; ingress errors stay intact.
+    let recovery = false;
+    const presentation = new Proxy(response, {
+      get(target, key) {
+        if (key === 'writeHead') return (sentStatus: number, headers: OutgoingHttpHeaders) => {
+          recovery = sentStatus === status;
+          return target.writeHead(sentStatus, recovery ? { ...headers, 'Content-Length': bytes } : headers);
+        };
+        if (key === 'end') return (body: string) => target.end(recovery ? json : body);
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return route(request, presentation, url, origin);
+  };
+}
 
 interface Options {
   cwd: string;
@@ -43,6 +82,10 @@ interface Options {
   codexConnect?: CodexServiceOptions['connect'];
   /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
   workflowCodeVerification?: WorkflowCodeHostConfiguration;
+  /** Trusted/test-only borrowed verifier. Never accepted from HTTP or agent data. */
+  scriptSourceVerifier?: ScriptSourceVerifier;
+  /** Borrowed trusted fixture seam; HTTP can never supply a test backend. */
+  studioTestService?: StudioTestService;
 }
 export async function createConnectionLab(options: Options) {
   const token = randomBytes(32).toString('hex');
@@ -54,7 +97,10 @@ export async function createConnectionLab(options: Options) {
     const bearer = typeof value==='string' && /^Bearer [a-f0-9]{64}(?![\s\S])/.test(value) ? value.slice(7) : '';
     return nativeAssetRegistry?.recognizes(bearer) ? bearer : agentToken;
   };
-  const bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, coreAgentToken) : null;
+  let bridge: ReturnType<typeof studioRoutes> | null = null;
+  let ownedSourceVerifier: ScriptSourceVerifier | null = null;
+  let ownedTests: StudioTestService | null = null;
+  let testApi: ReturnType<typeof studioTestRoutes> | null = null;
   const native = options.studioStore ? nativeRoutes() : null;
   const learning = options.learningService ? learningRoutes(options.learningService) : null;
   const store = new SelectionStore(options.stateDirectory);
@@ -78,6 +124,39 @@ export async function createConnectionLab(options: Options) {
   let workflow: ReturnType<typeof createWorkflowHost> | null = null;
   let conversationAssets: ReturnType<typeof createAssetConversationHost> | null = null;
   try {
+    if (options.studioStore && options.workflowCodeVerification && !options.scriptSourceVerifier) {
+      const directory = join(options.stateDirectory, 'studio-source-verification');
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      try { ownedSourceVerifier = await createScriptSourceVerifier({ compiler:options.workflowCodeVerification.compiler, directory:await realpath(directory) }); }
+      catch { /* Failed trusted preflight leaves activation unavailable, never a fallback. */ }
+    }
+    bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, coreAgentToken, options.scriptSourceVerifier ?? ownedSourceVerifier) : null;
+    if(options.studioStore){
+      const resolveTestActor: StudioTestActorResolver = request => {
+        const bearer=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
+        if(bearer===token)return {kind:'human',id:'human'};
+        if(bearer.length>0&&bearer===coreAgentToken(request))return {kind:'agent',id:'agent-'+createHash('sha256').update(bearer).digest('hex')};
+        return null;
+      };
+      let tests=options.studioTestService??null;
+      if(!tests){
+        let unavailableCode: keyof typeof unavailableTestMessages = 'UNAVAILABLE';
+        try{
+          const manifest=JSON.parse(await readFile(join(options.cwd,'plugin','build','manifest.json'),'utf8')) as {artifacts:{name:string;sha256:string}[]};
+          const source=await readFile(join(options.cwd,'plugin','build','ArcaneLocalBridge.lua'));
+          const sourceHash=createHash('sha256').update(source).digest('hex');
+          if(manifest.artifacts.find(a=>a.name==='ArcaneLocalBridge.lua')?.sha256!==sourceHash)throw new Error('Plugin source integrity mismatch');
+          // Once source verification passes, any failed journal initialization
+          // is unknown retained state. Never remove its lock or try a fresh ledger.
+          unavailableCode='FENCED';
+          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:options.studioStore,pluginArtifactHash:sourceHash});tests=ownedTests;
+        }catch{
+          stateWarnings.push(unavailableTestMessages[unavailableCode]);
+          testApi=unavailableStudioTestRoutes(unavailableCode,resolveTestActor);
+        }
+      }
+      if(tests)testApi=studioTestRoutes(tests,resolveTestActor);
+    }
     if (options.workStore) {
       associations = new ConversationWorkStore({
         directory: join(options.stateDirectory, 'conversation-work'),
@@ -122,6 +201,8 @@ export async function createConnectionLab(options: Options) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
     nativeAssetRegistry?.close();
+    ownedSourceVerifier?.dispose();
+    try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
     try { associations?.close(); } catch { /* Preserve original failure. */ }
     try { await codex?.close(); } catch { /* Preserve original failure. */ }
@@ -138,7 +219,7 @@ export async function createConnectionLab(options: Options) {
   const server = createServer(async (request, response) => {
     if (shuttingDown) { response.writeHead(503, {'Connection': 'close'}); response.end(); return; }
     response.setHeader('Referrer-Policy', 'no-referrer');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' blob:; img-src 'self' blob:; object-src 'none'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
     try {
       if (request.headers.host !== new URL(origin).host) throw new ArcaneError('HOST', 'Unexpected local host.');
       const url = new URL(request.url ?? '/', origin);
@@ -164,6 +245,15 @@ export async function createConnectionLab(options: Options) {
           ['/task-usage-ui.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage-ui.js'), 'text/javascript']],
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
+          ['/asset-viewer.js', [join(options.cwd, 'dist/apps/desktop/src/asset-viewer.js'), 'text/javascript']],
+          ['/automatic-asset-previews.js', [join(options.cwd, 'dist/apps/desktop/src/automatic-asset-previews.js'), 'text/javascript']],
+          ['/playtest-panel.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-panel.js'), 'text/javascript']],
+          ['/glb-preflight.js', [join(options.cwd, 'dist/apps/desktop/src/glb-preflight.js'), 'text/javascript']],
+          ['/asset-viewer-runtime.mjs', [join(options.cwd, 'apps/desktop/public/asset-viewer-runtime.mjs'), 'text/javascript']],
+          ...[
+            'build/three.module.js', 'build/three.core.js', 'examples/jsm/loaders/GLTFLoader.js',
+            'examples/jsm/controls/OrbitControls.js', 'examples/jsm/utils/BufferGeometryUtils.js', 'examples/jsm/utils/SkeletonUtils.js'
+          ].map(path => ['/vendor/three/' + path, [join(options.cwd, 'apps/desktop/public/vendor/three', path), 'text/javascript']] as [string, [string, string]]),
           ['/learning-panel.js', [join(options.cwd, 'dist/apps/desktop/src/learning-panel.js'), 'text/javascript']],
           ['/desktop-verification.js', [join(options.cwd, 'dist/apps/desktop/src/desktop-verification.js'), 'text/javascript']],
           ['/provider-setup.js',[join(options.cwd,'dist/apps/desktop/src/provider-setup.js'),'text/javascript']],
@@ -179,6 +269,7 @@ export async function createConnectionLab(options: Options) {
         response.writeHead(200, { 'Content-Type': asset[1] + (asset[1].startsWith('image/') ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(data); return;
       }
+      if(testApi&&await testApi(request,response,url,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;
       if (learning && await learning(request,response,url,token,origin,agentToken)) return;
       if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
@@ -219,6 +310,8 @@ export async function createConnectionLab(options: Options) {
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
     nativeAssetRegistry?.close();
+    ownedSourceVerifier?.dispose();
+    try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
     try { associations?.close(); } catch { /* Preserve listener failure. */ }
     try { await codex?.close(); } catch { /* Preserve listener failure. */ }
@@ -232,13 +325,14 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; nativeAssetRegistry?.close();
+      shuttingDown = true; nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
           .catch(error => error as Error);
         server.closeAllConnections();
         const errors: unknown[] = [];
+        try { await ownedTests?.lifecycle.close(); } catch (error) { errors.push(error); }
         try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
         try { associations?.close(); } catch (error) { errors.push(error); }
         try { await codex?.close(); } catch (error) { errors.push(error); }

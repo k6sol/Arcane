@@ -7,8 +7,9 @@ import { object, textField } from '../../../packages/protocol/src/studio.js';
 import type { StudioStore } from '../../../packages/storage/src/studio-store.js';
 import type { WorkStore } from '../../../packages/storage/src/work-store.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
+import type { ScriptSourceVerifier } from '../../../packages/core/src/script-source-verifier.js';
 
-export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken: string | ((request: IncomingMessage) => string) = '') {
+export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken: string | ((request: IncomingMessage) => string) = '', sourceVerifier: ScriptSourceVerifier | null = null) {
   // Canonical host identity, never supplied by a browser/model or inferred from UI text.
   const project = workflowProjectIdentity(projectPath);
   let attempts: number[] = [];
@@ -47,7 +48,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         send(404, { error: 'NOT_FOUND', message: 'Unknown bridge endpoint.' }); return true;
       }
       if (request.method !== 'POST') { send(405, { error: 'METHOD', message: 'Expected POST.' }); return true; }
-      if (['/v1/plugin/pair','/v1/plugin/connect'].includes(url.pathname)) {
+      if (['/v1/plugin/pair','/v1/plugin/connect','/v1/plugin/status'].includes(url.pathname)) {
         const now = Date.now(); attempts = attempts.filter(t => now - t < 60000);
         if (attempts.length >= 30) { send(429, { error: 'RATE_LIMIT', message: 'Pairing rate limit; wait one minute.' }); return true; }
         attempts.push(now);
@@ -56,12 +57,16 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       const input = await readBridgeJson(request);
       if (agent && !matches(expectedAgent())) throw new ArcaneError('SCOPE', 'The native agent connection changed before its operation.');
       const a = object(input);
+      const activationGuard = () => {
+        if (response.destroyed || (agent && !matches(expectedAgent()))) throw new ArcaneError('SCOPE', 'The native connection changed before its operation.');
+      };
       if (url.pathname === '/v1/product/mcp-token') { send(200, { token: expectedAgent(), scopes: ['studio-granted-commands', 'work-coordination', 'fixed-template-assets'], canReview: false, expires: 'daemon lifetime' }); return true; }
       if (plugin) {
+        if (url.pathname === '/v1/plugin/status') {send(200,store.connectionStatusWithKey(a,Number(new URL(origin).port)));return true;}
         if (url.pathname === '/v1/plugin/connect') {send(200,store.connectWithKey(a,Number(new URL(origin).port)));return true;}
         if (url.pathname === '/v1/plugin/pair') { send(200, store.pair(a)); return true; }
         const sessionId = textField(a.sessionId, 'session ID'); store.authenticate(sessionId, bearer);
-        if (url.pathname === '/v1/plugin/poll') send(200, { commands: store.poll(sessionId) });
+        if (url.pathname === '/v1/plugin/poll') send(200, { commands: store.poll(sessionId, a.observation) });
         else if (url.pathname === '/v1/plugin/result') { store.result(a); send(200, { accepted: true }); }
         else if (url.pathname === '/v1/plugin/disconnect') { store.revoke(sessionId); send(200, { revoked: true }); }
         else send(404, { error: 'NOT_FOUND', message: 'Unknown plugin endpoint.' });
@@ -81,12 +86,12 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       else if (url.pathname === '/v1/studio/keys/revoke') {store.revokeKey(textField(a.keyId,'key ID'));send(200,{revoked:true});}
       else if (url.pathname === '/v1/studio/pairing') send(200, store.createGrant(a));
       else if (url.pathname === '/v1/studio/revoke') { store.revoke(textField(a.sessionId, 'session ID')); send(200, { revoked: true }); }
-      else if (url.pathname === '/v1/studio/commands') send(200, { command: store.enqueue(a) });
-      else if (url.pathname === '/v1/studio/restore') send(200, { command: store.restore(a) });
+      else if (url.pathname === '/v1/studio/commands') send(200, { command: await store.enqueueVerified(a, sourceVerifier, activationGuard) });
+      else if (url.pathname === '/v1/studio/restore') send(200, { command: await store.restoreVerified(a, sourceVerifier, activationGuard) });
       else send(404, { error: 'NOT_FOUND', message: 'Unknown bridge endpoint.' });
     } catch (error) {
       const known = error instanceof ArcaneError; const code = known ? error.code : 'INTERNAL';
-      const status = code === 'AUTH' ? 401 : ['ORIGIN', 'SCOPE', 'READ_ONLY'].includes(code) ? 403 : code === 'BUSY' ? 429 : ['RECEIPT_CONFLICT', 'IDEMPOTENCY', 'RECONCILIATION', 'REVOKED', 'COMMAND_STATE'].includes(code) ? 409 : known ? 400 : 500;
+      const status = ['AUTH','KEY_REJECTED'].includes(code) ? 401 : ['ORIGIN', 'SCOPE', 'READ_ONLY'].includes(code) ? 403 : code === 'BUSY' ? 429 : ['RECEIPT_CONFLICT', 'IDEMPOTENCY', 'RECONCILIATION', 'REVOKED', 'COMMAND_STATE'].includes(code) ? 409 : known ? 400 : 500;
       if (!response.destroyed && !response.headersSent) send(status, { error: code, message: known ? error.message : 'Local bridge operation failed; inspect local receipts. Provider credentials are not involved.' });
     }
     return true;

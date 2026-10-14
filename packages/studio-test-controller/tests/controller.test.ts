@@ -218,9 +218,15 @@ test('host status callbacks cannot disrupt cleanup or grant control authority', 
   const review = await controller.stop({ runId: start.runId }); assert.equal(review.cleanup, 'complete');
 });
 
-test('real timer callbacks stop a generic test without status polling driving execution', async t => {
+test('real watchdog stops a delayed observation interval without status polling driving execution', async t => {
   const { systemScheduler } = await import('../src/contracts.js');
-  const real = await fixture({ scheduler: systemScheduler, durationMs: 100, controllerTimeout: 1000, adapterTimeout: 1000 }); t.after(real.close);
+  // Real fsynced admission/start records need time to enter the waiting phase;
+  // a 100 ms total run can finish naturally before its timer callback on Windows.
+  // The test still uses the real timer and never pumps status to advance it.
+  // Deliberately delay short interval timers so the actual deadline callback,
+  // rather than the observation loop's natural deadline check, owns stopping.
+  const scheduler={...systemScheduler,schedule(ms:number,callback:()=>void){return systemScheduler.schedule(ms<=100?ms+200:ms,callback);}};
+  const real = await fixture({ scheduler, durationMs: 1000, controllerTimeout: 1000, adapterTimeout: 1000 }); t.after(real.close);
   const runId = await real.launch();
   const review = await real.control.requests.wait({ runId });
   assert.equal(review.outcome, 'succeeded'); assert.equal(review.cleanup, 'complete'); assert.equal(real.effects().length, 2);

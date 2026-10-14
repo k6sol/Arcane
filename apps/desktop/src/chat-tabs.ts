@@ -61,6 +61,8 @@ export class ChatTabs {
   private presentationRevision = 0;
   private catalogueRevision = 0;
   private readonly recordings = new Map<string, HistoryBinding>();
+  private readonly preferredSelections = new Set<string>();
+  private readonly observedSelections = new Set<string>();
   private readonly preferences = new Map<string,string>();
   private readonly cleanup: (()=>void)[] = [];
   private storage: Pick<Storage,'getItem'|'setItem'> | undefined;
@@ -140,6 +142,7 @@ export class ChatTabs {
     let selectionChanged=false;
     if (this.projectPath !== state.projectPath) {
       this.persist(); this.projectPath = state.projectPath; this.rows = []; this.activeKey = null; this.recordings.clear();
+      this.preferredSelections.clear();this.observedSelections.clear();
       this.presentationRevision++;this.persistenceDirty=true;
       if(this.options.preferences&&this.nativeProject!==state.projectPath){this.nativeReady=false;this.nativeQueued=null;this.nativeGeneration++;}
       this.restore(state.projectPath);
@@ -161,6 +164,14 @@ export class ChatTabs {
     }
     for (const row of this.rows) if (row.kind==='native') {
       const selection=this.catalogueByKey.get(row.key)!.selection;
+      // Saved model/effort fields are per-chat preferences, never native proof.
+      // Retain a restored/staged choice until its actual native ACK agrees.
+      if(!this.observedSelections.has(row.key)&&row.selection&&!sameSelection(row.selection,selection))this.preferredSelections.add(row.key);
+      this.observedSelections.add(row.key);
+      if(this.preferredSelections.has(row.key)){
+        if(sameSelection(row.selection,selection))this.preferredSelections.delete(row.key);
+        else continue;
+      }
       if(!sameSelection(row.selection,selection)){row.selection=structuredClone(selection);this.persistenceDirty=true;selectionChanged=true;}
     }
     if (binding) this.recordings.set(nativeChatKey(binding),binding);
@@ -187,12 +198,14 @@ export class ChatTabs {
     if (existing) return existing;
     if (this.rows.length >= CHAT_TAB_LIMITS.open) return null;
     const tab: Tab = {key,localId:crypto.randomUUID(),title:'Chat',tool:'all',previewOpen:false,kind:'native',provider:'codex',projectPath:saved.projectPath,threadId:saved.threadId,sessionId:saved.sessionId,selection:structuredClone(saved.selection),draft:'',workflowDraft:false};
+    // This tab was created from an observed native selection, not restored prefs.
+    this.observedSelections.add(key);
     this.rows.push(tab);this.presentationRevision++;this.persistenceDirty=true; return tab;
   }
   needsNativePreferences(projectPath:string):boolean {return !!this.options.preferences&&(!this.nativeReady||this.nativeProject!==projectPath)&&!this.nativeError;}
   reloadPreferences(state:ChatState):void {
     if(this.nativeProject!==state.projectPath)return;
-    this.rows=[];this.activeKey=null;this.presentationRevision++;this.persistenceDirty=true;this.restore(state.projectPath);this.sync(state);
+    this.rows=[];this.activeKey=null;this.preferredSelections.clear();this.observedSelections.clear();this.presentationRevision++;this.persistenceDirty=true;this.restore(state.projectPath);this.sync(state);
   }
   createDraft(): ChatTabView | null {
     if (!this.projectPath || this.rows.length >= CHAT_TAB_LIMITS.open) return null;
@@ -216,6 +229,7 @@ export class ChatTabs {
     if (!saved) return false;
     const replacement: Tab = {...active,key:nativeChatKey(saved),kind:'native',threadId:saved.threadId,sessionId:saved.sessionId,selection:structuredClone(thread.selection)};
     this.rows = this.rows.filter(row=>row.key!==replacement.key); this.rows[this.rows.findIndex(row=>row.key===active.key)] = replacement;
+    this.observedSelections.add(replacement.key);this.preferredSelections.delete(replacement.key);
     this.activeKey = replacement.key;this.presentationRevision++;this.persistenceDirty=true; this.persist(); return true;
   }
   updateDraft(value: string, selection?: ChatSelection | null, workflowDraft?: boolean): void {
@@ -224,7 +238,13 @@ export class ChatTabs {
     if(bytes(value)>CHAT_TAB_LIMITS.draftBytes)return;
     const selectionChanged=selection!==undefined&&!sameSelection(active.selection,selection);
     active.draft = value;
-    if (selection!==undefined) active.selection=structuredClone(selection);
+    if (selection!==undefined) {
+      active.selection=structuredClone(selection);
+      if(active.kind==='native'){
+        if(sameSelection(selection,this.catalogueByKey.get(active.key)?.selection??null))this.preferredSelections.delete(active.key);
+        else this.preferredSelections.add(active.key);
+      }
+    }
     if (workflowDraft!==undefined) active.workflowDraft=workflowDraft;
     this.persistenceDirty=true;this.preferencesDirty=true;
     // Preserve the first edit immediately; coalesce subsequent edits until a pause.
@@ -239,6 +259,7 @@ export class ChatTabs {
     if((value.tool===undefined||value.tool===active.tool)&&(value.previewOpen===undefined||value.previewOpen===active.previewOpen)){this.persist();return;}
     const replacement={...active,...value};this.rows[this.rows.indexOf(active)]=replacement;this.persistenceDirty=true;this.persist();
   }
+  hasPreferredSelection():boolean {return !!this.activeKey&&this.preferredSelections.has(this.activeKey);}
   remove(key: string): boolean {
     if (key===this.activeKey || !this.rows.some(row=>row.key===key)) return false;
     this.rows = this.rows.filter(row=>row.key!==key);this.presentationRevision++;this.persistenceDirty=true; this.persist(); return true;

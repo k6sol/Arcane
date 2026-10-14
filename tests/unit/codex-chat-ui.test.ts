@@ -120,6 +120,7 @@ async function harness(t:test.TestContext,spawned=false) {
   const routes=codexRoutes(service);let origin='';
   const build=process.env.ARCANE_UI_BUILD_DIR??'dist';
   const assets=new Map([['/studio',resolve('apps/desktop/public/studio.html')],['/studio.css',resolve('apps/desktop/public/studio.css')],['/studio.js',resolve(build,'apps/desktop/src/studio.js')],['/codex-chat.js',resolve(build,'apps/desktop/src/codex-chat.js')],['/workspace-shell.js',resolve(build,'apps/desktop/src/workspace-shell.js')], ['/asset-downloads.js', resolve(build,'apps/desktop/src/asset-downloads.js')],['/learning-panel.js',resolve(build,'apps/desktop/src/learning-panel.js')],['/brand/arcane-ridges.png',resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
+  for(const name of ['asset-viewer','automatic-asset-previews','glb-preflight']) assets.set('/'+name+'.js',resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist','apps/desktop/src/'+name+'.js'));
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
@@ -129,6 +130,7 @@ async function harness(t:test.TestContext,spawned=false) {
   assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
+  assets.set('/playtest-panel.js', resolve(build, 'apps/desktop/src/playtest-panel.js'));
   let gets=0;
   const server=createServer((request,response)=>{void(async()=>{
     const url=new URL(request.url??'/',origin),asset=assets.get(url.pathname);
@@ -160,14 +162,50 @@ async function browser(t:test.TestContext,origin:string) {
       if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
       await page.locator('#workspace-new-chat').click();
     }
-    await openAdvancedSettings(page);await (await visibleControl(page,'#codex-model')).selectOption('fixture-sol');assert.equal(await page.locator('#codex-effort').inputValue(),'');await (await visibleControl(page,'#codex-effort')).selectOption('ultra');
-    const before=posts.length;await (await visibleControl(page,'#codex-select')).click();
+    if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+    const before=posts.length;
+    await page.locator('#codex-model-trigger').click();
+    await page.locator('#codex-picker-current-model').click();
+    await page.locator('[data-picker-model="fixture-sol"]').click();
+    await page.locator('#codex-model-trigger').click();
+    await page.locator('#codex-picker-effort-slider').press('End');
     await text('codex-effort-label','ultra');await ready('codex-thread-start');
     assert.equal(posts.length,before,'A draft model choice is local until its explicit native open gesture');
   };
   const grant=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-grant')).click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await text('codex-policy','Workspace writes granted');};
   return {page,errors,posts,text,ready,refresh,open,connect,select,grant,instance};
 }
+
+test('real Edge Send opens a selected draft and submits once; Enter sends and Stop retains its exact target', {skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t),b=await browser(t,h.origin),{page}=b;
+  await b.open();await b.connect();await b.select();
+  assert.equal(h.clients.at(-1)!.s.thread,null,'Metadata setup must not start a conversation or turn');
+  if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+  const message='Build a clean circular spawn. Synthetic UI test only.';
+  await page.locator('#codex-composer').fill(message);await b.ready('codex-submit');
+  await page.locator('#codex-submit').click();await b.text('codex-messages','samesame public');
+  const client=h.clients.at(-1)!;
+  assert.equal(client.calls.filter(row=>row.method==='thread-start').length,1);
+  assert.equal(client.calls.filter(row=>row.method==='turn-start').length,1);
+  assert.equal(b.posts.filter(row=>row.action==='turn-start').length,1);
+  assert.equal(b.posts.find(row=>row.action==='turn-start').text,message);
+  assert.equal(await page.locator('#codex-composer').inputValue(),'');
+  assert.equal(await page.locator('.composer-tool-context').isVisible(),false);
+  assert.equal(client.s.thread!.writeGranted,false,'Sending is not a write grant');
+  const stop=page.locator('#codex-submit');assert.equal(await stop.getAttribute('aria-label'),'Stop task');
+  await stop.click();await b.text('codex-policy','interrupted');
+  assert.equal(client.calls.filter(row=>row.method==='turn-interrupt').length,1);
+  await page.locator('#codex-composer').fill('Second synthetic message');await b.ready('codex-submit');
+  await page.locator('#codex-composer').press('Shift+Enter');
+  assert.equal(client.calls.filter(row=>row.method==='turn-start').length,1);
+  await page.locator('#codex-composer').press('Enter');
+  await page.waitForFunction(()=>document.getElementById('codex-submit')?.getAttribute('aria-label')==='Stop task');
+  assert.equal(client.calls.filter(row=>row.method==='turn-start').length,2);
+  assert.equal(client.calls.filter(row=>row.method==='thread-start').length,1);
+  if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.chat-send-synthetic.png'});
+  assert.deepEqual(b.errors,[]);
+  t.diagnostic('Actual Edge, production UI and durable service with labelled synthetic native clients. No paid inference or Studio operations.');
+});
 
 test('actual HTTP service denies every agent lifecycle/approval and malformed host input before connecting',async t=>{
   const h=await harness(t),st=state(),id=randomUUID();
@@ -245,7 +283,7 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   const latest=h.clients.at(-1)!;latest.loseAck();await (await visibleControl(page,'#codex-composer')).fill('Synthetic native unknown acknowledgement');await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-unknown-requests','unknown');
   assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-unknown.png'});
-  await page.reload();await b.text('codex-unknown-requests','unknown');assert.equal(await page.locator('#codex-submit').isDisabled(),true);assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);
+  await page.reload();await b.text('codex-unknown-requests','unknown');assert.equal(await page.locator('#codex-submit').getAttribute('type'),'button');assert.equal(await page.locator('#codex-submit').getAttribute('aria-label'),'Stop task');assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);
   await page.evaluate(()=>{window.dispatchEvent(new PageTransitionEvent('pagehide'));window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));});
   await b.text('codex-unknown-requests','unknown');await b.refresh();assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
   await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');await b.ready('codex-acknowledge');await (await visibleControl(page,'#codex-acknowledge')).click();
@@ -367,6 +405,7 @@ async function openAdvancedSettings(page:any, target='native-conversation-headin
 }
 
 async function visibleControl(page:any, selector:string) {
+  assert.ok(!['#codex-model','#codex-effort','#codex-select'].includes(selector),'User access must use the visible chat picker');
   const locator=page.locator(selector);
   const context=await locator.evaluate((el:HTMLElement)=>({settings:!!el.closest('#settings-drawer'),confirmation:!!el.closest('#codex-confirm'),target:el.id}));
   // Navigation opens only the control's ancestor pane/details. Real user actions
@@ -509,12 +548,13 @@ test('attested active model enables idle selection and invalidates workflows onl
   const initial=attestedState(),f=contextChat(initial),draft='One chat, same unsent draft';f.doc.getElementById('codex-composer').value=draft;
   let changes=0;f.chat.subscribeWorkflowContextChange(()=>changes++);await f.chat.refresh();
   assert.deepEqual(f.chat.workflowModelSelection(),initial.workflowModel!.selection);assert.equal(changes,1);
-  assert.equal(f.doc.getElementById('codex-model').disabled,false);assert.equal(f.doc.getElementById('codex-effort').disabled,false);
+  const controller=f.chat as unknown as {canSelectModel():boolean};
+  assert.equal(controller.canSelectModel(),true);
   initial.snapshot!.models[0]!.displayName='Metadata label only';initial.workflowModel=workflowNativeModel(initial)!.proof;f.set(initial);await f.chat.refresh();assert.equal(changes,1);
   initial.snapshot!.thread!.selection={model:'fixture-sol',effort:'low'};initial.snapshot!.selection={model:'fixture-sol',effort:'low'};initial.workflowModel=workflowNativeModel(initial)!.proof;
   f.set(initial);await f.chat.refresh();assert.equal(changes,2);assert.equal(f.chat.workflowModelSelection()!.effort,'low');
   initial.snapshot!.thread!.turnStatus='inProgress';f.set(initial);await f.chat.refresh();assert.equal(changes,2);
-  assert.equal(f.doc.getElementById('codex-model').disabled,true);assert.equal(f.doc.getElementById('codex-select').disabled,true);
+  assert.equal(controller.canSelectModel(),false,'Without chat tabs the legacy native selection remains idle-gated');
   assert.equal(f.doc.getElementById('codex-composer').value,draft);assert.ok(f.calls.every(c=>c.method==='GET'));
 });
 

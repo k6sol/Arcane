@@ -11,6 +11,8 @@ export const PLUGIN_SOURCES = Object.freeze([
   ['Properties', 'ModuleScript', 'Properties.luau'],
   ['Operations', 'ModuleScript', 'Operations.luau'],
   ['Transport', 'ModuleScript', 'Transport.luau'],
+  ['TestProof', 'ModuleScript', 'TestProof.luau'],
+  ['Sha256', 'ModuleScript', 'Sha256.luau'],
 ]);
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -92,7 +94,7 @@ export function renderPlugin(sources) {
   const manifest = {
     schemaVersion: 1,
     protocolVersion: 1,
-    pluginVersion: '0.1.3',
+    pluginVersion: '0.1.7',
     format: 'roblox-xml-v4',
     preferredArtifact: 'ArcaneLocalBridge.lua',
     entry: 'ArcaneLocalBridge',

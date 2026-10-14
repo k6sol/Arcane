@@ -180,6 +180,16 @@ export class DaemonClient {
     const requestId = randomUUID();
     return this.submit('/v1/studio/restore', { commandId, requestId }, { requestId, method: 'scene.restore' }, options);
   }
+  async playtestRequest(input: {sessionId:string;nativeStudioId?:string|undefined;durationMs?:number;observationIntervalMs?:number;failOnRuntimeError?:boolean}, options:WaitOptions={}) {
+    const schema=z.object({job:z.object({id:z.string().max(128),state:z.enum(['needs_approval','running','complete','cancelled']),displayDigest:z.string().regex(/^[a-f0-9]{64}$/),display:z.object({proposal:z.object({binding:z.object({pairedSessionId:z.string().max(128),nativeStudioId:z.string().max(128)}),durationMs:z.number(),observationIntervalMs:z.number(),failOnRuntimeError:z.boolean()})}).passthrough(),review:z.record(z.string(),z.unknown()),evidence:z.enum(['fixture','native']),nativeAcceptance:z.literal(false)})}).refine(r=>r.job.display.proposal.binding.pairedSessionId===input.sessionId&&(!input.nativeStudioId||r.job.display.proposal.binding.nativeStudioId===input.nativeStudioId),'Wrong playtest scope.');
+    return this.postOnce('/v1/playtests/prepare',input,schema,{sessionId:input.sessionId},'Read playtest_status for the original pending request. Preparation never authorizes play; do not submit it again automatically.',options);
+  }
+  async playtestStatus(jobId:string|undefined, options:WaitOptions={}) {
+    return this.readRecord('/v1/playtests'+(jobId?'?id='+encodeURIComponent(jobId):''),z.union([z.object({job:z.record(z.string(),z.unknown())}),z.object({jobs:z.array(z.record(z.string(),z.unknown())).max(64)})]),options);
+  }
+  async playtestCancel(jobId:string,options:WaitOptions={}) {
+    return this.postOnce('/v1/playtests/cancel',{id:jobId},z.object({job:z.record(z.string(),z.unknown())}).refine(r=>r.job.id===jobId,'Wrong playtest job.'),{jobId},'Read playtest_status for this job. Its owned stop/cleanup may still be in progress; never retry a stop blindly.',options);
+  }
 
   async workRuns(options: WaitOptions = {}): Promise<{ runs: WorkRun[] }> {
     return this.readRecord('/v1/work/runs', z.object({ runs: z.array(workRun).max(100) }), options);

@@ -105,7 +105,7 @@ function Operations:updateProperties(command: any, args: any, guard: () -> ()): 
 			progress.touched = true
 			instance[name] = decoded[name]
 		end
-		for _, name in ipairs(names) do if instance[name] ~= decoded[name] then V.fail("VERIFY", "Property write did not match the requested value.") end end
+		for _, name in ipairs(names) do if not P.assignedMatches(instance, name, decoded[name]) then V.fail("VERIFY", "Property write did not match the requested value.") end end
 		return {ref = self.registry:ref(instance), mutation = {kind = "scene.update", ref = ref,
 			before = {properties = before}, after = {properties = P.snapshot(instance, names)}}}
 	end)
@@ -144,6 +144,38 @@ function Operations:updateSource(command: any, args: any, guard: () -> ()): any
 	end)
 end
 
+function Operations:setEnabled(command: any, args: any, guard: () -> ()): any
+	V.fields(args, {"ref", "expectedSource", "expectedEnabled", "enabled"}, "execution-state arguments")
+	local instance = self.registry:resolve(args.ref)
+	if not instance:IsA("BaseScript") then V.fail("CLASS", "Only Script and LocalScript have an execution state.") end
+	local expected = V.string(args.expectedSource, "expected source", V.SOURCE_BYTES, true)
+	if type(args.expectedEnabled) ~= "boolean" or type(args.enabled) ~= "boolean" then V.fail("INPUT", "Execution state and baseline must be booleans.") end
+	if args.enabled and not string.find(expected, "%S") then V.fail("SOURCE_EMPTY", "An empty placeholder cannot be activated.") end
+	local ref = self.registry:ref(instance)
+	local function matches(): boolean
+		return self:source(instance) == expected and not instance.Disabled == args.expectedEnabled
+	end
+	if not matches() then V.fail("CONFLICT", "Source or execution state differs from the exact baseline.") end
+	-- The host compiles this exact source before delivery. A dirty editor buffer
+	-- must not activate a different persisted implementation in the engine.
+	if args.enabled and instance.Source ~= expected then V.fail("UNSAVED_SOURCE", "Persisted source differs from the verified editor source. Save the script first.") end
+	local proposed = {ref = ref, mutation = {kind = "script.set_enabled", ref = ref,
+		before = {source = expected, enabled = args.expectedEnabled}, after = {source = expected, enabled = args.enabled}}}
+	if #V.encode(proposed, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Execution-state receipt would exceed 512 KiB; no change attempted.") end
+	return self:record(command, guard, function(progress: any): any
+		guard()
+		self.registry:resolve(ref)
+		if not matches() then V.fail("CONFLICT", "Source or execution state changed before activation.") end
+		if args.enabled and instance.Source ~= expected then V.fail("UNSAVED_SOURCE", "Persisted source changed before activation.") end
+		progress.ref = ref
+		progress.touched = true
+		instance.Disabled = not args.enabled
+		if not instance.Disabled ~= args.enabled or self:source(instance) ~= expected or (args.enabled and instance.Source ~= expected) then V.fail("VERIFY", "Script execution state/source did not match after assignment.") end
+		return {ref = self.registry:ref(instance), mutation = {kind = "script.set_enabled", ref = ref,
+			before = {source = expected, enabled = args.expectedEnabled}, after = {source = expected, enabled = not instance.Disabled}}}
+	end)
+end
+
 function Operations:create(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"parent", "className", "name", "properties"}, "create arguments")
 	local parent = self.registry:resolve(args.parent)
@@ -171,7 +203,7 @@ function Operations:create(command: any, args: any, guard: () -> ()): any
 			instance.Name = name
 			if instance:IsA("BaseScript") then instance.Disabled = true end
 			for key, value in pairs(decoded) do instance[key] = value end
-			for key, value in pairs(decoded) do if instance[key] ~= value then V.fail("VERIFY", "Created property differs from the requested value.") end end
+			for key, value in pairs(decoded) do if not P.assignedMatches(instance, key, value) then V.fail("VERIFY", "Created property differs from the requested value.") end end
 			guard()
 		end)
 		if not prepared then instance:Destroy(); error(prepareError, 0) end
@@ -182,6 +214,7 @@ function Operations:create(command: any, args: any, guard: () -> ()): any
 		local snapshot = P.snapshot(instance)
 		local source = if instance:IsA("LuaSourceContainer") then self:source(instance) else nil
 		self.registry.owned[instance] = {parent = parent, properties = V.immutable(snapshot), source = source,
+			enabled = if instance:IsA("BaseScript") then not instance.Disabled else nil,
 			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance))}
 		return {ref = ref, mutation = {kind = "scene.create", ref = ref, before = V.NULL, after = {properties = snapshot}}}
 	end)
@@ -205,6 +238,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 				and V.equal(instance:GetAttributes(), owned.attributes)
 				and V.equal(self.collection:GetTags(instance), owned.tags)
 				and (owned.source == nil or self:source(instance) == owned.source)
+				and (owned.enabled == nil or not instance.Disabled == owned.enabled)
 		end
 		if not matches() then V.fail("CONFLICT", "Created instance has changed, moved, or gained children; restoration refused.") end
 		self:record(command, guard, function(progress: any): any
@@ -220,6 +254,8 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 		self:updateProperties(command, {ref = original.ref, expected = original.after.properties, properties = original.before.properties}, guard)
 	elseif original.kind == "script.update" then
 		self:updateSource(command, {ref = original.ref, expectedSource = original.after.source, source = original.before.source}, guard)
+	elseif original.kind == "script.set_enabled" then
+		self:setEnabled(command, {ref = original.ref, expectedSource = original.after.source, expectedEnabled = original.after.enabled, enabled = original.before.enabled}, guard)
 	else V.fail("RECEIPT", "Unsupported mutation receipt.") end
 	self.restored[receiptId] = true
 	return {restored = true, ref = original.ref}
@@ -252,9 +288,11 @@ function Operations:execute(command: any, guard: () -> ()): any
 		V.fields(args, {"ref"}, "read arguments")
 		local instance = self.registry:resolve(args.ref)
 		result = {ref = self.registry:ref(instance), source = self:source(instance)}
+		if instance:IsA("BaseScript") then result.enabled = not instance.Disabled end
 	elseif method == "scene.create" then result = self:create(command, args, guard)
 	elseif method == "scene.update" then result = self:updateProperties(command, args, guard)
 	elseif method == "script.update" then result = self:updateSource(command, args, guard)
+	elseif method == "script.set_enabled" then result = self:setEnabled(command, args, guard)
 	elseif method == "scene.restore" then result = self:restore(command, args, guard)
 	else V.fail("METHOD", "Unsupported Studio method.") end
 	if not table.find(V.WRITE_METHODS, method) then guard() end

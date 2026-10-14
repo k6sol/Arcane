@@ -9,9 +9,18 @@ export interface StudioIdentity { clientSessionId: string; placeId: number; univ
 export interface StudioSession extends StudioIdentity {
   id: string; protocolVersion: 1; allowedRoots: StudioRoot[]; allowWrites: boolean;
   capabilities: string[]; connectedAt: string; lastSeenAt: string; revokedAt: string | null;
+  proof?: StudioContinuityProof;
+}
+/** Authenticated plugin heartbeat, timestamped by the host on receipt. It is
+ * continuity/mapping evidence, never human playtest consent by itself. */
+export interface StudioContinuityProof {
+  sessionId: string; clientLifetimeId: string; pluginArtifactHash: string;
+  markerName: string; placeId: number; universeId: number; placeName: string;
+  mode: 'Edit' | 'Play'; playEpoch: number; continuitySupported: boolean;
+  connected: boolean; observedAt: string; expiresAt: string;
 }
 export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read'] as const;
-export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'scene.restore'] as const;
+export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'] as const;
 export type StudioMethod = typeof READ_METHODS[number] | typeof WRITE_METHODS[number];
 export type CommandState = 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'cancelled' | 'needs_reconciliation';
 export interface StudioCommand {
@@ -21,7 +30,7 @@ export interface StudioCommand {
   finishedAt: string | null; result: Json | null; error: string | null;
 }
 export interface MutationReceipt {
-  kind: 'scene.create' | 'scene.update' | 'script.update'; ref: InstanceRef;
+  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled'; ref: InstanceRef;
   before: Record<string, Json> | null; after: Record<string, Json>;
 }
 export interface PluginPairInput { code: string; protocolVersion: 1; identity: StudioIdentity; capabilities: string[] }

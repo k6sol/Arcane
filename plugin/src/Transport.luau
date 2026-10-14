@@ -1,21 +1,37 @@
 --!strict
 local V = require(script.Parent.Validation)
 local Operations = require(script.Parent.Operations)
+local TestProof = require(script.Parent.TestProof)
 local Transport = {}
 Transport.__index = Transport
 Transport.POLL_SECONDS = 2
 Transport.MAX_BACKOFF_SECONDS = 30
-local ROUTES = table.freeze({connect = "/v1/plugin/connect", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
+Transport.MAX_RECOVERY_ATTEMPTS = 8
+-- Status is a read-only POST so the exact key never enters a URL. The daemon
+-- must authenticate that key and inspect this exact client/identity without
+-- creating a session, renewing a lease, dispatching work or returning a bearer.
+local ROUTES = table.freeze({connect = "/v1/plugin/connect", status = "/v1/plugin/status", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
 local IDENTITY_CHANGED = "Place identity changed; this session is fenced. Inspect receipts and explicitly connect again."
 type Transport = any
 
-function Transport.new(gameModel: any, onStatus: (any) -> ()): Transport
+function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: string?): Transport
 	local http = gameModel:GetService("HttpService")
+	local clientSessionId = http:GenerateGUID(false)
+	local proof = if artifactHash then TestProof.new(gameModel, clientSessionId, artifactHash) else nil
 	return setmetatable({gameModel = gameModel, http = http, run = gameModel:GetService("RunService"),
-		clientSessionId = http:GenerateGUID(false), onStatus = onStatus, generation = 0,
+		clientSessionId = clientSessionId, testProof = proof, onStatus = onStatus, generation = 0,
 		pair = nil, desiredPair = nil, disconnectRequested = false, stopped = false,
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
-		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil}, Transport)
+		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil,
+		recovery = nil, checkInput = nil}, Transport)
+end
+
+function Transport:isEdit(): boolean
+	-- Edit RunService remains Stopped while a separate Play DataModel runs.
+	-- Use the plugin-facing global lifecycle property for production admission.
+	local ok, active = pcall(function(): any return self.gameModel:GetService("StudioTestService").EditModeActive end)
+	if ok then return type(active) == "boolean" and active == true end
+	return false
 end
 
 function Transport:status(state: string, detail: string, commandId: string?)
@@ -27,7 +43,7 @@ function Transport:status(state: string, detail: string, commandId: string?)
 		sessionId = if pair then pair.sessionId else nil,
 		allowedRoots = if pair then table.clone(pair.allowedRoots) else {},
 		allowWrites = if pair then pair.allowWrites else false,
-		clientSessionId = self.clientSessionId, editMode = self.run:IsEdit()})
+		clientSessionId = self.clientSessionId, editMode = self:isEdit()})
 end
 
 function Transport:dropIdentityFence(): ()
@@ -81,13 +97,22 @@ function Transport:forgetDesired(): ()
 	self.desiredPair = nil
 end
 
-function Transport:requestConnect(apiKey: any): ()
+function Transport:forgetRecovery(): ()
+	if self.recovery then self.recovery.apiKey = nil end
+	self.recovery = nil
+end
+
+function Transport:requestConnect(apiKey: any, automatic: boolean?): ()
 	if self.stopped then return end
 	local origin = V.keyOrigin(apiKey)
-	if not self.run:IsEdit() then V.fail("PLAY", "Stop playtesting before connecting.") end
+	if not automatic and not self:isEdit() then V.fail("PLAY", "Stop playtesting before connecting.") end
 	self.generation += 1
 	self:forgetDesired()
-	self.desiredPair = {url = origin, apiKey = apiKey, generation = self.generation}
+	self:forgetRecovery()
+	local intent = {url = origin, apiKey = apiKey, generation = self.generation,
+		needsStatus = automatic == true, attempts = 0, sessionId = nil, fence = nil}
+	self.recovery = intent
+	if not automatic then self.desiredPair = {url = origin, apiKey = apiKey, generation = self.generation} end
 	self.disconnectRequested = true
 	self:status("connecting", "Connecting to the Arcane workbench.")
 end
@@ -97,9 +122,10 @@ function Transport:requestPair(url: any, code: any): ()
 	if self.stopped then return end
 	local origin = V.url(url)
 	local pairingCode = V.string(code, "pairing code", 128)
-	if not self.run:IsEdit() then V.fail("PLAY", "Stop playtesting before pairing.") end
+	if not self:isEdit() then V.fail("PLAY", "Stop playtesting before pairing.") end
 	self.generation += 1 -- Immediately fences callbacks already waiting on Studio.
 	self:forgetDesired()
+	self:forgetRecovery()
 	self.desiredPair = {url = origin, code = pairingCode, generation = self.generation}
 	self.disconnectRequested = true
 	self:status("pairing", "Pairing requested; waiting for the current request to finish.")
@@ -109,6 +135,7 @@ function Transport:requestDisconnect(): ()
 	if self.stopped then return end
 	self.generation += 1
 	self:forgetDesired()
+	self:forgetRecovery()
 	self.disconnectRequested = true
 	self:status("disconnecting", "Local writes are fenced; disconnecting from the daemon.")
 end
@@ -119,7 +146,9 @@ function Transport:stop(): ()
 	self.generation += 1
 	self.stopped = true
 	self:forgetDesired()
+	self:forgetRecovery()
 	self:dropIdentityFence()
+	if self.testProof then self.testProof:stop() end
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
 	self.operations = nil
@@ -129,7 +158,7 @@ end
 
 function Transport:post(url: string, route: string, payload: any, token: string?): any
 	V.url(url)
-	if not table.find({ROUTES.connect, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect}, route) then V.fail("URL", "Unsupported plugin route.") end
+	if not table.find({ROUTES.connect, ROUTES.status, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect}, route) then V.fail("URL", "Unsupported plugin route.") end
 	if self.inFlight then V.fail("FLIGHT", "Another HTTP request is in flight.") end
 	if route == ROUTES.poll then self:checkIdentity(self.pair) end
 	local headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" }
@@ -141,6 +170,7 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 		return self.http:RequestAsync({Url = url .. route, Method = "POST", Headers = headers, Body = body, Timeout = 10})
 	end)
 	self.inFlight = false
+	if self.checkInput and not self.stopped then self.checkInput() end
 	if self.identityFence then self:observeIdentity(self.identityFence) end
 	if not ok then V.fail("NETWORK", "Loopback request failed or timed out.") end
 	if type(response) ~= "table" or type(response.StatusCode) ~= "number" or type(response.Success) ~= "boolean" then V.fail("PROTOCOL", "Invalid HTTP response.") end
@@ -148,9 +178,34 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 	-- RequestAsync documents Timeout, but no redirect-disable option. Native redirect
 	-- behavior still needs a disposable-fixture check; see docs/build/PLUGIN.md.
 	if response.StatusCode >= 300 and response.StatusCode < 400 then V.fail("REDIRECT", "Daemon returned a redirect; connection refused.") end
+	local errorCode = nil
+	if not response.Success and type(response.Body) == "string" and #response.Body <= 8192 then
+		local decoded, errorBody = pcall(function() return V.decode(response.Body, self.http) end)
+		if decoded and type(errorBody) == "table" then errorCode = errorBody.error end
+	end
 	if response.StatusCode == 401 or response.StatusCode == 403 then
-		if route == ROUTES.connect then V.fail("KEY_REJECTED", "Arcane API key was rejected. Enter a new API key.") end
+		if route == ROUTES.status and errorCode ~= "KEY_REJECTED" then
+			-- Older daemons route unknown plugin POSTs through bearer auth. Their
+			-- generic AUTH is not evidence that this saved API key is invalid.
+			V.fail("STATUS_UNAVAILABLE", "Daemon could not authenticate safe key status. Click Connect to connect explicitly.")
+		end
+		if route == ROUTES.connect or route == ROUTES.status then V.fail("KEY_REJECTED", "Arcane API key was rejected. Enter a new API key.") end
+		if errorCode == "ORIGIN" or errorCode == "SCOPE" then V.fail("RECONCILE", "Daemon refused the session scope; inspect the connection.") end
 		V.fail("REVOKED", "Session expired or was revoked; connect again.")
+	end
+	if route == ROUTES.status and (response.StatusCode == 400 or response.StatusCode == 404 or response.StatusCode == 405) then
+		V.fail("STATUS_UNAVAILABLE", "Daemon does not support safe session status. Click Connect to connect explicitly.")
+	end
+	if (route == ROUTES.poll or route == ROUTES.result) and (response.StatusCode == 404 or response.StatusCode == 410) then
+		V.fail("REVOKED", "Session no longer exists; checking fresh session status.")
+	end
+	-- The daemon reports restart/revocation as 409, not necessarily 401. Never
+	-- mistake an unrelated receipt conflict for definitive session loss, or echo
+	-- its untrusted message. Only inspect a bounded JSON error code.
+	if (response.StatusCode == 400 or response.StatusCode == 409) and route ~= ROUTES.connect and route ~= ROUTES.pair and route ~= ROUTES.status then
+		if table.find({"REVOKED", "EXPIRED", "SESSION"}, errorCode) then
+			V.fail("REVOKED", "Session expired or was lost; checking fresh session status.")
+		end
 	end
 	if response.StatusCode == 409 then V.fail("RECONCILE", "Daemon refused the session or receipt; inspect the command and connect again.") end
 	if not response.Success then V.fail("NETWORK", "Daemon request failed (HTTP " .. tostring(response.StatusCode) .. ").") end
@@ -160,8 +215,9 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 	return V.object(data, "daemon response")
 end
 
-function Transport:clearSession(): ()
-	self:dropIdentityFence()
+function Transport:clearSession(keepIdentity: boolean?): ()
+	if self.testProof then self.testProof:disconnect() end
+	if not keepIdentity then self:dropIdentityFence() end
 	if self.pair then self.pair.token = nil end
 	self.pair = nil
 	self.operations = nil
@@ -183,10 +239,16 @@ function Transport:exchange(desired: any): ()
 		capabilities = V.array(capabilities),
 	}
 	if isKey then payload.apiKey = desired.apiKey else payload.code = desired.code end
-	local fence = self:watchIdentity(payload.identity)
+	local intent = self.recovery
+	local fence = if intent and intent.fence then intent.fence else self:watchIdentity(payload.identity)
+	if intent then intent.fence = fence; intent.needsStatus = true end
+	if not self:observeIdentity(fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
+	-- Recovery keeps the original identity pin, never recaptures another place.
+	payload.identity = fence.identity
 	desired.apiKey, desired.code = nil, nil
-	local result = self:post(desired.url, if isKey then ROUTES.connect else ROUTES.pair, payload, nil)
+	local ok, result = pcall(function() return self:post(desired.url, if isKey then ROUTES.connect else ROUTES.pair, payload, nil) end)
 	payload.apiKey, payload.code = nil, nil
+	if not ok then error(result, 0) end
 	V.fields(result, {"sessionId", "token", "protocolVersion", "allowedRoots", "allowWrites"}, "pair result")
 	if result.protocolVersion ~= V.PROTOCOL then V.fail("PROTOCOL", "Unsupported daemon protocol.") end
 	V.string(result.sessionId, "session ID", 256)
@@ -201,6 +263,7 @@ function Transport:exchange(desired: any): ()
 	self.pair = result
 	self.failures = 0
 	if self.generation ~= desired.generation then self.disconnectRequested = true; return end
+	if intent and self.recovery == intent then intent.sessionId = result.sessionId; intent.needsStatus = false; intent.attempts = 0 end
 	self:checkIdentity(result) -- Before resolving any roots in the current engine.
 	self.operations = Operations.new(result, self.gameModel, self.http)
 	local editor = self.operations.editor
@@ -218,6 +281,12 @@ function Transport:exchange(desired: any): ()
 		end,
 	}
 	self:checkIdentity(result)
+	if self.testProof then
+		-- The mapping witness is editor metadata, but it is still an Instance.
+		-- Read-only or narrower legacy grants must not create it outside scope.
+		if result.allowWrites and table.find(result.allowedRoots, "ServerStorage") then self.testProof:bind(result.sessionId, true)
+		else self.testProof:disconnect() end
+	end
 	self:status("connected", "Connected to this Studio window. " .. (if result.allowWrites then "Writes granted." else "Read only."))
 end
 
@@ -252,7 +321,7 @@ function Transport:guard(command: any, pair: any): ()
 	if not string.match(command.expiresAt, "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d.*Z$") then V.fail("LEASE", "Expiry must be a UTC timestamp.") end
 	local ok, expires = pcall(function() return DateTime.fromIsoDate(command.expiresAt) end)
 	if not ok or not expires or expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis then V.fail("LEASE", "Command lease has expired.") end
-	if not self.run:IsEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
+	if not self:isEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
 	if table.find(V.WRITE_METHODS, command.method) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end
 end
 
@@ -295,7 +364,57 @@ function Transport:dispatch(command: any): ()
 	if unsafe then self.blocked = true end
 end
 
+function Transport:recover(): number
+	local intent = self.recovery
+	if not intent or intent.generation ~= self.generation or self.stopped then return Transport.POLL_SECONDS end
+	if not self:isEdit() then return Transport.MAX_BACKOFF_SECONDS end
+	if intent.attempts >= Transport.MAX_RECOVERY_ATTEMPTS then
+		self:forgetRecovery()
+		self:status("reconciliation", "Automatic recovery paused after eight attempts. Click Connect to try again.")
+		return Transport.MAX_BACKOFF_SECONDS
+	end
+	if not intent.fence then
+		intent.fence = self:watchIdentity({clientSessionId = self.clientSessionId, placeId = self.gameModel.PlaceId,
+			universeId = self.gameModel.GameId, name = V.string(self.gameModel.Name, "place name", 200), pluginVersion = V.VERSION})
+	end
+	if not self:observeIdentity(intent.fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
+	intent.attempts += 1
+	local payload = {protocolVersion = V.PROTOCOL, apiKey = intent.apiKey,
+		identity = intent.fence.identity, sessionId = intent.sessionId}
+	local ok, result = pcall(function() return self:post(intent.url, ROUTES.status, payload, nil) end)
+	payload.apiKey = nil
+	if self.stopped or self.recovery ~= intent or self.generation ~= intent.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
+	if not ok then error(result, 0) end
+	if not self:observeIdentity(intent.fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
+	V.fields(result, {"protocolVersion", "identity", "state", "sessionId"}, "session status")
+	if result.protocolVersion ~= V.PROTOCOL or not V.equal(result.identity, intent.fence.identity) then
+		V.fail("PROTOCOL", "Session status does not match the exact plugin identity.")
+	end
+	if result.state == "active" then
+		V.string(result.sessionId, "session ID", 256)
+		-- A lost connect ACK may have created this session. Status must never
+		-- reveal its bearer; wait for definitive loss, never supersede it blindly.
+		self:status("reconciliation", "A session already exists; checking status before another connection.")
+		return math.min(Transport.MAX_BACKOFF_SECONDS, Transport.POLL_SECONDS * 2 ^ intent.attempts)
+	end
+	if result.state == "reconciliation" then V.fail("RECONCILE", "Daemon requires command reconciliation before connecting.") end
+	if result.state == "lost" then
+		V.string(result.sessionId, "session ID", 256)
+		if intent.sessionId and result.sessionId ~= intent.sessionId then V.fail("PROTOCOL", "Session status targets another session.") end
+	elseif result.state == "absent" then
+		if result.sessionId ~= nil then V.fail("PROTOCOL", "Absent session status contains a session.") end
+	else V.fail("PROTOCOL", "Unsupported session status.") end
+	-- This status belongs to the current exact key and epoch, and was just read
+	-- by the single worker. No old command, receipt, grant or token is reused.
+	self:status("connecting", "Session loss confirmed; reconnecting to Arcane.")
+	if self.recovery ~= intent or self.generation ~= intent.generation or self.disconnectRequested or not self:isEdit() then return Transport.POLL_SECONDS end
+	self:exchange({url = intent.url, apiKey = intent.apiKey, generation = intent.generation})
+	return Transport.POLL_SECONDS
+end
+
 function Transport:tick(): number
+	if self.stopped then return Transport.POLL_SECONDS end
+	if self.checkInput then self.checkInput() end
 	if self.disconnectRequested then
 		local old = self.pair
 		if old and old.token then
@@ -309,23 +428,28 @@ function Transport:tick(): number
 	if self.desiredPair then
 		local desired = self.desiredPair
 		self.desiredPair = nil
-		-- Human-triggered exchanges are never automatically retried after an
-		-- uncertain response: a session may already exist at the daemon.
+		-- An uncertain exchange can only be followed by a fresh read-only status,
+		-- never by replaying this handshake.
 		local ok, err = pcall(function() self:exchange(desired) end)
 		desired.code, desired.apiKey = nil, nil
 		if not ok and desired.generation == self.generation then
 			if type(err) == "table" and err.code == "KEY_REJECTED" then
 				self:clearSession()
+				self:forgetRecovery()
 				self.generation += 1
 				self:status("failed", "Arcane API key was rejected. Enter a new API key.")
 			else
+				if type(err) ~= "table" or err.code ~= "NETWORK" then self:forgetRecovery() end
 				self:status(if type(err) == "table" and err.code == "IDENTITY" then "reconciliation" else "disconnected", V.safeError(err) .. " Click Connect to try again.")
 			end
 		end
-		return Transport.POLL_SECONDS
+		return if not ok then Transport.MAX_BACKOFF_SECONDS else Transport.POLL_SECONDS
 	end
 	local pair = self.pair
-	if not pair then return Transport.POLL_SECONDS end
+	if not pair then
+		if self.recovery and self.recovery.needsStatus and not self.blocked then return self:recover() end
+		return Transport.POLL_SECONDS
+	end
 	self:observeIdentity(pair.identityFence)
 	if self.pending then
 		local receipt = self.pending
@@ -338,32 +462,49 @@ function Transport:tick(): number
 		return Transport.POLL_SECONDS
 	end
 	if self.blocked then return Transport.POLL_SECONDS end
-	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId}, pair.token)
+	local observation = if self.testProof then self.testProof:snapshot() else nil
+	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = observation}, pair.token)
 	-- A poll that returns after disconnect/re-pair can never dispatch old work.
 	if self.stopped or self.pair ~= pair or self.generation ~= pair.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
 	self:checkIdentity(pair)
 	V.fields(response, {"commands"}, "poll response")
 	local commands = V.list(response.commands, 1, "command queue")
 	if #commands == 1 then self:dispatch(commands[1])
-	else self:status("connected", if self.run:IsEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.") end
+	else self:status("connected", if self:isEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.") end
 	return Transport.POLL_SECONDS
 end
 
 function Transport:cycle(): number
+	local generation = self.generation
 	local ok, delay = pcall(function() return self:tick() end)
 	if ok then self.failures = 0; return delay end
+	if self.stopped or generation ~= self.generation then return Transport.POLL_SECONDS end
 	if type(delay) == "table" and delay.code == "NETWORK" then
 		self.failures = math.min(self.failures + 1, 5)
 		local backoff = math.min(Transport.MAX_BACKOFF_SECONDS, Transport.POLL_SECONDS * 2 ^ self.failures)
-		self:status("retrying", "Loopback unavailable; retrying in " .. tostring(backoff) .. " seconds. Completed work will only resend its receipt.")
+		self:status("retrying", "Loopback unavailable; checking again in " .. tostring(backoff) .. " seconds. Commands are never replayed.")
 		return backoff
 	end
+	local wasBlocked = self.blocked
 	self.blocked = true
 	if type(delay) == "table" and delay.code == "REVOKED" then
-		self:clearSession()
+		local intent = self.recovery
+		local safe = intent and not wasBlocked and not (self.identityFence and self.identityFence.changed)
+			and not (self.pending and self.pending.unsafe)
+		-- Loss fences every old callback immediately. Pending receipts stay at the
+		-- old daemon for reconciliation and are never sent under replacement auth.
+		self:clearSession(safe == true)
 		self.generation += 1
-		self:status("disconnected", V.safeError(delay))
-	else self:status("reconciliation", V.safeError(delay)) end
+		if safe then intent.generation = self.generation; intent.needsStatus = true; intent.attempts = 0
+		else self:forgetRecovery(); self.blocked = wasBlocked end
+		self:status(if self.blocked then "reconciliation" else "disconnected", V.safeError(delay))
+	elseif type(delay) == "table" and delay.code == "KEY_REJECTED" then
+		self:clearSession(); self:forgetRecovery(); self.generation += 1
+		self:status("failed", "Arcane API key was rejected. Enter a new API key.")
+	else
+		self:forgetRecovery()
+		self:status("reconciliation", V.safeError(delay))
+	end
 	return Transport.MAX_BACKOFF_SECONDS
 end
 
