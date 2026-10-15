@@ -1,6 +1,7 @@
 // Synthetic protocol peer: spawned Node, no Codex and no inference.
 import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 const [mode, audit] = process.argv.slice(2);
 let initialized = false, turnNumber = 0, deferredTurnAck = null;
@@ -43,7 +44,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   const { id, method, params = {} } = message;
   if (method === 'initialize') {
     if (params.capabilities?.experimentalApi !== false) process.exit(8);
-    send({ id: 999999, result: { ignored: true } });
+    if(mode!=='image-history-resume')send({ id: 999999, result: { ignored: true } });
     send({ id, result: { userAgent: 'fixture', platformFamily: 'windows', platformOs: 'windows' } }); return;
   }
   if (method === 'initialized') { initialized = true; return; }
@@ -58,11 +59,16 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (method === 'model/list') {
     const first = !params.cursor;
     let data = first ? [model(), { hidden: true, accessToken: 'FIXTURE_SECRET' }] : [model('fixture-other')];
+    if(mode==='image-input'||mode==='image-text-only')data=data.map(item=>({...item,inputModalities:mode==='image-input'?['text','image']:['text']}));
     if (mode === 'duplicate-model' && !first) data = [model()];
     if (mode === 'duplicate-effort') data = [{ ...model(), supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'low' }] }];
     setTimeout(() => send({ id, result: { data, nextCursor: mode === 'cursor-loop' ? 'page-two' : first ? 'page-two' : null } }), 2); return;
   }
   if (method === 'mcpServerStatus/list') { send({id,result:{data:[...(mode==='inherited-mcp-active'?[{name:'unsafe-inherited',runtimeStatus:'connected',tools:{write:{}},toolsError:null,pluginId:null}]:[]),{name:'arcane',runtimeStatus:mode==='bad-mcp-inventory'?'unsafe':'connected',tools:Object.fromEntries(["sessions","scene_children","scene_inspect","scene_search","selection_read","script_read","script_update","script_set_enabled","scene_create","scene_update","receipt_status","receipt_restore","playtest_request","playtest_status","playtest_cancel","skills_recommend","skills_list","skills_get","work_runs","work_ready","work_create","work_claim","work_progress","work_submit","assets_probe","assets_jobs","assets_start","assets_cancel","assets_manifest"].map(name=>[name,{description:'FIXTURE_SECRET'}])),toolsError:null,pluginId:null,accessToken:'FIXTURE_SECRET'}],nextCursor:mode==='mcp-cursor-loop'?'same':null}});return; }
+  if(method==='thread/read'&&mode==='image-history-resume'){
+    const turns=JSON.parse(readFileSync(join(dirname(audit),'image-history.json'),'utf8'));
+    send({id,result:{thread:{id:params.threadId,sessionId:'fixture-session-root',cwd:process.cwd(),ephemeral:false,turns}}});return;
+  }
   if (method === 'thread/start' || method === 'thread/resume') {
     if (mode === 'reject-thread') { send({ id, error: { code: -32001, message: 'FIXTURE_SECRET rejected' } }); return; }
     if (mode === 'malformed-thread-ack-no-id') { send({ id, result: {} }); return; }
@@ -70,8 +76,14 @@ createInterface({ input: process.stdin }).on('line', line => {
     notify('thread/started', { thread: { id: effectiveId, sessionId: 'fixture-session-root' } });
     if (mode === 'lost-thread-ack') return;
     if (mode === 'malformed-thread-ack-observed') { send({ id, result: {} }); return; }
+    let turns=mode==='resume-unexpected-active'?[turn('existing-active-turn')]:[];
+    if(method==='thread/resume'&&mode==='image-history-resume'){
+      const history=JSON.parse(readFileSync(join(dirname(audit),'image-history.json'),'utf8'));
+      record({type:'image-history',historyBytes:Buffer.byteLength(JSON.stringify({id,result:{thread:{id:effectiveId,turns:history}}})),excluded:params.excludeTurns===true});
+      if(params.excludeTurns!==true)turns=history;
+    }
     send({ id, result: {
-      thread: { id: mode === 'malformed-thread-id' ? null : effectiveId, sessionId: 'fixture-session-root', status: { type: mode === 'resume-active-unknown' ? 'active' : 'idle' }, turns: [] },
+      thread: { id: mode === 'malformed-thread-id' ? null : effectiveId, sessionId: 'fixture-session-root', status: { type: ['resume-active-unknown','resume-unexpected-active'].includes(mode) ? 'active' : 'idle' }, turns },
       model: mode === 'bad-model' ? 'fixture-fallback' : params.model, modelProvider: 'openai', cwd: process.cwd(),
       approvalPolicy: 'on-request', approvalsReviewer: mode === 'bad-reviewer' ? 'auto_review' : 'user',
       sandbox: mode === 'malformed-thread-sandbox' ? null : { type: mode === 'bad-sandbox' ? 'workspaceWrite' : 'readOnly', networkAccess: false },
@@ -80,6 +92,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   }
   if (method === 'turn/start') {
     const turnId = 'fixture-turn-' + (++turnNumber);
+    if(mode==='image-input')notify('item/started',{threadId,turnId,item:{id:'synthetic-image-input',type:'userMessage',content:params.input}});
     if (mode === 'lost-turn-no-id' || mode === 'revoke-start-no-id') return;
     if (mode === 'malformed-turn-ack-no-id') { send({ id, result: {} }); return; }
     if (mode === 'malformed-turn-id') { send({ id, result: { turn: turn(null) } }); return; }
@@ -102,7 +115,7 @@ createInterface({ input: process.stdin }).on('line', line => {
       notify('turn/completed', {threadId,turn:turn('fixture-turn-1','completed')});
     }
     if ((mode === 'stale-turn-event' || mode.startsWith('stale-approval-before-turn-id-')) && turnNumber === 1) notify('turn/completed',{threadId,turn:turn(turnId,'completed')});
-    if (mode === 'complete-before-ack') notify('turn/completed', { threadId, turn: turn(turnId, 'completed') });
+    if (mode === 'complete-before-ack'||mode==='image-history-resume') notify('turn/completed', { threadId, turn: turn(turnId, 'completed') });
     send({ id, result: { turn: turn(turnId) } });
     if (mode === 'split-utf8') { void split({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'fixture-message', delta: 'héllo 🌕' } }); return; }
     if (mode === 'malformed') { process.stdout.write('{"not JSON"\n'); return; }

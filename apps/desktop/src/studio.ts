@@ -1819,6 +1819,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const attachments=await import('./chat-attachments.js');
     codexChat.enableTextAttachments(attachments.startChatAttachments(document,{
       getScope:()=>codexChat.textAttachmentScope(),onChange:()=>codexChat.attachmentPresentationChanged(),
+      imageInputAvailable:()=>codexChat.referenceImageInputAvailable(),
     }));
     if (workflowsStopped) chatTabController.stop();
   }).catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Chat could not be opened. Your saved history is unchanged.'; });

@@ -12,6 +12,7 @@ import { prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile
 import { ARCANE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
 import {arcaneIsolationOverrides,arcaneThreadIsIsolated} from '../../packages/codex-client/src/mcp-isolation.js';
 import type { Approval, ArcaneMcpLaunchProfile, LimitOptions, SessionEventValue } from '../../packages/codex-client/src/types.js';
+import {referencePng,referenceInput} from '../../packages/codex-client/testing/reference-fixture.js';
 
 const ROOT = resolve(process.cwd());
 const TEMP = join(ROOT, 'packages','codex-client','.test-output','fixtures');
@@ -19,7 +20,7 @@ const HUMAN = { initiatedBy: 'human' } as const;
 const PAIR = { model: 'fixture-sol', effort: 'ultra' };
 const THREAD = 'fixture-thread';
 const INPUT = { ...HUMAN, threadId: THREAD, text: 'Synthetic human input\nhéllo 🌕' };
-type Receipt = { type: string; cwd?: string; envKeys?: string[]; argv?: string[]; arcaneDaemonUrl?: string | null; arcaneTokenSha256?: string | null; message?: { id?: number | string; method?: string; params?: Record<string, unknown>; result?: { decision?: string }; error?: { code?: number } } };
+type Receipt = { type: string; cwd?: string; envKeys?: string[]; argv?: string[]; arcaneDaemonUrl?: string | null; arcaneTokenSha256?: string | null; historyBytes?:number;excluded?:boolean;message?: { id?: number | string; method?: string; params?: Record<string, unknown>; result?: { decision?: string }; error?: { code?: number } } };
 const code = (expected: string) => (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === expected;
 async function until(predicate: () => boolean | Promise<boolean>, timeout = 3000): Promise<void> {
   const deadline = Date.now() + timeout;
@@ -63,6 +64,50 @@ function answer(approval: Approval, decision: 'accept' | 'decline' | 'cancel' = 
 }
 const inputs = (records: Receipt[]) => records.flatMap(record => record.message ? [record.message] : []);
 const replies = (records: Receipt[]) => inputs(records).filter(message => !message.method);
+
+test('actual native peer receives original inline PNG with text; echoed media stays out of public state',async t=>{
+  const f=await open(t,'image-input'),references=[referenceInput()];
+  await f.session.startTurn({...INPUT,references});
+  const sent=inputs(await f.receipts()).find(message=>message.method==='turn/start')!.params!;
+  assert.deepEqual(sent.input,[{type:'text',text:INPUT.text,text_elements:[]},{type:'image',url:references[0]!.dataUrl}]);
+  assert.deepEqual(f.session.snapshot().models[0]!.inputModalities,['text','image']);assert.equal(f.session.snapshot().models[0]!.inputModalitiesSource,'reported');
+  assert.ok(!JSON.stringify(f.session.snapshot()).includes('data:image/'));
+});
+test('native catalogue image denial is not replaced by an assumed capability',async t=>{
+  const f=await open(t,'image-text-only');await assert.rejects(()=>f.session.startTurn({...INPUT,references:[referenceInput()]}),code('IMAGE_UNSUPPORTED'));
+  assert.equal(inputs(await f.receipts()).filter(message=>message.method==='turn/start').length,0);assert.equal(f.session.snapshot().thread!.writeGranted,false);
+  await f.session.startTurn(INPUT);assert.equal(inputs(await f.receipts()).filter(message=>message.method==='turn/start').length,1);
+});
+test('old catalogue uses documented modality compatibility while references remain initial human input only',async t=>{
+  const f=await open(t);assert.deepEqual(f.session.snapshot().models[0]!.inputModalities,['text','image']);assert.equal(f.session.snapshot().models[0]!.inputModalitiesSource,'compatibility-default');
+  await f.session.startTurn({...INPUT,references:[referenceInput()]});
+  await assert.rejects(()=>f.session.continueTask({continuation:{kind:'native-task-continuation'},text:'not a new human input',references:[referenceInput()]} as never),code('ARGUMENTS'));
+});
+test('whole native frame budget includes JSON-escaped caption and PNG; failure creates no operation or grant',async t=>{
+  const f=await open(t),before=f.session.snapshot().operations.length;
+  await assert.rejects(()=>f.session.startTurn({...INPUT,text:'\u0001'.repeat(131072),allowWorkspaceWrites:true,references:[referenceInput(referencePng(128,128,512*1024))]}),code('FRAME_LIMIT'));
+  assert.equal(f.session.snapshot().operations.length,before);assert.equal(f.session.snapshot().thread!.writeGranted,false);
+  assert.equal(inputs(await f.receipts()).filter(message=>message.method==='turn/start').length,0);
+});
+
+test('resume excludes two maximal prior images; a bounded history-read refusal preserves the exact live client',async t=>{
+  const f=await fixture(t,'image-history-resume'),image=referenceInput(referencePng(128,128,512*1024));
+  const history=[1,2].map(n=>({id:'earlier-turn-'+n,status:'completed',error:null,items:[{type:'userMessage',id:'earlier-image-'+n,
+    content:[{type:'text',text:'Earlier human caption '+n,text_elements:[]},{type:'image',url:image.dataUrl}]}]}));
+  assert.ok(Buffer.byteLength(JSON.stringify(history))>CODEX_LIMITS.maxFrameBytes);
+  await writeFile(join(f.dir,'image-history.json'),JSON.stringify(history),{flag:'wx'});
+  f.session.selectModel({...HUMAN,...PAIR});await f.session.resumeThread({...HUMAN,threadId:THREAD});
+  const receipts=await f.receipts(),resume=inputs(receipts).find(row=>row.method==='thread/resume')!;
+  assert.equal(resume.params!.threadId,THREAD);assert.equal(resume.params!.excludeTurns,true);
+  const originalHistory=receipts.find(row=>row.type==='image-history')!;assert.equal(originalHistory.excluded,true);assert.ok(originalHistory.historyBytes!>CODEX_LIMITS.maxFrameBytes);
+  const connection=f.session.snapshot().connectionId;
+  await f.session.startTurn({...INPUT,references:[referenceInput()]});assert.equal(f.session.snapshot().thread!.turnStatus,'completed');
+  const before=f.session.snapshot();await assert.rejects(()=>f.session.readThreadHistory({...HUMAN,threadId:THREAD,sessionId:'fixture-session-root'}),code('FRAME_LIMIT'));
+  const after=f.session.snapshot();assert.equal(after.connectionId,connection);assert.equal(after.connected,true);assert.equal(after.ready,true);assert.equal(after.failureCode,null);
+  assert.deepEqual(after.thread,before.thread);assert.deepEqual(after.operations,before.operations);assert.ok(!JSON.stringify(after).includes('data:image/'));
+  await f.session.startTurn(INPUT);assert.equal(f.session.snapshot().thread!.turnStatus,'completed');
+  assert.equal(inputs(await f.receipts()).filter(row=>row.method==='turn/start').length,2);
+});
 
 test('real Node stdio handshake, interleaved out-of-order IDs, pagination and sanitized account',async t=>{
   const {session,receipts}=await fixture(t);
@@ -426,15 +471,24 @@ test('resume by exact human-selected ID uses safe overrides and creates no new t
   const log=inputs(await receipts());
   assert.ok(!log.some(message=>message.method==='thread/start'));
   assert.equal(log.find(message=>message.method==='thread/resume')?.params?.threadId,THREAD);
+  assert.equal(log.find(message=>message.method==='thread/resume')?.params?.excludeTurns,true);
   assert.equal(session.snapshot().thread?.writeGranted,false);
 });
 
 test('active resumed metadata without a known turn ID stays unknown and cannot start another turn',async t=>{
-  const {session}=await fixture(t,'resume-active-unknown');
+  const {session,receipts}=await fixture(t,'resume-active-unknown');
   session.selectModel({...HUMAN,...PAIR});
   await session.resumeThread({...HUMAN,threadId:THREAD});
   assert.equal(session.snapshot().thread?.turnStatus,'unknown');
   await assert.rejects(()=>session.startTurn(INPUT),code('BUSY'));
+  const requests=inputs(await receipts());assert.equal(requests.find(row=>row.method==='thread/resume')?.params?.excludeTurns,true);assert.equal(requests.filter(row=>row.method==='turn/start').length,0);
+});
+
+test('unexpected active turns in a metadata-only resume still fence a later Send',async t=>{
+  const {session,receipts}=await fixture(t,'resume-unexpected-active');session.selectModel({...HUMAN,...PAIR});
+  await session.resumeThread({...HUMAN,threadId:THREAD});assert.equal(session.snapshot().thread!.turnId,'existing-active-turn');assert.equal(session.snapshot().thread!.turnStatus,'inProgress');
+  await assert.rejects(()=>session.startTurn(INPUT),code('BUSY'));
+  const requests=inputs(await receipts());assert.equal(requests.find(row=>row.method==='thread/resume')?.params?.excludeTurns,true);assert.equal(requests.filter(row=>row.method==='turn/start').length,0);
 });
 
 for(const mode of ['bad-model','bad-reviewer','bad-sandbox']) test('fails closed on effective thread settings: '+mode,async t=>{

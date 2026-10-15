@@ -12,10 +12,12 @@ import { HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, redactNativeHistoryText, typ
 import { ChatTaskCoordinator } from './chat-task-coordinator.js';
 import type { NativeTaskContinuation } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
+import {snapshotReferenceImages,referenceImageMetadata,type ReferenceImageMetadata} from '../../../packages/codex-client/src/reference-images.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
 const common = { requestId: uuid, connectionId: uuid };
+const imageReferences=z.unknown().transform((value,context)=>{try{return snapshotReferenceImages(value);}catch{context.addIssue({code:'custom',message:'Invalid bounded PNG reference images.'});return z.NEVER;}});
 export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ requestId: uuid, connectionId: z.null(), action: z.literal('connect') }),
   z.strictObject({ ...common, action: z.literal('disconnect'), preserveAssetWork: z.boolean().optional() }),
@@ -27,7 +29,7 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('revoke-assets'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('grant-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
-  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional() }),
+  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional(),references:imageReferences.optional() }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
   z.strictObject({ ...common, action: z.literal('task-stop'), threadId: identifier, taskId: uuid }),
   z.strictObject({ ...common, action: z.literal('task-focus'), threadId: identifier, taskId: uuid }),
@@ -40,6 +42,7 @@ export interface CodexActionRecord {
   threadId: string | null; turnId: string | null; model: string | null; effort: string | null;
   createdAt: string; finishedAt: string | null;
   nextConnectionId?: string;
+  references?:readonly ReferenceImageMetadata[];
 }
 export interface CodexRecordedHistory {
   requestId: string; connectionId: string; provenance: Snapshot['provenance']; loadedAt: string;
@@ -298,6 +301,7 @@ export function createCodexService(options: CodexServiceOptions) {
     const record: CodexActionRecord = {requestId:value.requestId,action:value.action,connectionId:value.connectionId,state:'pending',errorCode:null,
       threadId:'threadId' in value ? value.threadId:null,turnId:'turnId' in value ? value.turnId:null,
       model:value.action==='select'?value.model:null,effort:value.action==='select'?value.effort:null,createdAt:new Date().toISOString(),finishedAt:null};
+    if(value.action==='turn-start'&&value.references)record.references=referenceImageMetadata(value.references);
     try { db.prepare('INSERT INTO actions(id,hash,payload) VALUES(?,?,?)').run(record.requestId,hash,JSON.stringify(record)); }
     catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
     let epoch = generation;
@@ -498,11 +502,11 @@ export function createCodexService(options: CodexServiceOptions) {
                     }
                   }});
                 ownedContext.taskId=origin.taskId;taskContexts.set(origin.taskId,ownedContext);taskAfterCommit=taskId;
-                try {const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites});continuation=started.continuation;accepted=true;}
+                try {const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites,...(value.references?{references:value.references}:{})});continuation=started.continuation;accepted=true;}
                 catch(error){const uncertain=error instanceof CodexClientError&&error.dispatched&&error.code!=='REMOTE_REJECTED'||owned.snapshot().operations.some(op=>op.method==='turn/start'&&op.state==='unknown');
                   tasks!.uncertain(taskId,'initial_turn_not_replayed',uncertain);throw error;}
               } else {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text,
-                ...(value.allowWorkspaceWrites===undefined?{}:{allowWorkspaceWrites:value.allowWorkspaceWrites})});accepted=true;}}
+                ...(value.allowWorkspaceWrites===undefined?{}:{allowWorkspaceWrites:value.allowWorkspaceWrites}),...(value.references?{references:value.references}:{})});accepted=true;}}
               finally {
                 if(permission && context?.nextIntent===permission)context.nextIntent=null;
                 if(!accepted && permission?.operationId && authority){

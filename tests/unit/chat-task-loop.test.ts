@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, isAbsolute, sep } from 'node:path';
@@ -17,6 +17,8 @@ import type { StudioTestTaskOrigin, StudioTestTaskSettled } from '../../packages
 import { ChatTaskStore } from '../../packages/storage/src/chat-task-store.js';
 import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from '../../packages/storage/src/sqlite-path.js';
+import {referenceInput} from '../../packages/codex-client/testing/reference-fixture.js';
+import {referenceImageMetadata} from '../../packages/codex-client/src/reference-images.js';
 
 const THREAD='managed.thread:exact', SESSION='managed.session:exact', HASH='a'.repeat(64), SUBJECT='b'.repeat(64);
 // Production client/service/registry/SQLite/HTTP with a labelled JSONL process
@@ -31,7 +33,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(!method||method==='initialized')return;
  if(method==='initialize')return reply(id,{});
  if(method==='account/read')return reply(id,{account:{type:'chatgpt',email:s.email,planType:'plus'},requiresOpenaiAuth:true});
- if(method==='model/list')return reply(id,{data:[{id:'fixture',model:'fixture',displayName:'Fixture',supportedReasoningEfforts:[{reasoningEffort:'low'}]}],nextCursor:null});
+ if(method==='model/list')return reply(id,{data:[{id:'fixture',model:'fixture',displayName:'Fixture',supportedReasoningEfforts:[{reasoningEffort:'low'}],...(s.modalities?{inputModalities:s.modalities}:{})}],nextCursor:null});
  if(method==='thread/start'||method==='thread/resume'){threadId=params.threadId??s.newThread;const result={thread:{id:threadId,sessionId:s.session,turns:[],status:{type:'idle'}},model:params.model,modelProvider:'openai',cwd:process.cwd(),approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}};
   if(s.mode==='hold-resume'&&method==='thread/resume'){const timer=setInterval(()=>{if(existsSync(s.gate+'-resume')){clearInterval(timer);reply(id,result);}},5);return;}return reply(id,result);}
  if(method==='thread/read')return reply(id,{thread:{id:params.threadId,sessionId:s.session,cwd:process.cwd(),ephemeral:false,turns:[]}});
@@ -61,13 +63,13 @@ function packet(jobId=randomUUID(),outcome:'passed'|'failed'='failed'):StudioTes
       observations:1,logs:[],logsTruncated:false,requiresHumanReview:false,canStartAnotherOperation:true},
     scenario:{outcome,requiredEvidence:'complete',inputRelease:'complete',restoration:'complete',subjects:'current'}};
 }
-async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:number)=>string|null;revalidation?:'current'|'changed'|'unobserved';newThread?:(index:number)=>string;legacy?:true}={}){
+async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:number)=>string|null;modalities?:(index:number)=>string[];revalidation?:'current'|'changed'|'unobserved';newThread?:(index:number)=>string;legacy?:true}={}){
  const boundary=await realpath(tmpdir()),root=await realpath(await mkdtemp(join(boundary,'arcane-managed-task-'))),project=join(root,'project');await mkdir(project);
  const registry=createNativeAssetRegistry({projectPath:await realpath(project)}),clients:CodexSession[]=[],tokens:string[]=[],audit=join(root,'wire.jsonl');
  const cancelled:{jobId:string;origin:StudioTestTaskOrigin}[]=[],validated:string[]=[];
  let service=createCodexService({directory:join(root,'journal'),projectPath:project,assetRegistry:registry,connect:async hooks=>{
    assert.ok(hooks);tokens.push(hooks.finalCredential());const index=clients.length;
-   const client=new CodexSession({command:process.execPath,args:['-e',PEER,JSON.stringify({index,mode:options.mode??'held',email:options.email?options.email(index):'fixture@example.invalid',session:SESSION,newThread:options.newThread?.(index)??THREAD,gate:join(root,'finish-'+index),tools:ARCANE_NATIVE_TOOL_NAMES}),audit],cwd:project,env:nativeEnvironment()},limits({requestTimeoutMs:1500}),'spawned-node-fixture','arcane-only',hooks);
+   const client=new CodexSession({command:process.execPath,args:['-e',PEER,JSON.stringify({index,mode:options.mode??'held',email:options.email?options.email(index):'fixture@example.invalid',modalities:options.modalities?.(index),session:SESSION,newThread:options.newThread?.(index)??THREAD,gate:join(root,'finish-'+index),tools:ARCANE_NATIVE_TOOL_NAMES}),audit],cwd:project,env:nativeEnvironment()},limits({requestTimeoutMs:1500}),'spawned-node-fixture','arcane-only',hooks);
    clients.push(client);await client.initialize();
    if(options.legacy){const methods=['snapshot','selectModel','startThread','resumeThread','grantThreadWrites','revokeThreadWrites','startTurn','interruptTurn','respondApproval','close']as const;
      return Object.fromEntries(methods.map(name=>[name,(Reflect.get(client,name)as Function).bind(client)]))as CodexHostClient;}
@@ -80,7 +82,16 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+(server.address() as {port:number}).port;
  t.after(async()=>{await service.close();registry.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
    const part=relative(boundary,root);assert.ok(part.startsWith('arcane-managed-task-')&&!isAbsolute(part)&&!part.includes(sep));await rm(root,{recursive:true,force:true});});
- const post=async(input:unknown,bearer=control,requestOrigin=origin)=>{const response=await fetch(origin+'/v1/codex/action',{method:'POST',headers:{Authorization:'Bearer '+bearer,Origin:requestOrigin,'Content-Type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(10000)});return {status:response.status,data:await response.json() as CodexActionOutcome};};
+ const post=async(input:unknown,bearer=control,requestOrigin=origin,path=!!input&&typeof input==='object'&&Object.hasOwn(input,'references')?'/v1/codex/reference-turn':'/v1/codex/action')=>{const response=await fetch(origin+path,{method:'POST',headers:{Authorization:'Bearer '+bearer,Origin:requestOrigin,'Content-Type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(10000)});return {status:response.status,data:await response.json() as CodexActionOutcome};};
+ const excessiveReferenceBody=()=>new Promise<{status:number;error:string}>((resolve,reject)=>{
+   // Send the excessive declared length without uploading rejected bytes. The
+   // real route must refuse at its header boundary; its bounded discard closes
+   // an unfinished upload, so a large fetch body cannot reliably read the reply.
+   const request=httpRequest(origin+'/v1/codex/reference-turn',{method:'POST',headers:{Authorization:'Bearer '+control,Origin:origin,'Content-Type':'application/json','Content-Length':'1000001'},signal:AbortSignal.timeout(10000)},response=>{
+     let body='';response.setEncoding('utf8');response.on('data',chunk=>{body+=chunk;assert.ok(body.length<4096);});response.on('error',reject);
+     response.on('end',()=>{try{resolve({status:response.statusCode!,error:(JSON.parse(body)as {error:string}).error});}catch(error){reject(error);}finally{request.destroy();}});
+   });request.on('error',reject);request.end();
+ });
  const action=(action:string,fields:Record<string,unknown>={})=>post({requestId:randomUUID(),connectionId:action==='connect'?null:service.state().snapshot!.connectionId,action,...fields});
  const ready=async()=>{for(const [actionName,fields]of [['connect',{}],['select',{model:'fixture',effort:'low'}],['thread-start',{}]]as const)assert.equal((await action(actionName,fields)).data.record.state,'acknowledged');};
  const send=(text='Synthetic human task')=>action('turn-start',{threadId:service.state().snapshot!.thread!.threadId,text,allowWorkspaceWrites:true,allowAssets:true});
@@ -88,10 +99,58 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
  const taskOrigin=(index=0)=>service.playtestTasks!.capture('agent-'+createHash('sha256').update(tokens[index]!).digest('hex'))!;
  const prepare=(binding:StudioTestTaskOrigin,report:StudioTestTaskSettled)=>service.playtestTasks!.prepared(binding,{jobId:report.jobId,displayDigest:report.displayDigest,scenarioDigest:report.scenarioDigest,subjectDigest:report.subjectDigest});
  const wire=async():Promise<Wire[]>=>(await readFile(audit,'utf8')).trim().split('\n').map(line=>JSON.parse(line)as Wire);
- return {service,registry,clients,tokens,cancelled,validated,root,project,post,action,ready,send,task,taskOrigin,prepare,wire,
+ return {service,registry,clients,tokens,cancelled,validated,root,project,post,excessiveReferenceBody,action,ready,send,task,taskOrigin,prepare,wire,
    finish:(process=0,turn=1)=>writeFile(join(root,'finish-'+process+'-'+turn),'complete',{flag:'wx'}),
    releasePreflight:(process=0)=>writeFile(join(root,'finish-'+process+'-preflight'),'release',{flag:'wx'}),control,generic};
 }
+
+test('actual image HTTP Send reaches only its owned initial native turn; repair carries text and no image bytes',async t=>{
+ const f=await fixture(t,{modalities:()=>['text','image']});await f.ready();const references=[referenceInput()];
+ const input={requestId:randomUUID(),connectionId:f.service.state().snapshot!.connectionId,action:'turn-start',threadId:THREAD,text:'Use this visual reference',references,allowWorkspaceWrites:true,allowAssets:true};
+ const result=await f.post(input);assert.equal(result.data.record.state,'acknowledged');assert.deepEqual(result.data.record.references,referenceImageMetadata(references));
+ const initial=(await f.wire()).find(row=>row.method==='turn/start')!;
+ assert.deepEqual(initial.params!.input,[{type:'text',text:input.text,text_elements:[]},{type:'image',url:references[0]!.dataUrl}]);
+ assert.ok(!JSON.stringify(result.data.state).includes('data:image/'));assert.equal((await f.post(input)).data.replayed,true);
+ const journal=new DatabaseSync(sqliteTransportPath(join(f.root,'journal','codex-actions.sqlite')),{readOnly:true});
+ try{const rows=journal.prepare('SELECT payload FROM actions').all()as {payload:string}[];assert.ok(rows.length);assert.ok(rows.every(row=>!row.payload.includes('data:image/')));}
+ finally{journal.close();}
+ const origin=f.taskOrigin(),report=packet();f.prepare(origin,report);await f.finish();await f.service.playtestTasks!.terminal(origin,report);
+ await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===2);
+ const repair=(await f.wire()).filter(row=>row.method==='turn/start')[1]!.params!.input as {type:string}[];
+ assert.equal(repair.length,1);assert.equal(repair[0]!.type,'text');
+ const changed={...input,references:[referenceInput(undefined,'other.png')]};assert.equal((await f.post(changed)).status,409);
+});
+test('fresh task rotation rechecks image capability on the actual new native client',async t=>{
+ const f=await fixture(t,{modalities:index=>index===0?['text','image']:['text']});await f.ready();await f.send();await f.finish();await until(()=>f.clients[0]!.snapshot().thread!.turnStatus==='completed');
+ const result=await f.action('turn-start',{threadId:THREAD,text:'Reference follow-up',references:[referenceInput()],allowWorkspaceWrites:true,allowAssets:true});
+ assert.equal(result.data.record.state,'rejected');assert.equal(result.data.record.errorCode,'IMAGE_UNSUPPORTED');
+ assert.equal(f.clients.length,2);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
+});
+test('held managed image preflight uses the original immutable PNG after caller mutation',async t=>{
+ const f=await fixture(t,{mode:'hold-preflight'});await f.ready();const reference=referenceInput(),original=reference.dataUrl;
+ const input={requestId:randomUUID(),connectionId:f.service.state().snapshot!.connectionId,action:'turn-start',threadId:THREAD,text:'Original image',references:[reference],allowWorkspaceWrites:true,allowAssets:true};
+ const pending=f.service.action(input);await until(async()=>(await f.wire()).filter(row=>row.method==='mcpServerStatus/list').length===2);
+ reference.dataUrl='file:///not-authorized.png';input.references.push(referenceInput(undefined,'new.png'));await f.releasePreflight();
+ assert.equal((await pending).record.state,'acknowledged');
+ const sent=(await f.wire()).find(row=>row.method==='turn/start')!.params!.input as {type:string;url?:string}[];
+ assert.equal(sent.length,2);assert.equal(sent[1]!.url,original);
+});
+test('explicit exact task Stop during image preflight suppresses native image dispatch',async t=>{
+ const f=await fixture(t,{mode:'hold-preflight'});await f.ready();const pending=f.action('turn-start',{threadId:THREAD,text:'Stop image task',references:[referenceInput()],allowWorkspaceWrites:true,allowAssets:true});
+ await until(async()=>(await f.wire()).filter(row=>row.method==='mcpServerStatus/list').length===2);
+ assert.equal((await f.action('task-stop',{threadId:THREAD,taskId:f.task().taskId})).data.record.state,'acknowledged');await pending;
+ assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,0);assert.equal(f.task().state,'cancelled');
+});
+test('reference route denies agents, foreign origins, wrong envelopes and oversized bodies before native work',async t=>{
+ const f=await fixture(t);await f.ready();const input={requestId:randomUUID(),connectionId:f.service.state().snapshot!.connectionId,action:'turn-start',threadId:THREAD,text:'Human image',references:[referenceInput()]};
+ const before=(await f.wire()).length,records=f.service.state().actions.length;
+ assert.equal((await f.post(input,f.generic)).status,403);assert.equal((await f.post(input,f.control,'http://foreign.invalid')).status,403);
+ assert.equal((await f.post(input,f.control,undefined,'/v1/codex/action')).status,400);
+ assert.equal((await f.post({...input,action:'connect'})).status,400);
+ assert.deepEqual(await f.excessiveReferenceBody(),{status:413,error:'BODY_LIMIT'});
+ assert.equal((await f.post({...input,references:[{name:'reference.png',path:'private.png'}]})).status,400);
+ assert.equal(f.service.state().actions.length,records);assert.equal((await f.wire()).length,before);
+});
 
 test('actual human Send retains one private same-thread repair and one reverify after native terminal plus source check',async t=>{
  const f=await fixture(t);await f.ready();assert.equal((await f.send()).data.record.state,'acknowledged');

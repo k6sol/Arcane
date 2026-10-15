@@ -3,20 +3,21 @@ import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { CodexClientError } from '../../../packages/codex-client/src/index.js';
 import type { CodexService, CodexProductState } from './codex-service.js';
+import { REFERENCE_IMAGE_LIMITS } from '../../../packages/codex-client/src/reference-images.js';
 const MAX_BODY = 160 * 1024, MAX_RESPONSE = 4 * 1024 * 1024;
 const byteLength = (text: string) => Buffer.byteLength(text,'utf8');
 function matches(supplied: string, expected: string): boolean { return expected.length > 0 && byteLength(supplied)===byteLength(expected) && timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)); }
 class RouteError extends Error { constructor(public code: string, public status: number) { super(code); } }
-async function body(request: IncomingMessage): Promise<unknown> {
+async function body(request: IncomingMessage,maximum=MAX_BODY): Promise<unknown> {
   if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/json' || request.headers['content-encoding']) throw new RouteError('CONTENT_TYPE',415);
   const length = request.headers['content-length'];
-  if (length && (!/^\d+$/.test(length) || Number(length)>MAX_BODY)) throw new RouteError('BODY_LIMIT',413);
+  if (length && (!/^\d+$/.test(length) || Number(length)>maximum)) throw new RouteError('BODY_LIMIT',413);
   const chunks: Buffer[]=[]; let bytes=0;
   let timer: NodeJS.Timeout;
   const deadline = new Promise<never>((_,reject)=>{ timer=setTimeout(()=>{ request.destroy(); reject(new RouteError('BODY_TIMEOUT',408)); },8000); });
   try {
     await Promise.race([deadline,(async()=>{
-      for await(const raw of request) {const chunk=Buffer.isBuffer(raw)?raw:Buffer.from(raw as string);bytes+=chunk.length;if(bytes>MAX_BODY)throw new RouteError('BODY_LIMIT',413);chunks.push(chunk);}
+      for await(const raw of request) {const chunk=Buffer.isBuffer(raw)?raw:Buffer.from(raw as string);bytes+=chunk.length;if(bytes>maximum)throw new RouteError('BODY_LIMIT',413);chunks.push(chunk);}
     })()]);
     try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new RouteError('JSON',400); }
   } finally { clearTimeout(timer!); }
@@ -67,10 +68,14 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
         if(request.method!=='GET')throw new RouteError('METHOD',405);
         send(200,{nativeHistory:service.state().nativeHistory ?? null});return true;
       }
-      if(url.pathname!=='/v1/codex/action')throw new RouteError('NOT_FOUND',404);
+      const referenceTurn=url.pathname==='/v1/codex/reference-turn';
+      if(url.pathname!=='/v1/codex/action'&&!referenceTurn)throw new RouteError('NOT_FOUND',404);
       if(request.method!=='POST')throw new RouteError('METHOD',405);
       if(request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
-      const outcome=await service.action(await body(request));
+      const input=await body(request,referenceTurn?REFERENCE_IMAGE_LIMITS.actionBytes:MAX_BODY);
+      if(referenceTurn&&(!input||typeof input!=='object'||Array.isArray(input)||(input as {action?:unknown}).action!=='turn-start'||!Object.hasOwn(input,'references'))||
+        !referenceTurn&&!!input&&typeof input==='object'&&Object.hasOwn(input,'references'))throw new RouteError('REFERENCE_ENVELOPE',400);
+      const outcome=await service.action(input);
       const status=outcome.record.state==='unknown'?202:outcome.record.state==='rejected'?409:outcome.record.state==='pending'?202:200;
       send(status,{...outcome,state:project(outcome.state)});
     }catch(error){

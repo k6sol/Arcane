@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,9 @@ import { pathToFileURL } from 'node:url';
 import type { FileChooser, Page } from 'playwright-core';
 import type { CodexChat, ChatAction, ChatActionRecord, ChatState } from '../../apps/desktop/src/codex-chat.js';
 import type { ChatAttachmentsController } from '../../apps/desktop/src/chat-attachments.js';
+import { png } from '../../packages/asset-pipeline/testing/fixture.js';
+import { pngCrc } from '../../packages/asset-pipeline/src/validation.js';
+import { referenceImageMetadata } from '../../packages/codex-client/src/reference-images.js';
 
 // This capability belongs only to the synthetic loopback server below.
 const HUMAN = 'b'.repeat(64), browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
@@ -25,6 +28,11 @@ interface BrowserFixture {
   pickerTrusted: boolean[];
   changeTrusted: boolean[];
   submits: { trusted: boolean; submitter: string | null }[];
+  blobUrls: string[];
+  revokedUrls: string[];
+  digests: number;
+  holdDigests(): void;
+  releaseDigests(): void;
   holdReads(): void;
   releaseReads(): void;
   transition(away: ChatState, back: ChatState): void;
@@ -56,15 +64,25 @@ function receipt(input: Extract<ChatAction, { action: 'turn-start' }>, current: 
   return { requestId: input.requestId, connectionId: input.connectionId, action: input.action, state: 'acknowledged',
     errorCode: null, threadId: input.threadId, turnId: 'synthetic-accepted-turn',
     model: current.snapshot!.thread!.selection.model, effort: current.snapshot!.thread!.selection.effort,
-    createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+    createdAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    ...(input.references ? { references: referenceImageMetadata(input.references) } : {}) };
 }
 
 /** The actual modules and HTML run in Edge. Only state and turn ACKs are synthetic;
  * this fixture has no daemon, provider client, inference, credentials, or Studio. */
-async function fixture(t: TestContext, options: { tabs?: boolean; initial?: ChatState } = {}) {
+async function fixture(t: TestContext, options: { tabs?: boolean; initial?: ChatState; setup?: boolean } = {}) {
   const build = resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist');
   const root = await mkdtemp(join(tmpdir(), 'arcane-attachment-files-'));
   let observed = structuredClone(options.initial ?? state()), failState = false;
+  const originalSnapshot = structuredClone(observed.snapshot!);
+  const setup: ChatAction[] = [];
+  let heldAction: ChatAction['action'] | null = null, releaseSetup = () => {}, setupEntered = Promise.resolve();
+  let enterSetup = () => {}, setupGate = Promise.resolve();
+  const holdSetup = (action: ChatAction['action']) => {
+    heldAction = action; setupGate = new Promise<void>(done => { releaseSetup = done; });
+    setupEntered = new Promise<void>(done => { enterSetup = done; });
+  };
+  t.after(() => releaseSetup());
   if (options.tabs) observed.nativeThreads = [{ provider: 'codex', projectPath: observed.projectPath,
     threadId: observed.snapshot!.thread!.threadId, sessionId: observed.snapshot!.thread!.sessionId,
     selection: { ...observed.snapshot!.thread!.selection } }];
@@ -85,16 +103,23 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     import {CodexChat,CodexChatApi,readCodexState} from '/codex-chat.js';
     import {startChatAttachments} from '/chat-attachments.js';
     const chat = new CodexChat(document,new CodexChatApi('${HUMAN}'));
-    let readGate = null, release = () => {};
+    let readGate = null, release = () => {}, digestGate = null, releaseDigest = () => {};
     const audit = window.attachmentFixture = {
-      ready:false,chat,reads:[],pickerTrusted:[],changeTrusted:[],submits:[],
+      ready:false,chat,reads:[],pickerTrusted:[],changeTrusted:[],submits:[],blobUrls:[],revokedUrls:[],digests:0,
       holdReads(){readGate=new Promise(done=>{release=done;});},
       releaseReads(){const done=release;readGate=null;done();},
+      holdDigests(){digestGate=new Promise(done=>{releaseDigest=done;});},
+      releaseDigests(){const done=releaseDigest;digestGate=null;done();},
       // Exercise synchronous A -> B -> A publication without waiting for another
       // prepareText/getScope call. Private methods are a runtime fixture seam only.
       transition(away,back){chat.applyState(readCodexState(away));chat.applyState(readCodexState(back));chat.render();}
     };
     const nativeRead = Blob.prototype.arrayBuffer;
+    const nativeDigest=crypto.subtle.digest.bind(crypto.subtle);
+    crypto.subtle.digest=(algorithm,data)=>{audit.digests++;const run=()=>nativeDigest(algorithm,data);return digestGate?digestGate.then(run):run();};
+    const makeUrl=URL.createObjectURL.bind(URL),revokeUrl=URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL=blob=>{const url=makeUrl(blob);audit.blobUrls.push(url);return url;};
+    URL.revokeObjectURL=url=>{audit.revokedUrls.push(url);revokeUrl(url);};
     Blob.prototype.arrayBuffer = function(){
       audit.reads.push(this.size);
       const read = () => nativeRead.call(this);
@@ -110,7 +135,8 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     await chat.start();
     ${options.tabs ? "await chat.enableChatTabs({storage:{getItem(){return null;},setItem(){}}});" : ''}
     chat.enableTextAttachments(audit.attachments=startChatAttachments(document,{
-      getScope:()=>chat.textAttachmentScope(),onChange:()=>chat.attachmentPresentationChanged()
+      getScope:()=>chat.textAttachmentScope(),onChange:()=>chat.attachmentPresentationChanged(),
+      imageInputAvailable:()=>chat.referenceImageInputAvailable()
     }));
     // Explicit refreshes make context races deterministic; the actual transport
     // and controller lifecycle remain intact.
@@ -119,7 +145,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
   `;
   const server = createServer((request, response) => { void (async () => {
     const path = new URL(request.url ?? '/', 'http://fixture').pathname;
-    if (path === '/v1/codex/state' || path === '/v1/codex/action') {
+    if (path === '/v1/codex/state' || path === '/v1/codex/action' || path === '/v1/codex/reference-turn') {
       assert.equal(request.headers.authorization, 'Bearer ' + HUMAN, 'Synthetic human HTTP capability required');
       assert.equal(request.headers.cookie, undefined, 'The fixture does not use credential cookies');
       if (path.endsWith('/state')) {
@@ -132,8 +158,47 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
       const chunks: Buffer[] = []; let bytes = 0;
       for await (const chunk of request) { const data = Buffer.from(chunk); bytes += data.length;
         assert.ok(bytes <= 8 * TASK_BYTES, 'Bound the JSON transport body independently of task text'); chunks.push(data); }
-      const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Extract<ChatAction, { action: 'turn-start' }>;
-      assert.deepEqual(Object.keys(input).sort(), ['action', 'connectionId', 'requestId', 'text', 'threadId']);
+      const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as ChatAction;
+      if (input.action !== 'turn-start') {
+        assert.equal(options.setup, true, 'Only the explicit draft-setup fixture permits metadata lifecycle actions');
+        assert.equal(path, '/v1/codex/action');
+        const fields: Partial<Record<ChatAction['action'], string[]>> = {
+          connect: [], disconnect: ['preserveAssetWork'], select: ['model', 'effort'],
+          'thread-start': [], 'thread-resume': ['threadId'], 'history-load': ['threadId'],
+        };
+        assert.ok(fields[input.action], 'Only fixed synthetic setup actions are allowed');
+        assert.deepEqual(Object.keys(input).sort(), ['action', 'connectionId', 'requestId', ...fields[input.action]!].sort());
+        assert.equal(input.connectionId, input.action === 'connect' ? null : observed.snapshot!.connectionId);
+        setup.push(structuredClone(input));
+        if (heldAction === input.action) { enterSetup(); await setupGate; heldAction = null; }
+        if (input.action === 'disconnect') { observed.lastSnapshot = observed.snapshot; observed.snapshot = null; }
+        else if (input.action === 'connect') {
+          observed.snapshot = { ...structuredClone(originalSnapshot), connectionId: randomUUID(), thread: null };
+        } else if (input.action === 'select') observed.snapshot!.selection = { model: input.model, effort: input.effort };
+        else if (input.action === 'thread-start' || input.action === 'thread-resume') {
+          const threadId = input.action === 'thread-start' ? 'synthetic-created-thread' : input.threadId;
+          observed.snapshot!.thread = { threadId, sessionId: 'synthetic-created-session',
+            selection: { ...observed.snapshot!.selection! }, configured: true, writeGranted: false, turnId: null, turnStatus: 'idle' };
+          observed.nativeThreads = [...(observed.nativeThreads ?? []).filter(row => row.threadId !== threadId),
+            { provider: 'codex', projectPath: observed.projectPath, threadId, sessionId: observed.snapshot!.thread.sessionId,
+              selection: { ...observed.snapshot!.selection! } }];
+        } else if (input.action === 'history-load') {
+          observed.nativeHistory = { projectPath: observed.projectPath, threadId: input.threadId,
+            sessionId: observed.snapshot!.thread!.sessionId, recorded: null };
+        }
+        const record: ChatActionRecord = { requestId: input.requestId,
+          connectionId: input.action === 'connect' ? observed.snapshot!.connectionId : input.connectionId,
+          action: input.action, state: 'acknowledged', errorCode: null, threadId: observed.snapshot?.thread?.threadId ?? null,
+          turnId: null, model: observed.snapshot?.selection?.model ?? null, effort: observed.snapshot?.selection?.effort ?? null,
+          createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+        observed.actions = [...observed.actions, record].slice(-100);
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ record, state: observed, replayed: false })); return;
+      }
+      assert.equal(path, input.references ? '/v1/codex/reference-turn' : '/v1/codex/action');
+      assert.deepEqual(Object.keys(input).sort(), ['action', 'connectionId', 'requestId', 'text', 'threadId',
+        'allowWorkspaceWrites', 'allowAssets', ...(input.references ? ['references'] : [])].sort());
+      assert.equal(input.allowWorkspaceWrites, true); assert.equal(input.allowAssets, true);
       assert.equal(input.action, 'turn-start', 'The fixture permits no connection, inference, grant, or Studio action');
       assert.match(input.requestId, /^[0-9a-f-]{36}$/i);
       assert.equal(input.connectionId, observed.snapshot!.connectionId);
@@ -158,7 +223,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
       content = await readFile(file[0]!); contentType = file[1]!;
     }
     response.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store',
-      'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
+      'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
     response.end(content);
   })().catch(error => { errors.push(String(error)); response.writeHead(500); response.end(); }); });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
@@ -166,7 +231,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
   const origin = 'http://127.0.0.1:' + address.port;
   let page: Page | undefined;
   t.after(async () => {
-    if (page && !page.isClosed()) await page.evaluate(() => { window.attachmentFixture?.releaseReads();
+    if (page && !page.isClosed()) await page.evaluate(() => { window.attachmentFixture?.releaseReads();window.attachmentFixture?.releaseDigests();
       window.attachmentFixture?.chat.stop(); window.attachmentFixture?.attachments.cleanup(); }).catch(() => {});
   });
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
@@ -187,7 +252,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
   t.after(() => { assert.deepEqual(errors, [], 'No page or fixture server errors');
     assert.deepEqual(unexpected, [], 'Only explicitly allowed synthetic local HTTP routes'); });
   t.diagnostic('Actual Edge ' + browser.version() + '; synthetic HTTP; build=' + build);
-  return { page: currentPage, posts, root, chooserCount: () => chooserCount,
+  return { page: currentPage, posts, root, setup, holdSetup, releaseSetup: () => releaseSetup(), enteredSetup: () => setupEntered, chooserCount: () => chooserCount,
     observed: () => structuredClone(observed), set: (value: ChatState) => { observed = structuredClone(value); },
     failState: (value: boolean) => { failState = value; },
     refresh: () => currentPage.evaluate(() => window.attachmentFixture.chat.refresh()) };
@@ -244,7 +309,7 @@ test('Edge trusted filechooser: literal chips, quoted untrusted source and exact
   assert.equal(f.posts.length, 0); assert.equal(f.chooserCount(), 0);
   assert.equal(await page.locator('#workspace-add-context').getAttribute('type'), 'button');
   assert.equal(await page.locator('#workspace-add-context svg').count(), 1);
-  assert.equal(await page.locator('#codex-attachment-input').getAttribute('accept'), '.txt,.md,.lua,.luau,.json,.csv');
+  assert.equal(await page.locator('#codex-attachment-input').getAttribute('accept'), '.txt,.md,.lua,.luau,.json,.csv,.png');
   await choose(f, files);
   assert.equal(f.posts.length, 0, 'Choosing files does not submit or grant authority');
   assert.equal(await page.locator('#codex-composer').inputValue(), draft);
@@ -318,7 +383,7 @@ test('Edge pending read: failed prepare preserves the existing file and draft, t
   await choose(f, [ready]); await page.evaluate(() => window.attachmentFixture.holdReads());
   const chooser = await openPicker(page);
   await chooser.setFiles(await filesOnDisk(f, [pending]));
-  await page.waitForFunction(() => document.getElementById('codex-attachment-status')?.textContent === 'Reading text files…');
+  await page.waitForFunction(() => document.getElementById('codex-attachment-status')?.textContent === 'Reading attachments…');
   const draft = 'Draft stays until both files finish.';
   await page.locator('#codex-composer').fill(draft); await page.locator('#codex-submit').click();
   await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent === 'Wait for the text attachments to finish reading.');
@@ -428,3 +493,152 @@ test('Edge logged-out mount and auth, provider, stale-state and stop transitions
   }
   await submit(f, 'Explicit submit after recovery.', []);
 });
+
+async function choosePng(f: Fixture, name: string, bytes = png()): Promise<void> {
+  const directory = await mkdtemp(join(f.root, 'png-selection-')), file = join(directory, name);
+  assert.ok(name && !/[\\/]/.test(name)); await writeFile(file, bytes);
+  const chooser = await openPicker(f.page); await chooser.setFiles([file]);
+  await f.page.waitForFunction(() => {
+    try { return window.attachmentFixture.attachments.prepareReferences().length === 1; } catch { return false; }
+  });
+  await chips(f.page, 1);
+  await f.page.waitForFunction(() => [...document.querySelectorAll('.codex-attachment-chip img')]
+    .every(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0));
+  assert.deepEqual(await f.page.locator('.codex-attachment-chip img').evaluateAll(images =>
+    images.map(image => [(image as HTMLImageElement).naturalWidth, (image as HTMLImageElement).naturalHeight])), [[128, 128]]);
+}
+function paddedPng(size: number): Buffer {
+  const original = png(), data = Buffer.alloc(size - original.length - 12, 0x61);
+  Buffer.from('reference\0').copy(data);
+  const chunk = Buffer.alloc(data.length + 12); chunk.writeUInt32BE(data.length); chunk.write('teXt', 4); data.copy(chunk, 8);
+  chunk.writeUInt32BE(pngCrc(chunk.subarray(4, -4)), chunk.length - 4);
+  return Buffer.concat([original.subarray(0, 33), chunk, original.subarray(33)]);
+}
+async function sendReference(f: Fixture, caption: string): Promise<void> {
+  await f.page.locator('#codex-composer').fill(caption);
+  const response = f.page.waitForResponse(row => row.url().endsWith('/v1/codex/reference-turn'));
+  await f.page.locator('#codex-submit').click(); assert.equal((await response).status(), 200);
+  await f.page.waitForFunction(() => document.getElementById('codex-notice')?.textContent === 'Message accepted. Waiting for a response.');
+}
+async function selectDraftModel(f: Fixture): Promise<void> {
+  const before = f.setup.length, model = f.observed().snapshot!.models[0]!;
+  await f.page.locator('#codex-model-trigger').click();
+  await f.page.locator('#codex-picker-current-model').click();
+  await f.page.locator('[data-picker-model="' + model.model + '"]').click();
+  assert.equal(await f.page.locator('#codex-model').inputValue(), model.model);
+  assert.equal(await f.page.locator('#codex-effort').inputValue(), 'high');
+  assert.equal(f.setup.length, before, 'A visible reported draft model choice starts no native work');
+}
+
+test('Edge trusted PNG selection sends exact inline bytes and metadata, with removable and disposed previews', browserOptions, async t => {
+  const f = await fixture(t), { page } = f, bytes = png(), name = "reader's reference.png";
+  await choosePng(f, name, bytes);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.pickerTrusted), [true]);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.changeTrusted), [true]);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.reads), [bytes.length]);
+  await page.getByRole('button', { name: 'Remove ' + name, exact: true }).click(); await chips(page, 0);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.revokedUrls), await page.evaluate(() => window.attachmentFixture.blobUrls));
+  await choosePng(f, name, bytes);
+  const screenshot = join(f.root, 'reference-ready.png'); await page.screenshot({ path: screenshot });
+  t.diagnostic('Reference selection screenshot: ' + screenshot);
+  await sendReference(f, 'Use this reference for the tower.');
+  assert.equal(f.posts.length, 1); assert.equal(f.setup.length, 0);
+  assert.deepEqual(f.posts[0]!.references, [{ name, dataUrl: 'data:image/png;base64,' + bytes.toString('base64') }]);
+  assert.match(f.posts[0]!.text, /^Use this reference for the tower\./);
+  assert.ok(f.posts[0]!.text.includes(JSON.stringify(name)));
+  assert.deepEqual(f.observed().actions[0]!.references, [{ name, bytes: bytes.length, width: 128, height: 128,
+    sha256: createHash('sha256').update(bytes).digest('hex') }]);
+  assert.equal((await page.locator('body').innerText()).includes(bytes.toString('base64')), false);
+  await chips(page, 0);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.revokedUrls), await page.evaluate(() => window.attachmentFixture.blobUrls));
+});
+
+test('Edge first draft Send carries only the captured PNG through its acknowledged native setup', browserOptions, async t => {
+  const f = await fixture(t, { tabs: true, setup: true }), original = f.observed().snapshot!.connectionId;
+  await f.page.locator('#workspace-new-chat').click(); await selectDraftModel(f); await choosePng(f, 'draft-reference.png');
+  await sendReference(f, 'Build the tower from this reference.');
+  assert.deepEqual(f.setup.map(row => row.action), ['disconnect', 'connect', 'select', 'thread-start', 'history-load']);
+  assert.equal(f.posts.length, 1); assert.equal(f.posts[0]!.threadId, 'synthetic-created-thread');
+  assert.notEqual(f.posts[0]!.connectionId, original);
+  assert.deepEqual(f.posts[0]!.references, [{ name: 'draft-reference.png', dataUrl: 'data:image/png;base64,' + png().toString('base64') }]);
+  await chips(f.page, 0);
+});
+
+for (const change of ['caption', 'selection', 'stop', 'project-away-back'] as const) {
+  test('Edge held draft setup fences the captured PNG after ' + change, browserOptions, async t => {
+    const f = await fixture(t, { tabs: true, setup: true }), { page } = f;
+    await page.locator('#workspace-new-chat').click(); await selectDraftModel(f); await choosePng(f, 'pending-reference.png');
+    await page.locator('#codex-composer').fill('Original caption.'); f.holdSetup('thread-start');
+    await page.locator('#codex-submit').click(); await f.enteredSetup();
+    if (change === 'caption') await page.evaluate(() => {
+      // Explicit adversarial draft mutation while the owned setup is awaiting ACK.
+      const composer = document.getElementById('codex-composer') as HTMLTextAreaElement;
+      composer.value = 'Edited caption.'; composer.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    else if (change === 'selection') await page.evaluate(() => window.attachmentFixture.attachments.clear());
+    else if (change === 'stop') await page.evaluate(() => window.attachmentFixture.chat.stop());
+    else {
+      const baseline = f.observed(), away = state(); away.projectPath = baseline.projectPath + '-other';
+      await page.evaluate(({ away, baseline }) => window.attachmentFixture.transition(away, baseline), { away, baseline });
+    }
+    f.releaseSetup();
+    await page.waitForFunction(() => !(window.attachmentFixture.chat as unknown as { preparingMessage: boolean }).preparingMessage);
+    assert.equal(f.posts.length, 0, 'A stale captured image never starts an inference turn');
+    if (change === 'caption') assert.equal(await page.locator('#codex-composer').inputValue(), 'Edited caption.');
+  });
+}
+
+test('Edge escaped caption and maximal PNG reject before draft setup while retaining the selected bytes', browserOptions, async t => {
+  const f = await fixture(t, { tabs: true, setup: true }), { page } = f, bytes = paddedPng(512 * 1024);
+  await page.locator('#workspace-new-chat').click(); await selectDraftModel(f); await choosePng(f, 'bounded-reference.png', bytes);
+  const caption = '\u0001'.repeat(100_000);
+  await page.evaluate(value => {
+    const composer = document.getElementById('codex-composer') as HTMLTextAreaElement;
+    composer.value = value; composer.dispatchEvent(new Event('input', { bubbles: true }));
+  }, caption);
+  await page.locator('#codex-submit').click();
+  await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('too large'));
+  assert.equal(await page.locator('#codex-composer').inputValue(), caption);
+  assert.equal(f.setup.length, 0); assert.equal(f.posts.length, 0); await chips(page, 1);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.attachments.prepareReferences()),
+    [{ name: 'bounded-reference.png', dataUrl: 'data:image/png;base64,' + bytes.toString('base64') }]);
+});
+
+test('Edge explicit text-only models refuse PNG intake and Send while older catalogue compatibility remains available', browserOptions, async t => {
+  const baseline = state(), initial = structuredClone(baseline); initial.snapshot!.models[0]!.inputModalities = ['text'];
+  const f = await fixture(t, { initial }), { page } = f;
+  const file = join(f.root, 'model-reference.png'); await writeFile(file, png());
+  const chooser = await openPicker(page); await chooser.setFiles([file]);
+  await page.waitForFunction(() => document.getElementById('codex-attachment-status')?.textContent?.includes('does not advertise image input'));
+  await chips(page, 0); assert.deepEqual(await page.evaluate(() => window.attachmentFixture.reads), []);
+  f.set(baseline); await f.refresh(); await choosePng(f, 'model-reference.png');
+  const textOnly = f.observed(); textOnly.snapshot!.models[0]!.inputModalities = ['text']; f.set(textOnly); await f.refresh();
+  await page.locator('#codex-composer').fill('Keep this reference.'); await page.locator('#codex-submit').click();
+  await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('does not advertise image input'));
+  assert.equal(f.posts.length, 0); assert.equal(await page.locator('#codex-composer').inputValue(), 'Keep this reference.'); await chips(page, 1);
+  const compatible = f.observed(); delete compatible.snapshot!.models[0]!.inputModalities; f.set(compatible); await f.refresh();
+  await sendReference(f, 'Keep this reference.'); assert.equal(f.posts.length, 1);
+});
+
+for (const change of ['project-away-back', 'provider-away-back', 'stop'] as const) {
+  test('Edge bound Send cannot regain an unsent image after held digest and ' + change, browserOptions, async t => {
+    const f = await fixture(t, { tabs: true }), { page } = f;
+    await choosePng(f, 'digest-reference.png'); await page.locator('#codex-composer').fill('Original bound request.');
+    const baselineDigests = await page.evaluate(() => window.attachmentFixture.digests);
+    await page.evaluate(() => window.attachmentFixture.holdDigests()); await page.locator('#codex-submit').click();
+    await page.waitForFunction(before => window.attachmentFixture.digests > before, baselineDigests);
+    assert.equal(f.posts.length, 0, 'The exact image digest has not settled, so no HTTP Send exists yet');
+    if (change === 'project-away-back') {
+      const baseline = f.observed(), away = state(); away.projectPath = baseline.projectPath + '-other';
+      await page.evaluate(({ away, baseline }) => window.attachmentFixture.transition(away, baseline), { away, baseline });
+    } else if (change === 'provider-away-back') await page.evaluate(() => {
+      window.attachmentFixture.chat.setChatProviderPreference('claude');
+      window.attachmentFixture.chat.setChatProviderPreference('codex');
+    });
+    else await page.evaluate(() => window.attachmentFixture.chat.stop());
+    await page.evaluate(() => window.attachmentFixture.releaseDigests());
+    await page.waitForFunction(() => (window.attachmentFixture.chat as unknown as { imageRequest: unknown }).imageRequest === null);
+    assert.equal(f.posts.length, 0, 'Returning to the original project/provider cannot authorize a stale image');
+    assert.equal(f.setup.length, 0);
+  });
+}

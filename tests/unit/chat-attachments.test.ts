@@ -95,12 +95,12 @@ test('safe names are bounded basenames and never paths, executable extensions, c
   }
 });
 
-test('mount configures real text-only picker hooks without reading files', () => {
+test('mount configures text and PNG picker hooks without reading files', () => {
   const f = fixture();
   assert.equal(f.button.textContent, ''); assert.equal(f.button.type, 'button'); // Vector icon is preserved by the controller.
-  assert.equal(f.button.attributes.get('aria-label'), 'Attach text files');
+  assert.equal(f.button.attributes.get('aria-label'), 'Attach text files or PNG references');
   assert.equal(f.input.type, 'file'); assert.equal(f.input.hidden, true); assert.equal(f.input.multiple, true);
-  assert.equal(f.input.accept, '.txt,.md,.lua,.luau,.json,.csv');
+  assert.equal(f.input.accept, '.txt,.md,.lua,.luau,.json,.csv,.png');
   assert.equal(f.status.attributes.get('aria-live'), 'polite'); assert.equal(f.chips.hidden, true);
   assert.equal(f.input.clicks, 0); assert.equal(f.controller.prepareText('plain'), 'plain'); f.controller.cleanup();
 });
@@ -131,7 +131,7 @@ test('prepareText preserves the human message and JSON quotes untrusted source w
 
 test('batch count and total byte limits reject before any file read, including existing attachments', async () => {
   const f = fixture(), data = tracked('file.txt', encode('text'));
-  const unknown = tracked('picture.png', encode('text'));
+  const unknown = tracked('picture.jpg', encode('text'));
   f.choose([data.value, unknown.value]); await tick(); assert.equal(data.reads(), 0); assert.equal(unknown.reads(), 0);
   f.choose(Array.from({ length: 5 }, () => data.value)); await tick(); assert.equal(data.reads(), 0);
   assert.match(f.status.textContent, /at most 4/);

@@ -81,6 +81,8 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
   for (const model of models) {
     if (!object(model) || !text(model.model) || names.has(model.model) || !text(model.id) || !text(model.displayName) || model.entitlement !== 'unverified' || !Array.isArray(model.efforts) || !model.efforts.length || model.efforts.length > 16 || model.efforts.some(e => !text(e,64)) || new Set(model.efforts).size !== model.efforts.length) throw new Error('Invalid reported model/effort catalogue.');
     names.add(model.model);
+    if(Object.hasOwn(model,'inputModalities')&&(!Array.isArray(model.inputModalities)||model.inputModalities.length>3||model.inputModalities.some(x=>!['text','image','audio'].includes(x))||new Set(model.inputModalities).size!==model.inputModalities.length)||
+      Object.hasOwn(model,'inputModalitiesSource')&&!['reported','compatibility-default'].includes(String(model.inputModalitiesSource)))throw new Error('Invalid native input modality catalogue.');
   }
   const pair = (p: unknown) => dataObject(p) && text(p.model) && text(p.effort,64) && models.some((m: Model) => m.model === p.model && m.efforts.includes(p.effort as string));
   if (value.selection !== null && !pair(value.selection)) throw new Error('The native selection is absent from the reported catalogue.');
@@ -118,7 +120,17 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
 }
 function readActionRecord(value: unknown): ChatActionRecord {
   const rotated=dataObject(value)&&Object.hasOwn(value,'nextConnectionId');
-  if (!dataObject(value, ['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt',...(rotated?['nextConnectionId']:[])]) || !uuid(value.requestId) || !ACTIONS.includes(String(value.action)) || !(value.connectionId === null || uuid(value.connectionId)) || !['pending','acknowledged','rejected','unknown'].includes(String(value.state)) || rotated&&(!['turn-start','task-focus'].includes(String(value.action))||!uuid(value.nextConnectionId)||value.nextConnectionId===value.connectionId)) throw new Error('Invalid native action receipt.');
+  const references=dataObject(value)&&Object.hasOwn(value,'references');
+  if (!dataObject(value, ['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt',...(rotated?['nextConnectionId']:[]),...(references?['references']:[])]) || !uuid(value.requestId) || !ACTIONS.includes(String(value.action)) || !(value.connectionId === null || uuid(value.connectionId)) || !['pending','acknowledged','rejected','unknown'].includes(String(value.state)) || rotated&&(!['turn-start','task-focus'].includes(String(value.action))||!uuid(value.nextConnectionId)||value.nextConnectionId===value.connectionId)) throw new Error('Invalid native action receipt.');
+  if(references){
+    if(value.action!=='turn-start'||!Array.isArray(value.references)||!value.references.length||value.references.length>4)throw new Error('Invalid image reference receipt.');
+    let bytes=0,pixels=0;const names=new Set<string>();
+    for(const image of value.references){if(!dataObject(image,['name','bytes','width','height','sha256'])||!text(image.name,128)||names.has(image.name)||
+      !integer(image.bytes)||!image.bytes||!integer(image.width)||!image.width||(image.width as number)>4096||!integer(image.height)||!image.height||(image.height as number)>4096||
+      !/^[a-f0-9]{64}(?![\s\S])/.test(String(image.sha256)))throw new Error('Invalid image reference metadata.');
+      names.add(image.name);bytes+=image.bytes as number;pixels+=(image.width as number)*(image.height as number);}
+    if(bytes>512*1024||pixels>8_000_000)throw new Error('Image receipt exceeds its bounds.');
+  }
   for (const key of ['threadId','turnId','model','effort','errorCode']) if (!(value[key] === null || text(value[key], key === 'effort' ? 64 : 256))) throw new Error('Invalid native action receipt metadata.');
   if (!text(value.createdAt,64) || !Number.isFinite(Date.parse(value.createdAt)) || !(value.finishedAt === null || text(value.finishedAt,64) && Number.isFinite(Date.parse(value.finishedAt)))) throw new Error('Invalid native action receipt timestamps.');
   if (['grant-assets','revoke-assets'].includes(String(value.action)) && (!uuid(value.connectionId) || !text(value.threadId))) throw new Error('Invalid exact native asset action receipt scope.');
@@ -175,7 +187,7 @@ export function readCodexState(value: unknown): ChatState {
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
   const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], 'task-stop':['threadId','taskId'], 'task-focus':['threadId','taskId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
-  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites']:action==='disconnect'?['preserveAssetWork']:[];
+  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites','references']:action==='disconnect'?['preserveAssetWork']:[];
   const keys = [...accepted[action]!, ...optional.filter(key=>Object.hasOwn(fields,key))];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
   if (action==='disconnect' && Object.hasOwn(fields,'preserveAssetWork') && typeof fields.preserveAssetWork!=='boolean')
@@ -201,6 +213,14 @@ export function prepareCodexAction(state: ChatState | null, action: string, fiel
   if(action==='task-stop'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===s?.thread?.threadId&&task.sessionId===s.thread.sessionId&&fields.threadId===task.threadId)))throw new Error('Choose the exact owned task in this conversation.');
   if(action==='task-focus'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===fields.threadId&&task.retained===true&&state.nativeThreads?.some(saved=>saved.threadId===task.threadId&&saved.sessionId===task.sessionId))))throw new Error('Choose the exact retained task in a saved conversation.');
   if (action === 'turn-start' && (typeof fields.text !== 'string' || !fields.text.trim() || utf8(fields.text) > CODEX_INPUT_BYTES)) throw new Error('Submit nonempty text of at most 128 KiB in UTF-8.');
+  if(action==='turn-start'&&Object.hasOwn(fields,'references')){
+    const refs=fields.references;
+    if(!Array.isArray(refs)||!refs.length||refs.length>4||refs.some(image=>!dataObject(image,['name','dataUrl'])||!text(image.name,128)||typeof image.dataUrl!=='string'||image.dataUrl.length>699074||!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}(?![\s\S])/.test(image.dataUrl)))throw new Error('Choose bounded PNG references from the attachment picker.');
+    const model=s!.models.find(row=>row.model===s!.thread?.selection.model);
+    if(!model||model.inputModalities&&!model.inputModalities.includes('image'))throw new Error('The selected model does not advertise image input.');
+    fields={...fields,references:Object.freeze(refs.map(image=>Object.freeze({name:image.name as string,dataUrl:image.dataUrl as string})))};
+    if(utf8(JSON.stringify({requestId,connectionId:s!.connectionId,action,...fields}))>1_000_000)throw new Error('The complete message and PNG references are too large. Reduce the message or references; your draft is retained.');
+  }
   if (action === 'approval' && !['accept','decline','cancel'].includes(String(fields.decision))) throw new Error('Choose one explicit approval decision.');
   return { requestId, connectionId: action === 'connect' ? null : s!.connectionId, action, ...fields } as ChatAction;
 }
@@ -214,7 +234,7 @@ export class CodexChatApi {
   safe(value: string): string {
     return value.replaceAll(this.#token || '\0', '[REDACTED]').replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g,'[REDACTED]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [REDACTED]').replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}/g,'[REDACTED]').replace(/("?(?:accessToken|access_token|apiKey|api_key|password|secret)"?\s*[:=]\s*["']?)[^"',;\s]+/gi,'$1[REDACTED]').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g,'');
   }
-  async request(path: '/v1/codex/state' | '/v1/codex/action', input?: ChatAction, signal?: AbortSignal): Promise<unknown> {
+  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn', input?: ChatAction, signal?: AbortSignal): Promise<unknown> {
     if (!/^[a-f0-9]{64}$/.test(this.#token)) throw new CodexHttpError('Open the launcher’s human control link.',false);
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort',abort,{once:true}); if(signal?.aborted) controller.abort();
@@ -238,12 +258,41 @@ export class CodexChatApi {
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
   async action(input: ChatAction, signal?: AbortSignal): Promise<{record: ChatActionRecord; replayed: boolean; state: ChatState}> {
-    const value=await this.request('/v1/codex/action',input,signal);
+    let expectedReferences:readonly {name:string;bytes:number;width:number;height:number;sha256:string}[]|undefined;
+    if(input.action==='turn-start'&&input.references){
+      // Snapshot before WebCrypto yields. A same-caption replacement cannot
+      // change the submitted bytes or the expected acknowledgement underneath us.
+      const references=Object.freeze(input.references.map(image=>Object.freeze({name:image.name,dataUrl:image.dataUrl})));
+      input={...input,references};
+      let timer:ReturnType<typeof setTimeout>|undefined;
+      try{
+        expectedReferences=await Promise.race([(async()=>{
+          const result=[];let total=0,pixels=0;
+          if(!references.length||references.length>4)throw new Error();
+          for(const image of references){
+            if(signal?.aborted)throw new Error();
+            if(!image.dataUrl.startsWith('data:image/png;base64,')||image.dataUrl.length>699074)throw new Error();
+            const raw=atob(image.dataUrl.slice(22));if(!raw.length||(total+=raw.length)>512*1024||raw.length<33)throw new Error();
+            const bytes=Uint8Array.from(raw,char=>char.charCodeAt(0)),view=new DataView(bytes.buffer),width=view.getUint32(16),height=view.getUint32(20);
+            if(!width||!height||width>4096||height>4096||(pixels+=width*height)>8_000_000)throw new Error();
+            const digest=await crypto.subtle.digest('SHA-256',bytes);
+            result.push({name:image.name,bytes:bytes.length,width,height,sha256:Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('')});
+          }
+          return result;
+        })(),new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error()),5000);})]);
+        if(signal?.aborted)throw new Error();
+      }catch{throw new CodexHttpError('PNG reference verification was cancelled or unavailable. No message was sent.',false);}
+      finally{if(timer)clearTimeout(timer);}
+    }
+    const value=await this.request(input.action==='turn-start'&&input.references?'/v1/codex/reference-turn':'/v1/codex/action',input,signal);
     if(!object(value)||typeof value.replayed!=='boolean')throw new CodexHttpError('Native acknowledgement was unreadable; inspect this request ID.',true);
     try {
     const r=readActionRecord(value.record);
+    if(expectedReferences&&(r.references?.length!==expectedReferences.length||r.references.some((image,i)=>{
+      const expected=expectedReferences![i]!;return image.name!==expected.name||image.bytes!==expected.bytes||image.width!==expected.width||image.height!==expected.height||image.sha256!==expected.sha256;
+    })))throw new CodexHttpError('Image acknowledgement did not match the original reference bytes and order.',true);
     if(r.requestId!==input.requestId||r.action!==input.action||(input.action!=='connect'&&r.connectionId!==input.connectionId)||(input.action==='connect'&&r.state==='acknowledged'&&!uuid(r.connectionId)))throw new CodexHttpError('Native acknowledgement did not match the exact request.',true);
-    if ((input.action === 'grant-assets' || input.action === 'revoke-assets') && r.threadId !== input.threadId) throw new CodexHttpError('Native asset acknowledgement did not match the exact thread.', true);
+    if ((input.action === 'grant-assets' || input.action === 'revoke-assets' || input.action === 'turn-start') && r.threadId !== input.threadId) throw new CodexHttpError('Native acknowledgement did not match the exact thread.', true);
     const state=readCodexState(value.state);
     if(r.nextConnectionId){const snapshot=state.snapshot??state.lastSnapshot,binding=state.nativeThreads?.find(row=>row.threadId===r.threadId);
       if(!['turn-start','task-focus'].includes(input.action)||!('threadId'in input)||r.threadId!==input.threadId||!snapshot||snapshot.connectionId!==r.nextConnectionId||snapshot.thread?.threadId!==input.threadId||!binding||snapshot.thread.sessionId!==binding.sessionId)
@@ -349,6 +398,7 @@ export class CodexChat {
   private preferencesLoadingProject: string | null = null;
   private preferenceController: ChatTabsController | null = null;
   private attachments: ChatAttachmentsController | null = null;
+  private imageRequest:AbortController|null=null;
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
   /** Presentation-only attachment mount; it creates no native thread or task. */
   enableTextAttachments(controller:ChatAttachmentsController):void {
@@ -363,6 +413,12 @@ export class CodexChat {
       this.state?.connecting||this.state?.closing||this.tabs&&(!active||active.kind==='native'&&!this.tabs.bound(this.state)))return null;
     return JSON.stringify([this.state?.projectPath,active?.key??null,s.connectionId,
       active?.kind==='draft'?null:s.thread?.threadId??null,active?.kind==='draft'?null:s.thread?.sessionId??null]);
+  }
+  referenceImageInputAvailable():boolean{
+    if(this.textAttachmentScope()===null)return false;
+    const snapshot=this.snapshot(),pair=this.localPair()??snapshot?.thread?.selection;
+    const model=snapshot?.models.find(row=>row.model===pair?.model&&row.efforts.includes(pair.effort));
+    return !!model&&(model.inputModalities===undefined||model.inputModalities.includes('image'));
   }
   attachmentPresentationChanged():void {if(!this.stopped)this.renderComposer();}
   private el<T extends HTMLElement=HTMLElement>(id:string) {const e=this.doc.getElementById(id);if(!e)throw new Error('Missing Codex UI '+id);return e as T;}
@@ -400,7 +456,10 @@ export class CodexChat {
       conversation:this.workflowConversation(),persistence:this.tabs?.persistenceStatus()??'memory',preferredProvider:this.providerPreference(),preferencesSaved:!this.draftDirty&&(this.tabs?.preferencesSaved()??false)});
   }
   /** Provider presentation preference only; Claude continues through native handoff. */
-  setChatProviderPreference(provider:'codex'|'claude'):void {this.flushDraft();this.tabs?.setProviderPreference(provider);this.renderControls();this.publishState();}
+  setChatProviderPreference(provider:'codex'|'claude'):void {
+    if(provider!==this.providerPreference()){this.messageLifetime++;this.imageRequest?.abort();}
+    this.flushDraft();this.tabs?.setProviderPreference(provider);this.renderControls();this.publishState();
+  }
   private providerPreference():'codex'|'claude' {
     // Before tab hydration completes, the existing provider control can only deny Codex work.
     return this.tabs?.providerPreference()??((this.doc.getElementById('provider-setup-provider') as HTMLSelectElement|null)?.value==='claude'?'claude':'codex');
@@ -762,14 +821,22 @@ export class CodexChat {
   private async submitMessage():Promise<void> {
     if(this.preparingMessage||!this.messageTargetReady()||this.draftNeedsReview())return;
     const draft=this.value('codex-composer');
-    let message:string;
-    try {message=this.attachments?.prepareText(draft)??draft;}
+    let message:string,references:readonly {readonly name:string;readonly dataUrl:string}[]=[];
+    try {message=this.attachments?.prepareText(draft)??draft;references=this.attachments?.prepareReferences()??[];}
     catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be prepared.');return;}
     if(!message.trim()||utf8(message)>CODEX_INPUT_BYTES)return;
     const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
+    const referenceRevision=this.attachments?.selectionRevision(),referenceFields=references.length?{references}:{};
+    // Reject an oversized caption/reference envelope before opening a draft's
+    // native thread or clearing its selected files. Unknown future thread IDs
+    // reserve their maximum encoded space; dispatch checks the exact body again.
+    if(references.length&&utf8(JSON.stringify({requestId:'f'.repeat(36),connectionId:this.snapshot()!.connectionId,action:'turn-start',
+      threadId:source?.kind==='native'?source.threadId:'X'.repeat(1024),text:message,references,allowWorkspaceWrites:true,allowAssets:true}))>1_000_000){
+      this.text('codex-notice','The complete message and PNG references are too large. Reduce the message or references; your draft and selected files are retained.');return;
+    }
     const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
     const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
-    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
+    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
     if(!selection)return;
     this.preparingMessage=true;this.renderControls();
     try {
@@ -779,12 +846,13 @@ export class CodexChat {
       const live=this.snapshot()?.thread;
       if(!opened||this.stopped||lifetime!==this.messageLifetime||this.state?.projectPath!==project||!live?.configured||
         live.selection.model!==selection.model||live.selection.effort!==selection.effort||
+        references.length&&(this.tabs?.active()?.localId!==source?.localId||this.attachments?.selectionRevision()!==referenceRevision)||
         !this.messageTargetReady()||this.draftNeedsReview())return;
       let current:string;
       try {current=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
       catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
-      if(this.value('codex-composer')!==draft||current!==message){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
-      await this.dispatch('turn-start',{threadId:live.threadId,text:message,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
+      if(this.value('codex-composer')!==draft||!references.length&&current!==message){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
+      await this.dispatch('turn-start',{threadId:live.threadId,text:message,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
   private startConversation(event: Event) {
@@ -1098,6 +1166,7 @@ export class CodexChat {
   }
   stop() {
     this.messageLifetime++;
+    this.imageRequest?.abort();
     this.attachments?.stop();
     this.preferenceController?.stop();this.stashTabDraft();this.tabs?.stop();
     this.stopped=true;this.generation++;this.readVersion++;this.readController?.abort();if(this.timer)clearTimeout(this.timer);
@@ -1125,6 +1194,7 @@ export class CodexChat {
     } finally {if(version===this.readVersion&&!this.stopped){this.render();this.publishProviderState();this.publishState();}}
   }
   private applyState(state:ChatState) {
+    if(this.state&&this.state.projectPath!==state.projectPath){this.messageLifetime++;this.imageRequest?.abort();}
     this.flushDraft();
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
     const previous=this.snapshot()?.thread,next=state.snapshot?.thread;
@@ -1168,6 +1238,7 @@ export class CodexChat {
       if(!this.canSelectModel())return;
       if(this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||!IDLE.includes(this.snapshot()?.thread?.turnStatus??''))) {
         try {prepareCodexAction(this.state,action,fields);}catch{return;}
+        this.imageRequest?.abort();
         this.tabs.updateDraft(this.value('codex-composer'),{model:fields.model as string,effort:fields.effort as string},!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft);
         this.selectionSignature='';this.closePicker(true);this.render();this.publishState();return;
       }
@@ -1182,15 +1253,19 @@ export class CodexChat {
     if(action==='connect'&&(!this.fresh||this.snapshot()||this.uncertain.size||this.pending.size||this.state?.connecting||this.state?.closing))return;
     if(action==='turn-start'&&this.draftNeedsReview()){this.text('codex-notice','This workflow draft belongs to another conversation or model. Review it before submitting; your text has been preserved.');this.renderControls();return;}
     let input:ChatAction;try{input=prepareCodexAction(this.state,action,fields);}catch(error){this.text('codex-notice',String(error));return;}
+    const cancelsImagePreparation=!internal&&(input.action==='disconnect'||(input.action==='revoke-assets'||input.action==='revoke-writes')&&input.threadId===this.snapshot()?.thread?.threadId);
+    if(cancelsImagePreparation){this.imageRequest?.abort();if(this.preparingMessage)this.messageLifetime++;}
     if([...this.pending.values()].some(p=>p.action===input.action&&(input.action!=='approval'||'handle' in p&&p.handle===fields.handle)))return;
     if(safety){this.generation++;this.readVersion++;this.readController?.abort();this.closeConfirmation();}
     if(action==='disconnect')this.fresh=false;
     const epoch=this.generation, assetScope=this.assetScope();
+    const imageRequest=input.action==='turn-start'&&input.references?new AbortController():null;
+    if(imageRequest)this.imageRequest=imageRequest;
     this.pending.set(input.requestId,input);this.text('codex-notice','Waiting for confirmation…');
     if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.el<HTMLTextAreaElement>('codex-composer').value='';this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
     this.render();this.publishState();
     try {
-      const outcome=await this.api.action(input);
+      const outcome=await this.api.action(input,imageRequest?.signal);
       const current=this.snapshot()?.connectionId;
       const freshTask=input.action==='turn-start'&&!!outcome.record.nextConnectionId&&(current===input.connectionId||current===outcome.record.nextConnectionId)&&
         outcome.state.snapshot?.connectionId===outcome.record.nextConnectionId&&outcome.state.snapshot.thread?.threadId===input.threadId&&outcome.state.snapshot.thread.sessionId===this.snapshot()?.thread?.sessionId;
@@ -1207,6 +1282,7 @@ export class CodexChat {
       if(!(error instanceof CodexHttpError)||error.unknown)this.uncertain.set(input.requestId,{input,read:false});
       if(!this.stopped&&epoch===this.generation)this.text('codex-notice',(error instanceof Error?error.message:'Unknown native HTTP acknowledgement.')+' Request ID retained: '+input.requestId+'. No automatic retry.');
     } finally {
+        if(this.imageRequest===imageRequest)this.imageRequest=null;
       this.pending.delete(input.requestId);
       if(!this.stopped){this.render();this.publishProviderState();this.publishState();await this.refresh();}
     }

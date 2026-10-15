@@ -9,6 +9,7 @@ import { CodexClientError, validateNativeAssetHooks, type Account, type Approval
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
 import type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
+import { snapshotReferenceImages, type ReferenceImage } from './reference-images.js';
 
 const USAGE_COUNT_LIMIT = 1_000_000_000_000;
 const USAGE_KEYS = ['totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens'] as const;
@@ -375,18 +376,19 @@ export class CodexSession {
       this.#transport.stop(new CodexClientError('GRANT_REVOKED', 'Write grant revoked during an active turn; explicit recovery is required.'));
     }
   }
-  #humanTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }) {
-    exact(action, ['initiatedBy','threadId','text','allowWorkspaceWrites']); human({ initiatedBy: action.initiatedBy });
+  #humanTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean; references?:readonly ReferenceImage[] }) {
+    exact(action, ['initiatedBy','threadId','text','allowWorkspaceWrites','references']); human({ initiatedBy: action.initiatedBy });
     if (Object.hasOwn(action, 'allowWorkspaceWrites') && typeof action.allowWorkspaceWrites !== 'boolean') fail('ARGUMENTS', 'Send workspace permission must be a boolean.');
-    return { threadId: str(action.threadId), text: str(action.text, this.bounds.maxInputBytes), allowWorkspaceWrites: action.allowWorkspaceWrites === true };
+    const references=action.references===undefined?undefined:snapshotReferenceImages(action.references);
+    return { threadId: str(action.threadId), text: str(action.text, this.bounds.maxInputBytes), allowWorkspaceWrites: action.allowWorkspaceWrites === true,...(references?{references}:{}) };
   }
-  async startTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }): Promise<ThreadState> {
+  async startTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean; references?:readonly ReferenceImage[] }): Promise<ThreadState> {
     const input = this.#humanTurn(action);this.#requireThread(input.threadId);
     if(this.#managedStarting)fail('BUSY','A managed start is already awaiting its acknowledgement.');
     this.revokeTaskContinuation();
     return this.#startTurn(input, false);
   }
-  async startManagedTask(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }): Promise<ManagedTaskStart> {
+  async startManagedTask(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean; references?:readonly ReferenceImage[] }): Promise<ManagedTaskStart> {
     const input = this.#humanTurn(action);this.#requireThread(input.threadId);
     if(this.#managedStarting)fail('BUSY','A managed start is already awaiting its acknowledgement.');
     this.revokeTaskContinuation();
@@ -420,7 +422,7 @@ export class CodexSession {
     this.#taskContinuation.revoked = true;
     if (this.#turnPreflight) this.#turnPreflight.revoked = true;
   }
-  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean }, managed: boolean): Promise<ThreadState> {
+  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean; references?:readonly ReferenceImage[] }, managed: boolean): Promise<ThreadState> {
     const allowWorkspaceWrites = action.allowWorkspaceWrites === true;
     const thread = this.#requireThread(action.threadId);
     if (this.#turnPreflight || this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
@@ -448,6 +450,19 @@ export class CodexSession {
       }
       finally { this.#turnPreflight = null; }
     }
+    // The fresh, acknowledged catalogue belongs to this exact native client.
+    // Older catalogues use the vendor-documented text/image compatibility default.
+    const references=action.references;
+    if(references?.length){const model=this.#models.find(m=>m.model===thread.selection.model);
+      if(!model||model.inputModalities&&!model.inputModalities.includes('image'))fail('IMAGE_UNSUPPORTED','The selected native model does not advertise image input.');}
+    const params={threadId:thread.threadId,input:[{type:'text',text,text_elements:[]},...(references?.map(image=>({type:'image',url:image.dataUrl}))??[])],
+      cwd:this.#cwd,model:thread.selection.model,effort:thread.selection.effort,approvalPolicy:'on-request',approvalsReviewer:'user',
+      sandboxPolicy:allowWorkspaceWrites||thread.writeGranted
+        ?{type:'workspaceWrite',writableRoots:[this.#cwd],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}
+        :{type:'readOnly',networkAccess:false}};
+    // Include the complete UTF-8 envelope before allocating an operation/grant.
+    if(references?.length&&Buffer.byteLength(JSON.stringify({id:Number.MAX_SAFE_INTEGER,method:'turn/start',params})+'\n')>this.bounds.maxFrameBytes)
+      fail('FRAME_LIMIT','The complete native message and references exceed the frame limit. Reduce the message or images.');
     const operation = this.#newOperation('turn/start', thread.threadId, null);
     if (managed) this.#taskContinuation = { token: Object.freeze({ kind: 'native-task-continuation' }), thread, operation,
       selection: { ...thread.selection }, accountRevision: this.#accountRevision,
@@ -466,14 +481,7 @@ export class CodexSession {
       thread.writeGranted = true;
     }
     try {
-      const result = await this.#requestOperation(operation, {
-        threadId: thread.threadId, input: [{ type: 'text', text, text_elements: [] }],
-        cwd: this.#cwd, model: thread.selection.model, effort: thread.selection.effort,
-        approvalPolicy: 'on-request', approvalsReviewer: 'user',
-        sandboxPolicy: thread.writeGranted
-          ? { type: 'workspaceWrite', writableRoots: [this.#cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
-          : { type: 'readOnly', networkAccess: false },
-      });
+      const result = await this.#requestOperation(operation, params);
       this.#decodeAcknowledgement(() => {
         const turn = object(object(result).turn);
         const turnId = str(turn.id);
@@ -632,7 +640,10 @@ export class CodexSession {
           const efforts = raw.supportedReasoningEfforts.map(value => str(object(value).reasoningEffort, 64));
           if (new Set(efforts).size !== efforts.length) fail('CATALOGUE', 'Duplicate reported effort.');
           seenModels.add(model);
+          const modalities=raw.inputModalities===undefined?['text','image']:raw.inputModalities;
+          if(!Array.isArray(modalities)||modalities.length>3||modalities.some(x=>!['text','image','audio'].includes(x))||new Set(modalities).size!==modalities.length)fail('CATALOGUE','Invalid native input modality list.');
           models.push({ model, id, displayName: str(raw.displayName, 256), efforts,
+            inputModalities:[...modalities] as ('text'|'image'|'audio')[],inputModalitiesSource:raw.inputModalities===undefined?'compatibility-default':'reported',
             defaultEffort: typeof raw.defaultReasoningEffort === 'string' && efforts.includes(raw.defaultReasoningEffort) ? raw.defaultReasoningEffort : null,
             entitlement: 'unverified' });
           if (models.length > this.bounds.maxModels) fail('CATALOGUE_LIMIT', 'Model catalogue exceeded its bound.');
@@ -658,7 +669,9 @@ export class CodexSession {
     this.#threadOperation = operation;
     try {
       const result = await this.#requestOperation(operation, {
-        ...(id === null ? {} : { threadId: id }), model: pair.model, modelProvider: 'openai',
+        // Lifecycle resume needs identity/settings and live status, not a copy
+        // of every historic inline image. Explicit history reads stay bounded.
+        ...(id === null ? {} : { threadId: id, excludeTurns: true }), model: pair.model, modelProvider: 'openai',
         cwd: this.#cwd, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: 'read-only',
         ...(this.mcpPolicy==='arcane-only' ? { developerInstructions: ARCANE_TASK_INSTRUCTIONS } : {}),
       });

@@ -35,6 +35,8 @@ export interface Selection { model: string; effort: string }
 export interface Model {
   model: string; id: string; displayName: string; efforts: string[];
   defaultEffort: string | null; entitlement: 'unverified';
+  inputModalities?: ('text'|'image'|'audio')[];
+  inputModalitiesSource?: 'reported'|'compatibility-default';
 }
 export interface Account {
   auth: 'subscription' | 'signed-out' | 'unsupported';
