@@ -27,13 +27,13 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 // StudioTestView / TestReview from studio-test-service and the controller, with
 // the explicit UI name and optional private-target text used by the unit helper.
 // This is an in-memory HTTP response fake, not a native controller or acceptance run.
-function controllerMemoryFake(id, pluginSourceHash, digest, {
+function controllerMemoryFake(id, pluginRuntimeHash, digest, {
   state = 'needs_approval', evidence = 'fixture', targetName = NAME,
 } = {}) {
   const display = {
     proposal: {
       binding: { pairedSessionId: 'synthetic-paired-session', nativeStudioId: 'synthetic-studio-id', placeId: 0,
-        clientLifetimeId: 'synthetic-plugin-lifetime', pluginArtifactHash: pluginSourceHash,
+        clientLifetimeId: 'synthetic-plugin-lifetime', pluginArtifactHash: pluginRuntimeHash,
         scopeRevision: sha256('synthetic-scope-revision') },
       durationMs: 5000, observationIntervalMs: 1000, failOnRuntimeError: true,
       trustedPrivateTarget: { name: targetName, source: 'Synthetic UI fixture only: ' + XSS },
@@ -214,22 +214,23 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
   const privatePath = relative(verification, emit);
   assert.ok(!isAbsolute(privatePath) && privatePath !== '..' && !privatePath.startsWith('..\\') && !privatePath.startsWith('../'),
     'Select a private verification emit, never the root dist');
-  const [panel, css, serverSource, pluginSource, pluginManifest] = await Promise.all([
+  const [panel, css, serverSource, pluginArtifact, pluginManifest] = await Promise.all([
     readFile(join(emit, 'apps/desktop/src/playtest-panel.js'), 'utf8'), readFile(join(repository, 'apps/desktop/public/studio.css'), 'utf8'),
-    readFile(join(repository, 'apps/daemon/src/lab-server.ts'), 'utf8'), readFile(join(repository, 'plugin/build/ArcaneLocalBridge.lua')),
+    readFile(join(repository, 'apps/daemon/src/lab-server.ts'), 'utf8'), readFile(join(repository, 'plugin/build/ArcaneLocalBridge.rbxmx')),
     readFile(join(repository, 'plugin/build/manifest.json'), 'utf8'),
   ]);
   const policy = /setHeader\('Content-Security-Policy', "([^"]+)"\)/.exec(serverSource)?.[1]; assert.ok(policy);
   for (const rule of ["script-src 'self';", "style-src 'self';", "connect-src 'self' blob:;", "object-src 'none';"]) assert.ok(policy.includes(rule));
   assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval/);
-  const pluginSourceHash = sha256(pluginSource);
-  assert.equal(JSON.parse(pluginManifest).artifacts.find(artifact => artifact.name === 'ArcaneLocalBridge.lua')?.sha256, pluginSourceHash);
+  const {studioImportPluginArtifactHash}=await import(pathToFileURL(join(emit,'apps/daemon/src/studio-import-plugin-artifact.js')).href);
+  const pluginRuntimeHash = await studioImportPluginArtifactHash(repository);
+  assert.equal(JSON.parse(pluginManifest).artifacts.find(artifact => artifact.name === 'ArcaneLocalBridge.rbxmx')?.sha256, sha256(pluginArtifact));
   // Digest is the actual controller's canonical digest; Node-only code is never served to the browser.
   const { digest } = await import(pathToFileURL(join(emit, 'packages/studio-test-controller/src/contracts.js')).href);
   await mkdir(verification, { recursive: true });
   const proofDir = await mkdtemp(join(verification, 'playtest-browser-'));
   const report = { evidence: 'Synthetic browser UI fixtures only; no genuine native Studio acceptance', nativeAcceptance: false,
-    emit, productionCsp: policy, sourceHashes: { panel: sha256(panel), studioCss: sha256(css), pluginSourceHash,
+    emit, productionCsp: policy, sourceHashes: { panel: sha256(panel), studioCss: sha256(css), pluginRuntimeHash,pluginArtifactSha256:sha256(pluginArtifact),
       test: sha256(await readFile(fileURLToPath(import.meta.url))) }, checks: [], screenshots: [], console: [],
     serverErrors: [], pageErrors: [], forbiddenNetwork: [] };
   // Retain evidence even on failure, and stop only resources created by this test.
@@ -260,7 +261,7 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
     report.screenshots.push({ file: name + '.png', width: png.readUInt32BE(16), height: png.readUInt32BE(20), sha256: sha256(png) });
   };
   try {
-    const pending = controllerMemoryFake('synthetic-pending', pluginSourceHash, digest);
+    const pending = controllerMemoryFake('synthetic-pending', pluginRuntimeHash, digest);
     f.jobs([pending]);
     const documentResponse = await page.goto(f.origin); assert.equal(documentResponse.headers()['content-security-policy'], policy);
     await page.waitForFunction(() => !!window.__playtestFixture);
@@ -331,7 +332,7 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
     await assertFields(pendingRow, pending); await refresh(page); assert.equal(f.posts().length, 1);
     report.checks.push('trusted mouse Run test sends exact approval POST once; programmatic clicks send none');
 
-    const cancelJob = controllerMemoryFake('synthetic-existing-cancel', pluginSourceHash, digest, { targetName: 'Synthetic existing request' });
+    const cancelJob = controllerMemoryFake('synthetic-existing-cancel', pluginRuntimeHash, digest, { targetName: 'Synthetic existing request' });
     f.jobs([cancelJob]); await refresh(page);
     const cancelRow = row(page, cancelJob.targetName), cancel = cancelRow.locator('[data-playtest-action="cancel"]');
     assert.equal(await cancel.textContent(), 'Cancel'); await cancel.evaluate(button => button.click()); assert.equal(f.posts().length, 1);
@@ -341,7 +342,7 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
     assert.equal(f.posts()[1].headers.origin, f.origin); await refresh(page); assert.equal(f.posts().length, 2);
     report.checks.push('trusted mouse Cancel sends only the existing ID to cancel once');
 
-    const stopJob = controllerMemoryFake('synthetic-existing-run', pluginSourceHash, digest, { state: 'running', targetName: 'Synthetic existing running test' });
+    const stopJob = controllerMemoryFake('synthetic-existing-run', pluginRuntimeHash, digest, { state: 'running', targetName: 'Synthetic existing running test' });
     f.jobs([stopJob]); await refresh(page);
     await mouseClick(page, row(page, stopJob.targetName).getByRole('button', { name: 'Stop · ' + stopJob.targetName, exact: true }));
     await page.getByText('Test cancelled', { exact: true }).waitFor(); await idle(page);
@@ -350,7 +351,7 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
     assert.equal(f.posts()[2].headers.origin, f.origin); await refresh(page); assert.equal(f.posts().length, 3);
     report.checks.push('trusted mouse Stop cancels the exact existing running job once');
 
-    const ambiguous = controllerMemoryFake('synthetic-ambiguous', pluginSourceHash, digest, { targetName: 'Synthetic ambiguous HTTP request' });
+    const ambiguous = controllerMemoryFake('synthetic-ambiguous', pluginRuntimeHash, digest, { targetName: 'Synthetic ambiguous HTTP request' });
     f.jobs([ambiguous]); f.ambiguous(ambiguous.id, '/v1/playtests/approve'); await refresh(page);
     const ambiguousRow = row(page, ambiguous.targetName);
     await mouseClick(page, ambiguousRow.locator('[data-playtest-action="approve"]'));
@@ -370,8 +371,8 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
     report.checks.push('HTTP 503 stays ambiguous; manual refresh and automatic polling never retake consent or retry POST');
     await capture('ambiguous-no-retry-synthetic-ui');
 
-    const runningNative = controllerMemoryFake('synthetic-native-label', pluginSourceHash, digest, { state: 'running', evidence: 'native', targetName: 'Synthetic native-tagged response' });
-    const runningFixture = controllerMemoryFake('synthetic-fixture-label', pluginSourceHash, digest, { state: 'running', targetName: 'Synthetic fixture-tagged response' });
+    const runningNative = controllerMemoryFake('synthetic-native-label', pluginRuntimeHash, digest, { state: 'running', evidence: 'native', targetName: 'Synthetic native-tagged response' });
+    const runningFixture = controllerMemoryFake('synthetic-fixture-label', pluginRuntimeHash, digest, { state: 'running', targetName: 'Synthetic fixture-tagged response' });
     f.jobs([runningNative, runningFixture]); await refresh(page);
     for (const job of [runningNative, runningFixture]) {
       const actual = row(page, job.targetName); assert.equal(await actual.locator('.playtest-status').textContent(), 'Testing…');
@@ -391,8 +392,33 @@ test('real Edge/Chromium playtest panel render, consent HTTP and CSP (synthetic 
     assert.equal(f.posts().length, postCount);
     report.checks.push('running native/fixture labels, neutral native completion and unknown cleanup Needs review');
     await capture('unknown-cleanup-needs-review-synthetic-ui');
+
+    const attributeJob=controllerMemoryFake('synthetic-player-attribute',pluginRuntimeHash,digest,{targetName:'Synthetic checkpoint observation'});
+    const attributePlan={version:1,runtimeBudgetMs:300,targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:0,withinMs:100,requireTransition:true}],capture:{required:false}};
+    const subjectDigest=sha256('synthetic-player-attribute-source');
+    Object.assign(attributeJob.display.proposal,{scenario:attributePlan,subjectDigest});
+    attributeJob.display.actions=['start','execute-approved-scenario','observe-state-and-console','capture-viewport','stop-owned-play','restore-temporary-changes'];
+    attributeJob.displayDigest=digest(attributeJob.display);
+    attributeJob.review.scenario={scenarioDigest:digest(attributePlan),subjectDigest,state:'not_started',inputRelease:'not_started',temporary:'not_started',steps:[],capture:null,consoleCoverage:'ambiguous'};
+    f.jobs([attributeJob]);await refresh(page);
+    const attributeRow=row(page,attributeJob.targetName);
+    assert.match(await attributeRow.textContent(),/LocalPlayer attribute "Checkpoint" equals 0 within 100 ms/);
+    assert.match(await attributeRow.textContent(),/Client observation; server authority is unverified/);
+    await mouseClick(page,attributeRow.locator('[data-playtest-action="approve"]'));await idle(page);
+    assert.equal(f.posts().length,postCount+1);assert.deepEqual(f.posts().at(-1).body,{id:attributeJob.id,displayDigest:attributeJob.displayDigest});
+    attributeJob.state='complete';Object.assign(attributeJob.review,{phase:'done',outcome:'succeeded',code:'OK',cleanup:'complete'});
+    Object.assign(attributeJob.review.scenario,{state:'passed',steps:[{id:'checkpoint',kind:'assert-player-attribute',outcome:'passed',expected:0,observed:true,attribute:{
+      context:'Client',subject:'LocalPlayer',name:'Checkpoint',baseline:{present:false},observed:{present:true,value:0}}}]});
+    f.jobs([attributeJob]);await refresh(page);
+    assert.match(await attributeRow.textContent(),/checkpoint · passed · Expected 0 · Observed 0/);
+    assert.match(await attributeRow.textContent(),/Client player attribute "Checkpoint": 0. Initial value: absent/);
+    const attributeEvidence=attributeRow.getByText('Attribute evidence',{exact:true});await mouseClick(page,attributeEvidence);
+    assert.match(await attributeRow.locator('pre').textContent(),/"present": false/);assert.match(await attributeRow.locator('pre').textContent(),/"value": 0/);
+    await page.setViewportSize({width:360,height:900});report.attributeMobileGeometry=await assertFits(page,360);
+    await capture('player-attribute-measurement-mobile-synthetic-ui');
+    assert.equal(f.posts().length,postCount+1);report.checks.push('player attribute consent sends exact digest once; typed zero and absent baseline render in Client scope with mobile fit');
     report.clicks = await page.evaluate(() => window.__playtestFixture.clicks);
-    assert.deepEqual(report.clicks.filter(click => click.trusted && click.action === 'approve').map(click => click.heading), ['Playtest · ' + NAME, 'Playtest · ' + ambiguous.targetName]);
+    assert.deepEqual(report.clicks.filter(click => click.trusted && click.action === 'approve').map(click => click.heading), ['Playtest · ' + NAME, 'Playtest · ' + ambiguous.targetName,'Playtest · '+attributeJob.targetName]);
     assert.deepEqual(report.clicks.filter(click => click.trusted && click.action === 'cancel').map(click => click.heading),
       ['Playtest · ' + cancelJob.targetName, 'Playtest · ' + stopJob.targetName]);
     assert.deepEqual(report.pageErrors, []); assert.deepEqual(report.serverErrors, []);
