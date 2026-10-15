@@ -23,7 +23,7 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('revoke-assets'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('grant-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
-  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional() }),
+  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional() }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
   z.strictObject({ ...common, action: z.literal('approval'), threadId: identifier, turnId: identifier, handle: identifier, decision: z.enum(['accept','decline','cancel']) }),
 ]);
@@ -357,7 +357,8 @@ export function createCodexService(options: CodexServiceOptions) {
                 permission={connectionId:value.connectionId,threadId:value.threadId,sessionId:thread.sessionId,operationId:null};
                 context.nextIntent=permission;
               }
-              try {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text});accepted=true;}
+              try {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text,
+                ...(value.allowWorkspaceWrites===undefined?{}:{allowWorkspaceWrites:value.allowWorkspaceWrites})});accepted=true;}
               finally {
                 if(permission && context?.nextIntent===permission)context.nextIntent=null;
                 if(!accepted && permission?.operationId && authority){

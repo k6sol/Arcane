@@ -165,8 +165,10 @@ export function readCodexState(value: unknown): ChatState {
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
   const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
-  const keys = action==='turn-start' && Object.hasOwn(fields,'allowAssets') ? [...accepted[action]!,'allowAssets'] : accepted[action]!;
+  const keys = [...accepted[action]!, ...(action==='turn-start'?['allowAssets','allowWorkspaceWrites'].filter(key=>Object.hasOwn(fields,key)):[])];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
+  if (action==='turn-start' && Object.hasOwn(fields,'allowWorkspaceWrites') && typeof fields.allowWorkspaceWrites!=='boolean')
+    throw new Error('Send workspace permission requires a boolean.');
   if (action==='turn-start' && Object.hasOwn(fields,'allowAssets') &&
       (typeof fields.allowAssets!=='boolean' || fields.allowAssets && !state?.nativeAssets?.available))
     throw new Error('Send asset permission requires a boolean and an available managed asset capability.');
@@ -733,7 +735,7 @@ export class CodexChat {
     const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
     const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
     const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
-    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
+    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
     if(!selection)return;
     this.preparingMessage=true;this.renderControls();
     try {
@@ -748,7 +750,7 @@ export class CodexChat {
       try {current=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
       catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
       if(this.value('codex-composer')!==draft||current!==message){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
-      await this.dispatch('turn-start',{threadId:live.threadId,text:message,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
+      await this.dispatch('turn-start',{threadId:live.threadId,text:message,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
   private startConversation(event: Event) {
@@ -1199,7 +1201,7 @@ export class CodexChat {
     this.text('codex-status',this.state?.connecting?'Connecting':this.state?.closing?'Disconnecting':s?.connected?s.provenance==='spawned-node-fixture'?'Test connection':'Connected':s?'Disconnected':'Not connected');
     this.text('codex-scope',s?'Connection '+s.connectionId+(t?'\nThread '+t.threadId+'\nTurn '+(t.turnId??'Not started'):'\nNo thread started'):'No native connection selected.');
     this.text('codex-account',s?.account?'Native account: '+s.account.auth+' · reported plan '+(s.account.plan??'not reported')+' · model access unverified':'Connect reads account and model metadata only.');
-    this.text('codex-policy',t?(t.writeGranted?'Workspace writes granted for this exact thread':'Read-only thread')+' · native turn status: '+t.turnStatus:'Threads start read-only. No inference occurs until you submit text.');
+    this.text('codex-policy',t?(t.writeGranted?'Workspace editing enabled':'Send enables workspace editing for the next task')+' · native turn status: '+t.turnStatus:'Send starts a task with workspace editing.');
     this.text('codex-profile',this.state?.nativeTools.configured?'Native tool profile requested · verified:false. Studio grants remain separate; no Studio connection was established by this panel.':'Native tool profile not requested · verified:false. Studio grants remain separate.');
     if(this.state?.displayLimited)this.text('codex-profile','Display limited: public events and approvals were omitted, not resolved. New work is blocked. Review the native client or use interrupt, revoke or disconnect. '+this.el('codex-profile').textContent);
     if(s?.mcpIsolation)this.text('codex-profile','Native MCP scope: '+s.mcpIsolation+'. Read-only applies to native file/command execution; Arcane MCP operations still use their separate grants. '+this.el('codex-profile').textContent);

@@ -92,6 +92,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     }
     notify('turn/started', { threadId, turn: turn(turnId) });
     if (mode === 'lost-turn-ack') return;
+    if (mode === 'terminal-before-lost-ack') { notify('turn/completed', { threadId, turn: turn(turnId, 'completed') }); return; }
     if (mode === 'malformed-turn-ack-observed') { send({ id, result: {} }); return; }
     if (mode === 'malformed-turn-status') { send({ id, result: { turn: turn(turnId, null) } }); return; }
     if (mode === 'disconnect-turn') { setTimeout(() => process.exit(0), 20); return; }
