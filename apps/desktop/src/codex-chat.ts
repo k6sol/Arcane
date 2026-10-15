@@ -165,8 +165,11 @@ export function readCodexState(value: unknown): ChatState {
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
   const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
-  const keys = accepted[action]!;
+  const keys = action==='turn-start' && Object.hasOwn(fields,'allowAssets') ? [...accepted[action]!,'allowAssets'] : accepted[action]!;
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
+  if (action==='turn-start' && Object.hasOwn(fields,'allowAssets') &&
+      (typeof fields.allowAssets!=='boolean' || fields.allowAssets && !state?.nativeAssets?.available))
+    throw new Error('Send asset permission requires a boolean and an available managed asset capability.');
   if (action === 'grant-assets' || action === 'revoke-assets') {
     if (state) readCodexState(state);
     const assets = state?.nativeAssets, snapshot = state?.snapshot, thread = snapshot?.thread;
@@ -730,7 +733,7 @@ export class CodexChat {
     const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
     const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
     const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
-    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message});return;}
+    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
     if(!selection)return;
     this.preparingMessage=true;this.renderControls();
     try {
@@ -745,7 +748,7 @@ export class CodexChat {
       try {current=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
       catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
       if(this.value('codex-composer')!==draft||current!==message){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
-      await this.dispatch('turn-start',{threadId:live.threadId,text:message});
+      await this.dispatch('turn-start',{threadId:live.threadId,text:message,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
   private startConversation(event: Event) {

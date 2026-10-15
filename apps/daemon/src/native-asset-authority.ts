@@ -20,6 +20,9 @@ export interface NativeAssetIncarnation {
   /** Host calls only after the exact configured native acknowledgement AND durable journal commit. */
   seal(value: NativeAssetSeal): void;
   grant(value: {connectionId: string; threadId: string}): void;
+  /** Trusted HUMAN Send only, immediately before actual dispatch. Never grants
+   * before dispatch and expires with that exact intent; manual grants persist. */
+  grantNextIntent(value: {connectionId: string; threadId: string; sessionId: string | null}): void;
   revokeGrant(): void;
   /** Host dispatch intent, not provider-origin invocation/turn attestation. */
   dispatched(value: {connectionId: string; threadId: string; operationId: string}): void;
@@ -44,6 +47,7 @@ const DUMMY = Buffer.alloc(32);
 interface Entry {
   projectId: string; projectPath: string; generation: number; retired: boolean;
   sealed: Readonly<NativeAssetSeal> | null; granted: boolean; active: string | null;
+  nextIntent: boolean; automaticIntent: string | null;
   intents: Set<string>;
 }
 interface Admission {entry: Entry; generation: number; operation: NativeAssetOperation; scope: NativeAssetScope}
@@ -67,7 +71,7 @@ function data(value: unknown, keys: readonly string[]): Record<string, unknown> 
 function opaque(value: unknown): string {if (typeof value !== 'string' || !ID.test(value)) fail();return value;}
 function bump(entry: Entry): void {
   if (!Number.isSafeInteger(entry.generation) || entry.generation >= 65535) {
-    entry.retired = true; entry.granted = false; entry.active = null; fail();
+    entry.retired = true; entry.granted = false; entry.active = null; entry.nextIntent = false; entry.automaticIntent = null; fail();
   }
   entry.generation++;
 }
@@ -75,10 +79,13 @@ function live(entry: Entry): Readonly<NativeAssetSeal> {
   if (entry.retired || !entry.sealed) fail();
   return entry.sealed;
 }
+function mutationGranted(entry: Entry): boolean {
+  return entry.granted || entry.active !== null && entry.automaticIntent === entry.active;
+}
 function check(admission: Admission, operation: NativeAssetOperation): void {
   const entry = admission.entry;live(entry);
   if (admission.generation !== entry.generation ||
-      (operation === 'mutate' && (admission.operation !== 'mutate' || !entry.granted || entry.active === null))) fail();
+      (operation === 'mutate' && (admission.operation !== 'mutate' || !mutationGranted(entry) || entry.active === null))) fail();
 }
 /** Recheck the SAME capture; never upgrade/refetch a queued request into a new epoch. */
 export function assertNativeAssetActor(actor: NativeAssetActor, operation: NativeAssetOperation): void {
@@ -128,7 +135,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
     return matched && stored ? stored.entry : null;
   }
   const retire = (entry: Entry) => {
-    if (entry.retired) return; entry.granted = false;entry.active = null;entry.retired = true;
+    if (entry.retired) return; entry.granted = false;entry.active = null;entry.nextIntent = false;entry.automaticIntent = null;entry.retired = true;
     // Retirement/close must fence ALL entries even at a saturated epoch.
     if (Number.isSafeInteger(entry.generation) && entry.generation < 65535) entry.generation++;
   };
@@ -138,7 +145,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
       const credential = randomBytes(32).toString('hex');
       const digest = createHash('sha256').update(credential).digest();
       if (entries.has(digest.toString('hex'))) {digest.fill(0);fail();}
-      const entry: Entry = {...project,generation:0,retired:false,sealed:null,granted:false,active:null,intents:new Set()};
+      const entry: Entry = {...project,generation:0,retired:false,sealed:null,granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set()};
       entries.set(digest.toString('hex'),{digest,entry});
       const binding = (value: unknown, extra: readonly string[] = []): Record<string, unknown> => {
         open();const seal = live(entry), a=data(value,['connectionId','threadId',...extra]);
@@ -158,24 +165,35 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           entry.sealed=seal;bump(entry);
         },
         grant(value: {connectionId:string;threadId:string}) {binding(value);entry.granted=true;bump(entry);},
-        revokeGrant() {open();if(entry.retired)return;entry.granted=false;entry.active=null;bump(entry);},
+        grantNextIntent(value: {connectionId:string;threadId:string;sessionId:string|null}) {
+          const a=binding(value,['sessionId']);
+          if(a.sessionId!==live(entry).sessionId || entry.active!==null || entry.nextIntent) fail();
+          entry.nextIntent=true;bump(entry);
+        },
+        revokeGrant() {open();if(entry.retired)return;entry.granted=false;entry.active=null;entry.nextIntent=false;entry.automaticIntent=null;bump(entry);},
         dispatched(value: {connectionId:string;threadId:string;operationId:string}) {
-          const a=binding(value,['operationId']),operationId=opaque(a.operationId);
-          if (entry.active!==null || entry.intents.has(operationId) || entry.intents.size>=MAX_INTENTS) fail();
-          entry.intents.add(operationId);entry.active=operationId;bump(entry);
+          try {
+            const a=binding(value,['operationId']),operationId=opaque(a.operationId);
+            if (entry.active!==null || entry.intents.has(operationId) || entry.intents.size>=MAX_INTENTS) fail();
+            entry.intents.add(operationId);entry.active=operationId;
+            entry.automaticIntent=entry.nextIntent?operationId:null;entry.nextIntent=false;bump(entry);
+          } catch(error) {
+            // A failed actual start cannot leave permission for a later intent.
+            if(entry.nextIntent){entry.nextIntent=false;bump(entry);}throw error;
+          }
         },
         ended(operationId:string) {
           open();opaque(operationId);if (entry.retired || entry.active!==operationId) return;
-          entry.active=null;bump(entry);
+          entry.active=null;entry.automaticIntent=null;entry.nextIntent=false;bump(entry);
         },
         retire() {retire(entry);},
-        status() {return Object.freeze({sealed:entry.sealed!==null,granted:entry.granted,
+        status() {return Object.freeze({sealed:entry.sealed!==null,granted:mutationGranted(entry),
           admissionOpen:!entry.retired&&entry.active!==null,retired:entry.retired});},
       });
     },
     capture(credential:string,operation:NativeAssetOperation):NativeAssetActor {
       open();if(operation!=='read'&&operation!=='mutate')fail();const entry=find(credential);if(!entry)fail();const seal=live(entry);
-      if(operation==='mutate'&&(!entry.granted||entry.active===null))fail();
+      if(operation==='mutate'&&(!mutationGranted(entry)||entry.active===null))fail();
       const scope=Object.freeze({projectId:entry.projectId,projectPath:entry.projectPath,
         conversation:Object.freeze({provider:seal.provider,threadId:seal.threadId,sessionId:seal.sessionId})});
       const actor=Object.freeze({kind:'native-asset-actor' as const});

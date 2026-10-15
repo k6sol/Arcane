@@ -23,7 +23,7 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('revoke-assets'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('grant-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
-  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072) }),
+  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional() }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
   z.strictObject({ ...common, action: z.literal('approval'), threadId: identifier, turnId: identifier, handle: identifier, decision: z.enum(['accept','decline','cancel']) }),
 ]);
@@ -149,20 +149,33 @@ export function createCodexService(options: CodexServiceOptions) {
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
     return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}) });
   };
-  interface AssetContext { handle: NativeAssetIncarnation | null; retired: boolean; hooks: NativeAssetHooks }
+  interface HumanAssetIntent { connectionId:string; threadId:string; sessionId:string|null; operationId:string|null }
+  interface AssetContext { handle: NativeAssetIncarnation | null; retired: boolean; hooks: NativeAssetHooks; nextIntent:HumanAssetIntent|null }
   let currentAssets: AssetContext | null = null;
   const retireAssets = (context: AssetContext | null = currentAssets): void => {
-    if (!context || context.retired) return; context.retired = true; context.handle?.retire();
+    if (!context || context.retired) return; context.nextIntent=null; context.retired = true; context.handle?.retire();
   };
   function newAssets(): AssetContext | null {
     if (!options.assetRegistry) return null;
-    const context = {handle:null,retired:false} as AssetContext;
+    const context = {handle:null,retired:false,nextIntent:null} as AssetContext;
     context.hooks = Object.freeze({
       finalCredential(): string {
         if (context.retired || context.handle) throw new CodexClientError('ASSET_AUTHORITY','Native asset launch authority is unavailable.');
         context.handle = options.assetRegistry!.issue(); return context.handle.credential();
       },
-      dispatched(intent) { if (!context.handle || context.retired) throw new CodexClientError('ASSET_AUTHORITY','Native asset authority is unavailable.'); context.handle.dispatched(intent); },
+      dispatched(intent) {
+        if (!context.handle || context.retired) throw new CodexClientError('ASSET_AUTHORITY','Native asset authority is unavailable.');
+        const permission=context.nextIntent;context.nextIntent=null;
+        if(permission){
+          const snapshot=client?.snapshot(),thread=snapshot?.thread;
+          if(currentAssets!==context || !snapshot || !assetState(snapshot).sealed || snapshot.connectionId!==permission.connectionId ||
+            intent.connectionId!==permission.connectionId || intent.threadId!==permission.threadId || thread?.threadId!==permission.threadId || thread.sessionId!==permission.sessionId)
+            throw new CodexClientError('ASSET_AUTHORITY','Human Send asset scope changed before actual dispatch.');
+          context.handle.grantNextIntent({connectionId:permission.connectionId,threadId:permission.threadId,sessionId:permission.sessionId});
+        }
+        context.handle.dispatched(intent);
+        if(permission)permission.operationId=intent.operationId;
+      },
       ended(intent) { context.handle?.ended(intent.operationId); },
       retired() { retireAssets(context); },
     } satisfies NativeAssetHooks);
@@ -328,11 +341,31 @@ export function createCodexService(options: CodexServiceOptions) {
             case 'revoke-assets': {
               const snapshot = selected.snapshot();
               if (!currentAssets?.handle || snapshot.thread?.threadId !== value.threadId) throw new CodexClientError('ASSET_AUTHORITY','Choose the exact native asset chat.');
-              currentAssets.handle.revokeGrant(); break; // Fence synchronously before journal/await.
+              currentAssets.nextIntent=null;currentAssets.handle.revokeGrant(); break; // Fence synchronously before journal/await.
             }
             case 'grant-writes': selected.grantThreadWrites({initiatedBy:'human',threadId:value.threadId}); break;
             case 'revoke-writes': selected.revokeThreadWrites({initiatedBy:'human',threadId:value.threadId}); break;
-            case 'turn-start': await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text}); break;
+            case 'turn-start': {
+              const context=currentAssets,authority=context?.handle;
+              let permission:HumanAssetIntent|null=null,accepted=false;
+              // Only this existing human-control action can arm the next actual
+              // dispatch. Never forward allowAssets to the provider/model API.
+              if(value.allowAssets===true && options.assetRegistry){
+                const snapshot=selected.snapshot(),thread=snapshot.thread;
+                if(!context || !authority || !assetState(snapshot).sealed || !thread?.configured || thread.threadId!==value.threadId)
+                  throw new CodexClientError('ASSET_AUTHORITY','Choose the exact live sealed native asset chat.');
+                permission={connectionId:value.connectionId,threadId:value.threadId,sessionId:thread.sessionId,operationId:null};
+                context.nextIntent=permission;
+              }
+              try {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text});accepted=true;}
+              finally {
+                if(permission && context?.nextIntent===permission)context.nextIntent=null;
+                if(!accepted && permission?.operationId && authority){
+                  try {authority.ended(permission.operationId);} catch {retireAssets(context);}
+                }
+              }
+              break;
+            }
             case 'turn-interrupt': await selected.interruptTurn({initiatedBy:'human',threadId:value.threadId,turnId:value.turnId}); break;
             case 'approval': selected.respondApproval({initiatedBy:'human',connectionId:value.connectionId,threadId:value.threadId,turnId:value.turnId,handle:value.handle,decision:value.decision}); break;
           }

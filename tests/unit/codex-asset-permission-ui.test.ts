@@ -178,6 +178,52 @@ test('asset envelopes use only UUIDs, action and the exact configured live opaqu
   assert.equal(prepareCodexAction(busy, 'revoke-assets', { threadId: THREAD }).action, 'revoke-assets');
 });
 
+test('Send allowAssets is a closed optional boolean, never model metadata or a persistent grant action',()=>{
+  const st=state(),fields={threadId:THREAD,text:'Human modeling request'};
+  const ordinary=prepareCodexAction(st,'turn-start',fields);assert.ok(ordinary.action==='turn-start');assert.equal(ordinary.allowAssets,undefined);
+  for(const allowAssets of [false,true]){const input=prepareCodexAction(st,'turn-start',{...fields,allowAssets});assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,allowAssets);}
+  for(const allowAssets of [undefined,null,1,'true',{},()=>true])assert.throws(()=>prepareCodexAction(st,'turn-start',{...fields,allowAssets}));
+  for(const action of ['connect','select','thread-start','grant-assets'])assert.throws(()=>prepareCodexAction(st,action,{...fields,allowAssets:true}));
+  const unavailable=state();delete unavailable.nativeAssets;assert.throws(()=>prepareCodexAction(unavailable,'turn-start',{...fields,allowAssets:true}));
+});
+
+test('actual composer Human Send requests automatic assets without Advanced and terminal state permits tabs',async t=>{
+  const f=await fixture(t);f.el('codex-composer').value='Build an owned synthetic asset';assert.equal(f.posts.length,0);
+  assert.equal(f.observed().nativeAssets?.granted,false);
+  f.handler(async input=>{
+    assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,true);
+    const next=f.observed();next.snapshot!.thread!.turnId='sent-turn';next.snapshot!.thread!.turnStatus='inProgress';next.nativeAssets=assets({granted:true,admissionOpen:true});f.set(next);
+    return response(input,next,{turnId:'sent-turn'});
+  });
+  f.el('codex-compose').emit('submit');await flush();
+  assert.equal(f.posts.length,1);assert.deepEqual(f.posts.map(p=>p.action),['turn-start']);
+  assert.ok(f.posts[0]!.action==='turn-start');assert.equal(f.posts[0]!.allowAssets,true);assert.equal(f.observed().snapshot!.thread!.writeGranted,false);
+  const ended=f.observed();ended.snapshot!.thread!.turnStatus='completed';ended.nativeAssets=assets();f.set(ended);await f.chat.refresh();
+  assert.equal((f.chat as unknown as {tabBlockReason():string|null}).tabBlockReason(),null,'No manual revoke is required after the exact automatic intent ends.');
+});
+
+test('composer Send omits automatic assets when the host has no managed capability',async t=>{
+  const initial=state();delete initial.nativeAssets;const f=await fixture(t,initial);f.el('codex-composer').value='Ordinary human message';
+  f.handler(async input=>{assert.equal(input.action,'turn-start');assert.equal(Object.hasOwn(input,'allowAssets'),false);return response(input,f.observed());});
+  f.el('codex-compose').emit('submit');await flush();assert.equal(f.posts.length,1);
+});
+
+test('Human Send opens its exact new chat before requesting one-shot assets on that Send only',async t=>{
+  const initial=state();initial.snapshot!.thread=null;initial.nativeAssets=assets({sealed:false});
+  const f=await fixture(t,initial);f.el('codex-model').value='fixture';f.el('codex-effort').value='low';f.el('codex-composer').value='Human new-chat build';
+  f.handler(async input=>{
+    const next=f.observed();
+    if(input.action==='thread-start'){
+      assert.equal(Object.hasOwn(input,'allowAssets'),false);next.snapshot!.thread=state().snapshot!.thread!;next.nativeAssets=assets();f.set(next);
+      return response(input,next,{threadId:THREAD});
+    }
+    assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,true);assert.equal(input.threadId,THREAD);
+    return response(input,next,{threadId:THREAD});
+  });
+  assert.equal(f.posts.length,0);f.el('codex-compose').emit('submit');await flush();
+  assert.deepEqual(f.posts.map(p=>p.action),['thread-start','turn-start']);
+});
+
 test('asset receipts accept both enum values and reject wrong scope, authority and getters', async () => {
   const st = state();
   for (const action of ['grant-assets', 'revoke-assets']) {

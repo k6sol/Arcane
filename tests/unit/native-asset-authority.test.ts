@@ -35,6 +35,49 @@ test('new native key is private, unbound and admits no operation or generic clas
   for(const op of ['read','mutate'] as const)assert.throws(()=>f.registry.capture(f.token,op),refused);
   for(const value of [f.incarnation,f.registry,f.incarnation.status()])assert.equal(JSON.stringify(value).includes(f.token),false);
 });
+
+test('human next-intent grant opens only the actual dispatched operation and never upgrades old captures',t=>{
+  const f=fixture(t);f.incarnation.seal(f.seal);const old=f.registry.capture(f.token,'read');
+  f.incarnation.dispatched({...f.bound,operationId:'ungranted'});assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);f.incarnation.ended('ungranted');
+  f.incarnation.grantNextIntent({...f.bound,sessionId:null});assert.equal(f.incarnation.status().granted,false);
+  assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);
+  f.incarnation.dispatched({...f.bound,operationId:'human-send'});const actor=f.registry.capture(f.token,'mutate');
+  assert.equal(f.incarnation.status().granted,true);assert.throws(()=>assertNativeAssetActor(old,'mutate'),refused);
+  f.incarnation.ended('ungranted');assert.doesNotThrow(()=>assertNativeAssetActor(actor,'mutate'));
+  f.incarnation.ended('human-send');assert.equal(f.incarnation.status().granted,false);assert.throws(()=>assertNativeAssetActor(actor,'mutate'),refused);
+  f.incarnation.dispatched({...f.bound,operationId:'later-no-send'});assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);
+});
+
+test('late old end cannot clear a newly armed or active human Send grant',t=>{
+  const f=fixture(t);f.incarnation.seal(f.seal);
+  for(const id of ['first','second']){
+    f.incarnation.grantNextIntent({...f.bound,sessionId:null});
+    if(id==='second')f.incarnation.ended('first');
+    f.incarnation.dispatched({...f.bound,operationId:id});const actor=f.registry.capture(f.token,'mutate');
+    f.incarnation.ended('old');assert.doesNotThrow(()=>assertNativeAssetActor(actor,'mutate'));
+    if(id==='second'){f.incarnation.ended('first');assert.doesNotThrow(()=>assertNativeAssetActor(actor,'mutate'));}
+    f.incarnation.ended(id);assert.equal(f.incarnation.status().granted,false);
+  }
+});
+
+test('manual persistent grant survives the exact automatic intent ending',t=>{
+  const f=fixture(t);f.incarnation.seal(f.seal);f.incarnation.grant(f.bound);f.incarnation.grantNextIntent({...f.bound,sessionId:null});
+  f.incarnation.dispatched({...f.bound,operationId:'mixed'});f.incarnation.ended('mixed');
+  assert.equal(f.incarnation.status().granted,true);assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);
+  f.incarnation.dispatched({...f.bound,operationId:'manual-next'});assert.doesNotThrow(()=>f.registry.capture(f.token,'mutate'));
+});
+
+test('next-intent grant is exact host/session data; failed dispatch and revoke cannot lend it to another start',t=>{
+  const f=fixture(t);f.incarnation.seal({...f.seal,sessionId:'exact-session'});const valid={...f.bound,sessionId:'exact-session'};let reads=0;
+  for(const bad of [{...valid,sessionId:null},{...valid,sessionId:'foreign'},{...valid,threadId:'foreign'},{...valid,connectionId:'foreign'},{...valid,allowAssets:true},
+    Object.defineProperty({...valid},'sessionId',{enumerable:true,get(){reads++;return 'exact-session';}})])
+    assert.throws(()=>f.incarnation.grantNextIntent(bad as never),refused);
+  assert.equal(reads,0);f.incarnation.grantNextIntent(valid);
+  assert.throws(()=>f.incarnation.dispatched({...f.bound,operationId:'bad\n'}),refused);
+  f.incarnation.dispatched({...f.bound,operationId:'after-failure'});assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);f.incarnation.ended('after-failure');
+  f.incarnation.grantNextIntent(valid);f.incarnation.revokeGrant();f.incarnation.dispatched({...f.bound,operationId:'after-revoke'});
+  assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);
+});
 test('host seal grants readonly association scope only; mutation needs separate human grant AND local dispatch',t=>{
   const f=fixture(t);f.incarnation.seal(f.seal);assert.equal(f.registry.recognizes(f.token),true);
   const actor=f.registry.capture(f.token,'read');assert.deepEqual(nativeAssetActorScope(actor).conversation,{provider:'codex',threadId:'thread-a',sessionId:null});
