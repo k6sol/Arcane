@@ -50,6 +50,62 @@ function controller(initial=state(),storage=memoryStorage()) {
 }
 const callbacks={select:async()=>true,close:async()=>true,newChat:async()=>true,openSaved:async()=>true};
 
+function newChatShortcut(doc:DocumentFixture, modifiers:Partial<Pick<KeyboardEvent,'ctrlKey'|'metaKey'|'altKey'|'shiftKey'|'isComposing'|'repeat'>>={ctrlKey:true}, key='n'):Event {
+  const event=new Event('keydown',{cancelable:true});
+  Object.defineProperty(event,'key',{value:key});
+  for(const [name,value]of Object.entries(modifiers))Object.defineProperty(event,name,{value});
+  doc.dispatchEvent(event);return event;
+}
+
+test('sidebar and Ctrl/Cmd+N create actual local chats through one navigation hook without sending drafts',async t=>{
+  const f=controller();let navigations=0;t.after(()=>f.chat.stop());
+  await f.chat.enableChatTabs({storage:f.storage,captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;}});
+  await f.chat.start();const first=f.chat.chatTabsView()[0]!;
+  f.doc.getElementById('codex-composer').value='Keep this unsent draft.\n  ';
+  f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  const button=f.doc.getElementById('new-chat');assert.equal(button.disabled,false);
+  const click=new Event('click',{cancelable:true});button.dispatchEvent(click);await tick();
+  assert.equal(click.defaultPrevented,true);assert.equal(f.chat.chatTabsView().length,2);assert.equal(navigations,1);
+  assert.equal(f.chat.chatTabsView().find(row=>row.key===first.key)!.draft,'Keep this unsent draft.\n  ');
+  assert.equal(newChatShortcut(f.doc).defaultPrevented,true);await tick();
+  assert.equal(newChatShortcut(f.doc,{metaKey:true},'N').defaultPrevented,true);await tick();
+  assert.equal(f.chat.chatTabsView().length,4);assert.equal(navigations,3);
+  for(const modifiers of [{ctrlKey:true,isComposing:true},{ctrlKey:true,repeat:true},{ctrlKey:true,shiftKey:true},{ctrlKey:true,altKey:true},{}])
+    assert.equal(newChatShortcut(f.doc,modifiers).defaultPrevented,false);
+  const handled=new Event('keydown',{cancelable:true});Object.defineProperties(handled,{key:{value:'n'},ctrlKey:{value:true}});handled.preventDefault();f.doc.dispatchEvent(handled);
+  assert.equal(f.chat.chatTabsView().length,4);assert.equal(navigations,3);
+  assert.ok(f.calls.every(call=>call==='/v1/codex/state:GET'));
+  f.chat.stop();assert.equal(newChatShortcut(f.doc).defaultPrevented,false);assert.equal(navigations,3);
+});
+
+test('busy and uncertain native work disables both New chat buttons and the shortcut without navigation',async t=>{
+  for(const mode of ['busy','unknown']as const){
+    const initial=state();initial.snapshot=snapshot();
+    if(mode==='busy')initial.busy=true;
+    else initial.actions=[{requestId:randomUUID(),action:'thread-start',connectionId:initial.snapshot.connectionId,state:'unknown',errorCode:'FIXTURE_UNKNOWN',threadId:null,turnId:null,model:null,effort:null,createdAt:new Date().toISOString(),finishedAt:null}];
+    const f=controller(initial);let navigations=0;t.after(()=>f.chat.stop());
+    await f.chat.enableChatTabs({storage:f.storage,captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;}});
+    const count=f.chat.chatTabsView().length;
+    for(const id of ['new-chat','workspace-new-chat']){assert.equal(f.doc.getElementById(id).disabled,true);f.doc.getElementById(id).dispatchEvent(new Event('click',{cancelable:true}));}
+    assert.equal(newChatShortcut(f.doc).defaultPrevented,true);await tick();
+    assert.equal(f.chat.chatTabsView().length,count);assert.equal(navigations,0);assert.ok(f.calls.every(call=>call.endsWith(':GET')));
+  }
+});
+
+test('tab limit and lifecycle keep one shortcut owner and never navigate after stop',()=>{
+  const doc=new DocumentFixture();let created=0,navigations=0;
+  const tabs=new ChatTabs(doc.asDocument(),value=>value,{...callbacks,newChat:async()=>{created++;return true;}},
+    {storage:memoryStorage(),captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;}});
+  tabs.sync(state());tabs.mount();tabs.mount();tabs.render(false);
+  newChatShortcut(doc);assert.equal(created,1);assert.equal(navigations,1);
+  tabs.stop();assert.equal(newChatShortcut(doc).defaultPrevented,false);
+  tabs.mount();tabs.render(false);newChatShortcut(doc);assert.equal(created,2);
+  while(tabs.views().length<CHAT_TAB_LIMITS.open)tabs.createDraft();tabs.render(false);
+  assert.equal(doc.getElementById('new-chat').disabled,true);assert.equal(doc.getElementById('workspace-new-chat').disabled,true);
+  newChatShortcut(doc);assert.equal(created,2);assert.equal(navigations,2);
+  tabs.stop();newChatShortcut(doc);assert.equal(created,2);
+});
+
 test('empty native inventory opens local drafts; each draft and selection is separate; no automatic native calls',async t=>{
   const f=controller();t.after(()=>f.chat.stop());await f.chat.enableChatTabs({storage:f.storage});await f.chat.start();
   const first=f.chat.chatTabsView()[0]!;assert.equal(first.kind,'draft');assert.equal(first.threadId,null);

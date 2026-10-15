@@ -54,6 +54,10 @@ async function fixture(t: TestContext, viewport: { width: number; height: number
       await route.fulfill({ contentType: 'text/javascript', body: `
         import {startWorkspaceShell} from '/workspace-shell.js';
         const f = window.settingsFixture;
+        // Layout-only fixture: display the dormant workspace. This is not native
+        // authentication evidence; the separate onboarding tests enforce its gate.
+        document.getElementById('workspace-stage').classList.remove('provider-required');
+        document.getElementById('provider-login-gate').hidden=true;
         const dismiss = () => { f.navigations++; f.secret = ''; };
         f.shell = startWorkspaceShell(document, dismiss);
         f.restart = () => { f.shell.cleanup(); f.shell = startWorkspaceShell(document, dismiss); };
@@ -135,9 +139,13 @@ test('settings desktop: closed by default, General opens, close and Escape resto
 test('settings mobile: exact connection navigation selects Advanced, exposes details and restores focus',
   { skip: !browserModule, timeout: 60000 }, async t => {
     const { page, drawer, untouched } = await fixture(t, { width: 390, height: 844 });
-    const opener = page.getByRole('button', { name: 'Conversation settings', exact: true });
+    const opener = page.locator('#app-sidebar [data-workspace-target="workspace-settings"]');
     assert.equal(await opener.count(), 1); assert.equal(await opener.isVisible(), true);
-    await opener.click(); await targetVisibleAndFocused(page, 'native-conversation-settings', 'settings-advanced');
+    await opener.click(); await targetVisibleAndFocused(page, 'workspace-settings');
+    await page.locator('[data-settings-section-target="settings-advanced"]').click();
+    await targetVisibleAndFocused(page,'settings-advanced');
+    await page.locator('#settings-advanced summary').getByText('Conversation connection',{exact:true}).click();
+    assert.equal(await page.locator('#native-conversation-settings').isVisible(),true);
     assert.equal(await page.locator('#native-conversation-settings').evaluate(node => {
       for (let parent = node.parentElement; parent; parent = parent.parentElement)
         if (parent.tagName === 'DETAILS' && !parent.hasAttribute('open')) return false;
@@ -152,9 +160,13 @@ test('settings mobile: exact connection navigation selects Advanced, exposes det
 test('settings drawer short viewport: panels scroll inside the dialog and backdrop restores the opener',
   { skip: !browserModule, timeout: 60000 }, async t => {
     const { page, drawer, untouched } = await fixture(t, { width: 945, height: 400 });
-    const opener = page.getByRole('button', { name: 'Conversation settings', exact: true });
+    const opener = page.locator('#app-sidebar [data-workspace-target="workspace-settings"]');
     assert.equal(await opener.count(), 1); assert.equal(await opener.isVisible(), true);
-    await opener.click(); await targetVisibleAndFocused(page, 'native-conversation-settings', 'settings-advanced');
+    await opener.click(); await targetVisibleAndFocused(page,'workspace-settings');
+    await page.locator('[data-settings-section-target="settings-advanced"]').click();
+    await targetVisibleAndFocused(page,'settings-advanced');
+    await page.locator('#settings-advanced summary').getByText('Conversation connection',{exact:true}).click();
+    assert.equal(await page.locator('#native-conversation-settings').isVisible(),true);
     const layout = await drawer.evaluate(node => {
       const rect = node.getBoundingClientRect();
       const scrollables = [node, ...node.querySelectorAll('*')].filter(element => {
@@ -162,6 +174,9 @@ test('settings drawer short viewport: panels scroll inside the dialog and backdr
         return /auto|scroll/.test(style.overflowY) && element.scrollHeight > element.clientHeight;
       });
       const scroll = scrollables[0];
+      // Opening a low details section can already scroll to the bottom. Measure
+      // actual range from the top rather than mistaking that for no scrolling.
+      if(scroll)scroll.scrollTop=0;
       const before = scroll?.scrollTop ?? 0; if (scroll) scroll.scrollTop = before + 80;
       return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right,
         width: innerWidth, height: innerHeight, pageWidth: document.documentElement.scrollWidth,

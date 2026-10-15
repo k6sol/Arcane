@@ -34,6 +34,101 @@ test('General keeps one key action and initial guards without permission or hist
   assert.match(html, /id="codex-approval-section"[^>]*hidden/);
 });
 
+test('manual workflows stay in Advanced settings and New chat is disabled until its controller owns navigation',async()=>{
+  const html=await source('apps/desktop/public/studio.html');
+  const conversation=html.slice(html.indexOf('id="codex-messages"'),html.indexOf('id="key-setup-gate"'));
+  assert.doesNotMatch(conversation,/workflow-details|workflow-panel|Build workflow/);
+  const advanced=html.slice(html.indexOf('id="settings-advanced"'));
+  assert.match(advanced,/<details id="workflow-details"[^>]*><summary>Advanced workflows<\/summary><div id="workflow-panel"><\/div><\/details>/);
+  assert.equal(html.split('id="workflow-panel"').length-1,1);
+  assert.match(html,/<button id="new-chat"[^>]*data-chat-action="new"[^>]*aria-label="New chat"[^>]*disabled/);
+  const boot=await source('apps/desktop/src/studio.ts');
+  assert.match(boot,/beforeNewChat:\s*\(\)\s*=>\s*workspaceShell\.showConversation\(\)/);
+});
+
+test('owned Edge chat navigation: real controllers preserve drafts, close settings and never submit native work',
+  {skip:!browserModule,timeout:30000},async t=>{
+    const build=process.env.ARCANE_UI_BUILD_DIR;assert.ok(build);
+    const playwright=await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+    const root=await mkdtemp(join(process.env.ARCANE_UI_FIXTURE_DIR??tmpdir(),'chat-navigation-edge-'));
+    const browser=await playwright.chromium.launchPersistentContext(join(root,'profile'),{headless:true,
+      executablePath:process.env.ARCANE_UI_BROWSER_EXE??'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+      viewport:{width:1440,height:900},args:['--disable-gpu']});
+    t.after(()=>browser.close());const page=await browser.newPage(),unexpected:string[]=[],errors:string[]=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    const html=(await source('apps/desktop/public/studio.html')).replace('src="/studio.js"','src="/chat-flow-fixture.js"');
+    const modules=new Set(['workspace-shell','codex-chat','chat-tabs','codex-history']);
+    await page.route('**/*',async route=>{
+      const request=route.request(),url=new URL(request.url());
+      if(url.origin!=='http://127.0.0.1:41379'||request.method()!=='GET'){unexpected.push(request.method()+' '+request.url());await route.abort();return;}
+      if(url.pathname==='/studio'){await route.fulfill({contentType:'text/html',body:html});return;}
+      if(url.pathname==='/studio.css'){await route.fulfill({contentType:'text/css',body:await source('apps/desktop/public/studio.css')});return;}
+      if(url.pathname==='/brand/arcane-ridges.png'){await route.fulfill({contentType:'image/png',body:await readFile(resolve('apps/desktop/public/brand/arcane-ridges.png'))});return;}
+      const name=/^\/([a-z-]+)\.js$/.exec(url.pathname)?.[1];
+      if(name&&modules.has(name)){await route.fulfill({contentType:'text/javascript',body:await readFile(join(build,'apps/desktop/src',name+'.js'))});return;}
+      if(url.pathname==='/chat-flow-fixture.js'){
+        await route.fulfill({contentType:'text/javascript',body:`
+          import {startWorkspaceShell} from '/workspace-shell.js';
+          import {CodexChat,CodexChatApi} from '/codex-chat.js';
+          const counters={reads:0,actions:0,submits:0,navigations:0};
+          // Explicit disconnected metadata fixture, not a provider/login claim.
+          const state={provider:'codex',use:'personal-local',projectPath:'/fixture/chat-project',connecting:false,
+            closing:false,busy:false,snapshot:null,lastSnapshot:null,actions:[],nativeThreads:[],nativeHistory:null,
+            nativeTools:{configured:true,verified:false}};
+          window.fetch=async()=>{throw Error('No actual API or native transport in this fixture');};
+          document.addEventListener('submit',event=>{counters.submits++;event.preventDefault();},true);
+          const shell=startWorkspaceShell(document,()=>{counters.navigations++;});
+          const chat=new CodexChat(document,new CodexChatApi('a'.repeat(64),async(path,init)=>{
+            if(path!=='/v1/codex/state'||init?.method!=='GET'){counters.actions++;throw Error('Unexpected native action');}
+            counters.reads++;return Response.json({state});
+          }));
+          await chat.enableChatTabs({captureLegacyNewChat:true,beforeNewChat:()=>shell.showConversation(),
+            storage:{getItem:()=>null,setItem:()=>{}}});
+          document.getElementById('workspace-stage').classList.remove('provider-required');
+          document.getElementById('provider-login-gate').hidden=true;
+          window.chatFlowFixture={counters,views:()=>chat.chatTabsView(),stop:()=>chat.stop()};
+        `});return;
+      }
+      unexpected.push(request.url());await route.abort();
+    });
+    // Loopback is a secure context for the production crypto.randomUUID API.
+    // Every request is fulfilled/aborted above; no listener or daemon is started.
+    await page.goto('http://127.0.0.1:41379/studio');await page.waitForFunction(()=>'chatFlowFixture'in window);
+    const fixture=()=>page.evaluate(()=>{
+      const f=(window as unknown as {chatFlowFixture:{views():{key:string;draft:string}[];counters:{reads:number;actions:number;submits:number;navigations:number}}}).chatFlowFixture;
+      return {views:f.views(),counters:f.counters};
+    });
+    const draft='First exact draft.\n  ';await page.locator('#codex-composer').fill(draft);
+    const first=(await fixture()).views[0]!.key;
+    assert.equal(await page.locator('#workflow-details').isVisible(),false);
+    await page.locator('#new-chat').click();assert.equal((await fixture()).views.length,2);
+    assert.equal((await fixture()).views.find(row=>row.key===first)!.draft,draft);
+    await page.keyboard.press('Control+n');assert.equal((await fixture()).views.length,3);
+    assert.equal(await page.locator('#codex-composer').evaluate(node=>node===document.activeElement),true);
+    await page.locator('#workspace-chat-tabs [role="tab"]').first().click();
+    assert.equal(await page.locator('#codex-composer').inputValue(),draft);
+    await page.locator('#app-sidebar [data-workspace-target="workspace-settings"]').click();
+    await page.locator('[data-settings-section-target="settings-advanced"]').click();
+    assert.equal(await page.locator('#settings-advanced').isVisible(),true);
+    assert.equal(await page.locator('#workflow-details').isVisible(),false,'An uninitialized workflow controller stays empty, never a fabricated workflow.');
+    assert.equal(await page.locator('#workflow-details').evaluate(node=>!!node.closest('#settings-advanced')),true);
+    await page.keyboard.press('Control+n');assert.equal((await fixture()).views.length,4);
+    assert.equal(await page.locator('#settings-drawer').isVisible(),false);
+    assert.equal(await page.locator('#codex-composer').evaluate(node=>node===document.activeElement),true);
+    assert.equal((await fixture()).views.find(row=>row.key===first)!.draft,draft);
+    for(const flags of [{isComposing:true},{repeat:true},{shiftKey:true},{altKey:true}]){
+      assert.equal(await page.evaluate(flags=>{const event=new KeyboardEvent('keydown',{key:'n',ctrlKey:true,cancelable:true,...flags});document.dispatchEvent(event);return event.defaultPrevented;},flags),false);
+    }
+    assert.equal((await fixture()).views.length,4);
+    await page.screenshot({path:join(root,'chat-desktop.png')});
+    await page.setViewportSize({width:390,height:844});await page.screenshot({path:join(root,'chat-mobile.png')});
+    const before=await fixture();assert.equal(before.counters.actions,0);assert.equal(before.counters.submits,0);assert.ok(before.counters.reads>0);
+    await page.evaluate(()=>(window as unknown as {chatFlowFixture:{stop():void}}).chatFlowFixture.stop());
+    assert.equal(await page.evaluate(()=>{const event=new KeyboardEvent('keydown',{key:'n',ctrlKey:true,cancelable:true});document.dispatchEvent(event);return event.defaultPrevented;}),false);
+    assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
+    t.diagnostic('Owned private Edge; actual chat/shell controllers; no provider, daemon or Studio; screenshots='+root);
+  });
+
 // Production HTML/CSS and shell, in a fresh owned Edge profile. The unchanged
 // chat/key controllers are loaded only to verify empty-picker and warning guards.
 // No model catalogue, daemon, native bridge, provider or Studio is started.

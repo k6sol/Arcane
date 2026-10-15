@@ -1792,7 +1792,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const refreshWorkflowContext = () => { if (!workflowsStopped) void workflows?.resume(); };
   // Keep workflow loading optional so an older daemon's missing module cannot break chat.
   void import('./workflow-panel.js').then(module => {
-    workflows = module.startWorkflowPanel(document, {...createWorkflowContextOptions(() => token, workbench, codexChat, refreshWorkflowContext),appendToDraft:(text,provenance)=>codexChat.appendWorkflowDraft(text,provenance)});
+    workflows = module.startWorkflowPanel(document, {...createWorkflowContextOptions(() => token, workbench, codexChat, refreshWorkflowContext),
+      appendToDraft:(text,provenance)=>{
+        const appended=codexChat.appendWorkflowDraft(text,provenance);
+        if(appended)workspaceShell.showConversation();
+        return appended;
+      }});
     if (!workflowsStopped) return workflows.start();
   }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
@@ -1801,7 +1806,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume();playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
-    chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true });
+    chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,
+      beforeNewChat: () => workspaceShell.showConversation() });
     const attachments=await import('./chat-attachments.js');
     codexChat.enableTextAttachments(attachments.startChatAttachments(document,{
       getScope:()=>codexChat.textAttachmentScope(),onChange:()=>codexChat.attachmentPresentationChanged(),

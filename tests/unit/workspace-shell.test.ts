@@ -206,6 +206,17 @@ test('shortcuts focus search or the existing composer without native actions, re
   assert.equal(f.doc.body.key('n', { metaKey: true }).defaultPrevented, false);
 });
 
+test('explicit New chat belongs to chat tabs, while the navigation hook preserves the draft and dismisses secrets',()=>{
+  const f=fixture();f.newChat.setAttribute('data-chat-action','new');f.newChat.setAttribute('aria-label','New chat');
+  let dismissals=0;const shell=startWorkspaceShell(f.doc.document,()=>{dismissals++;});
+  f.composer.value='Keep the exact unsent draft.\n  ';
+  f.newChat.click();assert.equal(dismissals,0);assert.equal(f.newChat.getAttribute('aria-label'),'New chat');
+  assert.equal(f.doc.body.key('n',{ctrlKey:true}).defaultPrevented,false);
+  shell.showConversation();assert.ok(dismissals>0);assert.equal(f.doc.activeElement,f.composer);
+  assert.equal(f.composer.value,'Keep the exact unsent draft.\n  ');assert.equal(f.inputs,0);
+  f.untouched();shell.cleanup();
+});
+
 test('navigation hook dismisses secrets before drafts, focus, search and settings, with no duplicate binding', () => {
   const f = fixture(); let secret = true, calls = 0;
   const dismiss = () => { secret = false; calls++; };

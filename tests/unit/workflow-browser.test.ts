@@ -2,7 +2,7 @@ import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-pa
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -15,6 +15,7 @@ import { workflowReceiptParent } from '../../apps/daemon/src/workflow-host.js';
 import type { WorkflowPreview, WorkflowEvidencePreparationResponse, WorkflowDraftResponse } from '../../apps/daemon/src/workflow-host.js';
 import type { WorkflowSnapshot } from '../../apps/daemon/src/workflow-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import type { StudioTestService } from '../../apps/daemon/src/studio-test-service.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 import { workflowProjectIdentity } from '../../packages/storage/src/workflow-store.js';
 import { ConversationWorkStore, type NativeConversation } from '../../packages/storage/src/conversation-work-store.js';
@@ -55,10 +56,11 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     copyFileSync(join(SOURCE, 'apps/desktop/public', name), join(resources, 'apps/desktop/public', name));
   }
   copyFileSync(join(SOURCE, 'apps/desktop/public/brand/arcane-ridges.png'), join(resources, 'apps/desktop/public/brand/arcane-ridges.png'));
-  // Include studio's static provider/key-settings imports so the actual module graph can
-  // bootstrap; a missing fixture resource prevents even the transcript refresh.
-  for (const name of ['studio', 'codex-chat', 'codex-history', 'learning-panel', 'workspace-shell', 'provider-setup', 'studio-key-settings', 'asset-downloads', 'workflow-panel', 'desktop-verification', 'chat-tabs', 'task-usage', 'task-usage-ui']) {
-    copyFileSync(join(EMITTED, 'apps/desktop/src', name + '.js'), join(resources, 'dist/apps/desktop/src', name + '.js'));
+  // Copy the complete actual browser module graph, not an outdated hand-maintained
+  // subset. Missing static imports prevent the real entrypoint from bootstrapping.
+  for (const name of readdirSync(join(EMITTED,'apps/desktop/src')).filter(name=>name.endsWith('.js'))) {
+    const path=join(EMITTED,'apps/desktop/src',name);assert.equal(lstatSync(path).isFile(),true);
+    copyFileSync(path, join(resources, 'dist/apps/desktop/src', name));
   }
 
   const studio = new StudioStore({ directory: join(root, 'studio') });
@@ -117,7 +119,13 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
       }
     }
   });
-  app = await createConnectionLab({ cwd: resources, stateDirectory, projectPath, studioStore: studio,
+  // This workflow fixture owns no engine. Its separate read-only playtest port
+  // supplies an empty inventory; every attempted mutation remains a hard failure.
+  // Unavailable-engine/ingress contracts are exercised by studio-test-unavailable.
+  const refusePlaytest=():never=>{counters.nativeActions++;throw new Error('Native playtest actions are forbidden in the workflow browser fixture.');};
+  const playtests:StudioTestService={requests:{async prepare(){return refusePlaytest();},status(){return refusePlaytest();},list(){return [];},async cancel(){return refusePlaytest();}},
+    humanControl:{async approve(){return refusePlaytest();}},lifecycle:{async close(){throw new Error('The app must not close this borrowed fixture.');}}};
+  app = await createConnectionLab({ cwd: resources, stateDirectory, projectPath, studioStore: studio,studioTestService:playtests,
     workStore: work, assetService: assets, learningService: learning, codexService: codex,
     probe: async () => { counters.providerProbes++; return []; }, port: 0 });
   receiptParent = workflowReceiptParent(join(stateDirectory, 'workflows'), workflowProjectIdentity(projectPath).projectId);
@@ -130,10 +138,45 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   });
   context.setDefaultTimeout(10000);
   const page = await context.newPage();
+  const settings = page.locator('#settings-drawer');
+  const assertManualWorkflowHidden = async () => {
+    assert.equal(await page.locator('#settings-advanced #workflow-details').count(), 1);
+    assert.equal(await settings.isVisible(), false, 'Settings must not cover ordinary chat.');
+    assert.equal(await page.locator('#workflow-details').isVisible(), false,
+      'Manual workflows must not be visible in ordinary chat.');
+    assert.equal(await page.locator('#workflow-panel').isVisible(), false);
+  };
+  const closeSettings = async () => {
+    if (await settings.evaluate(element => (element as HTMLDialogElement).open)) {
+      await page.locator('#settings-drawer [data-settings-close]').click();
+      await settings.waitFor({ state: 'hidden' });
+    }
+    assert.equal(await settings.evaluate(element => (element as HTMLDialogElement).open), false);
+    await assertManualWorkflowHidden();
+  };
+  const openWorkflowSettings = async () => {
+    // The product metadata acknowledgement also fences reloads before clicking
+    // navigation: markup alone does not prove the real shell handlers are bound.
+    await page.waitForFunction(path => document.getElementById('project-path')?.textContent === path, projectPath);
+    if (!(await settings.evaluate(element => (element as HTMLDialogElement).open))) {
+      await page.locator('#app-sidebar [data-workspace-target="workspace-settings"]').click();
+      await page.waitForFunction(() => (document.getElementById('settings-drawer') as HTMLDialogElement | null)?.open);
+    }
+    await page.locator('#settings-drawer [data-settings-section-target="settings-advanced"]').click();
+    await page.waitForFunction(() => document.getElementById('settings-advanced')?.hidden === false);
+    // Reopening Settings retains the details state. Never blindly toggle an
+    // already-open workflow closed, and never manufacture a modal/details open.
+    if (!(await page.locator('#workflow-details').evaluate(element => (element as HTMLDetailsElement).open))) {
+      await page.locator('#workflow-details > summary').click();
+    }
+    await page.locator('#workflow-panel').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#workflow-panel').isVisible(), true);
+  };
   const errors: string[] = [], failedResources: string[] = [], forbiddenRequests: string[] = [];
   const workflowRequests: { method: string; path: string }[] = [];
-  page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('pageerror', error => { errors.push(error.message);t.diagnostic('Owned fixture page error: '+error.message); });
+  page.on('console', message => { if (message.type() === 'error') {errors.push(message.text());t.diagnostic('Owned fixture console error: '+message.text());} });
+  page.on('response',response=>{if(response.status()>=400)t.diagnostic('Owned fixture HTTP '+response.status()+' '+new URL(response.url()).pathname);});
   page.on('requestfailed', request => {
     if (['script', 'stylesheet', 'image', 'font'].includes(request.resourceType())) {
       failedResources.push(new URL(request.url()).pathname + ': ' + request.failure()?.errorText);
@@ -168,7 +211,8 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
   await page.waitForFunction(path => document.getElementById('project-path')?.textContent === path, projectPath);
   await page.waitForFunction(() => document.getElementById('codex-messages')?.textContent?.includes('Owned fixture public transcript.'));
-  await page.locator('#workflow-details > summary').click();
+  await assertManualWorkflowHidden();
+  await openWorkflowSettings();
   await page.waitForFunction(() => {
     const button = document.querySelector<HTMLButtonElement>('[data-workflow-action="recipe"]');
     return !!button && !button.disabled;
@@ -176,10 +220,12 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.ok(workflowRequests.some(r => r.method === 'GET' && r.path === '/v1/workflows'));
   assert.equal(work.runs().length, 0);
   const draft = 'Unsent draft preserved across tool selection.';
+  await closeSettings();
   await page.locator('#codex-composer').fill(draft);
   const composer = await page.locator('#codex-composer').elementHandle();
   assert.ok(composer);
   const chat = await page.locator('#codex-messages').textContent();
+  await openWorkflowSettings();
   await page.locator('#workflow-title').fill('Edge-owned workflow proof');
   await page.locator('#workflow-prompt').fill('Review a scoped local change with pinned evidence; no native turn is requested.');
   await page.locator('#workflow-scope').fill('src');
@@ -246,7 +292,9 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.deepEqual(work.task(promptTaskId), taskBeforePreparation);
   assert.equal(executions(), 1);
   assert.equal(await page.locator('[data-workflow-action="confirm"]').isVisible(), false);
+  await closeSettings();
   assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+  await openWorkflowSettings();
 
   // Each durable command has its own real preview and a separate trusted click.
   const confirmDecision = async (
@@ -257,11 +305,12 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   ): Promise<WorkflowSnapshot & { conversation: NativeConversation }> => {
     const before = executions(), beforePrompt = work.task(promptTaskId), beforeRequirements = work.task(requirementsTaskId);
     const previewReply = page.waitForResponse(response =>
-      new URL(response.url()).pathname === '/v1/workflows/preview' && response.request().method() === 'POST');
+      new URL(response.url()).pathname === '/v1/workflows/preview' && response.request().method() === 'POST')
+      .then(async response=>({status:response.status(),body:await response.json() as WorkflowPreview}));
     await page.locator('[data-workflow-action="decision"]').click();
     const response = await previewReply;
-    assert.equal(response.status(), 200);
-    const prepared = await response.json() as WorkflowPreview;
+    assert.equal(response.status, 200);
+    const prepared = response.body;
     assert.equal(prepared.prepared.kind, kind);
     assert.equal(prepared.prepared.workflowId, created.workflow.id);
     assert.equal(prepared.prepared.stepKey, stepKey);
@@ -275,11 +324,12 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
     assert.deepEqual(work.task(promptTaskId), beforePrompt);
     assert.deepEqual(work.task(requirementsTaskId), beforeRequirements);
     const executedReply = page.waitForResponse(response =>
-      new URL(response.url()).pathname === '/v1/workflows/execute' && response.request().method() === 'POST');
+      new URL(response.url()).pathname === '/v1/workflows/execute' && response.request().method() === 'POST')
+      .then(async response=>({status:response.status(),body:await response.json() as WorkflowSnapshot & {conversation:NativeConversation;result:string}}));
     await page.locator('[data-workflow-action="confirm"]').click();
     const executed = await executedReply;
-    assert.equal(executed.status(), 200);
-    const body = await executed.json() as WorkflowSnapshot & { conversation: NativeConversation; result: string };
+    assert.equal(executed.status, 200);
+    const body = executed.body;
     assert.equal(body.result, result);
     assert.equal(body.workflow.id, created.workflow.id);
     assert.deepEqual(body.conversation, native);
@@ -288,8 +338,10 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
       return status?.textContent?.includes('recorded: ' + expected);
     }, result);
     assert.equal(executions(), before + 1);
+    await closeSettings();
     assert.equal(await page.locator('#codex-composer').inputValue(), draft);
     assert.equal(counters.nativeActions, 0);
+    await openWorkflowSettings();
     return body;
   };
   mark('submit-evidence');
@@ -362,6 +414,7 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.ok(serverDraft.text.includes(briefPath) && serverDraft.text.includes(briefHash));
   assert.ok(serverDraft.text.includes('This draft grants no permission and runs no tool.'));
   const appendedDraft = draft + '\n\n' + serverDraft.text;
+  await closeSettings();
   await page.waitForFunction(expected => {
     const input = document.getElementById('codex-composer') as HTMLTextAreaElement | null;
     return input?.value === expected;
@@ -381,15 +434,14 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   assert.deepEqual(codex.state().actions, []);
   assert.equal(assets.jobs().length, 0); assert.equal(studio.commands().length, 0); assert.equal(studio.keys().length, 0);
 
+  await closeSettings();
   for (const tool of ['blender', 'roblox']) {
     await page.locator('#app-sidebar [data-workspace-tool="' + tool + '"]').click();
     assert.equal(await page.locator('#workspace-stage').getAttribute('data-workspace-tool'), tool);
     assert.equal(await page.locator('#codex-composer').inputValue(), appendedDraft);
     assert.equal(await page.locator('#codex-messages').textContent(), chat);
   }
-  if(await page.locator('#settings-drawer').isVisible()) {
-    await page.keyboard.press('Escape');await page.locator('#settings-drawer').waitFor({state:'hidden'});
-  }
+  await closeSettings();
   await page.locator('#workspace-preview-toggle').click();
   assert.equal(await page.locator('#artifact-panel').isVisible(), true);
   await page.locator('#workspace-preview-close').click();
@@ -436,8 +488,10 @@ test('owned Edge synthetic installed-cli metadata fixture exercises evidence, ex
   // filter can still select an old-document poll queued immediately before reload,
   // whose response body Chromium correctly discards on navigation.
   mark('reload');
+  await closeSettings();
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.locator('#workflow-details > summary').click();
+  await assertManualWorkflowHidden();
+  await openWorkflowSettings();
   await page.waitForFunction(id => (document.getElementById('workflow-stored') as HTMLSelectElement | null)?.value === id, created.workflow.id);
   const currentResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/workflows/current-flow')
     .then(response => response.json() as Promise<WorkflowSnapshot & {conversation?: NativeConversation}>);

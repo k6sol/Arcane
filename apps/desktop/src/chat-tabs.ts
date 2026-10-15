@@ -17,6 +17,8 @@ export interface ChatTabsOptions {
   preferences?: { read(): Promise<unknown>; save(value: ChatTabPreferences): Promise<unknown> };
   /** Opt in only when the parent has settled the legacy WorkspaceShell handshake. */
   captureLegacyNewChat?: boolean;
+  /** Presentation-only navigation hook; never starts or grants native work. */
+  beforeNewChat?: () => void;
 }
 export interface ChatTabPreferences {
   version: 1; projectPath: string; provider: 'codex'|'claude'; activeTabId: string | null;
@@ -71,6 +73,7 @@ export class ChatTabs {
   private persistenceDirty = false;
   private draftTimer: ReturnType<typeof setTimeout> | null = null;
   private mounted = false;
+  private newChatAllowed = false;
   private savedMenu: HTMLDetailsElement | null = null;
   private nativeReady = false;
   private nativeError = false;
@@ -319,11 +322,21 @@ export class ChatTabs {
     const mount = this.doc.getElementById('workspace-chat-tabs');
     if (!mount || mount.getAttribute('role')!=='tablist') throw new Error('The workspace chat tablist is missing.');
     this.mounted = true;
-    const listen = (el:HTMLElement,event:string,fn:(event:Event)=>void,capture=false)=>{el.addEventListener(event,fn,capture);this.cleanup.push(()=>el.removeEventListener(event,fn,capture));};
+    const listen = (el:HTMLElement,event:string,fn:(event:Event)=>void,capture=false)=>{el.addEventListener(event,fn,{capture});this.cleanup.push(()=>el.removeEventListener(event,fn,{capture}));};
     for (const name of ['workspace-new-chat',...(this.options.captureLegacyNewChat?['new-chat']:[])]) {
       const button = this.doc.getElementById(name); if (!button) continue;
       button.setAttribute('aria-label','New chat'); button.setAttribute('title','New chat');
-      listen(button,'click',event=>{if(event.defaultPrevented)return;event.preventDefault();if(name==='new-chat')event.stopImmediatePropagation();void this.callbacks.newChat();},name==='new-chat');
+      listen(button,'click',event=>{if(event.defaultPrevented)return;event.preventDefault();if(name==='new-chat')event.stopImmediatePropagation();this.requestNewChat();},name==='new-chat');
+    }
+    if (this.options.captureLegacyNewChat) {
+      const shortcut = (event: KeyboardEvent) => {
+        if (event.defaultPrevented || event.isComposing || event.repeat || event.altKey || event.shiftKey
+          || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'n') return;
+        event.preventDefault();
+        this.requestNewChat();
+      };
+      this.doc.addEventListener('keydown', shortcut, {capture:true});
+      this.cleanup.push(() => this.doc.removeEventListener('keydown', shortcut, {capture:true}));
     }
     listen(mount,'keydown',event=>{
       const input=event as KeyboardEvent, key=(input.target as HTMLElement)?.dataset?.chatKey;
@@ -339,6 +352,7 @@ export class ChatTabs {
   }
   render(blocked: boolean): void {
     if (!this.mounted) return;
+    this.newChatAllowed = !blocked && this.rows.length < CHAT_TAB_LIMITS.open;
     const signature = JSON.stringify([this.presentationRevision,this.activeKey,blocked]);
     if (signature!==this.signature) {
       this.signature=signature;
@@ -355,8 +369,10 @@ export class ChatTabs {
         close.addEventListener('click',()=>void this.callbacks.close(row.key));wrap.append(button,close);mount.append(wrap);
       }
       if (focusKey) Array.from(mount.querySelectorAll<HTMLElement>('[role=tab]')).find(button=>button.dataset.chatKey===focusKey)?.focus({preventScroll:true});
-      const create=this.doc.getElementById('workspace-new-chat') as HTMLButtonElement|null;
-      if(create)create.disabled=blocked||this.rows.length>=CHAT_TAB_LIMITS.open;
+      for (const id of ['workspace-new-chat', ...(this.options.captureLegacyNewChat ? ['new-chat'] : [])]) {
+        const create=this.doc.getElementById(id) as HTMLButtonElement|null;
+        if(create)create.disabled=!this.newChatAllowed;
+      }
     }
     const savedSignature=JSON.stringify([this.catalogueRevision,blocked]);
     if (this.savedMenu&&savedSignature!==this.savedSignature) {
@@ -369,7 +385,12 @@ export class ChatTabs {
       if(!this.catalogue.length){const empty=this.doc.createElement('p');empty.textContent='No saved native chats.';this.savedMenu.append(empty);}
     }
   }
-  stop(): void {this.persist();for(const fn of this.cleanup.splice(0))fn();this.savedMenu?.remove();this.savedMenu=null;this.mounted=false;this.signature='';this.savedSignature='';}
+  private requestNewChat(): void {
+    if (!this.mounted || !this.newChatAllowed) return;
+    this.options.beforeNewChat?.();
+    void this.callbacks.newChat();
+  }
+  stop(): void {this.newChatAllowed=false;this.persist();for(const fn of this.cleanup.splice(0))fn();this.savedMenu?.remove();this.savedMenu=null;this.mounted=false;this.signature='';this.savedSignature='';}
 }
 
 export interface WorkspacePreferencesBridge {
@@ -443,6 +464,8 @@ export function connectChatTabPreferences(doc:Document,chat:StartChatTabsOptions
 /** Parent boot/controller seam; enable also autodetects the native bridge when called directly. */
 export async function startChatTabs(doc:Document,options:StartChatTabsOptions):Promise<ChatTabsController> {
   const preferences=options.preferences??workspacePreferencesAdapter(doc,options),chat=options.chat;
-  await chat.enableChatTabs({...(preferences?{preferences}:{}),...(options.storage?{storage:options.storage}:{}),...(options.captureLegacyNewChat!==undefined?{captureLegacyNewChat:options.captureLegacyNewChat}:{})});
+  await chat.enableChatTabs({...(preferences?{preferences}:{}),...(options.storage?{storage:options.storage}:{}),
+    ...(options.captureLegacyNewChat!==undefined?{captureLegacyNewChat:options.captureLegacyNewChat}:{}),
+    ...(options.beforeNewChat?{beforeNewChat:options.beforeNewChat}:{})});
   return connectChatTabPreferences(doc,chat);
 }

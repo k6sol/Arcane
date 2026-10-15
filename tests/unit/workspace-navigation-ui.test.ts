@@ -26,7 +26,7 @@ test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, 
             // Fixture presentation only; no authentication or native connection.
             document.getElementById('provider-login-gate').hidden=true;
             document.getElementById('workspace-stage').classList.remove('provider-required');
-            startWorkspaceShell(document);`);
+            window.navigationShell = startWorkspaceShell(document);`);
           return;
         }
         const file = files.get(request.url ?? '');
@@ -113,7 +113,8 @@ test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, 
     assert.equal(await page.locator('#asset-heading').isVisible(), true);
     assert.equal(await results.isVisible(), false);
     await page.locator('[data-settings-close]').click();
-    await page.locator('#new-chat').click();
+    assert.equal(await page.locator('#new-chat').isDisabled(),true,'Shell-only layout has no chat controller; it cannot create a chat.');
+    await page.evaluate(()=>(window as unknown as {navigationShell:{showConversation():void}}).navigationShell.showConversation());
     assert.equal(await page.locator('#codex-composer').inputValue(), draft);
     // Capture the main workspace with its advanced settings folded away.
     await capture('workspace-desktop');
@@ -124,7 +125,7 @@ test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, 
     assert.deepEqual(palette, ['#080808', '#f5f5f5', '#ff3340']);
     for (const viewport of [{ width: 945, height: 618 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
-      await page.locator('#new-chat').click();
+      await page.evaluate(()=>(window as unknown as {navigationShell:{showConversation():void}}).navigationShell.showConversation());
       const layout = await page.evaluate(() => {
         const composer = document.getElementById('codex-compose')!.getBoundingClientRect();
         return { width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, composerTop: composer.top, composerBottom: composer.bottom };

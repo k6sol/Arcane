@@ -80,7 +80,8 @@ export class WorkspaceShell {
       if (draft !== null) this.openComposer(draft);
     }, control.hasAttribute('data-workspace-tool'));
     const newChat = doc.getElementById('new-chat');
-    if (newChat) {
+    newChat?.setAttribute('type','button');
+    if (newChat && newChat.getAttribute('data-chat-action') !== 'new') {
       newChat.setAttribute('aria-label', 'Focus current conversation');
       newChat.setAttribute('title', 'Focus current conversation');
       this.button(newChat, () => this.openComposer());
@@ -315,6 +316,8 @@ export class WorkspaceShell {
       ? composer as HTMLTextAreaElement | HTMLInputElement : null;
   }
 
+  /** Close settings and dismiss displayed secrets before the chat controller navigates. */
+  showConversation(): void { this.openComposer(); }
   private openComposer(draft?: string): void {
     const composer = this.composer();
     if (!composer) return;
@@ -388,7 +391,7 @@ export class WorkspaceShell {
       const keyboard = event as KeyboardEvent;
       if (event.defaultPrevented || keyboard.isComposing || keyboard.repeat || keyboard.altKey || keyboard.shiftKey || !(keyboard.ctrlKey || keyboard.metaKey)) return;
       const key = keyboard.key.toLowerCase();
-      if (key === 'n' && this.composer()) { event.preventDefault(); this.openComposer(); }
+      if (key === 'n' && this.doc.getElementById('new-chat')?.getAttribute('data-chat-action') !== 'new' && this.composer()) { event.preventDefault(); this.openComposer(); }
       if (key === 'k') {
         const search = this.doc.getElementById('workspace-search');
         const editable = (event.target as Element | null)?.closest?.('input, textarea, select, [contenteditable]');
