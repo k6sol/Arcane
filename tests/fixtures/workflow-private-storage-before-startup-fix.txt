@@ -1,0 +1,76 @@
+
+$ErrorActionPreference='Stop'
+try {
+  $root=$env:ARCANE_WORKFLOW_ACL_ROOT
+  $prepare=$env:ARCANE_WORKFLOW_ACL_PREPARE -eq '1'
+  $key=$env:ARCANE_WORKFLOW_ACL_KEY -eq '1'
+  if([string]::IsNullOrEmpty($root) -or $root.Length -gt 4096 -or $root -match '[\x00-\x1f]' -or $root.StartsWith('\') -or -not [IO.Path]::IsPathRooted($root)){throw 'scope'}
+  $full=[IO.Path]::GetFullPath($root)
+  if($full -cne $root -or -not [IO.Directory]::Exists($root)){throw 'scope'}
+  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+  $user=$identity.User
+  $defaultOwner=$identity.Owner
+  if($null -eq $user -or $null -eq $defaultOwner){throw 'token-owner'}
+  $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')
+  if($allowed -notcontains $defaultOwner.Value){throw 'token-owner'}
+  $danger=[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+  function Direct([string]$path) {
+    $attributes=[IO.File]::GetAttributes($path)
+    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'link'}
+    if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){
+      $item=[IO.DirectoryInfo]::new($path)
+    } else { $item=[IO.FileInfo]::new($path) }
+    $item.Refresh()
+    return $item
+  }
+  function IsDirectory($item) { return (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0) }
+  function Acl([string]$path) {
+    if(([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::Directory) -ne 0){
+      return [IO.Directory]::GetAccessControl($path)
+    }
+    return [IO.File]::GetAccessControl($path)
+  }
+  function Rules($acl) { return $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) }
+  $at=$root
+  while($at){
+    $item=Direct $at
+    if(-not (IsDirectory $item)){throw 'ancestor'}
+    foreach($rule in (Rules (Acl $at))){
+      if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and $allowed -notcontains $rule.IdentityReference.Value -and ($rule.FileSystemRights -band $danger) -ne 0){throw 'ancestor-acl'}
+    }
+    $parent=[IO.Directory]::GetParent($at)
+    if($null -eq $parent){break}
+    $at=$parent.FullName
+  }
+  $dir=[IO.Path]::Combine($root,'workflow-human-receipts')
+  $created=$false
+  if(-not [IO.Directory]::Exists($dir)){
+    if(-not $prepare -or [IO.File]::Exists($dir)){throw 'missing'}
+    $info=[IO.Directory]::CreateDirectory($dir)
+    $item=Direct $dir
+    $prior=Acl $dir
+    if(-not (IsDirectory $item) -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value) -or @(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0){throw 'created-scope'}
+    $acl=New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetOwner($user)
+    $acl.SetAccessRuleProtection($true,$false)
+    foreach($sid in $allowed){
+      $principal=New-Object Security.Principal.SecurityIdentifier($sid)
+      $rule=New-Object Security.AccessControl.FileSystemAccessRule($principal,[Security.AccessControl.FileSystemRights]::FullControl,([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
+      $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $dir -AclObject $acl
+    $created=$true
+  }
+  $item=Direct $dir
+  $acl=Acl $dir
+  if(-not (IsDirectory $item) -or -not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value){throw 'private-dir'}
+  foreach($rule in (Rules $acl)){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private-dir-rule'}}
+  if($key){
+    $file=[IO.Path]::Combine($dir,'key-v1')
+    $item=Direct $file
+    $acl=Acl $file
+    if((IsDirectory $item) -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value)){throw 'private-key'}
+    foreach($rule in (Rules $acl)){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private-key-rule'}}
+  }
+  [ordered]@{version=1;created=$created;directoryPrivate=$true;keyPrivate=$key;ancestorsSafe=$true} | ConvertTo-Json -Compress
+} catch { [Console]::Error.WriteLine('Arcane private workflow storage unavailable.'); exit 1 }

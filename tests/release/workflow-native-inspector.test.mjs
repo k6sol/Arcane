@@ -5,19 +5,21 @@ import {createHash} from 'node:crypto';
 import {stripTypeScriptTypes} from 'node:module';
 import {Script} from 'node:vm';
 import {win32} from 'node:path';
-import {inspectionOnlyCandidate,inspectionOnlyLegacy} from '../../scripts/check-receipt-inspector-equivalence.mjs';
+import {historicalInspectionCandidate,inspectionOnlyCandidate,inspectionOnlyLegacy} from '../../scripts/check-receipt-inspector-equivalence.mjs';
 const source=readFileSync(new URL('../../apps/daemon/src/workflow-private-storage.ts',import.meta.url),'utf8').replaceAll('\r\n','\n');
 const marker='const SCRIPT=String.raw`',start=source.indexOf(marker)+marker.length,end=source.indexOf('\n`;',start);
 assert.ok(start>=marker.length&&end>start);const script=source.slice(start,end)+'\n';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 
-// Static/native boundary DOUBLE proof. Actual Windows equivalence is the separate
-// comparison tool and retained verification.json, not this synthetic suite.
-test('approved owner policy and legacy read-inspector roundtrip remain source pinned',()=>{
-  assert.equal(hash(script),'9e80f4b7b3563233fa936c57c2a50316eac345c5ef3eb79457caa4d1ffd52f3e');
-  const legacy=inspectionOnlyLegacy(script);
+// Static/native boundary DOUBLE proof. Current native acceptance is the separate
+// owner/refusal suite; the comparison tool retains the historical experiment.
+test('current startup policy and historical read-inspector experiment remain separately source pinned',()=>{
+  assert.equal(hash(script),'5afafdb2fe946e8805c3d7221654ad28bac8de470ae23450a190e07b10017e08');
+  const historical=historicalInspectionCandidate();
+  assert.equal(hash(historical),'9e80f4b7b3563233fa936c57c2a50316eac345c5ef3eb79457caa4d1ffd52f3e');
+  const legacy=inspectionOnlyLegacy(historical);
   assert.equal(hash(legacy),'095214e83f2b94fdbade1f1086db4400aa2388d2198039f0aab87a8bd03637b8');
-  assert.equal(inspectionOnlyCandidate(legacy),script);
+  assert.equal(inspectionOnlyCandidate(legacy),historical);
 });
 
 test('native inspection keeps strict ancestry/DACL rules and binds default ownership to one trusted host token',()=>{
@@ -31,11 +33,13 @@ test('native inspection keeps strict ancestry/DACL rules and binds default owner
     '$allowed -notcontains $rule.IdentityReference.Value', '$item.Length -ne 32',
     '[IO.FileAttributes]::ReparsePoint', '$at=$parent.FullName',
     "if(-not $prepare -or [IO.File]::Exists($dir)){throw 'missing'}",
-    '@(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0',
-    '$acl.SetAccessRuleProtection($true,$false)', 'Set-Acl -LiteralPath $dir -AclObject $acl',
+    '$entries=[IO.Directory]::EnumerateFileSystemEntries($dir).GetEnumerator()',
+    'try{$empty=-not $entries.MoveNext()}finally{if($entries -is [IDisposable]){$entries.Dispose()}}',
+    "if(-not $empty){throw 'created-scope'}",
+    '$acl.SetAccessRuleProtection($true,$false)', '[IO.Directory]::SetAccessControl($dir,$acl)',
   ]) assert.ok(script.includes(predicate),predicate);
-  assert.equal((script.match(/Set-Acl/g)??[]).length,1);
-  assert.ok(script.indexOf('Set-Acl')>script.indexOf('if(-not [IO.Directory]::Exists($dir))'));
+  assert.equal((script.match(/\[IO\.Directory\]::SetAccessControl/g)??[]).length,1);
+  assert.ok(script.indexOf('[IO.Directory]::SetAccessControl')>script.indexOf('if(-not [IO.Directory]::Exists($dir))'));
   assert.ok(script.includes('[IO.Directory]::GetAccessControl($path)'));
   assert.ok(script.includes('[IO.File]::GetAccessControl($path)'));
   assert.equal((script.match(/\[Security\.Principal\.WindowsIdentity\]::GetCurrent\(\)/g)??[]).length,1);
@@ -50,6 +54,18 @@ test('native inspection keeps strict ancestry/DACL rules and binds default owner
   assert.equal((script.match(/-notin @\(\$user.Value,\$defaultOwner.Value\)/g)??[]).length,2);
   assert.ok(script.indexOf('if($allowed -notcontains $defaultOwner.Value)')<script.indexOf('[IO.Directory]::CreateDirectory'));
   assert.ok(script.indexOf("throw 'private-dir-rule'")<script.indexOf('if($key)'));
+});
+
+test('current native startup avoids module discovery while preserving the bounded fixed descriptor',()=>{
+  assert.ok(script.includes("$PSModuleAutoLoadingPreference='None'"));
+  for(const command of ['Get-Item','Get-Acl','Get-ChildItem','New-Object','Set-Acl','ConvertTo-Json'])
+    assert.equal(script.includes(command),false,command);
+  assert.ok(script.includes('[Security.AccessControl.DirectorySecurity]::new()'));
+  assert.ok(script.includes('[Security.Principal.SecurityIdentifier]::new($sid)'));
+  assert.ok(script.includes('[Security.AccessControl.FileSystemAccessRule]::new('));
+  assert.ok(script.includes("$createdJson=if($created){'true'}else{'false'}"));
+  assert.ok(script.includes("$keyJson=if($key){'true'}else{'false'}"));
+  assert.ok(script.includes('[Console]::Write(\'{"version":1,"created":\'+$createdJson+\',"directoryPrivate":true,"keyPrivate":\'+$keyJson+\',"ancestorsSafe":true}\')'));
 });
 
 function boundary(result={},pathFailure=false) {
