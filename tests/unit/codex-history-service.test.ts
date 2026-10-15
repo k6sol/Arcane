@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createCodexService, type CodexService } from '../../apps/daemon/src/codex-service.js';
+import { createCodexService, type CodexService, type CodexActionOutcome } from '../../apps/daemon/src/codex-service.js';
 import { codexRoutes } from '../../apps/daemon/src/codex-routes.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
@@ -20,9 +20,15 @@ const fixtureScript = String.raw`
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 const [modeFile,audit] = process.argv.slice(2);
-const log = message => appendFileSync(audit, JSON.stringify({pid:process.pid,message})+'\n');
+let phase='startup';
+const log = message => {phase='audit';appendFileSync(audit, JSON.stringify({pid:process.pid,at:Date.now(),message})+'\n');};
+// Keep Node's normal exception exit; this owned peer records only safe metadata.
+process.on('uncaughtExceptionMonitor',error=>{
+  try {appendFileSync(audit,JSON.stringify({pid:process.pid,at:Date.now(),message:{method:'fixture/error',phase,
+    code:typeof error.code==='string'?error.code.slice(0,64):null,syscall:typeof error.syscall==='string'?error.syscall.slice(0,64):null}})+'\n');}catch{}
+});
 log({method:'fixture/spawn',cwd:process.cwd()});
-const send = value => process.stdout.write(JSON.stringify(value)+'\n');
+const send = value => {phase='reply';return process.stdout.write(JSON.stringify(value)+'\n');};
 const item = (id='answer',text='Recorded assistant answer.') => ({type:'agentMessage',id,text,phase:'final_answer'});
 const turn = (items,id='fixture-turn') => ({id,items,itemsView:'full',status:'completed'});
 const history = mode => {
@@ -50,11 +56,14 @@ const history = mode => {
   return result;
 };
 createInterface({input:process.stdin}).on('line',line=>{
-  const message=JSON.parse(line);log(message);const mode=readFileSync(modeFile,'utf8').trim();
+  phase='parse';const message=JSON.parse(line);log(message);phase='mode';const mode=readFileSync(modeFile,'utf8').trim();phase='dispatch';
   if(message.method==='initialize')send({id:message.id,result:{userAgent:'synthetic-history-fixture'}});
   else if(message.method==='account/read')send({id:message.id,result:{requiresOpenaiAuth:true,account:{type:'chatgpt',planType:'pro'}}});
   else if(message.method==='model/list')send({id:message.id,result:{data:[{id:'fixture-model',model:'fixture-model',displayName:'Fixture model',supportedReasoningEfforts:[{reasoningEffort:'high'}],defaultReasoningEffort:'high'}],nextCursor:null}});
-  else if(message.method==='thread/start'||message.method==='thread/resume')send({id:message.id,result:{thread:{id:mode==='new-thread'?'fixture-new-thread':'fixture-thread',sessionId:'fixture-session',turns:[]},model:'fixture-model',modelProvider:'openai',cwd:process.cwd(),approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}}});
+  else if(message.method==='thread/start'||message.method==='thread/resume'){
+    if(mode==='start-hang')return;
+    send({id:message.id,result:{thread:{id:mode==='new-thread'?'fixture-new-thread':'fixture-thread',sessionId:'fixture-session',turns:[]},model:'fixture-model',modelProvider:'openai',cwd:process.cwd(),approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}}});
+  }
   else if(message.method==='thread/read'){
     if(mode==='hang')return;
     if(mode==='remote-error'){process.stderr.write('PRIVATE_STDERR');send({id:message.id,error:{code:-32602,message:'PRIVATE_REMOTE_ERROR'}});return;}
@@ -91,15 +100,27 @@ async function fixture(t: test.TestContext, initialMode='normal') {
     await rm(directory,{recursive:true,force:true});
   });
   const action=(service:CodexService,value:Record<string,unknown>)=>service.action({requestId:randomUUID(),...value});
-  const connect=async(service:CodexService)=>{const result=await action(service,{action:'connect',connectionId:null});assert.equal(result.record.state,'acknowledged');return result.state.snapshot!.connectionId;};
+  const expectAcknowledged=async(result:CodexActionOutcome)=>{
+    if(result.record.state==='acknowledged')return;
+    const text=(value:unknown,max=96)=>typeof value==='string'?value.slice(0,max):null;
+    let peer:unknown;
+    try {peer=(await logs()).slice(-16).map(({pid,at,message})=>({pid,at,method:text(message.method),
+      id:Number.isSafeInteger(message.id)?message.id:text(message.id,64),code:text(message.code,64),syscall:text(message.syscall,64),phase:text(message.phase,32)}));}
+    catch(error){peer={auditError:text((error as NodeJS.ErrnoException)?.code,64)??'UNREADABLE'};}
+    const {action,state,errorCode,createdAt,finishedAt}=result.record,snapshot=result.state.snapshot;
+    const diagnostic={record:{action,state,errorCode,createdAt,finishedAt},snapshot:snapshot?{connected:snapshot.connected,ready:snapshot.ready,
+      failureCode:snapshot.failureCode,operations:snapshot.operations.slice(-8).map(({method,state,errorCode})=>({method,state,errorCode}))}:null,peer};
+    assert.equal(result.record.state,'acknowledged','History fixture setup: '+JSON.stringify(diagnostic).slice(0,12288));
+  };
+  const connect=async(service:CodexService)=>{const result=await action(service,{action:'connect',connectionId:null});await expectAcknowledged(result);return result.state.snapshot!.connectionId;};
   const bind=async(service:CodexService)=>{
     const connectionId=await connect(service);
-    assert.equal((await action(service,{action:'select',connectionId,model:'fixture-model',effort:'high'})).record.state,'acknowledged');
-    const opened=await action(service,{action:'thread-start',connectionId});assert.equal(opened.record.state,'acknowledged');
+    await expectAcknowledged(await action(service,{action:'select',connectionId,model:'fixture-model',effort:'high'}));
+    const opened=await action(service,{action:'thread-start',connectionId});await expectAcknowledged(opened);
     return {connectionId,threadId:opened.record.threadId!};
   };
   const load=(service:CodexService,connectionId:string,threadId=THREAD,requestId=randomUUID())=>service.action({requestId,action:'history-load',connectionId,threadId});
-  const logs=async()=>{try{return (await readFile(audit,'utf8')).trim().split('\n').filter(Boolean).map(line=>JSON.parse(line) as {pid:number;message:Record<string,unknown>});}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return [];throw error;}};
+  const logs=async()=>{try{return (await readFile(audit,'utf8')).trim().split('\n').filter(Boolean).map(line=>JSON.parse(line) as {pid:number;at:number;message:Record<string,unknown>});}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return [];throw error;}};
   const waitRead=async()=>{for(let n=0;n<400;n++){if((await logs()).some(row=>row.message.method==='thread/read'))return;await delay(5);}assert.fail('Fixture read did not dispatch');};
   return {service,open,action,connect,bind,load,logs,waitRead,starts:()=>starts,sessions,projectPath,other,journal,directory,setMode:(mode:string)=>writeFile(modeFile,mode)};
 }
@@ -114,6 +135,24 @@ async function http(t:test.TestContext,service:CodexService) {
   };
   return {call,token,agentToken,origin};
 }
+
+test('uncertain history setup reports bounded receipt and peer metadata without replaying the request',async t=>{
+  const f=await fixture(t,'start-hang');
+  await assert.rejects(f.bind(f.service),(error:unknown)=>{
+    assert.ok(error instanceof assert.AssertionError);assert.equal(error.actual,'unknown');assert.equal(error.expected,'acknowledged');
+    const match=/^History fixture setup: (\{[^\n]*\})/.exec(error.message);assert.ok(match);
+    const diagnostic=JSON.parse(match[1]!);
+    assert.equal(diagnostic.record.action,'thread-start');assert.equal(diagnostic.record.errorCode,'TIMEOUT');
+    assert.equal(diagnostic.snapshot.connected,false);assert.equal(diagnostic.snapshot.failureCode,'TIMEOUT');
+    assert.deepEqual(diagnostic.snapshot.operations,[{method:'thread/start',state:'unknown',errorCode:'TIMEOUT'}]);
+    assert.equal(diagnostic.peer.filter((row:{method:string})=>row.method==='thread/start').length,1);
+    assert.ok(error.message.length<13000);
+    for(const value of [f.projectPath,SECRET,'PRIVATE_', 'params','cwd','sandbox'])assert.ok(!error.message.includes(value));
+    return true;
+  });
+  assert.equal((await f.logs()).filter(row=>row.message.method==='thread/start').length,1);
+  assert.equal(f.starts(),1);
+});
 
 test('history endpoints are inert and human-only; agent/foreign-origin/query/spoofed inputs cannot launch',async t=>{
   const f=await fixture(t),h=await http(t,f.service);
