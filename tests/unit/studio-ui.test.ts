@@ -49,6 +49,17 @@ test('UI method/root literals match the shared bridge contract, without exposing
   assert.equal((BUILDER_METHODS as readonly string[]).includes('scene.upload_context'), false, 'Uploader context stays a host-only background read.');
 });
 
+test('script-content UI search preserves literal whitespace and requires its own current-source baseline', () => {
+  const s = session();
+  for (const query of ['  Spawn  ', '.*', '🧩'.repeat(64)]) {
+    assert.deepEqual(prepareCommand(s, 'script.search', input(s, { query })), { method: 'script.search', args: { root: 'Workspace', query, limit: 100, caseSensitive: true } });
+  }
+  for (const query of ['', '\ud800', 'x\n', '\0', '🧩'.repeat(65)]) assert.throws(() => prepareCommand(s, 'script.search', input(s, { query })));
+  assert.throws(() => prepareCommand(s, 'script.search', input(s, { limit: 101 })), /1 to 100/);
+  const result = command(s, { method: 'script.search', args: { root: 'Workspace', query: 'x' }, result: { items: [{ ref: ref(s, 'ModuleScript') as unknown as Json, line: 1, column: 1, excerpt: 'x' }] } });
+  assert.throws(() => baselineFromReceipt(result, s), /baseline|source|reference|read/i);
+});
+
 test('launcher fragment is removed; only the local bearer persists in tab-scoped lab-compatible storage', () => {
   const saved = new Map<string, string>(); let replaced = '';
   const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => { saved.set(key, value); } };
@@ -463,6 +474,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
       let result: Json = { items: [{ ref: r as unknown as Json, name: '<img src=x onerror=alert(1)>', className: 'Part', childCount: 0 }, { ref: ref(s, 'Part', 'opaque-instance-2') as unknown as Json, name: 'Duplicate name', className: 'Part', childCount: 0 }, { ref: script as unknown as Json, name: 'Module', className: 'ModuleScript', childCount: 0 }], truncated: false };
       if (method === 'scene.inspect') result = { ref: args.ref!, name: 'Duplicate name', className: 'Part', properties: { Name: 'Duplicate name', Anchored: false, CanCollide: true, Size: { type: 'Vector3', value: [4, 1, 2] } }, childCount: 0 };
       if (method === 'script.read') result = { ref: args.ref!, source: '-- unsaved fixture editor\nreturn 1' };
+      if (method === 'script.search') result = { parentRef: ref(s, 'Workspace', 'opaque-root') as unknown as Json, items: [{ ref: script as unknown as Json, name: 'Module', className: 'ModuleScript', childCount: 0, line: 9, column: 3, excerpt: "  literal .*  <img src=x onerror=window.searchInjected=true>", excerptStartColumn: 1, excerptTruncated: false }], truncated: true, reasons: ['scripts'], nodesVisited: 129, scriptsRead: 128, skippedScripts: 0, sourceBytes: 4096, literal: true, caseSensitive: true, sourceKind: 'editor', columnEncoding: 'utf8-bytes', atomicSnapshot: false };
       if (method === 'scene.create') result = { ref: r as unknown as Json, mutation: { kind: method, ref: r as unknown as Json, before: null, after: { properties: { Name: args.name!, Anchored: true } } } };
       if (method === 'scene.update') result = { ref: args.ref!, mutation: { kind: method, ref: args.ref!, before: { properties: args.expected! }, after: { properties: args.properties! } } };
       if (method === 'script.update') result = { ref: args.ref!, mutation: { kind: method, ref: args.ref!, before: { source: args.expectedSource! }, after: { source: args.source! } } };
@@ -551,7 +563,18 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   loseNextResponse = true; await page.locator('#send').click(); await expectText('#unknown-message', 'Outcome unknown'); assert.equal(await page.locator('#session-picker').isDisabled(), true); const lost = posted.at(-1)!;
   await page.locator('#retry-request').click(); await expectText('#receipt-state', 'succeeded'); assert.deepEqual(posted.at(-1)?.body, lost.body); assert.equal(commands.filter(c => c.requestId === lost.body.requestId).length, 1);
   failSessions = true; await page.locator('#refresh').click(); await expectText('#connection-status', 'Refresh unavailable'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#notice', 'outcomes have not been inferred'); failSessions = false; await page.locator('#refresh').click(); await expectText('#connection-status', 'Daemon responding');
-  await page.locator('#method').selectOption('scene.search'); await page.locator('#query').fill('Duplicate'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.search'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).query, 'Duplicate');
+  await page.locator('#method').selectOption('script.search');
+  assert.equal(await page.locator('#limit').getAttribute('max'), '100');
+  await page.locator('#query').fill('  literal .*  '); await page.locator('#send').click(); await expectText('#receipt-title', 'script.search');
+  assert.deepEqual(posted.at(-1)?.body.args, { root: 'Workspace', limit: 100, query: '  literal .*  ', caseSensitive: true });
+  await expectText('#receipt-nodes', 'Line 9 · UTF-8 byte column 3'); await expectText('#receipt-nodes', 'Results truncated');
+  assert.equal(await page.locator('#receipt-nodes pre').textContent(), '  literal .*  <img src=x onerror=window.searchInjected=true>');
+  assert.equal(await page.locator('#receipt-nodes img').count(), 0); assert.equal(await page.evaluate(() => Boolean((window as any).searchInjected)), false);
+  assert.equal(await page.locator('#use-baseline').isVisible(), false, 'a search excerpt never becomes an update baseline');
+  if (process.env.ARCANE_UI_SCREENSHOT) await page.locator('#receipt-nodes').screenshot({ path: process.env.ARCANE_UI_SCREENSHOT + '.script-search.png' });
+  await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).click(); await page.locator('#read-source').click(); await expectText('#receipt-title', 'script.read');
+  assert.equal(await page.locator('#use-baseline').isVisible(), true, 'the chosen script requires a fresh editor read');
+  await page.locator('#method').selectOption('scene.search'); assert.equal(await page.locator('#limit').getAttribute('max'), '200'); await page.locator('#query').fill('Duplicate'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.search'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).query, 'Duplicate');
   await page.locator('#method').selectOption('scene.create'); await page.locator('#receipt-nodes button').filter({ hasText: 'Use reference' }).first().click(); await page.locator('#create-name').fill('Fixture folder'); await page.locator('#send').click(); await expectText('#receipt-title', 'scene.create'); assert.equal((posted.at(-1)?.body.args as Record<string, unknown>).className, 'Folder');
   await openAdvancedSettings(page, 'asset-heading'); await page.locator('#asset-name').fill('fixture-crate');
   assert.equal(await page.locator('#asset-start').isDisabled(), true);

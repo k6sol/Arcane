@@ -116,6 +116,14 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
     case 'scene.search':
       keys(a, ['root', 'query', 'limit']); root(a.root, session); textField(a.query, 'search query', 100);
       if (a.limit !== undefined && (!Number.isInteger(a.limit) || (a.limit as number) < 1 || (a.limit as number) > 200)) throw new ArcaneError('INPUT', 'Limit must be 1..200.'); break;
+    case 'script.search': {
+      keys(a, ['root', 'ref', 'query', 'limit', 'caseSensitive']); root(a.root, session);
+      if (a.ref !== undefined) { const r = ref(a.ref, session); if (r.root !== a.root) throw new ArcaneError('SCOPE', 'Root/ref mismatch.'); }
+      if (typeof a.query !== 'string' || !a.query.length || Buffer.byteLength(a.query, 'utf8') > 256 || /[\x00-\x1f\x7f]/.test(a.query) || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(a.query)) throw new ArcaneError('INPUT', 'Use a literal single-line query of at most 256 UTF-8 bytes.');
+      if (a.limit !== undefined && (!Number.isInteger(a.limit) || (a.limit as number) < 1 || (a.limit as number) > 100)) throw new ArcaneError('INPUT', 'Limit must be 1..100.');
+      if (a.caseSensitive !== undefined && typeof a.caseSensitive !== 'boolean') throw new ArcaneError('INPUT', 'caseSensitive must be a boolean.');
+      break;
+    }
     case 'selection.read': keys(a, []); break;
     case 'scene.inspect': case 'script.read': keys(a, ['ref']); ref(a.ref, session); break;
     case 'script.update': keys(a, ['ref', 'expectedSource', 'source']); ref(a.ref, session); source(a.expectedSource); source(a.source); break;

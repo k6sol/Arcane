@@ -339,6 +339,83 @@ function Operations:search(args: any): any
 	return {items = items, truncated = omitted or head <= #queue}
 end
 
+-- Content discovery reads editor text. Matches never authorize an update:
+-- script.read must supply its exact current baseline before editing.
+function Operations:searchScripts(args: any, guard: () -> ()): any
+	V.fields(args, {"root", "ref", "query", "limit", "caseSensitive"}, "script search arguments")
+	local root = self.registry:root(args.root)
+	local parent = if args.ref ~= nil then self.registry:resolve(args.ref) else root
+	local function scope(instance: any): ()
+		guard()
+		if self.registry:rootOf(parent) ~= args.root or self.registry:rootOf(instance) ~= args.root
+			or (instance ~= parent and not instance:IsDescendantOf(parent)) then V.fail("GRANT", "Search scope changed.") end
+	end
+	scope(parent)
+	local query = V.string(args.query, "query", 256)
+	if string.find(query, "[%c]") then V.fail("INPUT", "Use a literal single-line query.") end
+	if args.caseSensitive ~= nil and type(args.caseSensitive) ~= "boolean" then V.fail("INPUT", "caseSensitive must be a boolean.") end
+	local sensitive = args.caseSensitive ~= false
+	local needle = if sensitive then query else string.lower(query)
+	local limit = if args.limit == nil then 50 else V.integer(args.limit, 1, 100, "limit")
+	local items, reasons = V.array({}), V.array({})
+	local queue: {any} = {parent}
+	local head, nodes, scripts, sourceBytes, skipped, resultBytes = 1, 0, 0, 0, 0, 0
+	local function incomplete(reason: string): ()
+		if not table.find(reasons, reason) then table.insert(reasons, reason) end
+	end
+	local stopped = false
+	while head <= #queue and not stopped do
+		local instance = queue[head]
+		head += 1
+		scope(instance)
+		if nodes == 5000 then incomplete("nodes"); break end
+		nodes += 1
+		if instance:IsA("LuaSourceContainer") then
+			if scripts == 128 then incomplete("scripts"); break end
+			scripts += 1
+			local ok, source = pcall(function(): string return self:source(instance) end)
+			scope(instance) -- Grant loss or reparenting is not an unreadable-source skip.
+			if not ok then skipped += 1; incomplete("unreadable-source")
+			elseif sourceBytes + #source > 2 * 1024 * 1024 then incomplete("source-bytes"); break
+			else
+				sourceBytes += #source
+				local start, lineNumber = 1, 1
+				while start <= #source do
+					local newline = string.find(source, "\n", start, true)
+					local last = if newline then newline - 1 else #source
+					if string.sub(source, last, last) == "\r" then last -= 1 end
+					local line = string.sub(source, start, last)
+					local column = string.find(if sensitive then line else string.lower(line), needle, 1, true)
+					if column then
+						if #items == limit then incomplete("matches"); stopped = true; break end
+						local first = utf8.offset(line, 0, math.max(1, column - 64)) :: number
+						local finish = utf8.offset(line, 0, math.min(#line + 1, first + 512)) :: number
+						local item = self.registry:node(instance)
+						item.line, item.column = lineNumber, column
+						item.excerpt, item.excerptStartColumn = string.sub(line, first, finish - 1), first
+						item.excerptTruncated = first > 1 or finish <= #line
+						local size = #V.encode(item, self.http)
+						if resultBytes + size > 256 * 1024 then incomplete("result-bytes"); stopped = true; break end
+						resultBytes += size
+						table.insert(items, item)
+					end
+					if not newline then break end
+					start, lineNumber = newline + 1, lineNumber + 1
+				end
+			end
+		end
+		if not stopped then
+			for _, child in ipairs(instance:GetChildren()) do
+				if #queue < 5000 then table.insert(queue, child) else incomplete("nodes"); break end
+			end
+		end
+	end
+	scope(parent)
+	return {parentRef = self.registry:ref(parent), items = items, truncated = #reasons > 0, reasons = reasons,
+		nodesVisited = nodes, scriptsRead = scripts - skipped, skippedScripts = skipped, sourceBytes = sourceBytes,
+		literal = true, caseSensitive = sensitive, sourceKind = "editor", columnEncoding = "utf8-bytes", atomicSnapshot = false}
+end
+
 function Operations:updateProperties(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"ref", "expected", "properties"}, "update arguments")
 	local instance = self.registry:resolve(args.ref)
@@ -525,6 +602,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)
+	elseif method == "script.search" then result = self:searchScripts(args, guard)
 	elseif method == "scene.inspect" then
 		V.fields(args, {"ref"}, "inspect arguments")
 		local instance = self.registry:resolve(args.ref)

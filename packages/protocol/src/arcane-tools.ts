@@ -1,7 +1,7 @@
 /** Reviewed product MCP surface. No credentials, grants or caller-selectable tools. */
 export const ARCANE_TOOL_NAMES = Object.freeze([
   'sessions', 'scene_children', 'scene_inspect', 'scene_search', 'selection_read',
-  'script_read', 'script_update', 'script_set_enabled', 'scene_create', 'scene_update', 'receipt_status',
+  'script_read', 'script_search', 'script_update', 'script_set_enabled', 'scene_create', 'scene_update', 'receipt_status',
   'receipt_restore', 'playtest_request', 'playtest_status', 'playtest_cancel',
   'skills_recommend', 'skills_list', 'skills_get',
   'work_runs', 'work_ready', 'work_create', 'work_claim', 'work_progress', 'work_submit',

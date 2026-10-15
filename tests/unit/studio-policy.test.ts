@@ -28,6 +28,20 @@ test('legacy six creation classes remain stable; effective MCP/policy/plugin all
   assert.deepEqual(list('SHAPES'), SHAPES);
 });
 
+test('script content search enforces literal UTF-8 limits, exact roots/refs and a read-only capability', () => {
+  const readOnly = { ...session, allowWrites: false };
+  for (const query of ['literal .* [x]', ' ', '🧩'.repeat(64), 'é']) {
+    const args = { root: 'Workspace', query, ref: reference('Folder'), limit: 100, caseSensitive: false };
+    assert.deepEqual(validateCommandArgs('script.search', args, readOnly), args);
+  }
+  for (const patch of [{ query: '' }, { query: 'x\n' }, { query: 'x\r' }, { query: '\0' }, { query: '\u007f' }, { query: '\ud800' }, { query: '\udc00' }, { query: '🧩'.repeat(65) }, { limit: 101 }, { limit: 0 }, { limit: 1.5 }, { caseSensitive: 1 }, { regex: true }, { source: 'return 1' }, { ref: false }, { ref: null }]) {
+    assert.throws(() => validateCommandArgs('script.search', { root: 'Workspace', query: 'literal', ...patch }, readOnly), { code: 'INPUT' });
+  }
+  assert.throws(() => validateCommandArgs('script.search', { root: 'ServerStorage', query: 'x' }, readOnly));
+  assert.throws(() => validateCommandArgs('script.search', { root: 'Workspace', query: 'x', ref: { ...reference('Folder'), sessionId: 'other' } }, readOnly), { code: 'SCOPE' });
+  assert.throws(() => validateCommandArgs('script.search', { root: 'Workspace', query: 'x' }, { ...readOnly, capabilities: readOnly.capabilities.filter(m => m !== 'script.search') }), { code: 'CAPABILITY' });
+});
+
 test('all physical property fields including full twelve-property update fit the bounded schema/policy', () => {
   const full = { ...physical, Shape: 'Cylinder', Name: 'CircularSpawn' };
   assert.equal(Object.keys(full).length, 12);

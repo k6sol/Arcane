@@ -8,7 +8,7 @@ The daemon owns exact project/conversation identity, provider session continuity
 
 ## Implementation priorities
 
-1. **Source discovery:** find literal script contents within a granted root or observed subtree. Return real refs, line/byte-column evidence, bounded excerpts, scan counts and explicit truncation. Read the current editor source again before an update; a match is not an edit baseline.
+1. **Source discovery:** [bounded script-content search](../script-content-search.md) now provides real refs, line/byte-column evidence, excerpts, scan counts and explicit truncation within a granted root or observed subtree. Read the current editor source again before an update; a match is not an edit baseline. Native acceptance remains required.
 2. **Continuous execution:** connect accepted chat tasks to an owned dispatcher and carry exact project, conversation, account and model identity through workers. Return plan/build/verify/repair evidence to the originating chat. Preserve stop acknowledgement and uncertain-effect recovery.
 3. **Local asset delivery:** finish reconstruction-to-import, update/reimport mapping and visible engine acceptance. Keep source artifacts, approved rights, local geometry transfer and published assets separate. A GLB or successful local preview alone does not establish Studio delivery.
 4. **Visual iteration:** retain source-bound multi-view renders, timestamped capture moments and review sheets. Revisions must target the same asset or effect. Extend to rigs, animation and VFX with measured scale, timing, cleanup and final engine appearance.

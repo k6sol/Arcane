@@ -33,7 +33,7 @@ const TOKEN = 'fixture-control-bearer-1234567890';
 const SESSION_ID = 'fixture-studio-session';
 const REFERENCE: InstanceRef = { instanceId: 'opaque-1', sessionId: SESSION_ID, root: 'Workspace', pathSegments: ['Same', 'Same'], className: 'Part' };
 const TOOL_ACCESS = {
-  sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true,
+  sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true, script_search: true,
   script_update: false, script_set_enabled: false, scene_create: false, scene_update: false, receipt_status: true, receipt_restore: false,
   playtest_request:false,playtest_status:true,playtest_cancel:false,
   skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
@@ -218,6 +218,25 @@ test('fixture SDK: every scene/selection/script read uses exact shared endpoints
   assert.equal(f.state.posts,5);
   assert.ok(f.requests.every(request=>request.auth===`Bearer ${TOKEN}` && request.origin===undefined));
   assert.equal((f.requests.find(request=>request.body?.method==='scene.children')!.body!.args as any).limit,7);
+});
+
+test('fixture SDK: script content search uses one read command with closed literal inputs', async t => {
+  const f = await fixture(t), client = await linked(t, f);
+  const tools = (await client.listTools()).tools;
+  assert.equal(tools.find(tool => tool.name === 'script_search')?.annotations?.readOnlyHint, true);
+  for (const args of [{ root: 'Workspace', query: '  literal .*  ' }, { root: 'Workspace', query: '🧩'.repeat(64), ref: REFERENCE, limit: 100, caseSensitive: false }]) {
+    const read = await call(client, 'script_search', { sessionId: SESSION_ID, ...args });
+    assert.notEqual(read.result.isError, true);
+    assert.equal(read.data.command.method, 'script.search');
+    assert.deepEqual(read.data.command.args, { limit: 50, caseSensitive: true, ...args });
+  }
+  const before = f.state.posts;
+  for (const patch of [{ query: '' }, { query: '\ud800' }, { query: 'x\n' }, { query: '\u007f' }, { query: '🧩'.repeat(65) }, { limit: 101 }, { regex: true }, { caseSensitive: 0 }, { source: 'return 1' }]) {
+    assert.equal((await call(client, 'script_search', { sessionId: SESSION_ID, root: 'Workspace', query: 'x', ...patch })).result.isError, true);
+  }
+  assert.equal(f.state.posts, before, 'invalid search inputs never reach HTTP enqueue');
+  assert.equal((await call(client, 'script_search', { sessionId: SESSION_ID, root: 'Workspace', query: 'x', ref: { ...REFERENCE, sessionId: 'other-window' } })).data.error.code, 'REFERENCE_SESSION');
+  assert.equal(f.state.posts, before);
 });
 
 test('fixture SDK: guarded writes and daemon-built restore use separate receipt endpoint', async t => {
@@ -418,6 +437,21 @@ test('real daemon HTTP + SQLite + SDK: non-native mock plugin pairing, source up
   const readonly=await http('/v1/plugin/pair',{code:readonlyGrant.code,protocolVersion:1,identity:{clientSessionId:randomUUID(),placeId:0,universeId:0,name:'Readonly fixture',pluginVersion:'fixture'},capabilities:[...READ_METHODS,...WRITE_METHODS]});
   const refused=await call(client,'script_update',{sessionId:readonly.sessionId,ref:{...scriptRef,sessionId:readonly.sessionId},expectedSource:'',source:'return 3'});
   assert.equal(refused.result.isError,true,JSON.stringify(refused.data)); assert.equal(refused.data.error.code,'READ_ONLY',JSON.stringify(refused.data)); assert.equal(store.commands(readonly.sessionId).length,0);
+  const pendingSearch = call(client, 'script_search', { sessionId: readonly.sessionId, root: 'Workspace', query: '  literal .*  ' });
+  let searchCommand: StudioCommand | undefined;
+  const untilSearch = Date.now() + 2000;
+  while (!searchCommand && Date.now() < untilSearch) {
+    searchCommand = (await http('/v1/plugin/poll', { sessionId: readonly.sessionId }, readonly.token)).commands[0];
+    if (!searchCommand) await sleep(10);
+  }
+  assert.ok(searchCommand, 'The read-only mock plugin receives the real SQLite command.');
+  assert.equal(searchCommand.method, 'script.search'); assert.equal(searchCommand.allowWrites, false);
+  assert.deepEqual(searchCommand.args, { root: 'Workspace', query: '  literal .*  ', limit: 50, caseSensitive: true });
+  const observed = { items: [], truncated: false, reasons: [], nodesVisited: 1, scriptsRead: 0, skippedScripts: 0, sourceBytes: 0, literal: true, caseSensitive: true, sourceKind: 'editor', columnEncoding: 'utf8-bytes', atomicSnapshot: false };
+  await http('/v1/plugin/result', { sessionId: readonly.sessionId, commandId: searchCommand.id, state: 'succeeded', result: observed }, readonly.token);
+  const searched = await pendingSearch;
+  assert.equal(searched.data.state, 'succeeded'); assert.deepEqual(searched.data.command.result, observed);
+  assert.equal(store.commands(readonly.sessionId).length, 1);
   assert.notEqual(paired.token,lab.token); assert.notEqual(lab.agentToken,lab.token); assert.notEqual(paired.token,lab.agentToken);
   for (const [path, body] of [['/v1/studio/pairing', {allowedRoots:['Workspace'],allowWrites:true}], ['/v1/studio/revoke', {sessionId:paired.sessionId}], ['/v1/product/mcp-token', {}]] as const) {
     const denied = await fetch(lab.origin + path, {method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer ' + lab.agentToken},body:JSON.stringify(body)});

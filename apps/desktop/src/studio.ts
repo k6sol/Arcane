@@ -22,7 +22,7 @@ import type { InstanceRef, Json, MutationReceipt, StudioCommand, StudioMethod, S
 // Runtime dependencies are deliberately browser-only; the shared protocol import
 // is erased by TypeScript. Keep these literals checked against its types.
 export const STUDIO_ROOTS = ['Workspace', 'ReplicatedStorage', 'ServerScriptService', 'ServerStorage', 'StarterGui', 'StarterPlayer', 'Lighting'] as const satisfies readonly StudioRoot[];
-export const BUILDER_METHODS = ['scene.children', 'scene.search', 'scene.inspect', 'selection.read', 'script.read', 'scene.create', 'scene.update', 'script.update', 'script.set_enabled'] as const satisfies readonly StudioMethod[];
+export const BUILDER_METHODS = ['scene.children', 'scene.search', 'script.search', 'scene.inspect', 'selection.read', 'script.read', 'scene.create', 'scene.update', 'script.update', 'script.set_enabled'] as const satisfies readonly StudioMethod[];
 const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'];
 const WRITABLE_PROPERTIES = ['Name', 'Size', 'Position', 'Color', 'Anchored', 'CanCollide', 'Transparency', 'Material'];
 const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric'];
@@ -77,11 +77,15 @@ export function prepareCommand(session: StudioSession | undefined, method: strin
   const refJson = () => needRef() as unknown as Json;
   let args: Record<string, Json>;
   switch (operation) {
-    case 'scene.children': case 'scene.search': {
+    case 'scene.children': case 'scene.search': case 'script.search': {
       if (!session.allowedRoots.includes(input.root as StudioRoot)) throw new Error('Choose one of this session’s granted service roots.');
-      if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 200) throw new Error('Result limit must be an integer from 1 to 200.');
+      const maximum = operation === 'script.search' ? 100 : 200;
+      if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > maximum) throw new Error('Result limit must be an integer from 1 to ' + maximum + '.');
       args = { root: input.root, limit: input.limit };
-      if (operation === 'scene.search') {
+      if (operation === 'script.search') {
+        if (!input.query.length || utf8(input.query) > 256 || /[\x00-\x1f\x7f]/.test(input.query) || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(input.query)) throw new Error('Enter a literal single-line query of at most 256 UTF-8 bytes.');
+        args.query = input.query; args.caseSensitive = true;
+      } else if (operation === 'scene.search') {
         if (!input.query.trim() || input.query.length > 100 || input.query.includes('\0')) throw new Error('Enter a nonempty search query of at most 100 characters.');
         args.query = input.query.trim();
       } else if (input.browseParent) {
@@ -562,6 +566,7 @@ interface PropertyControl { checked: HTMLInputElement; inputs: (HTMLInputElement
 const HELP: Record<string, string> = {
   'scene.children': 'Browse a granted service root, or enable browsing inside a returned instance. Paths are display-only.',
   'scene.search': 'Search names inside one granted root. The plugin bounds traversal and may truncate results.',
+  'script.search': 'Find literal, case-sensitive text in current editor scripts inside one granted root. Matches have line/byte columns and excerpts. Read source again before editing; truncated results are incomplete.',
   'scene.inspect': 'Read allowlisted properties from the exact selected instance. Use the receipt to capture an edit baseline.',
   'selection.read': 'Read the current Studio selection within granted roots. No instance reference is required.',
   'script.read': 'Read current editor text through ScriptEditorService, including unsaved edits.',
@@ -937,7 +942,9 @@ export class StudioWorkbench {
   }
 
   private renderForm(rebuildProperties = false) {
-    const method = this.value('method'), browse = method === 'scene.children', search = method === 'scene.search';
+    const method = this.value('method'), browse = method === 'scene.children', search = method === 'scene.search' || method === 'script.search';
+    this.el<HTMLInputElement>('limit').max = method === 'script.search' ? '100' : '200';
+    this.el<HTMLInputElement>('query').maxLength = method === 'script.search' ? 256 : 100;
     for (const [id, visible] of [['root-field', browse || search], ['limit-field', browse || search], ['query-field', search], ['browse-parent-field', browse], ['ref-field', !search && method !== 'selection.read'], ['create-fields', method === 'scene.create'], ['properties-field', method === 'scene.create' && this.value('create-class') === 'Part' || method === 'scene.update'], ['source-fields', method === 'script.update']] as [string, boolean][]) this.el(id).hidden = !visible;
     this.el<HTMLInputElement>('query').required = search;
     this.el<HTMLInputElement>('limit').required = browse || search;
@@ -1172,7 +1179,10 @@ export class StudioWorkbench {
         if (!record(candidate)) continue;
         let ref: InstanceRef; try { ref = readReference(candidate.ref, session); } catch { nodes.append(this.make('p', 'A returned reference was invalid for this session and cannot be selected.', 'notice error')); continue; }
         const row = this.make('div', undefined, 'node-row'); row.append(this.make('p', typeof candidate.name === 'string' ? candidate.name : ref.pathSegments.at(-1) ?? ref.className), this.make('p', ref.className + ' · ' + ref.root + ' / ' + ref.pathSegments.join(' / ') + ' · opaque ID ' + ref.instanceId + (typeof candidate.childCount === 'number' ? ' · ' + candidate.childCount + ' children' : ''), 'node-meta'));
-        const actions = this.make('div', undefined, 'button-row'), use = this.make('button', 'Use reference', 'secondary'), copy = this.make('button', 'Copy reference', 'quiet'); use.type = 'button'; copy.type = 'button'; use.disabled = this.busy || Boolean(this.pending); use.addEventListener('click', () => { this.setRef(ref); this.notice('Selected returned reference ' + ref.instanceId + ' in exact session ' + ref.sessionId + '. Edit baselines cleared.'); }); copy.addEventListener('click', () => { void this.copy(json(ref)); }); actions.append(use, copy); row.append(actions); nodes.append(row);
+        if (command.method === 'script.search' && Number.isSafeInteger(candidate.line) && Number(candidate.line) > 0 && Number.isSafeInteger(candidate.column) && Number(candidate.column) > 0 && typeof candidate.excerpt === 'string' && utf8(candidate.excerpt) <= 512) {
+          row.append(this.make('p', 'Line ' + candidate.line + ' · UTF-8 byte column ' + candidate.column + (candidate.excerptTruncated === true ? ' · excerpt' : ''), 'node-meta'), this.make('pre', candidate.excerpt, 'message-text'));
+        }
+        const actions = this.make('div', undefined, 'button-row'), use = this.make('button', 'Use reference', 'secondary'), copy = this.make('button', 'Copy reference', 'quiet'); use.type = 'button'; copy.type = 'button'; use.disabled = this.busy || Boolean(this.pending); use.addEventListener('click', () => { this.setRef(ref); if (command.method === 'script.search') { this.el<HTMLSelectElement>('method').value = 'script.read'; this.renderForm(); } this.notice('Selected returned reference ' + ref.instanceId + ' in exact session ' + ref.sessionId + '. Edit baselines cleared.'); }); copy.addEventListener('click', () => { void this.copy(json(ref)); }); actions.append(use, copy); row.append(actions); nodes.append(row);
       }
     }
     let baseline = false; try { if (session) { baselineFromReceipt(command, session); baseline = true; } } catch { /* Baselines must match the original read request. */ }

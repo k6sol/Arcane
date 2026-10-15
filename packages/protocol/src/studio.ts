@@ -19,7 +19,7 @@ export interface StudioContinuityProof {
   mode: 'Edit' | 'Play'; playEpoch: number; continuitySupported: boolean;
   connected: boolean; observedAt: string; expiresAt: string;
 }
-export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'scene.import_context', 'scene.upload_context'] as const;
+export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context'] as const;
 export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'] as const;
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
