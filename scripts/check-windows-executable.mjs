@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import policy from '../apps/desktop/electron/policy.cjs';
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -87,6 +87,18 @@ export async function checkWindowsExecutable(directory) {
       env: policy.daemonEnvironment(process.env,{productRoot:join(directory,'resources','product'),stateRoot:join(reportDirectory,'runtime','product'),projectPath:reportDirectory}),
     });
     if(imported.code !== 0 || imported.output.trim() !== 'ARCANE_RUNTIME_IMPORT_OK') throw new Error('Bundled production dependency imports failed.');
+    phase = 'mcp-runtime'; await progress('running');
+    const productRoot = await policy.directPath(join(directory, 'resources', 'product'));
+    const toolModule = await policy.directPath(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js'), 'file');
+    const { ARCANE_TOOL_NAMES } = await import(pathToFileURL(toolModule).href);
+    const { checkMcpRuntime } = await import('./check-mcp-runtime.mjs');
+    const mcp = await checkMcpRuntime({
+      nodeExecutable: await policy.directPath(join(directory, 'resources', 'node', 'node.exe'), 'file'),
+      productRoot, workingDirectory: reportDirectory,
+      env: policy.daemonEnvironment(process.env, { productRoot, stateRoot: join(reportDirectory, 'mcp-state'), projectPath: reportDirectory }),
+      expectedTools: ARCANE_TOOL_NAMES,
+    });
+    await writeFile(join(reportDirectory, 'mcp-runtime.json'), JSON.stringify(mcp, null, 2) + '\n', { flag: 'wx' });
     const executable = await policy.directPath(join(directory, 'Arcane.exe'), 'file');
     const env = policy.daemonEnvironment(process.env, { productRoot: join(directory,'resources','product'),
       stateRoot: join(smokeDirectory,'profile','runtime','product'), projectPath: smokeDirectory });
@@ -120,7 +132,8 @@ export async function checkWindowsExecutable(directory) {
     if (after.manifestSha256 !== before.manifestSha256 || after.files !== before.files || after.bytes !== before.bytes)
       throw new Error('Bundle changed during verification.');
     const proof = { schemaVersion: 1, executable, directory, reportDirectory, screenshot: join(smokeDirectory,'workspace.png'),
-      manifestSha256: after.manifestSha256, checks: { ...report.checks, runtimeImportsVerified: true, parentLossShutdownVerified: true },
+      manifestSha256: after.manifestSha256, checks: { ...report.checks, runtimeImportsVerified: true, parentLossShutdownVerified: true,
+        mcpProtocolVerified: true, bundledGuidanceVerified: true, mcpShutdownVerified: true },
       elapsed: report.elapsed, verifierElapsedMs: Date.now()-started, inferenceStarted: false, studioOperations: 0,
       signed: false, fullProductVerified: false };
     await writeFile(join(reportDirectory,'verification.json'),JSON.stringify(proof,null,2)+'\n',{flag:'wx'});
