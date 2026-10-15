@@ -146,6 +146,16 @@ class ArcaneOwnerFixtureDirectory {
     if($path -ceq [ArcaneOwnerFixtureState]::Child){return [ArcaneOwnerFixtureState]::DirectoryAcl}
     return [ArcaneOwnerFixtureState]::AncestorAcl
   }
+  static [void] SetAccessControl([string]$path,[Security.AccessControl.DirectorySecurity]$acl) {
+    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-write-scope'}
+    [ArcaneOwnerFixtureState]::Writes++
+    [ArcaneOwnerFixtureState]::DirectoryAcl=$acl
+  }
+  static [string[]] EnumerateFileSystemEntries([string]$path) {
+    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-entries-scope'}
+    if([ArcaneOwnerFixtureState]::Case.nonempty){return @('fixture-entry')}
+    return @()
+  }
 }
 class ArcaneOwnerFixtureFile {
   static [bool] Exists([string]$path) {return $path -ceq [ArcaneOwnerFixtureState]::Key}
@@ -257,15 +267,9 @@ test('complete production owner policy: captured token equivalence preserves for
     } else { assert.equal(result.stdout, ''); assert.ok(result.stderr.includes('Arcane private workflow storage unavailable.')); }
     if (scenario.value.existing || !scenario.accepted) assert.equal(metadata.directoryUnchanged, true, 'Existing/refused directory ACLs are never repaired.');
   });
-  // Reconstruct and HASH-PIN the exact checker that failed on the real runner.
-  // Only the two corrected owner gates and the new token capture are reversed.
-  const previous = production.replace(String.raw`  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-  $user=$identity.User
-  $defaultOwner=$identity.Owner
-  if($null -eq $user -or $null -eq $defaultOwner){throw 'token-owner'}
-  $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')
-  if($allowed -notcontains $defaultOwner.Value){throw 'token-owner'}`, String.raw`  $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
-  $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')`).replaceAll('-notin @($user.Value,$defaultOwner.Value)', '-ne $user.Value');
+  // Preserve the exact historical checker independently of later performance
+  // changes; it must still reproduce the original native owner refusals.
+  const previous = readFileSync(resolve('tests/fixtures/workflow-private-storage-before-owner-fix.txt'), 'utf8').replaceAll('\r\n', '\n');
   assert.equal(createHash('sha256').update(previous).digest('hex'), 'f1e777b8885e769df7b0777223405105588650e8b34033cc61f0341fbee2c582');
   let previousDouble = previous;
   for (const [native, fixture] of [

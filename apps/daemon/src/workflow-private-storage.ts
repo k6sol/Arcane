@@ -16,7 +16,7 @@ export function parsePrivateReceiptDescriptor(value: unknown, prepare: boolean, 
 
 // Fixed native ACL operation. Neither source code nor a command/executable path
 // comes from workflow text, HTTP JSON, an MCP tool, or provider configuration.
-// Read-only .NET inspection avoids filesystem-provider discovery; verified
+// Direct .NET inspection and preparation avoid filesystem-provider discovery; verified
 // against native attributes, owner/DACL/rules and rejection cases. The native
 // binary, ancestry/DACL predicates, preparation writes and 5000ms deadline stay fixed.
 // Only a new, empty, direct Arcane child receives a narrower DACL. An existing
@@ -27,6 +27,7 @@ export function parsePrivateReceiptDescriptor(value: unknown, prepare: boolean, 
 // that captured default owner only under the verified exact-user private parent.
 const SCRIPT=String.raw`
 $ErrorActionPreference='Stop'
+$PSModuleAutoLoadingPreference='None'
 try {
   $root=$env:ARCANE_WORKFLOW_ACL_ROOT
   $prepare=$env:ARCANE_WORKFLOW_ACL_PREPARE -eq '1'
@@ -76,16 +77,19 @@ try {
     $info=[IO.Directory]::CreateDirectory($dir)
     $item=Direct $dir
     $prior=Acl $dir
-    if(-not (IsDirectory $item) -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value) -or @(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0){throw 'created-scope'}
-    $acl=New-Object Security.AccessControl.DirectorySecurity
+    if(-not (IsDirectory $item) -or $prior.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value)){throw 'created-scope'}
+    $entries=[IO.Directory]::EnumerateFileSystemEntries($dir).GetEnumerator()
+    try{$empty=-not $entries.MoveNext()}finally{if($entries -is [IDisposable]){$entries.Dispose()}}
+    if(-not $empty){throw 'created-scope'}
+    $acl=[Security.AccessControl.DirectorySecurity]::new()
     $acl.SetOwner($user)
     $acl.SetAccessRuleProtection($true,$false)
     foreach($sid in $allowed){
-      $principal=New-Object Security.Principal.SecurityIdentifier($sid)
-      $rule=New-Object Security.AccessControl.FileSystemAccessRule($principal,[Security.AccessControl.FileSystemRights]::FullControl,([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
+      $principal=[Security.Principal.SecurityIdentifier]::new($sid)
+      $rule=[Security.AccessControl.FileSystemAccessRule]::new($principal,[Security.AccessControl.FileSystemRights]::FullControl,([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
       $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $dir -AclObject $acl
+    [IO.Directory]::SetAccessControl($dir,$acl)
     $created=$true
   }
   $item=Direct $dir
@@ -99,7 +103,9 @@ try {
     if((IsDirectory $item) -or $item.Length -ne 32 -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($user.Value,$defaultOwner.Value)){throw 'private-key'}
     foreach($rule in (Rules $acl)){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private-key-rule'}}
   }
-  [ordered]@{version=1;created=$created;directoryPrivate=$true;keyPrivate=$key;ancestorsSafe=$true} | ConvertTo-Json -Compress
+  $createdJson=if($created){'true'}else{'false'}
+  $keyJson=if($key){'true'}else{'false'}
+  [Console]::Write('{"version":1,"created":'+$createdJson+',"directoryPrivate":true,"keyPrivate":'+$keyJson+',"ancestorsSafe":true}')
 } catch { [Console]::Error.WriteLine('Arcane private workflow storage unavailable.'); exit 1 }
 `;
 
