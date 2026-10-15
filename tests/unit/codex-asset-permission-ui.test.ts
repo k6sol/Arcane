@@ -60,6 +60,8 @@ class ElementFixture {
   set textContent(value: string) { this.content = value; this.children = []; }
   append(...children: ElementFixture[]): void { this.children.push(...children); }
   replaceChildren(...children: ElementFixture[]): void { this.content = ''; this.children = children; }
+  after(..._children: ElementFixture[]): void {}
+  remove(): void {}
   setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
   querySelectorAll(): ElementFixture[] { return []; }
@@ -69,6 +71,9 @@ class ElementFixture {
   addEventListener(type: string, fn: (event: Event) => void): void {
     this.listeners.set(type, [...this.listeners.get(type) ?? [], fn]);
   }
+  removeEventListener(type: string, fn: (event: Event) => void): void {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter(listener => listener !== fn));
+  }
   dispatchEvent(event: Event): void { for (const fn of this.listeners.get(event.type) ?? []) fn(event); }
   emit(type = 'click', patch: Record<string, unknown> = {}) {
     const event = { type, isTrusted: true, button: 0, detail: 1, target: this, currentTarget: this,
@@ -76,7 +81,7 @@ class ElementFixture {
     this.dispatchEvent(event as unknown as Event); return event;
   }
 }
-class DocumentFixture {
+class DocumentFixture extends EventTarget {
   hidden = true; // Suppress scheduled polling in this owned document.
   private elements = new Map<string, ElementFixture>();
   getElementById(id: string): ElementFixture {
@@ -285,8 +290,13 @@ test('opening an exact retained task focuses its original approval UI without se
   owned.approvals=[{handle:'original-approval',connectionId:originalId,serverRequestId:'approval:1',method:'item/commandExecution/requestApproval',threadId,turnId:'original.repair',itemId:'command:1',reason:null,command:'original-repair-command',cwd:initial.projectPath,changes:null,canAccept:true,expiresAt:Date.now()+60000}];
   const f=await fixture(t,initial);f.handler(async input=>{assert.equal(input.action,'task-focus');assert.ok('taskId'in input);assert.equal(input.taskId,taskId);
     const next=f.observed();next.snapshot=owned;next.nativeAssets=assets({granted:true,admissionOpen:true});const record=receipt(input,{nextConnectionId:originalId});next.actions=[record];f.set(next);return response(input,next,{nextConnectionId:originalId});});
-  const opened=await(f.chat as unknown as {bindNativeChat(action:'thread-resume',selection:{model:string;effort:string},threadId:string):Promise<boolean>}).bindNativeChat('thread-resume',{model:'fixture',effort:'low'},threadId);
+  f.doc.getElementById('workspace-chat-tabs').setAttribute('role','tablist');
+  const saved=new Map<string,string>();
+  await f.chat.enableChatTabs({storage:{getItem:key=>saved.get(key)??null,setItem:(key,value)=>{saved.set(key,value);}}});
+  const opened=await f.chat.openSavedChat(threadId);
   assert.equal(opened,true);assert.deepEqual(f.posts.map(input=>input.action),['task-focus']);assert.ok(f.el('codex-approvals').textContent.includes('original-repair-command'));
+  assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,true);
+  assert.equal(f.chat.currentStateView().conversation!.threadId,threadId);
   const control=prepareCodexAction(f.chat.currentStateView().state!,'approval',{threadId,turnId:'original.repair',handle:'original-approval',decision:'accept'});assert.equal(control.connectionId,originalId);
 });
 
