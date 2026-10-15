@@ -1,7 +1,7 @@
 import { z } from 'zod';
+import { SCENARIO_LIMITS } from './scenario-limits.js';
+export { SCENARIO_LIMITS } from './scenario-limits.js';
 
-export const SCENARIO_LIMITS = Object.freeze({ steps: 8, targets: 4, runtimeMs: 3000,
-  wireBytes: 4 * 1024 * 1024, imageBytes: 2 * 1024 * 1024, imageDimension: 4096, imagePixels: 8 * 1024 * 1024 });
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,64}(?![\s\S])/);
 const hash = z.string().regex(/^[a-f0-9]{64}(?![\s\S])/);
 const name = z.string().min(1).max(100).refine(value => !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value));

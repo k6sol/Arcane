@@ -1,5 +1,5 @@
 import { inflateSync } from 'node:zlib';
-import { SCENARIO_LIMITS } from './scenario.js';
+import { SCENARIO_LIMITS } from './scenario-limits.js';
 
 /** Native capture bytes stay outside text reports. Support bounded, CRC-checked
  * noninterlaced RGB/RGBA PNG, without inferring that its contents prove a test. */

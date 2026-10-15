@@ -346,7 +346,7 @@ test('shell tool metadata contains no public prompt while backend routing stays 
   ]);
   assert.doesNotMatch(shell, /draft:\s*['"]Tool context:|sendToolContext/);
   assert.match(native, /developerInstructions: ARCANE_TASK_INSTRUCTIONS/);
-  assert.match(native, /input: \[\{ type: 'text', text, text_elements: \[\] \}\]/);
+  assert.match(native, /input:\s*\[\{\s*type:\s*'text',\s*text,\s*text_elements:\s*\[\]\s*\},\s*\.\.\.\(references\?\.map\(image=>\(\{type:'image',url:image\.dataUrl\}\)\)\?\?\[\]\)\]/);
   assert.match(routing, /Call skills_recommend with the actual brief/);
   assert.match(routing, /The user should not choose a tool or workflow/);
 });
