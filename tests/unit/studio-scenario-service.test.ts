@@ -36,7 +36,7 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   const root=makeFixtureDirectory('arcane-scenario-service-'),directory=join(root,'playtests'),store=new StudioStore({directory:join(root,'store')});
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'scenario-plugin-lifetime',placeId:0,universeId:0,name:NAME,pluginVersion:'fixture'},capabilities:[...READ_METHODS,...WRITE_METHODS]});
-  const state={mode:'Edit' as 'Edit'|'Play',epoch:20,source:'print("fixture source")',pluginEnabled:!options.queuedSetup,closes:0,setupEffects:0,restores:0,transparency:0,clientCalls:0,captures:0,inputRequests:0,inputEffects:0};
+  const state={mode:'Edit' as 'Edit'|'Play',epoch:20,source:'print("fixture source")',pluginEnabled:!options.queuedSetup,polls:0,closes:0,setupEffects:0,restores:0,transparency:0,clientCalls:0,captures:0,inputRequests:0,inputEffects:0};
   const calls:{name:string;args:Record<string,unknown>}[]=[],connections:NativeTestConnection[]=[];
   const inputEntered=gate(),inputAck=gate();
   const setupEntered=gate(),setupAck=gate();
@@ -44,7 +44,7 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   const ref={instanceId:'private-scenario-part',sessionId:pair.sessionId,root:'Workspace' as const,pathSegments:['Part'],className:'Part'};
   if(options.temporary){plan.temporaryEdits=[{id:'visual-setup',ref,expected:{Transparency:0},properties:{Transparency:0.5}}];if(options.failSecondSetup)plan.temporaryEdits.push({id:'second-setup',ref:{...ref,instanceId:'second-private-part'},expected:{Transparency:0},properties:{Transparency:0.25}});}
   const observation=()=>({sessionId:pair.sessionId,clientLifetimeId:'scenario-plugin-lifetime',pluginArtifactHash:ARTIFACT,markerName:'ArcaneTestProof_scenario_fixture',placeId:0,universeId:0,placeName:NAME,mode:state.mode,playEpoch:state.epoch,continuitySupported:true,connected:true});
-  const publish=()=>{store.authenticate(pair.sessionId,pair.token);return store.poll(pair.sessionId,observation());};
+  const publish=()=>{store.authenticate(pair.sessionId,pair.token);const commands=store.poll(pair.sessionId,observation());state.polls++;return commands;};
   const records=()=>readTestLedger(join(directory,'ledger'),directory);
   publish();
   let pluginBusy=false,pluginFailure:unknown;
@@ -62,7 +62,10 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
       store.result({sessionId:pair.sessionId,commandId:command.id,state:'succeeded',result:{restored:true,ref:(command.args.mutation as Record<string,unknown>).ref}});
     }
   };
-  const timer=setInterval(()=>{if(pluginBusy||!state.pluginEnabled)return;pluginBusy=true;try{for(const command of publish())applyCommand(command);}catch(error){pluginFailure=error;}finally{pluginBusy=false;}},10);
+  // The production plugin polls every 2s. Accelerate queue delivery to 250ms
+  // here, keeping real proof freshness without idle 100Hz SQLite write traffic.
+  // Owned mode changes still publish their proof immediately below.
+  const timer=setInterval(()=>{if(pluginBusy||!state.pluginEnabled)return;pluginBusy=true;try{for(const command of publish())applyCommand(command);}catch(error){pluginFailure=error;}finally{pluginBusy=false;}},250);
   const connect=async():Promise<NativeTestConnection>=>{
     const client=new Client({name:'scenario-production-client-fixture',version:'fixture-only'}),server=new Server({name:'fixture-not-RobloxStudio',version:'fixture-only'},{capabilities:{tools:{}}});
     const[clientTransport,serverTransport]=InMemoryTransport.createLinkedPair();
@@ -83,8 +86,8 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
           sources:{s1:{root:'Workspace',path:['GameScript'],identity:'fixture-original-edit-script',className:'Script',enabled:true,source:state.source,editorSource:state.source}}});
       }
       if(name==='execute_luau'){
-        assert.equal(args.datamodel_type,'Client');assert.equal((await records()).at(-1)?.event.kind,'scenario_intent');
-        state.clientCalls++;const runId=(await records()).at(-1)!.event.id;
+        assert.equal(args.datamodel_type,'Client');const intent=(await records()).at(-1)!.event;assert.equal(intent.kind,'scenario_intent');
+        state.clientCalls++;const runId=intent.id;
         assert.equal(args.code,buildScenarioProgram(plan,runId,digest(plan)));
         inputEntered.release();const actual=runScenarioFixture(plan,options.runtime,runId,String(args.code));state.inputRequests+=actual.inputRequests;state.inputEffects+=actual.effects.length;options.mutateReport?.(actual.report);
         if(options.holdInputAck)await inputAck.promise;
@@ -121,9 +124,8 @@ test('production service runs approved read-only assertions without virtual inpu
   assert.ok(f.calls.filter(call=>call.name==='execute_luau'&&call.args.datamodel_type==='Edit').length>=3,'source scope remains checked around approval and cleanup');
 });
 
-test('production service binds approved layout measurements to settled source-current task evidence',{timeout:15000},async t=>{
-  for(const failed of [false,true])await t.test(failed?'measured failure':'current layout passes',async sub=>{
-    const task=taskFixture(),f=await fixture(sub,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
+for(const failed of [false,true])test(`production service binds approved layout measurements to settled source-current task evidence: ${failed?'measured failure':'current layout passes'}`,{timeout:15000},async t=>{
+    const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
     const job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.equal(f.state.clientCalls,0);await f.approve(job);await until(()=>task.packets.length===1);
     const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
     assert.equal(report.review.outcome,failed?'failed':'succeeded');assert.equal(report.review.code,failed?'ASSERTION_FAILED':'OK');assert.equal(report.review.cleanup,'complete');
@@ -133,12 +135,10 @@ test('production service binds approved layout measurements to settled source-cu
     assert.equal(f.state.inputRequests,0);assert.equal(f.state.inputEffects,0);assert.equal(f.state.clientCalls,1);assert.equal(report.nativeAcceptance,false);
     assert.deepEqual(f.calls.filter(call=>call.name==='start_stop_play').map(call=>call.args.is_start),[true,false]);assert.equal((await f.records()).at(-1)?.event.cleanup,'complete');
     assert.equal(await f.service.revalidateExact(job.id,task.origin,packet.reportDigest),'current');
-  });
 });
 
-test('native layout failures require measured metadata before they can become repair evidence',{timeout:15000},async t=>{
-  for(const mutation of ['missing','null','string','contradiction','wrong-minimum','clip-overflow']as const)await t.test(mutation,async sub=>{
-    const task=taskFixture(),f=await fixture(sub,{capture:false,taskPort:task.port,runtime:{layout:{width:60}},mutateReport(report){
+for(const mutation of ['missing','null','string','contradiction','wrong-minimum','clip-overflow']as const)test(`native layout failures require measured metadata before they can become repair evidence: ${mutation}`,{timeout:15000},async t=>{
+    const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{layout:{width:60}},mutateReport(report){
       const row=report.steps[0]!;
       if(mutation==='missing')delete row.layout;
       else if(mutation==='null'){delete row.layout;row.observed=null;}
@@ -150,7 +150,6 @@ test('native layout failures require measured metadata before they can become re
     const report=f.status(job.id);assert.equal(report.review.code,'BAD_NATIVE_RESPONSE');assert.equal(report.review.scenario!.inputRelease,'unknown');
     assert.equal(task.packets[0]!.scenario!.outcome,'incomplete');assert.equal(task.packets[0]!.scenario!.requiredEvidence,'missing');
     assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(report.review.canStartAnotherOperation,false);
-  });
 });
 
 test('production service executes finite gameplay and retains unattested capture without claiming Client screenshot proof',{timeout:15000},async t=>{
@@ -183,7 +182,7 @@ test('measured assertion failure retains the actual failed row, bounded console 
 test('human Stop cancels queued setup before Play starts and releases after exact zero-effect cleanup',{timeout:15000},async t=>{
   const f=await fixture(t,{temporary:true,queuedSetup:true}),job=await f.prepare();await f.approve(job);await until(()=>f.store.commands(f.pair.sessionId).some(command=>command.method==='scene.update'&&command.state==='queued'));
   const report=await f.service.requests.cancel(job.id,ACTOR);assert.equal(report.review.outcome,'cancelled');assert.equal(report.review.cleanup,'complete');assert.equal(report.review.scenario!.inputRelease,'not_started');assert.equal(f.state.clientCalls,0);assert.equal(f.state.setupEffects,0);assert.equal(f.calls.filter(call=>call.name==='start_stop_play').length,0);
-  f.state.pluginEnabled=true;await new Promise(resolve=>setTimeout(resolve,30));assert.equal(f.state.setupEffects,0);
+  const polls=f.state.polls;f.state.pluginEnabled=true;await until(()=>f.state.polls>polls);assert.equal(f.state.setupEffects,0);
 });
 
 test('human Stop awaits the late exact setup ACK before deriving its inverse and releasing the owner',{timeout:15000},async t=>{
@@ -204,21 +203,17 @@ test('late original scenario ACK never clears cancelled input uncertainty and ow
   assert.equal(report.review.outcome,'cancelled');assert.equal(report.review.cleanup,'unknown');assert.equal(report.review.scenario!.inputRelease,'unknown');assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(f.calls.filter(call=>call.name==='start_stop_play').length,2);assert.equal(f.state.captures,0);
   assert.equal((await f.records()).filter(row=>row.event.kind==='terminal').length,1);assert.equal((await f.records()).at(-1)?.event.cleanup,'unknown');assert.equal(existsSync(join(f.directory,'ledger','writer.lock')),true);
 });
-test('lost input ACK or failed release preserves unknown cleanup after a verified owned stop',{timeout:15000},async t=>{
-  for(const options of [{inputErrorAck:true},{runtime:{releaseError:true}}])await t.test(JSON.stringify(options),async sub=>{
-    const f=await fixture(sub,options),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);const report=f.status(job.id);
+for(const [label,options]of [['lost original ACK',{inputErrorAck:true}],['failed original release',{runtime:{releaseError:true}}]]as const)test(`verified owned stop preserves unknown input cleanup: ${label}`,{timeout:15000},async t=>{
+    const f=await fixture(t,options),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);const report=f.status(job.id);
     assert.equal(report.review.cleanup,'unknown');assert.equal(report.review.scenario!.inputRelease,'unknown');assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(f.calls.filter(call=>call.name==='start_stop_play').length,2);
-  });
 });
 test('capture ACK failure does not invent an image and does not erase observed input release',{timeout:15000},async t=>{
   const f=await fixture(t,{captureErrorAck:true}),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);const report=f.status(job.id);
   assert.equal(report.review.outcome,'failed');assert.equal(report.review.cleanup,'complete');assert.equal(report.review.scenario!.inputRelease,'observed_released');assert.equal(report.review.scenario!.capture,null);assert.equal(f.state.captures,1);assert.equal(f.state.mode,'Edit');
 });
-test('contradictory native step fields are rejected without replay and retain input uncertainty',{timeout:15000},async t=>{
-  for(const change of ['expected','observed','baseline']as const)await t.test(change,async sub=>{
-    const f=await fixture(sub,{mutateReport(report){const row=report.steps[3]!;if(change==='expected')row.expected=false;else if(change==='observed')row.observed=false;else row.baseline='not-a-boolean';}}),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);
+for(const change of ['expected','observed','baseline']as const)test(`contradictory native step fields are rejected without replay and retain input uncertainty: ${change}`,{timeout:15000},async t=>{
+    const f=await fixture(t,{mutateReport(report){const row=report.steps[3]!;if(change==='expected')row.expected=false;else if(change==='observed')row.observed=false;else row.baseline='not-a-boolean';}}),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);
     assert.equal(f.status(job.id).review.code,'BAD_NATIVE_RESPONSE');assert.equal(f.status(job.id).review.cleanup,'unknown');assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');
-  });
 });
 test('restoration conflict preserves original measured scenario evidence and retains the private fence',{timeout:15000},async t=>{
   const f=await fixture(t,{temporary:true,badRestore:true}),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);const report=f.status(job.id);
@@ -264,9 +259,8 @@ test('private cancellation settles owned stop but refuses successor admission wh
   assert.equal(await f.service.revalidateExact(job.id,task.origin,task.packets[0]!.reportDigest),'unobserved');assert.equal(f.state.closes,1);
 });
 
-test('real journal segment conflict restores proven temporary edits and closes SDK without releasing the reservation',{timeout:15000},async t=>{
-  for(const fault of ['start_intent','scenario_result']as const)await t.test(fault,async sub=>{
-    const f=await fixture(sub,{temporary:true,allowJournalFailure:true}),job=await f.prepare(),append=TestLedger.prototype.append;
+for(const fault of ['start_intent','scenario_result']as const)test(`real journal segment conflict restores proven temporary edits and closes SDK without releasing the reservation: ${fault}`,{timeout:15000},async t=>{
+    const f=await fixture(t,{temporary:true,allowJournalFailure:true}),job=await f.prepare(),append=TestLedger.prototype.append;
     let injected=false;
     TestLedger.prototype.append=async function(event){
       if(!injected&&event.kind===fault){injected=true;const records=this.records();writeFileSync(join(f.directory,'ledger',String(records.length+1).padStart(5,'0')+'.json'),'fixture interrupted segment',{flag:'wx'});}
@@ -280,5 +274,4 @@ test('real journal segment conflict restores proven temporary edits and closes S
     assert.equal(report.review.scenario!.inputRelease,fault==='start_intent'?'not_started':'observed_released');
     assert.throws(()=>f.store.enqueue({sessionId:f.pair.sessionId,requestId:'journal-reservation-remains-owned',method:'scene.children',args:{root:'Workspace'}}),{code:'BUSY'});
     assert.equal(existsSync(join(f.directory,'ledger','writer.lock')),true);await assert.rejects(f.records(),{code:'JOURNAL_FAILED'});
-  });
 });
