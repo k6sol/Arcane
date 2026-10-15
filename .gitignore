@@ -1,6 +1,7 @@
 # Disposable test workspaces.
 /tests/skills/.tmp/
 /tests/.tmp/
+/arcane-project-port-*/
 
 # Build and local connection-lab state; never commit credentials or generated caches.
 /node_modules/

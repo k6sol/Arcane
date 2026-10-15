@@ -2,6 +2,7 @@
 import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -9,7 +10,6 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
-import { fileURLToPath } from 'node:url';
 
 const test = (name, options, fn) => typeof options === 'function' ? nodeTest(name, { timeout: 10000 }, options) : nodeTest(name, options, fn);
 
@@ -29,7 +29,9 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const id = project => hash(process.platform === 'win32' ? project.toLowerCase() : project);
 const envelope = port => ({ type: 'arcane-ready', protocolVersion: 1, origin: 'http://127.0.0.1:' + port, token: 'a'.repeat(64) });
 const record = port => JSON.stringify({ protocolVersion: 1, port }) + '\n';
-const fixtureBase = fileURLToPath(new URL('../../', import.meta.url));
+// Use the physical OS scratch directory: repo-root fixtures can exceed legacy
+// Windows path limits and leave generated SQLite state in source checkouts.
+const fixtureBase = fs.realpathSync.native(tmpdir());
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(fixtureBase, 'arcane-project-port-'));
@@ -202,6 +204,9 @@ test('owned Node loopback restart: exact persisted endpoint and original real-st
     fs.writeFileSync(full, stripTypeScriptTypes(source(name), { mode: 'transform' }));
   }
   fs.writeFileSync(path.join(f.productRoot, 'package.json'), '{"type":"module"}\n');
+  // The isolated store must resolve its explicit pinned dependency, rather than
+  // accidentally inheriting node_modules from the developer's source checkout.
+  fs.cpSync(path.dirname(require.resolve('zod/package.json')), path.join(f.productRoot, 'node_modules', 'zod'), { recursive: true });
   fs.writeFileSync(path.join(f.productRoot, 'dist/apps/daemon/src/product-main.js'), `
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
