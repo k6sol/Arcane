@@ -226,7 +226,7 @@ Every tool checks project/session scope, permissions, capability availability an
 | skill.search/read | task topic or pinned ID | relevant instructions and provenance |
 | git.status/diff/branch/commit | approved repo and operation | repository result and conflicts |
 
-A production-data reset tool is separate, restricted to explicit environment/key approval and absent from the basic tool list. No hidden fallback to RoPilot or another paid backend is permitted.
+A production-data reset tool is separate, restricted to explicit environment/key approval and absent from the basic tool list. No hidden fallback to a paid external backend is permitted.
 
 ## 8. Script change algorithm
 

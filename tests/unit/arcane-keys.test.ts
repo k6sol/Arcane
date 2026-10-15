@@ -24,7 +24,7 @@ test('Arcane key grants survive daemon restart; no plaintext key is persisted or
 test('revoking an Arcane key revokes exact attached sessions; wrong endpoint and foreign keys are rejected',t=>{
  const f=setup(t);const key=f.store.issueKey({allowedRoots:['Workspace'],allowWrites:true},45871);
  assert.throws(()=>f.store.connectWithKey({...f.connect,apiKey:key.apiKey},45872),/another local endpoint/);
- assert.throws(()=>f.store.connectWithKey({...f.connect,apiKey:'ropilot_not_an_arcane_key'},45871),/invalid/);
+ assert.throws(()=>f.store.connectWithKey({...f.connect,apiKey:'foreign_not_an_arcane_key'},45871),/invalid/);
  const pair=f.store.connectWithKey({...f.connect,apiKey:key.apiKey},45871);
  const c=f.store.enqueue({sessionId:pair.sessionId,requestId:'key-revoke-command',method:'scene.children',args:{root:'Workspace'}});f.store.poll(pair.sessionId);
  f.store.revokeKey(key.keyId);assert.equal(f.store.command(c.id).state,'needs_reconciliation');assert.throws(()=>f.store.authenticate(pair.sessionId,pair.token),/revoked/);assert.throws(()=>f.store.connectWithKey({...f.connect,apiKey:key.apiKey},45871),/revoked/);

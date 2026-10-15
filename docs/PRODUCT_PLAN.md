@@ -18,7 +18,7 @@ Arcane is a desktop development platform with a Roblox Studio plugin. A develope
 
 The first customer is the owner, but Arcane must support excellent Roblox games beyond Hunted: obbies, tycoons, simulators, racing, combat, puzzles, cozy/social experiences and more. Hunted is one demanding acceptance project, not a hidden global template. The first release works locally on Windows with an external MCP client; integrated chat and optional commercial services follow reliable tools/plugin foundations.
 
-Build an independent implementation of the useful RoPilot workflows documented in the accompanying analysis. Its public product describes a desktop app, Studio plugin, code generation, playtesting, Blender modelling, animations and previews. The inspected MCP contracts give more specific workflow requirements, but private implementation details remain unknown. [RoPilot product](https://ropilot.ai/).
+Build Arcane as an independent local development platform. Its desktop, Studio plugin, code generation, playtesting, Blender modelling, animation and previews should form one continuous workflow. The [local workflow architecture](research/LOCAL_WORKFLOW_ARCHITECTURE.md) records implementation priorities and evidence boundaries. Ordinary local work should use Arcane’s daemon/workers and the user’s supported AI connection without an additional development-tool subscription or action-credit system.
 
 Success means a user can repeatedly inspect, change, test and restore a real project without losing manual work. A generated model must survive import and look correct in the engine. A successful task must include observable results, not just a confident chat response.
 
@@ -424,18 +424,18 @@ Export/delete user projects and chats, define retention, publish clear model-pro
 
 Support bundles redact tokens and avoid source by default. A user can inspect a bundle before sharing it. Recovery documentation covers lost pairing, wrong target, stale scripts, failed import, paused moderation, worker crash and local database restoration.
 
-## 14. RoPilot workflow equivalence checklist
+## 14. Development workflow acceptance checklist
 
-The inspected contracts cover source checkout/commit, script search and lifecycle, hierarchy queries, edit execution, play policy/start/client/server/stop, viewport screenshots, Blender Python/render/static import, rig export and animation return, plus asset search/insertion and data reset.
+The required workflows cover source checkout/commit, script search and lifecycle, hierarchy queries, scoped editing, owned client/server playtests, viewport evidence, Blender modelling/render/import, rig export and animation return, and supported asset search/insertion. Production data operations remain separate.
 
-Arcane must match useful behaviour through these acceptance tests:
+Arcane must pass these workflow acceptance tests:
 1. Checkout a live script to a local file, edit, commit, reread and safely restore.
 2. Inspect selected scene objects, make a bounded edit and capture repeatable views.
 3. Exercise actual client input, assert server outcome and stop the owned test.
 4. Generate a Blender asset, review it, import it and perform changed-only reimport.
 5. Export a rig into Blender, animate it and verify the returned clip in Roblox.
 
-RoPilot's advertised per-tool billing is not Arcane's pricing design. Its documented animation publishing default does not set Arcane's default. Its repeated engine guidance is not copied blindly. Independent correctness tests and measured results determine parity.
+Provider usage, optional publishing costs and local worker operation remain separate. Animation publication needs explicit controls. Independent correctness tests and measured results determine acceptance.
 
 ## 15. Release definition
 

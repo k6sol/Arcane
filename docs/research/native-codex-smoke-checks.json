@@ -94,7 +94,7 @@
       "pluginId": null
     },
     {
-      "name": "ropilot",
+      "name": "[redacted external server]",
       "runtimeStatus": "disabled",
       "toolNames": [],
       "toolsError": false,
@@ -128,7 +128,7 @@
       "pluginId": null
     },
     {
-      "name": "ropilot",
+      "name": "[redacted external server]",
       "pluginId": null
     }
   ],
@@ -166,5 +166,9 @@
     "packages/codex-client/src/mcp-profile.ts": "3623154783ed5ceb1ca2663d881ce73f3fdddda596d69ec6e781c42966a22805",
     "packages/codex-client/src/transport.ts": "124848eaf07e7bd517acdcc428fdf1f7a4a764d92c8aa1dea1e17f08380999a5",
     "apps/mcp/src/server.ts": "dde218cd0c16a3a9e0434926374055a825d56513844f56f23433b9b42944e243"
+  },
+  "publicRecordRedactions": {
+    "externalServerNames": true,
+    "note": "External server names are redacted in this public evidence summary. Original local evidence is retained separately."
   }
 }

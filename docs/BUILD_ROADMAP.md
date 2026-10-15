@@ -187,7 +187,7 @@ For each managed task, measure:
 
 Use provider-reported input/output/cached usage and current pricing configuration, not guessed prices. Include failed/retried jobs, refunds and support in business forecasting. Personal-API and external-client modes have different cost responsibilities and must be labelled.
 
-Compare equivalent completed tasks against the current workflow by cost, elapsed time, required corrections and result quality. No fixed savings percentage or RoPilot-equivalent claim is justified yet. Price a commercial service only after measuring representative code, model, animation and testing workloads.
+Compare equivalent completed tasks against the current workflow by cost, elapsed time, required corrections and result quality. No fixed savings percentage or workflow-equivalence claim is justified yet. Price a commercial service only after measuring representative code, model, animation and testing workloads.
 
 ## 7. Next implementation slice
 

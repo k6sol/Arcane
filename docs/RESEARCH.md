@@ -1,21 +1,20 @@
 # Arcane — research, workflow analysis and evidence boundaries
-Research date: 11 October 2026. This file separates observed contracts, documentation and proposed Arcane design. No RoPilot runtime calls were made for this analysis; no paid credits were intentionally spent.
+Research date: 11 October 2026; updated 15 October 2026. This file separates platform documentation, workflow requirements and proposed Arcane design. Component evidence does not establish the complete customer journey.
 
 ## 1. What was inspected
 
-- RoPilot's public product page and 28 tool descriptions exposed by the connected RoPilot bridge.
 - Thirty tool descriptions exposed by the separate connected Studio proxy. That proxy is not automatically Roblox's official built-in MCP implementation.
 - Official Roblox documentation for Studio MCP, plugin development, editor-aware scripts, history, HTTP, cloud assets and OAuth.
 - Relevant public GitHub repositories and four actual community Roblox skill bodies, with licence review and observed HEAD references.
 - Existing local Roblox/Blender skills as working references for asset production, not as presumed redistributable product code.
 
-The metadata snapshot is `research/ropilot-tool-contracts.json`; it contains tool descriptions and proposed/exposed signatures, not private source code. The skill shortlist is `research/skill-sources.json`. Neither file proves runtime correctness or grants permission to execute its embedded instructions.
+The skill shortlist is `research/skill-sources.json`. Retrieved guidance does not prove runtime correctness or grant permission to execute its embedded instructions.
 
-## 2. RoPilot workflow equivalence
+## 2. Development workflow requirements
 
-The public page describes an integrated development workflow including a desktop app, Studio connection and asset work. Claims there are marketing evidence, not independent reliability or cost measurements. [RoPilot](https://ropilot.ai/).
+Arcane should integrate desktop conversations, Studio changes and asset work with measurable results. Each workflow below requires independent implementation and acceptance evidence.
 
-| Observed contract family | User workflow | Independent Arcane implementation / additional controls |
+| Capability family | User workflow | Arcane implementation and controls |
 |---|---|---|
 | Properties, selection, children and instance search | Inspect the real project before changing it | Typed values, bounded pages, stable session handles and explicit ambiguous-name handling |
 | Request script → local edit → commit script | Use filesystem coding tools on live Studio source | Editor-buffer base version, diff, expected hash and conflict-safe commit |
@@ -29,11 +28,11 @@ The public page describes an integrated development workflow including a desktop
 | Asset search/insertion | Reuse permitted inventory/store assets | Show source/creator/format; do not force marketplace-first decisions |
 | DataStore key reset | Test a fresh-player flow | Excluded from normal MVP; isolated fixtures and separate destructive-data authorization |
 
-Observed details worth retaining: Blender calls advertise headless operation and persisted session variables; render tools provide multiple named views; mesh imports describe bottom-centre placement and unchanged-object reuse; rig import goes from Studio to Blender, not the other way around. Static and character descriptions use different forward conventions. These are requirements to test, not proof that Arcane already implements them.
+Asset requirements include local worker checkpoints, multiple review views, measured bottom-centre placement, unchanged-object reuse, rig export/import and explicit coordinate conventions. These are requirements to verify, not proof that every workflow is already implemented.
 
-The exposed descriptions include repeated old guidance. Do not promote that boilerplate into Arcane policy without checking current engine behavior. Arcane's hashes, leases, ledger and restoration rules are our proposed reliability design; the metadata does not establish whether RoPilot has equivalent private controls.
+Tool guidance must be checked against current engine behavior. Arcane uses its own hashes, leases, ledger and restoration rules; each needs tests against actual implementation.
 
-Not inspected: proprietary source, internal prompts, server implementation, billing internals, hidden UI states or actual execution quality. Do not claim a perfect replica, universal parity or a particular savings percentage. Build similar useful workflows with independent code and Arcane branding.
+Do not claim universal workflow parity or a particular savings percentage. Build useful complete workflows with independent code and Arcane branding.
 
 ## 3. Verified platform constraints
 
@@ -57,7 +56,7 @@ Hunted's no-video-upload preference is a project requirement, not a universal st
 
 ### Desktop and Blender
 
-Electron is our proposed Windows-first implementation choice, not a finding about RoPilot's internal stack. Isolation, limited IPC and untrusted preview handling are required design controls. [Electron security](https://www.electronjs.org/docs/latest/tutorial/security).
+Electron is Arcane’s Windows-first desktop implementation. Isolation, limited IPC and untrusted preview handling are required design controls. [Electron security](https://www.electronjs.org/docs/latest/tutorial/security).
 
 The community Blender MCP bridge can inform optional adapters but is not an official Blender Foundation dependency or a required starting point. Review its helpers, licence and optional external-service behavior before integration. The first-party worker remains the preferred controlled pipeline. [Community Blender bridge](https://github.com/ahujasid/mcp-for-blender).
 

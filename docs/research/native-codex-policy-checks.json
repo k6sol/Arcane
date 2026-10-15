@@ -97,7 +97,7 @@
       "pluginId": null
     },
     {
-      "name": "ropilot",
+      "name": "[redacted external server]",
       "runtimeStatus": "disabled",
       "toolNames": [],
       "toolsError": false,
@@ -105,5 +105,9 @@
       "pluginId": null
     }
   ],
-  "clientClosed": true
+  "clientClosed": true,
+  "publicRecordRedactions": {
+    "externalServerNames": true,
+    "note": "External server names are redacted in this public evidence summary. Original local evidence is retained separately."
+  }
 }
