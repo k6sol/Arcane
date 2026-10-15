@@ -3,8 +3,8 @@ import { isAbsolute } from 'node:path';
 import { CodexClientError, type Limits } from './types.js';
 import { fail, object } from './validation.js';
 
-type Method = 'initialize' | 'account/read' | 'model/list' | 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/interrupt' | 'mcpServerStatus/list';
-const METHODS = new Set<Method>(['initialize', 'account/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/interrupt', 'mcpServerStatus/list']);
+type Method = 'initialize' | 'account/read' | 'account/rateLimits/read' | 'model/list' | 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/interrupt' | 'mcpServerStatus/list';
+const METHODS = new Set<Method>(['initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/interrupt', 'mcpServerStatus/list']);
 interface Pending { resolve(value: unknown): void; reject(error: CodexClientError): void; timer: NodeJS.Timeout; dispatched: boolean }
 export interface InternalProcess { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
 export function nativeEnvironment(): NodeJS.ProcessEnv {
@@ -59,7 +59,14 @@ export class JsonlTransport {
     if (this.#pending.size >= this.bounds.maxPendingRequests) return Promise.reject(new CodexClientError('PENDING_LIMIT', 'Too many pending requests.'));
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.stop(new CodexClientError('TIMEOUT', 'Native request timed out.')), this.bounds.requestTimeoutMs);
+      const timer = setTimeout(() => {
+        // This optional, side-effect-free observation has no lifecycle outcome
+        // to reconcile. Its timeout must not interrupt a working model turn.
+        if (method === 'account/rateLimits/read') {
+          this.#pending.delete(id);
+          reject(new CodexClientError('RATE_LIMITS_TIMEOUT', 'Native account usage did not arrive before the read deadline.', entry.dispatched));
+        } else this.stop(new CodexClientError('TIMEOUT', 'Native request timed out.'));
+      }, this.bounds.requestTimeoutMs);
       const entry = { resolve, reject, timer, dispatched: false };
       this.#pending.set(id, entry);
       try {

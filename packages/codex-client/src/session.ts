@@ -10,6 +10,7 @@ import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
 import type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
 import { snapshotReferenceImages, type ReferenceImage } from './reference-images.js';
+import { parseNativeRateLimits, mergeNativeRateLimitUpdate, type NativeRateLimits } from './rate-limits.js';
 
 const USAGE_COUNT_LIMIT = 1_000_000_000_000;
 const USAGE_KEYS = ['totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens'] as const;
@@ -161,6 +162,9 @@ export class CodexSession {
   #droppedEvents = 0;
   #lastEventSeq = 0;
   #usage: TokenUsageReport | undefined;
+  #rateLimits: NativeRateLimits | undefined;
+  #rateLimitsReading = false;
+  #rateLimitsRevision = 0;
   #cwd: string;
   #mcpIsolated=false;
   #turnPreflight: TurnPreflight | null = null;
@@ -284,6 +288,7 @@ export class CodexSession {
       operations: this.#operations, approvals: [...this.#approvals.values()].map(entry => ({ ...entry.value, canAccept: this.#canAccept(entry) })),
       events: this.#events.map(entry => entry.value), droppedEvents: this.#droppedEvents, lastEventSeq: this.#lastEventSeq, failureCode: this.#failureCode,
       ...(this.#usage ? { usage: this.#usage } : {}),
+      ...(this.#rateLimits ? { rateLimits: this.#rateLimits } : {}),
     });
   }
   async readAccount(): Promise<Account> {
@@ -294,6 +299,7 @@ export class CodexSession {
       this.#retireNativeAssets();
       this.#account = null;
       this.#accountIdentity = null;
+      this.#rateLimits = undefined;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel');
       if (automatic) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Account verification failed during a writable turn.'));
@@ -302,6 +308,24 @@ export class CodexSession {
   }
   /** Host-only reported identity comparison; never part of snapshots or prompts. */
   taskAccountIdentity(): string | null { return this.#account?.auth === 'subscription' ? this.#accountIdentity : null; }
+  /** Explicit read only; no inference, earned-reset redemption, email or model fallback. */
+  async readRateLimits(action: HumanAction): Promise<NativeRateLimits> {
+    exact(action, ['initiatedBy']); human(action); this.#ensureSubscription();
+    if (this.#rateLimitsReading || this.#accountReads) fail('BUSY', 'An account usage read is already pending.');
+    this.#rateLimitsReading = true;
+    const accountRevision = this.#accountRevision, revision = this.#rateLimitsRevision;
+    try {
+      const raw = await this.#transport.request('account/rateLimits/read', { supportsLunaReserve: false, excludeResetCreditDetails: true });
+      if (!this.#transport.connected || !this.#ready || this.#accountRevision !== accountRevision || this.#account?.auth !== 'subscription')
+        fail('ACCOUNT_CHANGED', 'Account usage changed ownership while the read was pending.');
+      const parsed = parseNativeRateLimits(raw, Date.now());
+      if (!parsed) fail('RATE_LIMITS_UNAVAILABLE', 'The native usage snapshot is unavailable or unsupported.');
+      // A rolling update received after dispatch is newer than this full read's unknown sampling time.
+      if (this.#rateLimitsRevision !== revision) fail('RATE_LIMITS_CHANGED', 'Usage changed during refresh. The newer observation is retained.');
+      this.#rateLimits = parsed; this.#rateLimitsRevision++;
+      return structuredClone(parsed);
+    } finally { this.#rateLimitsReading = false; }
+  }
   async listModels(): Promise<Model[]> { this.#ensureReady(); await this.#listModels(); return structuredClone(this.#models); }
   selectModel(action: HumanAction & Selection): Selection {
     this.#ensureReady();
@@ -606,6 +630,7 @@ export class CodexSession {
       const identity = raw?.type === 'chatgpt' && typeof raw.email === 'string' && raw.email.length > 0 && raw.email.length <= 1024 && !/[\x00-\x1f\x7f]/.test(raw.email)
         ? createHash('sha256').update('codex-reported-account\0'+raw.email).digest('hex') : null;
       if ((this.#ready || this.#thread) && this.#account && (this.#account.auth !== account.auth || this.#account.plan !== account.plan || this.#account.requiresOpenaiAuth !== account.requiresOpenaiAuth || this.#accountIdentity !== identity)) {
+        this.#rateLimits = undefined;
         const automatic = this.#endAutomaticWrites();
         this.#retireNativeAssets();
         if (automatic) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Account metadata changed during a writable turn.'));
@@ -842,6 +867,12 @@ export class CodexSession {
   #message(message: Record<string, unknown>): void {
     if (Object.hasOwn(message, 'id')) { this.#serverRequest(message); return; }
     const method = message.method;
+    if (method === 'account/rateLimits/updated') {
+      if (!this.#ready || !this.#transport.connected || this.#account?.auth !== 'subscription' || this.#accountReads) return;
+      const parsed = mergeNativeRateLimitUpdate(this.#rateLimits, message.params, Date.now());
+      if (parsed) { this.#rateLimits = parsed; this.#rateLimitsRevision++; }
+      return;
+    }
     if (method === 'thread/tokenUsage/updated') {
       // Usage cannot adopt a thread/turn or revive a disconnected/unknown task.
       const params = message.params, thread = this.#thread;
@@ -861,6 +892,7 @@ export class CodexSession {
       return;
     }
     if (method === 'account/updated') {
+      this.#rateLimits = undefined;
       const automatic = this.#endAutomaticWrites();
       if (!this.#initializing || this.#ready || this.#thread) this.#retireNativeAssets();
       this.#accountRevision++;

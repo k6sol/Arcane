@@ -97,6 +97,8 @@ export interface Snapshot {
   failureCode: string | null;
   /** Absent until a supported, bounded native usage notification is received. */
   usage?: TokenUsageReport;
+  /** Last account-scoped native observation; not a permission or price estimate. */
+  rateLimits?: import('./rate-limits.js').NativeRateLimits;
 }
 export class CodexClientError extends Error {
   constructor(public readonly code: string, message: string, public readonly dispatched = false, public readonly remoteCode: number | null = null) {
