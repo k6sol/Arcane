@@ -75,6 +75,7 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
   if (value === null) return null;
   if (!dataObject(value) || !uuid(value.connectionId) || !['installed-cli','spawned-node-fixture'].includes(String(value.provenance)) || typeof value.connected !== 'boolean' || typeof value.ready !== 'boolean' || !Array.isArray(value.models) || value.models.length > 512 || !Array.isArray(value.operations) || value.operations.length > 128 || !Array.isArray(value.approvals) || value.approvals.length > 16 || !Array.isArray(value.events) || value.events.length > 256 || !integer(value.droppedEvents) || !integer(value.lastEventSeq)) throw new Error('Invalid bounded native snapshot.');
   if(value.mcpIsolation!==undefined&&!['native-config','arcane-only-pending','arcane-only-verified'].includes(String(value.mcpIsolation)))throw new Error('Invalid native MCP isolation evidence.');
+  if(Object.hasOwn(value,'rateLimits'))readRateLimits(value.rateLimits);
   if (value.account !== null && (!object(value.account) || !['subscription','signed-out','unsupported'].includes(String(value.account.auth)) || !(value.account.plan === null || text(value.account.plan)) || typeof value.account.requiresOpenaiAuth !== 'boolean')) throw new Error('Invalid native account metadata.');
   const names = new Set<string>();
   const models = value.models;
@@ -228,17 +229,59 @@ export function prepareCodexAction(state: ChatState | null, action: string, fiel
 export class CodexHttpError extends Error {
   constructor(message: string, readonly unknown: boolean) { super(message); }
 }
+/** Exact public quota shape; raw provider account/configuration objects never enter the view. */
+function readRateLimits(value:unknown):void {
+  const reasons=['rate_limit_reached','workspace_owner_credits_depleted','workspace_member_credits_depleted','workspace_owner_usage_limit_reached','workspace_member_usage_limit_reached'];
+  const label=(v:unknown)=>v===null||text(v,160)&&!!v.trim()&&!/[\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/u.test(v)&&!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(v);
+  const count=(v:unknown,max:number)=>integer(v)&&(v as number)<=max;
+  const window=(v:unknown)=>v===null||dataObject(v,['usedPercent','windowDurationMins','resetsAt'])&&typeof v.usedPercent==='number'&&Number.isFinite(v.usedPercent)&&v.usedPercent>=0&&v.usedPercent<=1_000_000&&
+    (v.windowDurationMins===null||count(v.windowDurationMins,5_256_000)&&(v.windowDurationMins as number)>0)&&(v.resetsAt===null||count(v.resetsAt,253_402_300_799));
+  if(!dataObject(value,['source','observedAt','ordinaryUsageAllowed','buckets'])||!['account/rateLimits/read','account/rateLimits/updated'].includes(String(value.source))||
+    !count(value.observedAt,253_402_300_799_000)||!(value.ordinaryUsageAllowed===null||typeof value.ordinaryUsageAllowed==='boolean')||
+    value.source==='account/rateLimits/updated'&&value.ordinaryUsageAllowed===true||!Array.isArray(value.buckets)||!value.buckets.length||value.buckets.length>16)throw new Error('Invalid reported account usage.');
+  const ids=new Set<unknown>();
+  for(const row of value.buckets){
+    if(!dataObject(row,['limitId','limitName','normalModelSlug','primary','secondary','credits','spendControlReached','rateLimitReachedType'])||
+      !label(row.limitId)||!label(row.limitName)||!label(row.normalModelSlug)||ids.has(row.limitId)||!window(row.primary)||!window(row.secondary)||
+      !(row.credits===null||dataObject(row.credits,['hasCredits','unlimited'])&&typeof row.credits.hasCredits==='boolean'&&typeof row.credits.unlimited==='boolean')||
+      !(row.spendControlReached===null||typeof row.spendControlReached==='boolean')||!(row.rateLimitReachedType===null||reasons.includes(String(row.rateLimitReachedType))))throw new Error('Invalid bounded account usage bucket.');
+    ids.add(row.limitId);
+  }
+}
+export function codexRateLimitDisplay(snapshot:ChatSnapshot|null):{status:string;rows:string[]} {
+  const report=snapshot?.rateLimits;
+  if(!report)return{status:'Usage limits appear when the provider reports them. Refresh usage to request a current snapshot.',rows:[]};
+  readRateLimits(report);
+  const observed=new Date(report.observedAt).toLocaleString(),live=snapshot.connected&&snapshot.ready&&snapshot.account?.auth==='subscription';
+  const availability=report.ordinaryUsageAllowed===true?'Provider reports included usage available.':report.ordinaryUsageAllowed===false?'Provider reports included usage is blocked.':'Included usage availability needs a full refresh.';
+  const reasons:Record<string,string>={rate_limit_reached:'Usage window reached.',workspace_owner_credits_depleted:'Workspace credits depleted. The workspace owner manages credits.',workspace_member_credits_depleted:'Member credits depleted. The workspace owner manages credits.',workspace_owner_usage_limit_reached:'Workspace usage limit reached. The workspace owner manages this limit.',workspace_member_usage_limit_reached:'Member usage limit reached. The workspace owner manages this limit.'};
+  const rows=report.buckets.map(row=>{
+    const parts=[row.limitName??row.limitId??'Usage bucket'];
+    if(row.normalModelSlug)parts.push('Reported model: '+row.normalModelSlug);
+    for(const [label,window] of [['Primary',row.primary],['Secondary',row.secondary]] as const)if(window){
+      const mins=window.windowDurationMins,duration=mins===null?'':mins%1440===0?' · '+mins/1440+' days':mins%60===0?' · '+mins/60+' hours':' · '+mins+' minutes';
+      parts.push(label+duration+': '+window.usedPercent+'% used · '+(window.resetsAt===null?'Reset time not reported':'Reported reset '+new Date(window.resetsAt*1000).toLocaleString()));
+    }
+    if(!row.primary&&!row.secondary)parts.push('Usage windows not reported.');
+    if(row.rateLimitReachedType)parts.push(reasons[row.rateLimitReachedType]!);
+    if(row.spendControlReached===true)parts.push('Account spending limit reached.');
+    if(row.credits)parts.push(row.credits.unlimited?'Provider reports unlimited workspace credits.':row.credits.hasCredits?'Workspace credits available.':'Workspace credits unavailable.');
+    return parts.join('\n');
+  });
+  return{status:(live?'Last reported ':'Disconnected · last reported ')+observed+'. '+availability,rows};
+}
 export class CodexChatApi {
   readonly #token: string;
   constructor(token: string, private readonly transport: typeof fetch = fetch, private readonly deadline = 45000) { this.#token = token; }
   safe(value: string): string {
     return value.replaceAll(this.#token || '\0', '[REDACTED]').replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g,'[REDACTED]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [REDACTED]').replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}/g,'[REDACTED]').replace(/("?(?:accessToken|access_token|apiKey|api_key|password|secret)"?\s*[:=]\s*["']?)[^"',;\s]+/gi,'$1[REDACTED]').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g,'');
   }
-  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn', input?: ChatAction, signal?: AbortSignal): Promise<unknown> {
+  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/usage', input?: ChatAction|{connectionId:string}, signal?: AbortSignal): Promise<unknown> {
     if (!/^[a-f0-9]{64}$/.test(this.#token)) throw new CodexHttpError('Open the launcher’s human control link.',false);
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort',abort,{once:true}); if(signal?.aborted) controller.abort();
     const timer = setTimeout(abort,this.deadline);
+    const mutable=!!input&&path!=='/v1/codex/usage';
     try {
       const transport = this.transport;
       const response = await transport(path,{method:input?'POST':'GET',headers:{Authorization:'Bearer '+this.#token,...(input?{'Content-Type':'application/json'}:{})},...(input?{body:JSON.stringify(input)}:{}),signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'});
@@ -247,16 +290,23 @@ export class CodexChatApi {
       try { for(;;) {const part=await reader.read();if(part.done)break;length+=part.value.byteLength;if(length>CODEX_STATE_BYTES){await reader.cancel();throw new Error('Native snapshot exceeded 4 MiB.');}chunks.push(part.value);} } finally {reader.releaseLock();}
       const bytes=new Uint8Array(length);let offset=0;for(const part of chunks){bytes.set(part,offset);offset+=part.byteLength;}
       let result:unknown;try{result=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw new Error('Native response was not valid UTF-8 JSON.');}
-      if (input && object(result) && object(result.record)) {
+      if (mutable && object(result) && object(result.record)) {
         const expected = result.record.state === 'acknowledged' ? 200 : result.record.state === 'rejected' ? 409 : ['pending','unknown'].includes(String(result.record.state)) ? 202 : 0;
         if (response.status !== expected) throw new CodexHttpError('Native HTTP status and acknowledgement state disagree; inspect this request ID.', true);
       }
-      if (!response.ok && !(object(result) && object(result.record))) throw new CodexHttpError('Native request refused (HTTP '+response.status+'). '+(object(result)&&typeof result.error==='string'?this.safe(result.error):'Inspect recorded state.'),!!input&&response.status>=500);
+      if (!response.ok && !(mutable && object(result) && object(result.record))) throw new CodexHttpError('Native request refused (HTTP '+response.status+'). '+(object(result)&&typeof result.error==='string'?this.safe(result.error):'Inspect recorded state.'),mutable&&response.status>=500);
       return result;
-    } catch(error) {if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Native HTTP response unavailable.'),!!input);}
+    } catch(error) {if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Native HTTP response unavailable.'),mutable);}
     finally {clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
+  async refreshUsage(connectionId:string,signal?:AbortSignal):Promise<void> {
+    if(!uuid(connectionId))throw new CodexHttpError('Choose the exact current native connection.',false);
+    const value=await this.request('/v1/codex/usage',{connectionId},signal);
+    if(!dataObject(value,['state']))throw new CodexHttpError('Account usage response was not recognized.',false);
+    const state=readCodexState(value.state);
+    if(state.snapshot?.connectionId!==connectionId||!state.snapshot.rateLimits)throw new CodexHttpError('Account usage belongs to a different connection.',false);
+  }
   async action(input: ChatAction, signal?: AbortSignal): Promise<{record: ChatActionRecord; replayed: boolean; state: ChatState}> {
     let expectedReferences:readonly {name:string;bytes:number;width:number;height:number;sha256:string}[]|undefined;
     if(input.action==='turn-start'&&input.references){
@@ -371,6 +421,8 @@ export class CodexChat {
   private fresh=false; private stopped=false; private generation=0; private readVersion=0;
   private timer:ReturnType<typeof setTimeout>|undefined;
   private readController:AbortController|undefined;
+  private usageController:AbortController|undefined;
+  private usageNotice='';
   private readonly pending=new Map<string,ChatAction>();
   private readonly uncertain=new Map<string,Uncertain>();
   private readonly transcript=new CodexTranscript();
@@ -1180,6 +1232,8 @@ export class CodexChat {
       if(this.providerAllowsCodex()&&thread?.configured&&thread.turnId&&['starting','inProgress'].includes(thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state)))this.stopCurrentTask();
     });
     this.on('codex-reconcile','click',()=>void this.refresh());
+    const usageButton=this.doc.getElementById('codex-refresh-usage');
+    if(usageButton)usageButton.addEventListener('click',()=>void this.refreshUsage());
     this.on('codex-acknowledge','click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Recorded action IDs and native state reviewed. No request was retried.');this.render();});
     this.on('codex-confirm-check','change',()=>this.renderControls());
     this.on('codex-confirm-cancel','click',()=>this.closeConfirmation());
@@ -1189,6 +1243,7 @@ export class CodexChat {
     this.renderControls();await this.refresh();this.schedule();
   }
   stop() {
+    this.usageController?.abort();this.usageController=undefined;this.usageNotice='';
     this.messageLifetime++;
     this.imageRequest?.abort();
     this.attachments?.stop();
@@ -1217,6 +1272,27 @@ export class CodexChat {
       this.fresh=false;this.text('codex-notice',error instanceof Error?error.message:'Native state unavailable.');
     } finally {if(version===this.readVersion&&!this.stopped){this.render();this.publishProviderState();this.publishState();}}
   }
+  private async refreshUsage():Promise<void> {
+    const snapshot=this.snapshot();
+    if(this.stopped||this.usageController||!this.fresh||!this.providerAllowsCodex()||!snapshot?.connected||!snapshot.ready||snapshot.account?.auth!=='subscription')return;
+    const controller=new AbortController(),connectionId=snapshot.connectionId,epoch=this.generation;
+    this.usageController=controller;this.usageNotice='Refreshing account usage…';this.renderUsage();
+    try{
+      await this.api.refreshUsage(connectionId,controller.signal);
+      if(this.stopped||epoch!==this.generation||this.snapshot()?.connectionId!==connectionId)return;
+      this.usageNotice='';await this.refresh();
+    }catch(error){
+      if(this.stopped||controller.signal.aborted||epoch!==this.generation||this.snapshot()?.connectionId!==connectionId)return;
+      this.usageNotice=(error instanceof Error?error.message:'Usage refresh is unavailable.')+' The last report is retained. Refresh again when ready.';
+    }finally{if(this.usageController===controller){this.usageController=undefined;if(!this.stopped)this.renderUsage();}}
+  }
+  private renderUsage():void {
+    const status=this.doc.getElementById('codex-usage-status'),buckets=this.doc.getElementById('codex-usage-buckets'),button=this.doc.getElementById('codex-refresh-usage') as HTMLButtonElement|null;
+    const snapshot=this.snapshot(),view=codexRateLimitDisplay(snapshot??null);
+    if(status)status.textContent=this.api.safe(this.usageNotice||view.status);
+    if(buckets){const signature=this.api.safe(JSON.stringify(view.rows));if(buckets.dataset.signature!==signature){buckets.dataset.signature=signature;buckets.replaceChildren();for(const row of view.rows)buckets.append(this.make('p',row,'hint codex-quota-bucket'));}}
+    if(button)button.disabled=this.stopped||!!this.usageController||!this.fresh||!this.providerAllowsCodex()||!!this.state?.connecting||!!this.state?.closing||!snapshot?.connected||!snapshot.ready||snapshot.account?.auth!=='subscription';
+  }
   private applyState(state:ChatState) {
     if(this.state&&this.state.projectPath!==state.projectPath){this.messageLifetime++;this.imageRequest?.abort();}
     this.flushDraft();
@@ -1226,7 +1302,7 @@ export class CodexChat {
       state.actions.some(record=>record.action==='turn-start'&&record.connectionId===before&&record.nextConnectionId===after&&record.threadId===next.threadId);
     const focus=before!==after&&!!next&&state.actions.some(record=>record.action==='task-focus'&&record.connectionId===before&&record.nextConnectionId===after&&record.threadId===next.threadId)&&
       this.state?.chatTasks?.some(task=>task.retained===true&&task.connectionId===after&&task.threadId===next.threadId&&task.sessionId===next.sessionId);
-    if(before!==after){if(!rotation&&!focus)this.generation++;if(rotation)this.transcript.rebind(after);else this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.selectionSignature='';this.closeConfirmation();this.closePicker(true);}
+    if(before!==after){this.usageController?.abort();this.usageController=undefined;this.usageNotice='';if(!rotation&&!focus)this.generation++;if(rotation)this.transcript.rebind(after);else this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.selectionSignature='';this.closeConfirmation();this.closePicker(true);}
     else if(this.assetScope()!==this.assetScope(state)) { this.generation++; this.closePicker(true); } // Invalidate gestures/replies; retain the disabled stale review for explicit dismissal.
     if(state.snapshot)this.transcript.consume(state.snapshot);
     this.state = state;
@@ -1394,6 +1470,7 @@ export class CodexChat {
     card.append(row);host.append(card);
   }
   private renderControls() {
+    this.renderUsage();
     this.renderAssets();
     const s=this.snapshot(),t=s?.thread,activeThread=(!this.tabs||this.tabs.bound(this.state))?t:null,
       normal=this.normal()&&!this.tabTransition,connected=!!s,selection=this.displaySelection(),pair=selection?.model===this.value('codex-model')&&selection?.effort===this.value('codex-effort');

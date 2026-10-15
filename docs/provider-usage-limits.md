@@ -4,6 +4,10 @@ Arcane reads Codex account usage through the supported native App Server interfa
 
 ## Native client surface
 
+The desktop's Advanced settings contain an Account usage disclosure beside the native account details. It shows the last provider observation, actual window percentages, reported reset times and classified limit reasons. Refresh usage makes one human-control request for the exact current native connection. It does not send the draft, select a model, grant permissions or create a lifecycle journal entry. The disclosure remains quiet in the ordinary conversation view.
+
+`POST /v1/codex/usage` accepts only `{connectionId}` with the human control bearer, exact loopback Host and Origin, no query and a maximum 1 KiB JSON body. Agents cannot call it. Connection retirement fences an in-flight refresh. The desktop validates the returned public shape and then reads current state; it does not adopt an older refresh response over newer polling results. A failed observation does not create an uncertain chat action or retry work.
+
 `CodexClient.readRateLimits({initiatedBy:'human'})` performs one `account/rateLimits/read` request. `Snapshot.rateLimits` contains the last accepted full read or `account/rateLimits/updated` notification. Connecting alone does not request usage or start inference.
 
 The public observation contains at most sixteen metered buckets, their bounded display labels, reported quota windows, credit-availability flags, the provider's classified limit reason and spending-limit state. Reset timestamps are Unix seconds; `observedAt` is Arcane's local observation time in milliseconds. Percentages retain the actual finite reported value, including values above 100. Missing fields remain unknown. Account IDs, balances, reset-credit handles, banners and arbitrary provider fields are omitted.

@@ -56,6 +56,10 @@ createInterface({ input: process.stdin }).on('line', line => {
       requiresOpenaiAuth: true, accessToken: 'FIXTURE_SECRET',
     } }), 35); return;
   }
+  if (method === 'account/rateLimits/read') {
+    const rateLimits={limitId:'codex',limitName:'Codex fixture',primary:{usedPercent:25,windowDurationMins:300,resetsAt:1792104000},secondary:null,credits:{hasCredits:true,unlimited:false,balance:'FIXTURE_SECRET'},rateLimitReachedType:null};
+    setTimeout(()=>send({id,result:{ordinaryUsageAllowed:true,rateLimits,rateLimitsByLimitId:{codex:rateLimits},accountId:'FIXTURE_SECRET',rateLimitResetCredits:{credits:[{id:'FIXTURE_SECRET'}]}}}),mode==='quota-held'?300:2);return;
+  }
   if (method === 'model/list') {
     const first = !params.cursor;
     let data = first ? [model(), { hidden: true, accessToken: 'FIXTURE_SECRET' }] : [model('fixture-other')];

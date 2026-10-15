@@ -37,6 +37,34 @@ async function thread(t:test.TestContext,mode='normal'){
   const opened=await f.action({action:'thread-start',connectionId:f.id});assert.equal(opened.record.state,'acknowledged');return {...f,threadId:opened.state.snapshot!.thread!.threadId};
 }
 
+test('human account-usage refresh uses the actual SDK without starting or journaling a model turn',async t=>{
+  const f=await connected(t),before=f.service.state();
+  const result=await f.call('/v1/codex/usage',{connectionId:f.id});assert.equal(result.status,200);
+  const after=JSON.parse(result.text).state as CodexProductState;
+  assert.equal(after.snapshot!.rateLimits!.buckets[0]!.primary!.usedPercent,25);assert.equal(after.snapshot!.rateLimits!.ordinaryUsageAllowed,true);
+  assert.deepEqual(after.actions,before.actions);assert.equal(after.snapshot!.thread,null);assert.deepEqual(after.snapshot!.selection,before.snapshot!.selection);
+  assert.doesNotMatch(result.text,/FIXTURE_SECRET|balance|accountId|rateLimitResetCredits/);
+  const audit=(await readFile(join(f.directory,'receipt-1.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(audit.filter(row=>row.message?.method==='account/rateLimits/read').length,1);assert.equal(audit.some(row=>row.message?.method==='turn/start'),false);
+});
+test('account-usage route denies agents, foreign origins, stale connections and expanded request bodies before native reads',async t=>{
+  const f=await connected(t);
+  for(const [token,origin,status] of [[f.lab.agentToken,f.lab.origin,403],['bad',f.lab.origin,401],[f.lab.token,'https://foreign.invalid',403],[f.lab.token,'',403]] as const)
+    assert.equal((await f.call('/v1/codex/usage',{connectionId:f.id},token,origin)).status,status);
+  for(const value of [{connectionId:randomUUID()},{connectionId:f.id,initiatedBy:'human'},{connectionId:f.id,action:'turn-start'},null,{connectionId:f.id,padding:'x'.repeat(1100)}])
+    assert.ok([400,413].includes((await f.call('/v1/codex/usage',value)).status));
+  assert.equal((await f.call('/v1/codex/usage')).status,405);assert.equal((await f.call('/v1/codex/usage?account=foreign',{connectionId:f.id})).status,400);
+  const audit=(await readFile(join(f.directory,'receipt-1.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(audit.some(row=>row.message?.method==='account/rateLimits/read'),false);assert.equal(f.starts(),1);
+});
+test('disconnect fences a pending account-usage read without attaching it to a replacement connection',async t=>{
+  const f=await connected(t,'quota-held'),pending=f.call('/v1/codex/usage',{connectionId:f.id});
+  const deadline=Date.now()+3000;for(;;){if((await readFile(join(f.directory,'receipt-1.jsonl'),'utf8')).includes('account/rateLimits/read'))break;if(Date.now()>deadline)assert.fail('Usage read was not dispatched');await delay(5);}
+  await f.action({action:'disconnect',connectionId:f.id});const result=await pending;assert.equal(result.status,400);
+  await f.action({action:'connect',connectionId:null});const current=f.service.state();assert.notEqual(current.snapshot!.connectionId,f.id);assert.equal(current.snapshot!.rateLimits,undefined);
+  assert.equal(current.actions.some(row=>String(row.action).includes('usage')),false);
+});
+
 test('human native controller is inert on mount and denies agent grants, omitted/mismatched Origin and host before native work',async t=>{
   const f=await fixture(t);assert.equal((await f.state()).snapshot,null);assert.equal(f.starts(),0);
   for(const [token,origin,status] of [[f.lab.agentToken,f.lab.origin,403],['bad',f.lab.origin,401],[f.lab.token,'https://evil.invalid',403],[f.lab.token,'',403]] as const){

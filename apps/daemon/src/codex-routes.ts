@@ -68,6 +68,13 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
         if(request.method!=='GET')throw new RouteError('METHOD',405);
         send(200,{nativeHistory:service.state().nativeHistory ?? null});return true;
       }
+      if(url.pathname==='/v1/codex/usage'){
+        if(request.method!=='POST')throw new RouteError('METHOD',405);
+        if(request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
+        if(!service.refreshUsage)throw new RouteError('RATE_LIMITS_UNAVAILABLE',400);
+        const input=await body(request,1024);
+        send(200,{state:project(await service.refreshUsage(input))});return true;
+      }
       const referenceTurn=url.pathname==='/v1/codex/reference-turn';
       if(url.pathname!=='/v1/codex/action'&&!referenceTurn)throw new RouteError('NOT_FOUND',404);
       if(request.method!=='POST')throw new RouteError('METHOD',405);

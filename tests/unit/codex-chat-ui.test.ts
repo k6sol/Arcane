@@ -101,6 +101,7 @@ function mockClient(projectPath:string,threadSuffix='') {
   const push=(delta:string)=>{const t=s.thread!;s.events.push({seq:++s.lastEventSeq,type:'delta',threadId:t.threadId,turnId:t.turnId!,itemId:'public-message',text:delta});};
   const host:CodexHostClient={
     snapshot(){return structuredClone(s);},
+    async readRateLimits(a){record('usage-read',a);if(hold)await hold;s.rateLimits={source:'account/rateLimits/read',observedAt:Date.now(),ordinaryUsageAllowed:false,buckets:[{limitId:'codex',limitName:'Codex <img src=x onerror=alert(1)>',normalModelSlug:null,primary:{usedPercent:100,windowDurationMins:300,resetsAt:1792104000},secondary:null,credits:{hasCredits:false,unlimited:false},spendControlReached:null,rateLimitReachedType:'rate_limit_reached'}]};return structuredClone(s.rateLimits);},
     async readThreadHistory(a){record('history-read',a);return {entries:[{role:'user' as const,text:'Fixture saved user message',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-user'}},{role:'assistant' as const,text:'Fixture imported native history <img src=x onerror=alert(1)>',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-assistant'}}],completeness:'incomplete' as const,gaps:[{reason:'context-compaction' as const,turnId:'saved-turn'}],truncated:false,marker:'[History incomplete: some content was omitted or truncated.]',excludedItems:1,droppedGaps:0,redacted:false};},
     selectModel(a){record('select',a);s.selection={model:a.model,effort:a.effort};return {...s.selection};},
     async startThread(a){record('thread-start',a);s.thread={...thread(),threadId:'fixture-thread'+threadSuffix};return structuredClone(s.thread);},
@@ -180,6 +181,29 @@ async function browser(t:test.TestContext,origin:string) {
   const grant=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-grant')).click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await text('codex-policy','Workspace editing enabled');};
   return {page,errors,posts,text,ready,refresh,open,connect,select,grant,instance};
 }
+
+test('real Edge account usage refresh preserves the draft and model while rendering bounded provider metadata as text', {skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t),b=await browser(t,h.origin),{page}=b;const usagePosts:unknown[]=[];
+  page.on('request',(request:any)=>{if(request.url().endsWith('/v1/codex/usage'))usagePosts.push(request.postDataJSON());});
+  await b.open();assert.equal(usagePosts.length,0);await b.connect();const client=h.clients[0]!;
+  await b.text('codex-usage-status','when the provider reports');assert.equal(usagePosts.length,0);
+  await b.select();await page.locator('#codex-composer').fill('Keep this unsent project request.');
+  const selectedModel=await page.locator('#codex-model').inputValue(),selectedEffort=await page.locator('#codex-effort').inputValue();
+  await openAdvancedSettings(page);await (await visibleControl(page,'#codex-refresh-usage')).click();
+  await b.text('codex-usage-status','included usage is blocked');await b.text('codex-usage-buckets','100% used');
+  assert.deepEqual(usagePosts,[{connectionId:client.s.connectionId}]);assert.equal(client.calls.filter(row=>row.method==='usage-read').length,1);
+  assert.equal(b.posts.filter(row=>row.action==='turn-start'||row.action==='thread-start'||row.action==='select').length,0);
+  assert.equal(client.s.selection,null);assert.equal(client.s.thread,null);assert.equal(await page.locator('#codex-usage-buckets img, #codex-usage-buckets script').count(),0);
+  assert.equal(await page.locator('#codex-composer').inputValue(),'Keep this unsent project request.');
+  assert.equal(await page.locator('#codex-model').inputValue(),selectedModel);assert.equal(await page.locator('#codex-effort').inputValue(),selectedEffort);
+  assert.ok((await page.locator('#codex-usage-buckets').textContent())!.includes('<img src=x onerror=alert(1)>'));
+  assert.equal(await page.locator('#codex-refresh-usage').isDisabled(),false);
+  if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-usage-details').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.quota-desktop-synthetic.png'});
+  await page.setViewportSize({width:390,height:844});
+  if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-usage-details').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.quota-mobile-synthetic.png'});
+  assert.equal(await page.locator('#codex-usage-details').evaluate((el:HTMLElement)=>el.scrollWidth<=el.clientWidth),true);
+  assert.deepEqual(b.errors,[]);
+});
 
 test('real Edge Send opens a selected draft and submits once; Enter sends and Stop retains its exact target', {skip:!browserModule,timeout:60000},async t=>{
   const h=await harness(t),b=await browser(t,h.origin),{page}=b;

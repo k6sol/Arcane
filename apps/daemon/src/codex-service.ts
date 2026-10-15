@@ -94,7 +94,7 @@ export interface CodexProductState {
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
-export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'>>;
+export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'>>;
 export interface CodexServiceOptions {
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
@@ -616,7 +616,24 @@ export function createCodexService(options: CodexServiceOptions) {
     const promise = runAction(input); inFlight.add(promise);
     void promise.finally(() => inFlight.delete(promise)).catch(() => {}); return promise;
   }
-  return { state, action, playtestTasks:tasks?.playtests??null,
+  const usageReads = new Set<Promise<CodexProductState>>();
+  async function readUsage(input: unknown): Promise<CodexProductState> {
+    if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
+    if (journalFault) throw new CodexClientError('JOURNAL_FAILURE','Review the retained native journal before refreshing account usage.');
+    const parsed = z.strictObject({connectionId:uuid}).safeParse(input);
+    if (!parsed.success) throw new CodexClientError('ARGUMENTS','Usage refresh requires the exact current connection ID.');
+    if (connecting || closing) throw new CodexClientError('BUSY','Wait for the current connection to settle.');
+    const selected = exactClient(parsed.data.connectionId), epoch = generation;
+    if (!selected.readRateLimits) throw new CodexClientError('RATE_LIMITS_UNAVAILABLE','This native client does not report account usage.');
+    await selected.readRateLimits({initiatedBy:'human'});
+    if (closed || client !== selected || generation !== epoch) throw new CodexClientError('STALE_CONNECTION','Usage refresh belongs to the previous native connection state.');
+    return state();
+  }
+  function refreshUsage(input: unknown): Promise<CodexProductState> {
+    const promise = readUsage(input); usageReads.add(promise);
+    void promise.finally(() => usageReads.delete(promise)).catch(() => {}); return promise;
+  }
+  return { state, action, refreshUsage, playtestTasks:tasks?.playtests??null,
     attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, async close() {
     if (closed) return; generation++; closed = true;tasks?.fence();
     try{retireAssets();}catch{/* Native task closure must still run after registry retirement. */}
@@ -624,10 +641,10 @@ export function createCodexService(options: CodexServiceOptions) {
       if (pendingConnect) { try { await (await pendingConnect).close(); } catch { /* Init failure already closed its native child. */ } }
       try{await tasks?.close();}finally{if(client)await client.close();}
       if (journalFault) await journalFault;
-    } finally { client = null; await Promise.allSettled([...inFlight]); db.close(); }
+    } finally { client = null; await Promise.allSettled([...inFlight,...usageReads]); db.close(); }
   },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
 export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &
-  Partial<Pick<ReturnType<typeof createCodexService>, 'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
+  Partial<Pick<ReturnType<typeof createCodexService>, 'refreshUsage'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
 
 
