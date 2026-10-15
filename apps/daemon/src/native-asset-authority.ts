@@ -27,6 +27,10 @@ export interface NativeAssetIncarnation {
   /** Host dispatch intent, not provider-origin invocation/turn attestation. */
   dispatched(value: {connectionId: string; threadId: string; operationId: string}): void;
   ended(operationId: string): void;
+  /** Explicit trusted human stop only. Normal completion/retirement does not
+   * cancel already accepted asynchronous workers. Cleanup remains available
+   * after retirement, without granting any new native operation. */
+  cancelWork(scope: 'active-operation' | 'incarnation'): void;
   retire(): void;
   status(): Readonly<{sealed: boolean; granted: boolean; admissionOpen: boolean; retired: boolean}>;
 }
@@ -49,6 +53,7 @@ interface Entry {
   sealed: Readonly<NativeAssetSeal> | null; granted: boolean; active: string | null;
   nextIntent: boolean; automaticIntent: string | null;
   intents: Set<string>;
+  work: Map<string, AbortController>;
 }
 interface Admission {entry: Entry; generation: number; operation: NativeAssetOperation; scope: NativeAssetScope}
 const actors = new WeakMap<object, Admission>();
@@ -95,6 +100,15 @@ export function assertNativeAssetActor(actor: NativeAssetActor, operation: Nativ
 }
 export function nativeAssetActorScope(actor: NativeAssetActor): NativeAssetScope {
   assertNativeAssetActor(actor,'read');return actors.get(actor)!.scope;
+}
+/** Host-only cancellation signal for the SAME actual dispatched operation.
+ * It cannot be recovered from serialized actor/scope/operation claims. The
+ * accepted worker may retain this signal after normal admission has ended. */
+export function nativeAssetOperationSignal(actor: NativeAssetActor): AbortSignal {
+  assertNativeAssetActor(actor, 'mutate');
+  const entry = actors.get(actor)!.entry, controller = entry.work.get(entry.active!);
+  if (!controller) fail();
+  return controller.signal;
 }
 function stageClaim(actor: NativeAssetActor, jobId: string): {entry: Entry; key: string; consumed: Set<string>} {
   assertNativeAssetActor(actor, 'mutate');
@@ -145,7 +159,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
       const credential = randomBytes(32).toString('hex');
       const digest = createHash('sha256').update(credential).digest();
       if (entries.has(digest.toString('hex'))) {digest.fill(0);fail();}
-      const entry: Entry = {...project,generation:0,retired:false,sealed:null,granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set()};
+      const entry: Entry = {...project,generation:0,retired:false,sealed:null,granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set(),work:new Map()};
       entries.set(digest.toString('hex'),{digest,entry});
       const binding = (value: unknown, extra: readonly string[] = []): Record<string, unknown> => {
         open();const seal = live(entry), a=data(value,['connectionId','threadId',...extra]);
@@ -176,6 +190,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
             const a=binding(value,['operationId']),operationId=opaque(a.operationId);
             if (entry.active!==null || entry.intents.has(operationId) || entry.intents.size>=MAX_INTENTS) fail();
             entry.intents.add(operationId);entry.active=operationId;
+            entry.work.set(operationId, new AbortController());
             entry.automaticIntent=entry.nextIntent?operationId:null;entry.nextIntent=false;bump(entry);
           } catch(error) {
             // A failed actual start cannot leave permission for a later intent.
@@ -185,6 +200,20 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
         ended(operationId:string) {
           open();opaque(operationId);if (entry.retired || entry.active!==operationId) return;
           entry.active=null;entry.automaticIntent=null;entry.nextIntent=false;bump(entry);
+        },
+        cancelWork(scope:'active-operation'|'incarnation') {
+          open();if (scope !== 'active-operation' && scope !== 'incarnation') fail();
+          const controllers = scope === 'incarnation' ? [...entry.work.values()] : entry.active === null ? [] : [entry.work.get(entry.active)!];
+          // Fence admission before notifying any accepted worker. Completed
+          // workers removed their listeners; other incarnations are untouched.
+          entry.active=null;entry.automaticIntent=null;entry.nextIntent=false;
+          if (!entry.retired) {
+            // Stop remains effective at a saturated epoch; exhausting admission
+            // history cannot strand an already accepted child process.
+            if (Number.isSafeInteger(entry.generation) && entry.generation < 65535) entry.generation++;
+            else retire(entry);
+          }
+          for (const controller of controllers) controller.abort();
         },
         retire() {retire(entry);},
         status() {return Object.freeze({sealed:entry.sealed!==null,granted:mutationGranted(entry),

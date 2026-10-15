@@ -14,7 +14,7 @@ const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.tes
 const common = { requestId: uuid, connectionId: uuid };
 export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ requestId: uuid, connectionId: z.null(), action: z.literal('connect') }),
-  z.strictObject({ ...common, action: z.literal('disconnect') }),
+  z.strictObject({ ...common, action: z.literal('disconnect'), preserveAssetWork: z.boolean().optional() }),
   z.strictObject({ ...common, action: z.literal('select'), model: identifier, effort: identifier.max(64) }),
   z.strictObject({ ...common, action: z.literal('thread-start') }),
   z.strictObject({ ...common, action: z.literal('thread-resume'), threadId: identifier }),
@@ -294,6 +294,10 @@ export function createCodexService(options: CodexServiceOptions) {
         const selected = exactClient(value.connectionId); actionClient = selected;
         for (const operation of selected.snapshot().operations) existingOperations.add(operation.operationId);
         if (value.action === 'disconnect') {
+          // Chat navigation retires the provider connection while preserving
+          // already accepted asynchronous asset jobs. The explicit Disconnect
+          // gesture (absent/false flag) stops owned work as well.
+          if (value.preserveAssetWork!==true) currentAssets?.handle?.cancelWork('incarnation');
           generation++; closing = true; retireAssets(); lastSnapshot = selected.snapshot(); client = null;
           try { await selected.close(); lastSnapshot = selected.snapshot(); } finally { closing = false; }
         } else {
@@ -341,10 +345,18 @@ export function createCodexService(options: CodexServiceOptions) {
             case 'revoke-assets': {
               const snapshot = selected.snapshot();
               if (!currentAssets?.handle || snapshot.thread?.threadId !== value.threadId) throw new CodexClientError('ASSET_AUTHORITY','Choose the exact native asset chat.');
-              currentAssets.nextIntent=null;currentAssets.handle.revokeGrant(); break; // Fence synchronously before journal/await.
+              currentAssets.nextIntent=null;currentAssets.handle.cancelWork('incarnation');currentAssets.handle.revokeGrant(); break; // Fence synchronously before journal/await.
             }
             case 'grant-writes': selected.grantThreadWrites({initiatedBy:'human',threadId:value.threadId}); break;
-            case 'revoke-writes': selected.revokeThreadWrites({initiatedBy:'human',threadId:value.threadId}); break;
+            case 'revoke-writes': {
+              // Validate scope before touching owned workers. Cancellation must
+              // precede fallible native cleanup, including approval-delivery IO.
+              if (selected.snapshot().thread?.threadId!==value.threadId) throw new CodexClientError('THREAD','Choose the exact native chat to revoke.');
+              if (currentAssets) currentAssets.nextIntent=null;
+              currentAssets?.handle?.cancelWork('incarnation');
+              selected.revokeThreadWrites({initiatedBy:'human',threadId:value.threadId});
+              break;
+            }
             case 'turn-start': {
               const context=currentAssets,authority=context?.handle;
               let permission:HumanAssetIntent|null=null,accepted=false;
@@ -367,7 +379,14 @@ export function createCodexService(options: CodexServiceOptions) {
               }
               break;
             }
-            case 'turn-interrupt': await selected.interruptTurn({initiatedBy:'human',threadId:value.threadId,turnId:value.turnId}); break;
+            case 'turn-interrupt': {
+              const snapshot=selected.snapshot(),thread=snapshot.thread;
+              if (!snapshot.connected || !snapshot.ready || !thread?.configured || thread.threadId!==value.threadId ||
+                thread.turnId!==value.turnId || !['starting','inProgress'].includes(thread.turnStatus))
+                throw new CodexClientError('STATE','Select the exact active native turn to stop.');
+              currentAssets?.handle?.cancelWork('active-operation');
+              await selected.interruptTurn({initiatedBy:'human',threadId:value.threadId,turnId:value.turnId});break;
+            }
             case 'approval': selected.respondApproval({initiatedBy:'human',connectionId:value.connectionId,threadId:value.threadId,turnId:value.turnId,handle:value.handle,decision:value.decision}); break;
           }
           if (closed || generation !== epoch) throw new CodexClientError('STALE_CONNECTION','Native lifecycle changed while awaiting acknowledgement.',true);

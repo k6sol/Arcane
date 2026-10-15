@@ -35,6 +35,11 @@ test('browser action envelopes exactly match service schemas, with UUIDs and no 
   assert.throws(()=>prepareCodexAction(st,'connect',{},'not-uuid'),/UUID/);
   assert.throws(()=>prepareCodexAction(st,'turn-start',{threadId:'fixture-thread',text:'🧩'.repeat(32769)}),/128 KiB/);
   assert.throws(()=>prepareCodexAction(st,'turn-start',{threadId:'fixture-thread',text:'  '}),/nonempty/);
+  for(const preserveAssetWork of [true,false]) {
+    const request=prepareCodexAction(st,'disconnect',{preserveAssetWork});assert.deepEqual(codexActionInput.parse(request),request);
+  }
+  for(const preserveAssetWork of ['true',1,null,undefined])assert.throws(()=>prepareCodexAction(st,'disconnect',{preserveAssetWork}),/boolean/);
+  assert.throws(()=>prepareCodexAction(st,'thread-start',{preserveAssetWork:true}),/exact browser envelope/);
 });
 
 test('public deltas deduplicate by seq while preserving identical consecutive text and ignoring private item payloads',()=>{
@@ -90,7 +95,7 @@ test('Codex bundle is browser-only and boot shares takeControlToken without new 
   const js=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/codex-chat.js'),'utf8');assert.doesNotMatch(js,/^\s*import\s|\brequire\s*\(|\bprocess\.|node:/m);
 });
 
-function mockClient(projectPath:string) {
+function mockClient(projectPath:string,threadSuffix='') {
   const s=snapshot(); const calls:{method:string;value:unknown}[]=[];let hold:Promise<void>|null=null;let release:()=>void=()=>{};let number=0;let loseAck=false;
   const record=(method:string,value:unknown)=>{calls.push({method,value:structuredClone(value)});};
   const push=(delta:string)=>{const t=s.thread!;s.events.push({seq:++s.lastEventSeq,type:'delta',threadId:t.threadId,turnId:t.turnId!,itemId:'public-message',text:delta});};
@@ -98,7 +103,7 @@ function mockClient(projectPath:string) {
     snapshot(){return structuredClone(s);},
     async readThreadHistory(a){record('history-read',a);return {entries:[{role:'user' as const,text:'Fixture saved user message',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-user'}},{role:'assistant' as const,text:'Fixture imported native history <img src=x onerror=alert(1)>',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-assistant'}}],completeness:'incomplete' as const,gaps:[{reason:'context-compaction' as const,turnId:'saved-turn'}],truncated:false,marker:'[History incomplete: some content was omitted or truncated.]',excludedItems:1,droppedGaps:0,redacted:false};},
     selectModel(a){record('select',a);s.selection={model:a.model,effort:a.effort};return {...s.selection};},
-    async startThread(a){record('thread-start',a);s.thread=thread();return structuredClone(s.thread);},
+    async startThread(a){record('thread-start',a);s.thread={...thread(),threadId:'fixture-thread'+threadSuffix};return structuredClone(s.thread);},
     async resumeThread(a){record('thread-resume',a);s.thread={...thread(),threadId:a.threadId};return structuredClone(s.thread);},
     grantThreadWrites(a){record('grant-writes',a);s.thread!.writeGranted=true;for(const p of s.approvals)p.canAccept=true;return structuredClone(s.thread!);},
     revokeThreadWrites(a){record('revoke-writes',a);s.thread!.writeGranted=false;s.approvals=[];if(s.thread!.turnStatus==='inProgress'){s.connected=false;s.ready=false;s.thread!.turnStatus='unknown';}},
@@ -109,13 +114,13 @@ function mockClient(projectPath:string) {
   };
   return {host,s,calls,push,loseAck(){loseAck=true;},hold(){hold=new Promise<void>(done=>{release=done;});},release(){release();hold=null;}};
 }
-async function harness(t:test.TestContext,spawned=false) {
+async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
   const directory=await mkdtemp(join(tmpdir(),'arcane-codex-chat-')),projectPath=join(directory,'project');await mkdir(projectPath);
   const clients:ReturnType<typeof mockClient>[]=[];const children:CodexSession[]=[];let connected=0;
   const service=createCodexService({directory:join(directory,'journal'),projectPath,nativeToolsConfigured:true,connect:async()=>{
     connected++;
     if(spawned){const client=new CodexSession({command:process.execPath,args:[resolve('packages/codex-client/fixtures/protocol.mjs'),'approvals',join(directory,'audit-'+connected+'.jsonl')],cwd:projectPath,env:nativeEnvironment()},limits({requestTimeoutMs:1500,approvalTimeoutMs:15000}),'spawned-node-fixture');children.push(client);await client.initialize();return client;}
-    const client=mockClient(projectPath);clients.push(client);return client.host;
+    const client=mockClient(projectPath,distinctThreads?'-'+connected:'');clients.push(client);return client.host;
   }});
   const routes=codexRoutes(service);let origin='';
   const build=process.env.ARCANE_UI_BUILD_DIR??'dist';
@@ -205,6 +210,27 @@ test('real Edge Send opens a selected draft and submits once; Enter sends and St
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.chat-send-synthetic.png'});
   assert.deepEqual(b.errors,[]);
   t.diagnostic('Actual Edge, production UI and durable service with labelled synthetic native clients. No paid inference or Studio operations.');
+});
+
+test('real Edge chat navigation preserves asynchronous work while the explicit Disconnect button keeps stop semantics', {skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t,false,true),b=await browser(t,h.origin),{page}=b;
+  await b.open();await b.connect();await b.select();
+  await page.locator('#codex-composer').fill('First synthetic navigation task');await b.ready('codex-submit');await page.locator('#codex-submit').click();
+  await b.text('codex-scope','fixture-thread-1');await b.text('codex-messages','samesame public');
+  h.clients[0]!.s.thread!.turnStatus='completed';await b.refresh();await b.text('codex-policy','completed');
+  if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+  await page.locator('#workspace-new-chat').click();await b.select();
+  await page.locator('#codex-composer').fill('Second synthetic navigation task');await b.ready('codex-submit');await page.locator('#codex-submit').click();
+  await b.text('codex-scope','fixture-thread-2');await b.text('codex-messages','Second synthetic navigation task');
+  const navigation=b.posts.filter(row=>row.action==='disconnect');assert.equal(navigation.length,1);
+  assert.equal(navigation[0].preserveAssetWork,true);assert.equal(h.clients[0]!.s.connected,false);
+  await openAdvancedSettings(page);await b.ready('codex-disconnect');await (await visibleControl(page,'#codex-disconnect')).click();
+  await b.text('codex-status','Not connected');
+  const disconnects=b.posts.filter(row=>row.action==='disconnect');assert.equal(disconnects.length,2);
+  assert.equal(Object.hasOwn(disconnects[1],'preserveAssetWork'),false,'Explicit Disconnect keeps the default stop-owned-work intent.');
+  for(const client of h.clients)for(const call of client.calls)assert.equal(Object.hasOwn(call.value as object,'preserveAssetWork'),false,'Teardown intent is never forwarded to the native provider.');
+  assert.deepEqual(b.errors,[]);
+  t.diagnostic('Actual Edge navigation/button envelopes and durable service; accepted-worker survival is independently exercised with bounded child processes.');
 });
 
 test('actual HTTP service denies every agent lifecycle/approval and malformed host input before connecting',async t=>{

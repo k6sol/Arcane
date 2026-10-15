@@ -165,8 +165,11 @@ export function readCodexState(value: unknown): ChatState {
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
   const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
-  const keys = [...accepted[action]!, ...(action==='turn-start'?['allowAssets','allowWorkspaceWrites'].filter(key=>Object.hasOwn(fields,key)):[])];
+  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites']:action==='disconnect'?['preserveAssetWork']:[];
+  const keys = [...accepted[action]!, ...optional.filter(key=>Object.hasOwn(fields,key))];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
+  if (action==='disconnect' && Object.hasOwn(fields,'preserveAssetWork') && typeof fields.preserveAssetWork!=='boolean')
+    throw new Error('Connection retirement intent requires a boolean.');
   if (action==='turn-start' && Object.hasOwn(fields,'allowWorkspaceWrites') && typeof fields.allowWorkspaceWrites!=='boolean')
     throw new Error('Send workspace permission requires a boolean.');
   if (action==='turn-start' && Object.hasOwn(fields,'allowAssets') &&
@@ -524,7 +527,7 @@ export class CodexChat {
       if(old?.configured&&this.state?.nativeHistory?.threadId===old.threadId) {
         if(!await perform('history-load',{threadId:old.threadId}))return false;
       }
-      if(this.snapshot()?.thread&&!await perform('disconnect'))return false;
+      if(this.snapshot()?.thread&&!await perform('disconnect',{preserveAssetWork:true}))return false;
       if(!this.snapshot()&&!await perform('connect'))return false;
       if(!this.snapshot()?.models.some(row=>row.model===selection.model&&row.efforts.includes(selection.effort))){this.text('codex-notice','The reconnect catalogue no longer contains this exact model and effort. Choose explicitly; no fallback was used.');return false;}
       if(!await perform('select',{...selection}))return false;

@@ -44,6 +44,8 @@ export interface AssetServiceOptions {
 }
 /** Trusted host-code admission only; never an AssetInput or HTTP JSON field. */
 export interface AssetStartAdmission {
+  /** Volatile signal selected from the actual host operation, never input JSON. */
+  readonly signal?: AbortSignal;
   beforeCreate(): void;
   created(jobId: string): void;
 }
@@ -434,7 +436,8 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history is full; use a fresh trusted output root.');
       const request = normalizeRequest(input);
       const now = new Date().toISOString();
-      const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}), onEvent: (event: AssetJobEvent) => {
+      const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}),
+        ...(admission?.signal ? { signal: admission.signal } : {}), onEvent: (event: AssetJobEvent) => {
         const e = entries.get(event.jobId);
         if (!e || closed) return;
         e.job.stage = event.stage; e.job.updatedAt = event.at;
