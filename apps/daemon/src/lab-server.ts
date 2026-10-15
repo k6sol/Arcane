@@ -27,7 +27,7 @@ import { assetRoutes } from './asset-routes.js';
 import { nativeRoutes } from './native-routes.js';
 import { createCodexService, type CodexService, type CodexServiceOptions } from './codex-service.js';
 import { codexRoutes } from './codex-routes.js';
-import {createStudioTestService, type StudioTestService} from './studio-test-service.js';
+import {createStudioTestService, type StudioTestService, type NativeTestConnection} from './studio-test-service.js';
 import {studioTestRoutes, STUDIO_TEST_HTTP_LIMITS, type StudioTestActorResolver, type StudioTestRouteService} from './studio-test-routes.js';
 import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
 
@@ -91,6 +91,8 @@ interface Options {
   scriptSourceVerifier?: ScriptSourceVerifier;
   /** Borrowed trusted fixture seam; HTTP can never supply a test backend. */
   studioTestService?: StudioTestService;
+  /** Owned native connection factory for trusted process/SDK fixtures only. */
+  studioTestConnect?: () => Promise<NativeTestConnection>;
 }
 export async function createConnectionLab(options: Options) {
   if (options.conversationWorkStore) {
@@ -133,6 +135,11 @@ export async function createConnectionLab(options: Options) {
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
   const nativeChat = codex ? codexRoutes(codex, {workflowModels:true}) : null;
+  // Quiesce every retained task before other services publish terminal evidence.
+  // Cleanup still runs if an individual private lifecycle hook fails.
+  const fenceTasks = (): unknown[] => {
+    try { codex?.fenceTaskAdmission?.(); return []; } catch (error) { return [error]; }
+  };
   let associations: ConversationWorkStore | null = null;
   let ownsAssociations = false;
   let workflow: ReturnType<typeof createWorkflowHost> | null = null;
@@ -162,13 +169,18 @@ export async function createConnectionLab(options: Options) {
           // Once source verification passes, any failed journal initialization
           // is unknown retained state. Never remove its lock or try a fresh ledger.
           unavailableCode='FENCED';
-          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:options.studioStore,pluginArtifactHash});tests=ownedTests;
+          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:options.studioStore,pluginArtifactHash,
+            ...(options.studioTestConnect?{connect:options.studioTestConnect}:{}),
+            ...(codex?.playtestTasks?{taskPort:codex.playtestTasks}:{})});tests=ownedTests;
         }catch{
           stateWarnings.push(unavailableTestMessages[unavailableCode]);
           testApi=unavailableStudioTestRoutes(unavailableCode,resolveTestActor);
         }
       }
-      if(tests)testApi=studioTestRoutes(tests,resolveTestActor);
+      if(tests){
+        testApi=studioTestRoutes(tests,resolveTestActor);
+        if(codex?.playtestTasks&&tests.cancelExact&&tests.revalidateExact)codex.attachPlaytestCancellation?.(Object.freeze({cancelExact:tests.cancelExact,revalidateExact:tests.revalidateExact}));
+      }
     }
     if (options.workStore) {
       associations = options.conversationWorkStore ?? new ConversationWorkStore({
@@ -215,6 +227,7 @@ export async function createConnectionLab(options: Options) {
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
+    fenceTasks();
     nativeAssetRegistry?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
@@ -324,6 +337,7 @@ export async function createConnectionLab(options: Options) {
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 32;
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
+    fenceTasks();
     nativeAssetRegistry?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
@@ -340,13 +354,13 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose();
+      shuttingDown = true; const fenceErrors = fenceTasks(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
           .catch(error => error as Error);
         server.closeAllConnections();
-        const errors: unknown[] = [];
+        const errors: unknown[] = [...fenceErrors];
         try { await ownedTests?.lifecycle.close(); } catch (error) { errors.push(error); }
         try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
         try { if (ownsAssociations) associations?.close(); } catch (error) { errors.push(error); }

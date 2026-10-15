@@ -236,6 +236,60 @@ test('Human Send opens its exact new chat before requesting one-shot assets on t
   assert.deepEqual(f.posts.map(p=>p.action),['thread-start','turn-start']);
 });
 
+test('conversation tasks are closed metadata and Stop carries only the exact human task identity',()=>{
+  const initial=state(),taskId=randomUUID();initial.chatTasks=[{taskId,threadId:THREAD,sessionId:null,connectionId:initial.snapshot!.connectionId,state:'awaiting_verification',round:0,reason:null,reportDigest:null}];
+  assert.equal(readCodexState(initial).chatTasks![0]!.taskId,taskId);
+  const requestId=randomUUID();assert.deepEqual(prepareCodexAction(initial,'task-stop',{threadId:THREAD,taskId},requestId),{requestId,connectionId:initial.snapshot!.connectionId,action:'task-stop',threadId:THREAD,taskId});
+});
+
+test('task state and Stop reject foreign identities, getters and model-supplied continuation authority',()=>{
+  const initial=state(),taskId=randomUUID();initial.chatTasks=[{taskId,threadId:THREAD,sessionId:null,connectionId:initial.snapshot!.connectionId,state:'awaiting_verification',round:0,reason:null,reportDigest:null}];
+  for(const patch of [{taskId:randomUUID()},{threadId:'foreign'},{taskId},{taskId,threadId:THREAD,continuation:{}},{taskId,threadId:THREAD,initiatedBy:'human'}]){
+    if(Object.keys(patch).length===1&&patch.taskId===taskId)continue;
+    assert.throws(()=>prepareCodexAction(initial,'task-stop',patch));
+  }
+  for(const patch of [{state:'complete'},{round:2},{reportDigest:'a'.repeat(64)+'\n'},{origin:{}},{sessionId:undefined}])assert.throws(()=>readCodexState({...initial,chatTasks:[{...initial.chatTasks![0],...patch}]}));
+  let called=0;const row={...initial.chatTasks[0]};Object.defineProperty(row,'state',{get(){called++;return'working';},enumerable:true});assert.throws(()=>readCodexState({...initial,chatTasks:[row]}));assert.equal(called,0);
+});
+
+test('fresh-task ACK lineage preserves the exact conversation and composer message across internal client rotation',async t=>{
+  const initial=state(),threadId='rotation.thread:exact',old=initial.snapshot!.connectionId,nextId=randomUUID();initial.snapshot!.thread!.threadId=threadId;
+  initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId,sessionId:null,selection:{model:'fixture',effort:'low'}}];
+  const f=await fixture(t,initial);f.el('codex-composer').value='Keep this original human message';
+  f.handler(async input=>{assert.equal(input.action,'turn-start');const next=f.observed();next.snapshot!.connectionId=nextId;next.snapshot!.thread!.turnStatus='inProgress';next.snapshot!.thread!.turnId='new-task-turn';
+    const record=receipt(input,{nextConnectionId:nextId,turnId:'new-task-turn'});next.actions=[record];f.set(next);return response(input,next,{nextConnectionId:nextId,turnId:'new-task-turn'});});
+  f.el('codex-compose').emit('submit');await flush();assert.equal(f.posts.length,1);assert.equal(f.posts[0]!.connectionId,old);
+  assert.equal(f.chat.currentStateView().state!.snapshot!.connectionId,nextId);assert.ok(f.el('codex-messages').textContent.includes('Keep this original human message'));assert.ok(f.el('codex-messages').textContent.includes('Accepted'));
+});
+
+test('automatic client rotation cannot launder a foreign thread/session or another action receipt',async()=>{
+  const initial=state(),threadId='rotation.thread:exact';initial.snapshot!.thread!.threadId=threadId;initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId,sessionId:null,selection:{model:'fixture',effort:'low'}}];
+  const input=prepareCodexAction(initial,'turn-start',{threadId,text:'Human Send'}),next=structuredClone(initial),nextId=randomUUID();next.snapshot!.connectionId=nextId;
+  for(const patch of [{threadId:'foreign'},{nextConnectionId:initial.snapshot!.connectionId},{action:'task-stop'}] satisfies Partial<ChatActionRecord>[]){
+    const api=new CodexChatApi(TOKEN,async()=>response(input,next,{nextConnectionId:nextId,...patch}));await assert.rejects(api.action(input));}
+  const foreign=structuredClone(next);foreign.snapshot!.thread!.sessionId='changed-session';const api=new CodexChatApi(TOKEN,async()=>response(input,foreign,{nextConnectionId:nextId}));await assert.rejects(api.action(input),/conversation/);
+});
+
+test('Stop remains available for owned verification after the native reply completed',async t=>{
+  const initial=state(),taskId=randomUUID();initial.snapshot!.thread!.turnStatus='completed';initial.snapshot!.thread!.turnId='completed-parent';initial.chatTasks=[{taskId,threadId:THREAD,sessionId:null,connectionId:initial.snapshot!.connectionId,state:'awaiting_verification',round:0,reason:null,reportDigest:null}];
+  const f=await fixture(t,initial);assert.equal(f.el('codex-interrupt').disabled,false);assert.equal(f.el('codex-interrupt').textContent,'Stop task');
+  f.handler(async input=>{assert.equal(input.action,'task-stop');assert.ok('taskId'in input);assert.equal(input.taskId,taskId);const next=f.observed();next.chatTasks![0]!.state='cancelled';f.set(next);return response(input,next);});
+  await f.click('codex-interrupt');assert.deepEqual(f.posts.map(input=>input.action),['task-stop']);assert.equal(f.el('codex-interrupt').disabled,true);
+});
+
+test('opening an exact retained task focuses its original approval UI without select, resume or a new model turn',async t=>{
+  const initial=state(),threadId='retained.thread:exact',taskId=randomUUID(),owned=state().snapshot!,originalId=owned.connectionId;
+  initial.snapshot!.thread=null;initial.nativeAssets=assets({sealed:false});initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId,sessionId:null,selection:{model:'fixture',effort:'low'}}];
+  initial.chatTasks=[{taskId,threadId,sessionId:null,connectionId:originalId,state:'repairing',round:1,reason:null,reportDigest:null,retained:true}];
+  owned.thread!.threadId=threadId;owned.thread!.turnId='original.repair';owned.thread!.turnStatus='inProgress';owned.thread!.writeGranted=true;
+  owned.approvals=[{handle:'original-approval',connectionId:originalId,serverRequestId:'approval:1',method:'item/commandExecution/requestApproval',threadId,turnId:'original.repair',itemId:'command:1',reason:null,command:'original-repair-command',cwd:initial.projectPath,changes:null,canAccept:true,expiresAt:Date.now()+60000}];
+  const f=await fixture(t,initial);f.handler(async input=>{assert.equal(input.action,'task-focus');assert.ok('taskId'in input);assert.equal(input.taskId,taskId);
+    const next=f.observed();next.snapshot=owned;next.nativeAssets=assets({granted:true,admissionOpen:true});const record=receipt(input,{nextConnectionId:originalId});next.actions=[record];f.set(next);return response(input,next,{nextConnectionId:originalId});});
+  const opened=await(f.chat as unknown as {bindNativeChat(action:'thread-resume',selection:{model:string;effort:string},threadId:string):Promise<boolean>}).bindNativeChat('thread-resume',{model:'fixture',effort:'low'},threadId);
+  assert.equal(opened,true);assert.deepEqual(f.posts.map(input=>input.action),['task-focus']);assert.ok(f.el('codex-approvals').textContent.includes('original-repair-command'));
+  const control=prepareCodexAction(f.chat.currentStateView().state!,'approval',{threadId,turnId:'original.repair',handle:'original-approval',decision:'accept'});assert.equal(control.connectionId,originalId);
+});
+
 test('asset receipts accept both enum values and reject wrong scope, authority and getters', async () => {
   const st = state();
   for (const action of ['grant-assets', 'revoke-assets']) {
@@ -417,9 +471,10 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
   const css = await readFile(resolve('apps/desktop/public/studio.css'), 'utf8');
   const js = await readFile(resolve(build, 'apps/desktop/src/codex-chat.js'), 'utf8');
   const shellJs = await readFile(resolve(build, 'apps/desktop/src/workspace-shell.js'), 'utf8');
+  const setupJs = await readFile(resolve(build, 'apps/desktop/src/provider-setup.js'), 'utf8');
   const server = createServer((request, reply) => {
     const path = request.url?.split('?')[0];
-    const body = path === '/fixture' ? html : path === '/studio.css' ? css : path === '/codex-chat.js' ? js : path === '/workspace-shell.js' ? shellJs : null;
+    const body = path === '/fixture' ? html : path === '/studio.css' ? css : path === '/codex-chat.js' ? js : path === '/workspace-shell.js' ? shellJs : path==='/provider-setup.js'?setupJs:null;
     reply.writeHead(body === null ? 404 : 200, { 'Content-Type': path === '/fixture' ? 'text/html' : path?.endsWith('.css') ? 'text/css' : 'text/javascript' });
     reply.end(body ?? '');
   });
@@ -439,8 +494,9 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
     }
     assert.ok(request.url().endsWith('/v1/codex/action'));
     const input = request.postDataJSON() as ChatAction; posts.push(input);
-    assert.ok(input.action === 'grant-assets' || input.action === 'revoke-assets');
-    observed = { ...observed, nativeAssets: assets({ granted: input.action === 'grant-assets', admissionOpen: input.action === 'grant-assets' }) };
+    assert.ok(input.action === 'grant-assets' || input.action === 'revoke-assets' || input.action==='task-stop');
+    if(input.action==='task-stop'){assert.equal(input.taskId,observed.chatTasks![0]!.taskId);assert.equal(input.threadId,observed.snapshot!.thread!.threadId);observed.chatTasks![0]!.state='cancelled';}
+    else observed = { ...observed, nativeAssets: assets({ granted: input.action === 'grant-assets', admissionOpen: input.action === 'grant-assets' }) };
     const record = receipt(input); observed.actions = [record, ...observed.actions];
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ record, replayed: false, state: observed }) });
   });
@@ -450,10 +506,13 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
     const module = await import(modulePath);
     const shellPath: string = '/workspace-shell.js';
     const { startWorkspaceShell } = await import(shellPath);
+    const setupPath:string='/provider-setup.js';const {startProviderSetup}=await import(setupPath);
     const shell = startWorkspaceShell(document);
     const chat = new module.CodexChat(document, new module.CodexChatApi(token));
+    const setup=startProviderSetup(document,{chat});
     await chat.start();
-    (window as unknown as { stopFixture: () => void }).stopFixture = () => { chat.stop(); shell.cleanup(); };
+    (window as unknown as { stopFixture: () => void;refreshFixture:()=>Promise<void> }).stopFixture = () => { chat.stop();setup.cleanup(); shell.cleanup(); };
+    (window as unknown as {refreshFixture:()=>Promise<void>}).refreshFixture=()=>chat.refresh();
   }, TOKEN);
   assert.equal(await page.locator('#settings-drawer').isVisible(), false);
   await page.locator('#codex-composer').fill('Owned browser draft 🧩');
@@ -493,5 +552,10 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
   if (process.env.ARCANE_ASSET_UI_SCREENSHOT) await page.locator('.codex-asset-permission').screenshot({ path: process.env.ARCANE_ASSET_UI_SCREENSHOT + '-mobile.png' });
   assert.equal(await page.locator('#codex-composer').inputValue(), 'Owned browser draft 🧩');
   assert.deepEqual(errors, []);
+  const taskId=randomUUID();observed.snapshot!.thread!.turnStatus='completed';observed.snapshot!.thread!.turnId='completed-parent';observed.nativeAssets=assets();
+  observed.chatTasks=[{taskId,threadId:THREAD,sessionId:null,connectionId:observed.snapshot!.connectionId,state:'awaiting_verification',round:0,reason:null,reportDigest:null}];
+  await page.evaluate(()=>(window as unknown as {refreshFixture:()=>Promise<void>}).refreshFixture());
+  assert.equal(await page.locator('#codex-interrupt').textContent(),'Stop task');await page.locator('#codex-interrupt').click();
+  await page.waitForFunction(()=>(document.getElementById('codex-interrupt')as HTMLButtonElement).disabled);assert.equal(posts.at(-1)!.action,'task-stop');assert.deepEqual(errors,[]);
   await page.evaluate(() => (window as unknown as { stopFixture: () => void }).stopFixture());
 });

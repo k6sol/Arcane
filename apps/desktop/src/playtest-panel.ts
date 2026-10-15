@@ -11,13 +11,20 @@ export interface PlaytestPanelController { stop(): void; refresh(): Promise<void
 const RESPONSE_BYTES = 128 * 1024;
 const POLL_MS = 2_000, AUTH_CHECK_MS = 250, TIMEOUT_MS = 15_000, VISIBLE_JOBS = 3;
 const ACTIONS = ['start', 'observe-state-and-console', 'stop-owned-play'] as const;
+const SCENARIO_ACTIONS=['start','execute-approved-scenario','observe-state-and-console','capture-viewport','stop-owned-play','restore-temporary-changes'] as const;
 type Row = Record<string, unknown>;
 type DisplayValue = string | number | boolean | DisplayValue[] | { [key: string]: DisplayValue };
+interface ScenarioPlanView {
+  runtimeBudgetMs:number;captureRequired:boolean;steps:readonly string[];
+  temporaryChanges:readonly {target:string;changes:readonly string[]}[];
+}
 interface Job {
   id: string; targetName: string; state: 'needs_approval' | 'running' | 'complete' | 'cancelled';
   displayDigest: string; display: Readonly<Row>; scope: string; durationMs: number;
   consentExpiresAt: number; evidence: 'native' | 'fixture';
-  review: { phase: string; outcome: string | null; code: string | null; cleanup: string; requiresHumanReview: boolean };
+  scenarioPlan?:ScenarioPlanView;
+  review: { phase: string; outcome: string | null; code: string | null; cleanup: string; requiresHumanReview: boolean;
+    scenario?: {state:string;inputRelease:string;temporary:string;steps:Row[];capture:{id:string;sha256:string;bytes:number}|null} };
 }
 function invalid(): never { throw new Error('Invalid playtest response'); }
 function object(value: unknown): Row {
@@ -40,12 +47,12 @@ function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER)
 function displayCopy(value: unknown): Readonly<Row> {
   let nodes = 0;
   const copy = (value: unknown, depth: number): DisplayValue => {
-    if (++nodes > 512 || depth > 6) invalid();
+    if (++nodes > 2048 || depth > 12) invalid();
     if (typeof value === 'string') return text(value, 4096);
     if (typeof value === 'boolean') return value;
-    if (typeof value === 'number') return integer(value);
+    if (typeof value === 'number') {if(!Number.isFinite(value)||Math.abs(value)>Number.MAX_SAFE_INTEGER)invalid();return value;}
     if (Array.isArray(value)) {
-      if (!value.length || value.length > 16) invalid();
+      if (value.length > 64) invalid();
       return Object.freeze(value.map(item => copy(item, depth + 1))) as unknown as DisplayValue[];
     }
     const source = object(value), result: { [key: string]: DisplayValue } = {};
@@ -64,6 +71,60 @@ function displayCopy(value: unknown): Readonly<Row> {
   };
   return object(copy(value, 0));
 }
+/** Human-readable projection of the exact immutable display. It grants no
+ * authority and never replaces the digest or the complete audit underneath. */
+function scenarioPlanView(plan:Row):ScenarioPlanView {
+  const targets=new Map<string,{label:string;className:string}>();
+  const identity=(value:unknown)=>{const id=text(value,64);if(!/^[A-Za-z0-9_-]{1,64}(?![\s\S])/.test(id))invalid();return id;};
+  for(const value of plan.targets as unknown[]){
+    const target=object(value);keys(target,['id','root','segments','className']);const id=identity(target.id);
+    if(targets.has(id)||target.root!=='LocalPlayer.PlayerGui'||!Array.isArray(target.segments)||!target.segments.length||target.segments.length>8||
+      !['TextButton','ImageButton','TextLabel','Frame'].includes(target.className as string))invalid();
+    targets.set(id,{label:['PlayerGui',...target.segments.map(segment=>text(segment,100))].join(' → '),className:target.className as string});
+  }
+  const ids=new Set<string>();let budget=0;
+  const steps=(plan.steps as unknown[]).map(value=>{
+    const step=object(value),id=identity(step.id);if(ids.has(id))invalid();ids.add(id);
+    if(step.kind==='hold-key'){
+      keys(step,['id','kind','key','holdMs']);if(!['W','A','S','D','E','F','Space'].includes(step.key as string))invalid();
+      const holdMs=integer(step.holdMs,25,1000);budget+=holdMs;return 'Hold '+step.key+' for '+holdMs+' ms.';
+    }
+    if(step.kind==='assert-displacement'){
+      keys(step,['id','kind','minimumStuds']);const distance=step.minimumStuds;
+      if(typeof distance!=='number'||!Number.isFinite(distance)||distance<0.1||distance>32)invalid();
+      return 'Assert horizontal movement of at least '+distance+(distance===1?' stud.':' studs.');
+    }
+    const target=targets.get(identity(step.targetId));if(!target)invalid();
+    if(step.kind==='click-gui'){
+      keys(step,['id','kind','targetId']);if(!['TextButton','ImageButton'].includes(target.className))invalid();budget+=50;
+      return 'Click '+target.label+' ('+target.className+').';
+    }
+    if(step.kind!=='assert-gui'&&step.kind!=='assert-text')invalid();
+    keys(step,step.kind==='assert-gui'?['id','kind','targetId','property','equals','withinMs']:['id','kind','targetId','equals','withinMs'],['requireTransition']);
+    const withinMs=integer(step.withinMs,25,1000);budget+=withinMs;
+    if(step.requireTransition!==undefined&&typeof step.requireTransition!=='boolean')invalid();
+    const transition=step.requireTransition!==false?' Require a transition from its initial value.':' An already satisfied result is allowed.';
+    if(step.kind==='assert-gui'){
+      if(step.property!=='Visible'||typeof step.equals!=='boolean')invalid();
+      return 'Assert '+target.label+' is '+(step.equals?'visible':'hidden')+' within '+withinMs+' ms.'+transition;
+    }
+    if(!['TextButton','TextLabel'].includes(target.className))invalid();
+    return 'Assert '+target.label+' text equals '+JSON.stringify(text(step.equals,100))+' within '+withinMs+' ms.'+transition;
+  });
+  if(budget>Number(plan.runtimeBudgetMs))invalid();
+  const capture=object(plan.capture);keys(capture,['required']);if(typeof capture.required!=='boolean')invalid();
+  if(plan.temporaryEdits!==undefined&&(!Array.isArray(plan.temporaryEdits)||!plan.temporaryEdits.length||plan.temporaryEdits.length>4))invalid();
+  const editIds=new Set<string>();
+  const temporaryChanges=((plan.temporaryEdits??[])as unknown[]).map(value=>{
+    const edit=object(value);keys(edit,['id','ref','expected','properties']);const id=identity(edit.id);if(editIds.has(id))invalid();editIds.add(id);
+    const ref=object(edit.ref);keys(ref,['instanceId','sessionId','root','pathSegments','className']);text(ref.instanceId);text(ref.sessionId);
+    if(!Array.isArray(ref.pathSegments)||ref.pathSegments.length>64)invalid();
+    const location=[text(ref.root),...ref.pathSegments.map(segment=>text(segment))].join(' → '),expected=object(edit.expected),properties=object(edit.properties),names=Object.keys(properties);
+    if(!names.length||names.length!==Object.keys(expected).length||names.some(name=>!Object.hasOwn(expected,name)))invalid();
+    return {target:text(ref.className)+' in '+location,changes:names.map(name=>name+': '+JSON.stringify(expected[name])+' → '+JSON.stringify(properties[name])+'.')};
+  });
+  return{runtimeBudgetMs:Number(plan.runtimeBudgetMs),captureRequired:capture.required,steps,temporaryChanges};
+}
 function readJob(value: unknown): Job {
   const source = object(value), id = text(source.id, 128);
   if (!/^[A-Za-z0-9_-]+$/.test(id)) invalid();
@@ -74,7 +135,7 @@ function readJob(value: unknown): Job {
       !['needs_approval', 'running', 'complete', 'cancelled'].includes(source.state as string)) invalid();
   const display = displayCopy(source.display), proposal = object(display.proposal), binding = object(proposal.binding);
   keys(display, ['proposal', 'cleanupGraceMs', 'requestTimeoutMs', 'proofMaxAgeMs', 'consentExpiresAt', 'guarantee', 'actions', 'raceDisclosure'], ['trustedPrivateTarget']);
-  keys(proposal, ['binding', 'durationMs', 'observationIntervalMs', 'failOnRuntimeError'], ['trustedPrivateTarget']);
+  keys(proposal, ['binding', 'durationMs', 'observationIntervalMs', 'failOnRuntimeError'], ['trustedPrivateTarget','scenario','subjectDigest']);
   keys(binding, ['pairedSessionId', 'nativeStudioId', 'placeId'], ['clientLifetimeId', 'pluginArtifactHash', 'scopeRevision']);
   text(binding.pairedSessionId); text(binding.nativeStudioId);
   for (const key of ['clientLifetimeId', 'pluginArtifactHash', 'scopeRevision']) if (binding[key] !== undefined) text(binding[key]);
@@ -83,19 +144,52 @@ function readJob(value: unknown): Job {
   integer(proposal.observationIntervalMs, 1, 86_400_000);
   for (const key of ['cleanupGraceMs', 'requestTimeoutMs', 'proofMaxAgeMs']) integer(display[key], 1, 86_400_000);
   const consentExpiresAt = integer(display.consentExpiresAt, 1);
+  const actions=proposal.scenario===undefined?ACTIONS:SCENARIO_ACTIONS;
   if (display.guarantee !== 'observed-non-atomic' || !Array.isArray(display.actions) ||
-      display.actions.length !== ACTIONS.length || display.actions.some((action, index) => action !== ACTIONS[index])) invalid();
+      display.actions.length !== actions.length || display.actions.some((action, index) => action !== actions[index])) invalid();
   text(display.raceDisclosure, 4096);
   const review = object(source.review);
   if (review.requiresHumanReview !== undefined && typeof review.requiresHumanReview !== 'boolean') invalid();
   integer(review.observations);
+  let scenario:Job['review']['scenario'];
+  let scenarioPlan:ScenarioPlanView|undefined;
+  if(proposal.scenario!==undefined){
+    const plan=object(proposal.scenario);keys(plan,['version','runtimeBudgetMs','targets','steps','capture'],['temporaryEdits']);
+    if(plan.version!==1||!Array.isArray(plan.targets)||plan.targets.length>4||!Array.isArray(plan.steps)||!plan.steps.length||plan.steps.length>8||
+        !/^[a-f0-9]{64}$/.test(text(proposal.subjectDigest,64)))invalid();
+    integer(plan.runtimeBudgetMs,100,3000);
+    scenarioPlan=scenarioPlanView(plan);
+    const report=object(review.scenario);keys(report,['scenarioDigest','subjectDigest','state','inputRelease','temporary','steps','capture','consoleCoverage']);
+    if(report.subjectDigest!==proposal.subjectDigest||!/^[a-f0-9]{64}$/.test(text(report.scenarioDigest,64))||!['not_started','running','passed','failed','unsupported','unknown'].includes(report.state as string)||
+      !['not_started','observed_released','unknown'].includes(report.inputRelease as string)||!['not_started','running','restored','unknown'].includes(report.temporary as string)||report.consoleCoverage!=='ambiguous'||
+      !Array.isArray(report.steps)||report.steps.length>8)invalid();
+    const steps=report.steps.map(value=>object(value));
+    if(steps.length>plan.steps.length||report.state==='passed'&&steps.length!==plan.steps.length)invalid();
+    for(let index=0;index<steps.length;index++){
+      const row=steps[index]!,step=object(plan.steps[index]);keys(row,['id','kind','outcome','expected','observed'],['baseline']);
+      if(row.id!==step.id||row.kind!==step.kind||!['passed','failed','not_run'].includes(row.outcome as string))invalid();
+      const expected=step.kind==='hold-key'?String(step.key)+':'+String(step.holdMs):step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:step.equals;
+      if(row.expected!==expected||report.state==='passed'&&row.outcome!=='passed')invalid();
+      if(row.baseline!==undefined&&(step.kind==='assert-gui'?typeof row.baseline!=='boolean':step.kind==='assert-text'?typeof row.baseline!=='string':true))invalid();
+      if(row.outcome==='passed'&&(step.kind==='assert-displacement'&&(typeof row.observed!=='number'||!Number.isFinite(row.observed)||row.observed<Number(step.minimumStuds))||
+        (step.kind==='assert-gui'||step.kind==='assert-text')&&(row.observed!==step.equals||step.requireTransition!==false&&(row.baseline===undefined||row.baseline===step.equals))||
+        (step.kind==='hold-key'||step.kind==='click-gui')&&row.observed!=='observed-released'))invalid();
+    }
+    if(report.state==='passed'&&report.inputRelease!==(plan.steps.some(value=>['hold-key','click-gui'].includes(object(value).kind as string))?'observed_released':'not_started')||
+      review.cleanup==='complete'&&report.inputRelease==='unknown'||review.outcome==='succeeded'&&(report.state!=='passed'||object(plan.capture).required!==false))invalid();
+    let capture:NonNullable<Job['review']['scenario']>['capture']=null;
+    if(report.capture!==null){const image=object(report.capture);keys(image,['id','sha256','bytes','mimeType','width','height','context','nativeAcceptance']);if(image.mimeType!=='image/png'||image.context!=='unattested'||image.nativeAcceptance!==false||!/^[A-Za-z0-9_-]{1,64}$/.test(text(image.id,64))||!/^[a-f0-9]{64}$/.test(text(image.sha256,64)))invalid();integer(image.width,1,4096);integer(image.height,1,4096);capture={id:image.id as string,sha256:image.sha256 as string,bytes:integer(image.bytes,1,2*1024*1024)};}
+    scenario={state:report.state as string,inputRelease:report.inputRelease as string,temporary:report.temporary as string,steps,capture};
+  }else if(review.scenario!==undefined||proposal.subjectDigest!==undefined)invalid();
   return {
     id, targetName, state: source.state as Job['state'], displayDigest, display,
     scope: JSON.stringify(display), durationMs, consentExpiresAt, evidence: source.evidence as Job['evidence'],
+    ...(scenarioPlan?{scenarioPlan}:{}),
     review: {
       phase: text(review.phase, 64), outcome: review.outcome === null ? null : text(review.outcome, 64),
       code: review.code === null ? null : text(review.code, 64), cleanup: text(review.cleanup, 64),
       requiresHumanReview: review.requiresHumanReview === true,
+      ...(scenario?{scenario}:{}),
     },
   };
 }
@@ -215,7 +309,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   function detailsFor(job: Job): HTMLDetailsElement {
     const details = node('details', undefined, 'playtest-details');
     const summary = node('summary', 'Permission details'); summary.setAttribute('data-playtest-action', 'details');
-    details.append(summary, node('p', 'Allow this test to start play, observe state and console, then stop only the play it owns.'));
+    details.append(summary, node('p', job.review.scenario?'Allow this exact gameplay scenario to drive game controls, inspect its assertions, capture the viewport, stop its owned play and restore the listed temporary changes.':'Allow this test to start play, observe state and console, then stop only the play it owns.'));
     const fields = node('dl');
     function field(key: string, value: string): void { fields.append(node('dt', key), node('dd', value)); }
     function walk(value: unknown, path: string): void {
@@ -235,9 +329,43 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       const label = node('p', state.label, state.danger ? 'playtest-status danger' : 'playtest-status');
       label.setAttribute('role', 'status'); label.setAttribute('aria-live', 'polite'); element.append(label);
     }
+    if(job.review.outcome!==null)element.append(node('p','Result: '+job.review.outcome+' · Code: '+(job.review.code??'unavailable')+' · Cleanup: '+job.review.cleanup,'playtest-result'));
     if (job.evidence === 'fixture' || !active(job)) element.append(node('p',
       job.evidence === 'fixture' ? 'Fixture evidence · Native acceptance unverified' : 'Native evidence · Native acceptance unverified', 'playtest-evidence'));
     const controls: HTMLButtonElement[] = [], listeners: (() => void)[] = [];
+    let captureUrl:string|null=null,captureAbort:AbortController|null=null;
+    if(job.review.scenario){
+      const report=job.review.scenario,plan=job.scenarioPlan!;
+      if(job.state==='needs_approval'){
+        element.append(node('p','Scenario plan · '+plan.steps.length+' '+(plan.steps.length===1?'step':'steps')+' · '+plan.runtimeBudgetMs+' ms Client execution limit.'));
+        const list=node('ol');for(const step of plan.steps)list.append(node('li',step));element.append(list);
+        if(plan.temporaryChanges.length){
+          element.append(node('p','Temporary changes · Restore exact prior values after owned Play stops.'));
+          const edits=node('ul');for(const edit of plan.temporaryChanges)edits.append(node('li',edit.target+' · '+edit.changes.join(' ')));element.append(edits);
+        }else element.append(node('p','Temporary changes: none.'));
+      }else{
+        element.append(node('p','Measured steps: '+report.state+' · Input release: '+report.inputRelease.replaceAll('_',' ')+' · Temporary changes: '+report.temporary.replaceAll('_',' ')));
+      }
+      if(plan.captureRequired)element.append(node('p',
+        (!active(job)?'Required Client capture: still unverified. ':'Required Client capture: unverified. ')+
+        (report.capture?'The retained image has unverified context.':'Current capture support does not attest Client context.')));
+      else element.append(node('p','Viewport capture: not requested.'));
+      if(report.steps.length){const list=node('ol');for(const step of report.steps)list.append(node('li',String(step.id)+' · '+String(step.outcome)+' · Expected '+String(step.expected)+' · Observed '+String(step.observed)));element.append(list);}
+      if(report.capture){
+        const image=report.capture,button=node('button','View capture · Context unverified');button.type='button';
+        const click=(event:Event)=>{if(event.isTrusted!==true||button.disabled||!root.contains(element)||!sessionToken)return;button.disabled=true;const originalToken=sessionToken;captureAbort=new AbortController();const controller=captureAbort;const timeout=setTimeout(()=>controller.abort(),8000);
+          void(async()=>{try{const response=await transport('/v1/playtests/capture?id='+encodeURIComponent(job.id),{headers:{Authorization:'Bearer '+originalToken},signal:controller.signal,cache:'no-store'});
+            if(response.status!==200||response.redirected||response.headers.get('content-type')!=='image/png'||!response.body)invalid();
+            const reader=response.body.getReader(),chunks:Uint8Array[]=[];let total=0;
+            try{for(;;){const item=await reader.read();if(item.done)break;total+=item.value.byteLength;if(total>2*1024*1024)invalid();chunks.push(item.value);}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+            const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+            const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(value=>value.toString(16).padStart(2,'0')).join('');
+            if(total!==image.bytes||hash!==image.sha256||stopped||pageHidden||sessionToken!==originalToken||!root.contains(element)||controller.signal.aborted)invalid();
+            captureUrl=URL.createObjectURL(new Blob([bytes],{type:'image/png'}));const preview=node('img');preview.src=captureUrl;preview.alt='Gameplay scenario viewport capture';preview.style.maxWidth='100%';element.append(preview);
+          }catch{if(!stopped&&root.contains(element))message('Capture unavailable. Refresh this test’s status to inspect its retained evidence.');}finally{clearTimeout(timeout);captureAbort=null;}})();};
+        button.addEventListener('click',click);listeners.push(()=>button.removeEventListener('click',click));element.append(button);
+      }
+    }
     function button(label: string, action: 'approve' | 'cancel'): void {
       const button = node('button', label); button.type = 'button'; button.setAttribute('data-playtest-action', action);
       button.setAttribute('aria-label', label + ' · ' + job.targetName);
@@ -251,7 +379,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     if (job.state === 'needs_approval') button('Run test', 'approve');
     if (active(job)) button(job.state === 'running' ? 'Stop' : 'Cancel', 'cancel');
     const details = detailsFor(job); element.append(details);
-    return { job, signature, element, heading, details, controls, remove() { listeners.forEach(remove => remove()); } };
+    return { job, signature, element, heading, details, controls, remove() { captureAbort?.abort();if(captureUrl)URL.revokeObjectURL(captureUrl);listeners.forEach(remove => remove()); } };
   }
   function render(): void {
     const selected = [...jobs].reverse().filter(job => active(job) || rendered.has(job.id)).slice(0, VISIBLE_JOBS);
@@ -261,7 +389,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     let changed = root.children.length !== selected.length + 1;
     const next = new Map<string, JobView>();
     for (const job of selected) {
-      const signature = JSON.stringify([job.id, job.targetName, job.state, job.scope, job.displayDigest, job.evidence, status(job)]);
+      const signature = JSON.stringify([job.id, job.targetName, job.state, job.scope, job.displayDigest, job.evidence, status(job),job.review]);
       const previous = rendered.get(job.id);
       let row = previous;
       if (!row || row.signature !== signature) {

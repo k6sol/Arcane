@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import { bindingSchema, codes, digest, logSummarySchema, proposalSchema }
   from '../../../packages/studio-test-controller/src/contracts.js';
+import { scenarioPlanSchema, scenarioReviewSchema, scenarioEvidenceIssue, SCENARIO_ACTIONS } from '../../../packages/studio-test-controller/src/scenario.js';
 
 export interface PlaytestRequest {
   sessionId: string; nativeStudioId?: string | undefined; durationMs?: number;
   observationIntervalMs?: number; failOnRuntimeError?: boolean;
+  scenario?: z.input<typeof scenarioPlanSchema> | undefined;
 }
 
 const timestamp = z.number().int().nonnegative().safe();
@@ -24,6 +26,7 @@ export const playtestRequestInput = z.strictObject({
   durationMs: z.number().int().min(5_000).max(60_000).default(15_000),
   observationIntervalMs: z.number().int().min(250).max(2_000).default(1_000),
   failOnRuntimeError: z.boolean().default(true),
+  scenario: scenarioPlanSchema.optional(),
 });
 const proposal = proposalSchema.extend({
   binding,
@@ -34,7 +37,7 @@ const proposal = proposalSchema.extend({
 const display = z.strictObject({
   proposal, cleanupGraceMs: timeout, requestTimeoutMs: timeout, proofMaxAgeMs: timeout,
   consentExpiresAt: timestamp, guarantee: z.literal('observed-non-atomic'),
-  actions: z.tuple([z.literal('start'), z.literal('observe-state-and-console'), z.literal('stop-owned-play')]),
+  actions: z.union([z.tuple([z.literal('start'), z.literal('observe-state-and-console'), z.literal('stop-owned-play')]),z.tuple(SCENARIO_ACTIONS.map(action=>z.literal(action)) as [z.ZodLiteral<'start'>,z.ZodLiteral<'execute-approved-scenario'>,z.ZodLiteral<'observe-state-and-console'>,z.ZodLiteral<'capture-viewport'>,z.ZodLiteral<'stop-owned-play'>,z.ZodLiteral<'restore-temporary-changes'>])]),
   raceDisclosure: z.literal('Observed checks cannot atomically fence the native call.'),
 });
 
@@ -48,6 +51,7 @@ const review = z.strictObject({
   watchdog: z.strictObject({ armed: z.boolean(), fired: z.boolean(), reason: z.enum(codes).nullable() }),
   observations: z.number().int().min(0).max(128), logs: z.array(logSummary).max(64),
   logsTruncated: z.boolean(), requiresHumanReview: z.boolean(), canStartAnotherOperation: z.boolean(),
+  scenario: scenarioReviewSchema.optional(),
 }).superRefine((value, context) => {
   const reject = (message: string) => context.addIssue({ code: 'custom', message });
   const runFields = [value.runId, value.binding, value.scopeDigest, value.startedAt, value.deadline, value.cleanupDeadline];
@@ -84,6 +88,16 @@ export const playtestJob = z.strictObject({
   const reject = (message: string) => context.addIssue({ code: 'custom', message });
   if (digest(value.display) !== value.displayDigest) reject('Wrong playtest display digest.');
   if (value.evidence !== value.review.evidence) reject('Inconsistent playtest evidence.');
+  const plan=value.display.proposal.scenario,scenario=value.review.scenario;
+  if(!!plan!==!!scenario||!!plan!==!!value.display.proposal.subjectDigest)reject('Incomplete scenario evidence.');
+  if(plan&&scenario){
+    if(scenario.scenarioDigest!==digest(plan)||scenario.subjectDigest!==value.display.proposal.subjectDigest||digest(value.display.actions)!==digest(SCENARIO_ACTIONS))reject('Wrong scenario scope.');
+    const stepIssue=scenarioEvidenceIssue(plan,scenario.steps,scenario.state==='passed',scenario.inputRelease);
+    if(stepIssue)reject(stepIssue);
+    if(value.review.cleanup==='complete'&&scenario.inputRelease==='unknown')reject('Input release is unverified.');
+    if(value.review.phase==='done'&&value.review.cleanup==='complete'&&plan.temporaryEdits?.length&&scenario.temporary!=='restored'&&scenario.temporary!=='not_started')reject('Temporary restoration is unverified.');
+    if(value.review.outcome==='succeeded'&&(scenario.state!=='passed'||scenario.steps.length!==plan.steps.length||scenario.steps.some(step=>step.outcome!=='passed')||plan.capture.required))reject('Required gameplay evidence is incomplete.');
+  }else if(value.display.actions.length!==3)reject('Unexpected scenario authority.');
   if (value.review.binding !== null && digest(value.review.binding) !== digest(value.display.proposal.binding)) reject('Wrong playtest run binding.');
   if (value.review.scopeDigest !== null && value.review.scopeDigest !== value.displayDigest) reject('Wrong playtest run scope.');
   if (value.display.proposal.failOnRuntimeError && value.review.outcome === 'succeeded' &&
@@ -97,13 +111,14 @@ export function playtestPreparedResponse(input: PlaytestRequest) {
   // Capture primitives before submission; caller mutation while awaiting an ACK
   // must not change which submitted scope/settings the response must describe.
   const { sessionId, nativeStudioId, durationMs = 15_000, observationIntervalMs = 1_000, failOnRuntimeError = true } = input;
+  const scenario=input.scenario===undefined?undefined:scenarioPlanSchema.parse(input.scenario);
   return z.strictObject({ job: playtestJob }).refine(({ job }) => {
     const proposal = job.display.proposal;
     return job.state === 'needs_approval' && job.review.phase === 'idle' &&
       proposal.binding.pairedSessionId === sessionId &&
       (nativeStudioId === undefined || proposal.binding.nativeStudioId === nativeStudioId) &&
       proposal.durationMs === durationMs && proposal.observationIntervalMs === observationIntervalMs &&
-      proposal.failOnRuntimeError === failOnRuntimeError;
+      proposal.failOnRuntimeError === failOnRuntimeError && digest(proposal.scenario??null)===digest(scenario??null);
   }, 'Wrong prepared playtest scope.');
 }
 

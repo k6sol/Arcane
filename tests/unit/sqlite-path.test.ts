@@ -122,7 +122,7 @@ test('Windows deep production stores retain canonical identity and metadata acro
   } finally { associations.close(); }
 });
 
-test('Windows actual daemon opens and closes all six deep stores through isolated metadata reads without native work', {
+test('Windows actual daemon opens and closes all seven deep stores through isolated metadata reads without native work', {
   skip: process.platform !== 'win32', timeout: 60_000,
 }, async t => {
   let terminal = false;
@@ -195,6 +195,7 @@ test('Windows actual daemon opens and closes all six deep stores through isolate
   assert.equal(existsSync(join(state, 'daemon.json')), false);
   const filenames = ['studio.sqlite', 'work.sqlite', 'learning/learning.sqlite',
     'connection-lab/conversation-work/conversation-work.sqlite', 'connection-lab/native-codex/codex-actions.sqlite',
+    'connection-lab/native-codex/chat-tasks/chat-tasks.sqlite',
     'connection-lab/workflows/workflow.sqlite'];
   for (const filename of filenames) {
     const canonical = join(state, filename);

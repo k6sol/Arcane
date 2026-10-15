@@ -63,6 +63,9 @@ test('SDK initialize supplies automatic planning and exact scene contracts while
   const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Metadata must not contact a daemon.'); });
   const client = await linked(t), instructions = client.getInstructions()!;
   assert.equal(instructions, productInstructions());
+  assert.match(instructions,/playtest_request.*scenario/);assert.match(instructions,/one same-thread repair followed by one reverify/);
+  assert.match(instructions,/no Client datamodel attestation/);assert.match(instructions,/assets_reconstruct_studio_import/);
+  assert.doesNotMatch(instructions,/exposes no viewport capture, playtest|Script enabling and arbitrary executable-class creation are not exposed|exposes no Studio asset-import tool/);
   assert.match(instructions, /Automatically plan from the user's brief/);
   assert.match(instructions, /call skills_recommend/);
   assert.match(instructions, /not behavior-verified or production-approved/);

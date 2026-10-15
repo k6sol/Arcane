@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { checkedDirectory, checkedEntries, checkedFile, FILE_LIMITS } from './paths.js';
 import { codes, digest, fail, fingerprint, freeze, identifier, parse, type TestCode } from './contracts.js';
+import { SCENARIO_ACTIONS, scenarioReviewSchema } from './scenario.js';
 
 export const eventSchema = z.strictObject({
   kind: z.enum(['consent', 'consume', 'admit', 'start_intent', 'start_result', 'observe', 'watchdog',
-    'stop_intent', 'stop_result', 'terminal', 'cleanup']),
+    'stop_intent', 'stop_result', 'terminal', 'cleanup', 'setup_intent', 'setup_result', 'scenario_intent', 'scenario_result', 'capture_intent', 'capture_result', 'restore_intent', 'restore_result']),
   id: identifier, at: z.number().int().nonnegative(), scopeDigest: fingerprint,
   evidence: z.enum(['fixture', 'native']), code: z.enum(codes),
   expiresAt: z.number().int().nonnegative().optional(),
@@ -15,6 +16,7 @@ export const eventSchema = z.strictObject({
   logs: z.array(z.strictObject({ idDigest: fingerprint, digest: fingerprint,
     level: z.enum(['info', 'warning', 'error']), bytes: z.number().int().min(0).max(8192) })).max(8).optional(),
   logsTruncated: z.boolean().optional(),
+  scenario: scenarioReviewSchema.optional(),
 });
 export type TestEvent = z.infer<typeof eventSchema>;
 const recordSchema = z.strictObject({ seq: z.number().int().positive(), previous: z.string().max(64), hash: fingerprint, event: eventSchema });
@@ -119,7 +121,7 @@ export async function readTestLedger(directory: string, existingTrustedRoot: str
 export interface ConsentDisplay {
   proposal: import('./contracts.js').TestProposal; cleanupGraceMs: number; requestTimeoutMs: number;
   proofMaxAgeMs: number; consentExpiresAt: number; guarantee: 'observed-non-atomic';
-  actions: readonly ['start', 'observe-state-and-console', 'stop-owned-play'];
+  actions: readonly ['start', 'observe-state-and-console', 'stop-owned-play'] | typeof SCENARIO_ACTIONS;
   raceDisclosure: 'Observed checks cannot atomically fence the native call.';
 }
 /** Authenticate a HUMAN control audience and verify confirmation of this exact

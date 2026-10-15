@@ -123,6 +123,13 @@ export function decodeTestMode(result: unknown): Pick<NativeTestState,'mode'|'da
   else fail('BAD_NATIVE_RESPONSE');
   return { mode, datamodels };
 }
+export function decodeTestFocus(result: unknown): 'Edit'|'Client'|'Server' {
+  decodeTestMode(result);
+  const text=responseText(result),lines=(text.endsWith('\n')?text.slice(0,-1):text).split('\n');
+  const value=lines[2]!.slice('- Focused DataModel in the viewport: '.length);
+  if(value!=='Edit'&&value!=='Client'&&value!=='Server')fail('BAD_NATIVE_RESPONSE');
+  return value;
+}
 
 // HOST classification of untrusted text, never native severity metadata. A
 // source/line header plus matching first stack frame also recognizes custom

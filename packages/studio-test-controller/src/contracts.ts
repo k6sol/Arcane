@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { scenarioPlanSchema, type ScenarioPlan, type ScenarioRuntimeReport, type ScenarioCapture } from './scenario.js';
 
 export const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 export const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
@@ -10,7 +11,8 @@ export const bindingSchema = z.strictObject({
 export type TestBinding = Readonly<z.infer<typeof bindingSchema>>;
 export const proposalSchema = z.strictObject({
   binding: bindingSchema, durationMs: z.number().int().min(100).max(60_000),
-  observationIntervalMs: z.number().int().min(25).max(2_000), failOnRuntimeError: z.boolean(),
+  observationIntervalMs: z.number().int().min(25).max(2_000), failOnRuntimeError: z.boolean(), scenario: scenarioPlanSchema.optional(),
+  subjectDigest: z.string().regex(/^[a-f0-9]{64}(?![\s\S])/).optional(),
 });
 export type TestProposal = Readonly<z.infer<typeof proposalSchema>>;
 export const proofSchema = z.strictObject({
@@ -46,11 +48,14 @@ export interface TestAdapter {
   start(binding: TestBinding, runId: string, deadline: number, signal: AbortSignal): Promise<void>;
   stop(binding: TestBinding, runId: string, deadline: number, signal: AbortSignal): Promise<void>;
   settle(signal: AbortSignal): Promise<boolean>;
+  prepareScenario?(plan: ScenarioPlan, signal: AbortSignal): Promise<void>;
+  runScenario?(binding: TestBinding, runId: string, plan: ScenarioPlan, deadline: number, signal: AbortSignal): Promise<ScenarioRuntimeReport>;
+  captureScenario?(binding: TestBinding, runId: string, signal: AbortSignal): Promise<ScenarioCapture>;
 }
 export const codes = ['OK', 'INVALID_REQUEST', 'BUSY', 'HUMAN_AUTH_REQUIRED', 'CONSENT_EXPIRED',
   'BINDING_CHANGED', 'STALE_PROOF', 'PLACE_DENIED', 'MODE_MISMATCH', 'NOT_OWNED_PLAY',
   'UNSUPPORTED_TOOL', 'BAD_NATIVE_RESPONSE', 'TIMEOUT', 'CANCELLED', 'DURATION_EXPIRED',
-  'DISCONNECTED', 'SHUTDOWN', 'EFFECT_UNKNOWN', 'RUNTIME_ERROR', 'JOURNAL_FAILED', 'FENCED'] as const;
+  'DISCONNECTED', 'SHUTDOWN', 'EFFECT_UNKNOWN', 'RUNTIME_ERROR', 'ASSERTION_FAILED', 'JOURNAL_FAILED', 'FENCED'] as const;
 export type TestCode = typeof codes[number];
 export class StudioTestError extends Error {
   readonly code: TestCode;

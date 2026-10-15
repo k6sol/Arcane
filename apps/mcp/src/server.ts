@@ -9,6 +9,7 @@ import { validateProperties } from '../../../packages/core/src/studio-policy.js'
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
 import { nativeAdoptGlbInput, assetInput, assetJobId, assetHistoryInput, nativeAssetHistoryInput, nativeAssetJobId } from './asset-schemas.js';
+import { scenarioPlanSchema } from '../../../packages/studio-test-controller/src/scenario.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -83,8 +84,8 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('receipt_restore', 'Write: user-authorized restoration from a succeeded mutation receipt commandId. The daemon constructs the inverse; the plugin requires the exact current after-state and refuses later-edit conflicts. Requires current write grant and edit mode. Do not supply an inverse or repeat on timeout.',
     z.strictObject({ commandId: id, timeoutMs }), WRITE,
     ({ commandId, timeoutMs }, signal) => client.restore(commandId, { timeoutMs, signal }));
-  register('playtest_request','Prepare a bounded real Studio playtest after building: inspect and independently bind the exact paired/native target, then request separate human approval in Arcane. Does not start play or turn write grants into test consent. Currently supports unpublished local places only, with fresh loaded-plugin continuity proof. No raw test code, tool choices or invented IDs. Returns needs_approval; use playtest_status, do not claim the game passed before terminal verified cleanup.',
-    z.strictObject({...target,nativeStudioId:id.optional(),durationMs:z.number().int().min(5000).max(60000).default(15000),observationIntervalMs:z.number().int().min(250).max(2000).default(1000),failOnRuntimeError:z.boolean().default(true)}),{...WRITE,destructiveHint:false},
+  register('playtest_request','Prepare a finite Studio playtest for the exact paired/native unpublished target, with separate human approval in Arcane. An optional sealed scenario can hold movement/interaction keys, click one privately bound GUI target, assert displacement or GUI/text transitions, and restore approved temporary property edits. Source and editor revisions are observed by the host. Request data cannot supply Luau or native tools. Current captures are retained for human review with unattested context; a required Client screenshot remains unsupported evidence. Returns needs_approval; follow playtest_status through settled input release, owned Play stop, and restoration before reporting measured results.',
+    z.strictObject({...target,nativeStudioId:id.optional(),durationMs:z.number().int().min(5000).max(60000).default(15000),observationIntervalMs:z.number().int().min(250).max(2000).default(1000),failOnRuntimeError:z.boolean().default(true),scenario:scenarioPlanSchema.optional()}),{...WRITE,destructiveHint:false},
     ({timeoutMs,...input},signal)=>client.playtestRequest(input,{timeoutMs,signal}));
   register('playtest_status','Read the actual current playtest request/report or caller-scoped pending requests. No effects or retries. Evidence records bounded state/console observations, not exhaustive gameplay correctness; fixture and native evidence remain distinct.',
     z.strictObject({jobId:id.optional(),timeoutMs}),READ,({jobId,timeoutMs},signal)=>client.playtestStatus(jobId,{timeoutMs,signal}));

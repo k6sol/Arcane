@@ -9,13 +9,14 @@ import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { playtestJob } from '../../apps/mcp/src/playtest-schemas.js';
 import { digest } from '../../packages/studio-test-controller/src/contracts.js';
 import type { StudioTestView } from '../../apps/daemon/src/studio-test-service.js';
+import {scenarioPlanSchema,SCENARIO_ACTIONS} from '../../packages/studio-test-controller/src/scenario.js';
 
 // Synthetic daemon reports exercise the actual SDK and HTTP response boundary.
 // The companion service tests validate real controller/store/ledger reports.
 // Neither suite launches a native executable or establishes native acceptance.
 const TOKEN = 'fixture-playtest-agent-bearer';
 const JOB = 'playtest-fixture-job', SESSION = 'paired-fixture-session', STUDIO = 'native-fixture-studio';
-type Mutable<T> = { -readonly [Key in keyof T]: Mutable<T[Key]> };
+type Mutable<T,Depth extends 1[]=[]>=Depth['length'] extends 10?T:{-readonly[Key in keyof T]:Mutable<T[Key],[...Depth,1]>};
 type Job = Mutable<StudioTestView>;
 
 function pending(): Job {
@@ -48,6 +49,21 @@ function finished(cleanup: 'complete' | 'unknown' = 'complete'): Job {
   Object.assign(job.review, { phase: 'done', outcome: 'succeeded', cleanup,
     watchdog: { armed: false, fired: true, reason: 'DURATION_EXPIRED' },
     requiresHumanReview: cleanup === 'unknown', canStartAnotherOperation: cleanup === 'complete' });
+  return job;
+}
+function gameplay():Job {
+  const job=finished(),plan=scenarioPlanSchema.parse({version:1,runtimeBudgetMs:1000,
+    targets:[{id:'panel',root:'LocalPlayer.PlayerGui',segments:['HUD','Result'],className:'TextLabel'}],
+    steps:[{id:'walk',kind:'hold-key',key:'W',holdMs:100},{id:'distance',kind:'assert-displacement',minimumStuds:1},
+      {id:'visible',kind:'assert-gui',targetId:'panel',property:'Visible',equals:true,withinMs:100},
+      {id:'text',kind:'assert-text',targetId:'panel',equals:'Complete',withinMs:100}],capture:{required:false}});
+  job.display.proposal.scenario=plan;job.display.proposal.subjectDigest='f'.repeat(64);job.display.actions=[...SCENARIO_ACTIONS];
+  job.displayDigest=digest(job.display);job.review.scopeDigest=job.displayDigest;
+  job.review.scenario={scenarioDigest:digest(plan),subjectDigest:'f'.repeat(64),state:'passed',inputRelease:'observed_released',temporary:'not_started',capture:null,consoleCoverage:'ambiguous',
+    steps:[{id:'walk',kind:'hold-key',outcome:'passed',expected:'W:100',observed:'observed-released'},
+      {id:'distance',kind:'assert-displacement',outcome:'passed',expected:1,observed:2},
+      {id:'visible',kind:'assert-gui',outcome:'passed',expected:true,observed:true,baseline:false},
+      {id:'text',kind:'assert-text',outcome:'passed',expected:'Complete',observed:'Complete',baseline:'Waiting'}]};
   return job;
 }
 function send(response: ServerResponse, status: number, payload: unknown) {
@@ -318,4 +334,32 @@ test('playtest decoder: service bounds and pending identity remain closed withou
     assert.equal(playtestJob.safeParse(job).success, false);
   }
   assert.equal(playtestJob.safeParse(finished('unknown')).success, true);
+});
+
+test('playtest SDK: sealed gameplay expectations and observed transitions survive HTTP decoding',async t=>{
+  const f=await fixture(t),valid=gameplay();f.state.payload={job:valid};
+  assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job:valid});
+  const mutations:[string,(job:Job)=>void][]=[
+    ['wrong key expectation',job=>{job.review.scenario!.steps[0]!.expected='D:100';}],
+    ['unobserved release',job=>{job.review.scenario!.steps[0]!.observed='pressed';}],
+    ['short displacement',job=>{job.review.scenario!.steps[1]!.observed=0.5;}],
+    ['false visible observation',job=>{job.review.scenario!.steps[2]!.observed=false;}],
+    ['nonboolean visible baseline',job=>{job.review.scenario!.steps[2]!.baseline='arbitrary';}],
+    ['already satisfied transition',job=>{job.review.scenario!.steps[2]!.baseline=true;}],
+    ['missing transition baseline',job=>{Reflect.deleteProperty(job.review.scenario!.steps[2]!,'baseline');}],
+    ['wrong text observation',job=>{job.review.scenario!.steps[3]!.observed='Waiting';}],
+    ['nonstring text baseline',job=>{job.review.scenario!.steps[3]!.baseline=false;}],
+    ['unrelated baseline',job=>{job.review.scenario!.steps[0]!.baseline=false;}],
+    ['missing input release',job=>{job.review.scenario!.inputRelease='not_started';}],
+    ['incomplete passing rows',job=>{job.review.scenario!.steps.pop();}],
+  ];
+  for(const[name,mutate]of mutations)await t.test(name,async()=>{
+    const job=gameplay();mutate(job);f.state.payload={job};const result=await call(f.client,'playtest_status',{jobId:JOB});
+    assert.equal(result.result.isError,true);assert.equal((result.data.error as{code:string}).code,'PROTOCOL');assert.equal(result.data.job,undefined);
+  });
+  const failed=gameplay();failed.review.outcome='failed';failed.review.code='ASSERTION_FAILED';failed.review.scenario!.state='failed';
+  failed.review.scenario!.steps[1]!.outcome='failed';failed.review.scenario!.steps[1]!.observed=0.5;
+  failed.review.scenario!.steps.splice(2);f.state.payload={job:failed};
+  assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job:failed},'a truthful failed prefix remains reportable');
+  assert.equal(f.requests.length,mutations.length+2,'malformed observations are read once without execution or replay');
 });

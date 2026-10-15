@@ -16,7 +16,7 @@ const object = (value: unknown): value is Record<string, unknown> => typeof valu
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f]/.test(value);
 const integer = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-const ACTIONS = ['grant-assets','revoke-assets','connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','approval','history-load'];
+const ACTIONS = ['grant-assets','revoke-assets','connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','task-stop','task-focus','approval','history-load'];
 const IDLE = ['idle','completed','failed','interrupted'];
 type ChatEvent = SessionEvent;
 export type ChatSnapshot = Omit<Snapshot, 'events'> & { events: ChatEvent[] };
@@ -117,7 +117,8 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
   return value as unknown as ChatSnapshot;
 }
 function readActionRecord(value: unknown): ChatActionRecord {
-  if (!dataObject(value, ['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt']) || !uuid(value.requestId) || !ACTIONS.includes(String(value.action)) || !(value.connectionId === null || uuid(value.connectionId)) || !['pending','acknowledged','rejected','unknown'].includes(String(value.state))) throw new Error('Invalid native action receipt.');
+  const rotated=dataObject(value)&&Object.hasOwn(value,'nextConnectionId');
+  if (!dataObject(value, ['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt',...(rotated?['nextConnectionId']:[])]) || !uuid(value.requestId) || !ACTIONS.includes(String(value.action)) || !(value.connectionId === null || uuid(value.connectionId)) || !['pending','acknowledged','rejected','unknown'].includes(String(value.state)) || rotated&&(!['turn-start','task-focus'].includes(String(value.action))||!uuid(value.nextConnectionId)||value.nextConnectionId===value.connectionId)) throw new Error('Invalid native action receipt.');
   for (const key of ['threadId','turnId','model','effort','errorCode']) if (!(value[key] === null || text(value[key], key === 'effort' ? 64 : 256))) throw new Error('Invalid native action receipt metadata.');
   if (!text(value.createdAt,64) || !Number.isFinite(Date.parse(value.createdAt)) || !(value.finishedAt === null || text(value.finishedAt,64) && Number.isFinite(Date.parse(value.finishedAt)))) throw new Error('Invalid native action receipt timestamps.');
   if (['grant-assets','revoke-assets'].includes(String(value.action)) && (!uuid(value.connectionId) || !text(value.threadId))) throw new Error('Invalid exact native asset action receipt scope.');
@@ -125,10 +126,19 @@ function readActionRecord(value: unknown): ChatActionRecord {
 }
 export function readCodexState(value: unknown): ChatState {
   if (!dataObject(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !dataObject(value.nativeTools, ['configured','verified']) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
-  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited'];
+  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks'];
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected native workflow state field.');
   if (Object.hasOwn(value, 'nativeAssets')) readNativeAssets(value.nativeAssets);
   readSnapshot(value.snapshot); readSnapshot(value.lastSnapshot);
+  if(Object.hasOwn(value,'chatTasks')){
+    if(!Array.isArray(value.chatTasks)||value.chatTasks.length>256)throw new Error('Invalid bounded conversation task state.');
+    const ids=new Set<string>();
+    for(const task of value.chatTasks){
+      if(!dataObject(task,['taskId','threadId','sessionId','connectionId','state','round','reason','reportDigest',...(dataObject(task)&&Object.hasOwn(task,'retained')?['retained']:[])])||Object.hasOwn(task,'retained')&&typeof task.retained!=='boolean'||!uuid(task.taskId)||ids.has(task.taskId)||!text(task.threadId)||!(task.sessionId===null||text(task.sessionId))||!uuid(task.connectionId)||
+        !['working','awaiting_verification','repair_queued','repairing','verified','failed','cancelled','paused','unknown'].includes(String(task.state))||![0,1].includes(task.round as number)||!(task.reason===null||text(task.reason))||!(task.reportDigest===null||typeof task.reportDigest==='string'&&/^[a-f0-9]{64}(?![\s\S])/.test(task.reportDigest)))throw new Error('Invalid exact conversation task summary.');
+      ids.add(task.taskId);
+    }
+  }
   if (value.nativeHistory !== undefined && value.nativeHistory !== null) {
     const binding = value.nativeHistory;
     const historyId = (id: unknown) => text(id) && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id);
@@ -164,7 +174,7 @@ export function readCodexState(value: unknown): ChatState {
 }
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
-  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
+  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], 'task-stop':['threadId','taskId'], 'task-focus':['threadId','taskId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
   const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites']:action==='disconnect'?['preserveAssetWork']:[];
   const keys = [...accepted[action]!, ...optional.filter(key=>Object.hasOwn(fields,key))];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
@@ -188,6 +198,8 @@ export function prepareCodexAction(state: ChatState | null, action: string, fiel
   if (action !== 'connect' && !s) throw new Error('An exact reported native connection is required.');
   if (action === 'select' && (!text(fields.model) || !text(fields.effort,64) || !s!.models.some(m => m.model === fields.model && m.efforts.includes(fields.effort as string)))) throw new Error('Choose an exact reported model and effort; there is no fallback.');
   for (const key of ['threadId','turnId','handle']) if (key in fields && !text(fields[key])) throw new Error('Enter an exact bounded scope ID.');
+  if(action==='task-stop'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===s?.thread?.threadId&&task.sessionId===s.thread.sessionId&&fields.threadId===task.threadId)))throw new Error('Choose the exact owned task in this conversation.');
+  if(action==='task-focus'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===fields.threadId&&task.retained===true&&state.nativeThreads?.some(saved=>saved.threadId===task.threadId&&saved.sessionId===task.sessionId))))throw new Error('Choose the exact retained task in a saved conversation.');
   if (action === 'turn-start' && (typeof fields.text !== 'string' || !fields.text.trim() || utf8(fields.text) > CODEX_INPUT_BYTES)) throw new Error('Submit nonempty text of at most 128 KiB in UTF-8.');
   if (action === 'approval' && !['accept','decline','cancel'].includes(String(fields.decision))) throw new Error('Choose one explicit approval decision.');
   return { requestId, connectionId: action === 'connect' ? null : s!.connectionId, action, ...fields } as ChatAction;
@@ -232,7 +244,11 @@ export class CodexChatApi {
     const r=readActionRecord(value.record);
     if(r.requestId!==input.requestId||r.action!==input.action||(input.action!=='connect'&&r.connectionId!==input.connectionId)||(input.action==='connect'&&r.state==='acknowledged'&&!uuid(r.connectionId)))throw new CodexHttpError('Native acknowledgement did not match the exact request.',true);
     if ((input.action === 'grant-assets' || input.action === 'revoke-assets') && r.threadId !== input.threadId) throw new CodexHttpError('Native asset acknowledgement did not match the exact thread.', true);
-    return {record:r,replayed:value.replayed,state:readCodexState(value.state)};
+    const state=readCodexState(value.state);
+    if(r.nextConnectionId){const snapshot=state.snapshot??state.lastSnapshot,binding=state.nativeThreads?.find(row=>row.threadId===r.threadId);
+      if(!['turn-start','task-focus'].includes(input.action)||!('threadId'in input)||r.threadId!==input.threadId||!snapshot||snapshot.connectionId!==r.nextConnectionId||snapshot.thread?.threadId!==input.threadId||!binding||snapshot.thread.sessionId!==binding.sessionId)
+        throw new CodexHttpError('Fresh task acknowledgement changed its exact conversation.',true);}
+    return {record:r,replayed:value.replayed,state};
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
 }
@@ -240,6 +256,7 @@ export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope:
 export class CodexTranscript {
   connectionId=''; cursor=0; gaps=0; dropped=0; truncated=false; messages:ChatMessage[]=[];
   reset(id='') {this.connectionId=id;this.cursor=0;this.gaps=0;this.dropped=0;this.truncated=false;this.messages=[];}
+  rebind(id:string) {this.connectionId=id;this.cursor=0;this.gaps=0;this.dropped=0;}
   consume(snapshot:ChatSnapshot) {
     if(snapshot.connectionId!==this.connectionId)this.reset(snapshot.connectionId);
     if(snapshot.lastEventSeq<this.cursor)throw new Error('Older native event snapshot discarded; refresh current state.');
@@ -518,11 +535,20 @@ export class CodexChat {
     if(!this.providerAllowsCodex()){this.text('codex-notice','Choose Codex to open this saved chat. Claude Code uses its native handoff.');return false;}
     await this.refresh();const project=this.state?.projectPath;
     const blocked=this.tabBlockReason();if(!project||blocked){if(blocked)this.text('codex-notice',blocked);return false;}
-    if(this.snapshot()&&!this.snapshot()!.models.some(row=>row.model===selection.model&&row.efforts.includes(selection.effort))){this.text('codex-notice','The saved model and effort are absent from the current catalogue. No fallback was selected.');return false;}
+    const saved=this.state?.nativeThreads?.find(row=>row.threadId===threadId),retained=action==='thread-resume'?this.state?.chatTasks?.filter(task=>task.retained===true&&task.threadId===threadId&&task.sessionId===saved?.sessionId)??[]:[];
+    if(retained.length>1){this.text('codex-notice','Multiple retained task owners require review before opening this conversation.');return false;}
+    if(!retained.length&&this.snapshot()&&!this.snapshot()!.models.some(row=>row.model===selection.model&&row.efforts.includes(selection.effort))){this.text('codex-notice','The saved model and effort are absent from the current catalogue. No fallback was selected.');return false;}
     this.tabTransition=true;this.render();this.publishState();
     const exact=()=>this.state?.projectPath===project&&this.fresh&&!this.stopped&&this.providerAllowsCodex();
     const perform=async(name:string,fields:Record<string,unknown>={})=>{if(!exact())return false;const receipt=await this.dispatch(name,fields,true);return exact()&&receipt?.state==='acknowledged';};
     try {
+      if(retained.length===1){
+        if(!this.snapshot()&&!await perform('connect'))return false;
+        if(!await perform('task-focus',{threadId,taskId:retained[0]!.taskId}))return false;
+        const live=this.snapshot()?.thread;if(!live?.configured||live.threadId!==threadId||live.sessionId!==saved?.sessionId)return false;
+        if(IDLE.includes(live.turnStatus))await perform('history-load',{threadId:live.threadId});
+        return exact();
+      }
       const old=this.snapshot()?.thread;
       if(old?.configured&&this.state?.nativeHistory?.threadId===old.threadId) {
         if(!await perform('history-load',{threadId:old.threadId}))return false;
@@ -632,6 +658,11 @@ export class CodexChat {
     this.text('codex-confirm-warning', 'This only re-reviews draft text for this conversation. It does not submit a turn, move a workflow, grant writes or accept evidence.');
   }
   private snapshot(){return this.state?.snapshot;}
+  private currentTask(){const thread=this.snapshot()?.thread;if(!thread||this.tabs&&!this.tabs.bound(this.state))return null;
+    return this.state?.chatTasks?.findLast(task=>task.threadId===thread.threadId&&task.sessionId===thread.sessionId&&['working','awaiting_verification','repair_queued','repairing'].includes(task.state))??null;}
+  private stopCurrentTask(){const task=this.currentTask(),thread=this.snapshot()?.thread;
+    if(task)void this.dispatch('task-stop',{threadId:task.threadId,taskId:task.taskId});
+    else if(thread?.turnId)void this.dispatch('turn-interrupt',{threadId:thread.threadId,turnId:thread.turnId});}
   private assetScope(state = this.state) {
     const s = state?.snapshot, t = s?.thread;
     return JSON.stringify([state?.projectPath, s?.connectionId, s?.connected, s?.ready, t?.threadId, t?.sessionId, t?.configured]);
@@ -1040,7 +1071,7 @@ export class CodexChat {
     this.bindAssetButton('codex-assets-revoke', 'revoke-assets');
     this.on('codex-grant','click',()=>this.openGrant());
     this.on('codex-revoke','click',()=>{const t=this.snapshot()?.thread;if(t)void this.dispatch('revoke-writes',{threadId:t.threadId});});
-    this.on('codex-interrupt','click',()=>{const t=this.snapshot()?.thread;if(t?.turnId)void this.dispatch('turn-interrupt',{threadId:t.threadId,turnId:t.turnId});});
+    this.on('codex-interrupt','click',()=>this.stopCurrentTask());
     this.on('codex-composer','input',()=>this.composerInput());
     this.on('codex-composer','keydown',event=>{
       const key=event as KeyboardEvent;
@@ -1054,7 +1085,7 @@ export class CodexChat {
     });
     this.on('codex-submit','click',()=>{
       const thread=this.snapshot()?.thread;
-      if(this.providerAllowsCodex()&&thread?.configured&&thread.turnId&&['starting','inProgress'].includes(thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state)))void this.dispatch('turn-interrupt',{threadId:thread.threadId,turnId:thread.turnId});
+      if(this.providerAllowsCodex()&&thread?.configured&&thread.turnId&&['starting','inProgress'].includes(thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state)))this.stopCurrentTask();
     });
     this.on('codex-reconcile','click',()=>void this.refresh());
     this.on('codex-acknowledge','click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Recorded action IDs and native state reviewed. No request was retried.');this.render();});
@@ -1096,13 +1127,18 @@ export class CodexChat {
   private applyState(state:ChatState) {
     this.flushDraft();
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
-    if(before!==after){this.generation++;this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.selectionSignature='';this.closeConfirmation();this.closePicker(true);}
+    const previous=this.snapshot()?.thread,next=state.snapshot?.thread;
+    const rotation=before!==after&&!!before&&!!after&&!!previous&&!!next&&previous.threadId===next.threadId&&previous.sessionId===next.sessionId&&
+      state.actions.some(record=>record.action==='turn-start'&&record.connectionId===before&&record.nextConnectionId===after&&record.threadId===next.threadId);
+    const focus=before!==after&&!!next&&state.actions.some(record=>record.action==='task-focus'&&record.connectionId===before&&record.nextConnectionId===after&&record.threadId===next.threadId)&&
+      this.state?.chatTasks?.some(task=>task.retained===true&&task.connectionId===after&&task.threadId===next.threadId&&task.sessionId===next.sessionId);
+    if(before!==after){if(!rotation&&!focus)this.generation++;if(rotation)this.transcript.rebind(after);else this.transcript.reset(after);this.messageSignature='';this.approvalSignature='';this.modelSignature='';this.selectionSignature='';this.closeConfirmation();this.closePicker(true);}
     else if(this.assetScope()!==this.assetScope(state)) { this.generation++; this.closePicker(true); } // Invalidate gestures/replies; retain the disabled stale review for explicit dismissal.
     if(state.snapshot)this.transcript.consume(state.snapshot);
     this.state = state;
     this.syncTabs();
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
-    for(const r of state.actions) if(['pending','unknown'].includes(r.state)&&!this.pending.has(r.requestId)&&!this.uncertain.has(r.requestId)&&(r.connectionId===state.snapshot?.connectionId||r.action==='connect'&&state.connecting)) {
+    for(const r of state.actions) if(['pending','unknown'].includes(r.state)&&!this.pending.has(r.requestId)&&!this.uncertain.has(r.requestId)&&(r.connectionId===state.snapshot?.connectionId||r.nextConnectionId===state.snapshot?.connectionId||r.action==='connect'&&state.connecting)) {
       this.uncertain.set(r.requestId,{input:{requestId:r.requestId,connectionId:r.action==='connect'?null:r.connectionId,action:r.action} as ChatAction,read:true});
     }
     this.publishProviderState();
@@ -1120,7 +1156,7 @@ export class CodexChat {
   private async dispatch(action:string,fields:Record<string,unknown>={},internal=false) {
     if(this.stopped)return;
     if(['turn-start','thread-start','thread-resume','select','grant-writes','grant-assets'].includes(action)&&!this.providerAllowsCodex())return;
-    if(this.tabTransition&&!internal&&!['disconnect','revoke-writes','revoke-assets','turn-interrupt','approval'].includes(action))return;
+    if(this.tabTransition&&!internal&&!['disconnect','revoke-writes','revoke-assets','turn-interrupt','task-stop','approval'].includes(action))return;
     if(action==='thread-start'&&!internal) {
       if(!this.canStartThread())return;
       if(this.tabs?.active()?.kind==='draft') {
@@ -1140,7 +1176,7 @@ export class CodexChat {
     if(this.tabs&&!internal&&action==='thread-resume')return; // Only openSavedChat can resolve advisory browser IDs.
     if(action==='turn-start'&&(!this.snapshot()?.thread?.configured||!IDLE.includes(this.snapshot()!.thread!.turnStatus)))return;
     if ((action === 'grant-assets' || action === 'revoke-assets') && !this.assetEligible(action)) return;
-    const safety=action==='revoke-assets'||action==='disconnect'||action==='revoke-writes'||action==='turn-interrupt'||action==='approval'&&fields.decision!=='accept';
+    const safety=action==='revoke-assets'||action==='disconnect'||action==='revoke-writes'||action==='turn-interrupt'||action==='task-stop'||action==='approval'&&fields.decision!=='accept';
     if(this.state?.displayLimited&&!safety&&action!=='connect')return;
     if(!safety&&action!=='connect'&&!this.normal()&&!(action==='approval'&&!this.uncertain.size&&this.fresh))return;
     if(action==='connect'&&(!this.fresh||this.snapshot()||this.uncertain.size||this.pending.size||this.state?.connecting||this.state?.closing))return;
@@ -1156,9 +1192,13 @@ export class CodexChat {
     try {
       const outcome=await this.api.action(input);
       const current=this.snapshot()?.connectionId;
-      const fenced=this.stopped||epoch!==this.generation||((input.action==='grant-assets'||input.action==='revoke-assets')&&assetScope!==this.assetScope())||(input.action!=='connect'&&input.action!=='disconnect'&&current!==input.connectionId)||(input.action==='disconnect'&&!!current&&current!==input.connectionId)||(input.action==='connect'&&!!current&&current!==outcome.record.connectionId);
+      const freshTask=input.action==='turn-start'&&!!outcome.record.nextConnectionId&&(current===input.connectionId||current===outcome.record.nextConnectionId)&&
+        outcome.state.snapshot?.connectionId===outcome.record.nextConnectionId&&outcome.state.snapshot.thread?.threadId===input.threadId&&outcome.state.snapshot.thread.sessionId===this.snapshot()?.thread?.sessionId;
+      const focusedTask=input.action==='task-focus'&&!!outcome.record.nextConnectionId&&(current===input.connectionId||current===outcome.record.nextConnectionId)&&
+        this.state?.chatTasks?.some(task=>task.taskId===input.taskId&&task.retained===true&&task.threadId===input.threadId&&task.sessionId===outcome.state.snapshot?.thread?.sessionId&&task.connectionId===outcome.record.nextConnectionId);
+      const fenced=this.stopped||epoch!==this.generation||((input.action==='grant-assets'||input.action==='revoke-assets')&&assetScope!==this.assetScope())||(input.action!=='connect'&&input.action!=='disconnect'&&current!==input.connectionId&&!freshTask&&!focusedTask)||(input.action==='disconnect'&&!!current&&current!==input.connectionId)||(input.action==='connect'&&!!current&&current!==outcome.record.connectionId);
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;
-        const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-interrupt':'Stop requested.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
+        const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
         this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;
@@ -1208,6 +1248,9 @@ export class CodexChat {
     this.text('codex-profile',this.state?.nativeTools.configured?'Native tool profile requested · verified:false. Studio grants remain separate; no Studio connection was established by this panel.':'Native tool profile not requested · verified:false. Studio grants remain separate.');
     if(this.state?.displayLimited)this.text('codex-profile','Display limited: public events and approvals were omitted, not resolved. New work is blocked. Review the native client or use interrupt, revoke or disconnect. '+this.el('codex-profile').textContent);
     if(s?.mcpIsolation)this.text('codex-profile','Native MCP scope: '+s.mcpIsolation+'. Read-only applies to native file/command execution; Arcane MCP operations still use their separate grants. '+this.el('codex-profile').textContent);
+    if(t){const task=this.state?.chatTasks?.findLast(task=>task.threadId===t.threadId&&task.sessionId===t.sessionId);if(task){
+      const labels:Record<string,string>={working:IDLE.includes(t.turnStatus)?'No settled gameplay verification yet.':'Working on this task.',awaiting_verification:'Waiting for bounded verification.',repair_queued:'One repair is queued.',repairing:'Repairing and verifying once.',verified:'The bounded scenario passed.',failed:'The bounded scenario still fails after one repair.',cancelled:'Task stopped.',paused:'Verification needs review.',unknown:'Task outcome is uncertain. No automatic retry.'};
+      this.text('codex-policy',labels[task.state]??'Verification needs review.');}}
     const signature=JSON.stringify(s?.models??[]),selection=this.displaySelection(),selectionSignature=JSON.stringify(selection??null);
     const catalogueChanged=signature!==this.modelSignature;
     if(catalogueChanged){this.modelSignature=signature;const select=this.el<HTMLSelectElement>('codex-model');select.replaceChildren();const p=this.make('option','Choose reported model');p.value='';select.append(p);for(const m of s?.models??[]){const o=this.make('option',m.displayName+' · '+m.model);o.value=m.model;select.append(o);}}
@@ -1280,7 +1323,8 @@ export class CodexChat {
       !this.startPairReady() ? 'Choose a model and effort to continue.' : 'Starting a conversation won’t send your message.');
     disable('codex-grant',!this.providerAllowsCodex()||!normal||!activeThread?.configured||activeThread.writeGranted||!IDLE.includes(activeThread.turnStatus));
     disable('codex-revoke',this.stopped||!t?.configured||pending('revoke-writes'));
-    disable('codex-interrupt',this.stopped||!t?.turnId||!['starting','inProgress'].includes(t.turnStatus)||pending('turn-interrupt'));
+    const ownedTask=this.currentTask();this.text('codex-interrupt',ownedTask?'Stop task':'Interrupt current turn');
+    disable('codex-interrupt',this.stopped||(!ownedTask&&(!t?.turnId||!['starting','inProgress'].includes(t.turnStatus)))||pending('turn-interrupt')||pending('task-stop'));
     this.renderComposer();
     disable('codex-acknowledge',!this.canAcknowledge());
     for(const card of Array.from(this.el('codex-approvals').children)){const a=s?.approvals.find(a=>a.handle===(card as HTMLElement).dataset.handle);for(const b of Array.from(card.querySelectorAll<HTMLButtonElement>('button[data-decision]')))b.disabled=this.stopped||!a||a.connectionId!==s?.connectionId||a.threadId!==t?.threadId||a.turnId!==t?.turnId||a.expiresAt<=Date.now()||[...this.pending.values()].some(p=>p.action==='approval'&&p.handle===a.handle)||(b.dataset.decision==='accept'&&(!this.fresh||!!this.uncertain.size||!approvalEligible(this.state,a)));}
@@ -1301,7 +1345,7 @@ export class CodexChat {
       path?.setAttribute('fill',active?'currentColor':'none');
     }
     const controls=submit.closest?.<HTMLElement>('.composer-controls');if(controls)controls.dataset.taskActive=String(active);
-    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'):this.preparingMessage||!this.messageTargetReady()||!message.trim()||size>CODEX_INPUT_BYTES||draftBlocked);
+    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'||input.action==='task-stop'):this.preparingMessage||!this.messageTargetReady()||!message.trim()||size>CODEX_INPUT_BYTES||draftBlocked);
     this.el('codex-draft-review').hidden=!draftBlocked;
     const notice=draftBlocked?this.restoredWorkflowDraft?'Restored draft. Review it for this conversation and model before sending.':'Workflow draft context changed. Your unsent text is preserved; review it for this conversation before sending.':'';
     if(this.el('codex-draft-review-notice').textContent!==notice)this.text('codex-draft-review-notice',notice);

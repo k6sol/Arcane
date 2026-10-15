@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -8,6 +8,7 @@ import { ARCANE_TASK_INSTRUCTIONS, ARCANE_NATIVE_TOOL_NAMES } from '../../protoc
 import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
+import type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
 
 const USAGE_COUNT_LIMIT = 1_000_000_000_000;
 const USAGE_KEYS = ['totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens'] as const;
@@ -144,6 +145,7 @@ export class CodexSession {
   #ready = false;
   #initializing = false;
   #account: Account | null = null;
+  #accountIdentity: string | null = null;
   #models: Model[] = [];
   #selection: Selection | null = null;
   #thread: ThreadState | null = null;
@@ -168,6 +170,9 @@ export class CodexSession {
   #turnOperation: Operation | null = null;
   #automaticWriteOperation: Operation | null = null;
   #automaticWriteStarts = new WeakSet<Operation>();
+  #taskContinuation: { token: NativeTaskContinuation; thread: ThreadState; operation: Operation;
+    selection: Selection; accountRevision: number; accountIdentity:string; allowWrites: boolean; used: boolean; revoked: boolean } | null = null;
+  #managedStarting = false;
   #catalogueLoading = false;
   #cancelledTurnId: string | null = null;
   #knownTurnIds = new Set<string>();
@@ -287,12 +292,15 @@ export class CodexSession {
       const automatic = this.#endAutomaticWrites();
       this.#retireNativeAssets();
       this.#account = null;
+      this.#accountIdentity = null;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel');
       if (automatic) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Account verification failed during a writable turn.'));
       throw error;
     }
   }
+  /** Host-only reported identity comparison; never part of snapshots or prompts. */
+  taskAccountIdentity(): string | null { return this.#account?.auth === 'subscription' ? this.#accountIdentity : null; }
   async listModels(): Promise<Model[]> { this.#ensureReady(); await this.#listModels(); return structuredClone(this.#models); }
   selectModel(action: HumanAction & Selection): Selection {
     this.#ensureReady();
@@ -306,6 +314,7 @@ export class CodexSession {
     }
     const pair = { model: str(action.model), effort: str(action.effort, 64) };
     this.#validatePair(pair); // Also fences catalogue refreshes, including a same-pair action.
+    this.revokeTaskContinuation();
     if (this.#selection?.model === pair.model && this.#selection.effort === pair.effort &&
         (!thread || thread.selection.model === pair.model && thread.selection.effort === pair.effort)) return structuredClone(pair);
     if (thread) {
@@ -356,6 +365,7 @@ export class CodexSession {
   revokeThreadWrites(action: HumanAction & { threadId: string }): void {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId, false);
+    this.revokeTaskContinuation();
     if (this.#turnPreflight?.thread === thread) this.#turnPreflight.revoked = true;
     this.#endAutomaticWrites();
     thread.writeGranted = false;
@@ -365,9 +375,52 @@ export class CodexSession {
       this.#transport.stop(new CodexClientError('GRANT_REVOKED', 'Write grant revoked during an active turn; explicit recovery is required.'));
     }
   }
-  async startTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }): Promise<ThreadState> {
+  #humanTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }) {
     exact(action, ['initiatedBy','threadId','text','allowWorkspaceWrites']); human({ initiatedBy: action.initiatedBy });
     if (Object.hasOwn(action, 'allowWorkspaceWrites') && typeof action.allowWorkspaceWrites !== 'boolean') fail('ARGUMENTS', 'Send workspace permission must be a boolean.');
+    return { threadId: str(action.threadId), text: str(action.text, this.bounds.maxInputBytes), allowWorkspaceWrites: action.allowWorkspaceWrites === true };
+  }
+  async startTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }): Promise<ThreadState> {
+    const input = this.#humanTurn(action);this.#requireThread(input.threadId);
+    if(this.#managedStarting)fail('BUSY','A managed start is already awaiting its acknowledgement.');
+    this.revokeTaskContinuation();
+    return this.#startTurn(input, false);
+  }
+  async startManagedTask(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }): Promise<ManagedTaskStart> {
+    const input = this.#humanTurn(action);this.#requireThread(input.threadId);
+    if(this.#managedStarting)fail('BUSY','A managed start is already awaiting its acknowledgement.');
+    this.revokeTaskContinuation();
+    if (this.mcpPolicy !== 'arcane-only' || !this.#nativeAssetHooks) fail('MCP_PROFILE', 'Managed tasks require an owned isolated MCP incarnation.');
+    if(!this.#accountIdentity)fail('ACCOUNT_IDENTITY','Managed continuation requires a reported native subscription identity.');
+    this.#managedStarting = true;
+    try {
+      const thread = await this.#startTurn(input, true);
+      if (!this.#taskContinuation) throw new CodexClientError('TASK_SCOPE', 'The managed task continuation was not established.', true);
+      return { thread, continuation: this.#taskContinuation.token };
+    } finally { this.#managedStarting = false; }
+  }
+  /** Private application port, never a human action or provider/MCP parameter. */
+  async continueTask(action: { continuation: NativeTaskContinuation; text: string }): Promise<ThreadState> {
+    exact(action, ['continuation','text']);
+    const permit = this.#taskContinuation;
+    if (!permit || action.continuation !== permit.token || permit.used || permit.revoked) fail('TASK_SCOPE', 'Task continuation is unavailable.');
+    const thread = this.#requireThread(permit.thread.threadId);
+    if (thread !== permit.thread || permit.operation.state !== 'acknowledged' ||
+        !['completed','failed'].includes(thread.turnStatus) || this.#accountRevision !== permit.accountRevision || this.#accountIdentity!==permit.accountIdentity ||
+        thread.selection.model !== permit.selection.model || thread.selection.effort !== permit.selection.effort ||
+        this.#selection?.model !== permit.selection.model || this.#selection.effort !== permit.selection.effort ||
+        !permit.allowWrites && thread.writeGranted) fail('TASK_SCOPE', 'The original task identity, policy or terminal operation changed.');
+    const text = str(action.text, this.bounds.maxInputBytes);
+    permit.used = true; // Reserve before asynchronous preflight; uncertain starts are never retried.
+    return this.#startTurn({ threadId: thread.threadId, text, allowWorkspaceWrites: permit.allowWrites }, false);
+  }
+  revokeTaskContinuation(): void {
+    if (this.#managedStarting && this.#turnPreflight) this.#turnPreflight.revoked = true;
+    if (!this.#taskContinuation || this.#taskContinuation.revoked) return;
+    this.#taskContinuation.revoked = true;
+    if (this.#turnPreflight) this.#turnPreflight.revoked = true;
+  }
+  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean }, managed: boolean): Promise<ThreadState> {
     const allowWorkspaceWrites = action.allowWorkspaceWrites === true;
     const thread = this.#requireThread(action.threadId);
     if (this.#turnPreflight || this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
@@ -396,6 +449,10 @@ export class CodexSession {
       finally { this.#turnPreflight = null; }
     }
     const operation = this.#newOperation('turn/start', thread.threadId, null);
+    if (managed) this.#taskContinuation = { token: Object.freeze({ kind: 'native-task-continuation' }), thread, operation,
+      selection: { ...thread.selection }, accountRevision: this.#accountRevision,
+      accountIdentity:this.#accountIdentity!,
+      allowWrites: allowWorkspaceWrites || thread.writeGranted, used: false, revoked: false };
     this.#turnOperation = operation;
     this.#cancelledTurnId = null;
     this.#clearApprovals('cancel');
@@ -447,6 +504,7 @@ export class CodexSession {
     const turnId = str(action.turnId);
     if (thread.turnId !== turnId || !['starting','inProgress'].includes(thread.turnStatus)) fail('STATE', 'Select the exact active turn to interrupt.');
     const operation = this.#newOperation('turn/interrupt', thread.threadId, turnId);
+    this.revokeTaskContinuation();
     // Fence first, synchronously, before any write or acknowledgement. Late prompts cannot be accepted.
     this.#cancelledTurnId = turnId; thread.turnStatus = 'cancelling'; thread.writeGranted = false;
     this.#endAutomaticWrites();
@@ -475,6 +533,7 @@ export class CodexSession {
     this.#removeApproval(pending, action.decision);
   }
   async close(): Promise<void> {
+    this.revokeTaskContinuation();
     this.#retireNativeAssets();
     const read = this.#historyRead; read?.stop();
     await Promise.allSettled([this.#transport.close(), ...(read ? [read.promise] : [])]);
@@ -536,12 +595,15 @@ export class CodexSession {
         plan: raw?.type === 'chatgpt' && typeof raw.planType === 'string' && PLANS.has(raw.planType) ? raw.planType : null,
         requiresOpenaiAuth: result.requiresOpenaiAuth,
       };
-      if ((this.#ready || this.#thread) && this.#account && (this.#account.auth !== account.auth || this.#account.plan !== account.plan || this.#account.requiresOpenaiAuth !== account.requiresOpenaiAuth)) {
+      const identity = raw?.type === 'chatgpt' && typeof raw.email === 'string' && raw.email.length > 0 && raw.email.length <= 1024 && !/[\x00-\x1f\x7f]/.test(raw.email)
+        ? createHash('sha256').update('codex-reported-account\0'+raw.email).digest('hex') : null;
+      if ((this.#ready || this.#thread) && this.#account && (this.#account.auth !== account.auth || this.#account.plan !== account.plan || this.#account.requiresOpenaiAuth !== account.requiresOpenaiAuth || this.#accountIdentity !== identity)) {
         const automatic = this.#endAutomaticWrites();
         this.#retireNativeAssets();
         if (automatic) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Account metadata changed during a writable turn.'));
       }
       this.#account = account;
+      this.#accountIdentity = identity;
       if (account.auth !== 'subscription' && this.#thread) {
         this.#thread.writeGranted = false; this.#clearApprovals('cancel');
         if (['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
@@ -703,6 +765,7 @@ export class CodexSession {
     }
   }
   #retireNativeAssets(): void {
+    this.revokeTaskContinuation();
     if (!this.#nativeAssetHooks || this.#assetsRetired) return;
     this.#assetsRetired = true;
     this.#ready = false;
@@ -789,6 +852,7 @@ export class CodexSession {
       if (!this.#initializing || this.#ready || this.#thread) this.#retireNativeAssets();
       this.#accountRevision++;
       this.#account = null;
+      this.#accountIdentity = null;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel'); this.#event({ type: 'account-changed' });
       const auth = object(message.params).authMode;

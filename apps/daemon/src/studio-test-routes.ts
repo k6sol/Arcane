@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { StudioTestService } from './studio-test-service.js';
+import {scenarioPlanSchema,SCENARIO_LIMITS,type ScenarioPlan} from '../../../packages/studio-test-controller/src/scenario.js';
 
 export interface StudioTestPrepareInput {
   sessionId: string;
@@ -7,6 +8,7 @@ export interface StudioTestPrepareInput {
   durationMs: number;
   observationIntervalMs: number;
   failOnRuntimeError: boolean;
+  scenario?: ScenarioPlan;
 }
 export interface StudioTestApprovalInput { id: string; displayDigest: string }
 /** Structural test seam with the parent's exact method arguments and opaque
@@ -19,6 +21,7 @@ export interface StudioTestRouteService {
     status(...args: Parameters<StudioTestService['requests']['status']>): unknown;
     list(...args: Parameters<StudioTestService['requests']['list']>): unknown;
     cancel(...args: Parameters<StudioTestService['requests']['cancel']>): Promise<unknown>;
+    capture?: NonNullable<StudioTestService['requests']['capture']>;
   };
   humanControl: { approve(...args: Parameters<StudioTestService['humanControl']['approve']>): Promise<unknown> };
   lifecycle: { close(...args: Parameters<StudioTestService['lifecycle']['close']>): Promise<void> };
@@ -32,7 +35,7 @@ export const STUDIO_TEST_HTTP_LIMITS = Object.freeze({ bodyBytes: 16 * 1024, res
 const PREFIX = '/v1/playtests';
 const ID = /^[A-Za-z0-9_-]{1,128}(?![\s\S])/;
 const DIGEST = /^[a-f0-9]{64}(?![\s\S])/;
-const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST']]);
+const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST']]);
 const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   AUTH: [401, 'An authenticated local caller is required.'],
   HOST: [403, 'The exact configured loopback host is required.'],
@@ -77,16 +80,18 @@ function record(value: unknown, keys: readonly string[], required: readonly stri
   return input;
 }
 function prepareInput(value: unknown): StudioTestPrepareInput {
-  const input = record(value, ['sessionId', 'nativeStudioId', 'durationMs', 'observationIntervalMs', 'failOnRuntimeError'], ['sessionId']);
+  const input = record(value, ['sessionId', 'nativeStudioId', 'durationMs', 'observationIntervalMs', 'failOnRuntimeError','scenario'], ['sessionId']);
   const duration = input.durationMs === undefined ? 15_000 : input.durationMs;
   const interval = input.observationIntervalMs === undefined ? 1_000 : input.observationIntervalMs;
   const failOnRuntimeError = input.failOnRuntimeError === undefined ? true : input.failOnRuntimeError;
   if (typeof duration !== 'number' || !Number.isInteger(duration) || duration < 5_000 || duration > 60_000 ||
       typeof interval !== 'number' || !Number.isInteger(interval) || interval < 250 || interval > 2_000 ||
       typeof failOnRuntimeError !== 'boolean') fail('INVALID_REQUEST');
+  const scenario=input.scenario===undefined?undefined:scenarioPlanSchema.safeParse(input.scenario);
+  if(scenario&&!scenario.success)fail('INVALID_REQUEST');
   return { sessionId: identifier(input.sessionId),
     ...(input.nativeStudioId === undefined ? {} : { nativeStudioId: identifier(input.nativeStudioId) }),
-    durationMs: duration, observationIntervalMs: interval, failOnRuntimeError };
+    durationMs: duration, observationIntervalMs: interval, failOnRuntimeError,...(scenario?.success?{scenario:scenario.data}:{}) };
 }
 function approvalInput(value: unknown): StudioTestApprovalInput {
   const input = record(value, ['id', 'displayDigest']);
@@ -226,7 +231,7 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
       const method = METHODS.get(url.pathname);
       if (!method) fail('NOT_FOUND');
       if (request.method !== method) { response.setHeader('Allow', method); fail('METHOD'); }
-      const allowed = url.pathname === PREFIX ? ['id'] : [];
+      const allowed = url.pathname === PREFIX || url.pathname===PREFIX+'/capture' ? ['id'] : [];
       const seen = new Set<string>();
       for (const key of url.searchParams.keys()) {
         if (!allowed.includes(key) || seen.has(key)) fail('QUERY');
@@ -255,6 +260,13 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
           if (request.headers['transfer-encoding'] !== undefined ||
               (request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0')) fail('INVALID_REQUEST');
           const id = url.searchParams.get('id');
+          if(url.pathname===PREFIX+'/capture'){
+            if(!service.requests.capture||id===null)fail('NOT_FOUND');
+            const capture=await service.requests.capture(identifier(id),initial.id);guard();
+            if(!Buffer.isBuffer(capture.bytes)||capture.bytes.length>SCENARIO_LIMITS.imageBytes||capture.image.mimeType!=='image/png')fail('RESPONSE_LIMIT');
+            response.writeHead(200,{'Content-Type':'image/png','Content-Length':capture.bytes.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; sandbox"});
+            response.end(capture.bytes);return {captureDelivered:true};
+          }
           return id === null ? { jobs: service.requests.list(initial.id) } : { job: service.requests.status(identifier(id), initial.id) };
         }
         readingBody = true;

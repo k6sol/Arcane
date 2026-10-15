@@ -161,11 +161,11 @@ async function untouched(f: Awaited<ReturnType<typeof fixture>>) {
   assert.equal(f.observed().nativeTools.verified, false);
 }
 
-test('Edge direct start: mount sends zero actions; one trusted click waits for exact ACK before enabling Send', { skip: !browserModule, timeout: 30000 }, async t => {
+test('Edge direct start: mount sends zero actions; explicit setup remains single-flight alongside automatic Send', { skip: !browserModule, timeout: 30000 }, async t => {
   const f = await fixture(t), { page } = f;
   assert.equal(f.posts.length, 0); assert.equal(await page.locator('#codex-conversation-start').isVisible(), true);
   assert.equal(await page.locator('#codex-thread-start').isVisible(), false);
-  assert.equal(await page.locator('#codex-submit').isDisabled(), true);
+  assert.equal(await page.locator('#codex-submit').isDisabled(), false, 'A selected model and draft already allow explicit Send to set up its own conversation.');
   await page.screenshot({ path: join(f.root, 'ready-to-start.png') });
   let release!: () => void; const held = new Promise<void>(done => { release = done; }); t.after(() => release());
   f.handler(async input => { await held; const next = f.observed(); next.snapshot!.thread = thread(next);
@@ -192,23 +192,28 @@ test('Edge missing pair opens the composer picker; exact user selection never st
   assert.equal(await page.locator('#codex-effort').inputValue(), '');
   await page.locator('#codex-conversation-start').focus(); await page.keyboard.press('Enter');
   assert.equal(await page.locator('#codex-model-popover').isVisible(), true);
+  assert.equal(await page.locator('#codex-model-popover').getAttribute('data-view'), 'reasoning');
+  await page.locator('#codex-picker-current-model').click();
   assert.equal(await page.locator('#codex-model-search').evaluate(node => node === document.activeElement), true);
   assert.equal(f.posts.length, 0); await untouched(f);
   await page.locator('[data-picker-model="fixture-sol"]').click();
-  assert.equal(await page.locator('#codex-effort').inputValue(), '', 'The reported default effort is never selected automatically');
-  await page.locator('[data-picker-effort="ultra"]').click();
-  await page.keyboard.press('Escape'); await page.locator('#codex-conversation-start').click();
-  assert.equal(await page.locator('#codex-model-popover').isVisible(), true, 'Staged fields cannot bypass selection acknowledgement');
-  await page.locator('#codex-picker-apply').click();
-  await page.waitForFunction(() => document.getElementById('codex-effort-label')?.textContent === 'ultra');
-  assert.equal(f.posts.length, 1); assert.deepEqual(f.posts[0], { requestId: f.posts[0]!.requestId, connectionId: f.observed().snapshot!.connectionId, action: 'select', model: 'fixture-sol', effort: 'ultra' });
-  assert.equal(f.observed().snapshot!.thread, null); assert.equal(await page.locator('#codex-submit').isDisabled(), true);
-  await settled(page); await page.locator('#codex-conversation-start').focus(); await page.keyboard.press('Space');
+  await page.waitForFunction(() => document.getElementById('codex-model-trigger')?.getAttribute('aria-busy') === 'false' && document.getElementById('codex-effort-label')?.textContent === 'low');
+  assert.equal(await page.locator('#codex-effort').inputValue(), 'low', 'Explicit model selection acknowledges only its reported default.');
+  assert.deepEqual(f.posts, [{ requestId: f.posts[0]!.requestId, connectionId: f.observed().snapshot!.connectionId, action: 'select', model: 'fixture-sol', effort: 'low' }]);
+  assert.equal(f.observed().snapshot!.thread, null); await untouched(f);
+  assert.equal(await page.locator('#codex-model-popover').isVisible(), false, 'A pending selection closes the picker; its ACK does not reopen it.');
+  await page.locator('#codex-model-trigger').click();
+  await page.locator('#codex-picker-effort-slider').focus(); await page.keyboard.press('End');
+  await page.waitForFunction(() => document.getElementById('codex-model-trigger')?.getAttribute('aria-busy') === 'false' && document.getElementById('codex-effort-label')?.textContent === 'ultra');
+  assert.equal(f.posts.length, 2); assert.deepEqual(f.posts[1], { requestId: f.posts[1]!.requestId, connectionId: f.observed().snapshot!.connectionId, action: 'select', model: 'fixture-sol', effort: 'ultra' });
+  assert.equal(f.observed().snapshot!.thread, null); assert.equal(await page.locator('#codex-submit').isDisabled(), false);
+  await page.keyboard.press('Escape'); await page.locator('#codex-conversation-start').focus(); await page.keyboard.press('Space');
+  await settled(page);
   await page.waitForFunction(() => !(document.getElementById('codex-submit') as HTMLButtonElement).disabled);
-  assert.deepEqual(f.posts.map(input => input.action), ['select', 'thread-start']); await untouched(f);
+  assert.deepEqual(f.posts.map(input => input.action), ['select', 'select', 'thread-start']); await untouched(f);
 });
 
-test('Edge pending, unknown, rejected and lost start acknowledgements never enable Send or retry', { skip: !browserModule, timeout: 60000 }, async t => {
+test('Edge uncertain start acknowledgements block Send; known rejection permits a new explicit gesture without retry', { skip: !browserModule, timeout: 60000 }, async t => {
   for (const outcome of ['pending', 'unknown', 'rejected', 'lost', 'mismatch'] as const) await t.test(outcome, async t => {
     const f = await fixture(t), { page } = f;
     f.handler(async input => {
@@ -219,7 +224,7 @@ test('Edge pending, unknown, rejected and lost start acknowledgements never enab
     });
     await page.locator('#codex-conversation-start').click();
     await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('Request ID retained:') || document.getElementById('codex-notice')?.textContent?.includes('native acknowledgement'));
-    await settled(page); assert.equal(f.posts.length, 1); assert.equal(await page.locator('#codex-submit').isDisabled(), true);
+    await settled(page); assert.equal(f.posts.length, 1); assert.equal(await page.locator('#codex-submit').isDisabled(), outcome!=='rejected');
     assert.equal(await page.locator('#codex-unknown').isVisible(), outcome !== 'rejected');
     assert.equal(await page.locator('#codex-conversation-start').isDisabled(), outcome !== 'rejected');
     await f.refresh(); await f.refresh(); assert.equal(f.posts.length, 1); await untouched(f);
@@ -284,7 +289,7 @@ test('Edge a late start ACK from the previous connection cannot replace the curr
   release(); await settled(page);
   assert.match(await page.locator('#codex-scope').textContent() ?? '', new RegExp(replacement.snapshot!.connectionId));
   assert.doesNotMatch(await page.locator('#codex-scope').textContent() ?? '', /fixture-thread/);
-  assert.equal(await page.locator('#codex-submit').isDisabled(), true);
+  assert.equal(await page.locator('#codex-submit').isDisabled(), false, 'The fresh selected connection can set up its own conversation on a new human Send.');
   assert.equal(f.posts.length, 1); assert.equal(f.posts[0]!.connectionId, original.snapshot!.connectionId);
   await untouched(f);
 });

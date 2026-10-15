@@ -1,6 +1,9 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { CallToolResultSchema, ToolListChangedNotificationSchema, ToolSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { SCENARIO_LIMITS, scenarioPlanSchema, scenarioRuntimeReportSchema, scenarioEvidenceIssue, type ScenarioPlan, type ScenarioRuntimeReport, type ScenarioCapture, type ScenarioCaptureStore } from './scenario.js';
+import { buildScenarioProgram } from './scenario-runtime.js';
+import { scenarioPng } from './scenario-image.js';
 import { bindingSchema, bounded, digest, fail, freeze, identifier, logsSchema, nativeStateSchema, parse,
   proofSchema, sameBinding, systemScheduler, type PairedProofReader, type PairedTestProof, type Scheduler,
   type TestAdapter, type TestBinding, type TestObservation } from './contracts.js';
@@ -12,6 +15,7 @@ export interface NativeObservationDecoder {
   inventory(result: CallToolResult): unknown;
   state(result: CallToolResult, requestedStudioId: string): unknown;
   logs(result: CallToolResult): unknown;
+  focus?(result: CallToolResult): 'Edit' | 'Client' | 'Server';
 }
 const inventorySchema = z.array(z.strictObject({ id: identifier, name: z.string().max(512) })).max(64);
 const strip = (value: unknown): unknown => Array.isArray(value) ? value.map(strip) : value && typeof value === 'object'
@@ -29,6 +33,9 @@ export interface NativeTestAdapterOptions {
   client: Client; pairedProof: PairedProofReader; decoder: NativeObservationDecoder;
   evidence: 'fixture' | 'native'; scheduler?: Scheduler; requestTimeoutMs?: number; proofMaxAgeMs?: number;
   onDisconnect?: () => void;
+  captureStore?: ScenarioCaptureStore;
+  subjectReader?: {read(binding: TestBinding, signal: AbortSignal): Promise<string>};
+  admissionGuard?: () => void;
 }
 /** Own a SEPARATE already-connected vetted SDK client. Does not spawn, pair, open
  * places, install, use input APIs, or widen NativeStudioSession's read surface. */
@@ -38,6 +45,7 @@ export class NativeTestAdapter implements TestAdapter {
   #tools: readonly Tool[] = []; #generation = 0; #loadedGeneration = -1;
   #requests = 0; #busy = false; #idle: Promise<unknown> = Promise.resolve();
   #owned: Ownership | null = null; #effectUnknown = false; #disconnected = false;
+  #preparedScenario: string | null = null; #scenarioConsumed = new Set<string>(); #captureConsumed = new Set<string>();
   constructor(options: NativeTestAdapterOptions) {
     this.#options = Object.freeze({ ...options }); this.evidence = options.evidence;
     if (options.evidence === 'native' && options.client.getServerVersion()?.name !== 'RobloxStudio') fail('BAD_NATIVE_RESPONSE');
@@ -54,11 +62,11 @@ export class NativeTestAdapter implements TestAdapter {
     const work = Promise.resolve().then(action); this.#idle = work;
     try { return await work; } finally { this.#busy = false; }
   }
-  async #request<T>(signal: AbortSignal, action: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  async #request<T>(signal: AbortSignal, action: (signal: AbortSignal) => Promise<T>, maximumBytes = 256 * 1024): Promise<T> {
     if (this.#disconnected) fail('DISCONNECTED');
     if (++this.#requests > 4096) fail('UNSUPPORTED_TOOL');
     const result = await bounded(this.#scheduler, this.#timeout, signal, action);
-    if (Buffer.byteLength(JSON.stringify(result) ?? '') > 256 * 1024) fail('BAD_NATIVE_RESPONSE');
+    if (Buffer.byteLength(JSON.stringify(result) ?? '') > maximumBytes) fail('BAD_NATIVE_RESPONSE');
     return result;
   }
   async #loadTools(signal: AbortSignal): Promise<void> {
@@ -140,6 +148,7 @@ export class NativeTestAdapter implements TestAdapter {
       if (before.mode !== 'Edit') fail('MODE_MISMATCH');
       if (signal.aborted || deadline <= this.#scheduler.now()) fail('CANCELLED');
       this.#assertTool('start_stop_play');
+      this.#options.admissionGuard?.();
       // After dispatch, caller cancellation does not prove physical cancellation.
       // Keep the whole ACK/postcheck path alive; settle waits for this original work.
       const independent = new AbortController().signal;
@@ -173,5 +182,73 @@ export class NativeTestAdapter implements TestAdapter {
     try { await bounded(this.#scheduler, this.#timeout, signal, () => this.#idle.catch(() => {})); }
     catch { return false; }
     return !this.#busy && !this.#effectUnknown;
+  }
+  async prepareScenario(input: ScenarioPlan, signal: AbortSignal): Promise<void> {
+    const plan = parse(scenarioPlanSchema, input);
+    await this.#exclusive(async () => {
+      await this.#loadTools(signal);
+      const requireTool = (name: string, required: string[], optional: string[]) => {
+        const tool=this.#tools.find(tool=>tool.name===name), schema=tool?.inputSchema;
+        if(!schema || schema.type!=='object' || !required.every(key=>schema.required?.includes(key)) ||
+            schema.required?.some(key=>!required.includes(key)) || Object.keys(schema.properties??{}).some(key=>![...required,...optional].includes(key))) fail('UNSUPPORTED_TOOL');
+        for(const key of required)if((schema.properties?.[key] as {type?:unknown}|undefined)?.type!=='string')fail('UNSUPPORTED_TOOL');
+        return schema;
+      };
+      const execution=requireTool('execute_luau',['studio_id','datamodel_type','code'],[]);
+      if(!this.#options.subjectReader)fail('UNSUPPORTED_TOOL');
+      const contexts=(execution.properties?.datamodel_type as {enum?:unknown}|undefined)?.enum;
+      if(!Array.isArray(contexts)||digest([...contexts].sort())!==digest(['Client','Edit','Server']))fail('UNSUPPORTED_TOOL');
+      if(plan.capture.required){requireTool('screen_capture',['studio_id','capture_id'],['camera_position','look_at_position']);if(!this.#options.captureStore||!this.#options.decoder.focus)fail('UNSUPPORTED_TOOL');}
+      this.#preparedScenario=digest(plan);
+    });
+  }
+  readScenarioSubjects(binding: TestBinding, signal: AbortSignal): Promise<string> {
+    return this.#exclusive(async()=>{await this.#loadTools(signal);this.#assertTool('execute_luau');if(!this.#options.subjectReader)fail('UNSUPPORTED_TOOL');return this.#options.subjectReader.read(binding,signal);});
+  }
+  runScenario(binding: TestBinding, runId: string, input: ScenarioPlan, deadline: number, signal: AbortSignal): Promise<ScenarioRuntimeReport> {
+    const plan=parse(scenarioPlanSchema,input), scenarioDigest=digest(plan);
+    return this.#exclusive(async()=>{
+      if(this.#preparedScenario!==scenarioDigest||this.#scenarioConsumed.has(runId)||this.#scenarioConsumed.size>=64)fail('FENCED');
+      const before=await this.#observe(binding,signal,false), owned=this.#owned;
+      if(!owned||owned.runId!==runId||before.mode!=='Play'||before.playEpoch!==owned.epoch||!sameBinding(owned.binding,binding))fail('NOT_OWNED_PLAY');
+      if(signal.aborted||this.#scheduler.now()+plan.runtimeBudgetMs>=deadline)fail('TIMEOUT');
+      // Once dispatched this original ACK/postcheck path is independent of caller
+      // cancellation. Input uncertainty never rewrites start/stop ownership.
+      const independent=new AbortController().signal;
+      this.#options.admissionGuard?.();
+      this.#scenarioConsumed.add(runId);
+      const result=await this.#call('execute_luau',{studio_id:binding.nativeStudioId,datamodel_type:'Client',code:buildScenarioProgram(plan,runId,scenarioDigest)},independent,true);
+      if(result.content.length!==1||result.content[0]?.type!=='text')fail('BAD_NATIVE_RESPONSE');
+      let value:unknown;try{value=JSON.parse(result.content[0].text);}catch{fail('BAD_NATIVE_RESPONSE');}
+      const report=parse(scenarioRuntimeReportSchema,value,'BAD_NATIVE_RESPONSE');
+      if(report.runId!==runId||report.scenarioDigest!==scenarioDigest||report.steps.length!==plan.steps.length||report.steps.some((step,index)=>step.id!==plan.steps[index]!.id||step.kind!==plan.steps[index]!.kind)||
+          report.outcome==='passed'&&(report.code!=='OK'||report.steps.some(step=>step.outcome!=='passed')||report.inputRelease==='unknown'))fail('BAD_NATIVE_RESPONSE');
+      if(scenarioEvidenceIssue(plan,report.steps,report.outcome==='passed',report.inputRelease)||report.outcome!=='passed'&&report.code==='OK')fail('BAD_NATIVE_RESPONSE');
+      const after=await this.#observe(binding,independent,false);
+      if(after.mode!=='Play'||after.playEpoch!==owned.epoch||!sameBinding(after.binding,binding))fail('NOT_OWNED_PLAY');
+      return freeze(report);
+    });
+  }
+  captureScenario(binding: TestBinding, runId: string, signal: AbortSignal): Promise<ScenarioCapture> {
+    return this.#exclusive(async()=>{
+      if(!this.#scenarioConsumed.has(runId)||this.#captureConsumed.has(runId))fail('FENCED');
+      const before=await this.#observe(binding,signal,false),owned=this.#owned;
+      if(!owned||owned.runId!==runId||before.mode!=='Play'||before.playEpoch!==owned.epoch||!sameBinding(owned.binding,binding)||!this.#options.captureStore||!this.#options.decoder.focus)fail('NOT_OWNED_PLAY');
+      const focused=await this.#call('get_studio_state',{studio_id:binding.nativeStudioId},signal);
+      if(this.#options.decoder.focus(focused)!=='Client')fail('MODE_MISMATCH');
+      this.#assertTool('screen_capture');
+      this.#options.admissionGuard?.();
+      this.#captureConsumed.add(runId);
+      const result=parse(CallToolResultSchema,await this.#request(signal,local=>this.#options.client.callTool({name:'screen_capture',arguments:{studio_id:binding.nativeStudioId,capture_id:'Arcane_'+runId}},CallToolResultSchema,{signal:local,timeout:this.#timeout,maxTotalTimeout:this.#timeout,resetTimeoutOnProgress:false}),SCENARIO_LIMITS.wireBytes),'BAD_NATIVE_RESPONSE');
+      const image=result.content[0];
+      if(result.isError||result.content.length!==1||image?.type!=='image'||image.mimeType!=='image/png')fail('BAD_NATIVE_RESPONSE');
+      const bytes=Buffer.from(image.data,'base64');
+      if(bytes.length>SCENARIO_LIMITS.imageBytes||bytes.toString('base64')!==image.data)fail('BAD_NATIVE_RESPONSE');
+      let dimensions:{width:number;height:number};try{dimensions=scenarioPng(bytes);}catch{fail('BAD_NATIVE_RESPONSE');}
+      const after=await this.#observe(binding,signal,false);
+      if(after.mode!=='Play'||after.playEpoch!==owned.epoch||!sameBinding(after.binding,binding))fail('NOT_OWNED_PLAY');
+      if(this.#options.decoder.focus(await this.#call('get_studio_state',{studio_id:binding.nativeStudioId},signal))!=='Client')fail('MODE_MISMATCH');
+      return this.#options.captureStore.save(runId,bytes,dimensions);
+    });
   }
 }

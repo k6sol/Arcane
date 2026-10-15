@@ -2,6 +2,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { startPlaytestPanel } from '../../apps/desktop/src/playtest-panel.js';
+import {SCENARIO_ACTIONS} from '../../packages/studio-test-controller/src/scenario.js';
 
 const NOW = 2_000_000_000_000, TOKEN = 'private-human-token', DIGEST = 'a'.repeat(64);
 function job(id = 'job-1', state = 'needs_approval') {
@@ -29,6 +30,17 @@ function terminal(id = 'job-1', patch: Partial<JobFixture['review']> = {}): JobF
   const result = job(id, 'complete');
   result.review = { ...result.review, phase: 'done', outcome: 'succeeded', code: 'OK', cleanup: 'complete', ...patch };
   return result;
+}
+function gameplayJob(passed=false){
+  const value=job(),scenario={version:1,runtimeBudgetMs:500,
+    targets:[{id:'status',root:'LocalPlayer.PlayerGui',segments:['Hud','Status'],className:'Frame'}],
+    steps:[{id:'opened',kind:'assert-gui',targetId:'status',property:'Visible',equals:true,withinMs:100,requireTransition:true}],capture:{required:false},
+    temporaryEdits:[{id:'setup',ref:{instanceId:'private-part',sessionId:'paired-private-id',root:'Workspace',pathSegments:[],className:'Part'},expected:{Transparency:0.25},properties:{Transparency:0.5}}]};
+  const report={scenarioDigest:'d'.repeat(64),subjectDigest:'e'.repeat(64),state:passed?'passed':'not_started',inputRelease:'not_started',temporary:passed?'restored':'not_started',
+    steps:passed?[{id:'opened',kind:'assert-gui',outcome:'passed',expected:true,observed:true,baseline:false}]:[],capture:null as null|Record<string,unknown>,consoleCoverage:'ambiguous'};
+  Object.assign(value.display.proposal,{scenario,subjectDigest:report.subjectDigest});value.display.actions=[...SCENARIO_ACTIONS];Object.assign(value.review,{scenario:report});
+  if(passed){value.state='complete';value.review.phase='done';value.review.outcome='succeeded';value.review.code='OK';value.review.cleanup='complete';}
+  return{value,scenario,report};
 }
 
 class Events {
@@ -122,6 +134,80 @@ test('hidden before sign-in: no request, prefill, consent or empty panel', async
   assert.equal(f.calls.length, 0); assert.equal(f.root.textContent, '');
   f.auth(true); t.mock.timers.tick(250); await flush();
   assert.equal(f.calls.length, 1); assert.equal(f.root.hidden, false); assert.equal(f.posts().length, 0);
+});
+
+test('scenario panel preserves exact temporary baselines and displays observed transitions with unattested capture context',async t=>{
+  const pending=gameplayJob(),f=fixture(t,[pending.value]);await f.panel.refresh();
+  assert.equal(fieldValues(f).get('display.proposal.scenario.temporaryEdits[0].expected.Transparency'),'0.25');
+  assert.equal(fieldValues(f).get('display.proposal.scenario.temporaryEdits[0].properties.Transparency'),'0.5');
+  const finished=gameplayJob(true);finished.scenario.capture.required=true;finished.value.review.outcome='failed';finished.value.review.code='UNSUPPORTED_TOOL';
+  finished.report.capture={id:'owned-image',sha256:'f'.repeat(64),bytes:128,mimeType:'image/png',width:128,height:128,context:'unattested',nativeAcceptance:false};
+  f.jobs([finished.value]);await f.panel.refresh();assert.match(f.root.textContent,/opened/);assert.match(f.root.textContent,/Observed true/);
+  assert.equal(button(f,'View capture · Context unverified').disabled,false);assert.equal(f.posts().length,0);
+});
+
+test('scenario approval makes each finite operation and exact temporary restoration readable before consent',async t=>{
+  const pending=gameplayJob();pending.scenario.targets[0]!.className='TextLabel';
+  pending.scenario.targets.push({id:'button',root:'LocalPlayer.PlayerGui',segments:['Hud','Interact'],className:'TextButton'});
+  Object.assign(pending.scenario,{runtimeBudgetMs:800,steps:[
+    {id:'walk',kind:'hold-key',key:'W',holdMs:100},
+    {id:'click',kind:'click-gui',targetId:'button'},
+    {id:'distance',kind:'assert-displacement',minimumStuds:0.5},
+    {id:'visible',kind:'assert-gui',targetId:'status',property:'Visible',equals:true,withinMs:100,requireTransition:true},
+    {id:'text',kind:'assert-text',targetId:'status',equals:'Open',withinMs:100,requireTransition:false},
+  ]});pending.scenario.capture.required=true;
+  const f=fixture(t,[pending.value]);await f.panel.refresh();const audit=details(f);
+  const readable=f.root.all().filter(element=>element.tagName==='LI'&&!audit.contains(element)).map(element=>element.textContent);
+  assert.deepEqual(readable,[
+    'Hold W for 100 ms.',
+    'Click PlayerGui → Hud → Interact (TextButton).',
+    'Assert horizontal movement of at least 0.5 studs.',
+    'Assert PlayerGui → Hud → Status is visible within 100 ms. Require a transition from its initial value.',
+    'Assert PlayerGui → Hud → Status text equals "Open" within 100 ms. An already satisfied result is allowed.',
+    'Part in Workspace · Transparency: 0.25 → 0.5.',
+  ]);
+  assert.ok(f.root.all().some(element=>element.tagName==='P'&&element.textContent==='Scenario plan · 5 steps · 800 ms Client execution limit.'));
+  assert.match(f.root.textContent,/Restore exact prior values after owned Play stops/);assert.match(f.root.textContent,/Required Client capture: unverified/);
+  assert.equal(audit.open,false);assert.equal(fieldValues(f).get('display.proposal.scenario.steps[0].holdMs'),'100');assert.equal(fieldValues(f).get('displayDigest'),DIGEST);
+  assert.equal(f.posts().length,0);button(f,'Run test').emit('click',true);await flush();assert.equal(f.posts().length,1);
+  assert.deepEqual(f.posts()[0]!.body,{id:pending.value.id,displayDigest:DIGEST},'the readable projection cannot replace the exact approval digest');
+});
+
+test('terminal scenario keeps measured rows separate from outer outcome and required Client capture evidence',async t=>{
+  const pending=gameplayJob();pending.scenario.capture.required=true;const f=fixture(t,[pending.value]);await f.panel.refresh();
+  const finished=gameplayJob(true);finished.scenario.capture.required=true;finished.value.review.outcome='failed';finished.value.review.code='UNSUPPORTED_TOOL';
+  f.jobs([finished.value]);await f.panel.refresh();assert.match(f.root.textContent,/Result: failed · Code: UNSUPPORTED_TOOL · Cleanup: complete/);
+  assert.match(f.root.textContent,/Measured steps: passed/);assert.match(f.root.textContent,/Required Client capture: still unverified/);assert.match(f.root.textContent,/does not attest Client context/);
+  finished.report.capture={id:'owned-image',sha256:'f'.repeat(64),bytes:128,mimeType:'image/png',width:128,height:128,context:'unattested',nativeAcceptance:false};
+  f.jobs([finished.value]);await f.panel.refresh();assert.match(f.root.textContent,/The retained image has unverified context/);assert.match(f.root.textContent,/Observed true/);
+  assert.equal(button(f,'View capture · Context unverified').disabled,false);assert.match(f.root.textContent,/Native acceptance unverified/);
+  finished.value.review.code='BINDING_CHANGED';f.jobs([finished.value]);await f.panel.refresh();assert.match(f.root.textContent,/Code: BINDING_CHANGED/);assert.doesNotMatch(f.root.textContent,/Code: UNSUPPORTED_TOOL/);
+  assert.equal(f.posts().length,0);
+});
+
+test('active scenario evidence refreshes within the same state without retaining detached control authority',async t=>{
+  const active=gameplayJob();active.value.state='running';active.value.review.phase='observing';active.report.state='running';
+  const f=fixture(t,[active.value]);await f.panel.refresh();const oldStop=button(f,'Stop');
+  Object.assign(active.report,{state:'failed',steps:[{id:'opened',kind:'assert-gui',outcome:'failed',expected:true,observed:false,baseline:false}]});
+  f.jobs([active.value]);await f.panel.refresh();assert.match(f.root.textContent,/Measured steps: failed/);assert.match(f.root.textContent,/opened · failed · Expected true · Observed false/);
+  assert.equal(oldStop.count(),0);oldStop.emit('click',true);assert.equal(f.posts().length,0);button(f,'Stop').emit('click',true);await flush();assert.equal(f.posts().length,1);
+});
+
+test('approval summary rejects unknown operations, extra capture authority and waits beyond its fixed bound',async t=>{
+  const f=fixture(t,[gameplayJob().value]);await f.panel.refresh();
+  for(const variant of ['operation','capture','budget']){
+    const malformed=gameplayJob();
+    if(variant==='operation')Object.assign(malformed.scenario.steps[0]!,{kind:'execute-luau',code:'unapproved()'});
+    if(variant==='capture')Object.assign(malformed.scenario.capture,{url:'https://unapproved.invalid'});
+    if(variant==='budget')malformed.scenario.steps[0]!.withinMs=1000;
+    f.jobs([malformed.value]);await f.panel.refresh();assert.equal(button(f,'Run test').disabled,true,variant);assert.equal(f.posts().length,0);
+  }
+});
+
+for(const field of ['expected','observed','baseline']as const)test('scenario panel rejects contradictory '+field+' evidence before displaying completion',async t=>{
+  const f=fixture(t,[gameplayJob().value]);await f.panel.refresh();const malformed=gameplayJob(true);
+  if(field==='baseline')Object.assign(malformed.report.steps[0]!,{baseline:'not-a-boolean'});else malformed.report.steps[0]![field]=false;
+  f.jobs([malformed.value]);await f.panel.refresh();assert.match(f.root.textContent,/status|refresh/i);assert.equal(button(f,'Run test').disabled,true);assert.equal(f.posts().length,0);
 });
 
 test('empty jobs and historical terminal jobs do not create a panel', async t => {

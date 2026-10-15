@@ -27,6 +27,10 @@ export interface ConnectOptions {
   command: string; cwd: string; use: LocalUse; limits?: LimitOptions; arcaneMcp?: ArcaneMcpLaunchProfile; nativeAssetHooks?: NativeAssetHooks;
 }
 export interface HumanAction { initiatedBy: 'human' }
+/** Host-only continuation token. Session object identity, not this JSON shape,
+ * binds one additional turn to the original human task and its local policy. */
+export interface NativeTaskContinuation { readonly kind: 'native-task-continuation' }
+export interface ManagedTaskStart { thread: ThreadState; continuation: NativeTaskContinuation }
 export interface Selection { model: string; effort: string }
 export interface Model {
   model: string; id: string; displayName: string; efforts: string[];

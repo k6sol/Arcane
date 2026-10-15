@@ -217,7 +217,7 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     assert.equal(job.review.runId, null);
     assert.equal(job.review.cleanup, 'not_started');
     assert.equal(job.displayDigest, digest(job.display));
-    assert.deepEqual(Object.keys(f.service.requests).sort(), ['cancel', 'list', 'prepare', 'status']);
+    assert.deepEqual(Object.keys(f.service.requests).sort(), ['cancel', 'capture', 'list', 'prepare', 'status']);
     assert.equal('approve' in f.service.requests, false);
     assert.deepEqual(f.effects(), []);
     assert.deepEqual(await f.records(), []);

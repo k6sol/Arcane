@@ -1,7 +1,7 @@
 import type { NativeWorkflowModelProof } from '../../../packages/protocol/src/workflow-model.js';
 import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from '../../../packages/storage/src/sqlite-path.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -9,6 +9,9 @@ import { connectCodexClient, CodexClientError, type CodexClient, type Snapshot, 
 import type { NativeAssetRegistry, NativeAssetIncarnation } from './native-asset-authority.js';
 import { locateNativeCli } from '../../../packages/model-adapters/src/process.js';
 import { HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, redactNativeHistoryText, type NativeHistoryResult } from '../../../packages/codex-client/src/history.js';
+import { ChatTaskCoordinator } from './chat-task-coordinator.js';
+import type { NativeTaskContinuation } from '../../../packages/codex-client/src/types.js';
+import type { StudioTestTaskCancellation, StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
@@ -26,6 +29,8 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional() }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
+  z.strictObject({ ...common, action: z.literal('task-stop'), threadId: identifier, taskId: uuid }),
+  z.strictObject({ ...common, action: z.literal('task-focus'), threadId: identifier, taskId: uuid }),
   z.strictObject({ ...common, action: z.literal('approval'), threadId: identifier, turnId: identifier, handle: identifier, decision: z.enum(['accept','decline','cancel']) }),
 ]);
 export type CodexAction = z.infer<typeof codexActionInput>;
@@ -34,6 +39,7 @@ export interface CodexActionRecord {
   state: 'pending' | 'acknowledged' | 'rejected' | 'unknown'; errorCode: string | null;
   threadId: string | null; turnId: string | null; model: string | null; effort: string | null;
   createdAt: string; finishedAt: string | null;
+  nextConnectionId?: string;
 }
 export interface CodexRecordedHistory {
   requestId: string; connectionId: string; provenance: Snapshot['provenance']; loadedAt: string;
@@ -81,9 +87,11 @@ export interface CodexProductState {
   connecting: boolean; closing: boolean; busy: boolean; snapshot: Snapshot | null; lastSnapshot: Snapshot | null;
   nativeAssets?: { available: boolean; sealed: boolean; granted: boolean; admissionOpen: boolean };
   workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; nativeThreads?: CodexSavedThread[]; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
+  chatTasks?: { taskId: string; threadId: string; sessionId: string | null; connectionId: string;
+    state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
-export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readThreadHistory'>>;
+export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'>>;
 export interface CodexServiceOptions {
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
@@ -103,6 +111,14 @@ function safeDirectory(path: string): string {
     const parent = dirname(current); if (parent === current) break; current = parent;
   }
   mkdirSync(path, { recursive: true }); return realpathSync(path);
+}
+function repairPrompt(report: StudioTestTaskSettled): string {
+  return `Continue this same human task with one bounded repair attempt. The approved gameplay scenario failed.\n`+
+    `Read playtest_status for job ${report.jobId}; settled report digest ${report.reportDigest}; scenario ${report.scenarioDigest}; subjects ${report.subjectDigest}.\n`+
+    `Inspect the measured failure and current project before making a focused repair. Then prepare the same bounded scenario once for verification. `+
+    `Keep the original model, workspace and permissions. Existing native and playtest approvals still apply. `+
+    `Do not publish, upload, purchase, change account settings or request wider permissions. `+
+    `If evidence or cleanup is uncertain, explain the remaining issue and stop. This is the only automatic repair attempt.`;
 }
 /** Durable human action receipts; native conversations remain owned by the actual CLI. */
 export function createCodexService(options: CodexServiceOptions) {
@@ -141,7 +157,11 @@ export function createCodexService(options: CodexServiceOptions) {
   }
   let client: CodexHostClient | null = null, lastSnapshot: Snapshot | null = null;
   let connecting = false, closing = false, busy = false, closed = false, generation = 0;
+  let pendingTaskBinding=false;
   let pendingConnect: Promise<CodexHostClient> | null = null;
+  let tasks:ChatTaskCoordinator|null;
+  try{tasks=options.assetRegistry?new ChatTaskCoordinator({directory:join(directory,'chat-tasks'),projectPath}):null;}
+  catch(error){db.close();throw error;}
   let saturatedClose: Promise<void> | null = null;
   let journalFault: Promise<void> | null = null;
   const factory = async (nativeAssetHooks?: NativeAssetHooks) => {
@@ -151,25 +171,30 @@ export function createCodexService(options: CodexServiceOptions) {
     return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}) });
   };
   interface HumanAssetIntent { connectionId:string; threadId:string; sessionId:string|null; operationId:string|null }
-  interface AssetContext { handle: NativeAssetIncarnation | null; retired: boolean; hooks: NativeAssetHooks; nextIntent:HumanAssetIntent|null }
+  interface AssetContext { handle: NativeAssetIncarnation | null; retired: boolean; hooks: NativeAssetHooks; nextIntent:HumanAssetIntent|null;
+    actorId: string | null; taskId: string | null; ownerClient: CodexHostClient | null;manualAssets:boolean;manualWrites:boolean }
   let currentAssets: AssetContext | null = null;
+  const taskContexts=new Map<string,AssetContext>();
   const retireAssets = (context: AssetContext | null = currentAssets): void => {
     if (!context || context.retired) return; context.nextIntent=null; context.retired = true; context.handle?.retire();
   };
   function newAssets(): AssetContext | null {
     if (!options.assetRegistry) return null;
-    const context = {handle:null,retired:false,nextIntent:null} as AssetContext;
+    const context = {handle:null,retired:false,nextIntent:null,actorId:null,taskId:null,ownerClient:null,manualAssets:false,manualWrites:false} as AssetContext;
     context.hooks = Object.freeze({
       finalCredential(): string {
         if (context.retired || context.handle) throw new CodexClientError('ASSET_AUTHORITY','Native asset launch authority is unavailable.');
-        context.handle = options.assetRegistry!.issue(); return context.handle.credential();
+        context.handle = options.assetRegistry!.issue();
+        const credential = context.handle.credential(); context.actorId = 'agent-'+createHash('sha256').update(credential).digest('hex');
+        return credential;
       },
       dispatched(intent) {
         if (!context.handle || context.retired) throw new CodexClientError('ASSET_AUTHORITY','Native asset authority is unavailable.');
         const permission=context.nextIntent;context.nextIntent=null;
+        if (context.taskId) tasks!.dispatched(context.taskId, intent.operationId);
         if(permission){
-          const snapshot=client?.snapshot(),thread=snapshot?.thread;
-          if(currentAssets!==context || !snapshot || !assetState(snapshot).sealed || snapshot.connectionId!==permission.connectionId ||
+          const snapshot=context.ownerClient?.snapshot(),thread=snapshot?.thread;
+          if(currentAssets!==context && !context.taskId || !snapshot || !assetState(snapshot,context).sealed || snapshot.connectionId!==permission.connectionId ||
             intent.connectionId!==permission.connectionId || intent.threadId!==permission.threadId || thread?.threadId!==permission.threadId || thread.sessionId!==permission.sessionId)
             throw new CodexClientError('ASSET_AUTHORITY','Human Send asset scope changed before actual dispatch.');
           context.handle.grantNextIntent({connectionId:permission.connectionId,threadId:permission.threadId,sessionId:permission.sessionId});
@@ -177,14 +202,14 @@ export function createCodexService(options: CodexServiceOptions) {
         context.handle.dispatched(intent);
         if(permission)permission.operationId=intent.operationId;
       },
-      ended(intent) { context.handle?.ended(intent.operationId); },
-      retired() { retireAssets(context); },
+      ended(intent) { context.handle?.ended(intent.operationId); if(context.taskId)tasks!.ended(context.taskId,intent.operationId); },
+      retired() { retireAssets(context); if(context.taskId)tasks!.uncertain(context.taskId,'native_incarnation_retired'); },
     } satisfies NativeAssetHooks);
     return context;
   }
-  function assetState(snapshot: Snapshot | null): NonNullable<CodexProductState['nativeAssets']> {
-    const status = currentAssets?.handle?.status();
-    const live = !!status && !status.retired && !currentAssets?.retired && snapshot?.connected === true && snapshot.ready === true && snapshot.thread?.configured === true && snapshot.account?.auth === 'subscription' && snapshot.mcpIsolation === 'arcane-only-verified';
+  function assetState(snapshot: Snapshot | null, context = currentAssets): NonNullable<CodexProductState['nativeAssets']> {
+    const status = context?.handle?.status();
+    const live = !!status && !status.retired && !context?.retired && snapshot?.connected === true && snapshot.ready === true && snapshot.thread?.configured === true && snapshot.account?.auth === 'subscription' && snapshot.mcpIsolation === 'arcane-only-verified';
     return {available:options.assetRegistry!==undefined,sealed:live&&status!.sealed,granted:live&&status!.granted,admissionOpen:live&&status!.granted&&status!.admissionOpen};
   }
   const history = (): CodexActionRecord[] => (db.prepare('SELECT payload FROM actions ORDER BY rowid DESC LIMIT 100').all() as {payload:string}[]).map(row => JSON.parse(row.payload) as CodexActionRecord);
@@ -217,9 +242,11 @@ export function createCodexService(options: CodexServiceOptions) {
   }
   function state(): CodexProductState {
     if (closed) throw new CodexClientError('CLOSED', 'Native workflow is closed.');
+    const snapshot=client?.snapshot()??null;
     return { provider:'codex', use:'personal-local', projectPath, connecting, closing, busy,
-      snapshot:client?.snapshot() ?? null, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
-      ...(options.assetRegistry ? {nativeAssets:assetState(client?.snapshot() ?? null)} : {}),
+      snapshot, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
+      ...(options.assetRegistry ? {nativeAssets:assetState(snapshot)} : {}),
+      ...(tasks?.configured() ? {chatTasks:tasks.summaries().map(({id,...task})=>{const context=taskContexts.get(id);return{taskId:id,...task,retained:!!context?.ownerClient&&!context.retired};})} : {}),
       actions:history(), nativeHistory:nativeHistory(), nativeThreads:savedThreads(), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
   }
   const save = (record: CodexActionRecord) => { db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId); };
@@ -229,14 +256,14 @@ export function createCodexService(options: CodexServiceOptions) {
   };
   /** Fence before fallible cleanup: a broken journal cannot leave live native authority. */
   function fenceJournalFailure(): Promise<void> {
-    retireAssets();
+    tasks?.fence();try{retireAssets();}catch{/* Still stop every owned native client. */}
     if (journalFault) return journalFault;
     generation++; closing = true;
     const owned = client; client = null;
     journalFault = (async () => {
-      try { if (owned) { try { lastSnapshot = owned.snapshot(); } catch { /* No trusted snapshot. */ } await owned.close(); } }
+      try { await tasks?.stopAll('native_journal_failure'); }
       catch { /* Authority is already retired; cleanup cannot restore it. */ }
-      finally { closing = false; }
+      finally { try{if(owned){try{lastSnapshot=owned.snapshot();}catch{/* No trusted snapshot. */}await owned.close();}}finally{closing=false;} }
     })();
     return journalFault;
   }
@@ -260,10 +287,10 @@ export function createCodexService(options: CodexServiceOptions) {
       // Fence immediately, preserve existing request identities, and dispatch no
       // refused model action. Further work needs offline journal reconciliation.
       saturatedClose ??= (async () => {
-        generation++; closing = true; retireAssets();
+        generation++; closing = true;tasks?.fence();try{retireAssets();}catch{/* Still stop every owned native client. */}
         const owned = client; client = null;
-        try { if (owned) { lastSnapshot = owned.snapshot(); await owned.close(); lastSnapshot = owned.snapshot(); } }
-        finally { closing = false; }
+        try { await tasks?.stopAll('native_journal_limit'); }
+        finally {try{if(owned){lastSnapshot=owned.snapshot();await owned.close();lastSnapshot=owned.snapshot();}}finally{closing=false;} }
       })();
       await saturatedClose;
       throw new CodexClientError('JOURNAL_LIMIT','The full native journal fenced the connection. Stop Arcane and archive its journal before reconnecting; old requests were not discarded or replayed.');
@@ -273,15 +300,18 @@ export function createCodexService(options: CodexServiceOptions) {
       model:value.action==='select'?value.model:null,effort:value.action==='select'?value.effort:null,createdAt:new Date().toISOString(),finishedAt:null};
     try { db.prepare('INSERT INTO actions(id,hash,payload) VALUES(?,?,?)').run(record.requestId,hash,JSON.stringify(record)); }
     catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
-    const epoch = generation;
+    let epoch = generation;
     let stagedHistory: CodexHistoryState | null = null;
-    let ownsBusy = false; const existingOperations = new Set<string>();
+    let ownsBusy = false,ownsTaskBinding=false; const existingOperations = new Set<string>();
     let actionClient: CodexHostClient | null = null;
     let grantAssetsAfterCommit: (() => void) | null = null;
+    let taskAfterCommit: string | null = null;
     const operationMethod = ({ 'thread-start':'thread/start', 'thread-resume':'thread/resume', 'turn-start':'turn/start', 'turn-interrupt':'turn/interrupt' } as Record<string,string>)[value.action] ?? null;
     try {
+      if(tasks?.configured()&&!tasks.available()&&!['disconnect','task-stop','turn-interrupt','revoke-writes','revoke-assets'].includes(value.action)&&!(value.action==='approval'&&value.decision!=='accept'))
+        throw new CodexClientError('CLOSED','Managed task admission has been fenced. No new native work was sent.');
       if (value.action === 'connect') {
-        if (client || connecting || closing) throw new CodexClientError('BUSY','Disconnect the previous native connection before connecting.');
+        if (client || connecting || closing || busy || pendingConnect) throw new CodexClientError('BUSY','Disconnect the previous native connection before connecting.');
         connecting = true;
         try {
           const context = newAssets();
@@ -290,20 +320,24 @@ export function createCodexService(options: CodexServiceOptions) {
           try { connected = await pendingConnect; } catch(error) { retireAssets(context); throw error; }
           if (closed || generation !== epoch) { retireAssets(context); await connected.close(); throw new CodexClientError('STALE_CONNECTION','Connection was cancelled before acknowledgement.'); }
           client = connected; currentAssets = context; lastSnapshot = null; record.connectionId = connected.snapshot().connectionId;
+          if(context)context.ownerClient=connected;
         } finally { connecting = false; pendingConnect = null; }
       } else {
-        const selected = exactClient(value.connectionId); actionClient = selected;
+        let selected = exactClient(value.connectionId); actionClient = selected;
         for (const operation of selected.snapshot().operations) existingOperations.add(operation.operationId);
         if (value.action === 'disconnect') {
           // Chat navigation retires the provider connection while preserving
           // already accepted asynchronous asset jobs. The explicit Disconnect
           // gesture (absent/false flag) stops owned work as well.
-          if (value.preserveAssetWork!==true) currentAssets?.handle?.cancelWork('incarnation');
-          generation++; closing = true; retireAssets(); lastSnapshot = selected.snapshot(); client = null;
-          try { await selected.close(); lastSnapshot = selected.snapshot(); } finally { closing = false; }
+          const context=currentAssets,taskId=context?.taskId,thread=selected.snapshot().thread,preserve=value.preserveAssetWork===true&&!!taskId&&tasks!.owns(taskId);
+          generation++; closing = true; lastSnapshot = selected.snapshot(); client = null;
+          if(preserve){currentAssets=null;closing=false;} // Task retains its exact client; no new tab can borrow it.
+          else try {if(value.preserveAssetWork!==true&&thread)await tasks?.cancelFor(thread.threadId,thread.sessionId,'human_disconnected');}
+          finally {try{if(value.preserveAssetWork!==true)context?.handle?.cancelWork('incarnation');}
+            finally{try{retireAssets(context);}finally{try{await selected.close();lastSnapshot=selected.snapshot();}finally{currentAssets=null;closing=false;}}}}
         } else {
           // Cancellation and revocation fence immediately even while a normal request awaits its acknowledgement.
-          const safety = value.action === 'turn-interrupt' || value.action === 'revoke-writes' || value.action === 'revoke-assets' || value.action === 'approval';
+          const safety = value.action === 'turn-interrupt' || value.action === 'task-stop' || value.action === 'revoke-writes' || value.action === 'revoke-assets' || value.action === 'approval';
           if (closing || connecting || (busy && !safety)) throw new CodexClientError('BUSY','A native action is still awaiting acknowledgement.');
           if (!safety) { busy = true; ownsBusy = true; }
           if (value.action === 'thread-start' || value.action === 'thread-resume') {
@@ -311,7 +345,30 @@ export function createCodexService(options: CodexServiceOptions) {
             if (!snapshot.connected || !snapshot.ready || snapshot.thread || snapshot.approvals.length || snapshot.operations.some(op=>op.state==='pending'||op.state==='unknown')) throw new CodexClientError('BUSY','Opening a chat requires an idle connection with no thread, approvals or unresolved operation.');
           }
           switch (value.action) {
-            case 'select': selected.selectModel({initiatedBy:'human',model:value.model,effort:value.effort}); break;
+            case 'task-focus': {
+              const binding=nativeHistory(value.threadId),context=taskContexts.get(value.taskId),owned=context?.ownerClient,snapshot=owned?.snapshot(),current=selected.snapshot();
+              if(!tasks?.available()||!binding||!context||context.retired||!owned||!snapshot?.connected||!snapshot.ready||!snapshot.thread?.configured||
+                !tasks.belongs(value.taskId,binding.threadId,binding.sessionId)||snapshot.thread.threadId!==binding.threadId||snapshot.thread.sessionId!==binding.sessionId)
+                throw new CodexClientError('TASK_SCOPE','Focus only the exact retained native task in this saved conversation.');
+              if(owned!==selected){
+                if(current.approvals.length||current.operations.some(op=>op.state==='pending'||op.state==='unknown')||current.thread&&(!['idle','completed','failed','interrupted'].includes(current.thread.turnStatus)||current.thread.writeGranted)||assetState(current).granted)
+                  throw new CodexClientError('BUSY','The selected conversation must settle before focusing another task.');
+                pendingTaskBinding=true;ownsTaskBinding=true;
+                record.nextConnectionId=snapshot.connectionId;try{save(record);}catch{await fenceJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Task selection could not be recorded. No task was dispatched.');}
+                const previous=currentAssets;
+                if(!previous?.taskId){try{retireAssets(previous);}finally{await selected.close();}}
+                const stillOwned=owned.snapshot();
+                if(closed||generation!==epoch||!tasks.available()||context.retired||!stillOwned.connected||!stillOwned.ready||stillOwned.connectionId!==snapshot.connectionId||stillOwned.thread?.threadId!==binding.threadId||stillOwned.thread.sessionId!==binding.sessionId)
+                  throw new CodexClientError('STALE_CONNECTION','Task focus was cancelled before exact selection.');
+                client=owned;currentAssets=context;selected=owned;actionClient=owned;lastSnapshot=null;
+              }
+              stagedHistory=binding;
+              break;
+            }
+            case 'select': {
+              selected.selectModel({initiatedBy:'human',model:value.model,effort:value.effort});
+              const thread=selected.snapshot().thread;if(thread)await tasks?.cancelFor(thread.threadId,thread.sessionId,'human_changed_model');break;
+            }
             case 'thread-start': {
               if (savedThreads().length >= CODEX_SAVED_THREAD_LIMIT) throw new CodexClientError('HISTORY_LIMIT','Saved chats are full; retained history was not deleted.');
               await selected.startThread({initiatedBy:'human'}); break;
@@ -341,37 +398,111 @@ export function createCodexService(options: CodexServiceOptions) {
               if (!authority || currentAssets?.retired || !authority.status().sealed || !snapshot.connected || !snapshot.ready || snapshot.account?.auth !== 'subscription' || !thread?.configured || thread.threadId !== value.threadId)
                 throw new CodexClientError('ASSET_AUTHORITY','Choose the exact live sealed native asset chat.');
               // Permission is applied only after the human action's durable commit.
-              grantAssetsAfterCommit = () => authority.grant({connectionId:value.connectionId,threadId:value.threadId}); break;
+              const context=currentAssets;
+              grantAssetsAfterCommit = () => {authority.grant({connectionId:value.connectionId,threadId:value.threadId});if(context)context.manualAssets=true;}; break;
             }
             case 'revoke-assets': {
               const snapshot = selected.snapshot();
               if (!currentAssets?.handle || snapshot.thread?.threadId !== value.threadId) throw new CodexClientError('ASSET_AUTHORITY','Choose the exact native asset chat.');
-              currentAssets.nextIntent=null;currentAssets.handle.cancelWork('incarnation');currentAssets.handle.revokeGrant(); break; // Fence synchronously before journal/await.
+              if(pendingTaskBinding)epoch=++generation;
+              const context=currentAssets,stopped=tasks?.cancelFor(snapshot.thread.threadId,snapshot.thread.sessionId,'human_revoked_assets');
+              try{context.nextIntent=null;context.manualAssets=false;context.handle!.cancelWork('incarnation');context.handle!.revokeGrant();}
+              finally{if(stopped)await stopped;}break;
             }
-            case 'grant-writes': selected.grantThreadWrites({initiatedBy:'human',threadId:value.threadId}); break;
+            case 'grant-writes': selected.grantThreadWrites({initiatedBy:'human',threadId:value.threadId});if(currentAssets)currentAssets.manualWrites=true; break;
             case 'revoke-writes': {
               // Validate scope before touching owned workers. Cancellation must
               // precede fallible native cleanup, including approval-delivery IO.
               if (selected.snapshot().thread?.threadId!==value.threadId) throw new CodexClientError('THREAD','Choose the exact native chat to revoke.');
-              if (currentAssets) currentAssets.nextIntent=null;
-              currentAssets?.handle?.cancelWork('incarnation');
-              selected.revokeThreadWrites({initiatedBy:'human',threadId:value.threadId});
+              if(pendingTaskBinding)epoch=++generation;
+              const context=currentAssets;if(context){context.nextIntent=null;context.manualWrites=false;}
+              const thread=selected.snapshot().thread!;
+              const stopped=tasks?.cancelFor(thread.threadId,thread.sessionId,'human_revoked_writes');
+              try {context?.handle?.cancelWork('incarnation');if(!stopped||selected.snapshot().connected)selected.revokeThreadWrites({initiatedBy:'human',threadId:value.threadId});}
+              finally {if(stopped)await stopped;}
               break;
             }
             case 'turn-start': {
+              // Explicit trusted test/host injections may implement the legacy
+              // client only. They gain no managed task origin or repair claim.
+              const injectedLegacy=options.connect!==undefined&&(!selected.startManagedTask||!selected.continueTask||!selected.revokeTaskContinuation||!selected.taskAccountIdentity);
+              const managed = tasks?.available() === true&&!injectedLegacy;
+              let allowWrites = value.allowWorkspaceWrites === true;
+              let allowAssets=value.allowAssets===true;
+              if(managed) {
+                const original=selected.snapshot(),thread=original.thread,context=currentAssets;
+                if(!thread?.configured || thread.threadId!==value.threadId || !original.connected || !original.ready || original.approvals.length ||
+                  original.operations.some(op=>op.state==='unknown') || !context?.handle || !context.actorId || !assetState(original,context).sealed ||
+                  !selected.startManagedTask || !selected.continueTask || !selected.revokeTaskContinuation)
+                  throw new CodexClientError('TASK_SCOPE','Managed Send requires the exact attested native chat.');
+                allowWrites ||= context.manualWrites;allowAssets ||= context.manualAssets;
+                const rotate=!!context.taskId || original.operations.some(op=>op.method==='turn/start');
+                const identity=selected.taskAccountIdentity?.()??null;
+                if(!identity)throw new CodexClientError('ACCOUNT_IDENTITY','Native account identity is unavailable for an exact managed task.');
+                pendingTaskBinding=true;ownsTaskBinding=true;
+                await tasks!.cancelFor(thread.threadId,thread.sessionId,'human_followup_superseded');
+                if(closed||generation!==epoch)throw new CodexClientError('STALE_CONNECTION','Human task was cancelled before dispatch.');
+                if(rotate) {
+                  // Fresh process/profile, never assumed MCP hot reload. Resume
+                  // uses the exact acknowledged native thread under this Send.
+                  context.nextIntent=null;context.handle.cancelWork('incarnation');retireAssets(context);await selected.close();
+                  if(closed||generation!==epoch)throw new CodexClientError('STALE_CONNECTION','Human task was cancelled before fresh initialization.');
+                  const freshContext=newAssets()!;
+                  let fresh:CodexHostClient|null=null;
+                  try {
+                    pendingConnect=factory(freshContext.hooks);fresh=await pendingConnect;freshContext.ownerClient=fresh;
+                    if(closed || generation!==epoch || fresh.taskAccountIdentity?.()!==identity)throw new CodexClientError('ACCOUNT_IDENTITY','Fresh task account changed or its identity is unavailable.');
+                    fresh.selectModel({initiatedBy:'human',...thread.selection});
+                    await fresh.resumeThread({initiatedBy:'human',threadId:thread.threadId});
+                    if(closed||generation!==epoch||!tasks!.available())throw new CodexClientError('STALE_CONNECTION','Human task was cancelled before resumed authority binding.');
+                    const resumed=fresh.snapshot(),binding=resumed.thread;
+                    if(!resumed.connected || !resumed.ready || resumed.mcpIsolation!=='arcane-only-verified' || !binding?.configured || binding.threadId!==thread.threadId || binding.sessionId!==thread.sessionId || binding.writeGranted ||
+                      binding.selection.model!==thread.selection.model || binding.selection.effort!==thread.selection.effort)
+                      throw new CodexClientError('TASK_SCOPE','Fresh task resume changed its native identity or policy.',true);
+                    freshContext.handle!.seal({connectionId:resumed.connectionId,provider:'codex',threadId:binding.threadId,sessionId:binding.sessionId});
+                    record.nextConnectionId=resumed.connectionId;
+                    try{save(record);}catch{await fenceJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Fresh task binding could not be persisted. No task turn was sent.');}
+                    client=fresh;currentAssets=freshContext;selected=fresh;actionClient=fresh;
+                    if(context.manualAssets){freshContext.handle!.grant({connectionId:resumed.connectionId,threadId:thread.threadId});freshContext.manualAssets=true;}
+                    if(context.manualWrites){fresh.grantThreadWrites({initiatedBy:'human',threadId:thread.threadId});freshContext.manualWrites=true;}
+                  } catch(error) {retireAssets(freshContext);if(fresh)await fresh.close();throw error;}
+                  finally {pendingConnect=null;}
+                }
+              }
               const context=currentAssets,authority=context?.handle;
               let permission:HumanAssetIntent|null=null,accepted=false;
               // Only this existing human-control action can arm the next actual
               // dispatch. Never forward allowAssets to the provider/model API.
-              if(value.allowAssets===true && options.assetRegistry){
+              if((managed?allowAssets:value.allowAssets===true) && options.assetRegistry){
                 const snapshot=selected.snapshot(),thread=snapshot.thread;
                 if(!context || !authority || !assetState(snapshot).sealed || !thread?.configured || thread.threadId!==value.threadId)
                   throw new CodexClientError('ASSET_AUTHORITY','Choose the exact live sealed native asset chat.');
-                permission={connectionId:value.connectionId,threadId:value.threadId,sessionId:thread.sessionId,operationId:null};
+                permission={connectionId:snapshot.connectionId,threadId:value.threadId,sessionId:thread.sessionId,operationId:null};
                 context.nextIntent=permission;
               }
-              try {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text,
-                ...(value.allowWorkspaceWrites===undefined?{}:{allowWorkspaceWrites:value.allowWorkspaceWrites})});accepted=true;}
+              try {if(managed) {
+                const owned=selected,ownedContext=context!,taskId=randomUUID();let continuation:NativeTaskContinuation|null=null;
+                const origin=tasks!.begin({id:taskId,actorId:ownedContext.actorId!,snapshot:owned.snapshot(),allowWorkspaceWrites:allowWrites,allowAssets,
+                  owner:{snapshot:()=>owned.snapshot(),revoke:()=>{ownedContext.nextIntent=null;owned.revokeTaskContinuation!();},
+                    repair:async(report:StudioTestTaskSettled)=>{
+                      if(!continuation)throw new CodexClientError('TASK_SCOPE','Original task continuation is unavailable.');
+                      const snapshot=owned.snapshot(),thread=snapshot.thread!;
+                      if(!allowAssets&&ownedContext.manualAssets)throw new CodexClientError('TASK_SCOPE','Task asset scope cannot expand after the original Send.');
+                      if(allowAssets)ownedContext.nextIntent={connectionId:snapshot.connectionId,threadId:thread.threadId,sessionId:thread.sessionId,operationId:null};
+                      try {await owned.continueTask!({continuation,text:repairPrompt(report)});}
+                      finally {ownedContext.nextIntent=null;}
+                    },cancel:async()=>{ownedContext.nextIntent=null;
+                      try{ownedContext.handle?.cancelWork('incarnation');}
+                      finally{try{retireAssets(ownedContext);}finally{
+                        if(client===owned&&!busy){lastSnapshot=owned.snapshot();client=null;currentAssets=null;}await owned.close();}}
+                    }
+                  }});
+                ownedContext.taskId=origin.taskId;taskContexts.set(origin.taskId,ownedContext);taskAfterCommit=taskId;
+                try {const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites});continuation=started.continuation;accepted=true;}
+                catch(error){const uncertain=error instanceof CodexClientError&&error.dispatched&&error.code!=='REMOTE_REJECTED'||owned.snapshot().operations.some(op=>op.method==='turn/start'&&op.state==='unknown');
+                  tasks!.uncertain(taskId,'initial_turn_not_replayed',uncertain);throw error;}
+              } else {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text,
+                ...(value.allowWorkspaceWrites===undefined?{}:{allowWorkspaceWrites:value.allowWorkspaceWrites})});accepted=true;}}
               finally {
                 if(permission && context?.nextIntent===permission)context.nextIntent=null;
                 if(!accepted && permission?.operationId && authority){
@@ -385,8 +516,16 @@ export function createCodexService(options: CodexServiceOptions) {
               if (!snapshot.connected || !snapshot.ready || !thread?.configured || thread.threadId!==value.threadId ||
                 thread.turnId!==value.turnId || !['starting','inProgress'].includes(thread.turnStatus))
                 throw new CodexClientError('STATE','Select the exact active native turn to stop.');
-              currentAssets?.handle?.cancelWork('active-operation');
-              await selected.interruptTurn({initiatedBy:'human',threadId:value.threadId,turnId:value.turnId});break;
+              if(pendingTaskBinding)epoch=++generation;
+              const context=currentAssets,stopped=context?.taskId?tasks!.cancel(context.taskId,'human_interrupted'):null;
+              try{context?.handle?.cancelWork('active-operation');if(!stopped)await selected.interruptTurn({initiatedBy:'human',threadId:value.threadId,turnId:value.turnId});}
+              finally{if(stopped)await stopped;}break;
+            }
+            case 'task-stop': {
+              const thread=selected.snapshot().thread;
+              if(!thread || thread.threadId!==value.threadId || !tasks?.belongs(value.taskId,thread.threadId,thread.sessionId))
+                throw new CodexClientError('TASK_SCOPE','Stop only the owned task in this exact native conversation.');
+              await tasks.cancel(value.taskId,'human_stopped_task');break;
             }
             case 'approval': selected.respondApproval({initiatedBy:'human',connectionId:value.connectionId,threadId:value.threadId,turnId:value.turnId,handle:value.handle,decision:value.decision}); break;
           }
@@ -419,7 +558,8 @@ export function createCodexService(options: CodexServiceOptions) {
         record.model = snapshot?.selection?.model ?? record.model; record.effort = snapshot?.selection?.effort ?? record.effort;
       }
     } finally {
-      if (ownsBusy) busy = false;
+      if(ownsTaskBinding)pendingTaskBinding=false;
+      if (ownsBusy) {busy = false;if(client&&currentAssets?.taskId&&currentAssets.retired&&!client.snapshot().connected){lastSnapshot=client.snapshot();client=null;currentAssets=null;}}
       record.finishedAt = new Date().toISOString();
       let transaction = false;
       try {
@@ -455,6 +595,16 @@ export function createCodexService(options: CodexServiceOptions) {
           try { save(record); } catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Asset permission acknowledgement could not be persisted. Authority retired; no retry.',true); }
         }
       }
+      if(taskAfterCommit && record.state==='acknowledged') {
+        try {tasks!.acknowledged(taskAfterCommit);}
+        catch(error) {
+          // The native ACK remains real even when its separate task journal
+          // fails. Retire that exact owner and join cleanup before reporting it.
+          try {tasks!.uncertain(taskAfterCommit,'initial_acknowledgement_journal_failure');}
+          catch {/* uncertain still starts owned cleanup when its journal write fails. */}
+          await tasks!.drain();throw error;
+        }
+      }
     }
     return {record,replayed:false,state:state()};
   }
@@ -462,15 +612,18 @@ export function createCodexService(options: CodexServiceOptions) {
     const promise = runAction(input); inFlight.add(promise);
     void promise.finally(() => inFlight.delete(promise)).catch(() => {}); return promise;
   }
-  return { state, action, async close() {
-    if (closed) return; generation++; closed = true; retireAssets();
+  return { state, action, playtestTasks:tasks?.playtests??null,
+    attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, async close() {
+    if (closed) return; generation++; closed = true;tasks?.fence();
+    try{retireAssets();}catch{/* Native task closure must still run after registry retirement. */}
     try {
       if (pendingConnect) { try { await (await pendingConnect).close(); } catch { /* Init failure already closed its native child. */ } }
-      if (client) await client.close();
+      try{await tasks?.close();}finally{if(client)await client.close();}
       if (journalFault) await journalFault;
     } finally { client = null; await Promise.allSettled([...inFlight]); db.close(); }
-  } };
+  },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
-export type CodexService = ReturnType<typeof createCodexService>;
+export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &
+  Partial<Pick<ReturnType<typeof createCodexService>, 'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
 
 

@@ -6,7 +6,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs } from '../../core/src/studio-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
@@ -56,6 +56,42 @@ export type StageRunBeginResult =
   | {created:true;runId:string;handle:StageRunHandle;record:StageRunRecord}
   | {created:false;runId:string;handle:null;record:StageRunRecord};
 export interface StageReconstructionRecord {runId:string;command:StudioCommand;receipt:StudioAssetReconstructReceipt|null}
+/** Process-local host authority. Neither its JSON spelling nor a job ID is a permit. */
+export interface StudioTestReservation {readonly kind:'studio-test-reservation'}
+export interface StudioTestTemporaryEdit {id:string;ref:InstanceRef;expected:Record<string,Json>;properties:Record<string,Json>}
+export const STUDIO_TEST_RESERVATION_LIMITS=Object.freeze({edits:4,liveOwners:64,reservations:64,commands:512,argumentBytes:32*1024});
+interface TestReservationEdit {id:string;args:Record<string,Json>;setupRequestId:string;restoreRequestId:string}
+interface TestReservationRecord {
+  id:string;sessionId:string;jobId:string;sessionIdentity:string;
+  proof:{pluginArtifactHash:string;markerName:string;playEpoch:number}|null;
+  setup:TestReservationEdit[];
+}
+interface TestCommandAdmission {reservation:TestReservationRecord;edit:TestReservationEdit;role:'setup'|'restore'}
+const testSessionIdentity=(s:StudioSession)=>canonical({id:s.id,clientSessionId:s.clientSessionId,placeId:s.placeId,universeId:s.universeId,
+  pluginVersion:s.pluginVersion,allowedRoots:s.allowedRoots,allowWrites:s.allowWrites,capabilities:s.capabilities,revokedAt:s.revokedAt});
+/** Bound the copy before JSON serialization, and never invoke caller code. */
+function testSetupSnapshot(value:unknown):unknown {
+  let nodes=0,bytes=0;
+  const charge=(text:string)=>{if(text.length>STUDIO_TEST_RESERVATION_LIMITS.argumentBytes||(bytes+=Buffer.byteLength(text)+2)>STUDIO_TEST_RESERVATION_LIMITS.argumentBytes)throw new ArcaneError('TEST_BUDGET','Temporary setup exceeds its argument bound.');};
+  const copy=(v:unknown,depth:number):unknown=>{
+    if(++nodes>1024||depth>8)throw new ArcaneError('TEST_BUDGET','Temporary setup exceeds its structure bound.');
+    if(v===null||typeof v==='boolean'||typeof v==='number'&&Number.isFinite(v))return v;
+    if(typeof v==='string'){charge(v);return v;}
+    if(!v||typeof v!=='object'||types.isProxy(v))throw new ArcaneError('TEST_SETUP','Expected plain temporary setup data.');
+    const array=Array.isArray(v),prototype=Object.getPrototypeOf(v),keys=Reflect.ownKeys(v);
+    if((array?prototype!==Array.prototype:prototype!==Object.prototype&&prototype!==null)||keys.length>(array?65:64))throw new ArcaneError('TEST_SETUP','Temporary setup requires bounded plain data.');
+    const out:Record<string,unknown>=Object.create(null) as Record<string,unknown>;
+    for(const key of keys){
+      if(array&&key==='length')continue;
+      const descriptor=typeof key==='string'?Object.getOwnPropertyDescriptor(v,key):undefined;
+      if(typeof key!=='string'||!descriptor||!Object.hasOwn(descriptor,'value')||!descriptor.enumerable||key==='__proto__')throw new ArcaneError('TEST_SETUP','Temporary setup requires data properties.');
+      charge(key);out[key]=copy(descriptor.value,depth+1);
+    }
+    if(array){if(keys.length!==(v as unknown[]).length+1||Object.keys(out).some((key,i)=>key!==String(i)))throw new ArcaneError('TEST_SETUP','Temporary setup requires dense bounded arrays.');return Object.values(out);}
+    return out;
+  };
+  return copy(value,0);
+}
 type StageRunStored = Omit<StageRunRecord,'phase'|'commands'|'receipt'|'attempt'|'previousRunId'>;
 const stageHash=z.string().length(64).regex(/^[a-f0-9]{64}(?![\s\S])/);
 const stageJob=z.string().length(36).regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/);
@@ -138,6 +174,9 @@ export class StudioStore {
   #stageRunHandles = new WeakMap<object,string>();
   #reconstructionClaims = new Set<string>();
   #testOwners = new Map<string, string>();
+  #testReservations = new WeakMap<object,TestReservationRecord>();
+  #testReservationRecords = new Map<string,TestReservationRecord>();
+  #testCommandAdmissions = new WeakMap<object,TestCommandAdmission>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
@@ -158,7 +197,7 @@ export class StudioStore {
     try {
       this.db = new DatabaseSync(sqliteTransportPath(join(options.directory, 'studio.sqlite')), { timeout: 2000, allowExtension: false });
       const version = this.db.prepare('PRAGMA user_version').get() as Row;
-      if (Number(version.user_version) > 5) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
+      if (Number(version.user_version) > 6) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS grants (hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT;
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0) STRICT;
@@ -172,7 +211,10 @@ export class StudioStore {
         CREATE TABLE IF NOT EXISTS asset_stage_commands (run_id TEXT NOT NULL REFERENCES asset_stage_runs(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
         CREATE TABLE IF NOT EXISTS asset_stage_attempts (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,attempt_no INTEGER NOT NULL CHECK(attempt_no>0),previous_run_id TEXT REFERENCES asset_stage_attempts(run_id),continuity_key TEXT NOT NULL,UNIQUE(project_id,job_id,attempt_no),UNIQUE(project_id,job_id,continuity_key)) STRICT;
         CREATE TABLE IF NOT EXISTS asset_stage_attempt_commands (run_id TEXT NOT NULL REFERENCES asset_stage_attempts(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_reconstructions (run_id TEXT PRIMARY KEY REFERENCES asset_stage_attempts(run_id),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT;`);
+        CREATE TABLE IF NOT EXISTS asset_stage_reconstructions (run_id TEXT PRIMARY KEY REFERENCES asset_stage_attempts(run_id),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT;
+        CREATE TABLE IF NOT EXISTS studio_test_reservations (id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id),job_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','released')),setup_closed INTEGER NOT NULL DEFAULT 0 CHECK(setup_closed IN (0,1)),payload TEXT NOT NULL) STRICT;
+        CREATE INDEX IF NOT EXISTS studio_test_reservations_state ON studio_test_reservations(state);
+        CREATE TABLE IF NOT EXISTS studio_test_commands (reservation_id TEXT NOT NULL REFERENCES studio_test_reservations(id),edit_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('setup','restore')),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL UNIQUE,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(reservation_id,edit_id,role)) STRICT;`);
       this.transaction(() => {
         if (Number(version.user_version) < 4) {
           const old = this.db.prepare('SELECT * FROM asset_stage_runs LIMIT 65').all() as Row[];
@@ -184,7 +226,7 @@ export class StudioStore {
           }
           this.db.exec('INSERT INTO asset_stage_attempt_commands SELECT * FROM asset_stage_commands;');
         }
-        this.db.exec('PRAGMA user_version=5;');
+        this.db.exec('PRAGMA user_version=6;');
       });
       const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Row[];
       if (!columns.some(c=>c.name==='key_id')) this.db.exec('ALTER TABLE sessions ADD COLUMN key_id TEXT');
@@ -340,7 +382,7 @@ export class StudioStore {
     const base={protocolVersion:1 as const,identity:{...identity}};
     if(!scoped.length)return {...base,state:'absent'};
     // Do not use the display-limited commands()/sessions() catalogues here.
-    for(const row of scoped)if(this.#testOwners.has(row.id as string)||this.db.prepare("SELECT 1 FROM commands WHERE session_id=? AND state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get(row.id as string))return {...base,state:'reconciliation',sessionId:row.id as string};
+    for(const row of scoped)if(this.hasTestSetupFence()||this.#testOwners.has(row.id as string)||this.db.prepare("SELECT 1 FROM commands WHERE session_id=? AND state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get(row.id as string))return {...base,state:'reconciliation',sessionId:row.id as string};
     const active=scoped.find(row=>!(JSON.parse(row.payload as string) as StudioSession).revokedAt);
     if(active)return {...base,state:'active',sessionId:active.id as string};
     return {...base,state:'lost',sessionId:scoped[0]!.id as string};
@@ -368,6 +410,7 @@ export class StudioStore {
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
     const method = methodField(a.method);
+    this.checkTestQueueAuthority(sessionId,requestId,admission);
     // Before idempotent lookup: a model cannot read/reuse a host staging receipt
     // by guessing its request ID, even if its JSON is structurally identical.
     if ((method === 'asset.stage_packet'||method==='asset.reconstruct') && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Asset intake and reconstruction require the trusted native import controller.');
@@ -376,6 +419,7 @@ export class StudioStore {
   }
   /** Already inside a transaction. No callback, await or second commit here. */
   private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object):StudioCommand {
+      this.checkTestQueueAuthority(sessionId,requestId,admission);
       if((method==='asset.stage_packet'||method==='asset.reconstruct')&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require trusted host admission.');
       const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
       if (old) {
@@ -383,7 +427,6 @@ export class StudioStore {
         return JSON.parse(old.payload as string) as StudioCommand;
       }
       const s = this.session(sessionId);
-      if (this.#testOwners.has(sessionId)) throw new ArcaneError('BUSY', 'An owned playtest fences the Studio command queue until verified cleanup.');
       const args = validateCommandArgs(method, a.args, s, internalRestore);
       const activating = this.activationSource(method, args);
       const verification = admission ? this.#activationAdmissions.get(admission) : undefined;
@@ -433,6 +476,7 @@ export class StudioStore {
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
     const method = methodField(a.method);
+    this.checkTestQueueAuthority(sessionId,requestId);
     if(method==='asset.stage_packet'||method==='asset.reconstruct')throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require private host admission, including idempotent lookup.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
@@ -782,13 +826,192 @@ export class StudioStore {
       this.event('command_' + command.state, command.id, {sessionId: command.sessionId, method: command.method});
     });
   }
-  /** Host-only coordination, never a request-provided lock or permission. */
-  reserveTest(sessionId: string, owner: string): void {
-    const s=this.session(sessionId);if (!s.allowWrites) throw new ArcaneError('READ_ONLY','Playtesting requires a writable paired target and separate human test consent.');
-    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(owner) || this.#testOwners.has(sessionId) || this.db.prepare("SELECT id FROM commands WHERE session_id=? AND state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get(sessionId)) throw new ArcaneError('BUSY','Finish or reconcile existing Studio work before starting a playtest.');
-    this.#testOwners.set(sessionId,owner);
+  private hasTestSetupFence():boolean {
+    return !!this.db.prepare("SELECT 1 FROM studio_test_reservations WHERE state='active' LIMIT 1").get();
   }
-  releaseTest(sessionId: string, owner: string): void { if (this.#testOwners.get(sessionId)===owner) this.#testOwners.delete(sessionId); }
+  private checkTestQueueAuthority(sessionId:string,requestId:string,admission?:object):void {
+    const permit=admission?this.#testCommandAdmissions.get(admission):undefined;
+    if(permit){
+      this.checkTestReservation(permit.reservation,permit.role);
+      if(sessionId!==permit.reservation.sessionId||requestId!==(permit.role==='setup'?permit.edit.setupRequestId:permit.edit.restoreRequestId))
+        throw new ArcaneError('TEST_RESERVATION','Test command identity differs from its private reservation.');
+      return;
+    }
+    // Apply before idempotency: knowing a private request ID is not authority to
+    // reuse its receipt, even after that reservation was safely released.
+    if(this.#testOwners.has(sessionId)||this.hasTestSetupFence()
+      ||this.db.prepare('SELECT 1 FROM studio_test_commands WHERE request_id=?').get(requestId))
+      throw new ArcaneError('BUSY','An owned playtest fences the Studio command queue until verified cleanup.');
+  }
+  private checkTestReservation(record:TestReservationRecord,role:'setup'|'restore'):StudioSession {
+    if(this.closed||this.#testOwners.get(record.sessionId)!==record.jobId||this.#testReservationRecords.get(record.sessionId)!==record)throw new ArcaneError('TEST_RESERVATION','The original test reservation is no longer active.');
+    if(record.setup.length){
+      const row=this.db.prepare("SELECT payload,setup_closed FROM studio_test_reservations WHERE id=? AND state='active'").get(record.id) as Row|undefined;
+      if(!row||row.payload!==JSON.stringify(record))throw new ArcaneError('TEST_RESERVATION','The durable original test reservation differs.');
+      if(role==='setup'&&row.setup_closed!==0)throw new ArcaneError('TEST_RESERVATION','Temporary setup was stopped by its original owner.');
+    }
+    const s=this.session(record.sessionId);
+    if(testSessionIdentity(s)!==record.sessionIdentity)throw new ArcaneError('SCOPE','The original test grant or client lifetime changed.');
+    if(record.setup.length){
+      const p=s.proof,original=record.proof;
+      if(!p||!original||p.sessionId!==s.id||p.clientLifetimeId!==s.clientSessionId||p.placeId!==s.placeId||p.universeId!==s.universeId
+        ||!p.connected||!p.continuitySupported||p.mode!=='Edit'||p.pluginArtifactHash!==original.pluginArtifactHash||p.markerName!==original.markerName
+        ||!Number.isSafeInteger(p.playEpoch)||p.playEpoch<original.playEpoch||role==='setup'&&p.playEpoch!==original.playEpoch
+        ||!Number.isFinite(Date.parse(p.observedAt))||Date.parse(p.observedAt)>this.now()
+        ||!Number.isFinite(Date.parse(p.expiresAt))||Date.parse(p.expiresAt)<=this.now())
+        throw new ArcaneError('SCOPE','Temporary edits require fresh exact plugin Edit continuity.');
+    }
+    return s;
+  }
+  private testReservation(owner:StudioTestReservation):TestReservationRecord {
+    const record=owner&&typeof owner==='object'?this.#testReservations.get(owner):undefined;
+    if(!record)throw new ArcaneError('TEST_RESERVATION','Only the original private host reservation may coordinate temporary edits.');
+    return record;
+  }
+  /** Seal the approved finite setup before any command can be dispatched. */
+  reserveTest(sessionId:string,jobId:string,setup:readonly StudioTestTemporaryEdit[]=[]):StudioTestReservation {
+    const s=this.session(sessionId);
+    if(!s.allowWrites)throw new ArcaneError('READ_ONLY','Playtesting requires a writable paired target and separate human test consent.');
+    if(typeof jobId!=='string'||!/^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(jobId)||this.#testOwners.size>=STUDIO_TEST_RESERVATION_LIMITS.liveOwners||this.#testOwners.has(sessionId)||this.hasTestSetupFence()
+      ||this.db.prepare("SELECT id FROM commands WHERE session_id=? AND state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get(sessionId))
+      throw new ArcaneError('BUSY','Finish or reconcile existing Studio work before starting a playtest.');
+    const snapshot=object(testSetupSnapshot({setup}));
+    jsonObject(snapshot,STUDIO_TEST_RESERVATION_LIMITS.argumentBytes);
+    if(!Array.isArray(snapshot.setup)||snapshot.setup.length>STUDIO_TEST_RESERVATION_LIMITS.edits)throw new ArcaneError('TEST_SETUP','At most four approved temporary edits are allowed.');
+    if(snapshot.setup.length&&(Number((this.db.prepare('SELECT count(*) AS n FROM studio_test_reservations').get() as Row).n)>=STUDIO_TEST_RESERVATION_LIMITS.reservations
+      ||Number((this.db.prepare('SELECT count(*) AS n FROM studio_test_commands').get() as Row).n)+snapshot.setup.length*2>STUDIO_TEST_RESERVATION_LIMITS.commands))
+      throw new ArcaneError('TEST_BUDGET','Retained temporary setup history is full; existing evidence was preserved.');
+    const ids=new Set<string>();
+    const edits:TestReservationEdit[]=snapshot.setup.map(value=>{
+      const edit=object(value);
+      if(Object.keys(edit).length!==4||Object.keys(edit).some(k=>!['id','ref','expected','properties'].includes(k))
+        ||typeof edit.id!=='string'||!/^[a-zA-Z0-9_-]{1,64}(?![\s\S])/.test(edit.id)||ids.has(edit.id))throw new ArcaneError('TEST_SETUP','Temporary edits require unique bounded IDs and closed property scope.');
+      ids.add(edit.id);
+      const r=object(edit.ref);
+      if(Object.keys(r).length!==5||Object.keys(r).some(k=>!['instanceId','sessionId','root','pathSegments','className'].includes(k)))throw new ArcaneError('TEST_SETUP','Temporary edits require an exact opaque Instance reference.');
+      const args=validateCommandArgs('scene.update',{ref:edit.ref,expected:edit.expected,properties:edit.properties},s);
+      validateCommandArgs('scene.restore',{receiptCommandId:'private-test-reservation',mutation:{ref:edit.ref}},s,true);
+      return {id:edit.id,args,setupRequestId:'test_setup_'+randomUUID(),restoreRequestId:'test_restore_'+randomUUID()};
+    });
+    if(edits.length&&(this.#testOwners.size>0||this.db.prepare("SELECT 1 FROM commands WHERE state IN ('queued','dispatched','needs_reconciliation') LIMIT 1").get()))
+      throw new ArcaneError('BUSY','Finish or reconcile all project Studio work before temporary setup.');
+    const p=s.proof;
+    const record:TestReservationRecord={id:randomUUID(),sessionId,jobId,sessionIdentity:testSessionIdentity(s),
+      proof:p?{pluginArtifactHash:p.pluginArtifactHash,markerName:p.markerName,playEpoch:p.playEpoch}:null,setup:edits};
+    const owner:StudioTestReservation=Object.freeze({kind:'studio-test-reservation'});
+    try{this.transaction(()=>{
+      if(edits.length)this.db.prepare("INSERT INTO studio_test_reservations(id,session_id,job_id,state,payload) VALUES(?,?,?,'active',?)").run(record.id,sessionId,jobId,JSON.stringify(record));
+      this.#testOwners.set(sessionId,jobId);this.#testReservationRecords.set(sessionId,record);
+      this.checkTestReservation(record,'setup');if(edits.length)this.event('test_reserved',record.id,{sessionId,jobId,setupDigest:hash(canonical(edits.map(e=>({id:e.id,args:e.args}))))});
+    });}catch(error){this.#testOwners.delete(sessionId);this.#testReservationRecords.delete(sessionId);throw error;}
+    this.#testReservations.set(owner,record);return owner;
+  }
+  private testCommand(record:TestReservationRecord,edit:TestReservationEdit,role:'setup'|'restore',args:Record<string,Json>):StudioCommand {
+    const method=role==='setup'?'scene.update':'scene.restore',requestId=role==='setup'?edit.setupRequestId:edit.restoreRequestId;
+    const input={sessionId:record.sessionId,requestId,method,args};
+    const fingerprint=hash(canonical({sessionId:record.sessionId,method,args}));
+    const admission=Object.freeze({});this.#testCommandAdmissions.set(admission,{reservation:record,edit,role});
+    try{
+      const prior=this.db.prepare('SELECT * FROM studio_test_commands WHERE reservation_id=? AND edit_id=? AND role=?').get(record.id,edit.id,role) as Row|undefined;
+      if(!prior&&Number((this.db.prepare('SELECT count(*) AS n FROM studio_test_commands').get() as Row).n)>=STUDIO_TEST_RESERVATION_LIMITS.commands)
+        throw new ArcaneError('TEST_BUDGET','Retained temporary command history is full; no command was allocated.');
+      const command=this.enqueueInTransaction(input,record.sessionId,requestId,method,fingerprint,role==='restore',admission);
+      if(prior){if(prior.command_id!==command.id||prior.request_id!==requestId||prior.lease_epoch!==command.leaseEpoch||prior.fingerprint!==fingerprint)throw new ArcaneError('TEST_RESERVATION','Original temporary command association differs.');}
+      else this.db.prepare('INSERT INTO studio_test_commands VALUES(?,?,?,?,?,?,?)').run(record.id,edit.id,role,command.id,requestId,command.leaseEpoch,fingerprint);
+      return command;
+    }finally{this.#testCommandAdmissions.delete(admission);}
+  }
+  enqueueTestSetup(owner:StudioTestReservation,editId:string):StudioCommand {
+    const record=this.testReservation(owner),edit=record.setup.find(e=>e.id===editId);
+    if(!edit)throw new ArcaneError('TEST_SETUP','That temporary edit was not approved in this reservation.');
+    return this.transaction(()=>{this.checkTestReservation(record,'setup');return this.testCommand(record,edit,'setup',edit.args);});
+  }
+  /** Stop is always available to the original owner, including after scope loss.
+   * It closes future setup before cancelling only still-undelivered commands. */
+  cancelTestSetup(owner:StudioTestReservation):void {
+    const record=this.testReservation(owner);
+    this.transaction(()=>{
+      if(this.#testOwners.get(record.sessionId)!==record.jobId||this.#testReservationRecords.get(record.sessionId)!==record)throw new ArcaneError('TEST_RESERVATION','Original test ownership is absent.');
+      if(!record.setup.length)return;
+      const row=this.db.prepare("SELECT payload,setup_closed FROM studio_test_reservations WHERE id=? AND state='active'").get(record.id) as Row|undefined;
+      if(!row||row.payload!==JSON.stringify(record))throw new ArcaneError('TEST_RESERVATION','The durable original test reservation differs.');
+      if(row.setup_closed===1)return;
+      const changed=this.db.prepare("UPDATE studio_test_reservations SET setup_closed=1 WHERE id=? AND state='active' AND setup_closed=0 AND payload=?").run(record.id,JSON.stringify(record));
+      if(changed.changes!==1)throw new ArcaneError('TEST_RESERVATION','The durable original test reservation differs.');
+      for(const entry of this.db.prepare("SELECT command_id FROM studio_test_commands WHERE reservation_id=? AND role='setup'").all(record.id) as Row[]){
+        const command=this.command(entry.command_id as string);
+        if(command.state==='queued'){command.state='cancelled';command.finishedAt=this.iso();command.error='Original test owner stopped undelivered temporary setup.';this.saveCommand(command);}
+      }
+      this.event('test_setup_stopped',record.id,{sessionId:record.sessionId,jobId:record.jobId});
+    });
+  }
+  enqueueTestRestore(owner:StudioTestReservation,commandId:string):StudioCommand {
+    const record=this.testReservation(owner);
+    return this.transaction(()=>{
+      this.checkTestReservation(record,'restore');
+      const association=this.db.prepare("SELECT * FROM studio_test_commands WHERE reservation_id=? AND command_id=? AND role='setup'").get(record.id,commandId) as Row|undefined;
+      const edit=association?record.setup.find(e=>e.id===association.edit_id):undefined;
+      if(!association||!edit)throw new ArcaneError('RESTORE','Only a setup receipt issued by this original reservation can be restored.');
+      const prior=this.command(commandId),fingerprint=hash(canonical({sessionId:prior.sessionId,method:prior.method,args:prior.args}));
+      if(prior.state!=='succeeded'||prior.method!=='scene.update'||prior.sessionId!==record.sessionId||prior.requestId!==edit.setupRequestId
+        ||prior.clientSessionId!==this.session(record.sessionId).clientSessionId||prior.leaseEpoch!==association.lease_epoch||fingerprint!==association.fingerprint
+        ||canonical(prior.args)!==canonical(edit.args))throw new ArcaneError('RESTORE','The exact succeeded setup receipt is unavailable.');
+      const mutation=jsonObject(object(prior.result).mutation);
+      if(mutation.kind!=='scene.update'||!sameReceiptRef(mutation.ref,edit.args.ref)
+        ||canonical(object(mutation.before).properties)!==canonical(edit.args.expected)
+        ||!nativePropertiesMatch(edit.args.properties as Record<string,Json>,object(mutation.after).properties,instanceRef(edit.args.ref).className))
+        throw new ArcaneError('RESTORE','The immutable setup receipt differs from the approved baseline and result.');
+      return this.testCommand(record,edit,'restore',{receiptCommandId:prior.id,mutation});
+    });
+  }
+  releaseTestReservation(owner:StudioTestReservation):void {
+    const record=this.testReservation(owner);
+    this.transaction(()=>{
+      if(this.#testOwners.get(record.sessionId)!==record.jobId||this.#testReservationRecords.get(record.sessionId)!==record)throw new ArcaneError('TEST_RESERVATION','Original test ownership is absent.');
+      for(const row of this.db.prepare("SELECT command_id,edit_id FROM studio_test_commands WHERE reservation_id=? AND role='setup'").all(record.id) as Row[]){
+        const setup=this.command(row.command_id as string);
+        if(setup.state==='queued'||setup.state==='cancelled'){
+          if(setup.state==='queued'){setup.state='cancelled';setup.finishedAt=this.iso();setup.error='Undelivered temporary setup cancelled by its original owner.';this.saveCommand(setup);}
+          continue;
+        }
+        const restored=this.db.prepare("SELECT command_id FROM studio_test_commands WHERE reservation_id=? AND edit_id=? AND role='restore'").get(record.id,row.edit_id!) as Row|undefined;
+        if(setup.state!=='succeeded'||!restored||this.command(restored.command_id as string).state!=='succeeded')
+          throw new ArcaneError('RECONCILIATION','Dispatched temporary edits require verified original restoration before release.');
+      }
+      if(record.setup.length){
+        const changed=this.db.prepare("UPDATE studio_test_reservations SET state='released' WHERE id=? AND state='active' AND payload=?").run(record.id,JSON.stringify(record));
+        if(changed.changes!==1)throw new ArcaneError('TEST_RESERVATION','The durable original test reservation differs.');
+      }
+      if(record.setup.length)this.event('test_released',record.id,{sessionId:record.sessionId,jobId:record.jobId});
+    });
+    this.#testOwners.delete(record.sessionId);this.#testReservationRecords.delete(record.sessionId);this.#testReservations.delete(owner);
+  }
+  /** Legacy smoke coordination cannot clear a setup-bearing reservation. */
+  releaseTest(sessionId:string,jobId:string):void {
+    if(this.db.prepare("SELECT 1 FROM studio_test_reservations WHERE session_id=? AND job_id=? AND state='active'").get(sessionId,jobId))
+      throw new ArcaneError('TEST_RESERVATION','Temporary setup requires its original private restoration owner.');
+    if(this.#testOwners.get(sessionId)===jobId){this.#testOwners.delete(sessionId);this.#testReservationRecords.delete(sessionId);}
+  }
+  private guardTestDispatch(command:StudioCommand):boolean {
+    const row=this.db.prepare('SELECT * FROM studio_test_commands WHERE command_id=?').get(command.id) as Row|undefined;
+    if(!row){if(this.hasTestSetupFence())throw new ArcaneError('BUSY','Temporary setup fences other project Studio commands.');return true;}
+    const record=this.#testReservationRecords.get(command.sessionId),role=row.role as 'setup'|'restore';
+    const edit=record?.setup.find(e=>e.id===row.edit_id);
+    if(!record||!edit||record.id!==row.reservation_id||command.requestId!==row.request_id||command.leaseEpoch!==row.lease_epoch
+      ||hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args}))!==row.fingerprint
+      ||command.method!==(role==='setup'?'scene.update':'scene.restore'))throw new ArcaneError('TEST_RESERVATION','Original temporary command owner or association is absent.');
+    let session:StudioSession;
+    try{session=this.checkTestReservation(record,role);}
+    catch(error){
+      // Preserve a newly observed Play transition (or stale proof) while
+      // withholding dispatch. Throwing here would roll that observation back
+      // and could leave an older Edit proof apparently usable on the next poll.
+      if(error instanceof ArcaneError&&error.code==='SCOPE')return false;
+      throw error;
+    }
+    validateCommandArgs(command.method,command.args,session,role==='restore');
+    return true;
+  }
   commands(sessionId?: string): StudioCommand[] {
     const q = sessionId ? this.db.prepare('SELECT payload FROM commands WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 100').all(sessionId) : this.db.prepare('SELECT payload FROM commands ORDER BY created DESC,rowid DESC LIMIT 100').all();
     return (q as Row[]).map(r => JSON.parse(r.payload as string) as StudioCommand);
@@ -839,6 +1062,7 @@ export class StudioStore {
         if (!row) return [];
         const c = JSON.parse(row.payload as string) as StudioCommand;
         if (Date.parse(c.expiresAt) <= this.now()) { c.state = 'cancelled'; c.error = 'Undelivered command expired.'; c.finishedAt = this.iso(); this.saveCommand(c); continue; }
+        if(!this.guardTestDispatch(c))return [];
         c.state = 'dispatched'; this.saveCommand(c); this.event('command_dispatched', c.id, { sessionId }); return [c];
       }
     });
@@ -859,6 +1083,11 @@ export class StudioStore {
         if (c.state !== a.state || canonical(c.result) !== canonical(result) || c.error !== error) throw new ArcaneError('RECEIPT_CONFLICT', 'Completed receipt is immutable.'); return;
       }
       if (c.state !== 'dispatched' && c.state !== 'needs_reconciliation') throw new ArcaneError('COMMAND_STATE', 'Command was not delivered.');
+      if(a.state==='succeeded'&&c.method==='scene.restore'&&this.db.prepare("SELECT 1 FROM studio_test_commands WHERE command_id=? AND role='restore'").get(c.id)){
+        const restored=object(result);
+        if(Object.keys(restored).length!==2||Object.keys(restored).some(k=>!['restored','ref'].includes(k))||restored.restored!==true
+          ||!sameReceiptRef(restored.ref,object(c.args.mutation).ref))throw new ArcaneError('RECEIPT','Temporary restoration requires its exact original opaque receipt acknowledgement.');
+      }
       if (a.state === 'succeeded' && c.method === 'asset.stage_packet') {
         const receipt = object(result), packet = object(JSON.parse(c.args.packet as string));
         if (Object.keys(receipt).length !== 5 || Object.keys(receipt).some(k => !['transferDigest', 'packetCount', 'byteLength', 'state', 'engineVerification'].includes(k))
@@ -896,6 +1125,7 @@ export class StudioStore {
   }
   private restoreInput(input: unknown): Record<string, Json> {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
+    if(this.db.prepare('SELECT 1 FROM studio_test_commands WHERE command_id=?').get(prior.id))throw new ArcaneError('TEST_RESERVATION','Temporary setup receipts require their original private restoration owner.');
     if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet'||prior.method==='asset.reconstruct') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
     return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };

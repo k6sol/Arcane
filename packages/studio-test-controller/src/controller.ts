@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { bounded, codeOf, delay, digest, fail, freeze, identifier, observationSchema, parse, proposalSchema, sameBinding, systemScheduler,
   type LogSummary, type Scheduler, type TestAdapter, type TestBinding, type TestCode, type TestProposal, type TestObservation } from './contracts.js';
 import { recordHumanConsent, type ConsentDisplay, type HumanTestVerifier, type TestEvent, type TestLedger } from './ledger.js';
+import { SCENARIO_ACTIONS, type ScenarioReview } from './scenario.js';
 
 export interface TestReview {
   runId: string | null; evidence: 'fixture' | 'native'; nativeAcceptance: false;
@@ -14,11 +15,15 @@ export interface TestReview {
   watchdog: { armed: boolean; fired: boolean; reason: TestCode | null };
   observations: number; logs: readonly LogSummary[]; logsTruncated: boolean;
   requiresHumanReview: boolean; canStartAnotherOperation: boolean;
+  scenario?: ScenarioReview;
 }
 export interface TestControllerOptions {
   adapter: TestAdapter; ledger: TestLedger; humanVerifier: HumanTestVerifier;
   scheduler?: Scheduler; requestTimeoutMs?: number; cleanupGraceMs?: number; proofMaxAgeMs?: number;
   onStatus?: (status: Readonly<TestReview>) => void;
+  /** Trusted service-owned setup/restore capability; never supplied by JSON. */
+  temporary?: { setup(signal: AbortSignal): Promise<void>; restore(signal: AbortSignal): Promise<void>;
+    verifySubjects(signal: AbortSignal): Promise<void>; release(): void };
 }
 const startSchema = z.strictObject({ proposalId: identifier, consentId: identifier });
 const idSchema = z.strictObject({ runId: identifier });
@@ -50,18 +55,25 @@ export class BoundedStudioTestController {
     if (this.#closed || this.#run || this.#admission || this.#confirming || this.#preparing) fail('BUSY');
     if (this.#options.ledger.unresolved()) fail('FENCED');
     const proposal = freeze(parse(proposalSchema, input));
+    if (!!proposal.scenario !== !!proposal.subjectDigest) fail('INVALID_REQUEST');
     // Bound both sampling volume and total native requests for a single run.
     if (proposal.observationIntervalMs > proposal.durationMs || Math.ceil(proposal.durationMs / proposal.observationIntervalMs) > 128) fail('INVALID_REQUEST');
     this.#preparing = true;
     try {
+      if(proposal.scenario){
+        if(!this.#options.adapter.prepareScenario||!this.#options.adapter.runScenario||
+            proposal.scenario.capture.required&&!this.#options.adapter.captureScenario||!this.#options.temporary)fail('UNSUPPORTED_TOOL');
+        await bounded(this.#scheduler,this.#timeout,new AbortController().signal,signal=>this.#options.adapter.prepareScenario!(proposal.scenario!,signal));
+      }
       const observation = this.#checkObservation(await bounded(this.#scheduler, this.#timeout, new AbortController().signal,
         signal => this.#options.adapter.observe(proposal.binding, signal)), proposal);
       if (observation.mode !== 'Edit') fail('MODE_MISMATCH');
       const display: ConsentDisplay = freeze({ proposal, cleanupGraceMs: this.#grace, requestTimeoutMs: this.#timeout,
         proofMaxAgeMs: this.#freshness, consentExpiresAt: this.#scheduler.now() + 60_000, guarantee: 'observed-non-atomic',
-        actions: ['start', 'observe-state-and-console', 'stop-owned-play'],
+        actions: proposal.scenario ? SCENARIO_ACTIONS : ['start', 'observe-state-and-console', 'stop-owned-play'],
         raceDisclosure: 'Observed checks cannot atomically fence the native call.' });
       this.#prepared = { id: randomUUID(), display };
+      if(proposal.scenario)this.#status.scenario={scenarioDigest:digest(proposal.scenario),subjectDigest:proposal.subjectDigest!,state:'not_started',inputRelease:'not_started',temporary:'not_started',steps:[],capture:null,consoleCoverage:'ambiguous'};
       return freeze({ proposalId: this.#prepared.id, display, displayDigest: digest(display) });
     } finally { this.#preparing = false; }
   }
@@ -106,6 +118,7 @@ export class BoundedStudioTestController {
       // Unexpected failures never erase a fence or become a success.
       this.#status.phase = 'done'; this.#status.cleanup = 'unknown'; this.#status.requiresHumanReview = true;
       this.#status.outcome ??= 'failed'; this.#status.code = this.#status.code === 'OK' ? 'EFFECT_UNKNOWN' : this.#status.code;
+      if(this.#status.scenario?.state==='running')this.#status.scenario.state='unknown';
       this.#status.canStartAnotherOperation = false; this.#cancelWatchdog?.(); this.#status.watchdog.armed = false; this.#publish();
     });
     this.#publish(); this.#finishAdmission(); return this.status();
@@ -168,10 +181,33 @@ export class BoundedStudioTestController {
     let outcome: NonNullable<TestReview['outcome']> = 'succeeded', code: TestCode = 'OK';
     try {
       this.#status.phase = 'starting'; await this.#observe(proposal, true);
+      if(proposal.scenario)await this.#operation(signal=>this.#options.temporary!.verifySubjects(signal));
+      if(proposal.scenario?.temporaryEdits?.length){
+        await this.#event('setup_intent','OK');this.#status.scenario!.temporary='running';this.#publish();
+        await this.#operation(signal=>this.#options.temporary!.setup(signal));
+        await this.#event('setup_result','OK');
+      }
       await this.#event('start_intent', 'OK');
       if (this.#controller.signal.aborted) fail('CANCELLED');
       await this.#operation(signal => this.#options.adapter.start(proposal.binding, this.#runId!, this.#status.deadline!, signal));
       await this.#event('start_result', 'OK');
+      if(proposal.scenario){
+        const status=this.#status.scenario!;
+        await this.#event('scenario_intent','OK');status.state='running';status.inputRelease='unknown';this.#status.phase='observing';this.#publish();
+        const result=await this.#operation(signal=>this.#options.adapter.runScenario!(proposal.binding,this.#runId!,proposal.scenario!,this.#status.deadline!,signal));
+        status.state=result.outcome;status.inputRelease=result.inputRelease;status.steps=result.steps;
+        await this.#event('scenario_result',result.code,{scenario:structuredClone(status)});this.#publish();
+        if(result.inputRelease!=='unknown'&&(result.outcome==='passed'||result.code==='ASSERTION_FAILED'))await this.#observe(proposal,false);
+        if(proposal.scenario.capture.required&&result.inputRelease!=='unknown'&&(result.outcome==='passed'||result.code==='ASSERTION_FAILED')){
+          await this.#event('capture_intent','OK');
+          status.capture=await this.#operation(signal=>this.#options.adapter.captureScenario!(proposal.binding,this.#runId!,signal));
+          await this.#event('capture_result','OK',{scenario:structuredClone(status)});this.#publish();
+        }
+        if(result.outcome!=='passed')fail(result.code==='OK'?'BAD_NATIVE_RESPONSE':result.code);
+        // Native screen_capture currently supplies no datamodel provenance.
+        // Keep its bytes for human review, never substitute focus for proof.
+        if(proposal.scenario.capture.required)fail('UNSUPPORTED_TOOL');
+      }
       const maximumObservations = Math.ceil(proposal.durationMs / proposal.observationIntervalMs);
       while (this.#scheduler.now() < this.#status.deadline!) {
         // Timer callbacks may fire just before their requested boundary. Never
@@ -191,6 +227,7 @@ export class BoundedStudioTestController {
       else outcome = code === 'TIMEOUT' ? 'timed_out' : 'failed';
     }
     this.#cancelWatchdog?.(); this.#cancelWatchdog = null; this.#status.watchdog.armed = false;
+    if(this.#status.scenario?.state==='running')this.#status.scenario.state='unknown';
     // Outcome is fixed once; cleanup has its own status and cannot rewrite it.
     this.#status.outcome = outcome; this.#status.code = code; this.#status.phase = 'stopping'; this.#status.cleanup = 'running'; this.#publish();
     try {
@@ -207,6 +244,18 @@ export class BoundedStudioTestController {
       await this.#operation(signal => this.#options.adapter.stop(proposal.binding, this.#runId!, this.#status.cleanupDeadline!, signal), true);
       clean = true;
       if (!this.#journalFailed) await this.#event('stop_result', 'OK');
+      if(proposal.scenario){
+        const status=this.#status.scenario!;
+        if(status.temporary==='running'){
+          if(!this.#journalFailed)await this.#event('restore_intent','OK');
+          try {await this.#operation(signal=>this.#options.temporary!.restore(signal),true);status.temporary='restored';}
+          catch {status.temporary='unknown';throw new Error('Temporary restoration is unknown.');}
+          if(!this.#journalFailed)await this.#event('restore_result','OK',{scenario:structuredClone(status)});
+        }
+        await this.#operation(signal=>this.#options.temporary!.verifySubjects(signal),true);
+        if(status.inputRelease==='unknown')clean=false;
+        if(clean&&!this.#journalFailed)this.#options.temporary!.release();
+      }
     } catch { clean = false; }
     this.#status.cleanup = clean && !this.#journalFailed ? 'complete' : 'unknown';
     try { await this.#event('cleanup', clean ? code : 'EFFECT_UNKNOWN', { cleanup: this.#status.cleanup }); }
