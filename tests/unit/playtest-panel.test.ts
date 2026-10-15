@@ -42,6 +42,14 @@ function gameplayJob(passed=false){
   if(passed){value.state='complete';value.review.phase='done';value.review.outcome='succeeded';value.review.code='OK';value.review.cleanup='complete';}
   return{value,scenario,report};
 }
+function layoutJob(passed=false){
+  const current=gameplayJob(passed);
+  Object.assign(current.scenario,{steps:[{id:'layout',kind:'assert-gui-layout',targetId:'status',minimumWidth:120,minimumHeight:40,withinMs:100}]});
+  const measurement={coordinateSpace:'CoreUISafeInsets',target:{left:24,top:24,right:224,bottom:74},safeArea:{left:0,top:0,right:800,bottom:600},
+    clips:[{left:0,top:0,right:400,bottom:300}],visibleChain:true,viewport:{width:800,height:644,units:'RobloxUIOffset'}};
+  const row={id:'layout',kind:'assert-gui-layout',outcome:'passed',expected:'core-safe:120x40',observed:true as unknown,layout:measurement};
+  Object.assign(current.report,{steps:passed?[row]:[]});return{...current,row,measurement};
+}
 
 class Events {
   private listeners = new Map<string, EventListener[]>();
@@ -171,6 +179,38 @@ test('scenario approval makes each finite operation and exact temporary restorat
   assert.equal(audit.open,false);assert.equal(fieldValues(f).get('display.proposal.scenario.steps[0].holdMs'),'100');assert.equal(fieldValues(f).get('displayDigest'),DIGEST);
   assert.equal(f.posts().length,0);button(f,'Run test').emit('click',true);await flush();assert.equal(f.posts().length,1);
   assert.deepEqual(f.posts()[0]!.body,{id:pending.value.id,displayDigest:DIGEST},'the readable projection cannot replace the exact approval digest');
+});
+
+test('layout consent is readable and measured GUI pixels remain distinct from camera viewport units',async t=>{
+  const pending=layoutJob(),f=fixture(t,[pending.value]);await f.panel.refresh();
+  assert.match(f.root.textContent,/at least 120 x 40 GUI pixels/);assert.match(f.root.textContent,/Core UI safe area and clipping ancestors, within 100 ms/);
+  assert.match(f.root.textContent,/Layout snapshot; occlusion and device input are unverified/);assert.equal(details(f).open,false);
+  assert.equal(fieldValues(f).get('display.proposal.scenario.steps[0].minimumWidth'),'120');
+  button(f,'Run test').emit('click',true);await flush();assert.deepEqual(f.posts()[0]!.body,{id:pending.value.id,displayDigest:DIGEST});
+  const finished=layoutJob(true);f.jobs([finished.value]);await f.panel.refresh();
+  assert.match(f.root.textContent,/layout · passed · Expected at least 120 x 40 GUI pixels · Observed true/);
+  assert.doesNotMatch(f.root.textContent,/Expected core-safe:/);
+  assert.match(f.root.textContent,/Layout snapshot: 200 x 50 GUI pixels at \(24, 24\)/);assert.match(f.root.textContent,/Core UI safe area: 800 x 600 GUI pixels/);
+  assert.match(f.root.textContent,/Clipping ancestors: 1/);assert.match(f.root.textContent,/Camera viewport: 800 x 644 Roblox UI offset units; separate from GUI pixels/);
+  assert.match(f.root.textContent,/Overlap and device behavior unverified/);
+  const evidence=f.root.all().find(element=>element.tagName==='DETAILS'&&element.textContent.includes('Camera viewport:'));assert.ok(evidence);assert.equal(evidence.open,false);
+  const summary=f.root.all().find(element=>element.tagName==='P'&&element.textContent.startsWith('Layout snapshot:'));assert.ok(summary);assert.doesNotMatch(summary.textContent,/Camera viewport/);
+});
+
+test('layout evidence refreshes in an unchanged running state and rejects contradictory measurements',async t=>{
+  const active=layoutJob();active.value.state='running';active.value.review.phase='observing';active.report.state='running';
+  const f=fixture(t,[active.value]);await f.panel.refresh();Object.assign(active.report,{steps:[active.row]});
+  f.jobs([active.value]);await f.panel.refresh();assert.match(f.root.textContent,/Layout snapshot: 200 x 50/);
+  const mutations:[string,(value:ReturnType<typeof layoutJob>)=>void][]=[
+    ['size',value=>{value.measurement.target.right=100;}],['clipping',value=>{value.measurement.clips[0]!.right=100;}],
+    ['visibility',value=>{value.measurement.visibleChain=false;}],['safe origin',value=>{value.measurement.safeArea.top=1;}],
+    ['too many clips',value=>{value.measurement.clips=Array.from({length:9},()=>value.measurement.safeArea);}],
+    ['units',value=>{value.measurement.viewport.units='pixels';}],['missing measurement',value=>{Reflect.deleteProperty(value.row,'layout');}],
+    ['unmeasured failure',value=>{value.value.review.code='ASSERTION_FAILED';value.value.review.outcome='failed';value.report.state='failed';value.row.outcome='failed';value.row.observed=null;Reflect.deleteProperty(value.row,'layout');}],
+  ];
+  for(const[name,mutate]of mutations){const malformed=layoutJob(true);mutate(malformed);f.jobs([malformed.value]);await f.panel.refresh();
+    assert.equal(button(f,'Stop').disabled,true,name);assert.match(f.root.textContent,/refresh|status/i);}
+  assert.equal(f.posts().length,0);
 });
 
 test('terminal scenario keeps measured rows separate from outer outcome and required Client capture evidence',async t=>{

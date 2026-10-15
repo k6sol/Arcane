@@ -22,6 +22,59 @@ observed within the bounded wait. A transition observed without scenario input
 does not establish that Arcane caused it. Displacement measures change from the
 original root position; a stationary character still fails a positive minimum.
 
+## GUI layout snapshots
+
+`assert-gui-layout` carries only `id`, `targetId`, `minimumWidth`, `minimumHeight`
+and `withinMs`. Minimum dimensions are integers from 1 to 4,096 GUI pixels; the
+wait is 25–1,000 ms within the existing eight-step, four-selector, three-second
+scenario budget. It waits for the retained target's rectangle to meet both
+minimum dimensions and fit completely inside the Core UI safe area and each
+clipping ancestor. The target and GUI ancestor `Visible` values and the enclosing
+ScreenGui's `Enabled` value must be true. Already satisfied layout is allowed.
+This is a snapshot of geometry and visibility flags, not proof of interaction
+causality, optical visibility, lack of overlapping UI, touchability or a device
+profile.
+
+GUI `AbsolutePosition` and `GuiService:GetInsetArea(CoreUISafeInsets)` share the
+documented Core UI safe-inset coordinate space. Layout compares those rectangles
+directly. The retained camera's viewport is recorded separately in Roblox UI
+offset units and never converted to GUI pixels or used as a rectangle bound.
+See [GUI coordinates](https://create.roblox.com/docs/reference/engine/classes/GuiBase2d#AbsolutePosition),
+[safe areas](https://create.roblox.com/docs/reference/engine/classes/GuiService#GetInsetArea)
+and [camera units](https://create.roblox.com/docs/reference/engine/classes/Camera#ViewportSize).
+Nonzero top-bar insets can support a read-only layout assertion even when the
+separate, conservative mouse-input coordinate preflight declines a click.
+
+The original selector chain is retained once, with one ScreenGui under the
+original PlayerGui. Folder ancestors may precede that ScreenGui; after it, the
+supported clipping profile requires a direct GuiObject chain. Folders among
+those GuiObjects remain outside this assertion's bounded support; legacy
+selectors remain unchanged. Roblox documents ScreenGui descendants in
+[PlayerGui](https://create.roblox.com/docs/reference/engine/classes/PlayerGui)
+and [Folder UI layouts](https://create.roblox.com/docs/reference/engine/classes/Folder);
+the supported-profile limit does not claim other hierarchies cannot render. Both local and
+absolute GUI rotations must be zero. Unsupported or malformed geometry is
+refused before any earlier input step. Positive, finite safe-area and viewport
+dimensions, zero Core UI safe-area origin, ordered rectangle edges within
+±16,384 and at most eight clipping rectangles are required. Zero-size targets
+and clipping areas are measured failures. Camera/service replacement or a
+changed safe area/viewport during a wait produces `BINDING_CHANGED`, retaining
+the original cleanup rules. Clipping semantics and ScreenGui enable state follow
+the [GuiObject](https://create.roblox.com/docs/reference/engine/classes/GuiObject#ClipsDescendants)
+and [LayerCollector](https://create.roblox.com/docs/reference/engine/classes/LayerCollector#Enabled)
+contracts.
+
+Every true or false layout observation includes closed rectangle, clipping,
+visibility-chain and viewport measurements. Native and HTTP decoders recompute
+the result against the sealed minimum pair; both sides derive dimensions from
+rectangle edge differences. Missing or contradictory failure measurements
+cannot become automatic repair evidence. Unsupported, unexecuted and binding
+failure rows can remain explicitly unobserved. The human panel shows the exact
+size/safe-area requirement before approval and measured geometry afterward.
+Native acceptance and Client screenshot provenance remain unverified.
+
+## Runtime inputs and identity
+
 The production native adapter executes one fixed Client program. It resolves
 literal selectors under the original LocalPlayer's PlayerGui once, then retains
 the actual player, character, root, GUI, target and ancestor objects across every

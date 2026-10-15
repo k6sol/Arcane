@@ -14,6 +14,8 @@ export const scenarioStepSchema = z.discriminatedUnion('kind', [
   z.strictObject({ id, kind: z.literal('assert-displacement'), minimumStuds: z.number().min(0.1).max(32) }),
   z.strictObject({ id, kind: z.literal('assert-gui'), targetId: id, property: z.literal('Visible'), equals: z.boolean(), withinMs: z.number().int().min(25).max(1000), requireTransition: z.boolean().default(true) }),
   z.strictObject({ id, kind: z.literal('assert-text'), targetId: id, equals: name, withinMs: z.number().int().min(25).max(1000), requireTransition: z.boolean().default(true) }),
+  z.strictObject({ id, kind: z.literal('assert-gui-layout'), targetId: id, minimumWidth: z.number().int().min(1).max(4096),
+    minimumHeight: z.number().int().min(1).max(4096), withinMs: z.number().int().min(25).max(1000) }),
 ]);
 const ref = z.strictObject({ instanceId: z.string().min(1).max(256), sessionId: z.string().min(1).max(256),
   root: z.enum(['Workspace', 'ReplicatedStorage', 'ServerScriptService', 'ServerStorage', 'StarterGui', 'StarterPlayer', 'Lighting']),
@@ -41,21 +43,47 @@ export const scenarioPlanSchema = z.strictObject({ version: z.literal(1), runtim
   if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) reject('Scenario exceeds its input budget.');
 });
 export type ScenarioPlan = z.infer<typeof scenarioPlanSchema>;
-export const scenarioStepResultSchema = z.strictObject({ id, kind: z.enum(['hold-key', 'click-gui', 'assert-displacement', 'assert-gui', 'assert-text']),
+const edge = z.number().finite().min(-16384).max(16384);
+export const scenarioLayoutRectSchema = z.strictObject({left:edge,top:edge,right:edge,bottom:edge})
+  .refine(rect=>rect.right>=rect.left&&rect.bottom>=rect.top&&rect.right-rect.left<=16384&&rect.bottom-rect.top<=16384,'Invalid layout rectangle.');
+export const scenarioLayoutSchema = z.strictObject({coordinateSpace:z.literal('CoreUISafeInsets'),target:scenarioLayoutRectSchema,
+  safeArea:scenarioLayoutRectSchema.refine(rect=>rect.left===0&&rect.top===0&&rect.right>0&&rect.bottom>0,'Invalid core safe area.'),
+  clips:z.array(scenarioLayoutRectSchema).max(8),visibleChain:z.boolean(),
+  viewport:z.strictObject({width:z.number().finite().positive().max(16384),height:z.number().finite().positive().max(16384),units:z.literal('RobloxUIOffset')})});
+export type ScenarioLayout = z.infer<typeof scenarioLayoutSchema>;
+/** Geometry uses one documented GUI coordinate space. Camera UI-offset units
+ * are context only and never participate in rectangle arithmetic. */
+export function scenarioLayoutPasses(minimumWidth:number,minimumHeight:number,layout:ScenarioLayout):boolean {
+  const target=layout.target;
+  return layout.visibleChain&&target.right-target.left>=minimumWidth&&target.bottom-target.top>=minimumHeight&&
+    [layout.safeArea,...layout.clips].every(rect=>target.left>=rect.left&&target.top>=rect.top&&target.right<=rect.right&&target.bottom<=rect.bottom);
+}
+export const scenarioStepResultSchema = z.strictObject({ id, kind: z.enum(['hold-key', 'click-gui', 'assert-displacement', 'assert-gui', 'assert-text','assert-gui-layout']),
   outcome: z.enum(['passed', 'failed', 'not_run']), expected: z.union([z.boolean(), z.number().finite(), z.string().max(256)]),
   observed: z.union([z.boolean(), z.number().finite(), z.string().max(256), z.null()]),
-  baseline: z.union([z.boolean(),z.string().max(256),z.number().finite()]).optional() });
+  baseline: z.union([z.boolean(),z.string().max(256),z.number().finite()]).optional(),layout:scenarioLayoutSchema.optional() })
+  .superRefine((row,context)=>{
+    const reject=()=>context.addIssue({code:'custom',message:'Invalid layout observation.'});
+    if(row.kind!=='assert-gui-layout'){if(row.layout!==undefined)reject();return;}
+    if(row.baseline!==undefined||typeof row.observed!=='boolean'&&row.observed!==null&&row.observed!=='not-observed'||
+      (row.layout!==undefined)!==(typeof row.observed==='boolean')||
+      row.outcome==='passed'&&row.observed!==true||row.outcome==='not_run'&&(row.observed!==null&&row.observed!=='not-observed'))reject();
+  });
 export type ScenarioStepResult = z.infer<typeof scenarioStepResultSchema>;
 /** Shared native and HTTP boundary check. Partial failures may retain the exact
  * prefix observed so far; a passing row must prove its sealed postcondition. */
 export function scenarioEvidenceIssue(plan: ScenarioPlan, rows: readonly ScenarioStepResult[], passed: boolean,
-  inputRelease: 'not_started'|'observed_released'|'unknown'): string | null {
+  inputRelease: 'not_started'|'observed_released'|'unknown', code='OK'): string | null {
   if(rows.length>plan.steps.length || passed&&rows.length!==plan.steps.length)return 'Incomplete scenario step evidence.';
+  if(code==='ASSERTION_FAILED'&&!rows.some(row=>row.outcome==='failed'))return 'Missing failed scenario assertion.';
   for(let index=0;index<rows.length;index++){
     const step=plan.steps[index]!,row=rows[index]!;
     if(row.id!==step.id||row.kind!==step.kind)return 'Wrong scenario step identity.';
-    const expected=step.kind==='hold-key'?step.key+':'+step.holdMs:step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:step.equals;
+    const expected=step.kind==='hold-key'?step.key+':'+step.holdMs:step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:
+      step.kind==='assert-gui-layout'?'core-safe:'+step.minimumWidth+'x'+step.minimumHeight:step.equals;
     if(row.expected!==expected)return 'Wrong scenario step expectation.';
+    if(step.kind==='assert-gui-layout'&&(row.layout&&row.observed!==scenarioLayoutPasses(step.minimumWidth,step.minimumHeight,row.layout)||
+      code==='ASSERTION_FAILED'&&row.outcome==='failed'&&(row.observed!==false||!row.layout)))return 'Unmeasured or contradictory layout evidence.';
     if(step.kind==='assert-gui'&&row.baseline!==undefined&&typeof row.baseline!=='boolean'||
       step.kind==='assert-text'&&row.baseline!==undefined&&typeof row.baseline!=='string'||
       !['assert-gui','assert-text'].includes(step.kind)&&row.baseline!==undefined)return 'Wrong scenario baseline type.';

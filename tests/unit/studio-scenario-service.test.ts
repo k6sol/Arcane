@@ -11,7 +11,7 @@ import {createStudioTestService,type NativeTestConnection} from '../../apps/daem
 import {StudioStore,type StudioTestTemporaryEdit} from '../../packages/storage/src/studio-store.js';
 import {readTestLedger,reviewedTestTools,digest,TestLedger} from '../../packages/studio-test-controller/src/index.js';
 import {buildScenarioProgram} from '../../packages/studio-test-controller/src/scenario-runtime.js';
-import {fixtureScenario,runScenarioFixture,type ScenarioFixtureOptions} from '../../packages/studio-test-controller/testing/scenario-fixture.js';
+import {fixtureScenario,fixtureLayoutScenario,runScenarioFixture,type ScenarioFixtureOptions} from '../../packages/studio-test-controller/testing/scenario-fixture.js';
 import {png} from '../../packages/asset-pipeline/testing/fixture.js';
 import {READ_METHODS,WRITE_METHODS,type StudioCommand} from '../../packages/protocol/src/studio.js';
 import {makeFixtureDirectory,fixtureTempDirectory} from './windows-fixture-paths.js';
@@ -119,6 +119,38 @@ test('production service runs approved read-only assertions without virtual inpu
   assert.deepEqual(f.calls.filter(call=>call.name==='start_stop_play').map(call=>call.args.is_start),[true,false]);
   const records=await f.records();assert.equal(records.filter(row=>row.event.kind==='terminal').length,1);assert.equal(records.at(-1)?.event.cleanup,'complete');
   assert.ok(f.calls.filter(call=>call.name==='execute_luau'&&call.args.datamodel_type==='Edit').length>=3,'source scope remains checked around approval and cleanup');
+});
+
+test('production service binds approved layout measurements to settled source-current task evidence',{timeout:15000},async t=>{
+  for(const failed of [false,true])await t.test(failed?'measured failure':'current layout passes',async sub=>{
+    const task=taskFixture(),f=await fixture(sub,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
+    const job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.equal(f.state.clientCalls,0);await f.approve(job);await until(()=>task.packets.length===1);
+    const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
+    assert.equal(report.review.outcome,failed?'failed':'succeeded');assert.equal(report.review.code,failed?'ASSERTION_FAILED':'OK');assert.equal(report.review.cleanup,'complete');
+    assert.equal(row.observed,!failed);assert.equal(row.layout!.target.right-row.layout!.target.left,failed?60:200);
+    assert.equal(row.layout!.safeArea.bottom,600);assert.equal(row.layout!.viewport.height,644);assert.equal(packet.reportDigest,digest(report));
+    assert.deepEqual(packet.scenario,{outcome:failed?'failed':'passed',requiredEvidence:'complete',inputRelease:'complete',restoration:'not_required',subjects:'current'});
+    assert.equal(f.state.inputRequests,0);assert.equal(f.state.inputEffects,0);assert.equal(f.state.clientCalls,1);assert.equal(report.nativeAcceptance,false);
+    assert.deepEqual(f.calls.filter(call=>call.name==='start_stop_play').map(call=>call.args.is_start),[true,false]);assert.equal((await f.records()).at(-1)?.event.cleanup,'complete');
+    assert.equal(await f.service.revalidateExact(job.id,task.origin,packet.reportDigest),'current');
+  });
+});
+
+test('native layout failures require measured metadata before they can become repair evidence',{timeout:15000},async t=>{
+  for(const mutation of ['missing','null','string','contradiction','wrong-minimum','clip-overflow']as const)await t.test(mutation,async sub=>{
+    const task=taskFixture(),f=await fixture(sub,{capture:false,taskPort:task.port,runtime:{layout:{width:60}},mutateReport(report){
+      const row=report.steps[0]!;
+      if(mutation==='missing')delete row.layout;
+      else if(mutation==='null'){delete row.layout;row.observed=null;}
+      else if(mutation==='string'){delete row.layout;row.observed='not-observed';}
+      else if(mutation==='contradiction')row.layout!.target.right=row.layout!.target.left+200;
+      else if(mutation==='wrong-minimum')row.expected='core-safe:1x1';
+      else row.layout!.clips=Array.from({length:9},()=>row.layout!.safeArea);
+    }});Object.assign(f.plan,fixtureLayoutScenario());const job=await f.prepare();await f.approve(job);await until(()=>task.packets.length===1);
+    const report=f.status(job.id);assert.equal(report.review.code,'BAD_NATIVE_RESPONSE');assert.equal(report.review.scenario!.inputRelease,'unknown');
+    assert.equal(task.packets[0]!.scenario!.outcome,'incomplete');assert.equal(task.packets[0]!.scenario!.requiredEvidence,'missing');
+    assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(report.review.canStartAnotherOperation,false);
+  });
 });
 
 test('production service executes finite gameplay and retains unattested capture without claiming Client screenshot proof',{timeout:15000},async t=>{

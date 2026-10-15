@@ -66,6 +66,16 @@ function gameplay():Job {
       {id:'text',kind:'assert-text',outcome:'passed',expected:'Complete',observed:'Complete',baseline:'Waiting'}]};
   return job;
 }
+function layoutGameplay(failed=false):Job{
+  const job=gameplay(),plan=scenarioPlanSchema.parse({version:1,runtimeBudgetMs:300,targets:job.display.proposal.scenario!.targets,
+    steps:[{id:'layout',kind:'assert-gui-layout',targetId:'panel',minimumWidth:120,minimumHeight:40,withinMs:100}],capture:{required:false}});
+  job.display.proposal.scenario=plan;job.displayDigest=digest(job.display);job.review.scopeDigest=job.displayDigest;
+  Object.assign(job.review.scenario!,{scenarioDigest:digest(plan),inputRelease:'not_started',state:failed?'failed':'passed',steps:[
+    {id:'layout',kind:'assert-gui-layout',outcome:failed?'failed':'passed',expected:'core-safe:120x40',observed:!failed,layout:{
+      coordinateSpace:'CoreUISafeInsets',target:{left:24,top:24,right:failed?84:224,bottom:74},safeArea:{left:0,top:0,right:800,bottom:600},
+      clips:[{left:0,top:0,right:400,bottom:300}],visibleChain:true,viewport:{width:800,height:644,units:'RobloxUIOffset'}}}]});
+  if(failed){job.review.outcome='failed';job.review.code='ASSERTION_FAILED';}return job;
+}
 function send(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(payload));
 }
@@ -362,4 +372,32 @@ test('playtest SDK: sealed gameplay expectations and observed transitions surviv
   failed.review.scenario!.steps.splice(2);f.state.payload={job:failed};
   assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job:failed},'a truthful failed prefix remains reportable');
   assert.equal(f.requests.length,mutations.length+2,'malformed observations are read once without execution or replay');
+});
+
+test('playtest SDK: layout pass and failure measurements remain closed and recomputed over HTTP',async t=>{
+  const f=await fixture(t);
+  for(const failed of [false,true]){const job=layoutGameplay(failed);f.state.payload={job};assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job});}
+  const mutations:[string,(job:Job)=>void][]=[
+    ['undersized pass',job=>{job.review.scenario!.steps[0]!.layout!.target.right=100;}],
+    ['hidden chain pass',job=>{job.review.scenario!.steps[0]!.layout!.visibleChain=false;}],
+    ['clipped pass',job=>{job.review.scenario!.steps[0]!.layout!.clips[0]!.right=100;}],
+    ['offset safe origin',job=>{job.review.scenario!.steps[0]!.layout!.safeArea.top=1;}],
+    ['negative extent',job=>{job.review.scenario!.steps[0]!.layout!.target.right=0;}],
+    ['oversized geometry',job=>{job.review.scenario!.steps[0]!.layout!.target.right=16385;}],
+    ['too many clips',job=>{job.review.scenario!.steps[0]!.layout!.clips=Array.from({length:9},()=>({left:0,top:0,right:400,bottom:300}));}],
+    ['unknown coordinate space',job=>{Object.assign(job.review.scenario!.steps[0]!.layout!,{coordinateSpace:'screen'});}],
+    ['wrong viewport units',job=>{Object.assign(job.review.scenario!.steps[0]!.layout!.viewport,{units:'pixels'});}],
+    ['extra measurement authority',job=>{Object.assign(job.review.scenario!.steps[0]!.layout!,{code:'unapproved()'});}],
+    ['wrong expectation',job=>{job.review.scenario!.steps[0]!.expected='core-safe:1x1';}],
+    ['unrelated baseline',job=>{job.review.scenario!.steps[0]!.baseline=false;}],
+  ];
+  for(const[name,mutate]of mutations)await t.test(name,async()=>{const job=layoutGameplay();mutate(job);f.state.payload={job};const result=await call(f.client,'playtest_status',{jobId:JOB});
+    assert.equal(result.result.isError,true);assert.equal((result.data.error as{code:string}).code,'PROTOCOL');assert.equal(result.data.job,undefined);});
+  for(const observed of [false,null,'not-observed']){
+    const job=layoutGameplay(true),row=job.review.scenario!.steps[0]!;row.observed=observed;delete row.layout;f.state.payload={job};
+    const result=await call(f.client,'playtest_status',{jobId:JOB});assert.equal(result.result.isError,true,'unmeasured failure cannot authorize repair');
+  }
+  const partial=layoutGameplay(true);partial.review.code='BINDING_CHANGED';partial.review.scenario!.steps[0]!.observed=null;delete partial.review.scenario!.steps[0]!.layout;
+  f.state.payload={job:partial};assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job:partial},'an unmeasured binding failure remains reportable');
+  assert.ok(f.requests.every(request=>request.method==='GET'),'invalid evidence is never replayed or executed');
 });

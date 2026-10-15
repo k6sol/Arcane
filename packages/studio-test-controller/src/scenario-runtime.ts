@@ -7,6 +7,7 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
   for _, step in ipairs(plan.steps) do
     local expected = if step.kind == "hold-key" then step.key .. ":" .. tostring(step.holdMs)
       elseif step.kind == "click-gui" then step.targetId
+      elseif step.kind == "assert-gui-layout" then "core-safe:" .. tostring(step.minimumWidth) .. "x" .. tostring(step.minimumHeight)
       elseif step.kind == "assert-displacement" then step.minimumStuds else step.equals
     rows[#rows + 1] = {id = step.id, kind = step.kind, outcome = "not_run", expected = expected, observed = "not-observed"}
   end
@@ -14,9 +15,10 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
   local players = gameModel:GetService("Players")
   local userInput = gameModel:GetService("UserInputService")
   local player, character, root, gui, input
-  local links, targets, keys = {}, {}, {}
+  local links, targets, keys, targetLinks = {}, {}, {}, {}
   local mouse = nil
   local clickContext = nil
+  local layoutContext = nil
   local attempted, released, active = false, true, nil
   local started = os.clock()
   local deadline = started + plan.runtimeBudgetMs / 1000
@@ -24,6 +26,19 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
   local function fail(code) error({arcaneCode = code}, 0) end
   local function bounded(value)
     return type(value) == "number" and value == value and math.abs(value) <= 16384
+  end
+  local function rectangle(left, top, right, bottom)
+    if not bounded(left) or not bounded(top) or not bounded(right) or not bounded(bottom)
+      or right < left or bottom < top or right - left > 16384 or bottom - top > 16384 then fail("UNSUPPORTED_TOOL") end
+    return {left = left, top = top, right = right, bottom = bottom}
+  end
+  local function layoutBasis(value)
+    local area = value.guiService:GetInsetArea(Enum.ScreenInsets.CoreUISafeInsets)
+    local safe = rectangle(area.Min.X, area.Min.Y, area.Max.X, area.Max.Y)
+    if safe.left ~= 0 or safe.top ~= 0 or safe.right <= 0 or safe.bottom <= 0 then fail("UNSUPPORTED_TOOL") end
+    local viewport = value.camera.ViewportSize
+    if not bounded(viewport.X) or not bounded(viewport.Y) or viewport.X <= 0 or viewport.Y <= 0 then fail("UNSUPPORTED_TOOL") end
+    return safe, {width = viewport.X, height = viewport.Y, units = "RobloxUIOffset"}
   end
   -- GUI hit tests use CoreUISafeInsets coordinates; VirtualInput documents only
   -- screen-space pixels. Admit clicks only where every documented area coincides,
@@ -63,6 +78,18 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
       end)
       if not ok or width ~= clickContext.width or height ~= clickContext.height then fail("BINDING_CHANGED") end
     end
+    if layoutContext then
+      local ok, current = pcall(function()
+        if gameModel:GetService("Workspace") ~= layoutContext.workspace
+          or gameModel:GetService("GuiService") ~= layoutContext.guiService
+          or layoutContext.workspace.CurrentCamera ~= layoutContext.camera then return nil end
+        local safe, viewport = layoutBasis(layoutContext)
+        return safe.left == layoutContext.safeArea.left and safe.top == layoutContext.safeArea.top
+          and safe.right == layoutContext.safeArea.right and safe.bottom == layoutContext.safeArea.bottom
+          and viewport.width == layoutContext.viewport.width and viewport.height == layoutContext.viewport.height
+      end)
+      if not ok or current ~= true then fail("BINDING_CHANGED") end
+    end
   end
   local function guard()
     context()
@@ -98,6 +125,45 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
     end)
     if ok and trusted then mouse = nil else released = false end
   end
+  local function guiRectangle(instance)
+    local position, size = instance.AbsolutePosition, instance.AbsoluteSize
+    if not bounded(size.X) or not bounded(size.Y) or size.X < 0 or size.Y < 0 then fail("UNSUPPORTED_TOOL") end
+    return rectangle(position.X, position.Y, position.X + size.X, position.Y + size.Y)
+  end
+  local function measureLayout(targetId)
+    local chain = targetLinks[targetId]
+    if not chain or #chain > 8 then fail("UNSUPPORTED_TOOL") end
+    local seenScreen, visible, clips = false, true, {}
+    for index, instance in ipairs(chain) do
+      if instance.ClassName == "ScreenGui" then
+        if seenScreen or type(instance.Enabled) ~= "boolean" then fail("UNSUPPORTED_TOOL") end
+        seenScreen = true; visible = visible and instance.Enabled
+      elseif instance.ClassName == "Folder" and not seenScreen then
+        -- A folder may organize ScreenGuis, never substitute for a GUI parent.
+      elseif instance:IsA("GuiObject") and seenScreen then
+        if instance.Rotation ~= 0 or instance.AbsoluteRotation ~= 0 or type(instance.Visible) ~= "boolean"
+          or type(instance.ClipsDescendants) ~= "boolean" then fail("UNSUPPORTED_TOOL") end
+        visible = visible and instance.Visible
+        if index < #chain and instance.ClipsDescendants then
+          if #clips >= 8 then fail("UNSUPPORTED_TOOL") end
+          clips[#clips + 1] = guiRectangle(instance)
+        end
+      else fail("UNSUPPORTED_TOOL") end
+    end
+    if not seenScreen then fail("UNSUPPORTED_TOOL") end
+    return {coordinateSpace = "CoreUISafeInsets", target = guiRectangle(targets[targetId]), safeArea = layoutContext.safeArea,
+      clips = clips, visibleChain = visible, viewport = layoutContext.viewport}
+  end
+  local function layoutPasses(step, value)
+    local target = value.target
+    if not value.visibleChain or target.right - target.left < step.minimumWidth or target.bottom - target.top < step.minimumHeight then return false end
+    local function contains(rect)
+      return target.left >= rect.left and target.top >= rect.top and target.right <= rect.right and target.bottom <= rect.bottom
+    end
+    if not contains(value.safeArea) then return false end
+    for _, rect in ipairs(value.clips) do if not contains(rect) then return false end end
+    return true
+  end
   local success, problem = xpcall(function()
     if not run:IsClient() or gameModel.PlaceId ~= 0 or gameModel.GameId ~= 0 then fail("UNSUPPORTED_TOOL") end
     player = players.LocalPlayer
@@ -124,15 +190,22 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
       end
     end
     for _, step in ipairs(plan.steps) do
-      if step.kind == "hold-key" or step.kind == "click-gui" then
-        local available, value = pcall(function() return userInput:CreateVirtualInput() end)
-        if not available or not value then fail("UNSUPPORTED_TOOL") end
-        input = value
+      if step.kind == "assert-gui-layout" then
+        local ok, value = pcall(function()
+          local workspace = gameModel:GetService("Workspace")
+          local value = {workspace = workspace, guiService = gameModel:GetService("GuiService"), camera = workspace.CurrentCamera}
+          if not value.camera then return nil end
+          value.safeArea, value.viewport = layoutBasis(value)
+          return value
+        end)
+        if not ok or not value then fail("UNSUPPORTED_TOOL") end
+        layoutContext = value
         break
       end
     end
     for _, selector in ipairs(plan.targets) do
       local parent = gui
+      local chain = {}
       for _, segment in ipairs(selector.segments) do
         guard()
         local found, count = nil, 0
@@ -141,10 +214,22 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
         for _, child in ipairs(children) do if child.Name == segment then found = child; count += 1 end end
         if count ~= 1 then fail("BINDING_CHANGED") end
         links[#links + 1] = {instance = found, parent = parent, name = found.Name, className = found.ClassName}
+        chain[#chain + 1] = found
         parent = found
       end
       if parent.ClassName ~= selector.className or not parent:IsDescendantOf(gui) then fail("BINDING_CHANGED") end
       targets[selector.id] = parent
+      targetLinks[selector.id] = chain
+    end
+    -- Validate every layout's supported geometry before any earlier input step.
+    for _, step in ipairs(plan.steps) do if step.kind == "assert-gui-layout" then measureLayout(step.targetId) end end
+    for _, step in ipairs(plan.steps) do
+      if step.kind == "hold-key" or step.kind == "click-gui" then
+        local available, value = pcall(function() return userInput:CreateVirtualInput() end)
+        if not available or not value then fail("UNSUPPORTED_TOOL") end
+        input = value
+        break
+      end
     end
     local initial = root.Position
     -- Establish each transition's initial state before any scenario input. An
@@ -196,6 +281,17 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
         releaseMouse(mouse)
         if mouse then fail("EFFECT_UNKNOWN") end
         row.observed = "observed-released"
+      elseif step.kind == "assert-gui-layout" then
+        local untilAt = math.min(deadline, os.clock() + step.withinMs / 1000)
+        repeat
+          guard()
+          local value = measureLayout(step.targetId)
+          guard()
+          row.layout = value; row.observed = layoutPasses(step, value)
+          if row.observed then break end
+          if os.clock() >= untilAt then fail("ASSERTION_FAILED") end
+          pause(math.min(0.025, untilAt - os.clock()))
+        until false
       elseif step.kind == "assert-displacement" then
         local delta = root.Position - initial
         row.observed = math.sqrt(delta.X * delta.X + delta.Z * delta.Z)

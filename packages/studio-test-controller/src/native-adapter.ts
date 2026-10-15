@@ -223,7 +223,7 @@ export class NativeTestAdapter implements TestAdapter {
       const report=parse(scenarioRuntimeReportSchema,value,'BAD_NATIVE_RESPONSE');
       if(report.runId!==runId||report.scenarioDigest!==scenarioDigest||report.steps.length!==plan.steps.length||report.steps.some((step,index)=>step.id!==plan.steps[index]!.id||step.kind!==plan.steps[index]!.kind)||
           report.outcome==='passed'&&(report.code!=='OK'||report.steps.some(step=>step.outcome!=='passed')||report.inputRelease==='unknown'))fail('BAD_NATIVE_RESPONSE');
-      if(scenarioEvidenceIssue(plan,report.steps,report.outcome==='passed',report.inputRelease)||report.outcome!=='passed'&&report.code==='OK')fail('BAD_NATIVE_RESPONSE');
+      if(scenarioEvidenceIssue(plan,report.steps,report.outcome==='passed',report.inputRelease,report.code)||report.outcome!=='passed'&&report.code==='OK')fail('BAD_NATIVE_RESPONSE');
       const after=await this.#observe(binding,independent,false);
       if(after.mode!=='Play'||after.playEpoch!==owned.epoch||!sameBinding(after.binding,binding))fail('NOT_OWNED_PLAY');
       return freeze(report);

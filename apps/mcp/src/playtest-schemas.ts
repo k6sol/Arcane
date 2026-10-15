@@ -92,7 +92,7 @@ export const playtestJob = z.strictObject({
   if(!!plan!==!!scenario||!!plan!==!!value.display.proposal.subjectDigest)reject('Incomplete scenario evidence.');
   if(plan&&scenario){
     if(scenario.scenarioDigest!==digest(plan)||scenario.subjectDigest!==value.display.proposal.subjectDigest||digest(value.display.actions)!==digest(SCENARIO_ACTIONS))reject('Wrong scenario scope.');
-    const stepIssue=scenarioEvidenceIssue(plan,scenario.steps,scenario.state==='passed',scenario.inputRelease);
+    const stepIssue=scenarioEvidenceIssue(plan,scenario.steps,scenario.state==='passed',scenario.inputRelease,value.review.code);
     if(stepIssue)reject(stepIssue);
     if(value.review.cleanup==='complete'&&scenario.inputRelease==='unknown')reject('Input release is unverified.');
     if(value.review.phase==='done'&&value.review.cleanup==='complete'&&plan.temporaryEdits?.length&&scenario.temporary!=='restored'&&scenario.temporary!=='not_started')reject('Temporary restoration is unverified.');

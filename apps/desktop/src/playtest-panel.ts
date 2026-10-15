@@ -44,6 +44,22 @@ function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER)
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) invalid();
   return value;
 }
+function layoutRect(value:unknown):{left:number;top:number;right:number;bottom:number}{
+  const rect=object(value);keys(rect,['left','top','right','bottom']);
+  for(const edge of Object.values(rect))if(typeof edge!=='number'||!Number.isFinite(edge)||Math.abs(edge)>16384)invalid();
+  const {left,top,right,bottom}=rect as {left:number;top:number;right:number;bottom:number};
+  if(right<left||bottom<top||right-left>16384||bottom-top>16384)invalid();return{left,top,right,bottom};
+}
+function layoutObserved(value:unknown,minimumWidth:number,minimumHeight:number):boolean{
+  const layout=object(value);keys(layout,['coordinateSpace','target','safeArea','clips','visibleChain','viewport']);
+  if(layout.coordinateSpace!=='CoreUISafeInsets'||typeof layout.visibleChain!=='boolean'||!Array.isArray(layout.clips)||layout.clips.length>8)invalid();
+  const target=layoutRect(layout.target),safe=layoutRect(layout.safeArea),clips=layout.clips.map(layoutRect),viewport=object(layout.viewport);
+  if(safe.left!==0||safe.top!==0||safe.right<=0||safe.bottom<=0)invalid();
+  keys(viewport,['width','height','units']);if(viewport.units!=='RobloxUIOffset')invalid();
+  for(const axis of [viewport.width,viewport.height])if(typeof axis!=='number'||!Number.isFinite(axis)||axis<=0||axis>16384)invalid();
+  return layout.visibleChain&&target.right-target.left>=minimumWidth&&target.bottom-target.top>=minimumHeight&&
+    [safe,...clips].every(rect=>target.left>=rect.left&&target.top>=rect.top&&target.right<=rect.right&&target.bottom<=rect.bottom);
+}
 function displayCopy(value: unknown): Readonly<Row> {
   let nodes = 0;
   const copy = (value: unknown, depth: number): DisplayValue => {
@@ -98,6 +114,11 @@ function scenarioPlanView(plan:Row):ScenarioPlanView {
     if(step.kind==='click-gui'){
       keys(step,['id','kind','targetId']);if(!['TextButton','ImageButton'].includes(target.className))invalid();budget+=50;
       return 'Click '+target.label+' ('+target.className+').';
+    }
+    if(step.kind==='assert-gui-layout'){
+      keys(step,['id','kind','targetId','minimumWidth','minimumHeight','withinMs']);
+      const width=integer(step.minimumWidth,1,4096),height=integer(step.minimumHeight,1,4096),withinMs=integer(step.withinMs,25,1000);budget+=withinMs;
+      return 'Check '+target.label+' is at least '+width+' x '+height+' GUI pixels, with a visible ancestry chain and its full rectangle inside the Core UI safe area and clipping ancestors, within '+withinMs+' ms. Layout snapshot; occlusion and device input are unverified.';
     }
     if(step.kind!=='assert-gui'&&step.kind!=='assert-text')invalid();
     keys(step,step.kind==='assert-gui'?['id','kind','targetId','property','equals','withinMs']:['id','kind','targetId','equals','withinMs'],['requireTransition']);
@@ -166,15 +187,24 @@ function readJob(value: unknown): Job {
     const steps=report.steps.map(value=>object(value));
     if(steps.length>plan.steps.length||report.state==='passed'&&steps.length!==plan.steps.length)invalid();
     for(let index=0;index<steps.length;index++){
-      const row=steps[index]!,step=object(plan.steps[index]);keys(row,['id','kind','outcome','expected','observed'],['baseline']);
+      const row=steps[index]!,step=object(plan.steps[index]);keys(row,['id','kind','outcome','expected','observed'],['baseline','layout']);
       if(row.id!==step.id||row.kind!==step.kind||!['passed','failed','not_run'].includes(row.outcome as string))invalid();
-      const expected=step.kind==='hold-key'?String(step.key)+':'+String(step.holdMs):step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:step.equals;
+      const expected=step.kind==='hold-key'?String(step.key)+':'+String(step.holdMs):step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:
+        step.kind==='assert-gui-layout'?'core-safe:'+String(step.minimumWidth)+'x'+String(step.minimumHeight):step.equals;
       if(row.expected!==expected||report.state==='passed'&&row.outcome!=='passed')invalid();
+      if(step.kind==='assert-gui-layout'){
+        if((row.layout!==undefined)!==(typeof row.observed==='boolean')||
+          typeof row.observed!=='boolean'&&row.observed!==null&&row.observed!=='not-observed'||
+          row.outcome==='not_run'&&typeof row.observed==='boolean'||row.outcome==='passed'&&row.observed!==true||
+          row.layout!==undefined&&row.observed!==layoutObserved(row.layout,Number(step.minimumWidth),Number(step.minimumHeight))||
+          review.code==='ASSERTION_FAILED'&&row.outcome==='failed'&&(row.observed!==false||row.layout===undefined))invalid();
+      }else if(row.layout!==undefined)invalid();
       if(row.baseline!==undefined&&(step.kind==='assert-gui'?typeof row.baseline!=='boolean':step.kind==='assert-text'?typeof row.baseline!=='string':true))invalid();
       if(row.outcome==='passed'&&(step.kind==='assert-displacement'&&(typeof row.observed!=='number'||!Number.isFinite(row.observed)||row.observed<Number(step.minimumStuds))||
         (step.kind==='assert-gui'||step.kind==='assert-text')&&(row.observed!==step.equals||step.requireTransition!==false&&(row.baseline===undefined||row.baseline===step.equals))||
         (step.kind==='hold-key'||step.kind==='click-gui')&&row.observed!=='observed-released'))invalid();
     }
+    if(review.code==='ASSERTION_FAILED'&&!steps.some(step=>step.outcome==='failed'))invalid();
     if(report.state==='passed'&&report.inputRelease!==(plan.steps.some(value=>['hold-key','click-gui'].includes(object(value).kind as string))?'observed_released':'not_started')||
       review.cleanup==='complete'&&report.inputRelease==='unknown'||review.outcome==='succeeded'&&(report.state!=='passed'||object(plan.capture).required!==false))invalid();
     let capture:NonNullable<Job['review']['scenario']>['capture']=null;
@@ -309,7 +339,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   function detailsFor(job: Job): HTMLDetailsElement {
     const details = node('details', undefined, 'playtest-details');
     const summary = node('summary', 'Permission details'); summary.setAttribute('data-playtest-action', 'details');
-    details.append(summary, node('p', job.review.scenario?'Allow this exact gameplay scenario to drive game controls, inspect its assertions, capture the viewport, stop its owned play and restore the listed temporary changes.':'Allow this test to start play, observe state and console, then stop only the play it owns.'));
+    details.append(summary, node('p', job.review.scenario?'Allow this exact gameplay scenario to run its listed steps, inspect its assertions, capture the viewport when requested, stop its owned play and restore the listed temporary changes.':'Allow this test to start play, observe state and console, then stop only the play it owns.'));
     const fields = node('dl');
     function field(key: string, value: string): void { fields.append(node('dt', key), node('dd', value)); }
     function walk(value: unknown, path: string): void {
@@ -350,7 +380,19 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
         (!active(job)?'Required Client capture: still unverified. ':'Required Client capture: unverified. ')+
         (report.capture?'The retained image has unverified context.':'Current capture support does not attest Client context.')));
       else element.append(node('p','Viewport capture: not requested.'));
-      if(report.steps.length){const list=node('ol');for(const step of report.steps)list.append(node('li',String(step.id)+' · '+String(step.outcome)+' · Expected '+String(step.expected)+' · Observed '+String(step.observed)));element.append(list);}
+      if(report.steps.length){const list=node('ol');for(const step of report.steps){
+        const expected=step.kind==='assert-gui-layout'?String(step.expected).replace(/^core-safe:(\d+)x(\d+)$/,'at least $1 x $2 GUI pixels'):String(step.expected);
+        const item=node('li',String(step.id)+' · '+String(step.outcome)+' · Expected '+expected+' · Observed '+String(step.observed));
+        if(step.layout){
+          const layout=object(step.layout),target=layoutRect(layout.target),safe=layoutRect(layout.safeArea),viewport=object(layout.viewport);
+          item.append(node('p','Layout snapshot: '+(target.right-target.left)+' x '+(target.bottom-target.top)+' GUI pixels at ('+target.left+', '+target.top+'). Core UI safe area: '+(safe.right-safe.left)+' x '+(safe.bottom-safe.top)+' GUI pixels. Clipping ancestors: '+
+            (layout.clips as unknown[]).length+'. Target and parents visible: '+(layout.visibleChain?'yes':'no')+'. Overlap and device behavior unverified.'));
+          const evidence=node('details',undefined,'playtest-layout-evidence');
+          evidence.append(node('summary','Layout evidence'),node('p','Camera viewport: '+viewport.width+' x '+viewport.height+' Roblox UI offset units; separate from GUI pixels.'),node('pre',JSON.stringify(layout,null,2)));
+          item.append(evidence);
+        }
+        list.append(item);
+      }element.append(list);}
       if(report.capture){
         const image=report.capture,button=node('button','View capture · Context unverified');button.type='button';
         const click=(event:Event)=>{if(event.isTrusted!==true||button.disabled||!root.contains(element)||!sessionToken)return;button.disabled=true;const originalToken=sessionToken;captureAbort=new AbortController();const controller=captureAbort;const timeout=setTimeout(()=>controller.abort(),8000);

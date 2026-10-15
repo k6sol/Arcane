@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarioRuntimeReportSchema } from '../../packages/studio-test-controller/src/scenario.js';
-import { runScenarioFixture,fixtureScenario as keyboardScenario } from '../../packages/studio-test-controller/testing/scenario-fixture.js';
+import { scenarioRuntimeReportSchema,scenarioEvidenceIssue,scenarioPlanSchema } from '../../packages/studio-test-controller/src/scenario.js';
+import { runScenarioFixture,fixtureScenario as keyboardScenario,fixtureLayoutScenario,type ScenarioFixtureOptions } from '../../packages/studio-test-controller/testing/scenario-fixture.js';
 
 function clickScenario(){
   const plan=keyboardScenario();plan.targets.push({id:'button',root:'LocalPlayer.PlayerGui',segments:['Hud','Interact'],className:'TextButton'});
@@ -106,4 +106,64 @@ for(const changeBasis of ['inset','viewport','camera']as const)test('mouse relea
 
 test('the click coordinate requirement does not acquire GUI services for a keyboard-only scenario',()=>{
   const actual=runScenarioFixture(keyboardScenario(),{basis:'missing-api'});assert.equal(actual.report.outcome,'passed');assert.equal(actual.report.inputRelease,'observed_released');
+});
+
+test('production layout snapshots use Core UI rectangles independently of camera viewport units',()=>{
+  for(const layout of [{},{safeWidth:360,safeHeight:640,viewportWidth:390,viewportHeight:844,clipWidth:340,clipHeight:600},{clipping:false},{left:0.1,width:120,height:40}]){
+    const plan=fixtureLayoutScenario(),actual=runScenarioFixture(plan,{layout,basis:'topbar',inputUnavailable:true});
+    scenarioRuntimeReportSchema.parse(actual.report);assert.equal(scenarioEvidenceIssue(plan,actual.report.steps,true,'not_started',actual.report.code),null);
+    assert.equal(actual.report.outcome,'passed');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+    const measured=actual.report.steps[0]!.layout!;assert.equal(measured.coordinateSpace,'CoreUISafeInsets');assert.equal(measured.viewport.units,'RobloxUIOffset');
+    assert.ok(Array.isArray(measured.clips));assert.equal(actual.report.steps[0]!.observed,true);
+  }
+  const settling=runScenarioFixture(fixtureLayoutScenario(),{layout:{settle:true}});assert.equal(settling.report.outcome,'passed');assert.equal(settling.inputRequests,0);
+});
+
+for(const[name,layout]of [
+  ['undersized',{width:119.999999}],['clipped',{left:350}],['outside safe area',{left:790,clipping:false}],['zero target',{width:0}],
+  ['zero clipping area',{clipWidth:0}],['hidden target',{hiddenTarget:true}],['hidden ancestor',{hiddenAncestor:true}],['disabled ScreenGui',{disabledScreen:true}],
+]as const)test('layout '+name+' has complete measured failure evidence',()=>{
+  const plan=fixtureLayoutScenario(),actual=runScenarioFixture(plan,{layout,inputUnavailable:true});scenarioRuntimeReportSchema.parse(actual.report);
+  assert.equal(actual.report.code,'ASSERTION_FAILED');assert.equal(actual.report.steps[0]!.observed,false);assert.ok(actual.report.steps[0]!.layout);
+  assert.equal(scenarioEvidenceIssue(plan,actual.report.steps,false,'not_started',actual.report.code),null);
+  assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+});
+
+test('unsupported layout geometry or APIs refuse a later layout before any earlier input acquisition',()=>{
+  const plan=fixtureLayoutScenario();plan.steps.unshift({id:'earlier-key',kind:'hold-key',key:'W',holdMs:25});
+  const variants:ScenarioFixtureOptions[]=[...(['target','ancestor','cancelled']as const).map(rotation=>({layout:{rotation}})),
+    ...(['negative-size','nonfinite-position','negative-clip','oversized','safe-origin']as const).map(invalid=>({layout:{invalid}})),
+    {layout:{folderParent:true}},{layout:{},basis:'missing-api'},{layout:{},basis:'missing-camera'},{layout:{},basis:'nonfinite'}];
+  for(const options of variants){const actual=runScenarioFixture(plan,options);scenarioRuntimeReportSchema.parse(actual.report);
+    assert.equal(actual.report.code,'UNSUPPORTED_TOOL',JSON.stringify(options));assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+    assert.ok(actual.report.steps.every(row=>row.outcome==='not_run'));}
+});
+
+for(const changeBasis of ['safe-area','viewport','camera','service']as const)test('layout retains '+changeBasis+' context across a bounded wait',()=>{
+  const plan=fixtureLayoutScenario(),actual=runScenarioFixture(plan,{layout:{width:1},changeBasis});scenarioRuntimeReportSchema.parse(actual.report);
+  assert.equal(actual.report.code,'BINDING_CHANGED');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+  assert.equal(scenarioEvidenceIssue(plan,actual.report.steps,false,'not_started',actual.report.code),null);
+});
+for(const replace of ['layout-target','layout-ancestor']as const)test('layout keeps exact '+replace+' identity rather than reacquiring its selector',()=>{
+  const actual=runScenarioFixture(fixtureLayoutScenario(),{layout:{width:1},replace});assert.equal(actual.report.code,'BINDING_CHANGED');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+});
+test('layout selector ambiguity cannot gain input authority and mixed plans acquire input exactly once',()=>{
+  const plan=fixtureLayoutScenario();plan.steps.unshift({id:'walk',kind:'hold-key',key:'W',holdMs:25});
+  const duplicate=runScenarioFixture(plan,{layout:{duplicateTarget:true}});assert.equal(duplicate.report.code,'BINDING_CHANGED');assert.equal(duplicate.inputRequests,0);
+  const actual=runScenarioFixture(plan,{layout:{}});assert.equal(actual.report.outcome,'passed');assert.equal(actual.inputRequests,1);assert.equal(actual.creates,1);
+  assert.deepEqual(actual.effects.map(row=>[row.pressed,row.object]),[[true,1],[false,1]]);
+  const changed=runScenarioFixture(plan,{layout:{},changeBasis:'safe-area'});assert.equal(changed.report.code,'BINDING_CHANGED');assert.equal(changed.report.inputRelease,'unknown');assert.equal(changed.held,false);
+  assert.deepEqual(changed.effects.map(row=>[row.pressed,row.object]),[[true,1],[false,1]]);
+});
+test('layout step retains the closed selectors, finite dimensions and total wait budget',()=>{
+  for(const patch of [{minimumWidth:0},{minimumHeight:4097},{minimumWidth:1.5},{withinMs:1001},{requireTransition:true},{code:'unapproved()'}]){
+    const plan=fixtureLayoutScenario();Object.assign(plan.steps[0]!,patch);assert.equal(scenarioPlanSchema.safeParse(plan).success,false);
+  }
+  const plan=fixtureLayoutScenario();plan.runtimeBudgetMs=100;Object.assign(plan.steps[0]!,{withinMs:101});assert.equal(scenarioPlanSchema.safeParse(plan).success,false);
+});
+test('layout supports a retained Folder prefix before its ScreenGui without crossing a GUI clipping container',()=>{
+  const plan=fixtureLayoutScenario();plan.targets[0]!.segments.unshift('Ui');
+  const actual=runScenarioFixture(plan,{layout:{folderBeforeScreen:true}});scenarioRuntimeReportSchema.parse(actual.report);
+  assert.equal(actual.report.outcome,'passed');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+  assert.equal(scenarioEvidenceIssue(plan,actual.report.steps,true,'not_started',actual.report.code),null);
 });
