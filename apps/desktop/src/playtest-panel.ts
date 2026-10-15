@@ -44,6 +44,21 @@ function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER)
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) invalid();
   return value;
 }
+function attributeScalar(value:unknown):boolean|number|string{
+  if(typeof value==='boolean'||typeof value==='number'&&Number.isFinite(value)&&Math.abs(value)<=Number.MAX_SAFE_INTEGER)return value;
+  if(typeof value!=='string'||value.length>128||new TextEncoder().encode(value).length>256||
+    /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ud800-\udfff]/u.test(value))invalid();
+  return value;
+}
+function attributeObserved(value:unknown,attributeName:unknown,expected:unknown,requireTransition:boolean):boolean{
+  const measurement=object(value);keys(measurement,['context','subject','name','baseline','observed']);
+  if(measurement.context!=='Client'||measurement.subject!=='LocalPlayer'||measurement.name!==attributeName)invalid();
+  const read=(value:unknown)=>{const observation=object(value);
+    if(observation.present===false){keys(observation,['present']);return observation;}
+    if(observation.present!==true)invalid();keys(observation,['present','value']);attributeScalar(observation.value);return observation;};
+  const baseline=read(measurement.baseline),observed=read(measurement.observed);
+  return observed.present===true&&observed.value===expected&&(!requireTransition||baseline.present===false||baseline.value!==expected);
+}
 function layoutRect(value:unknown):{left:number;top:number;right:number;bottom:number}{
   const rect=object(value);keys(rect,['left','top','right','bottom']);
   for(const edge of Object.values(rect))if(typeof edge!=='number'||!Number.isFinite(edge)||Math.abs(edge)>16384)invalid();
@@ -62,8 +77,9 @@ function layoutObserved(value:unknown,minimumWidth:number,minimumHeight:number):
 }
 function displayCopy(value: unknown): Readonly<Row> {
   let nodes = 0;
-  const copy = (value: unknown, depth: number): DisplayValue => {
+  const copy = (value: unknown, depth: number, scalar=false): DisplayValue => {
     if (++nodes > 2048 || depth > 12) invalid();
+    if(scalar)return attributeScalar(value);
     if (typeof value === 'string') return text(value, 4096);
     if (typeof value === 'boolean') return value;
     if (typeof value === 'number') {if(!Number.isFinite(value)||Math.abs(value)>Number.MAX_SAFE_INTEGER)invalid();return value;}
@@ -81,7 +97,7 @@ function displayCopy(value: unknown): Readonly<Row> {
         if (typeof child === 'string') text(child);
         else for (const field of Object.values(object(child))) text(field);
       }
-      result[key] = copy(child, depth + 1);
+      result[key] = copy(child, depth + 1,source.kind==='assert-player-attribute'&&key==='equals');
     }
     return Object.freeze(result);
   };
@@ -109,6 +125,13 @@ function scenarioPlanView(plan:Row):ScenarioPlanView {
       keys(step,['id','kind','minimumStuds']);const distance=step.minimumStuds;
       if(typeof distance!=='number'||!Number.isFinite(distance)||distance<0.1||distance>32)invalid();
       return 'Assert horizontal movement of at least '+distance+(distance===1?' stud.':' studs.');
+    }
+    if(step.kind==='assert-player-attribute'){
+      keys(step,['id','kind','attribute','equals','withinMs'],['requireTransition']);
+      const attribute=text(step.attribute,100),value=attributeScalar(step.equals),withinMs=integer(step.withinMs,25,1000);budget+=withinMs;
+      if(/[\u0000-\u001f]/u.test(attribute)||step.requireTransition!==undefined&&typeof step.requireTransition!=='boolean')invalid();
+      return 'Observe LocalPlayer attribute '+JSON.stringify(attribute)+' equals '+JSON.stringify(value)+' within '+withinMs+' ms.'+
+        (step.requireTransition!==false?' Require a transition from its initial value.':' An already satisfied result is allowed.')+' Client observation; server authority is unverified.';
     }
     const target=targets.get(identity(step.targetId));if(!target)invalid();
     if(step.kind==='click-gui'){
@@ -187,11 +210,18 @@ function readJob(value: unknown): Job {
     const steps=report.steps.map(value=>object(value));
     if(steps.length>plan.steps.length||report.state==='passed'&&steps.length!==plan.steps.length)invalid();
     for(let index=0;index<steps.length;index++){
-      const row=steps[index]!,step=object(plan.steps[index]);keys(row,['id','kind','outcome','expected','observed'],['baseline','layout']);
+      const row=steps[index]!,step=object(plan.steps[index]);keys(row,['id','kind','outcome','expected','observed'],['baseline','layout','attribute']);
       if(row.id!==step.id||row.kind!==step.kind||!['passed','failed','not_run'].includes(row.outcome as string))invalid();
       const expected=step.kind==='hold-key'?String(step.key)+':'+String(step.holdMs):step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:
         step.kind==='assert-gui-layout'?'core-safe:'+String(step.minimumWidth)+'x'+String(step.minimumHeight):step.equals;
       if(row.expected!==expected||report.state==='passed'&&row.outcome!=='passed')invalid();
+      if(step.kind==='assert-player-attribute'){
+        if(row.baseline!==undefined||(row.attribute!==undefined)!==(typeof row.observed==='boolean')||
+          typeof row.observed!=='boolean'&&row.observed!==null&&row.observed!=='not-observed'||
+          row.outcome==='not_run'&&typeof row.observed==='boolean'||row.outcome==='passed'&&row.observed!==true||
+          row.attribute!==undefined&&row.observed!==attributeObserved(row.attribute,step.attribute,step.equals,step.requireTransition!==false)||
+          review.code==='ASSERTION_FAILED'&&row.outcome==='failed'&&(row.observed!==false||row.attribute===undefined))invalid();
+      }else if(row.attribute!==undefined)invalid();
       if(step.kind==='assert-gui-layout'){
         if((row.layout!==undefined)!==(typeof row.observed==='boolean')||
           typeof row.observed!=='boolean'&&row.observed!==null&&row.observed!=='not-observed'||
@@ -381,8 +411,16 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
         (report.capture?'The retained image has unverified context.':'Current capture support does not attest Client context.')));
       else element.append(node('p','Viewport capture: not requested.'));
       if(report.steps.length){const list=node('ol');for(const step of report.steps){
-        const expected=step.kind==='assert-gui-layout'?String(step.expected).replace(/^core-safe:(\d+)x(\d+)$/,'at least $1 x $2 GUI pixels'):String(step.expected);
-        const item=node('li',String(step.id)+' · '+String(step.outcome)+' · Expected '+expected+' · Observed '+String(step.observed));
+        const expected=step.kind==='assert-gui-layout'?String(step.expected).replace(/^core-safe:(\d+)x(\d+)$/,'at least $1 x $2 GUI pixels'):
+          step.kind==='assert-player-attribute'?JSON.stringify(step.expected):String(step.expected);
+        const describe=(value:unknown)=>{const observation=object(value);return observation.present?JSON.stringify(observation.value):'absent';};
+        const observed=step.attribute?describe(object(step.attribute).observed):String(step.observed);
+        const item=node('li',String(step.id)+' · '+String(step.outcome)+' · Expected '+expected+' · Observed '+observed);
+        if(step.attribute){
+          const measurement=object(step.attribute);
+          item.append(node('p','Client player attribute '+JSON.stringify(measurement.name)+': '+describe(measurement.observed)+'. Initial value: '+describe(measurement.baseline)+'. Server authority is unverified.'));
+          const details=node('details');details.append(node('summary','Attribute evidence'),node('pre',JSON.stringify(measurement,null,2)));item.append(details);
+        }
         if(step.layout){
           const layout=object(step.layout),target=layoutRect(layout.target),safe=layoutRect(layout.safeArea),viewport=object(layout.viewport);
           item.append(node('p','Layout snapshot: '+(target.right-target.left)+' x '+(target.bottom-target.top)+' GUI pixels at ('+target.left+', '+target.top+'). Core UI safe area: '+(safe.right-safe.left)+' x '+(safe.bottom-safe.top)+' GUI pixels. Clipping ancestors: '+

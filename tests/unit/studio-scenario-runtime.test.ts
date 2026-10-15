@@ -7,6 +7,108 @@ function clickScenario(){
   const plan=keyboardScenario();plan.targets.push({id:'button',root:'LocalPlayer.PlayerGui',segments:['Hud','Interact'],className:'TextButton'});
   plan.steps=[{id:'click',kind:'click-gui',targetId:'button'},plan.steps[3]!];return plan;
 }
+function attributeScenario(equals:boolean|number|string=2,requireTransition=true){
+  return scenarioPlanSchema.parse({version:1,runtimeBudgetMs:300,targets:[],capture:{required:false},
+    steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals,withinMs:100,requireTransition}]});
+}
+function verifyAttributeReport(plan:ReturnType<typeof attributeScenario>,options:ScenarioFixtureOptions){
+  const actual=runScenarioFixture(plan,options);scenarioRuntimeReportSchema.parse(actual.report);
+  assert.equal(scenarioEvidenceIssue(plan,actual.report.steps,actual.report.outcome==='passed',actual.report.inputRelease,actual.report.code),null);
+  return actual;
+}
+
+for(const value of [false,0,'','Stage two', '雪🌳'])test('player attribute snapshots preserve the typed value '+JSON.stringify(value),()=>{
+  const plan=attributeScenario(value,false),actual=verifyAttributeReport(plan,{attribute:{initial:value},inputUnavailable:true});
+  assert.equal(actual.report.outcome,'passed');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+  assert.deepEqual(actual.report.steps[0]!.attribute,{context:'Client',subject:'LocalPlayer',name:'Checkpoint',
+    baseline:{present:true,value},observed:{present:true,value}});
+});
+
+test('player attribute transition captures absence before interaction and the new checkpoint afterward',()=>{
+  const plan=attributeScenario();plan.steps.unshift({id:'interact',kind:'hold-key',key:'E',holdMs:25});
+  const actual=verifyAttributeReport(plan,{attribute:{next:2,transition:'input'}});
+  assert.equal(actual.report.outcome,'passed');assert.equal(actual.report.inputRelease,'observed_released');
+  assert.deepEqual(actual.report.steps[1]!.attribute,{context:'Client',subject:'LocalPlayer',name:'Checkpoint',baseline:{present:false},observed:{present:true,value:2}});
+  assert.deepEqual(actual.effects.map(value=>[value.key,value.pressed]),[['E',true],['E',false]]);
+});
+
+test('read-only player attribute transition observes external state without requesting input',()=>{
+  const actual=verifyAttributeReport(attributeScenario(),{attribute:{initial:1,next:2,transition:'wait'},inputUnavailable:true});
+  assert.equal(actual.report.outcome,'passed');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+  assert.deepEqual(actual.report.steps[0]!.attribute?.baseline,{present:true,value:1});
+});
+
+test('missing or unchanged player attributes retain measured failure evidence and cannot impersonate false or zero',()=>{
+  for(const value of [false,0,2]){
+    const plan=attributeScenario(value,false),actual=verifyAttributeReport(plan,{});
+    assert.equal(actual.report.code,'ASSERTION_FAILED');assert.equal(actual.report.steps[0]!.observed,false);
+    assert.deepEqual(actual.report.steps[0]!.attribute?.observed,{present:false});assert.equal(actual.inputRequests,0);
+  }
+  const actual=verifyAttributeReport(attributeScenario(),{attribute:{initial:1}});
+  assert.equal(actual.report.code,'ASSERTION_FAILED');assert.deepEqual(actual.report.steps[0]!.attribute?.observed,{present:true,value:1});
+});
+
+test('already satisfied player transition prevents an earlier input step and records its actual baseline',()=>{
+  const plan=attributeScenario();plan.steps.unshift({id:'interact',kind:'hold-key',key:'E',holdMs:25});
+  const actual=verifyAttributeReport(plan,{attribute:{initial:2}});
+  assert.equal(actual.report.code,'ASSERTION_FAILED');assert.equal(actual.effects.length,0);
+  assert.deepEqual(actual.report.steps[1]!.attribute?.baseline,{present:true,value:2});assert.equal(actual.report.steps[1]!.observed,false);
+});
+
+for(const invalid of ['table','nan','infinite','invalid-utf8','long-string','control']as const)test('unsupported player attribute '+invalid+' prevents the whole input plan',()=>{
+  const plan=attributeScenario();plan.steps.unshift({id:'interact',kind:'hold-key',key:'E',holdMs:25});
+  const actual=verifyAttributeReport(plan,{attribute:{invalid}});
+  assert.equal(actual.report.code,'UNSUPPORTED_TOOL');assert.equal(actual.inputRequests,0);assert.equal(actual.effects.length,0);
+  assert.ok(actual.report.steps.every(step=>step.outcome==='not_run'));
+});
+
+test('unavailable attribute APIs and read errors refuse without exposing exception content',()=>{
+  for(const attribute of [{missingApi:true},{readError:true}]){
+    const actual=verifyAttributeReport(attributeScenario(),{attribute});assert.equal(actual.report.code,'UNSUPPORTED_TOOL');
+    assert.equal(actual.effects.length,0);assert.ok(!JSON.stringify(actual).includes('PRIVATE_ATTRIBUTE_ERROR'));
+  }
+});
+
+for(const replace of ['player','character','gui']as const)test('player attribute wait keeps original '+replace+' identity',()=>{
+  const actual=verifyAttributeReport(attributeScenario(),{replace,attribute:{initial:1,next:2,transition:'wait'}});
+  assert.equal(actual.report.code,'BINDING_CHANGED');assert.equal(actual.report.outcome,'failed');assert.equal(actual.inputRequests,0);
+});
+
+test('player replacement inside attribute read is caught before its returned value becomes evidence',()=>{
+  const actual=verifyAttributeReport(attributeScenario(2,false),{attribute:{initial:2,replaceOnRead:true}});
+  assert.equal(actual.report.code,'BINDING_CHANGED');assert.equal(actual.report.steps[0]!.attribute,undefined);
+});
+
+test('player attribute evidence rejects borrowed names, authority, unmeasured failures and contradictory values',()=>{
+  const plan=attributeScenario(),actual=verifyAttributeReport(plan,{attribute:{initial:1,next:2,transition:'wait'}});
+  for(const mutate of [
+    (row:typeof actual.report.steps[number])=>{row.attribute!.name='Foreign';},
+    (row:typeof actual.report.steps[number])=>{row.attribute!.observed={present:false};},
+    (row:typeof actual.report.steps[number])=>{row.attribute!.baseline={present:true,value:2};},
+  ]){const rows=structuredClone(actual.report.steps);mutate(rows[0]!);assert.ok(scenarioEvidenceIssue(plan,rows,true,'not_started'));}
+  const failure=structuredClone(actual.report.steps);failure[0]!.outcome='failed';failure[0]!.observed=false;delete failure[0]!.attribute;
+  assert.ok(scenarioEvidenceIssue(plan,failure,false,'not_started','ASSERTION_FAILED'));
+  for(const patch of [{context:'Server'},{subject:'AnotherPlayer'},{extra:'unapproved()'}]){
+    const row=structuredClone(actual.report.steps[0]!);Object.assign(row.attribute!,patch);assert.equal(scenarioRuntimeReportSchema.safeParse({...actual.report,steps:[row]}).success,false);
+  }
+});
+
+test('player attribute plans keep scope and bounds closed and quote attribute names as data',()=>{
+  const plan=attributeScenario(),step=plan.steps[0]!;
+  for(const patch of [{context:'Server'},{code:'unapproved()'},{targetId:'foreign'},{equals:null},{equals:{}},{equals:Infinity},{equals:1e16},
+    {equals:'x'.repeat(129)},{equals:'雪'.repeat(100)},{equals:'\u0001'},{attribute:'\u202eForeign'},{withinMs:1001}]){
+    assert.equal(scenarioPlanSchema.safeParse({...plan,steps:[{...step,...patch}]}).success,false);
+  }
+  const name='Checkpoint "];error("PRIVATE_INJECTION")--';Object.assign(step,{attribute:name});
+  const actual=verifyAttributeReport(plan,{attribute:{name,initial:1,next:2,transition:'wait'}});assert.equal(actual.report.outcome,'passed');
+  assert.equal(actual.report.steps[0]!.attribute!.name,name);
+});
+
+test('attribute type changes during a wait remain unsupported with no invented postcondition',()=>{
+  const actual=verifyAttributeReport(attributeScenario(),{attribute:{initial:1,transition:'wait',invalid:'table',invalidAfterWait:true}});
+  assert.equal(actual.report.code,'UNSUPPORTED_TOOL');assert.equal(actual.report.steps[0]!.observed,false);
+  assert.deepEqual(actual.report.steps[0]!.attribute?.observed,{present:true,value:1});assert.equal(actual.effects.length,0);
+});
 
 test('production Luau scenario executes movement, ordinary interaction and measured transition assertions',()=>{
   const actual=runScenarioFixture(keyboardScenario());scenarioRuntimeReportSchema.parse(actual.report);

@@ -124,6 +124,34 @@ test('production service runs approved read-only assertions without virtual inpu
   assert.ok(f.calls.filter(call=>call.name==='execute_luau'&&call.args.datamodel_type==='Edit').length>=3,'source scope remains checked around approval and cleanup');
 });
 
+for(const failed of [false,true])test(`production service settles player attribute evidence with its original task and source digest: ${failed?'measured failure':'checkpoint changes'}`,{timeout:15000},async t=>{
+  const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,attribute:{initial:1,...(failed?{}:{next:2,transition:'wait' as const})}}});
+  Object.assign(f.plan,{version:1,runtimeBudgetMs:300,targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:2,withinMs:100,requireTransition:true}],capture:{required:false}});
+  const job=await f.prepare();assert.equal(f.state.clientCalls,0);await f.approve(job);await until(()=>task.packets.length===1);
+  const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
+  assert.equal(report.review.code,failed?'ASSERTION_FAILED':'OK');assert.equal(report.review.cleanup,'complete');assert.equal(row.observed,!failed);
+  assert.deepEqual(row.attribute,{context:'Client',subject:'LocalPlayer',name:'Checkpoint',baseline:{present:true,value:1},observed:{present:true,value:failed?1:2}});
+  assert.deepEqual(packet.scenario,{outcome:failed?'failed':'passed',requiredEvidence:'complete',inputRelease:'complete',restoration:'not_required',subjects:'current'});
+  assert.equal(packet.reportDigest,digest(report));assert.equal(await f.service.revalidateExact(job.id,task.origin,packet.reportDigest),'current');
+  assert.equal(f.state.inputRequests,0);assert.equal(f.state.inputEffects,0);assert.equal(f.state.clientCalls,1);assert.equal(report.nativeAcceptance,false);
+  assert.deepEqual(f.calls.filter(call=>call.name==='start_stop_play').map(call=>call.args.is_start),[true,false]);
+});
+
+for(const mutation of ['missing','server','wrong-name','contradiction']as const)test('native player attribute failure cannot authorize repair with '+mutation+' evidence',{timeout:15000},async t=>{
+  const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{attribute:{initial:1}},mutateReport(report){
+    const row=report.steps[0]!;
+    if(mutation==='missing')delete row.attribute;
+    else if(mutation==='server')Object.assign(row.attribute!,{context:'Server'});
+    else if(mutation==='wrong-name')row.attribute!.name='Foreign';
+    else row.attribute!.observed={present:true,value:2};
+  }});
+  Object.assign(f.plan,{version:1,runtimeBudgetMs:300,targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:2,withinMs:100,requireTransition:true}],capture:{required:false}});
+  const job=await f.prepare();await f.approve(job);await until(()=>task.packets.length===1);
+  const report=f.status(job.id);assert.equal(report.review.code,'BAD_NATIVE_RESPONSE');assert.equal(report.review.scenario!.inputRelease,'unknown');
+  assert.equal(task.packets[0]!.scenario!.outcome,'incomplete');assert.equal(task.packets[0]!.scenario!.requiredEvidence,'missing');
+  assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(report.review.canStartAnotherOperation,false);
+});
+
 for(const failed of [false,true])test(`production service binds approved layout measurements to settled source-current task evidence: ${failed?'measured failure':'current layout passes'}`,{timeout:15000},async t=>{
     const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
     const job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.equal(f.state.clientCalls,0);await f.approve(job);await until(()=>task.packets.length===1);

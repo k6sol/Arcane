@@ -5,6 +5,18 @@ export { SCENARIO_LIMITS } from './scenario-limits.js';
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,64}(?![\s\S])/);
 const hash = z.string().regex(/^[a-f0-9]{64}(?![\s\S])/);
 const name = z.string().min(1).max(100).refine(value => !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value));
+const attributeName = name.refine(value=>!!value.trim()&&!/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/u.test(value));
+const attributeValue = z.union([z.boolean(), z.number().finite().min(-Number.MAX_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER), z.string().max(128)
+  .refine(value => Buffer.byteLength(value) <= 256 && !/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ud800-\udfff]/u.test(value))]);
+const attributeObservation = z.discriminatedUnion('present', [z.strictObject({present:z.literal(false)}),
+  z.strictObject({present:z.literal(true),value:attributeValue})]);
+export const scenarioAttributeSchema = z.strictObject({context:z.literal('Client'),subject:z.literal('LocalPlayer'),name:attributeName,
+  baseline:attributeObservation,observed:attributeObservation});
+export type ScenarioAttribute = z.infer<typeof scenarioAttributeSchema>;
+export function scenarioAttributePasses(expected:boolean|number|string, requireTransition:boolean, measurement:ScenarioAttribute):boolean {
+  return measurement.observed.present && measurement.observed.value === expected &&
+    (!requireTransition || !measurement.baseline.present || measurement.baseline.value !== expected);
+}
 export const scenarioKey = z.enum(['W', 'A', 'S', 'D', 'E', 'F', 'Space']);
 export const scenarioTargetSchema = z.strictObject({ id, root: z.literal('LocalPlayer.PlayerGui'),
   segments: z.array(name).min(1).max(8), className: z.enum(['TextButton', 'ImageButton', 'TextLabel', 'Frame']) });
@@ -16,6 +28,8 @@ export const scenarioStepSchema = z.discriminatedUnion('kind', [
   z.strictObject({ id, kind: z.literal('assert-text'), targetId: id, equals: name, withinMs: z.number().int().min(25).max(1000), requireTransition: z.boolean().default(true) }),
   z.strictObject({ id, kind: z.literal('assert-gui-layout'), targetId: id, minimumWidth: z.number().int().min(1).max(4096),
     minimumHeight: z.number().int().min(1).max(4096), withinMs: z.number().int().min(25).max(1000) }),
+  z.strictObject({id,kind:z.literal('assert-player-attribute'),attribute:attributeName,equals:attributeValue,
+    withinMs:z.number().int().min(25).max(1000),requireTransition:z.boolean().default(true)}),
 ]);
 const ref = z.strictObject({ instanceId: z.string().min(1).max(256), sessionId: z.string().min(1).max(256),
   root: z.enum(['Workspace', 'ReplicatedStorage', 'ServerScriptService', 'ServerStorage', 'StarterGui', 'StarterPlayer', 'Lighting']),
@@ -58,11 +72,17 @@ export function scenarioLayoutPasses(minimumWidth:number,minimumHeight:number,la
   return layout.visibleChain&&target.right-target.left>=minimumWidth&&target.bottom-target.top>=minimumHeight&&
     [layout.safeArea,...layout.clips].every(rect=>target.left>=rect.left&&target.top>=rect.top&&target.right<=rect.right&&target.bottom<=rect.bottom);
 }
-export const scenarioStepResultSchema = z.strictObject({ id, kind: z.enum(['hold-key', 'click-gui', 'assert-displacement', 'assert-gui', 'assert-text','assert-gui-layout']),
+export const scenarioStepResultSchema = z.strictObject({ id, kind: z.enum(['hold-key', 'click-gui', 'assert-displacement', 'assert-gui', 'assert-text','assert-gui-layout','assert-player-attribute']),
   outcome: z.enum(['passed', 'failed', 'not_run']), expected: z.union([z.boolean(), z.number().finite(), z.string().max(256)]),
   observed: z.union([z.boolean(), z.number().finite(), z.string().max(256), z.null()]),
-  baseline: z.union([z.boolean(),z.string().max(256),z.number().finite()]).optional(),layout:scenarioLayoutSchema.optional() })
+  baseline: z.union([z.boolean(),z.string().max(256),z.number().finite()]).optional(),layout:scenarioLayoutSchema.optional(),attribute:scenarioAttributeSchema.optional() })
   .superRefine((row,context)=>{
+    const attributeReject=()=>context.addIssue({code:'custom',message:'Invalid player attribute observation.'});
+    if(row.kind==='assert-player-attribute'){
+      if(row.baseline!==undefined||row.layout!==undefined||(row.attribute!==undefined)!==(typeof row.observed==='boolean')||
+        typeof row.observed!=='boolean'&&row.observed!==null&&row.observed!=='not-observed'||
+        row.outcome==='passed'&&row.observed!==true||row.outcome==='not_run'&&typeof row.observed==='boolean')attributeReject();
+    }else if(row.attribute!==undefined)attributeReject();
     const reject=()=>context.addIssue({code:'custom',message:'Invalid layout observation.'});
     if(row.kind!=='assert-gui-layout'){if(row.layout!==undefined)reject();return;}
     if(row.baseline!==undefined||typeof row.observed!=='boolean'&&row.observed!==null&&row.observed!=='not-observed'||
@@ -82,6 +102,9 @@ export function scenarioEvidenceIssue(plan: ScenarioPlan, rows: readonly Scenari
     const expected=step.kind==='hold-key'?step.key+':'+step.holdMs:step.kind==='click-gui'?step.targetId:step.kind==='assert-displacement'?step.minimumStuds:
       step.kind==='assert-gui-layout'?'core-safe:'+step.minimumWidth+'x'+step.minimumHeight:step.equals;
     if(row.expected!==expected)return 'Wrong scenario step expectation.';
+    if(step.kind==='assert-player-attribute'&&(row.attribute&&(row.attribute.name!==step.attribute||
+      row.observed!==scenarioAttributePasses(step.equals,step.requireTransition,row.attribute))||
+      code==='ASSERTION_FAILED'&&row.outcome==='failed'&&(row.observed!==false||!row.attribute)))return 'Unmeasured or contradictory player attribute evidence.';
     if(step.kind==='assert-gui-layout'&&(row.layout&&row.observed!==scenarioLayoutPasses(step.minimumWidth,step.minimumHeight,row.layout)||
       code==='ASSERTION_FAILED'&&row.outcome==='failed'&&(row.observed!==false||!row.layout)))return 'Unmeasured or contradictory layout evidence.';
     if(step.kind==='assert-gui'&&row.baseline!==undefined&&typeof row.baseline!=='boolean'||

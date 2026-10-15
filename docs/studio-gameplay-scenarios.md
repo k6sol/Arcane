@@ -22,6 +22,38 @@ observed within the bounded wait. A transition observed without scenario input
 does not establish that Arcane caused it. Displacement measures change from the
 original root position; a stationary character still fails a positive minimum.
 
+## Player attributes
+
+`assert-player-attribute` observes one named attribute on the original
+`LocalPlayer`. For example, `{ "id": "checkpoint", "kind": "assert-player-attribute",
+"attribute": "Checkpoint", "equals": 2, "withinMs": 500 }` can wait for a
+checkpoint change after an approved movement or interaction step. It uses the
+same eight-step, three-second budget and 25–1,000 ms wait limits. It neither
+sets attributes nor invokes gameplay remotes. See the official
+[GetAttribute contract](https://create.roblox.com/docs/reference/engine/classes/Instance#GetAttribute)
+and [replication ordering](https://create.roblox.com/docs/scripting/attributes#replication-order).
+
+Boolean, finite numbers within ±9,007,199,254,740,991, and strings up to 128 UTF-16
+units and 256 UTF-8 bytes are supported. Empty strings, `false` and zero retain
+their types. Missing attributes have explicit `present: false` measurements;
+they cannot masquerade as a false or zero value. Control, directional-formatting
+and invalid Unicode strings, larger values and non-scalar attribute types are
+outside this assertion's support. All initial values are checked before input.
+
+The default requires a different initial value, captured before scenario input;
+`requireTransition: false` allows an already satisfied snapshot. Attribute-only
+scenarios never create virtual input. Each result retains the attribute name,
+Client/LocalPlayer context, baseline presence/value and observed presence/value.
+The host and human panel recompute the result from those measurements and the
+sealed expectation. An unmeasured assertion failure cannot authorize automatic
+repair. Player replacement, character/GUI replacement or a context change
+during sampling retains the existing binding and cleanup fences.
+
+This is a Client-visible player-state assertion. Even when the intended game
+logic updates an attribute on the server, this observation does not establish
+server authority, cross-client replication or causality. Native Studio execution
+and customer gameplay acceptance remain unverified.
+
 ## GUI layout snapshots
 
 `assert-gui-layout` carries only `id`, `targetId`, `minimumWidth`, `minimumHeight`

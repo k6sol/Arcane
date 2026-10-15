@@ -76,6 +76,15 @@ function layoutGameplay(failed=false):Job{
       clips:[{left:0,top:0,right:400,bottom:300}],visibleChain:true,viewport:{width:800,height:644,units:'RobloxUIOffset'}}}]});
   if(failed){job.review.outcome='failed';job.review.code='ASSERTION_FAILED';}return job;
 }
+function attributeGameplay(failed=false):Job{
+  const job=gameplay(),plan=scenarioPlanSchema.parse({version:1,runtimeBudgetMs:300,targets:[],
+    steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:2,withinMs:100}],capture:{required:false}});
+  job.display.proposal.scenario=plan;job.displayDigest=digest(job.display);job.review.scopeDigest=job.displayDigest;
+  Object.assign(job.review.scenario!,{scenarioDigest:digest(plan),inputRelease:'not_started',state:failed?'failed':'passed',steps:[
+    {id:'checkpoint',kind:'assert-player-attribute',outcome:failed?'failed':'passed',expected:2,observed:!failed,attribute:{
+      context:'Client',subject:'LocalPlayer',name:'Checkpoint',baseline:{present:false},observed:failed?{present:false}:{present:true,value:2}}}]});
+  if(failed){job.review.outcome='failed';job.review.code='ASSERTION_FAILED';}return job;
+}
 function send(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(payload));
 }
@@ -372,6 +381,29 @@ test('playtest SDK: sealed gameplay expectations and observed transitions surviv
   failed.review.scenario!.steps.splice(2);f.state.payload={job:failed};
   assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job:failed},'a truthful failed prefix remains reportable');
   assert.equal(f.requests.length,mutations.length+2,'malformed observations are read once without execution or replay');
+});
+
+test('playtest SDK: player attributes retain typed measured evidence and refuse forged authority over HTTP',async t=>{
+  const f=await fixture(t);
+  for(const failed of [false,true]){const job=attributeGameplay(failed);f.state.payload={job};assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job});}
+  const mutations:[string,(job:Job)=>void][]=[
+    ['server authority',job=>{Object.assign(job.review.scenario!.steps[0]!.attribute!,{context:'Server'});}],
+    ['foreign player',job=>{Object.assign(job.review.scenario!.steps[0]!.attribute!,{subject:'AnotherPlayer'});}],
+    ['borrowed name',job=>{job.review.scenario!.steps[0]!.attribute!.name='Foreign';}],
+    ['missing observed value',job=>{job.review.scenario!.steps[0]!.attribute!.observed={present:false};}],
+    ['typed mismatch',job=>{job.review.scenario!.steps[0]!.attribute!.observed={present:true,value:'2'};}],
+    ['already satisfied',job=>{job.review.scenario!.steps[0]!.attribute!.baseline={present:true,value:2};}],
+    ['extra measurement authority',job=>{Object.assign(job.review.scenario!.steps[0]!.attribute!,{code:'unapproved()'});}],
+    ['ambiguous absence',job=>{Object.assign(job.review.scenario!.steps[0]!.attribute!.baseline,{value:false});}],
+    ['unknown scalar type',job=>{Object.assign(job.review.scenario!.steps[0]!.attribute!.observed,{value:{x:1}});}],
+    ['missing measurement',job=>{delete job.review.scenario!.steps[0]!.attribute;}],
+  ];
+  for(const[name,mutate]of mutations)await t.test(name,async()=>{const job=attributeGameplay();mutate(job);f.state.payload={job};const result=await call(f.client,'playtest_status',{jobId:JOB});
+    assert.equal(result.result.isError,true);assert.equal((result.data.error as{code:string}).code,'PROTOCOL');assert.equal(result.data.job,undefined);});
+  const failed=attributeGameplay(true);delete failed.review.scenario!.steps[0]!.attribute;f.state.payload={job:failed};
+  assert.equal((await call(f.client,'playtest_status',{jobId:JOB})).result.isError,true,'unmeasured assertion cannot authorize repair');
+  failed.review.code='BINDING_CHANGED';failed.review.scenario!.steps[0]!.observed=null;f.state.payload={job:failed};
+  assert.deepEqual((await call(f.client,'playtest_status',{jobId:JOB})).data,{job:failed});assert.ok(f.requests.every(request=>request.method==='GET'));
 });
 
 test('playtest SDK: layout pass and failure measurements remain closed and recomputed over HTTP',async t=>{

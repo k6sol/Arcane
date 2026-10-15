@@ -24,6 +24,30 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
   local deadline = started + plan.runtimeBudgetMs / 1000
   local samples = 0
   local function fail(code) error({arcaneCode = code}, 0) end
+  -- The retained Client player is observed, never written or replaced by a
+  -- server-state claim. Explicit presence keeps nil distinct from false/zero.
+  local function readAttribute(attributeName: string)
+    local value = player:GetAttribute(attributeName)
+    if value == nil then return {present = false} end
+    local kind = type(value)
+    if kind == "number" then
+      if value ~= value or math.abs(value) > 9007199254740991 then fail("UNSUPPORTED_TOOL") end
+    elseif kind == "string" then
+      if #value > 256 or not utf8.len(value) then fail("UNSUPPORTED_TOOL") end
+      local units = 0
+      for _, point in utf8.codes(value) do
+        units += if point > 65535 then 2 else 1
+        if units > 128 or point < 32 or point >= 127 and point <= 159
+          or point >= 55296 and point <= 57343 or point >= 8203 and point <= 8207
+          or point >= 8234 and point <= 8238 or point >= 8288 and point <= 8303 or point == 65279 then fail("UNSUPPORTED_TOOL") end
+      end
+    elseif kind ~= "boolean" then fail("UNSUPPORTED_TOOL") end
+    return {present = true, value = value}
+  end
+  local function attributePasses(step, measurement)
+    return measurement.observed.present and measurement.observed.value == step.equals
+      and (not step.requireTransition or not measurement.baseline.present or measurement.baseline.value ~= step.equals)
+  end
   local function bounded(value)
     return type(value) == "number" and value == value and math.abs(value) <= 16384
   end
@@ -223,6 +247,14 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
     end
     -- Validate every layout's supported geometry before any earlier input step.
     for _, step in ipairs(plan.steps) do if step.kind == "assert-gui-layout" then measureLayout(step.targetId) end end
+    local attributeBaselines = {}
+    for index, step in ipairs(plan.steps) do
+      if step.kind == "assert-player-attribute" then
+        guard()
+        attributeBaselines[index] = readAttribute(step.attribute)
+        guard()
+      end
+    end
     for _, step in ipairs(plan.steps) do
       if step.kind == "hold-key" or step.kind == "click-gui" then
         local available, value = pcall(function() return userInput:CreateVirtualInput() end)
@@ -235,6 +267,15 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
     -- Establish each transition's initial state before any scenario input. An
     -- already satisfied postcondition cannot prove an interaction changed it.
     for index, step in ipairs(plan.steps) do
+      if step.kind == "assert-player-attribute" and step.requireTransition then
+        local baseline = attributeBaselines[index]
+        if baseline.present and baseline.value == step.equals then
+          active = index
+          rows[index].attribute = {context = "Client", subject = "LocalPlayer", name = step.attribute, baseline = baseline, observed = baseline}
+          rows[index].observed = false
+          fail("ASSERTION_FAILED")
+        end
+      end
       if step.kind == "assert-gui" or step.kind == "assert-text" then
         local target = targets[step.targetId]
         local value = if step.kind == "assert-text" then target.Text else target.Visible
@@ -281,6 +322,19 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
         releaseMouse(mouse)
         if mouse then fail("EFFECT_UNKNOWN") end
         row.observed = "observed-released"
+      elseif step.kind == "assert-player-attribute" then
+        local untilAt = math.min(deadline, os.clock() + step.withinMs / 1000)
+        repeat
+          guard()
+          local value = readAttribute(step.attribute)
+          guard()
+          row.attribute = {context = "Client", subject = "LocalPlayer", name = step.attribute,
+            baseline = attributeBaselines[index], observed = value}
+          row.observed = attributePasses(step, row.attribute)
+          if row.observed then break end
+          if os.clock() >= untilAt then fail("ASSERTION_FAILED") end
+          pause(math.min(0.025, untilAt - os.clock()))
+        until false
       elseif step.kind == "assert-gui-layout" then
         local untilAt = math.min(deadline, os.clock() + step.withinMs / 1000)
         repeat

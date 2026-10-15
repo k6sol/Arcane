@@ -50,6 +50,13 @@ function layoutJob(passed=false){
   const row={id:'layout',kind:'assert-gui-layout',outcome:'passed',expected:'core-safe:120x40',observed:true as unknown,layout:measurement};
   Object.assign(current.report,{steps:passed?[row]:[]});return{...current,row,measurement};
 }
+function attributeJob(passed=false,expected:boolean|number|string=2){
+  const current=gameplayJob(passed);
+  Object.assign(current.scenario,{targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:expected,withinMs:100,requireTransition:true}]});
+  const measurement={context:'Client',subject:'LocalPlayer',name:'Checkpoint',baseline:{present:false},observed:{present:true,value:expected}};
+  const row={id:'checkpoint',kind:'assert-player-attribute',outcome:'passed',expected,observed:true as unknown,attribute:measurement};
+  Object.assign(current.report,{steps:passed?[row]:[]});return{...current,row,measurement};
+}
 
 class Events {
   private listeners = new Map<string, EventListener[]>();
@@ -179,6 +186,36 @@ test('scenario approval makes each finite operation and exact temporary restorat
   assert.equal(audit.open,false);assert.equal(fieldValues(f).get('display.proposal.scenario.steps[0].holdMs'),'100');assert.equal(fieldValues(f).get('displayDigest'),DIGEST);
   assert.equal(f.posts().length,0);button(f,'Run test').emit('click',true);await flush();assert.equal(f.posts().length,1);
   assert.deepEqual(f.posts()[0]!.body,{id:pending.value.id,displayDigest:DIGEST},'the readable projection cannot replace the exact approval digest');
+});
+
+test('player attribute consent keeps Client scope, exact values and measured presence visible',async t=>{
+  const pending=attributeJob(false,''),f=fixture(t,[pending.value]);await f.panel.refresh();
+  assert.match(f.root.textContent,/LocalPlayer attribute "Checkpoint" equals "" within 100 ms/);
+  assert.match(f.root.textContent,/Require a transition from its initial value/);assert.match(f.root.textContent,/Client observation; server authority is unverified/);
+  button(f,'Run test').emit('click',true);await flush();assert.deepEqual(f.posts()[0]!.body,{id:pending.value.id,displayDigest:DIGEST});
+  for(const expected of ['',false,0,2]){
+    const finished=attributeJob(true,expected);f.jobs([finished.value]);await f.panel.refresh();
+    assert.ok(f.root.textContent.includes('checkpoint · passed · Expected '+JSON.stringify(expected)+' · Observed '+JSON.stringify(expected)));
+    assert.ok(f.root.textContent.includes('Client player attribute "Checkpoint": '+JSON.stringify(expected)+'. Initial value: absent.'));
+    assert.match(f.root.textContent,/Server authority is unverified/);
+  }
+});
+
+test('player attribute panel refuses borrowed authority, ambiguous presence and contradictory pass/failure rows',async t=>{
+  const pending=attributeJob();pending.value.state='running';pending.value.review.phase='observing';pending.report.state='running';
+  const f=fixture(t,[pending.value]);await f.panel.refresh();
+  const mutations:[string,(value:ReturnType<typeof attributeJob>)=>void][]=[
+    ['server',value=>{value.measurement.context='Server';}],['subject',value=>{value.measurement.subject='OtherPlayer';}],
+    ['name',value=>{value.measurement.name='Foreign';}],['value',value=>{value.measurement.observed.value=3;}],
+    ['missing',value=>{Object.assign(value.measurement.observed,{present:false});}],
+    ['missing measurement',value=>{Reflect.deleteProperty(value.row,'attribute');}],
+    ['already satisfied',value=>{Object.assign(value.measurement.baseline,{present:true,value:2});}],
+    ['unmeasured failure',value=>{value.value.review.code='ASSERTION_FAILED';value.value.review.outcome='failed';value.report.state='failed';value.row.outcome='failed';value.row.observed=null;Reflect.deleteProperty(value.row,'attribute');}],
+    ['extra authority',value=>{Object.assign(value.measurement,{code:'unapproved()'});}],
+  ];
+  for(const[name,mutate]of mutations){const malformed=attributeJob(true);mutate(malformed);f.jobs([malformed.value]);await f.panel.refresh();
+    assert.equal(button(f,'Stop').disabled,true,name);assert.match(f.root.textContent,/refresh|status/i,name);}
+  assert.equal(f.posts().length,0);
 });
 
 test('layout consent is readable and measured GUI pixels remain distinct from camera viewport units',async t=>{

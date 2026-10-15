@@ -13,7 +13,9 @@ const literal=(value:unknown):string=>typeof value==='string'?'"'+[...Buffer.fro
   value===null||value===undefined?'nil':typeof value==='number'||typeof value==='boolean'?String(value):Array.isArray(value)?'{'+value.map(literal).join(',')+'}':
   '{'+Object.entries(value as Record<string,unknown>).map(([key,item])=>'['+literal(key)+']='+literal(item)).join(',')+'}';
 export interface ScenarioFixtureOptions { immobile?:boolean; noInteraction?:boolean; alreadySatisfied?:boolean; inputUnavailable?:boolean;externalTransition?:boolean;
-  pressError?:boolean; releaseError?:boolean; focus?:boolean; replace?:'character'|'gui'|'target'|'layout-ancestor'|'layout-target'; replaceDuringMouse?:boolean;hit?:'nested-button'|'passive-label';
+  pressError?:boolean; releaseError?:boolean; focus?:boolean; replace?:'player'|'character'|'gui'|'target'|'layout-ancestor'|'layout-target'; replaceDuringMouse?:boolean;hit?:'nested-button'|'passive-label';
+  attribute?:{name?:string;initial?:boolean|number|string;next?:boolean|number|string;transition?:'input'|'wait';
+    invalid?:'table'|'nan'|'infinite'|'invalid-utf8'|'long-string'|'control';invalidAfterWait?:boolean;missingApi?:boolean;replaceOnRead?:boolean;readError?:boolean};
   basis?:'topbar'|'cutout'|'extent-mismatch'|'inset-only'|'missing-api'|'missing-inset'|'viewport-mismatch'|'nonfinite'|'oversized'|'zero-size'|'missing-camera';
   changeBasis?:'inset'|'viewport'|'camera'|'safe-area'|'service';changeDuringMouse?:boolean;
   layout?:{width?:number;height?:number;left?:number;top?:number;safeWidth?:number;safeHeight?:number;viewportWidth?:number;viewportHeight?:number;
@@ -76,6 +78,22 @@ if config.basis=="missing-api"then guiService.GetInsetArea=nil end
 if config.basis=="missing-inset"then guiService.GetGuiInset=nil end
 local players=node("Players","Players",game)
 local player=node("Player","Player",players);players.LocalPlayer=player
+local attributeOptions=config.attribute or {}
+local attributeValue,attributeChanged=attributeOptions.initial,false
+function player:GetAttribute(name)
+ if attributeOptions.readError then error("PRIVATE_ATTRIBUTE_ERROR")end
+ if attributeOptions.replaceOnRead then players.LocalPlayer=node("ReplacementPlayer","Player",players)end
+ if name~=(attributeOptions.name or "Checkpoint")then return nil end
+ local invalid=if not attributeOptions.invalidAfterWait or attributeChanged then attributeOptions.invalid else nil
+ if invalid=="table"then return {}elseif invalid=="nan"then return 0/0 elseif invalid=="infinite"then return math.huge
+ elseif invalid=="invalid-utf8"then return string.char(255)elseif invalid=="long-string"then return string.rep("x",257)
+ elseif invalid=="control"then return string.char(1)end
+ return attributeValue
+end
+if attributeOptions.missingApi then player.GetAttribute=nil end
+local function updateAttribute(mode)
+ if attributeOptions.transition==mode and not attributeChanged then attributeValue=attributeOptions.next;attributeChanged=true end
+end
 local character=node("Character","Model",workspace);player.Character=character
 local root=node("HumanoidRootPart","Part",character);root.Position=vector(0,0,0)
 local gui=node("PlayerGui","PlayerGui",player)
@@ -119,6 +137,7 @@ function userInput:CreateVirtualInput()
   if not pressed and config.releaseError then error("fixture release failed")end
   held[key]=pressed
   if pressed and (key=="E" or key=="F")and not config.noInteraction then status.Visible=true;status.Text="Open"end
+  if pressed and (key=="E" or key=="F")and not config.noInteraction then updateAttribute("input")end
   if pressed and config.pressError then error("fixture press ACK failed after effect")end
  end
  function input:SendMouseButton(position,key,pressed,repeatCount)
@@ -126,6 +145,7 @@ function userInput:CreateVirtualInput()
   if not pressed and config.releaseError then error("fixture release failed")end
   held[key]=pressed
   if pressed and not config.noInteraction then status.Visible=true;status.Text="Open"end
+  if pressed and not config.noInteraction then updateAttribute("input")end
   if pressed and config.pressError then error("fixture mouse ACK failed after effect")end
  end
  return input
@@ -136,6 +156,7 @@ function game:GetService(name)return assert(services[name],"unavailable fixture 
 local replaced,transitioned=false,false
 local task={wait=function(seconds)
  now+=math.max(seconds,0.001)
+ updateAttribute("wait")
  if held.W and not config.immobile then root.Position=root.Position+vector(0,0,seconds*16)end
  if config.externalTransition and not transitioned then
   transitioned=true;status.Visible=true;status.Text="Open";root.Position=root.Position+vector(0,0,2)
@@ -149,7 +170,8 @@ local task={wait=function(seconds)
  end
  if not replaced and config.replace and (not config.replaceDuringMouse or held.MouseButton1)then
   replaced=true
-  if config.replace=="character" then player.Character=node("ReplacementCharacter","Model",workspace)
+  if config.replace=="player"then players.LocalPlayer=node("ReplacementPlayer","Player",players)
+  elseif config.replace=="character" then player.Character=node("ReplacementCharacter","Model",workspace)
   elseif config.replace=="gui" then gui.Parent=nil;node("PlayerGui","PlayerGui",player)
   elseif config.replace=="layout-ancestor"then layoutFrame.Parent=nil;node("Layout","Frame",hud)
   elseif config.replace=="layout-target"then layoutTarget.Parent=nil;node("Target","TextButton",layoutFrame)
