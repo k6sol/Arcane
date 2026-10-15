@@ -105,6 +105,58 @@ async function mutateManifest(directory, change) {
   await writeFile(join(directory, 'windows-manifest.json'), JSON.stringify(value));
 }
 
+test('packaging diagnostics preserve original thrown errors and frozen values', async t => {
+  const { options } = await fixture(t);
+  const original = Object.assign(new Error('Synthetic Node probe failure.'), { code: 'EBADF', path: options.nodeExecutable, syscall: 'realpath' });
+  const stack = original.stack;
+  for (const failure of [original, Object.freeze(new Error('Frozen probe failure.')), Object.freeze({ reason: 'Non-Error probe failure.' })]) {
+    await assert.rejects(packageWindows({ ...options, inspectNode: async () => { throw failure; } }), error => {
+      assert.equal(error, failure);
+      if (error === original) {
+        assert.equal(error.stack, stack); assert.equal(error.code, 'EBADF');
+        assert.equal(error.path, options.nodeExecutable); assert.equal(error.syscall, 'realpath');
+        assert.deepEqual(error.packageContext, { phase: 'validate-inputs', outputDirectory: null, lastBundlePath: null });
+        assert.ok(Object.isFrozen(error.packageContext));
+      } else assert.equal(Object.hasOwn(error, 'packageContext'), false);
+      return true;
+    });
+  }
+});
+
+test('native path errors retain their original code and bounded validation context', async t => {
+  const { root, options } = await fixture(t);
+  const missing = join(root, 'toolchains/node/missing.exe');
+  await assert.rejects(packageWindows({ ...options, nodeExecutable: missing }), error => {
+    assert.equal(error.code, 'ENOENT'); assert.equal(error.syscall, 'lstat'); assert.equal(error.path, missing);
+    assert.deepEqual(error.pathValidation, { operation: 'lstat', expected: 'single-link-file', path: missing });
+    assert.ok(Object.isFrozen(error.pathValidation));
+    assert.deepEqual(error.packageContext, { phase: 'validate-inputs', outputDirectory: null, lastBundlePath: null });
+    return true;
+  });
+});
+
+test('dependency path rejection identifies and retains the incomplete owned bundle', async t => {
+  const { root, scratch, options } = await fixture(t);
+  const source = join(root, 'node_modules/zod/index.js');
+  const before = await readFile(source);
+  await link(source, join(scratch, 'linked-dependency.js'));
+  let directory;
+  await assert.rejects(packageWindows(options), error => {
+    assert.match(error.message, /regular unredirected single-link file/);
+    assert.deepEqual(error.pathValidation, { operation: 'identity', expected: 'single-link-file', path: source });
+    assert.equal(error.packageContext.phase, 'copy-dependencies');
+    directory = error.packageContext.outputDirectory;
+    assert.ok(isAbsolute(directory));
+    const child = relative(join(root, 'runtime/windows'), directory);
+    assert.ok(child.startsWith('arcane-win32-x64-') && !child.includes(sep) && !isAbsolute(child));
+    assert.ok(error.packageContext.lastBundlePath === null || error.packageContext.lastBundlePath.length <= 1024);
+    return true;
+  });
+  assert.ok((await readdir(directory)).includes('Arcane.exe'));
+  await assert.rejects(readFile(join(directory, 'windows-manifest.json')), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(source), before);
+});
+
 test('directory package has a real PE exe, explicit app entry, standalone Node and only production closure', async t => {
   const { root, write, options, probes } = await fixture(t);
   await write('runtime/product/daemon.json', '{"token":"never-copy-runtime"}');

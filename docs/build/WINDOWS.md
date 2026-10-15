@@ -49,6 +49,14 @@ It also retains the verified source snapshot under runtime/releases. Existing
 outputs are neither overwritten nor recursively deleted. On failure, any new
 partial output remains for diagnosis and must not be distributed.
 
+Packaging errors preserve the original thrown value, code, path and stack.
+Where available, `packageContext` identifies the build phase, owned output
+directory and last validated relative bundle path. `pathValidation` identifies
+the failed `lstat`, `realpath` or identity check. This metadata belongs to one
+invocation; the last bundle path can precede the failing filesystem operation.
+Diagnostic absolute paths longer than 4,096 characters are omitted. The original
+error still propagates, and all filesystem and integrity checks remain in force.
+
 The directory layout is:
 
 ~~~text

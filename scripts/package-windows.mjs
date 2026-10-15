@@ -38,6 +38,16 @@ const MAX_FILES = 32768, MAX_FILE_BYTES = 512 * 1024 * 1024, MAX_BYTES = 2 * 102
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 const canonical = value => JSON.stringify(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+const diagnosticPath = value => typeof value === 'string' && value.length <= 4096 ? value : null;
+
+function annotateFailure(error, key, value) {
+  // Diagnostic metadata cannot replace a frozen error or make a failed check pass.
+  try {
+    if (error instanceof Error && Object.isExtensible(error) && !Object.hasOwn(error, key)) {
+      Object.defineProperty(error, key, { value: Object.freeze(value), enumerable: true });
+    }
+  } catch { /* Preserve the original thrown value even if annotation is unavailable. */ }
+}
 
 function safeRelative(path, dependency = path.startsWith('resources/product/node_modules/')) {
   if (typeof path !== 'string' || path.length > 1024 || path.includes('\\') ||
@@ -52,12 +62,21 @@ function safeRelative(path, dependency = path.startsWith('resources/product/node
 // lstat + realpath are authoritative for OneDrive placeholders; Dirent/reparse
 // attributes alone do not distinguish a cloud file from a real redirect.
 async function checkedPath(path, directory = false) {
-  const stat = await lstat(path), actual = await realpath(path);
-  if (stat.isSymbolicLink() || !samePath(resolve(path), actual) ||
-      (directory ? !stat.isDirectory() : (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_FILE_BYTES))) {
-    throw new Error('Expected a regular unredirected ' + (directory ? 'directory' : 'single-link file') + '.');
+  let operation = 'lstat';
+  try {
+    const stat = await lstat(path);
+    operation = 'realpath';
+    const actual = await realpath(path);
+    operation = 'identity';
+    if (stat.isSymbolicLink() || !samePath(resolve(path), actual) ||
+        (directory ? !stat.isDirectory() : (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_FILE_BYTES))) {
+      throw new Error('Expected a regular unredirected ' + (directory ? 'directory' : 'single-link file') + '.');
+    }
+    return stat;
+  } catch (error) {
+    annotateFailure(error, 'pathValidation', { operation, expected: directory ? 'directory' : 'single-link-file', path: diagnosticPath(path) });
+    throw error;
   }
-  return stat;
 }
 async function safeParents(path) {
   for (let current = resolve(path); ; current = dirname(current)) {
@@ -233,8 +252,16 @@ function appPackage(version) {
 
 /** Trusted build API. Paths and the Node probe are injectable for offline fixtures,
  * never accepted from HTTP/IPC. The CLI always uses the real executable probe. */
-export async function packageWindows({ repository = REPOSITORY, electronDist,
-  nodeExecutable = process.execPath, nodeLicense, inspectNode = probeNodeRuntime } = {}) {
+export async function packageWindows(options = {}) {
+  const context = { phase: 'validate-inputs', outputDirectory: null, lastBundlePath: null };
+  try { return await assembleWindowsPackage(options, context); }
+  catch (error) {
+    annotateFailure(error, 'packageContext', { ...context, outputDirectory: diagnosticPath(context.outputDirectory) });
+    throw error;
+  }
+}
+async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
+  nodeExecutable = process.execPath, nodeLicense, inspectNode = probeNodeRuntime } = {}, context) {
   repository = resolve(repository);
   await checkedPath(repository, true);
   electronDist = resolve(electronDist ?? join(repository, 'node_modules/electron/dist'));
@@ -254,10 +281,12 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
   validateNodeLicense(await regularBytes(licensePath));
   const hostRoot = join(repository, 'apps/desktop/electron');
   for (const file of HOST_FILES) await regularBytes(join(hostRoot, file));
+  context.phase = 'resolve-dependencies';
   const dependencies = await productionDependencies(repository, pkg, lock);
 
   // This API owns the source/compiled-map proof and excludes root runtime,
   // credentials, generated client configurations and dependency/user caches.
+  context.phase = 'prepare-source-release';
   const release = await createLocalRelease({ repository });
   const releaseProof = await verifyLocalRelease(release.directory);
   const releaseManifest = await json(join(release.directory, 'release-manifest.json'));
@@ -272,13 +301,16 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
       throw new Error('Host file is absent from or differs from the verified source snapshot: ' + file);
     }
   }
+  context.phase = 'create-output';
   const outputRoot = join(repository, 'runtime/windows');
   await safeParents(outputRoot); await mkdir(outputRoot, { recursive: true }); await checkedPath(outputRoot, true);
   const directory = await mkdtemp(join(outputRoot, 'arcane-win32-x64-'));
+  context.outputDirectory = directory;
   await checkedPath(directory, true);
   const files = [], sourceChecks = [], seen = new Set(); let totalBytes = 0;
   const add = async (path, bytes, source) => {
     safeRelative(path);
+    context.lastBundlePath = path;
     if (seen.has(path.toLowerCase())) throw new Error('Duplicate/case-colliding bundle path.');
     seen.add(path.toLowerCase());
     totalBytes += bytes.length;
@@ -295,12 +327,14 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
     files.push({ path, bytes: bytes.length, sha256: hash(bytes) });
   };
   const copy = async (source, path) => add(path, await regularBytes(source), source);
+  context.phase = 'copy-electron';
   await walk(electronDist, async (source, path) => {
     if (!electronPath(path)) throw new Error('Unexpected Electron distribution payload: ' + path);
     await copy(source, path === 'electron.exe' ? 'Arcane.exe' : path);
   }, path => path === 'resources/default_app.asar');
   for (const file of ELECTRON_REQUIRED) if (!seen.has(file.toLowerCase())) throw new Error('Incomplete Electron distribution: ' + file);
   if (!files.some(file => file.path.startsWith('locales/'))) throw new Error('Missing Electron locales.');
+  context.phase = 'copy-host'; context.lastBundlePath = null;
   await add('resources/app/package.json', Buffer.from(JSON.stringify(appPackage(pkg.version), null, 2) + '\n'));
   for (const file of HOST_FILES) await copy(join(hostRoot, file), 'resources/app/' + file);
   if (await exists(join(hostRoot, 'icon.png'))) {
@@ -308,22 +342,27 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
     if (icon.length <= 8 || !icon.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Invalid host icon PNG.');
     await copy(join(hostRoot, 'icon.png'), 'resources/app/icon.png');
   }
+  context.phase = 'copy-node'; context.lastBundlePath = null;
   await copy(nodeExecutable, 'resources/node/node.exe');
   await copy(licensePath, 'resources/node/LICENSE');
+  context.phase = 'copy-product'; context.lastBundlePath = null;
   const deployedManifest = deploymentManifest(releaseManifest);
   for (const entry of deployedManifest.files) await copy(join(release.directory, entry.path), 'resources/product/' + entry.path);
   const deployedManifestBytes = Buffer.from(JSON.stringify(deployedManifest, null, 2) + '\n');
   await add('resources/product/release-manifest.json', deployedManifestBytes);
   // Retain the complete original integrity metadata, not test/private-key fixture payloads.
   await copy(join(release.directory, 'release-manifest.json'), 'resources/source-manifest.json');
+  context.phase = 'copy-dependencies'; context.lastBundlePath = null;
   for (const dependency of dependencies) {
     await walk(join(repository, dependency.path), (source, path) => copy(source, 'resources/product/' + dependency.path + '/' + path),
       (_path, name) => name.startsWith('.') || DEPENDENCY_OMISSIONS.has(name.toLowerCase()), '', true);
   }
+  context.phase = 'recheck-sources'; context.lastBundlePath = null;
   for (const { source, sha256 } of sourceChecks) {
     if (hash(await regularBytes(source)) !== sha256) throw new Error('Packaging source changed; incomplete owned output retained for diagnosis.');
   }
 
+  context.phase = 'brand-executable';
   let branding = { applied: false };
   // Build-only, pinned official resource editor. Never reachable from the app or renderer.
   if (pkg.devDependencies?.rcedit !== undefined) {
@@ -359,7 +398,9 @@ export async function packageWindows({ repository = REPOSITORY, electronDist,
     runtime: { installedNodeRequired: false, dependenciesIncluded: true, applicationLaunchVerified: false, inferenceStarted: false },
     dependencies, fileCount: files.length, totalBytes, files,
   };
+  context.phase = 'write-manifest';
   await writeFile(join(directory, MANIFEST), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
+  context.phase = 'verify-output';
   const proof = await verifyWindowsBundle(directory);
   return { directory, executable: join(directory, 'Arcane.exe'), ...proof };
 }
