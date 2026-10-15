@@ -7,3 +7,5 @@ The preparation branch still used `Get-ChildItem`, `New-Object`, `Set-Acl` and `
 The complete native owner/refusal matrix passes locally: 36 tests, zero failures and zero skips. This includes real owner permissions through the HTTP boundary, hardlink and borrowed-project rejection, foreign Read rejection, all 25 policy scenarios, and the two historical default-owner refusals. The old policy is retained as a hash-pinned text fixture so later performance changes cannot silently rewrite its evidence.
 
 GitHub verification of the corrected commit is a separate pending check. This change performs no Studio or provider operations.
+
+The next PR attempt passed the production permission cases and then exposed the same cold-start issue in the separate read-only metadata tracer. Its JSON handling and the policy fixture metadata now use the framework serializer directly, with module autoloading disabled and the existing byte/depth/process bounds retained. The exact failing metadata test passes, and the combined native owner/diagnostic/policy suite passes 34/34 with no skips. Diagnostic results remain evidence only and cannot grant a production receipt descriptor.

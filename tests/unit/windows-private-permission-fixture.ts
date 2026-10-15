@@ -6,11 +6,22 @@ import type test from 'node:test';
 
 const errorCode = (error: Error | undefined) => (error as NodeJS.ErrnoException | undefined)?.code ?? null;
 
+// Use the Windows .NET Framework serializer directly: JSON cmdlets can trigger
+// module discovery in the very cold-start diagnostics we need to observe.
+export const nativeMetadataJsonSetup = String.raw`
+$PSModuleAutoLoadingPreference='None'
+$null=[Reflection.Assembly]::Load('System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
+$nativeJson=[Web.Script.Serialization.JavaScriptSerializer]::new()
+$nativeJson.MaxJsonLength=8192
+$nativeJson.RecursionLimit=8
+`;
+
 // Diagnostic evidence only. This script cannot create, repair, open key bytes,
 // change a token, or return a descriptor that grants production authority.
 export const privatePermissionTraceScript = String.raw`
 $ErrorActionPreference='Stop'
 try {
+` + nativeMetadataJsonSetup + String.raw`
   $root=$env:ARCANE_WORKFLOW_ACL_ROOT
   if([string]::IsNullOrEmpty($root) -or $root.Length -gt 4096 -or $root.StartsWith('\') -or -not [IO.Path]::IsPathRooted($root)){throw 'scope'}
   $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -55,7 +66,8 @@ try {
   $directory=Row $dir
   $key=@{exists=$false}
   if($directory.exists -and -not $directory.reparse -and -not $directory.errorType){$key=Row ([IO.Path]::Combine($dir,'key-v1'))}
-  [ordered]@{version=1;powerShell=$PSVersionTable.PSVersion.ToString();tokenOwnerIsUser=($defaultOwner -eq $user);tokenOwnerIsAdministrators=($defaultOwner -eq 'S-1-5-32-544');tokenOwnerIsSystem=($defaultOwner -eq 'S-1-5-18');fullPathMatches=([IO.Path]::GetFullPath($root) -ceq $root);ancestors=$ancestors;directory=$directory;key=$key} | ConvertTo-Json -Compress -Depth 6
+  $report=@{version=1;powerShell=$PSVersionTable.PSVersion.ToString();tokenOwnerIsUser=($defaultOwner -eq $user);tokenOwnerIsAdministrators=($defaultOwner -eq 'S-1-5-32-544');tokenOwnerIsSystem=($defaultOwner -eq 'S-1-5-18');fullPathMatches=([IO.Path]::GetFullPath($root) -ceq $root);ancestors=$ancestors;directory=$directory;key=$key}
+  [Console]::Write($nativeJson.Serialize($report))
 }catch{[Console]::Error.WriteLine('Arcane permission trace unavailable.');exit 1}
 `;
 

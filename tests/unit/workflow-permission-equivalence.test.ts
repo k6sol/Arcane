@@ -7,7 +7,7 @@ import { Script } from 'node:vm';
 import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { parsePrivateReceiptDescriptor } from '../../apps/daemon/src/workflow-private-storage.js';
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
-import { privatePermissionTraceScript, tracePrivatePermissions } from './windows-private-permission-fixture.js';
+import { nativeMetadataJsonSetup, privatePermissionTraceScript, tracePrivatePermissions } from './windows-private-permission-fixture.js';
 
 test('permission diagnostic is read-only metadata and cannot grant a private receipt descriptor', () => {
   for (const write of ['CreateDirectory', 'SetAccessControl', 'Set-Acl', 'SetOwner', 'SetTokenInformation', 'AdjustTokenPrivileges', 'ReadAllBytes', 'File]::Open'])
@@ -84,7 +84,7 @@ test('real Windows token/default-owner metadata agrees for fresh fixture directo
 // DOUBLES backed by real .NET ACL/SID objects. No token is changed and no real
 // filesystem operation or permission write exists in this harness. The separate
 // normal-owner tests exercise the unmodified native checker on the actual host.
-const ownerFixture = String.raw`
+const ownerFixture = nativeMetadataJsonSetup + String.raw`
 class ArcaneOwnerFixtureState {
   static [object] $Case
   static [Security.Principal.SecurityIdentifier] $User
@@ -181,7 +181,9 @@ function Get-ChildItem($LiteralPath,[switch]$Force) {
   if($LiteralPath -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-entries-scope'}
   if([ArcaneOwnerFixtureState]::Case.nonempty){return 'fixture-entry'}
 }
-[ArcaneOwnerFixtureState]::Case=ConvertFrom-Json $env:ARCANE_OWNER_FIXTURE_CASE
+$caseData=$nativeJson.DeserializeObject($env:ARCANE_OWNER_FIXTURE_CASE)
+[ArcaneOwnerFixtureState]::Case=@{}
+foreach($field in $caseData.Keys){[ArcaneOwnerFixtureState]::Case[$field]=$caseData[$field]}
 [ArcaneOwnerFixtureState]::User=[Security.Principal.SecurityIdentifier]::new('S-1-5-21-100-200-300-1001')
 $case=[ArcaneOwnerFixtureState]::Case
 [ArcaneOwnerFixtureState]::DirectoryExists=$case.existing
@@ -211,7 +213,7 @@ test('complete production owner policy: captured token equivalence preserves for
     .replace('[ArcaneOwnerFixtureItem]::new($path)', '[IO.FileInfo]::new($path)'), production);
   const script = ownerFixture + '\ntry { & {\n' + doubled + String.raw`
 } } finally {
-  [Console]::Error.WriteLine('OWNER_POLICY_METADATA_DOUBLE '+(@{identities=[ArcaneOwnerFixtureState]::Identities;creates=[ArcaneOwnerFixtureState]::Creates;writes=[ArcaneOwnerFixtureState]::Writes;directoryOwnerIsUser=([ArcaneOwnerFixtureState]::DirectoryAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq [ArcaneOwnerFixtureState]::User.Value);directoryProtected=[ArcaneOwnerFixtureState]::DirectoryAcl.AreAccessRulesProtected;directoryUnchanged=([ArcaneOwnerFixtureState]::DirectoryAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeDirectory);keyUnchanged=([ArcaneOwnerFixtureState]::KeyAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeKey)} | ConvertTo-Json -Compress))
+  [Console]::Error.WriteLine('OWNER_POLICY_METADATA_DOUBLE '+$nativeJson.Serialize(@{identities=[ArcaneOwnerFixtureState]::Identities;creates=[ArcaneOwnerFixtureState]::Creates;writes=[ArcaneOwnerFixtureState]::Writes;directoryOwnerIsUser=([ArcaneOwnerFixtureState]::DirectoryAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq [ArcaneOwnerFixtureState]::User.Value);directoryProtected=[ArcaneOwnerFixtureState]::DirectoryAcl.AreAccessRulesProtected;directoryUnchanged=([ArcaneOwnerFixtureState]::DirectoryAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeDirectory);keyUnchanged=([ArcaneOwnerFixtureState]::KeyAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeKey)}))
 }
 `;
   const user = 'S-1-5-21-100-200-300-1001', foreign = 'S-1-5-21-100-200-300-1002', admin = 'S-1-5-32-544', system = 'S-1-5-18';
