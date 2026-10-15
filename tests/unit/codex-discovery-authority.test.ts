@@ -9,8 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { prepareCodexDiscoveryProcess, prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
+import { proposalThreadIsIsolated } from '../../packages/codex-client/src/mcp-isolation.js';
 // Include the exact public factory in scoped compiler inputs; importing it never launches a child.
-import '../../packages/codex-client/src/index.js';
+import {connectCodexProposalWorker} from '../../packages/codex-client/src/index.js';
 
 const TOKEN = 'a4'.repeat(32), AMBIENT = 'b5'.repeat(32);
 const DAEMON = 'http://127.0.0.1:47831';
@@ -21,17 +22,21 @@ const MODULES = [
 ];
 const EMITTED = fileURLToPath(new URL('../../packages/', import.meta.url));
 type Mode = 'normal' | 'discovery-init-failure' | 'inventory-failure' | 'unsafe-key' |
-  'arcane-active' | 'arcane-missing' | 'arcane-null' | 'arcane-plugin' | 'arcane-metadata' | 'final-init-failure' | 'final-inherited' | 'final-null';
+  'arcane-active' | 'arcane-missing' | 'arcane-null' | 'arcane-plugin' | 'arcane-metadata' | 'final-init-failure' | 'final-inherited' | 'final-null' |
+  'proposal-discovery-account' | 'proposal-final-account' | 'proposal-reviewer' | 'proposal-sandbox' | 'proposal-approval' | 'proposal-model' |
+  'proposal-tools' | 'proposal-active' | 'proposal-account-change' | 'proposal-late-inherited' | 'proposal-lost-turn';
 type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'invalid-id' | 'extra-field' | 'disconnected' | 'close-pending' | 'busy-pending';
 type HistoryResponse = 'wrong-thread' | 'wrong-session' | 'wrong-project';
 interface FixtureOptions {
   profile?: boolean; mode?: Mode; thread?: boolean; history?: boolean; invalidProfile?: boolean;
   historyAction?: HistoryAction; historyResponse?: HistoryResponse; repeatHistory?: boolean;
+  proposal?: boolean; dispatch?: boolean; repeatProposal?: boolean;
 }
 interface Receipt {
   event: string; launch?: number; args?: string[]; envKeys?: string[]; tokenHash?: string | null;
   daemonUrl?: string | null; method?: string; params?: Record<string, unknown>; cwd?: string; envHasEntry?: boolean;
   code?: string; snapshot?: { ready: boolean; mcpIsolation: string; thread: { threadId: string; configured: boolean } | null };
+  keys?: string[]; resultValue?: {decision?:string};
   history?: { completeness: string; entries: { text: string; ids: { threadId: string; sessionId: string | null; turnId: string; itemId: string } }[]; gaps: { reason: string }[] };
 }
 
@@ -43,6 +48,7 @@ const { appendFileSync } = require('node:fs');
 const { createHash } = require('node:crypto');
 const [encoded, audit, ...args] = process.argv.slice(1), scenario = JSON.parse(encoded);
 const launch = scenario.launch, mode = scenario.mode;
+let inventoryReads=0;
 const record = value => appendFileSync(audit, JSON.stringify({ launch, ...value }) + '\n');
 record({ event: 'child', args, cwd: process.cwd(), envKeys: Object.keys(process.env),
   envHasEntry: Object.values(process.env).some(value => value.includes(require('node:path').join(process.cwd(), 'apps', 'mcp', 'src', 'main.js'))),
@@ -54,17 +60,19 @@ const reject = id => send({ id, error: { code: -32017, message: 'Synthetic refus
 const row = (name, runtimeStatus, pluginId = null) => ({ name, runtimeStatus, pluginId, toolsError: null,
   tools: name === 'arcane' && runtimeStatus === 'connected' ? Object.fromEntries(scenario.arcaneToolNames.map(name => [name, {}])) : {} });
 createInterface({ input: process.stdin }).on('line', line => {
-  const { id, method, params = {} } = JSON.parse(line);
-  record({ event: 'rpc', method, params });
+  const { id, method, params = {}, result: resultValue } = JSON.parse(line);
+  record({ event: 'rpc', method, params, resultValue });
   if (method === 'initialized') return;
   if (method === 'initialize') {
     if (mode === 'discovery-init-failure' && launch === 1 || mode === 'final-init-failure' && launch === 2) return reject(id);
     return result(id, {});
   }
-  if (method === 'account/read') return result(id, { account: { type: 'chatgpt', planType: 'pro' }, requiresOpenaiAuth: true });
+  if (method === 'account/read') return result(id, { account: { type: 'chatgpt', planType: 'pro', email:
+    (mode==='proposal-discovery-account'&&launch===1||mode==='proposal-final-account'&&launch===2)?'different@example.test':'synthetic@example.test' }, requiresOpenaiAuth: true });
   if (method === 'model/list') return result(id, { data: [{ id: 'picker-fixture', model: 'fixture-model', displayName: 'Fixture',
     supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }], nextCursor: null });
   if (method === 'mcpServerStatus/list') {
+    inventoryReads++;
     if (launch === 1 && mode === 'inventory-failure') return reject(id);
     const discovery = launch === 1;
     let data = [row('arcane', discovery ? 'disabled' : 'connected'),
@@ -79,12 +87,29 @@ createInterface({ input: process.stdin }).on('line', line => {
       if (mode === 'arcane-metadata') delete data[0].pluginId;
     }
     if (!discovery && mode === 'final-null') data[0].runtimeStatus = null;
+    if(scenario.proposal&&!discovery) {
+      data[0].runtimeStatus=mode==='final-null'?null:'disabled';data[0].tools={};
+      if(mode==='proposal-tools')data[0].tools={read:{}};
+      if(mode==='proposal-late-inherited'&&inventoryReads>1)data[1].runtimeStatus='connected';
+    }
     return result(id, { data, nextCursor: null });
   }
   if (method === 'thread/start') return result(id, {
-    thread: { id: 'fixture-thread', sessionId: 'fixture-session', turns: [], status: { type: 'idle' } },
-    model: params.model, modelProvider: 'openai', cwd: process.cwd(), approvalPolicy: 'on-request',
-    approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } });
+    thread: { id: 'fixture-thread', sessionId: 'fixture-session', turns: [], status: { type: mode==='proposal-active'?'active':'idle' } },
+    model: mode==='proposal-model'?'unexpected-model':params.model, modelProvider: 'openai', cwd: process.cwd(), approvalPolicy: mode==='proposal-approval'?'on-request':params.approvalPolicy,
+    approvalsReviewer: mode==='proposal-reviewer'?'auto_review':'user', sandbox: { type: mode==='proposal-sandbox'?'workspaceWrite':'readOnly', networkAccess: false } });
+  if(method==='turn/start'&&scenario.proposal) {
+    if(mode==='proposal-lost-turn')return;
+    result(id,{turn:{id:'proposal-turn',status:'inProgress'}});
+    send({method:'item/commandExecution/requestApproval',id:'proposal-approval',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-command',command:'synthetic command',cwd:process.cwd()}});
+    if(mode==='proposal-account-change')send({method:'account/updated',params:{authMode:'chatgpt'}});
+    else {
+      send({method:'item/agentMessage/delta',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-result',delta:'Synthetic code proposal'}});
+      send({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'proposal-turn',status:'completed'}}});
+    }
+    return;
+  }
+  if(!method)return;
   if (method === 'thread/read') {
     if (scenario.historyAction === 'close-pending' || scenario.historyAction === 'busy-pending') {
       appendFileSync(audit + '.waiting', 'Synthetic read dispatched'); return;
@@ -126,17 +151,32 @@ process.env.ARCANE_AGENT_TOKEN = 'SYNTHETIC_OTHER_AUTHORITY';
 process.env.CODEX_HOME = 'SYNTHETIC_PROVIDER_OVERRIDE';
 process.env.OPENAI_API_KEY = 'SYNTHETIC_PROVIDER_KEY';
 process.env.NODE_OPTIONS = '--require=SYNTHETIC_WRAPPER';
-const { connectCodexClient } = await import(library + 'index.js');
+const { connectCodexClient, connectCodexProposalWorker } = await import(library + 'index.js');
 let client;
 try {
   const profile = { nodeExecutable: process.execPath, serverEntry: join(root, 'apps', 'mcp', 'src', 'main.js'),
     projectRoot: root, daemonUrl: 'http://127.0.0.1:47831', agentToken: 'a4'.repeat(32) };
   if (scenario.invalidProfile) profile.daemonUrl = 'https://example.test';
-  client = await connectCodexClient({
+  const options={
     command: join(root, process.platform === 'win32' ? 'codex.exe' : 'codex'), cwd: root,
-    use: 'personal-local', limits: { requestTimeoutMs: 5000 }, ...(scenario.profile ? { arcaneMcp: profile } : {})
-  });
+    use: 'personal-local', limits: { requestTimeoutMs: 5000 },
+  };
+  client = scenario.proposal ? await connectCodexProposalWorker({...options,
+    accountIdentity:(await import('node:crypto')).createHash('sha256').update('codex-reported-account\0synthetic@example.test').digest('hex'),
+    selection:{model:'fixture-model',effort:'low'}}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {})});
   record({ event: 'connected', snapshot: client.snapshot(), node: await realpath(process.execPath) });
+  if(scenario.proposal) {
+    record({event:'surface',keys:Object.keys(client)});
+    if(scenario.dispatch) {
+      await client.propose('Synthetic task context; return a review proposal.');
+      const deadline=Date.now()+3000;
+      while(client.snapshot().connected&&client.snapshot().thread?.turnStatus==='inProgress') {
+        if(Date.now()>=deadline)throw new Error('Synthetic proposal did not settle.');await delay(5);
+      }
+      record({event:'proposal',snapshot:client.snapshot()});
+      if(scenario.repeatProposal)try{await client.propose('Do not replay.');}catch(error){record({event:'repeat-error',code:error.code});}
+    }
+  }
   if (scenario.thread) {
     client.selectModel({ initiatedBy: 'human', model: 'fixture-model', effort: 'low' });
     await client.startThread({ initiatedBy: 'human' });
@@ -443,4 +483,68 @@ test('each embedded history read receives fresh copies of the immutable secret-f
   for (const read of events(records, 'history')) assert.equal(read.history?.completeness, 'complete');
   assert.deepEqual(events(records, 'history-after')[0]?.snapshot, events(records, 'history-before')[0]?.snapshot);
   for (const method of ['thread/start', 'thread/resume', 'turn/start']) assert.equal(calls(records, method).length, 0);
+});
+
+test('proposal worker launches two secret-free children and dispatches exactly one read-only turn',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,repeatProposal:true});
+  assert.deepEqual(events(records,'error'),[]);
+  assert.equal(events(records,'spawn').length,2);assert.equal(events(records,'close').length,2);
+  for(const child of events(records,'child')) {
+    assertSecretFree(child);
+    for(const flag of ['agents.enabled=false','features.shell_tool=false','features.apps=false','features.plugins=false','features.memories=false','features.request_permissions_tool=false','web_search="disabled"','features.skill_mcp_dependency_install=false'])assert.ok(child.args!.includes(flag));
+  }
+  const final=events(records,'child')[1]!;
+  assert.ok(final.args!.some(arg=>arg.startsWith('mcp_servers.inherited=')&&arg.includes('enabled=false')));
+  assert.ok(final.args!.includes('plugins.fixture-plugin@bundled.mcp_servers.plugin_server.enabled=false'));
+  assert.deepEqual(events(records,'surface')[0]?.keys,['snapshot','propose','close']);
+  assert.equal(events(records,'connected')[0]?.snapshot?.mcpIsolation,'proposal-verified');
+  assert.equal(calls(records,'thread/start').length,1);assert.equal(calls(records,'thread/resume').length,0);
+  const turn=calls(records,'turn/start');assert.equal(turn.length,1);
+  assert.deepEqual(turn[0]!.params!.sandboxPolicy,{type:'readOnly',networkAccess:false});
+  assert.equal(turn[0]!.params!.approvalPolicy,'never');assert.equal(turn[0]!.params!.model,'fixture-model');assert.equal(turn[0]!.params!.effort,'low');
+  assert.equal(calls(records,'mcpServerStatus/list').length,3);
+  assert.equal(events(records,'rpc').find(row=>row.resultValue)?.resultValue?.decision,'cancel');
+  assert.equal(events(records,'repeat-error')[0]?.code,'PROPOSAL_READ_ONLY');
+});
+
+for(const [mode,expected,launches] of [
+  ['proposal-discovery-account','ACCOUNT_IDENTITY',1],['proposal-final-account','ACCOUNT_IDENTITY',2],
+  ['unsafe-key','MCP_ISOLATION',1],['final-inherited','MCP_ISOLATION',2],['final-null','MCP_ISOLATION',2],
+  ['proposal-tools','MCP_ISOLATION',2],['proposal-late-inherited','MCP_ISOLATION',2],
+  ['proposal-reviewer','SETTINGS_MISMATCH',2],['proposal-sandbox','SETTINGS_MISMATCH',2],
+  ['proposal-approval','SETTINGS_MISMATCH',2],['proposal-model','SETTINGS_MISMATCH',2],['proposal-active','SETTINGS_MISMATCH',2],
+] as const)test('proposal worker rejects '+mode+' without a model turn',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,mode});
+  assert.equal(events(records,'error')[0]?.code,expected);
+  assert.equal(events(records,'spawn').length,launches);assert.equal(events(records,'close').length,launches);
+  assert.equal(calls(records,'turn/start').length,0);
+  for(const child of events(records,'child'))assertSecretFree(child);
+});
+
+test('proposal account notification fences the active worker even when auth mode remains subscription',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,mode:'proposal-account-change'});
+  assert.equal(calls(records,'turn/start').length,1);
+  assert.equal(events(records,'proposal')[0]?.snapshot?.ready,false);
+  assert.equal(events(records,'proposal')[0]?.snapshot?.mcpIsolation,'proposal-pending');
+  assert.equal(events(records,'close').length,2);
+});
+
+test('proposal isolation accepts only explicit disabled empty inventories',()=>{
+  const row={name:'arcane',runtimeStatus:'disabled',toolNames:[],toolsError:false,plugin:false,pluginId:null};
+  assert.equal(proposalThreadIsIsolated([]),true);assert.equal(proposalThreadIsIsolated([row]),true);
+  for(const value of [null,{},[row,row],[{...row,runtimeStatus:null}],[{...row,toolNames:['read']}],
+    [{...row,toolsError:true}],[{...row,plugin:true}],[{...row,name:'unsafe.dot'}],Array.from({length:65},(_,i)=>({...row,name:'server'+i}))])
+    assert.equal(proposalThreadIsIsolated(value as never),false);
+});
+
+test('proposal factory rejects account, model, launch and authority overrides before spawning',async()=>{
+  const base={command:process.execPath,cwd:process.cwd(),use:'personal-local' as const,
+    accountIdentity:'a4'.repeat(32),selection:{model:'fixture-model',effort:'low'}};
+  await assert.rejects(()=>connectCodexProposalWorker({...base,accountIdentity:'untrusted-identity'}),{code:'ACCOUNT_IDENTITY'});
+  for(const value of [
+    {...base,selection:{...base.selection,provider:'other'}},
+    ...['env','args','arcaneMcp','nativeAssetHooks','allowWorkspaceWrites','config','continuation','parentTaskId'].map(key=>({...base,[key]:{}})),
+  ])await assert.rejects(()=>connectCodexProposalWorker(value as never),{code:'ARGUMENTS'});
+  await assert.rejects(()=>connectCodexProposalWorker({...base,use:'commercial-hosted'} as never),{code:'LOCAL_USE_ONLY'});
+  await assert.rejects(()=>connectCodexProposalWorker({...base,command:'codex'}),{code:'PROCESS_PATH'});
 });

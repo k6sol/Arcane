@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { JsonlTransport, type InternalProcess } from './transport.js';
-import { arcaneThreadIsIsolated, requireArcaneBuildTools, type McpInventoryRow } from './mcp-isolation.js';
+import { arcaneThreadIsIsolated, proposalThreadIsIsolated, requireArcaneBuildTools, type McpInventoryRow } from './mcp-isolation.js';
 import { ARCANE_TASK_INSTRUCTIONS, ARCANE_NATIVE_TOOL_NAMES } from '../../protocol/src/arcane-tools.js';
 import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
@@ -184,7 +184,7 @@ export class CodexSession {
   #nativeAssetHooks: NativeAssetHooks | undefined;
   #assetIntent: { operation: Operation; scope: NativeAssetIntent } | null = null;
   #assetsRetired = false;
-  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only' = 'native-config', hooks?: NativeAssetHooks) {
+  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only'|'proposal' = 'native-config', hooks?: NativeAssetHooks) {
     if (hooks !== undefined) {
       this.#nativeAssetHooks = validateNativeAssetHooks(hooks);
       if (mcpPolicy !== 'arcane-only') fail('MCP_PROFILE', 'Native asset hooks require Arcane isolation.');
@@ -246,13 +246,13 @@ export class CodexSession {
         const response = await this.#transport.request('mcpServerStatus/list', { cursor, limit: 4, detail: 'toolsAndAuthOnly', ...(threadId === undefined ? {} : { threadId }) });
         check();
         const result = object(response);
-        if (this.mcpPolicy === 'arcane-only' && !Object.hasOwn(result, 'nextCursor')) fail('MCP_INVENTORY', 'Native MCP inventory lacks pagination metadata.');
+        if (this.mcpPolicy !== 'native-config' && !Object.hasOwn(result, 'nextCursor')) fail('MCP_INVENTORY', 'Native MCP inventory lacks pagination metadata.');
         if (!Array.isArray(result.data) || result.data.length > 4) fail('MCP_INVENTORY', 'Native MCP inventory exceeds its page bound.');
         for (const value of result.data) {
           const raw = object(value), name = str(raw.name, 256);
           if (names.has(name) || rows.length >= 64) fail('MCP_INVENTORY', 'Duplicate or excessive native MCP servers.');
           names.add(name);
-          if (this.mcpPolicy === 'arcane-only' &&
+          if (this.mcpPolicy !== 'native-config' &&
               (!['runtimeStatus','pluginId','toolsError'].every(key => Object.hasOwn(raw, key)) || raw.toolsError !== null && typeof raw.toolsError !== 'string')) {
             fail('MCP_INVENTORY', 'Native MCP inventory lacks valid isolation metadata.');
           }
@@ -263,7 +263,7 @@ export class CodexSession {
           if (totalTools > 2048) fail('MCP_INVENTORY', 'Native MCP tool names exceed their bound.');
           for (const tool of toolNames) {
             str(tool, 256);
-            if (this.mcpPolicy === 'arcane-only') object(tools[tool]);
+            if (this.mcpPolicy !== 'native-config') object(tools[tool]);
           }
           rows.push({ name, runtimeStatus, toolNames, toolsError: raw.toolsError != null, plugin: raw.pluginId != null, pluginId: raw.pluginId == null ? null : str(raw.pluginId, 256) });
         }
@@ -282,7 +282,7 @@ export class CodexSession {
     // Defensive copies: the host cannot grant writes or mutate approval scope by editing metadata.
     return structuredClone({
       connectionId: this.#connectionId, provenance: this.provenance,
-      mcpIsolation:this.mcpPolicy==='native-config'?'native-config':this.#mcpIsolated?'arcane-only-verified':'arcane-only-pending',
+      mcpIsolation:this.mcpPolicy==='native-config'?'native-config':this.mcpPolicy==='proposal'?(this.#mcpIsolated?'proposal-verified':'proposal-pending'):this.#mcpIsolated?'arcane-only-verified':'arcane-only-pending',
       connected: this.#transport.connected, ready: this.#ready && this.#transport.connected,
       account: this.#account, models: this.#models, selection: this.#selection, thread: this.#thread,
       operations: this.#operations, approvals: [...this.#approvals.values()].map(entry => ({ ...entry.value, canAccept: this.#canAccept(entry) })),
@@ -378,6 +378,7 @@ export class CodexSession {
     } finally { if (this.#historyRead === read) this.#historyRead = null; }
   }
   grantThreadWrites(action: HumanAction & { threadId: string }): ThreadState {
+    if(this.mcpPolicy==='proposal')fail('PROPOSAL_READ_ONLY','Proposal workers cannot receive write grants.');
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId);
     if (this.#turnPreflight) fail('STATE', 'Wait for the current turn isolation check before granting writes.');
@@ -448,12 +449,14 @@ export class CodexSession {
   }
   async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean; references?:readonly ReferenceImage[] }, managed: boolean): Promise<ThreadState> {
     const allowWorkspaceWrites = action.allowWorkspaceWrites === true;
+    if(this.mcpPolicy==='proposal'&&(allowWorkspaceWrites||this.#operations.some(operation=>operation.method==='turn/start')))
+      fail('PROPOSAL_READ_ONLY','Proposal workers permit one read-only turn and no automatic replay.');
     const thread = this.#requireThread(action.threadId);
     if (this.#turnPreflight || this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
         !['idle','completed','failed','interrupted'].includes(thread.turnStatus)) fail('BUSY', 'The previous turn must be reconciled before starting another.');
     const text = str(action.text, this.bounds.maxInputBytes);
     this.#validatePair(thread.selection);
-    if (this.mcpPolicy === 'arcane-only') {
+    if (this.mcpPolicy !== 'native-config') {
       const preflight: TurnPreflight = { thread, selection: { ...thread.selection }, accountRevision: this.#accountRevision,
         turnId: thread.turnId, turnStatus: thread.turnStatus, revoked: false };
       // Reserve the entire asynchronous check without inventing a turn or an operation ID.
@@ -462,8 +465,12 @@ export class CodexSession {
         this.#clearApprovals('cancel');
         const rows = await this.#inspectMcpServers(thread.threadId, () => this.#checkTurnPreflight(preflight));
         this.#checkTurnPreflight(preflight);
-        if (!arcaneThreadIsIsolated(rows)) fail('MCP_ISOLATION', 'The current native thread is not isolated to Arcane. No turn was sent.');
-        requireArcaneBuildTools(rows, this.#nativeAssetHooks !== undefined);
+        if(this.mcpPolicy==='proposal') {
+          if(!proposalThreadIsIsolated(rows))fail('MCP_ISOLATION','The proposal worker exposes an effective MCP server. No turn was sent.');
+        } else {
+          if (!arcaneThreadIsIsolated(rows)) fail('MCP_ISOLATION', 'The current native thread is not isolated to Arcane. No turn was sent.');
+          requireArcaneBuildTools(rows, this.#nativeAssetHooks !== undefined);
+        }
         this.#mcpIsolated = true;
       } catch (error) {
         this.#invalidateIsolation(error);
@@ -480,7 +487,7 @@ export class CodexSession {
     if(references?.length){const model=this.#models.find(m=>m.model===thread.selection.model);
       if(!model||model.inputModalities&&!model.inputModalities.includes('image'))fail('IMAGE_UNSUPPORTED','The selected native model does not advertise image input.');}
     const params={threadId:thread.threadId,input:[{type:'text',text,text_elements:[]},...(references?.map(image=>({type:'image',url:image.dataUrl}))??[])],
-      cwd:this.#cwd,model:thread.selection.model,effort:thread.selection.effort,approvalPolicy:'on-request',approvalsReviewer:'user',
+      cwd:this.#cwd,model:thread.selection.model,effort:thread.selection.effort,approvalPolicy:this.mcpPolicy==='proposal'?'never':'on-request',approvalsReviewer:'user',
       sandboxPolicy:allowWorkspaceWrites||thread.writeGranted
         ?{type:'workspaceWrite',writableRoots:[this.#cwd],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}
         :{type:'readOnly',networkAccess:false}};
@@ -683,11 +690,12 @@ export class CodexSession {
     finally { this.#catalogueLoading = false; }
   }
   async #openThread(id: string | null): Promise<ThreadState> {
+    if(this.mcpPolicy==='proposal'&&id!==null)fail('PROPOSAL_READ_ONLY','Proposal workers always start a fresh thread.');
     this.#ensureSubscription();
     if (!this.#selection) fail('SELECTION', 'Select an exact model and effort first.');
     this.#validatePair(this.#selection);
     if (this.#thread || this.#threadOperation) fail('STATE', 'This connection already owns a thread lifecycle.');
-    if (this.mcpPolicy === 'arcane-only' && this.#accountReads) fail('BUSY', 'Wait for the current native account read before opening a thread.');
+    if (this.mcpPolicy !== 'native-config' && this.#accountReads) fail('BUSY', 'Wait for the current native account read before opening a thread.');
     const accountRevision = this.#accountRevision;
     const pair = { ...this.#selection };
     const operation = this.#newOperation(id === null ? 'thread/start' : 'thread/resume', id, null);
@@ -697,7 +705,8 @@ export class CodexSession {
         // Lifecycle resume needs identity/settings and live status, not a copy
         // of every historic inline image. Explicit history reads stay bounded.
         ...(id === null ? {} : { threadId: id, excludeTurns: true }), model: pair.model, modelProvider: 'openai',
-        cwd: this.#cwd, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: 'read-only',
+        cwd: this.#cwd, approvalPolicy: this.mcpPolicy==='proposal'?'never':'on-request', approvalsReviewer: 'user', sandbox: 'read-only',
+        ...(this.mcpPolicy==='proposal'?{developerInstructions:'Return a bounded code or review proposal from the supplied context. Do not edit files, run commands, access Studio, request permissions, or delegate work. The parent task owns implementation and verification. Your response is a proposal, not evidence of acceptance.'}:{}),
         ...(this.mcpPolicy==='arcane-only' ? { developerInstructions: ARCANE_TASK_INSTRUCTIONS } : {}),
       });
       this.#decodeAcknowledgement(() => {
@@ -708,20 +717,22 @@ export class CodexSession {
         operation.threadId = threadId;
         this.#acknowledgeThread(threadId, pair, optionalText(rawThread.sessionId, 256));
         const sandbox = object(resultObject.sandbox);
-        if (resultObject.model !== pair.model || resultObject.modelProvider !== 'openai' || resultObject.approvalPolicy !== 'on-request' || resultObject.approvalsReviewer !== 'user' || sandbox.type !== 'readOnly' || sandbox.networkAccess !== false || typeof resultObject.cwd !== 'string' || resolve(resultObject.cwd) !== resolve(this.#cwd)) {
+        if (resultObject.model !== pair.model || resultObject.modelProvider !== 'openai' || resultObject.approvalPolicy !== (this.mcpPolicy==='proposal'?'never':'on-request') || resultObject.approvalsReviewer !== 'user' || sandbox.type !== 'readOnly' || sandbox.networkAccess !== false || typeof resultObject.cwd !== 'string' || resolve(resultObject.cwd) !== resolve(this.#cwd)) {
           fail('SETTINGS_MISMATCH', 'Native thread settings do not match the requested local policy and model.');
         }
         const thread = this.#thread!;
+        if(this.mcpPolicy==='proposal'&&(!Array.isArray(rawThread.turns)||rawThread.turns.length!==0||rawThread.status==null||object(rawThread.status).type!=='idle'))
+          fail('SETTINGS_MISMATCH','A proposal worker must acknowledge a fresh idle thread.');
         if (Array.isArray(rawThread.turns)) {
           const active = rawThread.turns.filter(value => object(value).status === 'inProgress');
           if (active.length > 1) fail('PROTOCOL', 'Resume reported multiple active turns.');
           if (active.length) { thread.turnId = str(object(active[0]).id); this.#knownTurnIds.add(thread.turnId); thread.turnStatus = 'inProgress'; }
         }
         if (rawThread.status != null && object(rawThread.status).type === 'active' && thread.turnId === null) thread.turnStatus = 'unknown';
-        thread.configured = this.mcpPolicy!=='arcane-only'; operation.state = 'acknowledged';
+        thread.configured = this.mcpPolicy==='native-config'; operation.state = 'acknowledged';
       });
       const thread = this.#thread!;
-      if(this.mcpPolicy==='arcane-only') {
+      if(this.mcpPolicy!=='native-config') {
         const turnId=thread.turnId,turnStatus=thread.turnStatus;
         const check=()=>{
           this.#checkIsolationContext(thread,pair,accountRevision);
@@ -730,8 +741,12 @@ export class CodexSession {
         try {
           const inventory=await this.#inspectMcpServers(thread.threadId,check);
           check();
-          if(!arcaneThreadIsIsolated(inventory))fail('MCP_ISOLATION','The native thread exposes an inherited tool server or Arcane is not connected. No turn can be started.');
-          requireArcaneBuildTools(inventory, this.#nativeAssetHooks !== undefined);
+          if(this.mcpPolicy==='proposal') {
+            if(!proposalThreadIsIsolated(inventory))fail('MCP_ISOLATION','The proposal worker exposes an effective MCP server. No turn can be started.');
+          } else {
+            if(!arcaneThreadIsIsolated(inventory))fail('MCP_ISOLATION','The native thread exposes an inherited tool server or Arcane is not connected. No turn can be started.');
+            requireArcaneBuildTools(inventory, this.#nativeAssetHooks !== undefined);
+          }
           this.#mcpIsolated=true;thread.configured=true;
         } catch(error) { this.#invalidateIsolation(error);throw error; }
       }
@@ -850,7 +865,7 @@ export class CodexSession {
     this.#endAutomaticWrites();
     this.#retireNativeAssets();
     this.#ready = false; this.#failureCode ??= error.code;
-    if (this.mcpPolicy === 'arcane-only') {
+    if (this.mcpPolicy !== 'native-config') {
       this.#mcpIsolated = false;
       if (this.#thread) this.#thread.configured = false;
     }
@@ -901,7 +916,7 @@ export class CodexSession {
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel'); this.#event({ type: 'account-changed' });
       const auth = object(message.params).authMode;
-      if ((auth !== 'chatgpt' || automatic) && this.#thread && ['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
+      if ((auth !== 'chatgpt' || automatic || this.mcpPolicy==='proposal') && this.#thread && ['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
       return;
     }
     // Ignore all other auth, configuration, raw reasoning and unknown notifications.
@@ -966,7 +981,7 @@ export class CodexSession {
   #scopeActive(threadId: string, turnId: string | null): boolean {
     const thread = this.#thread;
     return this.#transport.connected && thread !== null && thread.threadId === threadId && turnId !== null && thread.turnId === turnId &&
-      (this.mcpPolicy !== 'arcane-only' || thread.configured && this.#mcpIsolated) &&
+      (this.mcpPolicy === 'native-config' || thread.configured && this.#mcpIsolated) &&
       this.#cancelledTurnId !== turnId && ['starting','inProgress'].includes(thread.turnStatus);
   }
   #serverRequest(message: Record<string, unknown>): void {
@@ -976,6 +991,11 @@ export class CodexSession {
     if (this.#serverIds.has(key)) { this.#transport.stop(new CodexClientError('PROTOCOL', 'Server reused an approval request ID.')); return; }
     if (this.#serverIds.size >= this.bounds.maxServerRequests) { this.#transport.stop(new CodexClientError('APPROVAL_LIMIT', 'Server request history exceeded its bound.')); return; }
     this.#serverIds.add(key);
+    if(this.mcpPolicy==='proposal') {
+      if(APPROVALS.has(message.method as string))this.#transport.respond(id,{decision:'cancel'});
+      else this.#transport.refuse(id);
+      return;
+    }
     if (!APPROVALS.has(message.method as string)) { this.#transport.refuse(id); return; }
     const params = object(message.params);
     const threadId = str(params.threadId); const turnId = str(params.turnId);

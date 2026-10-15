@@ -7,11 +7,75 @@ import { arcaneIsolationOverrides } from './mcp-isolation.js';
 import { exact, fail, limits, str } from './validation.js';
 import { validateNativeAssetHooks, type ConnectOptions, type Limits, type NativeAssetHooks } from './types.js';
 import type { InternalProcess } from './transport.js';
+import type { LocalUse, LimitOptions, Selection, Snapshot, ThreadState } from './types.js';
+import { nativeEnvironment } from './transport.js';
 export { CODEX_LIMITS, CodexClientError } from './types.js';
 export type { Account, ArcaneMcpLaunchProfile, Approval, ConnectOptions, FileChangePreview, HumanAction, LimitOptions, LocalUse, Model, NativeAssetHooks, NativeAssetIntent, Operation, Selection, SessionEvent, SessionEventValue, Snapshot, ThreadState } from './types.js';
 export type CodexClient = CodexSession;
 export type { NativeRateLimits, NativeRateLimitBucket, NativeRateLimitWindow, NativeLimitReason } from './rate-limits.js';
 export type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
+
+export interface ProposalWorker {
+  snapshot(): Snapshot;
+  /** One task-scoped dispatch. The worker has no write grant or approval API. */
+  propose(text: string): Promise<ThreadState>;
+  close(): Promise<void>;
+}
+/** Trusted host input only. Capture identity and selection from the original task,
+ * never from a model tool argument or a browser-supplied account identifier. */
+export interface ProposalWorkerOptions {
+  command: string; cwd: string; use: LocalUse; limits?: LimitOptions;
+  accountIdentity: string; selection: Selection;
+}
+const PROPOSAL_FLAGS = [
+  '-c','agents.enabled=false','-c','features.shell_tool=false','-c','features.apps=false',
+  '-c','features.plugins=false','-c','features.memories=false','-c','features.request_permissions_tool=false',
+  '-c','web_search="disabled"','-c','features.skill_mcp_dependency_install=false',
+];
+
+async function installedPaths(commandInput: unknown, cwdInput: unknown, use: unknown) {
+  if (!['personal-local','open-source-local'].includes(use as string)) fail('LOCAL_USE_ONLY', 'This client supports only personal local or eligible open-source local use.');
+  const command = str(commandInput,4096), cwd = str(cwdInput,4096);
+  if (!isAbsolute(command) || !isAbsolute(cwd)) fail('PROCESS_PATH', 'Installed executable and workspace must be absolute.');
+  if (basename(command).toLowerCase() !== (process.platform === 'win32' ? 'codex.exe' : 'codex')) fail('PROCESS_PATH', 'Select the installed native Codex executable.');
+  try {
+    const executable = await realpath(command), workspace = await realpath(cwd);
+    if (!(await stat(executable)).isFile() || !(await stat(workspace)).isDirectory()) fail('PROCESS_PATH', 'Invalid installed executable or workspace.');
+    await access(executable,constants.X_OK);return {executable,workspace};
+  } catch { fail('PROCESS_PATH','Installed executable or workspace is unavailable.'); }
+}
+
+/** Owned, fresh subscription worker. Discovery never receives a bearer or sends
+ * a model turn; the final child disables every discovered MCP server. */
+export async function connectCodexProposalWorker(options: ProposalWorkerOptions): Promise<ProposalWorker> {
+  exact(options,['command','cwd','use','limits','accountIdentity','selection']);
+  const identity = str(options.accountIdentity,64);
+  if(!/^[a-f0-9]{64}$/.test(identity))fail('ACCOUNT_IDENTITY','The original task account identity is required.');
+  exact(options.selection,['model','effort']);
+  const selection={model:str(options.selection.model),effort:str(options.selection.effort,64)};
+  const bounds=limits(options.limits),{executable,workspace}=await installedPaths(options.command,options.cwd,options.use);
+  const discovery=prepareCodexDiscoveryProcess(executable,workspace);
+  discovery.args.push(...PROPOSAL_FLAGS);
+  let session=new CodexSession(discovery,bounds,'installed-cli','proposal');
+  try {
+    await session.initialize();
+    if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The worker account differs from the original task.');
+    const rows=await session.inspectMcpServers({initiatedBy:'human'});
+    const overrides=arcaneIsolationOverrides(rows,process.execPath,'');
+    await session.close();
+    // Discovery already resets Arcane to disabled. No Arcane credential, endpoint
+    // or tool allowlist is ever added to the worker environment or arguments.
+    session=new CodexSession({command:executable,cwd:workspace,env:nativeEnvironment(),args:[...discovery.args,...overrides]},bounds,'installed-cli','proposal');
+    await session.initialize();
+    if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The final worker account differs from the original task.');
+    session.selectModel({initiatedBy:'human',...selection});
+    const thread=await session.startThread({initiatedBy:'human'});
+    return Object.freeze({snapshot:()=>session.snapshot(),propose:async(text:string)=>{
+      if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The worker account changed before dispatch.');
+      return session.startTurn({initiatedBy:'human',threadId:thread.threadId,text});
+    },close:()=>session.close()});
+  }catch(error){await session.close();throw error;}
+}
 
 /** Embedded history uses only the separate, secret-free isolated launch template. */
 class ArcaneCodexSession extends CodexSession {
@@ -34,18 +98,8 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
   if (hookField && !Object.hasOwn(hookField, 'value') || !hookField && 'nativeAssetHooks' in options) fail('ARGUMENTS', 'Native asset hooks must be an own data option.');
   const hooks = hookField?.value === undefined ? undefined : validateNativeAssetHooks(hookField.value);
   if (hooks && !options.arcaneMcp) fail('MCP_PROFILE', 'Native asset hooks require the trusted Arcane MCP profile.');
-  if (!['personal-local','open-source-local'].includes(options.use)) fail('LOCAL_USE_ONLY', 'This client supports only personal local or eligible open-source local use.');
-  const command = str(options.command, 4096);
-  const cwd = str(options.cwd, 4096);
-  if (!isAbsolute(command) || !isAbsolute(cwd)) fail('PROCESS_PATH', 'Installed executable and workspace must be absolute.');
-  if (basename(command).toLowerCase() !== (process.platform === 'win32' ? 'codex.exe' : 'codex')) fail('PROCESS_PATH', 'Select the installed native Codex executable.');
   const bounds = limits(options.limits);
-  let executable: string; let workspace: string;
-  try {
-    executable = await realpath(command); workspace = await realpath(cwd);
-    if (!(await stat(executable)).isFile() || !(await stat(workspace)).isDirectory()) fail('PROCESS_PATH', 'Invalid installed executable or workspace.');
-    await access(executable, constants.X_OK);
-  } catch { fail('PROCESS_PATH', 'Installed executable or workspace is unavailable.'); }
+  const {executable,workspace}=await installedPaths(options.command,options.cwd,options.use);
   // Snapshot the trusted profile before asynchronous discovery or host callbacks can mutate it.
   if (hooks) exact(options.arcaneMcp, ['nodeExecutable','serverEntry','projectRoot','daemonUrl','agentToken']);
   const profile = hooks ? { ...options.arcaneMcp! } : options.arcaneMcp;

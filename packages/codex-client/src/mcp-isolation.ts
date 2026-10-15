@@ -1,6 +1,18 @@
 import {fail} from './validation.js';
 import { missingArcaneTools } from '../../protocol/src/arcane-tools.js';
 export interface McpInventoryRow {name:string;runtimeStatus:string|null;toolNames:string[];toolsError:boolean;plugin:boolean;pluginId:string|null}
+/** Proposal workers must have no effective MCP tools, including Arcane tools. */
+export function proposalThreadIsIsolated(rows: readonly McpInventoryRow[]): boolean {
+ if(!Array.isArray(rows)||rows.length>64)return false;
+ const names=new Set<string>();
+ return rows.every(row=>{
+  if(!row||typeof row!=='object'||typeof row.name!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(row.name)||names.has(row.name)||
+    row.runtimeStatus!=='disabled'||row.toolsError!==false||!Array.isArray(row.toolNames)||row.toolNames.length!==0||
+    typeof row.plugin!=='boolean'||row.plugin!==(row.pluginId!==null)||
+    row.pluginId!==null&&(typeof row.pluginId!=='string'||!/^[A-Za-z0-9_@-]{1,256}$/.test(row.pluginId)))return false;
+  names.add(row.name);return true;
+ });
+}
 /** Check effective native inventory, not merely a configured/connected server. */
 export function requireArcaneBuildTools(rows: readonly McpInventoryRow[], nativeAssets = false): void {
  const row=rows.find(value=>value.name==='arcane');

@@ -90,7 +90,7 @@ export type SessionEventValue =
 export type SessionEvent = SessionEventValue & { seq: number };
 export interface Snapshot {
   connectionId: string; provenance: 'installed-cli' | 'spawned-node-fixture';
-  mcpIsolation?: 'native-config'|'arcane-only-pending'|'arcane-only-verified';
+  mcpIsolation?: 'native-config'|'arcane-only-pending'|'arcane-only-verified'|'proposal-pending'|'proposal-verified';
   connected: boolean; ready: boolean; account: Account | null; models: Model[];
   selection: Selection | null; thread: ThreadState | null; operations: Operation[];
   approvals: Approval[]; events: SessionEvent[]; droppedEvents: number; lastEventSeq: number;
