@@ -35,6 +35,8 @@ jobs:
           node-version: '24'
       - name: Install pinned dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Acquire and verify pinned standalone Luau for mandatory VM tests
+        run: node scripts/luau-test-runtime.mjs --install --github-env
       - name: Strict type checking
         run: npm run typecheck
       - name: Warm the trusted Windows permission host
