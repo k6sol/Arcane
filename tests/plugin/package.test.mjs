@@ -300,6 +300,12 @@ test('aggregate source can exceed one script while every delivered Script remain
   assert.equal(output.manifest.preferredArtifact, 'ArcaneLocalBridge.rbxmx');
 });
 
+test('CDATA expansion cannot produce an artifact beyond the daemon delivery bound', () => {
+  const expanded = files.map(file => ({ ...file, source: '--!strict\n--[=[' + ']]>'.repeat(60000) + ']=]\nreturn {}\n' }));
+  assert.ok(expanded.every(file => Buffer.byteLength(file.source) <= 199999));
+  assert.throws(() => renderPlugin(expanded), /bounded artifact size/);
+});
+
 test('rebuild removes only an owned legacy bundle and check mode refuses mixed deliveries', async t => {
   const outDir = await mkdtemp(path.join(tmpdir(), 'arcane-plugin-package-'));
   t.after(async () => { assert.equal(path.dirname(outDir), path.resolve(tmpdir())); await rm(outDir, { recursive: true, force: true }); });

@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile, lstat, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { STUDIO_PLUGIN_SOURCES, STUDIO_PLUGIN_IDENTITY_SCHEME } from '../packages/protocol/src/studio-plugin-artifact.ts';
+import { STUDIO_PLUGIN_SOURCES, STUDIO_PLUGIN_IDENTITY_SCHEME, STUDIO_PLUGIN_LIMITS } from '../packages/protocol/src/studio-plugin-artifact.ts';
 
 export const PLUGIN_SOURCES = STUDIO_PLUGIN_SOURCES;
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,7 +71,7 @@ export function renderPlugin(sources) {
     if (!source.startsWith('--!strict\n')) throw new Error(`${filename} must start with --!strict.`);
     if (/[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]/u.test(source)) throw new Error(`${filename} contains an invalid XML character.`);
     if (!source.endsWith('\n')) source += '\n';
-    if (Buffer.byteLength(source) > 199999) throw new Error(`${filename} exceeds the portable per-script source bound.`);
+    if (Buffer.byteLength(source) > STUDIO_PLUGIN_LIMITS.sourceBytes) throw new Error(`${filename} exceeds the portable per-script source bound.`);
     return { name, className, filename, source };
   });
   const modules = ordered.slice(1).map((source, index) => item(source, index + 1)).join('');
@@ -79,6 +79,7 @@ export function renderPlugin(sources) {
     + '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="4">\n'
     + '<External>null</External>\n<External>nil</External>\n'
     + item(ordered[0], 0, modules) + '</roblox>\n';
+  if (Buffer.byteLength(xml) > STUDIO_PLUGIN_LIMITS.artifactBytes) throw new Error('Modular plugin exceeds the bounded artifact size.');
   const lua = renderLuaBundle(ordered);
   const artifacts = ['ArcaneLocalBridge.rbxm', 'ArcaneLocalBridge.rbxmx'];
   const manifest = {
