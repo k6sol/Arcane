@@ -38,8 +38,8 @@ local function checkRejected(value: any, message: string): ()
 end
 `;
 
-function run(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
+function run(command, args, cwd = repository) {
+  const result = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   return result.stdout;
@@ -52,8 +52,8 @@ async function runFixture(checks) {
     await writeFile(path.join(directory, 'Sha256.luau'), await readFile(modulePath, 'utf8'));
     const harness = path.join(directory, 'digest-checks.luau');
     await writeFile(harness, `${prelude}\n${checks}\nprint("sha256 fixture passed")\n`);
-    if (compile) run(compile, ['--null', harness]);
-    assert.match(run(runtime, [harness]), /sha256 fixture passed/);
+    if (compile) run(compile, ['--null', harness], directory);
+    assert.match(run(runtime, [harness], directory), /sha256 fixture passed/);
   } finally {
     assert.equal(path.dirname(path.resolve(directory)), path.resolve(tmpdir()));
     assert.ok(path.basename(directory).startsWith('arcane-sha256-fixture-'));

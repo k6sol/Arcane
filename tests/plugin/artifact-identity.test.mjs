@@ -69,7 +69,7 @@ assert(loadedArtifactHash() == nil, "a different root cannot impersonate Arcane"
 print("modular artifact identity passed")
 `);
   for (const [binary, args] of [...(compile ? [[compile, ['--null', harness]]] : []), [runtime, [harness]]]) {
-    const result = spawnSync(binary, args, { encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
+    const result = spawnSync(binary, args, { cwd: directory, encoding: 'utf8', windowsHide: true, timeout: 40000, maxBuffer: 1024 * 1024 });
     assert.ifError(result.error); assert.equal(result.status, 0, result.stdout + result.stderr);
   }
 });
