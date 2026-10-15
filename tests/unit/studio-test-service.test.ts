@@ -13,6 +13,7 @@ import { createStudioTestService, type NativeTestConnection, type StudioTestServ
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { digest, readTestLedger, reviewedTestTools } from '../../packages/studio-test-controller/src/index.js';
 import { fixtureTempDirectory, makeFixtureDirectory } from './windows-fixture-paths.js';
+import { playtestJob } from '../../apps/mcp/src/playtest-schemas.js';
 
 // End-to-end SERVICE fixtures: real SDK Client/Server, authenticated StudioStore
 // heartbeats, SQLite and the fsynced ledger. No native executable, HTTP human
@@ -35,6 +36,12 @@ type Hooks = {
 };
 const text = (value: string): CallToolResult => ({ content: [{ type: 'text', text: value }] });
 const approval = (job: StudioTestView) => ({ id: job.id, displayDigest: job.displayDigest });
+function report(job: StudioTestView): StudioTestView {
+  // Validate actual production service snapshots, not just hand-authored wire
+  // fixtures. Parsing must preserve honest controller cleanup/evidence fields.
+  assert.deepEqual(playtestJob.parse(job), job);
+  return job;
+}
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 function gate() {
   let release!: () => void;
@@ -180,8 +187,8 @@ async function fixture(t: TestContext, options: {
   const service = await openService();
   const request = { sessionId: pair.sessionId, nativeStudioId: STUDIO, durationMs: 5_000,
     observationIntervalMs: 1_000, failOnRuntimeError: true };
-  const prepare = (actor = ACTOR) => service.requests.prepare(request, actor);
-  const status = (job: StudioTestView, actor = ACTOR) => service.requests.status(job.id, actor);
+  const prepare = async (actor = ACTOR) => report(await service.requests.prepare(request, actor));
+  const status = (job: StudioTestView, actor = ACTOR) => report(service.requests.status(job.id, actor));
   const effects = () => calls.filter(call => call.name === 'start_stop_play');
   const scene = (requestId: string) => store.enqueue({ sessionId: pair.sessionId, requestId,
     method: 'scene.children', args: { root: 'Workspace' } });
@@ -226,7 +233,7 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     // Pairing writes and preparation do not reserve the scene queue.
     const queued = f.scene('pending-scene-fixture');
     assert.equal(queued.state, 'queued');
-    const cancelled = await f.service.requests.cancel(job.id, ACTOR);
+    const cancelled = report(await f.service.requests.cancel(job.id, ACTOR));
     assert.equal(cancelled.state, 'cancelled');
     assert.equal(f.state.closes, 1);
     assert.equal(f.store.command(queued.id).state, 'queued');
@@ -296,6 +303,10 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     assert.ok(terminal[0]!.event.at >= complete.review.deadline!);
     assert.ok(journal.every(record => record.event.evidence === 'fixture' && record.event.scopeDigest === job.displayDigest));
     assert.equal(journal.at(-1)?.event.cleanup, 'complete');
+    const lateCancel = report(await f.service.requests.cancel(job.id, ACTOR));
+    assert.equal(lateCancel.state, 'complete', 'late cancel preserves an already completed report');
+    assert.deepEqual(lateCancel.review, complete.review);
+    assert.deepEqual(await f.records(), journal, 'late cancellation does not rewrite the recorded outcome');
     assert.equal(readFileSync(join(f.storeDirectory, 'studio.sqlite')).subarray(0, 16).toString(), 'SQLite format 3\0');
     const queued = f.scene('released-scene-fixture');
     assert.equal(queued.state, 'queued');
@@ -532,7 +543,7 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     await f.service.humanControl.approve(approval(job), () => {});
     await until(() => f.status(job).review.phase === 'waiting');
     assert.throws(() => f.scene('cancel-running-scene'), { code: 'BUSY' });
-    const cancelled = await f.service.requests.cancel(job.id, ACTOR);
+    const cancelled = report(await f.service.requests.cancel(job.id, ACTOR));
     assert.equal(cancelled.state, 'cancelled');
     assert.equal(cancelled.review.code, 'CANCELLED');
     assert.equal(cancelled.review.outcome, 'cancelled');
@@ -587,7 +598,7 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
       assert.equal(nativeSignal!.aborted, false, 'caller abort cannot certify physical mutation cancellation');
       assert.throws(() => f.scene('unknown-pending-scene'), { code: 'BUSY' });
     } finally { held.release(); }
-    const cancelled = await cancelling;
+    const cancelled = report(await cancelling);
     assert.equal(cancelled.state, 'cancelled');
     assert.equal(cancelled.review.outcome, 'cancelled');
     assert.equal(cancelled.review.code, 'CANCELLED');

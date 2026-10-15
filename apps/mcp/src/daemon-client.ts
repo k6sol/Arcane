@@ -13,6 +13,7 @@ import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } 
 import { NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse } from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
 import { parseNativeStudioStagingStatusResponse } from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
 import {nativeStudioReconstructionResponse,parseNativeStudioReconstructionStatusResponse} from '../../../packages/asset-pipeline/src/studio-reconstruction-wire.js';
+import { playtestJobResponse, playtestListResponse, playtestPreparedResponse, playtestRequestInput, type PlaytestRequest } from './playtest-schemas.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -197,15 +198,18 @@ export class DaemonClient {
     const requestId = randomUUID();
     return this.submit('/v1/studio/restore', { commandId, requestId }, { requestId, method: 'scene.restore' }, options);
   }
-  async playtestRequest(input: {sessionId:string;nativeStudioId?:string|undefined;durationMs?:number;observationIntervalMs?:number;failOnRuntimeError?:boolean}, options:WaitOptions={}) {
-    const schema=z.object({job:z.object({id:z.string().max(128),state:z.enum(['needs_approval','running','complete','cancelled']),displayDigest:z.string().regex(/^[a-f0-9]{64}$/),display:z.object({proposal:z.object({binding:z.object({pairedSessionId:z.string().max(128),nativeStudioId:z.string().max(128)}),durationMs:z.number(),observationIntervalMs:z.number(),failOnRuntimeError:z.boolean()})}).passthrough(),review:z.record(z.string(),z.unknown()),evidence:z.enum(['fixture','native']),nativeAcceptance:z.literal(false)})}).refine(r=>r.job.display.proposal.binding.pairedSessionId===input.sessionId&&(!input.nativeStudioId||r.job.display.proposal.binding.nativeStudioId===input.nativeStudioId),'Wrong playtest scope.');
-    return this.postOnce('/v1/playtests/prepare',input,schema,{sessionId:input.sessionId},'Read playtest_status for the original pending request. Preparation never authorizes play; do not submit it again automatically.',options);
+  async playtestRequest(input: PlaytestRequest, options:WaitOptions={}) {
+    const parsed=playtestRequestInput.safeParse(input);
+    if(!parsed.success)throw new BridgeError('INPUT','Invalid bounded playtest request.');
+    const request=parsed.data;
+    return this.postOnce('/v1/playtests/prepare',request,playtestPreparedResponse(request),{sessionId:request.sessionId},'Read playtest_status for the original pending request. Preparation never authorizes play; do not submit it again automatically.',options);
   }
   async playtestStatus(jobId:string|undefined, options:WaitOptions={}) {
-    return this.readRecord('/v1/playtests'+(jobId?'?id='+encodeURIComponent(jobId):''),z.union([z.object({job:z.record(z.string(),z.unknown())}),z.object({jobs:z.array(z.record(z.string(),z.unknown())).max(64)})]),options);
+    const path='/v1/playtests'+(jobId!==undefined?'?id='+encodeURIComponent(jobId):'');
+    return jobId===undefined?this.readRecord(path,playtestListResponse,options):this.readRecord(path,playtestJobResponse(jobId),options);
   }
   async playtestCancel(jobId:string,options:WaitOptions={}) {
-    return this.postOnce('/v1/playtests/cancel',{id:jobId},z.object({job:z.record(z.string(),z.unknown())}).refine(r=>r.job.id===jobId,'Wrong playtest job.'),{jobId},'Read playtest_status for this job. Its owned stop/cleanup may still be in progress; never retry a stop blindly.',options);
+    return this.postOnce('/v1/playtests/cancel',{id:jobId},playtestJobResponse(jobId),{jobId},'Read playtest_status for this job. Its owned stop/cleanup may still be in progress; never retry a stop blindly.',options);
   }
 
   async workRuns(options: WaitOptions = {}): Promise<{ runs: WorkRun[] }> {
