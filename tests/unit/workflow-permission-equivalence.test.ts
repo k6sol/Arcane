@@ -69,6 +69,7 @@ test('real Windows token/default-owner metadata agrees for fresh fixture directo
   };
   const before = { directory: fingerprint(directory), key: fingerprint(key) };
   const first = tracePrivatePermissions(root), second = tracePrivatePermissions(root);
+  t.diagnostic('WINDOWS_TOKEN_OWNER_EQUIVALENCE ' + JSON.stringify({first,second}));
   assert.equal(first.status, 0); assert.equal(first.errorCode, null); assert.equal(first.signal, null);
   assert.deepEqual(second, first, 'Repeated metadata inspection must preserve the ACL observations.');
   const report = first.report as { tokenOwnerIsUser: boolean; tokenOwnerIsAdministrators: boolean; directory: { ownerIsTokenDefault: boolean; ownerIsUser: boolean }; key: { ownerIsTokenDefault: boolean; ownerIsUser: boolean } };
@@ -77,7 +78,6 @@ test('real Windows token/default-owner metadata agrees for fresh fixture directo
   assert.equal(report.directory.ownerIsUser, report.tokenOwnerIsUser); assert.equal(report.key.ownerIsUser, report.tokenOwnerIsUser);
   assert.deepEqual({ directory: fingerprint(directory), key: fingerprint(key) }, before);
   assert.throws(() => parsePrivateReceiptDescriptor(first.report, true, false), { code: 'WORKFLOW_RECEIPT_STORAGE' });
-  t.diagnostic('WINDOWS_TOKEN_OWNER_EQUIVALENCE ' + JSON.stringify(first));
 });
 
 // Execute the COMPLETE current production script with explicit native metadata

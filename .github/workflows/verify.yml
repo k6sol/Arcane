@@ -44,7 +44,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command '[Security.Principal.WindowsIdentity]::GetCurrent() | Out-Null; [IO.Directory]::GetAccessControl($env:SystemRoot) | Out-Null'
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; $PSModuleAutoLoadingPreference="None"; $null=[Reflection.Assembly]::Load("System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35"); $nativeJson=[Web.Script.Serialization.JavaScriptSerializer]::new(); $nativeJson.MaxJsonLength=8192; $nativeJson.RecursionLimit=8; $identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $acl=[IO.Directory]::GetAccessControl($env:SystemRoot); $rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]); $null=$nativeJson.Serialize(@{version=1;powerShell=$PSVersionTable.PSVersion.ToString();tokenOwnerIsUser=($identity.Owner.Value -eq $identity.User.Value);ancestors=@(@{ruleCount=$rules.Count});directory=@{ownerIsUser=($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $identity.User.Value)}})'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build product for the selected inventory
         run: npm run build

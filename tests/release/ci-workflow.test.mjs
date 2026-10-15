@@ -4,6 +4,7 @@ import {mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'no
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {nativeMetadataJsonSetup} from '../unit/windows-private-permission-fixture.ts';
 
 const source=readFileSync(new URL('../../.github/workflows/verify.yml',import.meta.url),'utf8').replaceAll('\r\n','\n');
 const block=source.match(/^concurrency:\n((?:[ \t]+[^\n]*\n)+)/m)?.[1]??'';
@@ -61,6 +62,18 @@ test('every lane builds after pinned tooling and retains the Windows private-own
   assert.match(owner,/node --test --test-concurrency=1 dist\/tests\/unit\/workflow-normal-owner.test.js dist\/tests\/unit\/workflow-permission-equivalence.test.js/);
   assert.ok(source.indexOf(owner)>previous);assert.ok(source.indexOf(owner)<source.indexOf(step('Test complete unit inventory shard 1 of 2')));
   assert.equal([...source.matchAll(/^        run: npm run build$/gm)].length,1,'Each lane builds once before compiled tests.');
+});
+
+test('Windows warmup includes the exact read-only diagnostic serializer before bounded permission probes',()=>{
+  const warm=step('Warm the trusted Windows permission host'),normalize=value=>value.replaceAll('"',"'").replace(/\s+/g,'');
+  assert.match(warm,/^        if: runner.os == 'Windows'$/m);
+  assert.ok(warm.includes('$ErrorActionPreference="Stop";'),'Native preparation errors must stop the warm process.');
+  for(const line of nativeMetadataJsonSetup.trim().split('\n'))assert.ok(normalize(warm).includes(normalize(line)),'Warmup must cover diagnostic setup: '+line);
+  assert.ok(warm.includes('$nativeJson.Serialize('));assert.ok(warm.includes('[Security.Principal.WindowsIdentity]::GetCurrent()'));
+  assert.ok(warm.includes('[IO.Directory]::GetAccessControl($env:SystemRoot)'));assert.ok(warm.includes('$acl.GetAccessRules('));
+  assert.doesNotMatch(warm,/SetAccessControl|Set-Acl|SetOwner|CreateDirectory|SetTokenInformation|AdjustTokenPrivileges/);
+  assert.ok(source.indexOf(warm)<source.indexOf(step('Verify private storage on Windows')));
+  assert.match(warm,/if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
 });
 
 test('native Node shards execute a disjoint exhaustive union of the same actual fixture glob',t=>{
