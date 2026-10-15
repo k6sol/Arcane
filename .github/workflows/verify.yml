@@ -48,6 +48,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build product for the selected inventory
         run: npm run build
+      - name: Prepare Windows owner policy metadata fixture
+        if: runner.os == 'Windows'
+        timeout-minutes: 1
+        run: node scripts/prepare-windows-owner-policy-fixture.mjs
       - name: Verify private storage on Windows
         if: runner.os == 'Windows'
         run: |

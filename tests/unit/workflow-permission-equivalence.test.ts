@@ -8,6 +8,7 @@ import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { parsePrivateReceiptDescriptor } from '../../apps/daemon/src/workflow-private-storage.js';
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import { nativeMetadataJsonSetup, privatePermissionTraceScript, tracePrivatePermissions } from './windows-private-permission-fixture.js';
+import {ownerPolicyFixture as ownerFixture} from './windows-owner-policy-fixture.js';
 
 test('permission diagnostic is read-only metadata and cannot grant a private receipt descriptor', () => {
   for (const write of ['CreateDirectory', 'SetAccessControl', 'Set-Acl', 'SetOwner', 'SetTokenInformation', 'AdjustTokenPrivileges', 'ReadAllBytes', 'File]::Open'])
@@ -84,118 +85,6 @@ test('real Windows token/default-owner metadata agrees for fresh fixture directo
 // DOUBLES backed by real .NET ACL/SID objects. No token is changed and no real
 // filesystem operation or permission write exists in this harness. The separate
 // normal-owner tests exercise the unmodified native checker on the actual host.
-const ownerFixture = nativeMetadataJsonSetup + String.raw`
-class ArcaneOwnerFixtureState {
-  static [object] $Case
-  static [Security.Principal.SecurityIdentifier] $User
-  static [object] $DirectoryAcl
-  static [object] $KeyAcl
-  static [object] $AncestorAcl
-  static [bool] $DirectoryExists
-  static [int] $Identities
-  static [int] $Creates
-  static [int] $Writes
-  static [string] $Root='C:\arcane-owner-fixture'
-  static [string] $Child='C:\arcane-owner-fixture\workflow-human-receipts'
-  static [string] $Key='C:\arcane-owner-fixture\workflow-human-receipts\key-v1'
-  static [IO.FileAttributes] Attributes([string]$path) {
-    if($path -ceq [ArcaneOwnerFixtureState]::Key){
-      if([ArcaneOwnerFixtureState]::Case.keyReparse){return [IO.FileAttributes]::ReparsePoint}
-      return [IO.FileAttributes]::Normal
-    }
-    if($path -ceq [ArcaneOwnerFixtureState]::Root -and [ArcaneOwnerFixtureState]::Case.ancestorReparse){return [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint}
-    return [IO.FileAttributes]::Directory
-  }
-}
-class ArcaneOwnerFixtureIdentity {
-  [Security.Principal.SecurityIdentifier] $User
-  [Security.Principal.SecurityIdentifier] $Owner
-  static [ArcaneOwnerFixtureIdentity] GetCurrent() {
-    [ArcaneOwnerFixtureState]::Identities++
-    $identity=[ArcaneOwnerFixtureIdentity]::new()
-    $identity.User=[ArcaneOwnerFixtureState]::User
-    if([ArcaneOwnerFixtureState]::Case.defaultOwner -ne 'null'){$identity.Owner=[Security.Principal.SecurityIdentifier]::new([ArcaneOwnerFixtureState]::Case.defaultOwner)}
-    return $identity
-  }
-}
-class ArcaneOwnerFixtureItem {
-  [IO.FileAttributes] $Attributes
-  [long] $Length
-  ArcaneOwnerFixtureItem([string]$path) {
-    $this.Attributes=[ArcaneOwnerFixtureState]::Attributes($path)
-    $this.Length=[ArcaneOwnerFixtureState]::Case.keyLength
-  }
-  [void] Refresh() {}
-}
-class ArcaneOwnerFixtureDirectory {
-  static [bool] Exists([string]$path) {
-    if($path -ceq [ArcaneOwnerFixtureState]::Child){return [ArcaneOwnerFixtureState]::DirectoryExists}
-    return $path -cne [ArcaneOwnerFixtureState]::Key
-  }
-  static [object] GetParent([string]$path) {
-    if($path -ceq 'C:\'){return $null}
-    return @{FullName='C:\'}
-  }
-  static [object] CreateDirectory([string]$path) {
-    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-create-scope'}
-    [ArcaneOwnerFixtureState]::Creates++
-    [ArcaneOwnerFixtureState]::DirectoryExists=$true
-    return [ArcaneOwnerFixtureItem]::new($path)
-  }
-  static [object] GetAccessControl([string]$path) {
-    if($path -ceq [ArcaneOwnerFixtureState]::Child){return [ArcaneOwnerFixtureState]::DirectoryAcl}
-    return [ArcaneOwnerFixtureState]::AncestorAcl
-  }
-  static [void] SetAccessControl([string]$path,[Security.AccessControl.DirectorySecurity]$acl) {
-    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-write-scope'}
-    [ArcaneOwnerFixtureState]::Writes++
-    [ArcaneOwnerFixtureState]::DirectoryAcl=$acl
-  }
-  static [string[]] EnumerateFileSystemEntries([string]$path) {
-    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-entries-scope'}
-    if([ArcaneOwnerFixtureState]::Case.nonempty){return @('fixture-entry')}
-    return @()
-  }
-}
-class ArcaneOwnerFixtureFile {
-  static [bool] Exists([string]$path) {return $path -ceq [ArcaneOwnerFixtureState]::Key}
-  static [IO.FileAttributes] GetAttributes([string]$path) {return [ArcaneOwnerFixtureState]::Attributes($path)}
-  static [object] GetAccessControl([string]$path) {return [ArcaneOwnerFixtureState]::KeyAcl}
-}
-function FixtureAcl([string]$owner,[bool]$protected,[bool]$foreign) {
-  $acl=[Security.AccessControl.DirectorySecurity]::new()
-  $acl.SetOwner([Security.Principal.SecurityIdentifier]::new($owner))
-  $acl.SetAccessRuleProtection($protected,$false)
-  foreach($sid in @([ArcaneOwnerFixtureState]::User.Value,'S-1-5-18','S-1-5-32-544')){
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
-  }
-  if($foreign){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow))}
-  return $acl
-}
-function Set-Acl($LiteralPath,$AclObject) {
-  if($LiteralPath -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-write-scope'}
-  [ArcaneOwnerFixtureState]::Writes++
-  [ArcaneOwnerFixtureState]::DirectoryAcl=$AclObject
-}
-function Get-ChildItem($LiteralPath,[switch]$Force) {
-  if($LiteralPath -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-entries-scope'}
-  if([ArcaneOwnerFixtureState]::Case.nonempty){return 'fixture-entry'}
-}
-$caseData=$nativeJson.DeserializeObject($env:ARCANE_OWNER_FIXTURE_CASE)
-[ArcaneOwnerFixtureState]::Case=@{}
-foreach($field in $caseData.Keys){[ArcaneOwnerFixtureState]::Case[$field]=$caseData[$field]}
-[ArcaneOwnerFixtureState]::User=[Security.Principal.SecurityIdentifier]::new('S-1-5-21-100-200-300-1001')
-$case=[ArcaneOwnerFixtureState]::Case
-[ArcaneOwnerFixtureState]::DirectoryExists=$case.existing
-[ArcaneOwnerFixtureState]::DirectoryAcl=FixtureAcl $case.directoryOwner $case.protected $case.directoryForeign
-[ArcaneOwnerFixtureState]::KeyAcl=FixtureAcl $case.keyOwner $false $case.keyForeign
-[ArcaneOwnerFixtureState]::AncestorAcl=FixtureAcl ([ArcaneOwnerFixtureState]::User.Value) $false $false
-if($case.unsafeAncestor){[ArcaneOwnerFixtureState]::AncestorAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),[Security.AccessControl.FileSystemRights]::Delete,[Security.AccessControl.AccessControlType]::Allow))}
-$sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
-$beforeDirectory=[ArcaneOwnerFixtureState]::DirectoryAcl.GetSecurityDescriptorSddlForm($sections)
-$beforeKey=[ArcaneOwnerFixtureState]::KeyAcl.GetSecurityDescriptorSddlForm($sections)
-`;
-
 test('complete production owner policy: captured token equivalence preserves foreign-owner, existing-directory and ACL refusals', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   const source = readFileSync(resolve('apps/daemon/src/workflow-private-storage.ts'), 'utf8').replaceAll('\r\n', '\n');
   const marker = 'const SCRIPT=String.raw`', start = source.indexOf(marker) + marker.length, end = source.indexOf('\n`;', start);

@@ -76,6 +76,21 @@ test('Windows warmup includes the exact read-only diagnostic serializer before b
   assert.match(warm,/if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
 });
 
+test('bounded Windows metadata-fixture preparation follows build without replacing any native policy check',()=>{
+  const prepare=step('Prepare Windows owner policy metadata fixture');
+  assert.match(prepare,/^        if: runner.os == 'Windows'$/m);
+  assert.match(prepare,/^        timeout-minutes: 1$/m);
+  assert.match(prepare,/^        run: node scripts\/prepare-windows-owner-policy-fixture.mjs$/m);
+  assert.ok(source.indexOf(prepare)>source.indexOf(step('Build product for the selected inventory')));
+  assert.ok(source.indexOf(prepare)<source.indexOf(step('Verify private storage on Windows')));
+  assert.equal([...source.matchAll(/run: node scripts\/prepare-windows-owner-policy-fixture.mjs/g)].length,1);
+  const native=readFileSync(new URL('../../tests/unit/workflow-permission-equivalence.test.ts',import.meta.url),'utf8');
+  assert.match(native,/timeout: 30_000/);
+  assert.equal([...native.matchAll(/timeout: 5_000/g)].length,2,'Current and historical fresh-process policy query bounds stay fixed.');
+  assert.match(native,/for \(const scenario of cases\)/);
+  assert.match(native,/for \(const scenario of \[cases\[0\]!, cases\[14\]!\]\)/);
+});
+
 test('native Node shards execute a disjoint exhaustive union of the same actual fixture glob',t=>{
   const boundary=realpathSync.native(tmpdir()),directory=realpathSync.native(mkdtempSync(join(boundary,'arcane-ci-shards-'))),markers=join(directory,'cases.txt');
   t.after(()=>{assert.equal(dirname(resolve(directory)),boundary);assert.ok(directory.startsWith(join(boundary,'arcane-ci-shards-')));rmSync(directory,{recursive:true,force:true});});
