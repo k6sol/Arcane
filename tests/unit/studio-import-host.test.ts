@@ -164,6 +164,7 @@ test('native controller stages owned bytes through durable bounded queue receipt
     assert.equal(command.method, 'asset.stage_packet'); assert.equal(command.state, 'succeeded');
     assert.ok(Buffer.byteLength(JSON.stringify(command.args)) <= 256 * 1024);
     assert.throws(() => f.studio.enqueue({sessionId: command.sessionId, requestId: command.requestId, method: command.method, args: command.args}), {code: 'ASSET_STAGE_AUTHORITY'});
+    await assert.rejects(f.studio.enqueueVerified({sessionId:command.sessionId,requestId:command.requestId,method:command.method,args:command.args},null),{code:'ASSET_STAGE_AUTHORITY'});
     assert.throws(() => f.studio.restore({commandId: id, requestId: 'fixture_restore_stage'}), {code: 'RESTORE'});
   }
   assert.deepEqual(f.counts(), {saved: 1, reads: 3});

@@ -429,6 +429,7 @@ export class StudioStore {
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
     const method = methodField(a.method);
+    if(method==='asset.stage_packet')throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake requires private host admission, including idempotent lookup.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
     if (old) {
