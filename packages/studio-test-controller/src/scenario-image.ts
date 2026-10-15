@@ -11,7 +11,7 @@ export function scenarioPng(bytes: Buffer): {width: number; height: number} {
   const crc = (data: Buffer) => { let value = 0xffffffff; for (const byte of data) { value ^= byte; for (let bit=0;bit<8;bit++) value=(value>>>1)^((value&1)?0xedb88320:0); } return (value^0xffffffff)>>>0; };
   for (let count = 0; at < bytes.length && count < 4096; count++) {
     if (at + 12 > bytes.length) bad();
-    const length = bytes.readUInt32BE(at), kind = bytes.toString('ascii', at + 4, at + 8), end = at + length + 12;
+    const length = bytes.readUInt32BE(at), kind = bytes.toString('latin1', at + 4, at + 8), end = at + length + 12;
     if (end > bytes.length || crc(bytes.subarray(at+4,end-4)) !== bytes.readUInt32BE(end-4) || !/^[A-Za-z]{4}$/.test(kind)) bad();
     const data = bytes.subarray(at+8,end-4);
     if (!width && kind !== 'IHDR') bad();
