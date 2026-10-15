@@ -24,6 +24,8 @@ export class JsonlTransport {
   #exited = false;
   #closedPromise: Promise<void>;
   #resolveClosed!: () => void;
+  #fullyClosed = false;
+  #joining: Promise<void> | null = null;
   constructor(spec: InternalProcess, readonly bounds: Limits, private readonly onMessage: (message: Record<string, unknown>) => void, private readonly onDisconnect: (error: CodexClientError) => void) {
     if (!isAbsolute(spec.command) || !isAbsolute(spec.cwd)) fail('PROCESS_PATH', 'Executable and workspace must be absolute.');
     this.#frame = Buffer.alloc(bounds.maxFrameBytes);
@@ -47,6 +49,7 @@ export class JsonlTransport {
     });
     this.#child.on('close', () => {
       this.#exited = true;
+      this.#fullyClosed = true;
       this.stop(new CodexClientError('DISCONNECTED', 'Native CLI disconnected.'));
       this.#resolveClosed();
     });
@@ -148,14 +151,25 @@ export class JsonlTransport {
     this.#pending.clear();
     this.onDisconnect(reason);
     this.#child.stdin.destroy();
-    if (!this.#exited) this.#child.kill();
+    if (!this.#exited) { try { this.#child.kill(); } catch { /* close() reports an unconfirmed exit after bounded escalation. */ } }
   }
-  async close(): Promise<void> {
+  close(): Promise<void> {
     this.stop();
+    return this.#joining ??= this.#join();
+  }
+  async #waitForClose(): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
-    await Promise.race([this.#closedPromise, new Promise<void>(resolve => {
-      timer = setTimeout(() => { if (!this.#exited) this.#child.kill('SIGKILL'); resolve(); }, 1000);
-    })]);
-    if (timer) clearTimeout(timer);
+    try {
+      await Promise.race([this.#closedPromise,new Promise<void>(resolve=>{timer=setTimeout(resolve,1000);})]);
+    } finally { if(timer)clearTimeout(timer); }
+  }
+  async #join(): Promise<void> {
+    await this.#waitForClose();
+    if(this.#fullyClosed)return;
+    if(!this.#exited){try{this.#child.kill('SIGKILL');}catch{/* The bounded confirmation below remains authoritative. */}}
+    // Sending a signal is not evidence that the owned process and its streams
+    // closed. Join the close event after escalation, or report uncertainty.
+    await this.#waitForClose();
+    if(!this.#fullyClosed)throw new CodexClientError('PROCESS_EXIT_UNCONFIRMED','Native process closure was not confirmed.');
   }
 }

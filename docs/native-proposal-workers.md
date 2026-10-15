@@ -13,6 +13,8 @@ The child launch also disables native agent tools, shell tools, apps, plugins, m
 
 Account-change notifications fence an active proposal even if authentication remains a subscription. Failure closes the owned child; there is no fallback account, model or automatic turn replay. The host must close a worker when its parent task stops or changes ownership.
 
+The native lifecycle transport joins the child's `close` event. After one second it escalates termination and waits one further second for confirmation. If closure remains unobserved, `close()` rejects with `PROCESS_EXIT_UNCONFIRMED`, which the session passes to its host. Concurrent and repeated close calls share the same join and outcome. This confirms the owned lifecycle process and its streams only; Windows descendant containment and the separate history-reader process need their own acceptance evidence.
+
 ## Integration boundary
 
 This component does not yet connect the chat task coordinator or WorkStore graph to automatic workers. The host integration must capture parent authority privately, reserve dispatch durably, bound concurrency and execution time, join cancellation, and return bounded proposals to the originating task. A serialized task ID or account hash alone is not permission to launch a worker. No browser or MCP launch route is exposed by this change.

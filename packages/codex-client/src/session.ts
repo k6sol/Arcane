@@ -575,7 +575,9 @@ export class CodexSession {
     this.revokeTaskContinuation();
     this.#retireNativeAssets();
     const read = this.#historyRead; read?.stop();
-    await Promise.allSettled([this.#transport.close(), ...(read ? [read.promise] : [])]);
+    const settled=await Promise.allSettled([this.#transport.close(), ...(read ? [read.promise] : [])]);
+    const transport=settled[0]!;
+    if(transport.status==='rejected')throw transport.reason;
   }
   #ensureReady(): void {
     if (!this.#ready || !this.#transport.connected || this.#assetsRetired) fail('DISCONNECTED', 'A ready local connection is required.');
