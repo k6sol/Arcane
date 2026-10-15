@@ -29,6 +29,7 @@ import { createCodexService, type CodexService, type CodexServiceOptions } from 
 import { codexRoutes } from './codex-routes.js';
 import {createStudioTestService, type StudioTestService} from './studio-test-service.js';
 import {studioTestRoutes, STUDIO_TEST_HTTP_LIMITS, type StudioTestActorResolver, type StudioTestRouteService} from './studio-test-routes.js';
+import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
 
 const unavailableTestMessages = {
   UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
@@ -155,14 +156,13 @@ export async function createConnectionLab(options: Options) {
       if(!tests){
         let unavailableCode: keyof typeof unavailableTestMessages = 'UNAVAILABLE';
         try{
-          const manifest=JSON.parse(await readFile(join(options.cwd,'plugin','build','manifest.json'),'utf8')) as {artifacts:{name:string;sha256:string}[]};
-          const source=await readFile(join(options.cwd,'plugin','build','ArcaneLocalBridge.lua'));
-          const sourceHash=createHash('sha256').update(source).digest('hex');
-          if(manifest.artifacts.find(a=>a.name==='ArcaneLocalBridge.lua')?.sha256!==sourceHash)throw new Error('Plugin source integrity mismatch');
+          // Match the actual loaded Script/ModuleScript identity used by the
+          // plugin's continuity proof, rather than a delivery-file checksum.
+          const pluginArtifactHash=await studioImportPluginArtifactHash(options.cwd);
           // Once source verification passes, any failed journal initialization
           // is unknown retained state. Never remove its lock or try a fresh ledger.
           unavailableCode='FENCED';
-          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:options.studioStore,pluginArtifactHash:sourceHash});tests=ownedTests;
+          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:options.studioStore,pluginArtifactHash});tests=ownedTests;
         }catch{
           stateWarnings.push(unavailableTestMessages[unavailableCode]);
           testApi=unavailableStudioTestRoutes(unavailableCode,resolveTestActor);
