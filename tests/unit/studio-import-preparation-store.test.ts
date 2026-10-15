@@ -60,11 +60,13 @@ async function fixture(t: test.TestContext, local = false) {
     clientLifetimeId: 'fixture-plugin-lifetime', playEpoch: 0 };
   const outputRoot = join(root, 'outputs'); await mkdir(outputRoot);
   const sources = new Map<string, { manifest: Awaited<ReturnType<typeof saveStudioFixture>>; exports: Map<'asset.glb' | 'collision.glb', Buffer> }>();
-  for (const job of [JOB, NEXT]) {
+  async function sourceFor(job: string) {
+    const existing = sources.get(job); if (existing) return existing;
+    assert.ok(job === JOB || job === NEXT);
     const directory = join(outputRoot, 'test-kit-' + job); await mkdir(directory);
     const manifest = await saveStudioFixture(directory, job), exports = new Map<'asset.glb' | 'collision.glb', Buffer>();
     for (const name of ['asset.glb', 'collision.glb'] as const) exports.set(name, await readFile(join(directory, name)));
-    sources.set(job, { manifest, exports });
+    const source = { manifest, exports }; sources.set(job, source); return source;
   }
   let studsPerMeter = 1 / 0.28, parentRef = 'fixture-workspace';
   const selection = (): StudioImportSelection => ({ target: { sessionId: pair.sessionId, placeId: observation.placeId, universeId: observation.universeId,
@@ -74,7 +76,7 @@ async function fixture(t: test.TestContext, local = false) {
   // without repeating AssetService's full artifact inventory in every fence setup.
   // The dedicated equivalence case below retains that actual service integration.
   async function directPrepared(jobId: string): Promise<PreparedStudioImport> {
-    const scope = assertStudioImportJobScope(projectPath, cws, actor, jobId), source = sources.get(jobId); assert.ok(source);
+    const scope = assertStudioImportJobScope(projectPath, cws, actor, jobId), source = await sourceFor(jobId);
     const generated = adaptCompletedStudioImport(source.manifest, source.exports, scope.projectId, selection(), null);
     const authority = createStudioImportManifestAuthority({ loadGeneratedFiles: async requested => {
       assert.equal(requested, jobId); assertStudioImportJobScope(projectPath, cws, actor, jobId); return generated;
@@ -86,6 +88,9 @@ async function fixture(t: test.TestContext, local = false) {
   }
   let assets: Awaited<ReturnType<typeof createAssetService>> | undefined;
   async function servicePrepared(jobId: string): Promise<PreparedStudioImport> {
+    // The real service equivalence case still sees the complete two-job disk
+    // inventory at startup. Other fences need only their requested export.
+    if (!assets) for (const job of [JOB, NEXT]) await sourceFor(job);
     assets ??= await createAssetService({ cwd: projectPath, projectPath, outputRoot,
       studioImport: { workAssociations: cws, selectTarget: selection } });
     return assets.prepareStudioImport(jobId, actor);
@@ -206,11 +211,17 @@ test('receipt witness refuses an actual Play heartbeat', async t => {
 
 for (const operation of ['save', 'get'] as const) for (const transition of ['regrant', 'new-intent', 'retire', 'registry-close', 'cws-close'] as const)
   test('preparation ' + operation + ' fences the same actor and binding across awaited filesystem ' + transition, { timeout: 8000 }, async t => {
-    const f = await fixture(t), store = await f.create(); if (operation === 'get') await store.save(f.actor, JOB, f.prepared, f.witness, guard);
+    const started = performance.now(), phases = [{phase:'fixture',elapsedMs:0}]; let completed = false;
+    const phase = (name:string) => phases.push({phase:name,elapsedMs:Math.round(performance.now()-started)});
+    t.after(()=>{if(!completed)t.diagnostic('Preparation fence phases: '+JSON.stringify({operation,transition,timeoutMs:8000,aborted:t.signal.aborted,phases}));});
+    const f = await fixture(t); phase('open-store'); const store = await f.create(); phase('store-ready');
+    if (operation === 'get') { await store.save(f.actor, JOB, f.prepared, f.witness, guard); phase('initial-save-ready'); }
     const hold = f.holdRead(), pending = operation === 'save' ? store.save(f.actor, JOB, f.prepared, f.witness, guard) : store.get(f.actor, JOB, guard);
+    phase('await-held-filesystem');
     const denied = assert.rejects(pending, transition === 'cws-close' ? refused('CONVERSATION_WORK_CLOSED') : refused('NATIVE_ASSET_AUTHORITY'));
-    await hold.entered; f.transition(transition); hold.release(); await denied;
+    await hold.entered; phase('filesystem-held'); f.transition(transition); hold.release(); phase('authority-changed'); await denied; phase('refusal-observed');
     assert.equal((await readdir(f.options.directory)).includes(JOB + '.json'), operation === 'get');
+    completed = true;
   });
 
 test('trusted target/service/deadline guard fences awaits and asynchronous or boolean guards never authorize storage', async t => {
