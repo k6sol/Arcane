@@ -178,11 +178,70 @@ test('malformed ACK cannot write a record; timeout has no retry or process kill'
   await assert.rejects(h.start(), /timed out/); assert.equal(fs.existsSync(f.portFile), false); assert.equal(h.context.origin, ''); assert.equal(h.calls.length, 1);
 });
 
-test('owned child failure preserves saved port and emits conditional recovery guidance', async t => {
+const failure = code => ({ type: 'arcane-startup-failure', protocolVersion: 1, code });
+const exitAfter = (...messages) => ({ action(owned) { for (const message of messages) owned.emit('message', message); owned.exitCode = 1; owned.emit('exit', 1); } });
+function unadopted(h, f, saved) {
+  assert.equal(h.context.origin, ''); assert.equal(h.context.token, ''); assert.equal(h.context.projectSession, null);
+  assert.equal(h.calls.length, 1); assert.equal(h.timers.size, 0);
+  if (saved === null) assert.equal(fs.existsSync(f.portFile), false); else assert.equal(fs.readFileSync(f.portFile, 'utf8'), saved);
+}
+
+test('an unreported child exit preserves saved port and uses honest generic text', async t => {
   const f = fixture(t); fs.writeFileSync(f.portFile, record(45071));
-  const h = host(f, { action(owned) { owned.exitCode = 1; owned.emit('exit', 1); } });
-  await assert.rejects(h.start(), /Check for another app using the local port/);
-  assert.equal(fs.readFileSync(f.portFile, 'utf8'), record(45071)); assert.equal(h.context.origin, ''); assert.equal(h.calls.length, 1);
+  const h = host(f, exitAfter());
+  const error = await h.start().then(() => assert.fail('Expected startup failure.'), error => error);
+  assert.equal(error.code, 'ARCANE_STARTUP'); assert.match(error.message, /^The local runtime could not start\. Project records and the saved port were retained\./);
+  assert.doesNotMatch(error.message, /port is in use|another app/);
+  unadopted(h, f, record(45071));
+});
+
+test('only a daemon-proved bind conflict uses port-conflict guidance', async t => {
+  const f = fixture(t); fs.writeFileSync(f.portFile, record(45071));
+  const h = host(f, exitAfter(failure('PORT_IN_USE')));
+  await assert.rejects(h.start(), { code: 'ARCANE_PROJECT_PORT', message: /local port is in use.*Check for another app using the local port/ });
+  unadopted(h, f, record(45071));
+});
+
+test('reported state, resource and generic failures map to their fixed guidance', async t => {
+  for (const [code, text] of [['STATE_NEWER', /saved by a newer version of Arcane.*Open this project with that version or later/], ['STATE_UNSAFE', /could not safely verify this project's saved records/],
+    ['RESOURCE_UNAVAILABLE', /application folder is incomplete or unavailable/], ['STARTUP_FAILED', /^The local runtime could not start\. Project records/]]) {
+    const f = fixture(t); const h = host(f, exitAfter(failure(code)));
+    const error = await h.start().then(() => assert.fail('Expected startup failure.'), error => error);
+    assert.equal(error.code, 'ARCANE_STARTUP', code); assert.match(error.message, text); assert.doesNotMatch(error.message, /another app/, code);
+    unadopted(h, f, null);
+  }
+});
+
+test('malformed or fabricated failure reports are ignored and never become readiness', async t => {
+  const f = fixture(t);
+  const malformed = [failure('C:\\Users\\private'), failure('port_in_use'), { ...failure('PORT_IN_USE'), detail: 'stderr' }, { ...failure('PORT_IN_USE'), protocolVersion: 2 },
+    { type: 'arcane-startup-failure', protocolVersion: 1 }, Object.assign(Object.create(null), failure('PORT_IN_USE')), 'PORT_IN_USE', null];
+  const h = host(f, exitAfter(...malformed));
+  const error = await h.start().then(() => assert.fail('Expected startup failure.'), error => error);
+  assert.match(error.message, /^The local runtime could not start\./); assert.doesNotMatch(error.message, /another app/);
+  unadopted(h, f, null);
+});
+
+test('the first valid report wins and a later ready message is refused without adoption', async t => {
+  const f = fixture(t);
+  const h = host(f, { action(owned) { owned.emit('message', failure('STATE_NEWER')); owned.emit('message', failure('PORT_IN_USE')); owned.emit('message', envelope(45071)); } });
+  await assert.rejects(h.start(), { code: 'ARCANE_STARTUP', message: /newer version of Arcane/ });
+  unadopted(h, f, null);
+});
+
+test('a startup timeout keeps an already reported failure and adopts nothing', async t => {
+  const f = fixture(t);
+  const h = host(f, { action(owned) { owned.emit('message', failure('STATE_UNSAFE')); queueMicrotask(() => [...h.timers.values()][0]()); } });
+  await assert.rejects(h.start(), { code: 'ARCANE_STARTUP', message: /could not safely verify this project's saved records/ });
+  unadopted(h, f, null);
+});
+
+test('an unreported startup timeout is bounded, generic and not a port conflict', async t => {
+  const f = fixture(t); fs.writeFileSync(f.portFile, record(45071));
+  const h = host(f, { action() { queueMicrotask(() => [...h.timers.values()][0]()); } });
+  const error = await h.start().then(() => assert.fail('Expected startup timeout.'), error => error);
+  assert.equal(error.code, 'ARCANE_STARTUP'); assert.match(error.message, /timed out after 30 seconds.*saved port were retained/); assert.doesNotMatch(error.message, /another app/);
+  unadopted(h, f, record(45071));
 });
 
 test('fresh and legacy state without a port record request 0 and do not inspect credentials or infer migration', async t => {

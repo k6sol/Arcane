@@ -49,6 +49,16 @@ async function startDaemon(project) {
   // A conflicting occupied port fails startup; no silent port rotation or key replacement.
   const portFile = join(stateRoot, 'listener-port.json'); let savedPort = null;
   const startupPortError = message => Object.assign(new Error(message), { code: 'ARCANE_PROJECT_PORT' });
+  // Only a daemon-proved listener bind conflict uses port wording and the port code; other outcomes stay generic.
+  const startupFailure = code => code === 'PORT_IN_USE' ? startupPortError(STARTUP_FAILURE_TEXT[code]) : Object.assign(new Error(STARTUP_FAILURE_TEXT[code]), { code: 'ARCANE_STARTUP' });
+  const STARTUP_FAILURE_TEXT = Object.freeze({
+    PORT_IN_USE: 'The local runtime could not start because its local port is in use. Project records and the saved port were retained. Check for another app using the local port, then restart Arcane. No automatic retry was attempted.',
+    STATE_NEWER: 'This project uses records saved by a newer version of Arcane. Open this project with that version or later. No automatic retry or downgrade was attempted.',
+    STATE_UNSAFE: 'Arcane could not safely verify this project\'s saved records. They were retained unchanged; inspect the Arcane application-data folder before restarting. No automatic retry was attempted.',
+    RESOURCE_UNAVAILABLE: 'The Arcane application folder is incomplete or unavailable. Project records and the saved port were retained. Replace the complete app folder, then restart Arcane. No automatic retry was attempted.',
+    STARTUP_FAILED: 'The local runtime could not start. Project records and the saved port were retained. No automatic retry was attempted.',
+    STARTUP_TIMEOUT: 'The local runtime startup timed out after 30 seconds. Project records and the saved port were retained. No automatic retry was attempted.',
+  });
   const portFailure = () => { throw startupPortError('Saved local port metadata is unavailable. Project records were retained; inspect the Arcane application-data folder before restarting.'); };
   const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   const sameNode = (a, b) => ['dev', 'ino', 'mode', 'nlink'].every(name => a[name] === b[name]);
@@ -107,13 +117,17 @@ async function startDaemon(project) {
   Object.assign(env, verification.environment);
   const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   child = owned;
+  let reportedFailure = null;
   const ready = await new Promise((resolve, reject) => {
     const cleanup = () => { clearTimeout(timer); owned.removeListener('error', fail); owned.removeListener('exit', fail); owned.removeListener('message', onMessage); };
-    const timer = setTimeout(() => { cleanup(); reject(new Error('Startup timed out.')); }, 30000);
-    const fail = () => { cleanup(); reject(startupPortError('The local runtime could not start. Project records and the saved port were retained. Check for another app using the local port, then restart Arcane. No automatic retry was attempted.')); };
+    const timer = setTimeout(() => { cleanup(); reject(startupFailure(reportedFailure ?? 'STARTUP_TIMEOUT')); }, 30000);
+    const fail = () => { cleanup(); reject(startupFailure(reportedFailure ?? 'STARTUP_FAILED')); };
     const onMessage = message => {
-      let ready; try { ready = policy.readyMessage(message); } catch { return; }
       if (child !== owned || origin) return;
+      // The first valid report is kept until exit; it never establishes readiness or a retry.
+      try { const code = policy.startupFailureMessage(message); reportedFailure ??= code; return; } catch { /* Not a failure report. */ }
+      let ready; try { ready = policy.readyMessage(message); } catch { return; }
+      if (reportedFailure !== null) { cleanup(); reject(startupFailure(reportedFailure)); return; }
       // Use the validated literal port: URL normalizes the explicit HTTP port 80.
       const assignedPort = Number(ready.origin.slice(ready.origin.lastIndexOf(':') + 1));
       cleanup();
@@ -184,7 +198,7 @@ async function chooseProject() {
     await startDaemon(path); makeWindow(); await loadWorkspace();
     const pref = join(userRoot, 'last-project.json'); await policy.directPath(pref, 'file', true);
     await writeFile(pref, JSON.stringify({ version: 1, projectPath: path }) + '\n', { mode: 0o600 });
-  } catch (error) { await failStartup(error.code === 'ARCANE_PROJECT_PORT' ? error.message : 'Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
+  } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP'].includes(error.code) ? error.message : 'Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
   finally { switching = false; }
 }
 function installMenu() {
@@ -358,6 +372,6 @@ else {
         if (Object.keys(saved).sort().join(',') !== 'projectPath,version' || saved.version !== 1) throw new Error('Invalid project preference.'); selected = await policy.directPath(saved.projectPath);
       } catch (error) { if (error.code !== 'ENOENT' && !smoke) await dialog.showMessageBox({ type: 'warning', title: 'Saved project unavailable', message: 'Starting an empty local project. The saved preference was preserved; use File > Open project to choose a folder.' }); }
       await startDaemon(selected); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
-    } catch (error) { await failStartup(error.code === 'ARCANE_PROJECT_PORT' ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
+    } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP'].includes(error.code) ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
   });
 }

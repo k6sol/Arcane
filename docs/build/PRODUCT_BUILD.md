@@ -1,6 +1,6 @@
 # Managed product build
 
-Status: active development · 15 October 2026. The [full product plan](../PRODUCT_PLAN.md) remains the scope of work.
+Status: active development · 16 October 2026. The [full product plan](../PRODUCT_PLAN.md) remains the scope of work.
 
 ## Delivery gates (not marketing claims)
 
@@ -19,13 +19,16 @@ Broad optional hosted/cloud/enterprise backlog is separate from the complete loc
 | CORE-01 | Durable local bridge, exact command ownership, typed operations and recovery fences | HTTP/SQLite/SDK and Luau fixtures; native Studio conflict, replay and restoration acceptance remains required |
 | PLUGIN-01 | Modular XML artifact, installer and loaded-source hierarchy identity | Deterministic build/integrity/VM checks; actual Studio loading and compatibility remain unverified |
 | UI-01 | Electron shell, local workbench, projects/chats, approvals and previews | Real browser and packaged startup checks; complete customer journey and accessibility/performance acceptance remain required |
-| MCP-01 | Bundled SDK entrypoint, fixed tools and progressive guidance | Actual packaged Node/entrypoint discovery of 30 tools, guidance and clean shutdown; no provider inference or Studio calls in that check |
+| MCP-01 | Bundled SDK entrypoint, fixed tools and progressive guidance | Actual packaged Node/entrypoint discovery of 30 tools, guidance and that MCP process's shutdown; no provider inference or Studio calls in that check |
 | CHAT-01 | Managed Codex task permissions, retained ownership, PNG references, reported models/token usage, account quota observations and bounded repair | Client/HTTP/store/process and real Edge fixtures; [quota metadata and refresh](../provider-usage-limits.md) preserve account ownership and explicit model selection. Installed provider authentication/inference acceptance and Claude in-app parity remain open |
 | TEST-01 | Owned Play lifecycle, temporary edits, source-bound scenarios, capture review and task settlement | Production Client program executed in standalone Luau through synthetic SDK/service fixtures; native gameplay, server authority, multiplayer and devices remain open |
 | ASSET-01 | Supervised Blender jobs, bounded composition, previews and typed import delivery contracts | Recorded native template evidence and scoped worker/import fixtures; reference-driven production, advanced assets and actual Studio delivery remain required |
 | RELEASE-01 | Portable Windows bundle with pinned runtimes, dependencies and local diagnostics | 30 executable checks with scoped reports; installer/update, application signing and clean-machine customer acceptance remain required |
+| STARTUP-01 | Retained asset history separated from bounded metadata validation; fixed-code private startup diagnostics | Filesystem, launcher and actual disposable-daemon IPC checks; [startup recovery boundaries](../startup-recovery.md) preserve saved ports and newer state. Packaged failure dialogs retain separate acceptance |
 
 The cooperative work graph records dependencies, leases and reviews; an Arcane-hosted agent dispatcher remains work to complete. Optional cloud accounts, teams, shared assets, billing and operator tooling remain tracked in the full plan.
+
+The [native proposal-worker component](../native-proposal-workers.md) provides fresh account-matched read-only sessions with one dispatch and effective MCP isolation. Native lifecycle cleanup now waits for observed process closure or reports uncertainty. Parent-task dispatcher integration and native Windows descendant containment remain required. Executable startup/shutdown receipts without active native workers do not establish those workers' cleanup.
 
 Current implementation details and receipts are recorded in [chat task permissions](CHAT_TASK_PERMISSIONS_20261015.md), [PNG references](../chat-reference-images.md), [gameplay scenarios](../studio-gameplay-scenarios.md) and [packaged verification](PACKAGED_MCP_VERIFICATION_20261015.md). Keep native engine behavior, synthetic fixtures, real browser rendering, Blender runtime evidence and packaged startup distinct. Unknown effects retain reconciliation fences; completed commands are not silently dispatched again.
 

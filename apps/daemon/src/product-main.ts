@@ -1,7 +1,9 @@
 import { workflowCodeHostConfiguration } from './workflow-code-host.js';
 import { createLearningService } from './learning-service.js';
-import { resolve, join, dirname, relative, isAbsolute, sep, parse } from 'node:path';
-import { mkdir, writeFile, unlink, readFile, lstat, realpath, opendir } from 'node:fs/promises';
+import { resolve, join, isAbsolute } from 'node:path';
+import { mkdir, writeFile, unlink, readFile, lstat } from 'node:fs/promises';
+import { directStateDirectory, validatedStateDirectory } from './state-directory-validation.js';
+import { reportStartupFailure, type StartupPhase } from './startup-failure.js';
 import { StudioStore } from '../../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
@@ -16,6 +18,11 @@ async function cleanupStartup(services: Array<() => void | Promise<void>>): Prom
   // merely because one earlier service failed to close.
   for (const close of services) { try { await close(); } catch { /* Keep the original startup failure. */ } }
 }
+async function startupFailed(phase: StartupPhase, error: unknown, services: Array<() => void | Promise<void>> = []): Promise<void> {
+  // Close owned services first, then send only a fixed code. Callers rethrow the original error.
+  await cleanupStartup(services);
+  await reportStartupFailure(phase, error);
+}
 // The desktop host keeps immutable application resources separate from its owned writable cwd.
 // These environment values come only from a trusted local launcher, never HTTP/MCP input.
 const runtimeRoot = resolve(process.cwd());
@@ -23,78 +30,32 @@ const workflowCodeVerification = workflowCodeHostConfiguration(process.env);
 const resourceOverride = process.env.ARCANE_RESOURCE_DIRECTORY;
 const cwd = resourceOverride === undefined ? runtimeRoot : resolve(resourceOverride);
 const stateOverride = process.env.ARCANE_STATE_DIRECTORY;
-const samePath = (a: string, b: string) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-const inside = (root: string, target: string) => {
-  const path = relative(root, target);
-  return path !== '' && !isAbsolute(path) && path !== '..' && !path.startsWith('..' + sep);
-};
-async function directStateDirectory(path: string): Promise<void> {
-  let current = path;
-  for (;;) {
-    try {
-      const info = await lstat(current);
-      if (!info.isDirectory() || info.isSymbolicLink() || !samePath(await realpath(current), current)) {
-        throw new Error('ARCANE_STATE_DIRECTORY cannot contain links or redirected directories.');
-      }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    const parent = dirname(current);
-    if (parent === current) return;
-    current = parent;
-  }
-}
-async function validatedStateDirectory(value: string): Promise<string> {
-  if (!value || !isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value) || /^(?:\\\\|\/\/)/.test(value)) {
-    throw new Error('ARCANE_STATE_DIRECTORY must be an absolute local directory inside Arcane/runtime.');
-  }
-  const root = parse(value).root;
-  const parts = value.slice(root.length).split(process.platform === 'win32' ? /[\\/]/ : /\//);
-  if (parts.some(part => part === '.' || part === '..') || (process.platform === 'win32' &&
-      (!/^[a-z]:[\\/]$/i.test(root) || parts.some(part => /[<>:"|?*]|[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))))) {
-    throw new Error('ARCANE_STATE_DIRECTORY contains an unsafe path segment.');
-  }
-  const path = resolve(value), runtime = join(runtimeRoot, 'runtime');
-  if (!inside(runtime, path)) throw new Error('ARCANE_STATE_DIRECTORY must stay strictly inside Arcane/runtime.');
-  await directStateDirectory(path);
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  await directStateDirectory(path);
-  const physicalRuntime = await realpath(runtime), physicalPath = await realpath(path);
-  if (!inside(physicalRuntime, physicalPath)) throw new Error('ARCANE_STATE_DIRECTORY resolves outside Arcane/runtime.');
-  // Inspect only owned state metadata, never project files or credential contents.
-  // Reject nested links, non-regular files and hardlinked databases/descriptors too.
-  let entries = 0;
-  async function inspect(directory: string, depth: number): Promise<void> {
-    if (depth > 16) throw new Error('Arcane runtime state exceeds the validation depth limit.');
-    for await (const entry of await opendir(directory)) {
-      if (++entries > 4096) throw new Error('Arcane runtime state exceeds the validation entry limit.');
-      const child = join(directory, entry.name), info = await lstat(child);
-      if (info.isSymbolicLink() || !samePath(await realpath(child), child) || (!info.isDirectory() && (!info.isFile() || info.nlink !== 1))) {
-        throw new Error('Arcane runtime state cannot contain links or non-regular files.');
-      }
-      if (info.isDirectory()) await inspect(child, depth + 1);
-    }
-  }
-  await inspect(physicalPath, 0);
-  return physicalPath;
-}
 if (resourceOverride !== undefined) {
-  if (!isAbsolute(resourceOverride) || /[\x00-\x1f\x7f]/.test(resourceOverride) || /^(?:\\\\|\/\/)/.test(resourceOverride)) throw new Error('Arcane resource directory must be an absolute local installation.');
-  await directStateDirectory(cwd);
-  const entry = await lstat(join(cwd, 'dist/apps/daemon/src/product-main.js'));
-  if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1) throw new Error('Arcane resource installation is unavailable.');
+  try {
+    if (!isAbsolute(resourceOverride) || /[\x00-\x1f\x7f]/.test(resourceOverride) || /^(?:\\\\|\/\/)/.test(resourceOverride)) throw new Error('Arcane resource directory must be an absolute local installation.');
+    await directStateDirectory(cwd);
+    const entry = await lstat(join(cwd, 'dist/apps/daemon/src/product-main.js'));
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1) throw new Error('Arcane resource installation is unavailable.');
+  } catch (error) { await startupFailed('resources', error); throw error; }
 }
-const directory = stateOverride === undefined ? join(runtimeRoot, 'runtime', 'product') : await validatedStateDirectory(stateOverride);
+let directory: string;
+try { directory = stateOverride === undefined ? join(runtimeRoot, 'runtime', 'product') : await validatedStateDirectory(stateOverride, runtimeRoot); }
+catch (error) { await startupFailed('state', error); throw error; }
 const connectionDirectory = stateOverride === undefined ? join(runtimeRoot, 'runtime', 'connection-lab') : join(directory, 'connection-lab');
 const portText = process.env.ARCANE_PORT;
 const port = portText ? Number(portText) : 45871;
-if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('ARCANE_PORT must be an integer 0..65535.');
-const store = new StudioStore({ directory });
+if (!Number.isInteger(port) || port < 0 || port > 65535) {
+  const error = new Error('ARCANE_PORT must be an integer 0..65535.'); await startupFailed('services', error); throw error;
+}
+let store: StudioStore;
+try { store = new StudioStore({ directory }); } catch (error) { await startupFailed('services', error); throw error; }
 const projectPath = resolve(process.env.ARCANE_PROJECT ?? cwd);
 let work: WorkStore;
-try { work = new WorkStore({ directory, projectPath }); } catch (error) { await cleanupStartup([() => store.close()]); throw error; }
+try { work = new WorkStore({ directory, projectPath }); } catch (error) { await startupFailed('services', error, [() => store.close()]); throw error; }
 let associations: ConversationWorkStore;
 try {
   associations = new ConversationWorkStore({ directory: join(connectionDirectory, 'conversation-work'), projectPath });
-} catch (error) { await cleanupStartup([() => work.close(), () => store.close()]); throw error; }
+} catch (error) { await startupFailed('services', error, [() => work.close(), () => store.close()]); throw error; }
 let assets: Awaited<ReturnType<typeof createAssetService>>;
 let preparations: Awaited<ReturnType<typeof createStudioImportPreparationStore>>;
 let importHost: ReturnType<typeof createStudioImportHost>;
@@ -108,23 +69,23 @@ try {
     importHost = createStudioImportHost({ projectPath: associations.projectPath, workAssociations: associations, studio: store,
       pluginArtifactHash, persistPreparation: (...args) => preparations.save(...args) });
   } catch (error) { await cleanupStartup([() => preparations.close()]); throw error; }
-} catch (error) { await cleanupStartup([() => associations.close(), () => work.close(), () => store.close()]); throw error; }
-try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,studioImport:importHost.hooks,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await cleanupStartup([() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
+} catch (error) { await startupFailed('services', error, [() => associations.close(), () => work.close(), () => store.close()]); throw error; }
+try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,studioImport:importHost.hooks,...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await startupFailed('services', error, [() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 try {importStaging=createStudioImportStagingController({projectPath: associations.projectPath, workAssociations: associations, studio: store,
   assets, host: importHost.hooks, pluginArtifactHash});}
-catch(error){await cleanupStartup([() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
+catch(error){await startupFailed('services', error, [() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
-catch (error) { await cleanupStartup([() => importStaging.close(), () => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
+catch (error) { await startupFailed('services', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
 try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
-catch (error) { await cleanupStartup([() => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
+catch (error) { await startupFailed('listen', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 const descriptor = join(directory, 'daemon.json');
 try {
   await mkdir(directory, { recursive: true });
   await writeFile(descriptor, JSON.stringify({ origin: app.origin, pid: process.pid, protocolVersion: 1 }) + '\n', { mode: 0o600 });
 } catch (error) {
-  await cleanupStartup([() => app.close(), () => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);
+  await startupFailed('descriptor', error, [() => app.close(), () => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);
   throw error;
 }
 console.log('Arcane local Studio workbench. An explicit Studio API-key connection and write grant are required before edits.');

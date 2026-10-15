@@ -9,6 +9,9 @@ import { projectLaunchPlan } from '../../scripts/open-project.mjs';
 
 const launcherSource = await readFile(new URL('../../scripts/open-project.mjs', import.meta.url), 'utf8');
 const productSource = await readFile(new URL('../../apps/daemon/src/product-main.ts', import.meta.url), 'utf8');
+// Real startup validation/reporting modules execute beside the fixture entry; only services are replaced.
+const productStartupModules = await Promise.all(['state-directory-validation', 'startup-failure'].map(async name =>
+  ({ name, source: await readFile(new URL('../../apps/daemon/src/' + name + '.ts', import.meta.url), 'utf8') })));
 const digest = path => createHash('sha256').update(process.platform === 'win32' ? path.toLowerCase() : path).digest('hex');
 function cleanEnv(extra = {}) {
   const env = { ...process.env };
@@ -66,6 +69,12 @@ async function fixture(t) {
   for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js', './studio-import-host.js', './studio-import-preparation-store.js', './studio-import-plugin-artifact.js', './studio-import-staging-controller.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
+  }
+  for (const { name, source } of productStartupModules) {
+    assert.ok(productFixture.includes("from './" + name + ".js'"));
+    assert.doesNotMatch(source, /from '\.{1,2}\//, 'Copied startup modules must depend only on Node built-ins.');
+    productFixture = productFixture.replace("from './" + name + ".js'", "from './" + name + ".ts'");
+    await write(name + '.ts', source);
   }
   await write('product.fixture.ts', productFixture);
   await write('product-services.fixture.mjs', `

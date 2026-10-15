@@ -88,6 +88,7 @@ function productServiceFixture({ closeFailAt } = {}) {
     stateOverride:directory, resourceOverride:cwd, port:0, workflowCodeVerification:undefined,
     process:{env:{ARCANE_PROJECT:projectPath},pid:17,exit(code){exitCode=code;}},
     join:win32.join, resolve:win32.resolve,
+    async reportStartupFailure(){ assert.fail('A healthy product composition must not report a startup failure.'); },
     StudioStore:class { constructor(options) { assert.equal(options.directory,directory); created('studio',this); } close(){closed('studio',this);} },
     WorkStore:class { constructor(options) { assert.equal(options.directory,directory); assert.equal(options.projectPath,projectPath); created('work',this); } close(){closed('work',this);} },
     ConversationWorkStore:class { constructor(options) { assert.equal(options.directory,win32.join(directory,'connection-lab','conversation-work')); assert.equal(options.projectPath,projectPath); this.projectPath=projectPath; created('associations',this); } close(){closed('associations',this);} },
@@ -134,7 +135,7 @@ function productServiceFixture({ closeFailAt } = {}) {
     },
   };
   const cleanupBegin = productSource.indexOf('async function cleanupStartup('), cleanupEnd = productSource.indexOf('// The desktop host',cleanupBegin);
-  const begin = productSource.indexOf('const store = new StudioStore('), end = productSource.indexOf('const descriptor =',begin);
+  const begin = productSource.indexOf('let store: StudioStore;'), end = productSource.indexOf('const descriptor =',begin);
   assert.ok(cleanupBegin >= 0 && cleanupEnd > cleanupBegin && begin >= 0 && end > begin,'Expected the trusted product composition boundary.');
   const initialize = () => vm.runInNewContext(stripTypeScriptTypes('(async () => {\n' + productSource.slice(cleanupBegin,cleanupEnd) + productSource.slice(begin,end) + '\nreturn {store,work,associations,assets,learning,app};\n})()'),context);
   const shutdown = async () => {
