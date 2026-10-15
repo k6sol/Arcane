@@ -1,5 +1,5 @@
 # Arcane — implementation roadmap and release gates
-Version 1.2 · 11 October 2026. Milestones below are not completed. The experimental skill pack/offline helper and a buildable provider-connection workspace/lab now exist. Native metadata, exact preference saving and local HTTP boundaries are tested; Studio/plugin, inference and packaged desktop gates remain open. See [current provider slice](PROVIDER_NATIVE_FEATURES.md).
+Version 1.3 · 15 October 2026. Milestones below remain acceptance gates. Implemented components now include the Electron shell, managed Codex chat/tasks, connected asset contracts, modular plugin packaging and finite gameplay scenarios. Actual portable Windows executable/MCP and browser checks have scoped evidence; native Studio, completed provider inference, clean-machine installation/update and the full customer journey remain open. See [current product build](build/PRODUCT_BUILD.md), [packaged verification](build/PACKAGED_MCP_VERIFICATION_20261015.md) and [provider integration](PROVIDER_NATIVE_FEATURES.md).
 
 ## 1. Build strategy
 
@@ -191,4 +191,6 @@ Compare equivalent completed tasks against the current workflow by cost, elapsed
 
 ## 7. Next implementation slice
 
-Implement M0 and the read-only portion of M1 first, following `BUILD_PROMPT.md`. Finish a buildable plugin, authenticated local pairing, exact target identity, hierarchy/selection/script reads and external MCP health. Test in a disposable place. Keep scope narrow enough to diagnose the full path end to end before adding writes or Blender.
+Continue the chat-first integration path: automatic permissions → connected asset delivery and reconciliation → modular plugin compatibility → the complete task/playtest/repair loop → packaged customer acceptance. Existing implementations and their fixtures are evidence for their stated scope; each milestone still needs its complete acceptance gate.
+
+Prioritize interrupted-task continuity, uncertain import/update recovery, delivered asset quality and the remaining provider, agent-dispatch, multiplayer/device and installation/update requirements. Keep the full product plan intact. Studio execution remains deferred under the current instruction to leave Studio untouched, so SDK/Luau fixtures and executable startup cannot certify native gameplay or plugin loading. `BUILD_PROMPT.md` remains the historical first development brief, rather than an instruction to rebuild existing M0/M1 components.

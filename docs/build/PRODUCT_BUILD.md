@@ -1,6 +1,6 @@
 # Managed product build
 
-Status: active. Owner: parent integration agent. User explicitly requested continued work and parallel agents.
+Status: active development · 15 October 2026. The [full product plan](../PRODUCT_PLAN.md) remains the scope of work.
 
 ## Delivery gates (not marketing claims)
 
@@ -12,14 +12,21 @@ Status: active. Owner: parent integration agent. User explicitly requested conti
 
 Broad optional hosted/cloud/enterprise backlog is separate from the complete local developer product. No full-product completion until required local gates actually pass. No fabricated success for unavailable integrations.
 
-## Work board
+## Current implementation and evidence
 
-| ID | Scope | Owner | State | Acceptance |
-|---|---|---|---|---|
-| CORE-01 | Shared bridge contract + SQLite + HTTP + integration | parent | in progress | Loopback security, persistence, idempotency, exact scope, recovery tests |
-| PLUGIN-01 | Plugin transport/widget/typed operations/package | plugin worker | ready | Build artifact + source tests, later native fixture |
-| UI-01 | Genuine local product/Studio panel | UI worker | ready | Pair/read/write/receipt paths without fake data |
-| MCP-01 | SDK stdio tools + local connection config | MCP worker | ready | Actual SDK client integration and timeouts |
-| ASSET-01 | Supervised Blender pipeline | asset worker | ready | Local runtime probe + verified manifest/exports |
+| ID | Implemented scope | Evidence and remaining gate |
+|---|---|---|
+| CORE-01 | Durable local bridge, exact command ownership, typed operations and recovery fences | HTTP/SQLite/SDK and Luau fixtures; native Studio conflict, replay and restoration acceptance remains required |
+| PLUGIN-01 | Modular XML artifact, installer and loaded-source hierarchy identity | Deterministic build/integrity/VM checks; actual Studio loading and compatibility remain unverified |
+| UI-01 | Electron shell, local workbench, projects/chats, approvals and previews | Real browser and packaged startup checks; complete customer journey and accessibility/performance acceptance remain required |
+| MCP-01 | Bundled SDK entrypoint, fixed tools and progressive guidance | Actual packaged Node/entrypoint discovery of 29 tools, guidance and clean shutdown; no provider inference or Studio calls in that check |
+| CHAT-01 | Managed Codex task permissions, retained ownership, PNG references, reported models/usage and bounded repair | Client/HTTP/store/process fixtures; installed provider authentication/inference acceptance and Claude in-app parity remain open |
+| TEST-01 | Owned Play lifecycle, temporary edits, source-bound scenarios, capture review and task settlement | Production Client program executed in standalone Luau through synthetic SDK/service fixtures; native gameplay, server authority, multiplayer and devices remain open |
+| ASSET-01 | Supervised Blender jobs, bounded composition, previews and typed import delivery contracts | Recorded native template evidence and scoped worker/import fixtures; reference-driven production, advanced assets and actual Studio delivery remain required |
+| RELEASE-01 | Portable Windows bundle with pinned runtimes, dependencies and local diagnostics | 30 executable checks with scoped reports; installer/update, application signing and clean-machine customer acceptance remain required |
 
-Agents get disjoint write scopes. Parent owns shared dependencies and protocol, reviews before acceptance, records evidence. A worker completion is not a product completion. Unknown mutation outcomes are reconciled, never silently retried.
+The cooperative work graph records dependencies, leases and reviews; an Arcane-hosted agent dispatcher remains work to complete. Optional cloud accounts, teams, shared assets, billing and operator tooling remain tracked in the full plan.
+
+Current implementation details and receipts are recorded in [chat task permissions](CHAT_TASK_PERMISSIONS_20261015.md), [PNG references](../chat-reference-images.md), [gameplay scenarios](../studio-gameplay-scenarios.md) and [packaged verification](PACKAGED_MCP_VERIFICATION_20261015.md). Keep native engine behavior, synthetic fixtures, real browser rendering, Blender runtime evidence and packaged startup distinct. Unknown effects retain reconciliation fences; completed commands are not silently dispatched again.
+
+The latest player-attribute component was verified with 233 focused runtime/MCP/panel/service cases, 37 final panel cases and ten real Edge browser checks. Its portable Windows source snapshot is `afc5a90799f32735ee844c1a0d4353daf5a3fc76`; all 30 executable checks passed. These results leave the full native customer acceptance gate open.
