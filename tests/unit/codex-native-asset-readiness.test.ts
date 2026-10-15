@@ -14,7 +14,7 @@ import { requireArcaneBuildTools, type McpInventoryRow } from '../../packages/co
 import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 
 const ROOT = resolve(process.cwd()), HUMAN = { initiatedBy: 'human' } as const;
-const THREAD = 'readiness.thread:exact', PREPARE = 'assets_prepare_studio_import', STAGE = 'assets_stage_studio_import', STATUS = 'assets_studio_staging_status';
+const THREAD = 'readiness.thread:exact', ADOPT = 'assets_adopt_glb', PREPARE = 'assets_prepare_studio_import', STAGE = 'assets_stage_studio_import', STATUS = 'assets_studio_staging_status';
 const INPUT = { ...HUMAN, threadId: THREAD, text: 'Synthetic readiness turn' };
 type Wire = { method?: string; params?: { threadId?: string } };
 
@@ -72,7 +72,7 @@ const calls = (wire: Wire[], method: string) => wire.filter(row => row.method ==
 const setup = (session: CodexSession, method: 'start' | 'resume') => method === 'start'
  ? session.startThread(HUMAN) : session.resumeThread({ ...HUMAN, threadId: THREAD });
 
-for (const method of ['start', 'resume'] as const) for (const native of [false, true]) for (const missing of [PREPARE, STAGE, STATUS]) {
+for (const method of ['start', 'resume'] as const) for (const native of [false, true]) for (const missing of [ADOPT, PREPARE, STAGE, STATUS]) {
  test(`${method}: missing ${missing} ${native ? 'fences native' : 'allows generic'} setup despite opposing metadata`, async t => {
    const partial = native ? ARCANE_NATIVE_TOOL_NAMES.filter(name => name !== missing) : ARCANE_TOOL_NAMES;
    const f = await fixture(t, native, partial);
@@ -147,7 +147,7 @@ test('actual generic and native MCP catalogues exactly match their reviewed read
    await server.connect(serverTransport); await client.connect(clientTransport);
    const names: string[] = (await client.listTools()).tools.map(tool => tool.name);
    assert.deepEqual([...names], [...(native ? ARCANE_NATIVE_TOOL_NAMES : ARCANE_TOOL_NAMES)]);
-   assert.equal(names.includes(PREPARE), native); assert.equal(names.includes(STAGE), native); assert.equal(names.includes(STATUS), native);
+   assert.equal(names.includes(ADOPT), native); assert.equal(names.includes(PREPARE), native); assert.equal(names.includes(STAGE), native); assert.equal(names.includes(STATUS), native);
    assert.equal(names.includes('scene_import_context'), false);
    const row: McpInventoryRow = { name: 'arcane', runtimeStatus: 'connected', toolNames: names, toolsError: false, plugin: false, pluginId: null };
    assert.doesNotThrow(() => requireArcaneBuildTools([row], native));

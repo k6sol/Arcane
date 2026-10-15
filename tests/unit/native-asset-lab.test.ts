@@ -105,6 +105,7 @@ async function fixture(t: test.TestContext) {
     async cancel(id) { const job = jobs.find(value => value.jobId === id); assert.ok(job); cancels++; job.state = 'cancelled'; return structuredClone(job); },
     async probe() { throw new Error('No runtime probes in LAB proof'); },
     async manifest() { throw new Error('No generated manifests in LAB proof'); },
+    async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in LAB proof'); },
     async prepareStudioImportPayload() { throw new Error('Payload staging must not be called by this public service fixture.'); },
     async preview() { throw new Error('No rendered previews in LAB proof'); },

@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
+import {parseAdoptGlbInput,parseAdoptedGlbRequest,parseAdoptedGlbManifest,type AdoptedGlbRequest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+import type {AssetPreviewManifest} from '../../daemon/src/asset-service.js';
 import { normalizeRequest, validateAudit } from '../../../packages/asset-pipeline/src/validation.js';
 import { jsonSnapshot, JOB_JOURNAL_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { AssetInput, AssetRequest, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
@@ -28,6 +30,12 @@ export const assetInput = z.strictObject({
   recipe: assemblyRecipe.optional(),
 });
 export type SafeAssetInput = z.output<typeof assetInput>;
+export const nativeAdoptGlbInput=z.strictObject({name:assetSlug,path:z.string().min(1).max(4096)}).superRefine((value,context)=>{
+ try{parseAdoptGlbInput(value);}catch{context.addIssue({code:'custom',message:'Use a direct project-relative .glb path, not URLs, links, traversal or authority fields.'});}
+});
+export const adoptedGlbRequest:z.ZodType<AdoptedGlbRequest>=z.unknown().transform((value,context)=>{
+ try{return parseAdoptedGlbRequest(value);}catch{context.addIssue({code:'custom',message:'Invalid adopted GLB request provenance.'});return z.NEVER;}
+});
 export function safeAssetInput(input: SafeAssetInput): AssetInput {
   // Keep optional settings and recipe defaults omitted in the submitted source request.
   // The shared validator snapshots plain JSON, checks topology/preflight, and returns a typed normalized request.
@@ -53,7 +61,7 @@ export const assetJobId = z.string().regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f
 const jobState = z.enum(['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted']);
 export const assetJob: z.ZodType<AssetJobRecord> = z.object({
   schemaVersion: z.literal(1), jobId: assetJobId, directory: path, state: jobState,
-  manifestPath: path.nullable(), error: z.object({ code: id.max(64), message: text }).nullable(), request: assetRequest,
+  manifestPath: path.nullable(), error: z.object({ code: id.max(64), message: text }).nullable(), request: z.union([assetRequest,adoptedGlbRequest]),
   stage: id.max(48), startedAt: id, updatedAt: id, manifestAvailable: z.boolean(),
   events: z.array(z.object({ jobId: assetJobId, at: id, stage: id.max(48), state: jobState })).max(64), finishedAt: id.optional(),
 }).transform(({ finishedAt, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }) }))
@@ -123,7 +131,7 @@ const audit = z.object({ schemaVersion: z.literal(1), template, meshes: z.array(
     meanLuminance: finite, standardDeviation: finite })).max(32), exports: z.array(exported).max(32),
   savedSceneReopened: z.boolean(), errors: z.array(text).max(128), warnings: z.array(text).max(128), assembly: assemblyEvidence.optional(),
 }).transform(({ assembly, ...value }) => ({ ...value, ...(assembly === undefined ? {} : { assembly }) }));
-export const assetManifest: z.ZodType<AssetManifest> = z.object({
+const generatedAssetManifest: z.ZodType<AssetManifest> = z.object({
   schemaVersion: z.literal(1), jobId: assetJobId, createdAt: id, request: assetRequest, runtime, templateSha256: hash,
   sourceRequestSha256: hash.optional(), assembly: assemblyEvidence.optional(),
   coordinateSystem: z.object({ units: z.literal('meters'), sceneUp: z.literal('Z'), glbUp: z.literal('Y'), fbxUp: z.literal('Y'), pivot: z.literal('floor'), robloxScaleVerified: z.literal(false) }),
@@ -141,3 +149,7 @@ export const assetManifest: z.ZodType<AssetManifest> = z.object({
       validateAudit(value.validation, value.request);
     } catch { context.addIssue({ code: 'custom', message: 'Custom manifest requires matching assembly, source digest, mesh bounds/digests, export sockets and shared audit evidence.' }); }
   });
+
+export const assetManifest:z.ZodType<AssetPreviewManifest>=z.union([generatedAssetManifest,z.unknown().transform((value,context)=>{
+ try{return parseAdoptedGlbManifest(value);}catch{context.addIssue({code:'custom',message:'Invalid preview-only adopted GLB manifest.'});return z.NEVER;}
+})]);

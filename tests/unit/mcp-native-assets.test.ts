@@ -330,14 +330,14 @@ test('native MCP: existing probe/manifest/cancel record checks retain requested 
 test('native MCP: fixed descriptions/annotations explain scope, host permission and unproven originating turn', async t => {
   const f = await fixture(t, () => assert.fail('Listing tools must not contact HTTP'));
   const tools = (await f.client.listTools()).tools.filter(tool => tool.name.startsWith('assets_'));
-  assert.equal(tools.length, 8);
+  assert.equal(tools.length, 9);
   for (const tool of tools) {
     assert.equal(tool.inputSchema.additionalProperties, false); assert.equal(tool.annotations?.openWorldHint, false);
     assert.match(tool.description!, /exact project and Codex conversation scope/);
     assert.match(tool.description!, /explicit host asset permission.*open admission window/);
     assert.match(tool.description!, /routing mode grants no authority/);
     assert.match(tool.description!, /no originating-turn provenance/);
-    const mutation = ['assets_start', 'assets_cancel', 'assets_prepare_studio_import', 'assets_stage_studio_import'].includes(tool.name);
+    const mutation = ['assets_start', 'assets_adopt_glb', 'assets_cancel', 'assets_prepare_studio_import', 'assets_stage_studio_import'].includes(tool.name);
     assert.equal(tool.annotations?.readOnlyHint, !mutation); assert.equal(tool.annotations?.idempotentHint, !mutation);
   }
   assert.equal(f.requests.length, 0);

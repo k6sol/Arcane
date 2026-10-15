@@ -14,8 +14,8 @@ import { startPlaytestPanel } from './playtest-panel.js';
 import { StudioKeySettings, trustedKeyAction } from './studio-key-settings.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
-import type { AssetInput, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
-import type { AssetJobRecord } from '../../daemon/src/asset-service.js';
+import type { AssetInput, AssetProbe } from '../../../packages/asset-pipeline/src/types.js';
+import type { AssetPreviewManifest as AssetManifest, AssetJobRecord } from '../../daemon/src/asset-service.js';
 import type { WorkRun, WorkTask } from '../../../packages/storage/src/work-store.js';
 import type { InstanceRef, Json, MutationReceipt, StudioCommand, StudioMethod, StudioRoot, StudioSession } from '../../../packages/protocol/src/studio.js';
 
@@ -254,12 +254,20 @@ function readAssetJob(value: unknown): AssetJobRecord {
   const states = ['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
   const time = (v: unknown) => assetText(v, 64) && Number.isFinite(Date.parse(v));
   if (r.schemaVersion !== 1 || !assetId(r.jobId) || !assetText(r.directory, 4096) || !(r.manifestPath === null || assetText(r.manifestPath, 4096)) || !states.includes(String(r.state)) || !assetText(r.stage, 256) || !time(r.startedAt) || !time(r.updatedAt) || (r.finishedAt !== undefined && !time(r.finishedAt)) || typeof r.manifestAvailable !== 'boolean' || !Array.isArray(r.events) || r.events.length > 4096) throw new Error('Invalid recorded asset job.');
+  if (record(r.request) && r.request.template === 'adopted-glb') {
+    const request=assetFields(r.request,['schemaVersion','template','name','path','sourceSha256','sourceBytes']);
+    if(request.schemaVersion!==1||typeof request.name!=='string'||!/^[a-z][a-z0-9-]{0,47}$/.test(request.name)
+      ||!assetText(request.path,4096)||!request.path.toLowerCase().endsWith('.glb')||/[\\:\x00-\x1f]/.test(request.path)
+      ||request.path.split('/').some(s=>!s||s==='.'||s==='..')||typeof request.sourceSha256!=='string'||!/^[a-f0-9]{64}$/.test(request.sourceSha256)
+      ||typeof request.sourceBytes!=='number'||!Number.isSafeInteger(request.sourceBytes)||request.sourceBytes<1||request.sourceBytes>64*1024*1024) throw new Error('Invalid adopted GLB request.');
+  } else {
   const request = assetFields(r.request, ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples'], ['recipe']);
   if (request.schemaVersion !== 1 || !['hero-prop', 'environment-kit', 'custom-assembly'].includes(String(request.template))) throw new Error('Invalid recorded asset request.');
   const { schemaVersion: _schema, recipe, ...parameters } = request;
   prepareAssetInput({ ...parameters, ...(request.template === 'custom-assembly' ? { template: 'hero-prop', sizeMeters: [1, 1, 1] } : {}) });
   if (request.template === 'custom-assembly' && (!Array.isArray(request.sizeMeters) || request.sizeMeters.length !== 3 || request.sizeMeters.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0.01 || value > 40))) throw new Error('Invalid recorded custom asset dimensions.');
   if (request.template === 'custom-assembly' ? !record(recipe) : recipe !== undefined) throw new Error('Invalid recorded asset recipe.');
+  }
   for (const event of r.events) {
     const e = assetFields(event, ['jobId', 'at', 'stage', 'state']);
     if (e.jobId !== r.jobId || !time(e.at) || !assetText(e.stage, 256) || !states.includes(String(e.state))) throw new Error('Invalid recorded asset event.');
@@ -1469,7 +1477,7 @@ export class StudioWorkbench {
     for (const job of jobs) {
       const card = this.make('article', undefined, 'chat-asset-card'); card.setAttribute('role', 'listitem'); card.setAttribute('data-job-id', job.jobId);
       const name = job.request.name.replaceAll('-', ' '), title = this.make('strong', name.charAt(0).toUpperCase() + name.slice(1));
-      const state = this.make('span', job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state], 'chat-asset-state');
+      const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (job.request.template === 'adopted-glb' ? ' · Adopted GLB · preview only' : ''), 'chat-asset-state');
       const info = this.make('div', undefined, 'chat-asset-info'); info.append(title, state); card.append(info);
       if (job.state === 'succeeded' && job.manifestAvailable) {
         const view = this.make('button', 'View', 'secondary'); view.type = 'button'; view.setAttribute('aria-label', 'View ' + name); view.disabled = this.assetBusy;
@@ -1527,7 +1535,7 @@ export class StudioWorkbench {
         if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'running'},bubbles:false}));
       }
     }
-    this.text('asset-job-summary', job ? job.request.name + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
+    this.text('asset-job-summary', job ? job.request.name + (job.request.template === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
   }
   private assetFailure(error: unknown, operation: string) {
     const message = error instanceof Error ? error.message : String(error); this.text('asset-notice', message);

@@ -62,6 +62,7 @@ async function fixture(t: test.TestContext) {
       probeReads++; readEntered.release(); await readRelease.promise;
       return { observedAt: now, available: false, blender: null, python: null, attempts: [], fixtureMarker: MARKER };
     },
+    async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in the native HTTP fixture.'); },
     async prepareStudioImportPayload() { throw new Error('Payload staging must not be called by this public service fixture.'); },
     async preview() { throw new Error('No fixture previews'); }, async artifact() { throw new Error('No fixture artifacts'); }, async close() {},

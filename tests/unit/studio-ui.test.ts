@@ -426,6 +426,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
       if (url.pathname === '/v1/assets/jobs') { send(url.searchParams.has('limit') ? { schemaVersion: 1, jobs: fixtureAssetJobs, total: fixtureAssetJobs.length, nextCursor: null, byteLimit: 512 * 1024 } : { jobs: fixtureAssetJobs }); return; }
       if (url.pathname === '/v1/assets/manifest') {
         const job = fixtureAssetJobs.find(j => j.jobId === url.searchParams.get('jobId'))!;
+        if (job.request.template === 'adopted-glb') throw new Error('This generated-manifest fixture does not admit adopted jobs.');
         const manifest: AssetManifest = { schemaVersion: 1, jobId: job.jobId, createdAt: job.startedAt, request: job.request, runtime: fixtureRuntime, templateSha256: '0'.repeat(64), coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false }, validation: audit(), artifacts: ['preview-hero.png', 'preview-side.png'].map(path => ({ path, role: 'preview', bytes: fixturePng.length, sha256: createHash('sha256').update(fixturePng).digest('hex') })), limitations: ['HTTP contract fixture only; no native Blender or Studio verification.'] }; send({ manifest }); return;
       }
       if (url.pathname === '/v1/assets/preview') { const bytes = Buffer.from(fixturePng); if (corruptPreview) bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1; response.writeHead(200, { 'Content-Type': 'image/png' }); response.end(bytes); return; }

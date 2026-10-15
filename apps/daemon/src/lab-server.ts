@@ -210,6 +210,7 @@ export async function createConnectionLab(options: Options) {
       },
       start: async request => (await options.assetService!.start(request)).jobId,
       startNative: async (request,admission) => (await options.assetService!.start(request,admission)).jobId,
+      ...(typeof options.assetService.adoptProjectGlb === 'function' ? {adoptNative: async (request,actor,admission) => (await options.assetService!.adoptProjectGlb(request,actor,admission)).jobId} satisfies Pick<import('./asset-conversation-host.js').AssetConversationHostOptions,'adoptNative'> : {}),
     }) : null;
   } catch (error) {
     // Initialization failure must close every owned resource, without closing

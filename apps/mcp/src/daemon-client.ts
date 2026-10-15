@@ -8,7 +8,7 @@ import type { StudioCommand, StudioMethod, StudioSession, Json } from '../../../
 import { command, session } from './schemas.js';
 import { workTask, workRun, workDefinition, leaseToken } from './work-schemas.js';
 import type { WorkTask, WorkRun } from '../../../packages/storage/src/work-store.js';
-import { assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel, nativeAssetJobId, nativeAssetCursorMatchesScope, type SafeAssetInput } from './asset-schemas.js';
+import { nativeAdoptGlbInput, assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel, nativeAssetJobId, nativeAssetCursorMatchesScope, type SafeAssetInput } from './asset-schemas.js';
 import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import { NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse } from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
 import { parseNativeStudioStagingStatusResponse } from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
@@ -275,6 +275,12 @@ export class DaemonClient {
       'Inspect assets_jobs for this asset name and request. The job may have started; do not repeat the start automatically. operationId is diagnostic, not a daemon idempotency key.', options);
   }
 
+  async assetsAdoptGlb(input:{name:string;path:string},options:WaitOptions={}) {
+    if(this.assetAudience!=='native-session')throw new BridgeError('ASSET_AUDIENCE','GLB adoption requires the dedicated native-session audience.');
+    const body=nativeAdoptGlbInput.parse(input);
+    return this.postOnce('/v1/assets/native/adopt-glb',body,nativeAssetStart,{jobId:null,name:body.name,retry:false},
+      'Inspect assets_jobs in this exact native project and conversation; adoption or binding may be unknown. Never auto-retry or manufacture a worker manifest. Preview does not establish engine import rights.',options);
+  }
   async assetsCancel(jobId: string, options: WaitOptions = {}) {
     (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);
     const nextStep = this.assetAudience === 'native-session'

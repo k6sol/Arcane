@@ -1,6 +1,10 @@
 import { JOB_JOURNAL_BYTES, CUSTOM_REQUEST_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { Stats } from 'node:fs';
-import { lstat, opendir } from 'node:fs/promises';
+import { lstat, opendir, mkdir, writeFile, rename } from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
+import {parseAdoptGlbInput, parseAdoptedGlbRequest, isAdoptedGlbRequest, isAdoptedGlbManifest, readOwnedProjectGlb, validateAdoptedGlbManifest, ADOPTED_GLB_LIMITS, type AdoptedGlbRequest, type AdoptedGlbManifest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest;
 import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
@@ -22,7 +26,7 @@ export interface PreparedStudioImportPayload {
   readonly transfer: StudioImportTransfer;
 }
 interface StudioImportReaders {
-  manifest(jobId: unknown): Promise<AssetManifest>;
+  manifest(jobId: unknown): Promise<AssetPreviewManifest>;
   artifact(jobId: unknown, path: unknown): Promise<{ bytes: Buffer; filename: string; contentType: string }>;
 }
 
@@ -54,7 +58,7 @@ export interface AssetJobRecord {
   directory: string;
   manifestPath: string | null;
   finishedAt?: string;
-  request: AssetRequest;
+  request: AssetRequest | AdoptedGlbRequest;
   state: AssetJobState;
   stage: string;
   startedAt: string;
@@ -112,6 +116,7 @@ export async function createAssetService(options: AssetServiceOptions) {
   const entries = new Map<string, { directory: string; job: AssetJobRecord }>();
   const active = new Map<string, { handle: AssetJob; completion: Promise<void> }>();
   let probeActive: AbortController | null = null;
+  let adoption: Promise<AssetJobRecord> | null = null;
   let artifactReadActive = false;
   let studioImportActive = false;
   let pending: Promise<void> = Promise.resolve(), persistenceError = false, closed = false;
@@ -164,6 +169,23 @@ export async function createAssetService(options: AssetServiceOptions) {
       await noLinks(directory);
       const journal = record(await readJson(join(directory, 'job.json'), JOB_JOURNAL_BYTES), 'job journal');
       if (id(journal.jobId) !== match[2]) throw new AssetError('RECOVERY', 'Job directory and journal identities disagree.');
+      if (isAdoptedGlbRequest(journal.request)) {
+        const request = parseAdoptedGlbRequest(journal.request);
+        if (request.name !== match[1]) throw new AssetError('RECOVERY','Adopted job identity disagrees.');
+        const startedAt = timestamp(journal.startedAt, new Date().toISOString());
+        let state: AssetJobState = journal.state === 'running' ? 'interrupted' : journal.state === 'succeeded' ? 'succeeded' : 'failed';
+        let error: AssetJobRecord['error'] = state === 'interrupted' ? {code:'SUPERVISION_LOST',message:'Adoption completion is unknown; no replay.'} : null;
+        if (state === 'succeeded') {
+          try {
+            const manifest = await validateAdoptedGlbManifest(directory, await readJson(join(directory,'manifest.json')));
+            if(manifest.jobId !== match[2] || !isDeepStrictEqual(manifest.request,request) || !importHost || manifest.provenance.projectId !== importHost.workAssociations.projectId) throw new Error('scope');
+          } catch {state='failed';error={code:'HISTORY_INTEGRITY',message:'Managed adopted GLB evidence failed verification.'};}
+        }
+        entries.set(match[2]!,{directory,job:{schemaVersion:1,jobId:match[2]!,directory,request,state,stage:'complete',startedAt,
+          updatedAt:timestamp(journal.updatedAt,startedAt),...(typeof journal.finishedAt==='string'?{finishedAt:journal.finishedAt}:{}),
+          manifestPath:state==='succeeded'?join(directory,'manifest.json'):null,manifestAvailable:state==='succeeded',events:[],error}});
+        continue;
+      }
       let request: AssetRequest;
       try { request = normalizeRequest(journal.request ?? await readJson(join(directory, 'request.json'), CUSTOM_REQUEST_BYTES)); }
       catch { throw new AssetError('RECOVERY', 'Job history has no valid request.'); }
@@ -228,6 +250,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     const check = () => { guard(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
     const originalScope = check();
     const e = entry(requested);
+    if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB origin requires safe conversion and observed source mapping; engine import is unavailable.');
     if (e.job.state !== 'succeeded' || !e.job.manifestAvailable || active.has(requested)) throw new ArcaneError('JOB_STATE', 'Import preparation requires a verified completed job.');
     if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
     studioImportActive = true;
@@ -248,6 +271,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       // Tighten import size BEFORE the service's existing complete manifest proof.
       for (const name of ['asset.glb', 'collision.glb'] as const) await wait(regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
       const manifest = await wait(readers.manifest(requested));
+      if (isAdoptedGlbManifest(manifest)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB has preview-only provenance; engine import is unavailable.');
       if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
       const selection = snapshotStudioImportSelection(await wait(importHost.selectTarget(scope, requested, actor, guard)));
       selected = selection;
@@ -294,7 +318,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     projectPath,
     async probe(operation: OperationOptions = {}): Promise<AssetProbe> {
       ensureOpen();
-      if (active.size || probeActive) throw new AssetError('BUSY', 'A Blender operation is already running.');
+      if (active.size || probeActive || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
       const controller = new AbortController();
       probeActive = controller;
       const abort = () => controller.abort();
@@ -326,10 +350,87 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (Buffer.byteLength(JSON.stringify(page)) > HISTORY_PAGE_BYTES) throw new ArcaneError('HISTORY_LIMIT', 'History response exceeds its byte bound.');
       return page;
     },
+    /** Native-only ordinary-file adoption. Actor/project authority is private;
+     * request JSON carries only a name and project-relative .glb path. */
+    adoptProjectGlb(input: unknown, actor: NativeAssetActor, admission: AssetStartAdmission): Promise<AssetJobRecord> {
+      ensureOpen();
+      const source = parseAdoptGlbInput(input), associations = importHost?.workAssociations;
+      assertNativeAssetActor(actor,'mutate');
+      const original = nativeAssetActorScope(actor);
+      if (!(associations instanceof ConversationWorkStore) || associations.projectPath !== projectPath
+        || original.projectPath !== projectPath || original.projectId !== associations.projectId || original.conversation.provider !== 'codex'
+        || typeof admission?.beforeCreate !== 'function' || typeof admission.created !== 'function') throw new ArcaneError('ASSET_ADOPT_SCOPE','Exact native project/store admission is required.');
+      if (adoption || probeActive || active.size) throw new AssetError('BUSY','An asset operation is already running.');
+      const end = Date.now() + ADOPTED_GLB_LIMITS.deadlineMs;
+      const guard = () => {
+        ensureOpen(); assertNativeAssetActor(actor,'mutate');
+        if (Date.now() >= end || !isDeepStrictEqual(nativeAssetActorScope(actor),original)
+          || associations.projectPath !== projectPath || associations.projectId !== original.projectId) throw new ArcaneError('ASSET_ADOPT_SCOPE','Original adoption scope expired or changed.');
+        associations.list(original.conversation,'asset-job',{limit:1});
+      };
+      const wait = async <T>(p:Promise<T>):Promise<T> => {const value=await p;guard();return value;};
+      const run = async ():Promise<AssetJobRecord> => {
+        let job:AssetJobRecord|null=null;
+        try {
+          await wait(flushed());
+          if(entries.size>=LIMIT) throw new ArcaneError('HISTORY_LIMIT','Asset history is full.');
+          guard();
+          // Actual bytes + all preview geometry/image budgets are checked BEFORE
+          // creating/copying anything into managed storage. No source execution.
+          const owned=await readOwnedProjectGlb(projectPath,root,source,guard);guard();
+          if(admission.beforeCreate()!==undefined) throw new ArcaneError('ASSET_ADOPT_ADMISSION','Synchronous void admission required.');
+          guard();
+          const jobId=randomUUID(),directory=join(root,source.name+'-'+jobId),staging=join(root,'.adopting-'+jobId),now=new Date().toISOString();
+          const request:AdoptedGlbRequest={schemaVersion:1,template:'adopted-glb',...source,sourceSha256:sha256(owned.bytes),sourceBytes:owned.bytes.length};
+          const initial:AssetJobRecord={schemaVersion:1,jobId,directory,manifestPath:null,request,state:'running',stage:'adopting',startedAt:now,updatedAt:now,events:[],manifestAvailable:false,error:null};
+          // Publish a discoverable job only AFTER its first fsynced journal.
+          // A crash before publication leaves owned staging evidence, not a
+          // matching journal-less directory that prevents all history reopening.
+          guard();await wait(mkdir(staging));
+          await wait(atomicAssetJson(staging,'job.json',JSON.stringify(initial)+'\n'));
+          guard();await rename(staging,directory);
+          job=initial;
+          entries.set(jobId,{directory,job});
+          // Publication FACT: bind the original conversation once even if the
+          // actor retired while rename yielded. Never rebind an unknown ACK.
+          if(admission.created(jobId)!==undefined) throw new ArcaneError('ASSET_ADOPT_ADMISSION','Synchronous void creation witness required.');
+          guard();await wait(noLinks(directory));
+          const requestBytes=Buffer.from(JSON.stringify(request)+'\n');
+          guard();await wait(writeFile(artifactPath(directory,'asset.glb'),owned.bytes,{flag:'wx'}));
+          guard();await wait(writeFile(artifactPath(directory,'request.json'),requestBytes,{flag:'wx'}));
+          const manifest:AdoptedGlbManifest={schemaVersion:1,jobId,createdAt:now,request,
+            provenance:{kind:'native-project-glb',projectId:original.projectId,conversation:{provider:'codex',threadId:original.conversation.threadId,sessionId:original.conversation.sessionId},sourceSha256:sha256(owned.bytes),sourceBytes:owned.bytes.length},
+            validation:{kind:'glb-preview-preflight',metadata:owned.metadata,imageDecode:'not-run',engineVerification:'pending'},
+            engineImport:{status:'unavailable',reason:'adopted-origin-requires-safe-conversion'},
+            artifacts:[{path:'asset.glb',role:'export',bytes:owned.bytes.length,sha256:sha256(owned.bytes)},
+              {path:'request.json',role:'request',bytes:requestBytes.length,sha256:sha256(requestBytes)}],
+            limitations:['Adopted project bytes, not bundled Blender worker output; producer/ownership rights are not inferred from GLB metadata.',
+              'Preview preflight only; no Python execution, image pixel decode, native render, Studio import, upload or engine acceptance.',
+              'Engine import unavailable until a safe owned conversion supplies actual producer/source mapping evidence.']};
+          guard();await wait(writeFile(artifactPath(directory,'manifest.json'),JSON.stringify(manifest)+'\n',{flag:'wx'}));
+          await wait(validateAdoptedGlbManifest(directory,manifest));
+          job.state='succeeded';job.stage='complete';job.manifestAvailable=true;job.manifestPath=join(directory,'manifest.json');
+          job.finishedAt=new Date().toISOString();job.updatedAt=job.finishedAt;
+          guard();await atomicAssetJson(directory,'job.json',JSON.stringify(job)+'\n');
+          // Persist completion FACT even if continuation retires while COMMIT
+          // returns. No new operation or original source mutation follows.
+          persist();await flushed();return structuredClone(job);
+        } catch(error) {
+          if(!job) throw error;
+          job.state='failed';job.stage='complete';job.manifestAvailable=false;job.manifestPath=null;
+          job.finishedAt=new Date().toISOString();job.updatedAt=job.finishedAt;
+          job.error={code:'ASSET_ADOPT_INCOMPLETE',message:'Managed adoption is incomplete or acknowledgement unknown; inspect this original job without replay.'};
+          await atomicAssetJson(job.directory,'job.json',JSON.stringify(job)+'\n');
+          persist();await flushed();return structuredClone(job);
+        }
+      };
+      const task=run();adoption=task;
+      return task.finally(()=>{if(adoption===task) adoption=null;});
+    },
     async start(input: AssetInput, admission?: AssetStartAdmission): Promise<AssetJobRecord> {
       ensureOpen(); await flushed(); ensureOpen();
-      if (probeActive || active.size) throw new AssetError('BUSY', 'A Blender operation is already running.');
-      if ([...entries.values()].some(e => e.job.state === 'interrupted')) throw new ArcaneError('RECONCILIATION', 'Lost worker supervision requires inspection before starting work in this output root. Use a fresh trusted output root after confirming the old worker has stopped.');
+      if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+      if ([...entries.values()].some(e => e.job.state === 'interrupted' && !isAdoptedGlbRequest(e.job.request))) throw new ArcaneError('RECONCILIATION', 'Lost worker supervision requires inspection before starting work in this output root. Use a fresh trusted output root after confirming the old worker has stopped.');
       if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history is full; use a fresh trusted output root.');
       const request = normalizeRequest(input);
       const now = new Date().toISOString();
@@ -378,12 +479,19 @@ export async function createAssetService(options: AssetServiceOptions) {
       await flushed();
       return structuredClone(e.job);
     },
-    async manifest(jobId: unknown): Promise<AssetManifest> {
+    async manifest(jobId: unknown): Promise<AssetPreviewManifest> {
       ensureOpen();
       const e = entry(jobId);
       if (!e.job.manifestAvailable || e.job.state !== 'succeeded') throw new ArcaneError('JOB_STATE', 'A verified completed manifest is unavailable for this job.');
-      const manifest = await pipeline.validate(join(e.directory, 'manifest.json'));
+      const manifest = isAdoptedGlbRequest(e.job.request)
+        ? await validateAdoptedGlbManifest(e.directory, await readJson(join(e.directory,'manifest.json')))
+        : await pipeline.validate(join(e.directory, 'manifest.json'));
       if (manifest.jobId !== e.job.jobId || manifest.request.name !== e.job.request.name) throw new AssetError('MANIFEST', 'Manifest identity does not match the indexed job.');
+      if(isAdoptedGlbManifest(manifest)){
+        const binding=importHost?.workAssociations.binding('asset-job',e.job.jobId);
+        if(!isDeepStrictEqual(manifest.request,e.job.request)||!binding||binding.projectId!==manifest.provenance.projectId
+          ||!isDeepStrictEqual(binding.conversation,manifest.provenance.conversation)) throw new AssetError('MANIFEST','Adopted snapshot differs from its original request or durable conversation binding.');
+      }
       return manifest;
     },
     /** Production host preparation. Only a completed owned job UUID and the SAME
@@ -408,6 +516,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (!artifact) throw new ArcaneError('NOT_FOUND', 'Preview is not approved by the manifest.');
       const bytes = await readRegularFile(artifactPath(e.directory, path), 8 * 1024 * 1024);
       if (bytes.length !== artifact.bytes || sha256(bytes) !== artifact.sha256) throw new AssetError('HASH', 'Preview changed since manifest verification.');
+      if (isAdoptedGlbManifest(manifest)) throw new ArcaneError('NOT_FOUND','Adopted GLB uses the existing interactive viewer; no rendered PNG was produced.');
       inspectPng(bytes, manifest.request.renderResolution);
       return bytes;
     },
@@ -470,6 +579,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       closed = true; probeActive?.abort();
       closing = (async () => {
         for (const run of active.values()) run.handle.cancel();
+        if (adoption) await adoption.catch(() => {});
         try {
           await Promise.all([...active.values()].map(run => run.completion));
           while (probeActive) await new Promise<void>(r => setTimeout(r, 10));
