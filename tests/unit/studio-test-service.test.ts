@@ -1,4 +1,4 @@
-import test, { type TestContext } from 'node:test';
+import test, { describe, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, relative, isAbsolute } from 'node:path';
@@ -190,10 +190,14 @@ async function fixture(t: TestContext, options: {
     effects, scene, moveStoreTime: (ms: number) => { storeTimeOffset += ms; } };
 }
 
-// All subtests run sequentially in one context. The sole Date.now override is
-// scoped to consent expiry and restored before teardown or another fixture.
-test('createStudioTestService: SDK/store/ledger fixture integration', { concurrency: false, timeout: 30_000 }, async t => {
-  await t.test('prepare needs approval without effects; model port cannot approve and trusted guard must pass', async sub => {
+// Serial cases retain their own 30-second budgets. Their cumulative fixture and
+// fsync cost must not cancel later cases under a shared parent test deadline.
+// The sole Date.now override is restored before teardown or another fixture.
+describe('createStudioTestService: SDK/store/ledger fixture integration', { concurrency: false }, () => {
+  function serviceCase(name: string, body: (sub: TestContext) => Promise<void>): void {
+    test(name, { timeout: 30_000 }, body);
+  }
+  serviceCase('prepare needs approval without effects; model port cannot approve and trusted guard must pass', async sub => {
     const f = await fixture(sub);
     const job = await f.prepare();
     assert.equal(job.state, 'needs_approval');
@@ -230,7 +234,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.deepEqual(f.effects(), []);
   });
 
-  await t.test('exact scoped approval runs a real five-second bound, observes, stops and releases scene queue', async sub => {
+  serviceCase('exact scoped approval runs a real five-second bound, observes, stops and releases scene queue', async sub => {
     const f = await fixture(sub);
     const proof = f.store.session(f.pair.sessionId).proof!;
     assert.equal(Object.keys(f.observation()).length, 11);
@@ -304,7 +308,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.equal(existsSync(join(f.directory, 'ledger', 'writer.lock')), false);
   });
 
-  await t.test('digest and job tampering cannot mint consent; status/display copies cannot change the stored scope', async sub => {
+  serviceCase('digest and job tampering cannot mint consent; status/display copies cannot change the stored scope', async sub => {
     const f = await fixture(sub), job = await f.prepare();
     const original = structuredClone(job.display);
     const changed = structuredClone(job.display);
@@ -323,7 +327,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     await f.service.requests.cancel(job.id, ACTOR);
   });
 
-  await t.test('authority is checked again after durable consent and cancellation wins before reservation', async sub => {
+  serviceCase('authority is checked again after durable consent and cancellation wins before reservation', async sub => {
     for (const action of ['throw', 'cancel'] as const) await sub.test(action, async inner => {
       const f = await fixture(inner), job = await f.prepare();
       const denied = new Error('fixture HumanPort authority changed during consent');
@@ -345,7 +349,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     });
   });
 
-  await t.test('foreign actors cannot see or cancel jobs; only the stable human actor sees every owner', async sub => {
+  serviceCase('foreign actors cannot see or cancel jobs; only the stable human actor sees every owner', async sub => {
     const f = await fixture(sub), job = await f.prepare();
     assert.deepEqual(f.service.requests.list(OTHER), []);
     assert.deepEqual(f.service.requests.list('fixture-human'), []);
@@ -367,7 +371,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     await f.service.requests.cancel(humanJob.id, HUMAN);
   });
 
-  await t.test('concurrent preparation holds the service lock, pending jobs block admission, cancellation releases it', async sub => {
+  serviceCase('concurrent preparation holds the service lock, pending jobs block admission, cancellation releases it', async sub => {
     const f = await fixture(sub), blocked = gate();
     f.hooks.connect = () => blocked.pending;
     const first = f.prepare();
@@ -390,7 +394,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.equal(f.state.closes, 2);
   });
 
-  await t.test('missing, stale, disconnected, unsupported or mismatched host proofs refuse preparation before connecting', async sub => {
+  serviceCase('missing, stale, disconnected, unsupported or mismatched host proofs refuse preparation before connecting', async sub => {
     const cases = [
       { name: 'missing', options: { publish: false } },
       { name: 'expired server receipt', options: { storeTimeOffset: -6_001 } },
@@ -408,7 +412,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     });
   });
 
-  await t.test('strict authenticated eleven-field poll cannot admit cross identities or client-supplied receipt timestamps', async sub => {
+  serviceCase('strict authenticated eleven-field poll cannot admit cross identities or client-supplied receipt timestamps', async sub => {
     const f = await fixture(sub, { publish: false });
     for (const changes of [
       { sessionId: 'foreign-fixture-session' }, { clientLifetimeId: 'foreign-fixture-lifetime' },
@@ -423,7 +427,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.deepEqual(f.effects(), []);
   });
 
-  await t.test('published place/universe and absent writable ServerStorage root cannot supply playtest authority', async sub => {
+  serviceCase('published place/universe and absent writable ServerStorage root cannot supply playtest authority', async sub => {
     for (const identity of [{ placeId: 1 }, { universeId: 1 }, { allowWrites: false, publish: false }]) {
       await sub.test(JSON.stringify(identity), async inner => {
         const f = await fixture(inner, identity);
@@ -441,7 +445,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     });
   });
 
-  await t.test('independent witness must bind the exact lifetime, session, artifact and unpublished place', async sub => {
+  serviceCase('independent witness must bind the exact lifetime, session, artifact and unpublished place', async sub => {
     const mismatches: Partial<Witness>[] = [{ placeId: 1 }, { universeId: 1 },
       { sessionId: 'foreign-fixture-session' }, { clientLifetimeId: 'foreign-fixture-lifetime' },
       { pluginArtifactHash: 'b'.repeat(64) }];
@@ -458,7 +462,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     });
   });
 
-  await t.test('native inventory ambiguity cannot silently choose a same-named Studio', async sub => {
+  serviceCase('native inventory ambiguity cannot silently choose a same-named Studio', async sub => {
     const f = await fixture(sub);
     f.state.inventory.push({ id: 'other-service-fixture', name: NAME });
     const { nativeStudioId: _ignored, ...automatic } = f.request;
@@ -470,7 +474,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.deepEqual(f.effects(), []);
   });
 
-  await t.test('service duration/interval bounds and request-provided authority are rejected without connection', async sub => {
+  serviceCase('service duration/interval bounds and request-provided authority are rejected without connection', async sub => {
     const f = await fixture(sub);
     for (const changes of [{ durationMs: 4_999 }, { durationMs: 60_001 },
       { observationIntervalMs: 249 }, { observationIntervalMs: 2_001 },
@@ -483,7 +487,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.deepEqual(await f.records(), []);
   });
 
-  await t.test('consent expires after sixty seconds with Date.now isolated to this one context', async sub => {
+  serviceCase('consent expires after sixty seconds with Date.now isolated to this one context', async sub => {
     const f = await fixture(sub), job = await f.prepare();
     const future = job.display.consentExpiresAt + 1;
     const mockedNow = sub.mock.method(Date, 'now', () => future);
@@ -501,7 +505,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.equal(f.scene('expired-scene-fixture').state, 'queued');
   });
 
-  await t.test('closePending closes the actual SDK client, removes writer lock and permits ledger reopening', async sub => {
+  serviceCase('closePending closes the actual SDK client, removes writer lock and permits ledger reopening', async sub => {
     const f = await fixture(sub), job = await f.prepare();
     assert.equal(existsSync(join(f.directory, 'ledger', 'writer.lock')), true);
     await f.service.lifecycle.close();
@@ -523,7 +527,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.equal(f.scene('closed-pending-scene').state, 'queued');
   });
 
-  await t.test('cancelling known owned play stops and releases the fence without a fake success', async sub => {
+  serviceCase('cancelling known owned play stops and releases the fence without a fake success', async sub => {
     const f = await fixture(sub), job = await f.prepare();
     await f.service.humanControl.approve(approval(job), () => {});
     await until(() => f.status(job).review.phase === 'waiting');
@@ -542,7 +546,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.equal(terminal[0]!.event.code, 'CANCELLED');
   });
 
-  await t.test('recognized fixture console diagnostic fails the run and still verifies owned cleanup', async sub => {
+  serviceCase('recognized fixture console diagnostic fails the run and still verifies owned cleanup', async sub => {
     const f = await fixture(sub), job = await f.prepare();
     // Synthetic parser diagnostic, not a claim that a Roblox engine ran code.
     f.state.consoleText = "ServerScriptService.Fixture:7: attempt to index nil with 'Value'\nStack Begin\nScript 'ServerScriptService.Fixture', Line 7\nStack End";
@@ -565,7 +569,7 @@ test('createStudioTestService: SDK/store/ledger fixture integration', { concurre
     assert.equal(f.scene('diagnostic-released-scene').state, 'queued');
   });
 
-  await t.test('abort during a dispatched native request with unknown effect preserves scene and durable fences', async sub => {
+  serviceCase('abort during a dispatched native request with unknown effect preserves scene and durable fences', async sub => {
     const f = await fixture(sub), job = await f.prepare(), held = gate();
     let nativeSignal: AbortSignal | undefined;
     f.hooks.afterEffect = async (call, signal) => {

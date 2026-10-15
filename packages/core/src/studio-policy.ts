@@ -1,5 +1,5 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite } from '../../protocol/src/studio.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -70,17 +70,33 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   if (isWrite(method) && !session.allowWrites) throw new ArcaneError('READ_ONLY', 'This Studio pairing is read-only. Create an explicit writable pairing to edit.');
   if (!session.capabilities.includes(method)) throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
   switch (method) {
-    case 'asset.stage_packet': {
-      keys(a, ['expected', 'packet', 'target', 'continuity']);
+    case 'asset.stage_packet': case 'asset.reconstruct': {
+      keys(a, method === 'asset.stage_packet' ? ['expected', 'packet', 'target', 'continuity'] : ['runId','expected','packetCount','byteLength','objects','target','continuity']);
       const expected = object(a.expected), target = object(a.target), continuity = object(a.continuity);
       keys(expected, ['digest', 'payloadDigest', 'manifestDigest']);
-      for (const key of ['digest', 'payloadDigest', 'manifestDigest']) if (typeof expected[key] !== 'string' || !/^[a-f0-9]{64}$/.test(expected[key])) throw new ArcaneError('INPUT', 'Expected complete asset staging digests.');
+      for (const key of ['digest', 'payloadDigest', 'manifestDigest']) if (typeof expected[key] !== 'string' || !/^[a-f0-9]{64}(?![\s\S])/.test(expected[key])) throw new ArcaneError('INPUT', 'Expected complete asset staging digests.');
+      if(method==='asset.stage_packet') {
       textField(a.packet, 'asset packet', 256 * 1024);
       let packet: Record<string, unknown>;
       try {packet = object(JSON.parse(a.packet as string));} catch {throw new ArcaneError('INPUT', 'Expected a bounded JSON asset packet.');}
       if (packet.formatVersion !== 1 || packet.payloadDigest !== expected.payloadDigest || packet.manifestDigest !== expected.manifestDigest
         || !Number.isInteger(packet.ordinal) || (packet.ordinal as number) < 0 || (packet.ordinal as number) >= 512
         || !['begin', 'object', 'chunk', 'seal'].includes(packet.kind as string)) throw new ArcaneError('INPUT', 'Asset packet does not match its fixed staging envelope.');
+      } else {
+        if(typeof a.runId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(a.runId)||!Number.isSafeInteger(a.packetCount)||Number(a.packetCount)<1||Number(a.packetCount)>512
+          ||!Number.isSafeInteger(a.byteLength)||Number(a.byteLength)<Number(a.packetCount)||Number(a.byteLength)>8*1024*1024
+          ||!Array.isArray(a.objects)||a.objects.length<1||a.objects.length>STUDIO_RECONSTRUCTION_LIMITS.objects)throw new ArcaneError('INPUT','Invalid bounded reconstruction metadata.');
+        let vertices=0,triangles=0;const ids=new Set<string>();
+        for(const value of a.objects){
+          const item=object(value);keys(item,['sourceObjectId','meshExportSha256','vertexCount','triangleCount']);
+          const id=textField(item.sourceObjectId,'source object',128);
+          if(ids.has(id)||typeof item.meshExportSha256!=='string'||!/^[a-f0-9]{64}(?![\s\S])/.test(item.meshExportSha256)
+            ||!Number.isSafeInteger(item.vertexCount)||Number(item.vertexCount)<1||Number(item.vertexCount)>60000
+            ||!Number.isSafeInteger(item.triangleCount)||Number(item.triangleCount)<1||Number(item.triangleCount)>20000)throw new ArcaneError('INPUT','Invalid reconstructed source metadata.');
+          ids.add(id);vertices+=Number(item.vertexCount);triangles+=Number(item.triangleCount);
+        }
+        if(vertices>STUDIO_RECONSTRUCTION_LIMITS.vertices||triangles>STUDIO_RECONSTRUCTION_LIMITS.triangles)throw new ArcaneError('BODY_LIMIT','Reconstruction exceeds aggregate resource limits.');
+      }
       keys(target, ['sessionId', 'placeId', 'universeId', 'root', 'parentRef', 'creator']); root(target.root, session);
       if (target.root !== 'Workspace' || target.sessionId !== session.id || target.placeId !== session.placeId || target.universeId !== session.universeId) throw new ArcaneError('SCOPE', 'Asset staging targets another paired Workspace.');
       textField(target.parentRef, 'parent reference');

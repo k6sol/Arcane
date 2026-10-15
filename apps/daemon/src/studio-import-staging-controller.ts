@@ -1,7 +1,7 @@
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
-import type {Json, StudioAssetStageArgs, StudioAssetStageReceipt, StudioCommand} from '../../../packages/protocol/src/studio.js';
+import {studioImportContextObservation, type Json, type StudioAssetStageArgs, type StudioAssetStageReceipt, type StudioCommand, type StudioAssetReconstructReceipt} from '../../../packages/protocol/src/studio.js';
 import {StudioStore, type StageRunHandle} from '../../../packages/storage/src/studio-store.js';
 import {ConversationWorkStore} from '../../../packages/storage/src/conversation-work-store.js';
 import {snapshotStudioImportSelection} from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
@@ -28,12 +28,18 @@ export interface NativeStageStatus {
     plannedPacketCount:number;plannedEnvelopeBytes:number;commands:{ordinal:number;commandId:string;state:StudioCommand['state']}[];
     receipt:StudioAssetStageReceipt|null;receiptScope:'historical-cpu';currentBuffers:'unobserved';engineVerification:'pending';imported:false;retry:false};
 }
+export interface NativeReconstructionStatus {
+  jobId:string;projectId:string;
+  reconstruction:null|{runId:string;commandId:string;state:StudioCommand['state'];receipt:StudioAssetReconstructReceipt|null;
+    receiptScope:'historical-reconstruction';currentResources:'unobserved';imported:false;engineVerification:'pending';retry:false};
+}
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 function fail(code: string): never {throw new ArcaneError(code, 'Native asset staging is unavailable, changed or incomplete. No import/upload was accepted.');}
 
 /** Host composition, not a request decoder. Keeps exact native authority across
- * preparation and every durable packet receipt. This stage does NOT upload,
- * allocate EditableMesh, parent Instances or claim an engine baseline. */
+ * preparation and every durable packet receipt. stage() admits CPU bytes only;
+ * reconstruct() separately admits one detached engine reconstruction from its
+ * original sealed run. Neither operation uploads, parents or admits rights. */
 export function createStudioImportStagingController(config: StudioImportStagingConfiguration) {
   const {projectPath, workAssociations, studio, assets, host, pluginArtifactHash} = config;
   if (!(studio instanceof StudioStore) || !(workAssociations instanceof ConversationWorkStore)
@@ -57,6 +63,70 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         plannedPacketCount:run.intent.plan.length,plannedEnvelopeBytes:run.intent.plan.reduce((n,p)=>n+p.envelopeByteLength,0),
         commands:run.commands.map(({ordinal,commandId,command})=>({ordinal,commandId,state:command.state})),
         receipt:run.receipt,receiptScope:'historical-cpu',currentBuffers:'unobserved',engineVerification:'pending',imported:false,retry:false}:null};
+    },
+    async reconstructionStatus(jobId:string,actor:NativeAssetActor,guard:()=>void=()=>{}):Promise<NativeReconstructionStatus> {
+      const check=()=>{
+        guard();assertNativeAssetActor(actor,'read');const scope=nativeAssetActorScope(actor);
+        if(closed||scope.projectPath!==projectPath||scope.projectId!==workAssociations.projectId)fail('STUDIO_STAGE_SCOPE');
+        const binding=workAssociations.binding('asset-job',jobId);
+        if(!binding||binding.projectId!==scope.projectId||!isDeepStrictEqual(binding.conversation,scope.conversation))fail('NOT_FOUND');
+        return scope;
+      };
+      const scope=check(),run=studio.readStageRun(scope.projectId,jobId);check();
+      if(run&&!isDeepStrictEqual(run.intent.conversation,scope.conversation))fail('NOT_FOUND');
+      const record=run?studio.readStageReconstruction(scope.projectId,jobId,run.runId):null;check();
+      return {jobId,projectId:scope.projectId,reconstruction:record?{runId:record.runId,commandId:record.command.id,state:record.command.state,
+        receipt:record.receipt,receiptScope:'historical-reconstruction',currentResources:'unobserved',imported:false,engineVerification:'pending',retry:false}:null};
+    },
+    async reconstruct(jobId:string,actor:NativeAssetActor,guard:()=>void=()=>{}):Promise<StudioAssetReconstructReceipt & {commandId:string}> {
+      const scope=assertStudioImportJobScope(projectPath,workAssociations,actor,jobId);
+      guard();if(closed||busy)fail(closed?'STUDIO_STAGE_CLOSED':'STUDIO_STAGE_BUSY');
+      const run=studio.readStageRun(scope.projectId,jobId);
+      if(!run||run.phase!=='cpu-staged'||run.closedAt===null||!run.receipt||!isDeepStrictEqual(run.intent.conversation,scope.conversation))fail('STUDIO_RECONSTRUCT_STATE');
+      if(studio.readStageReconstruction(scope.projectId,jobId,run.runId))fail('STUDIO_RECONSTRUCT_EXISTS');
+      const {target,continuity}=run.intent,expires=now()+STUDIO_STAGING_LIMITS.totalDeadlineMs;
+      const boundary=()=>{
+        guard();if(closed||!isDeepStrictEqual(assertStudioImportJobScope(projectPath,workAssociations,actor,jobId),scope))fail('STUDIO_STAGE_SCOPE');
+        if(now()>=expires)fail('STUDIO_STAGE_TIMEOUT');
+        const session=studio.session(target.sessionId),proof=session.proof;
+        if(session.revokedAt||!session.allowWrites||!session.allowedRoots.includes('Workspace')||!session.capabilities.includes('asset.reconstruct')
+          ||!proof||proof.sessionId!==target.sessionId||session.clientSessionId!==continuity.clientLifetimeId
+          ||proof.clientLifetimeId!==continuity.clientLifetimeId||proof.pluginArtifactHash!==pluginArtifactHash||proof.pluginArtifactHash!==continuity.pluginArtifactHash
+          ||proof.playEpoch!==continuity.playEpoch||proof.placeId!==target.placeId||proof.universeId!==target.universeId
+          ||proof.mode!=='Edit'||!proof.connected||!proof.continuitySupported||!Number.isFinite(Date.parse(proof.expiresAt))||Date.parse(proof.expiresAt)<=now())fail('STUDIO_STAGE_CONTINUITY');
+      };
+      busy=true;let admitted=false;
+      try {
+        boundary();
+        // Observe the ORIGINAL target, never select/capture another live place.
+        const contextCommand=studio.enqueue({sessionId:target.sessionId,requestId:'reconstruct_context_'+randomUUID().replaceAll('-',''),method:'scene.import_context',args:{}});
+        const contextDeadline=Math.min(expires,now()+STUDIO_STAGING_LIMITS.packetDeadlineMs);
+        while(true){
+          boundary();const command=studio.command(contextCommand.id);
+          if(command.state==='succeeded'){
+            const context=studioImportContextObservation(command.result);
+            const creator=context.creator.status==='available'?{kind:context.creator.kind,id:String(context.creator.id)}:
+              context.placeId===0&&context.universeId===0&&context.creator.id===0&&context.studioUser.status==='available'?{kind:'user',id:String(context.studioUser.id)}:null;
+            if(context.mode!=='Edit'||context.sessionId!==target.sessionId||context.placeId!==target.placeId||context.universeId!==target.universeId
+              ||context.parentRef.instanceId!==target.parentRef||!isDeepStrictEqual(creator,target.creator))fail('STUDIO_RECONSTRUCT_TARGET');
+            break;
+          }
+          if(['failed','cancelled','needs_reconciliation'].includes(command.state))fail('STUDIO_RECONSTRUCT_TARGET');
+          if(now()>=contextDeadline)fail('STUDIO_STAGE_TIMEOUT');
+          await new Promise<void>(resolve=>setTimeout(resolve,25));
+        }
+        boundary();admitted=true;
+        const queued=studio.enqueueStageReconstruction(scope.projectId,jobId,run.runId,boundary);
+        while(true){
+          boundary();const record=studio.readStageReconstruction(scope.projectId,jobId,run.runId);
+          if(!record||record.command.id!==queued.id)fail('STUDIO_RECONSTRUCT_RECEIPT');
+          if(record.receipt){boundary();return {...record.receipt,commandId:queued.id};}
+          if(['failed','cancelled','needs_reconciliation'].includes(record.command.state))fail('STUDIO_RECONSTRUCT_RECEIPT');
+          await new Promise<void>(resolve=>setTimeout(resolve,25));
+        }
+      } finally {
+        try{if(admitted)studio.abandonStageReconstruction(scope.projectId,jobId,run.runId);}finally{busy=false;}
+      }
     },
     async stage(jobId: string, actor: NativeAssetActor, guard: () => void = () => {}): Promise<StudioAssetStageReceipt & {status: 'staged'; imported: false; runId: string; commandIds: string[]}> {
       const scope = assertStudioImportJobScope(projectPath, workAssociations, actor, jobId);

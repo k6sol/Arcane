@@ -21,8 +21,9 @@ export interface StudioContinuityProof {
 }
 export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'scene.import_context', 'scene.upload_context'] as const;
 export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'] as const;
-/** Host-owned binary intake. Not a generic agent scene command or reversible mutation. */
-export const ASSET_STAGE_METHODS = ['asset.stage_packet'] as const;
+/** Host-owned intake and detached reconstruction. Neither is a generic agent
+ * scene command or reversible mutation. */
+export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
 export type StudioMethod = typeof READ_METHODS[number] | typeof WRITE_METHODS[number] | typeof ASSET_STAGE_METHODS[number];
 export interface StudioAssetStageArgs {
   expected: { digest: string; payloadDigest: string; manifestDigest: string };
@@ -33,6 +34,21 @@ export interface StudioAssetStageArgs {
 export interface StudioAssetStageReceipt {
   transferDigest: string; packetCount: number; byteLength: number;
   state: 'receiving' | 'sealed'; engineVerification: 'pending';
+}
+/** Detached reconstruction only. These bounds are per owned transfer; the
+ * plugin retains at most two transfers and never evicts a live owner. */
+export const STUDIO_RECONSTRUCTION_LIMITS = Object.freeze({objects:128,vertices:120000,triangles:40000});
+export interface StudioAssetReconstructedObject {
+  sourceObjectId:string;meshExportSha256:string;vertexCount:number;triangleCount:number;
+}
+export interface StudioAssetReconstructArgs {
+  runId:string;expected:StudioAssetStageArgs['expected'];
+  packetCount:number;byteLength:number;target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];
+  objects:StudioAssetReconstructedObject[];
+}
+export interface StudioAssetReconstructReceipt {
+  runId:string;transferDigest:string;state:'reconstructed';objects:StudioAssetReconstructedObject[];
+  imported:false;engineVerification:'pending';
 }
 export type CommandState = 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'cancelled' | 'needs_reconciliation';
 export interface StudioCommand {

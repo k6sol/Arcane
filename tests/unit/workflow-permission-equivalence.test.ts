@@ -7,7 +7,7 @@ import { Script } from 'node:vm';
 import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { parsePrivateReceiptDescriptor } from '../../apps/daemon/src/workflow-private-storage.js';
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
-import { privatePermissionTraceScript, tracePrivatePermissions } from './windows-private-permission-fixture.js';
+import { nativeMetadataJsonSetup, privatePermissionTraceScript, tracePrivatePermissions } from './windows-private-permission-fixture.js';
 
 test('permission diagnostic is read-only metadata and cannot grant a private receipt descriptor', () => {
   for (const write of ['CreateDirectory', 'SetAccessControl', 'Set-Acl', 'SetOwner', 'SetTokenInformation', 'AdjustTokenPrivileges', 'ReadAllBytes', 'File]::Open'])
@@ -84,7 +84,7 @@ test('real Windows token/default-owner metadata agrees for fresh fixture directo
 // DOUBLES backed by real .NET ACL/SID objects. No token is changed and no real
 // filesystem operation or permission write exists in this harness. The separate
 // normal-owner tests exercise the unmodified native checker on the actual host.
-const ownerFixture = String.raw`
+const ownerFixture = nativeMetadataJsonSetup + String.raw`
 class ArcaneOwnerFixtureState {
   static [object] $Case
   static [Security.Principal.SecurityIdentifier] $User
@@ -146,6 +146,16 @@ class ArcaneOwnerFixtureDirectory {
     if($path -ceq [ArcaneOwnerFixtureState]::Child){return [ArcaneOwnerFixtureState]::DirectoryAcl}
     return [ArcaneOwnerFixtureState]::AncestorAcl
   }
+  static [void] SetAccessControl([string]$path,[Security.AccessControl.DirectorySecurity]$acl) {
+    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-write-scope'}
+    [ArcaneOwnerFixtureState]::Writes++
+    [ArcaneOwnerFixtureState]::DirectoryAcl=$acl
+  }
+  static [string[]] EnumerateFileSystemEntries([string]$path) {
+    if($path -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-entries-scope'}
+    if([ArcaneOwnerFixtureState]::Case.nonempty){return @('fixture-entry')}
+    return @()
+  }
 }
 class ArcaneOwnerFixtureFile {
   static [bool] Exists([string]$path) {return $path -ceq [ArcaneOwnerFixtureState]::Key}
@@ -171,7 +181,9 @@ function Get-ChildItem($LiteralPath,[switch]$Force) {
   if($LiteralPath -cne [ArcaneOwnerFixtureState]::Child){throw 'fixture-entries-scope'}
   if([ArcaneOwnerFixtureState]::Case.nonempty){return 'fixture-entry'}
 }
-[ArcaneOwnerFixtureState]::Case=ConvertFrom-Json $env:ARCANE_OWNER_FIXTURE_CASE
+$caseData=$nativeJson.DeserializeObject($env:ARCANE_OWNER_FIXTURE_CASE)
+[ArcaneOwnerFixtureState]::Case=@{}
+foreach($field in $caseData.Keys){[ArcaneOwnerFixtureState]::Case[$field]=$caseData[$field]}
 [ArcaneOwnerFixtureState]::User=[Security.Principal.SecurityIdentifier]::new('S-1-5-21-100-200-300-1001')
 $case=[ArcaneOwnerFixtureState]::Case
 [ArcaneOwnerFixtureState]::DirectoryExists=$case.existing
@@ -201,7 +213,7 @@ test('complete production owner policy: captured token equivalence preserves for
     .replace('[ArcaneOwnerFixtureItem]::new($path)', '[IO.FileInfo]::new($path)'), production);
   const script = ownerFixture + '\ntry { & {\n' + doubled + String.raw`
 } } finally {
-  [Console]::Error.WriteLine('OWNER_POLICY_METADATA_DOUBLE '+(@{identities=[ArcaneOwnerFixtureState]::Identities;creates=[ArcaneOwnerFixtureState]::Creates;writes=[ArcaneOwnerFixtureState]::Writes;directoryOwnerIsUser=([ArcaneOwnerFixtureState]::DirectoryAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq [ArcaneOwnerFixtureState]::User.Value);directoryProtected=[ArcaneOwnerFixtureState]::DirectoryAcl.AreAccessRulesProtected;directoryUnchanged=([ArcaneOwnerFixtureState]::DirectoryAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeDirectory);keyUnchanged=([ArcaneOwnerFixtureState]::KeyAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeKey)} | ConvertTo-Json -Compress))
+  [Console]::Error.WriteLine('OWNER_POLICY_METADATA_DOUBLE '+$nativeJson.Serialize(@{identities=[ArcaneOwnerFixtureState]::Identities;creates=[ArcaneOwnerFixtureState]::Creates;writes=[ArcaneOwnerFixtureState]::Writes;directoryOwnerIsUser=([ArcaneOwnerFixtureState]::DirectoryAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq [ArcaneOwnerFixtureState]::User.Value);directoryProtected=[ArcaneOwnerFixtureState]::DirectoryAcl.AreAccessRulesProtected;directoryUnchanged=([ArcaneOwnerFixtureState]::DirectoryAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeDirectory);keyUnchanged=([ArcaneOwnerFixtureState]::KeyAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeKey)}))
 }
 `;
   const user = 'S-1-5-21-100-200-300-1001', foreign = 'S-1-5-21-100-200-300-1002', admin = 'S-1-5-32-544', system = 'S-1-5-18';
@@ -257,15 +269,9 @@ test('complete production owner policy: captured token equivalence preserves for
     } else { assert.equal(result.stdout, ''); assert.ok(result.stderr.includes('Arcane private workflow storage unavailable.')); }
     if (scenario.value.existing || !scenario.accepted) assert.equal(metadata.directoryUnchanged, true, 'Existing/refused directory ACLs are never repaired.');
   });
-  // Reconstruct and HASH-PIN the exact checker that failed on the real runner.
-  // Only the two corrected owner gates and the new token capture are reversed.
-  const previous = production.replace(String.raw`  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-  $user=$identity.User
-  $defaultOwner=$identity.Owner
-  if($null -eq $user -or $null -eq $defaultOwner){throw 'token-owner'}
-  $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')
-  if($allowed -notcontains $defaultOwner.Value){throw 'token-owner'}`, String.raw`  $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
-  $allowed=@($user.Value,'S-1-5-18','S-1-5-32-544')`).replaceAll('-notin @($user.Value,$defaultOwner.Value)', '-ne $user.Value');
+  // Preserve the exact historical checker independently of later performance
+  // changes; it must still reproduce the original native owner refusals.
+  const previous = readFileSync(resolve('tests/fixtures/workflow-private-storage-before-owner-fix.txt'), 'utf8').replaceAll('\r\n', '\n');
   assert.equal(createHash('sha256').update(previous).digest('hex'), 'f1e777b8885e769df7b0777223405105588650e8b34033cc61f0341fbee2c582');
   let previousDouble = previous;
   for (const [native, fixture] of [

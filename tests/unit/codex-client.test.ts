@@ -159,6 +159,130 @@ test('human write grant is exact-thread, defensive and only changes subsequent t
   assert.equal(session.snapshot().thread?.writeGranted,false);
 });
 
+test('human Send enables only its exact turn sandbox and expires before a terminal-before-ACK response',async t=>{
+  const {session,receipts}=await open(t,'complete-before-ack');
+  assert.equal(session.snapshot().thread?.writeGranted,false);
+  const completed=await session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  assert.equal(completed.turnStatus,'completed');assert.equal(completed.writeGranted,false);
+  assert.equal(session.snapshot().thread?.writeGranted,false);
+  await session.startTurn(INPUT);
+  await session.startTurn({...INPUT,allowWorkspaceWrites:false});
+  const turns=inputs(await receipts()).filter(message=>message.method==='turn/start');
+  assert.equal(turns.length,3);
+  assert.deepEqual(turns[0]?.params?.sandboxPolicy,{type:'workspaceWrite',writableRoots:[ROOT],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true});
+  for(const message of turns.slice(1))assert.deepEqual(message.params?.sandboxPolicy,{type:'readOnly',networkAccess:false});
+  for(const message of turns){
+    assert.equal(message.params?.cwd,ROOT);assert.equal(message.params?.approvalPolicy,'on-request');assert.equal(message.params?.approvalsReviewer,'user');
+    assert.equal(Object.hasOwn(message.params!,'allowWorkspaceWrites'),false,'Human host intent is not provider metadata.');
+  }
+});
+
+test('a delayed terminal from an earlier turn cannot clear the newer automatic write operation',async t=>{
+  const {session,receipts}=await open(t,'stale-turn-event');
+  await session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  assert.equal(session.snapshot().thread?.turnStatus,'completed');assert.equal(session.snapshot().thread?.writeGranted,false);
+  await session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  const current=session.snapshot();
+  assert.equal(current.connected,true);assert.equal(current.thread?.turnId,'fixture-turn-2');
+  assert.equal(current.thread?.turnStatus,'inProgress');assert.equal(current.thread?.writeGranted,true);
+  assert.equal(current.operations.at(-1)?.turnId,'fixture-turn-2');
+  assert.equal(inputs(await receipts()).filter(message=>message.method==='turn/start').length,2);
+  await session.interruptTurn({...HUMAN,threadId:THREAD,turnId:'fixture-turn-2'});
+  assert.equal(session.snapshot().thread?.writeGranted,false);
+  await until(()=>session.snapshot().thread?.turnStatus==='interrupted');
+});
+
+for(const [mode,turnId] of [['lost-turn-no-id',null],['lost-turn-ack','fixture-turn-1']] as const)
+test('unknown automatic start stops the owned client without asset hooks or replay: '+mode,async t=>{
+  const {session,receipts}=await open(t,mode,{requestTimeoutMs:1500});
+  await assert.rejects(()=>session.startTurn({...INPUT,allowWorkspaceWrites:true}),error=>{
+    assert.ok(code('TIMEOUT')(error));assert.equal((error as {dispatched:boolean}).dispatched,true);return true;
+  });
+  const unknown=session.snapshot();
+  assert.equal(unknown.connected,false);assert.equal(unknown.ready,false);assert.equal(unknown.failureCode,'TIMEOUT');
+  assert.equal(unknown.thread?.writeGranted,false);assert.equal(unknown.thread?.turnStatus,'unknown');assert.equal(unknown.thread?.turnId,turnId);
+  assert.equal(unknown.operations.at(-1)?.state,'unknown');assert.equal(unknown.operations.at(-1)?.turnId,turnId);
+  await assert.rejects(()=>session.startTurn({...INPUT,allowWorkspaceWrites:true}),code('DISCONNECTED'));
+  const turns=inputs(await receipts()).filter(message=>message.method==='turn/start');assert.equal(turns.length,1);
+  assert.equal((turns[0]?.params?.sandboxPolicy as {type:string}).type,'workspaceWrite');
+});
+
+test('an automatic frame refusal clears permission before dispatch and a later ordinary turn stays read-only',async t=>{
+  const {session,receipts}=await open(t,'normal',{maxFrameBytes:2048});
+  await assert.rejects(()=>session.startTurn({...INPUT,text:'x'.repeat(2000),allowWorkspaceWrites:true}),error=>{
+    assert.ok(code('FRAME_LIMIT')(error));assert.equal((error as {dispatched:boolean}).dispatched,false);return true;
+  });
+  const refused=session.snapshot();
+  assert.equal(refused.connected,true);assert.equal(refused.thread?.writeGranted,false);assert.equal(refused.thread?.turnStatus,'idle');
+  assert.equal(refused.operations.at(-1)?.state,'not-sent');assert.equal(refused.operations.at(-1)?.errorCode,'FRAME_LIMIT');
+  assert.equal(inputs(await receipts()).some(message=>message.method==='turn/start'),false);
+  await session.startTurn(INPUT);
+  const turns=inputs(await receipts()).filter(message=>message.method==='turn/start');assert.equal(turns.length,1);
+  assert.deepEqual(turns[0]?.params?.sandboxPolicy,{type:'readOnly',networkAccess:false});
+  assert.equal(session.snapshot().thread?.writeGranted,false);
+});
+
+test('a lost automatic ACK still closes the owned client after an earlier terminal event expired its active grant',async t=>{
+  const {session,receipts}=await open(t,'terminal-before-lost-ack',{requestTimeoutMs:1500});
+  const starting=session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  const rejected=assert.rejects(starting,code('TIMEOUT'));
+  await until(()=>session.snapshot().thread?.turnStatus==='completed');
+  const terminal=session.snapshot();
+  assert.equal(terminal.connected,true);assert.equal(terminal.thread?.writeGranted,false);
+  assert.equal(terminal.thread?.turnId,'fixture-turn-1');assert.equal(terminal.operations.at(-1)?.state,'pending');
+  await rejected;
+  const unknown=session.snapshot();
+  assert.equal(unknown.connected,false);assert.equal(unknown.ready,false);assert.equal(unknown.failureCode,'TIMEOUT');
+  assert.equal(unknown.thread?.writeGranted,false);assert.equal(unknown.thread?.turnStatus,'completed','Keep the observed terminal event without inventing an ACK.');
+  assert.equal(unknown.operations.at(-1)?.state,'unknown');assert.equal(unknown.operations.at(-1)?.turnId,'fixture-turn-1');
+  await assert.rejects(()=>session.startTurn(INPUT),code('DISCONNECTED'));
+  assert.equal(inputs(await receipts()).filter(message=>message.method==='turn/start').length,1);
+});
+
+test('revoking an automatic write start before its first turn ID fences the dispatched client',async t=>{
+  const {session,receipts}=await open(t,'revoke-start-no-id');
+  const starting=session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  const rejected=assert.rejects(starting,code('GRANT_REVOKED'));
+  await until(async()=>inputs(await receipts()).some(message=>message.method==='turn/start'));
+  const pending=session.snapshot();
+  assert.equal(pending.thread?.turnStatus,'starting');assert.equal(pending.thread?.turnId,null);assert.equal(pending.thread?.writeGranted,true);
+  session.revokeThreadWrites({...HUMAN,threadId:THREAD});await rejected;
+  const revoked=session.snapshot();
+  assert.equal(revoked.connected,false);assert.equal(revoked.failureCode,'GRANT_REVOKED');assert.equal(revoked.thread?.writeGranted,false);
+  assert.equal(revoked.thread?.turnStatus,'unknown');assert.equal(revoked.operations.at(-1)?.state,'unknown');
+  assert.equal(inputs(await receipts()).filter(message=>message.method==='turn/start').length,1);
+});
+
+test('revoking automatic writes during an acknowledged active turn stops native execution',async t=>{
+  const {session,receipts}=await open(t);
+  await session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  assert.equal(session.snapshot().thread?.writeGranted,true);assert.equal(session.snapshot().thread?.turnStatus,'inProgress');
+  session.revokeThreadWrites({...HUMAN,threadId:THREAD});
+  const revoked=session.snapshot();
+  assert.equal(revoked.connected,false);assert.equal(revoked.thread?.writeGranted,false);assert.equal(revoked.thread?.turnStatus,'unknown');
+  await assert.rejects(()=>session.startTurn(INPUT),code('DISCONNECTED'));
+  assert.equal(inputs(await receipts()).filter(message=>message.method==='turn/start').length,1);
+});
+
+test('omitted, false and automatic Send flags preserve an existing deliberate persistent write grant',async t=>{
+  const {session,receipts}=await open(t,'complete-before-ack');session.grantThreadWrites({...HUMAN,threadId:THREAD});
+  for(const flags of [{},{allowWorkspaceWrites:false},{allowWorkspaceWrites:true},{}]){
+    const completed=await session.startTurn({...INPUT,...flags});
+    assert.equal(completed.turnStatus,'completed');assert.equal(completed.writeGranted,true);
+  }
+  const turns=inputs(await receipts()).filter(message=>message.method==='turn/start');assert.equal(turns.length,4);
+  for(const message of turns)assert.deepEqual(message.params?.sandboxPolicy,{type:'workspaceWrite',writableRoots:[ROOT],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true});
+  session.revokeThreadWrites({...HUMAN,threadId:THREAD});assert.equal(session.snapshot().thread?.writeGranted,false);
+});
+
+test('automatic write intent requires a boolean, human action and exact current thread before any operation',async t=>{
+  const {session,receipts}=await open(t),before=session.snapshot();
+  for(const value of [undefined,null,'true',1,{},[]])await assert.rejects(()=>session.startTurn({...INPUT,allowWorkspaceWrites:value} as never),code('ARGUMENTS'));
+  await assert.rejects(()=>session.startTurn({...INPUT,initiatedBy:'agent',allowWorkspaceWrites:true} as never),code('HUMAN_REQUIRED'));
+  await assert.rejects(()=>session.startTurn({...INPUT,threadId:'foreign-thread',allowWorkspaceWrites:true}),code('THREAD'));
+  assert.deepEqual(session.snapshot(),before);assert.equal(inputs(await receipts()).some(message=>message.method==='turn/start'),false);
+});
+
 test('revoking writes before any turn ID or ACK stops the dispatched workspaceWrite client',async t=>{
   const {session,receipts}=await open(t,'revoke-start-no-id');
   session.grantThreadWrites({...HUMAN,threadId:THREAD});

@@ -124,7 +124,7 @@ test('attempt migration preserves original stage rows and associations',t=>{
   f.restart();const migrated=f.store.readStageRun(projectId,jobId)!;
   assert.equal(migrated.runId,original.runId);assert.deepEqual(migrated.commands,original.commands);assert.deepEqual(migrated.intent,original.intent);
   const check=new DatabaseSync(join(f.directory,'studio.sqlite'));
-  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,4);}finally{check.close();}
+  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,5);}finally{check.close();}
 });
 
 test('fresh paired session admits a CPU attempt at the same actual plugin lifetime and epoch',t=>{

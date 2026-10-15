@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {validateCommandArgs} from '../../packages/core/src/studio-policy.js';
-import {isWrite, type StudioSession, type StudioAssetStageArgs} from '../../packages/protocol/src/studio.js';
+import {isWrite, type StudioSession, type StudioAssetStageArgs,type StudioAssetReconstructArgs} from '../../packages/protocol/src/studio.js';
 import {importContextFixture} from './studio-import-context-fixture.js';
 
 function fixture() {
@@ -46,4 +46,19 @@ test('packet metadata cannot substitute another revision or smuggle unbounded bi
     assert.throws(() => validateCommandArgs('asset.stage_packet', {...args, packet}, session), {code: 'INPUT'});
   assert.throws(() => validateCommandArgs('asset.stage_packet', {...args, permission: true}, session), {code: 'INPUT'});
   assert.throws(() => validateCommandArgs('asset.stage_packet', {...args, packet: args.packet+' '.repeat(256*1024)}, session), {code: 'BODY_LIMIT'});
+});
+
+test('detached reconstruction has exact source metadata, aggregate bounds and the same writable Edit fence',()=>{
+  const f=fixture(),session={...f.session,capabilities:[...f.session.capabilities,'asset.reconstruct']};
+  const args:StudioAssetReconstructArgs={runId:'11111111-1111-4111-8111-111111111111',expected:f.args.expected,
+    packetCount:3,byteLength:1024,target:f.args.target,continuity:f.args.continuity,
+    objects:[{sourceObjectId:'fixture-mesh',meshExportSha256:'e'.repeat(64),vertexCount:4,triangleCount:4}]};
+  assert.equal(isWrite('asset.reconstruct'),true);assert.deepEqual(validateCommandArgs('asset.reconstruct',args,session),args);
+  for(const patch of [{runId:'-'.repeat(36)},{permission:true},{objects:[]},{objects:[args.objects[0],args.objects[0]]},
+    {expected:{...args.expected,digest:args.expected.digest+'\n'}},{objects:[{...args.objects[0],meshExportSha256:'e'.repeat(64)+'\n'}]},
+    {objects:[{...args.objects[0],vertexCount:60001}]},{objects:[{...args.objects[0],triangleCount:20001}]}])assert.throws(()=>validateCommandArgs('asset.reconstruct',{...args,...patch},session),{code:'INPUT'});
+  const large={...args,objects:Array.from({length:3},(_,i)=>({...args.objects[0]!,sourceObjectId:'source-'+i,vertexCount:60000,triangleCount:20000}))};
+  assert.throws(()=>validateCommandArgs('asset.reconstruct',large,session),{code:'BODY_LIMIT'});
+  assert.throws(()=>validateCommandArgs('asset.reconstruct',args,{...session,allowWrites:false}),{code:'READ_ONLY'});
+  assert.throws(()=>validateCommandArgs('asset.reconstruct',{...args,continuity:{...args.continuity,playEpoch:1}},session),{code:'SCOPE'});
 });

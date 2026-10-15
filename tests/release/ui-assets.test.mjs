@@ -40,8 +40,8 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   for (const path of REQUIRED_MANAGED_LUAU_FILES) await write(path, await readFile(new URL('../../' + path, import.meta.url)));
   const plugin = '--!strict\n-- Offline fixture only.\n';
   await write('plugin/src/Main.server.luau', plugin);
-  await write('plugin/build/ArcaneLocalBridge.lua', plugin);
-  await write('plugin/build/manifest.json', JSON.stringify({ schemaVersion: 1, preferredArtifact: 'ArcaneLocalBridge.lua', sources: [{ path: 'src/Main.server.luau', sha256: hash(plugin) }], artifacts: [{ name: 'ArcaneLocalBridge.lua', bytes: Buffer.byteLength(plugin), sha256: hash(plugin) }] }));
+  await write('plugin/build/ArcaneLocalBridge.rbxmx', plugin);
+  await write('plugin/build/manifest.json', JSON.stringify({ schemaVersion: 1, preferredArtifact: 'ArcaneLocalBridge.rbxmx', sources: [{ path: 'src/Main.server.luau', sha256: hash(plugin) }], artifacts: [{ name: 'ArcaneLocalBridge.rbxmx', bytes: Buffer.byteLength(plugin), sha256: hash(plugin) }] }));
   // Local resolution stubs prove doctor scope without installing dependencies.
   await write('node_modules/@modelcontextprotocol/sdk/package.json', JSON.stringify({ name: '@modelcontextprotocol/sdk', exports: { './client/index.js': './client/index.js' } }));
   await write('node_modules/@modelcontextprotocol/sdk/client/index.js', '// Resolution stub.\n');

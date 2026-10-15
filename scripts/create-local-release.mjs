@@ -166,7 +166,8 @@ export async function createLocalRelease({ repository = REPOSITORY } = {}) {
   validateWorkspaceLock(files);
   const packageJson = JSON.parse(files.find(file => file.path === 'package.json').bytes.toString('utf8'));
   const firstRunDeclared = packageJson.scripts?.['setup:arcane'] !== undefined || files.some(file => FIRST_RUN_FILES.includes(file.path));
-  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua', 'plugin/build/manifest.json', ...REQUIRED_FRONTEND_FILES, ...REQUIRED_MANAGED_LUAU_FILES, ...(firstRunDeclared ? FIRST_RUN_FILES : [])]) {
+  if (files.some(file => file.path === 'plugin/build/ArcaneLocalBridge.lua')) throw new Error('Rebuild the modular plugin before packaging; stale single-script artifact remains.');
+  for (const required of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.rbxmx', 'plugin/build/manifest.json', ...REQUIRED_FRONTEND_FILES, ...REQUIRED_MANAGED_LUAU_FILES, ...(firstRunDeclared ? FIRST_RUN_FILES : [])]) {
     if (!files.some(file => file.path === required)) throw new Error('Build the product and plugin before packaging: missing ' + required);
   }
   validateCompiledSources(files);

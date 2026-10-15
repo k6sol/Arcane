@@ -187,11 +187,23 @@ test('Send allowAssets is a closed optional boolean, never model metadata or a p
   const unavailable=state();delete unavailable.nativeAssets;assert.throws(()=>prepareCodexAction(unavailable,'turn-start',{...fields,allowAssets:true}));
 });
 
+test('Send workspace editing is a closed optional boolean confined to the turn-start envelope',()=>{
+  const st=state(),fields={threadId:THREAD,text:'Human project request'};
+  const ordinary=prepareCodexAction(st,'turn-start',fields);assert.ok(ordinary.action==='turn-start');assert.equal(ordinary.allowWorkspaceWrites,undefined);
+  for(const allowWorkspaceWrites of [false,true]){
+    const input=prepareCodexAction(st,'turn-start',{...fields,allowWorkspaceWrites});assert.ok(input.action==='turn-start');assert.equal(input.allowWorkspaceWrites,allowWorkspaceWrites);
+  }
+  for(const value of [undefined,null,1,'true',{},()=>true])assert.throws(()=>prepareCodexAction(st,'turn-start',{...fields,allowWorkspaceWrites:value}));
+  for(const action of ['connect','select','thread-start','grant-writes','grant-assets'])assert.throws(()=>prepareCodexAction(st,action,{...fields,allowWorkspaceWrites:true}));
+  const combined=prepareCodexAction(st,'turn-start',{...fields,allowWorkspaceWrites:true,allowAssets:true});
+  assert.ok(combined.action==='turn-start');assert.equal(combined.allowWorkspaceWrites,true);assert.equal(combined.allowAssets,true);
+});
+
 test('actual composer Human Send requests automatic assets without Advanced and terminal state permits tabs',async t=>{
   const f=await fixture(t);f.el('codex-composer').value='Build an owned synthetic asset';assert.equal(f.posts.length,0);
   assert.equal(f.observed().nativeAssets?.granted,false);
   f.handler(async input=>{
-    assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,true);
+    assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,true);assert.equal(input.allowWorkspaceWrites,true);
     const next=f.observed();next.snapshot!.thread!.turnId='sent-turn';next.snapshot!.thread!.turnStatus='inProgress';next.nativeAssets=assets({granted:true,admissionOpen:true});f.set(next);
     return response(input,next,{turnId:'sent-turn'});
   });
@@ -204,7 +216,7 @@ test('actual composer Human Send requests automatic assets without Advanced and 
 
 test('composer Send omits automatic assets when the host has no managed capability',async t=>{
   const initial=state();delete initial.nativeAssets;const f=await fixture(t,initial);f.el('codex-composer').value='Ordinary human message';
-  f.handler(async input=>{assert.equal(input.action,'turn-start');assert.equal(Object.hasOwn(input,'allowAssets'),false);return response(input,f.observed());});
+  f.handler(async input=>{assert.ok(input.action==='turn-start');assert.equal(Object.hasOwn(input,'allowAssets'),false);assert.equal(input.allowWorkspaceWrites,true);return response(input,f.observed());});
   f.el('codex-compose').emit('submit');await flush();assert.equal(f.posts.length,1);
 });
 
@@ -214,10 +226,10 @@ test('Human Send opens its exact new chat before requesting one-shot assets on t
   f.handler(async input=>{
     const next=f.observed();
     if(input.action==='thread-start'){
-      assert.equal(Object.hasOwn(input,'allowAssets'),false);next.snapshot!.thread=state().snapshot!.thread!;next.nativeAssets=assets();f.set(next);
+      assert.equal(Object.hasOwn(input,'allowAssets'),false);assert.equal(Object.hasOwn(input,'allowWorkspaceWrites'),false);next.snapshot!.thread=state().snapshot!.thread!;next.nativeAssets=assets();f.set(next);
       return response(input,next,{threadId:THREAD});
     }
-    assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,true);assert.equal(input.threadId,THREAD);
+    assert.ok(input.action==='turn-start');assert.equal(input.allowAssets,true);assert.equal(input.allowWorkspaceWrites,true);assert.equal(input.threadId,THREAD);
     return response(input,next,{threadId:THREAD});
   });
   assert.equal(f.posts.length,0);f.el('codex-compose').emit('submit');await flush();

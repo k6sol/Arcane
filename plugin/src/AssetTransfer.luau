@@ -235,6 +235,28 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		if not ok then abort(); error(result, 0) end
 		return result
 	end
+	-- Closed metadata from the ACTUAL sealed receiver, before any allocation.
+	-- A serialized copy of this plan is still not permission or mesh ownership.
+	function receiver:reconstructionPlan(): any
+		if state ~= "sealed" then fail("STATE", "Only an original sealed transfer may plan reconstruction.") end
+		check()
+		local result = {}
+		local vertices, triangles = 0, 0
+		for _, entry in ipairs(objects) do
+			local vertexCount, triangleCount = 0, 0
+			for _, primitive in ipairs(entry.primitives) do
+				vertexCount += integer(primitive.vertexCount, 1, 60000)
+				triangleCount += integer(primitive.triangleCount, 1, 20000)
+			end
+			integer(vertexCount, 1, 60000); integer(triangleCount, 1, 20000)
+			vertices += vertexCount; triangles += triangleCount
+			integer(vertices, 1, 120000); integer(triangles, 1, 40000)
+			result[#result + 1] = table.freeze({sourceObjectId = entry.object.sourceObjectId,
+				meshExportSha256 = digest(entry.object.meshExportSha256), vertexCount = vertexCount, triangleCount = triangleCount})
+		end
+		check()
+		return table.freeze(result)
+	end
 	return table.freeze(receiver)
 end
 

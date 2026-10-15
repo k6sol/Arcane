@@ -52,13 +52,22 @@ function inspectionOnlyTransform(script, inverse = false) {
 export const inspectionOnlyCandidate = script => inspectionOnlyTransform(script);
 export const inspectionOnlyLegacy = script => inspectionOnlyTransform(script, true);
 
+// Retain the original read-inspector experiment independently of later native
+// preparation/serialization changes. This is historical evidence, not the current
+// production policy acceptance gate (workflow-permission-equivalence.test.ts).
+export function historicalInspectionCandidate() {
+  const script=readFileSync(new URL('../tests/fixtures/workflow-private-storage-before-startup-fix.txt',import.meta.url),'utf8').replaceAll('\r\n','\n');
+  assert.equal(createHash('sha256').update(script).digest('hex'),'9e80f4b7b3563233fa936c57c2a50316eac345c5ef3eb79457caa4d1ffd52f3e');
+  return script;
+}
+
 async function main() {
   assert.equal(process.platform,'win32');assert.equal(process.argv.length,2);
   const modulePath=resolve('apps/daemon/src/workflow-private-storage.ts');
   const source=readFileSync(modulePath,'utf8').replaceAll('\r\n','\n');
   const marker='const SCRIPT=String.raw`';const start=source.indexOf(marker)+marker.length;const end=source.indexOf('\n`;',start);
-  assert.ok(start>=marker.length && end>start);const current=source.slice(start,end)+'\n';const original=current.includes('function IsDirectory')?inspectionOnlyLegacy(current):current;const candidate=inspectionOnlyCandidate(original);
-  assert.ok(current===original||current===candidate,'only the verified read-inspector replacement is supported');
+  assert.ok(start>=marker.length && end>start);const current=source.slice(start,end)+'\n';const candidate=historicalInspectionCandidate(),original=inspectionOnlyLegacy(candidate);
+  assert.equal(inspectionOnlyCandidate(original),candidate,'historical read-inspector replacement must stay source pinned');
   assert.equal(inspectionOnlyLegacy(candidate),original,'all non-inspection predicates and preparation writes must roundtrip exactly');
   const hash=value=>createHash('sha256').update(value).digest('hex');
   const evidence=mkdtempSync(join(resolve('runtime/verification'),'acl-equivalence-'));
@@ -124,7 +133,7 @@ foreach($path in $paths){
     for(let i=0;i<6;i++){const a=run(original),b=run(candidate);assert.equal(a.status,0);assert.equal(b.status,0);assert.equal(a.error,null);assert.equal(b.error,null);timings.push({originalMs:a.elapsedMs,candidateMs:b.elapsedMs});}
     assert.equal(hash(readFileSync(modulePath,'utf8').replaceAll('\r\n','\n')),hash(source),'production module must remain unchanged during the comparison');passed=true;
   } finally {
-    const proof={schemaVersion:1,kind:'real-windows-read-only-inspector-equivalence',passed,productionEdited:false,securityRulesChanged:false,securityDeadlineMs:5000,originalScriptSha256:hash(original),candidateScriptSha256:hash(candidate),fingerprints,checks,timings,providerInference:false,studioOperations:0,fullProductVerified:false};
+    const proof={schemaVersion:1,kind:'real-windows-read-only-inspector-equivalence',historicalOnly:true,passed,productionEdited:false,securityRulesChanged:false,securityDeadlineMs:5000,productionScriptSha256:hash(current),originalScriptSha256:hash(original),candidateScriptSha256:hash(candidate),fingerprints,checks,timings,providerInference:false,studioOperations:0,fullProductVerified:false};
     writeFileSync(join(evidence,'verification.json'),JSON.stringify(proof,null,2)+'\n',{flag:'wx',mode:0o600});
     const base=resolve(homedir(),'.arcane-private-receipts-v1'),part=relative(base,resolve(parent));assert.match(part,/^[a-f0-9]{64}$/);assert.ok(!lstatSync(parent).isSymbolicLink());assert.equal(realpathSync(parent).toLowerCase(),resolve(parent).toLowerCase());rmSync(parent,{recursive:true,force:true});
     const part2=relative(resolve(tmpdir()),resolve(root));assert.ok(part2&&!isAbsolute(part2)&&part2!=='..'&&!part2.startsWith('..'+sep));rmSync(root,{recursive:true,force:true});

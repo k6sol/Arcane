@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,16 +16,17 @@ import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { TestLedger, digest } from '../../packages/studio-test-controller/src/index.js';
+import { STUDIO_PLUGIN_SOURCES } from '../../packages/protocol/src/studio-plugin-artifact.js';
+import { studioImportPluginArtifactHash } from '../../apps/daemon/src/studio-import-plugin-artifact.js';
 import { fixtureTempDirectory, makeFixtureDirectory } from './windows-fixture-paths.js';
 
-// Offline host-wiring fixtures only: synthetic artifact text and retained journal
-// bytes in an owned temporary tree, real loopback HTTP/SQLite, no native engine,
+// Offline host-wiring fixtures only: copies of the actual bundled modular plugin
+// and retained journal bytes in an owned temporary tree, real loopback HTTP/SQLite, no native engine,
 // SDK connection, provider, installed plugin, or fabricated completed playtest.
-const SOURCE = '-- synthetic host integrity fixture; never executed\n';
-const SOURCE_HASH = createHash('sha256').update(SOURCE).digest('hex');
 const PRIVATE = 'private-unavailable-fixture-diagnostic';
 const APPROVAL = { id: 'fixture-job', displayDigest: 'a'.repeat(64) };
-type Source = 'verified' | 'missing-manifest' | 'missing-source' | 'malformed-manifest' | 'wrong-hash';
+type Source = 'verified' | 'missing-manifest' | 'missing-source' | 'malformed-manifest' | 'wrong-hash' |
+  'missing-module' | 'tampered-module' | 'wrong-identity' | 'duplicate-artifact' | 'legacy-only';
 type Lab = Awaited<ReturnType<typeof createConnectionLab>>;
 type Reply = { status: number; text: string; json: Record<string, unknown>; headers: IncomingHttpHeaders };
 
@@ -55,9 +56,26 @@ function fixture(t: TestContext, source: Source = 'verified') {
   const cwd = join(root, 'synthetic-resources'), stateDirectory = join(root, 'lab');
   const artifacts = join(cwd, 'plugin', 'build'), ledgerDirectory = join(stateDirectory, 'playtests', 'ledger');
   mkdirSync(artifacts, { recursive: true }); mkdirSync(stateDirectory);
-  if (source !== 'missing-manifest') writeFileSync(join(artifacts, 'manifest.json'), source === 'malformed-manifest'
-    ? PRIVATE : JSON.stringify({ artifacts: [{ name: 'ArcaneLocalBridge.lua', sha256: source === 'wrong-hash' ? 'b'.repeat(64) : SOURCE_HASH }] }));
-  if (source !== 'missing-source') writeFileSync(join(artifacts, 'ArcaneLocalBridge.lua'), SOURCE);
+  const sources = join(cwd, 'plugin', 'src'); mkdirSync(sources);
+  const bundled = resolve('plugin');
+  copyFileSync(join(bundled, 'build', 'ArcaneLocalBridge.rbxmx'), join(artifacts, 'ArcaneLocalBridge.rbxmx'));
+  for (const [, , filename] of STUDIO_PLUGIN_SOURCES) copyFileSync(join(bundled, 'src', filename), join(sources, filename));
+  const manifest = JSON.parse(readFileSync(join(bundled, 'build', 'manifest.json'), 'utf8')) as {
+    preferredArtifact: string; runtimeIdentity: { sha256: string }; artifacts: { name: string; sha256: string }[];
+  };
+  if (source === 'wrong-hash') manifest.artifacts.find(artifact => artifact.name === 'ArcaneLocalBridge.rbxmx')!.sha256 = 'b'.repeat(64);
+  if (source === 'wrong-identity') manifest.runtimeIdentity.sha256 = 'b'.repeat(64);
+  if (source === 'duplicate-artifact') manifest.artifacts.push({ ...manifest.artifacts.find(artifact => artifact.name === 'ArcaneLocalBridge.rbxmx')! });
+  if (source === 'legacy-only') {
+    manifest.preferredArtifact = 'ArcaneLocalBridge.lua';
+    manifest.artifacts = [{ name: 'ArcaneLocalBridge.lua', sha256: createHash('sha256').update(PRIVATE).digest('hex') }];
+    writeFileSync(join(artifacts, 'ArcaneLocalBridge.lua'), PRIVATE);
+    rmSync(join(artifacts, 'ArcaneLocalBridge.rbxmx'));
+  }
+  if (source !== 'missing-manifest') writeFileSync(join(artifacts, 'manifest.json'), source === 'malformed-manifest' ? PRIVATE : JSON.stringify(manifest));
+  if (source === 'missing-source') rmSync(join(artifacts, 'ArcaneLocalBridge.rbxmx'));
+  if (source === 'missing-module') rmSync(join(sources, 'AssetUpload.luau'));
+  if (source === 'tampered-module') writeFileSync(join(sources, 'AssetUpload.luau'), '--!strict\n-- Changed child module fixture.\nreturn {}\n');
   const storeDirectory = join(root, 'studio-fixture'), store = new StudioStore({ directory: storeDirectory });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
   const pair = store.pair({ code: grant.code, protocolVersion: 1,
@@ -99,7 +117,8 @@ function fixture(t: TestContext, source: Source = 'verified') {
       rmSync(target, { recursive: true, force: true });
     }
   });
-  return { root, cwd, stateDirectory, artifacts, ledgerDirectory, store, pair, effects, codex, labs, workStores, start, counts, noExecution };
+  return { root, cwd, stateDirectory, artifacts, ledgerDirectory, store, pair, effects, codex, labs, workStores, start, counts, noExecution,
+    runtimeHash: manifest.runtimeIdentity.sha256 };
 }
 
 function call(lab: Lab, options: {
@@ -137,7 +156,7 @@ function refusal(reply: Reply, code: 'UNAVAILABLE' | 'FENCED', lab: Lab, root: s
   assert.equal(reply.headers.connection, 'close');
   assert.equal(Number(reply.headers['content-length']), Buffer.byteLength(reply.text));
   assert.ok(Buffer.byteLength(reply.text) <= STUDIO_TEST_HTTP_LIMITS.responseBytes);
-  for (const secret of [lab.token, lab.agentToken, PRIVATE, root, SOURCE.trim()]) assert.equal(reply.text.includes(secret), false);
+  for (const secret of [lab.token, lab.agentToken, PRIVATE, root]) assert.equal(reply.text.includes(secret), false);
 }
 
 async function mountedRefusals(f: ReturnType<typeof fixture>, lab: Lab, code: 'UNAVAILABLE' | 'FENCED') {
@@ -160,8 +179,27 @@ async function mountedRefusals(f: ReturnType<typeof fixture>, lab: Lab, code: 'U
   f.noExecution();
 }
 
-test('offline source fixtures mount actionable UNAVAILABLE on every playtest operation', async t => {
-  for (const source of ['missing-manifest', 'missing-source', 'malformed-manifest', 'wrong-hash'] as const) await t.test(source, async sub => {
+test('actual bundled modular plugin initializes the production playtest service without launching native tools', async t => {
+  const f = fixture(t);
+  assert.equal(existsSync(join(f.artifacts, 'ArcaneLocalBridge.lua')), false, 'No legacy single-script artifact may mask the modular path.');
+  const xmlHash = createHash('sha256').update(readFileSync(join(f.artifacts, 'ArcaneLocalBridge.rbxmx'))).digest('hex');
+  assert.notEqual(f.runtimeHash, xmlHash, 'The loaded-source identity is distinct from the delivery checksum.');
+  assert.equal(await studioImportPluginArtifactHash(f.cwd), f.runtimeHash);
+  const lab = await f.start();
+  for (const token of [lab.token, lab.agentToken]) {
+    const listed = await call(lab, { token }); assert.equal(listed.status, 200); assert.deepEqual(listed.json, { jobs: [] });
+  }
+  const state = await call(lab, { path: '/v1/state', token: lab.token });
+  assert.equal(state.status, 200); assert.deepEqual(state.json.warnings, []);
+  assert.equal(existsSync(join(f.ledgerDirectory, 'writer.lock')), true, 'The real owned service opened its ledger.');
+  f.noExecution(); await lab.close();
+  assert.equal(existsSync(join(f.ledgerDirectory, 'writer.lock')), false, 'Shutdown releases only the owned idle ledger.');
+  f.noExecution();
+});
+
+test('offline modular resource fixtures mount actionable UNAVAILABLE on every playtest operation', async t => {
+  for (const source of ['missing-manifest', 'missing-source', 'malformed-manifest', 'wrong-hash',
+    'missing-module', 'tampered-module', 'wrong-identity', 'duplicate-artifact', 'legacy-only'] as const) await t.test(source, async sub => {
     const f = fixture(sub, source), lab = await f.start();
     assert.equal(existsSync(join(f.stateDirectory, 'playtests')), false, 'Untrusted source cannot initialize a journal.');
     await mountedRefusals(f, lab, 'UNAVAILABLE');

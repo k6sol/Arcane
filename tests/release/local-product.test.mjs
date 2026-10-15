@@ -39,8 +39,8 @@ async function fixture(t) {
   for (const path of REQUIRED_MANAGED_LUAU_FILES) await write(path, await readFile(new URL('../../' + path, import.meta.url)));
   const pluginSource = '--!strict\nlocal __arcaneFactories = {}\n';
   await write('plugin/src/Main.server.luau', pluginSource);
-  await write('plugin/build/ArcaneLocalBridge.lua', pluginSource);
-  await write('plugin/build/manifest.json', JSON.stringify({ schemaVersion: 1, preferredArtifact: 'ArcaneLocalBridge.lua', sources: [{ path: 'src/Main.server.luau', sha256: hash(pluginSource) }], artifacts: [{ name: 'ArcaneLocalBridge.lua', bytes: Buffer.byteLength(pluginSource), sha256: hash(pluginSource) }] }));
+  await write('plugin/build/ArcaneLocalBridge.rbxmx', pluginSource);
+  await write('plugin/build/manifest.json', JSON.stringify({ schemaVersion: 1, preferredArtifact: 'ArcaneLocalBridge.rbxmx', sources: [{ path: 'src/Main.server.luau', sha256: hash(pluginSource) }], artifacts: [{ name: 'ArcaneLocalBridge.rbxmx', bytes: Buffer.byteLength(pluginSource), sha256: hash(pluginSource) }] }));
   return { root, write };
 }
 
@@ -54,7 +54,7 @@ test('release snapshots compiled/source files and never copies runtime, tokens, 
   const result = await createLocalRelease({ repository: root });
   assert.equal(result.dependencyInstallRequired, true); assert.equal(result.fullProductVerified, false);
   const manifest = JSON.parse(await readFile(join(result.directory, 'release-manifest.json'), 'utf8'));
-  assert.ok(manifest.files.some(file => file.path === 'plugin/build/ArcaneLocalBridge.lua'));
+  assert.ok(manifest.files.some(file => file.path === 'plugin/build/ArcaneLocalBridge.rbxmx'));
   assert.ok(manifest.files.every(file => !/(?:^|\/)(?:runtime|node_modules|generated|\.tmp)(?:\/|$)/.test(file.path)));
   const verified = await verifyLocalRelease(result.directory);
   assert.equal(verified.signed, false); assert.equal(verified.runtimeVerified, false);
@@ -75,6 +75,12 @@ test('integrity verification rejects modified, unlisted and traversal payloads',
   const path = join(third.directory, 'release-manifest.json'), manifest = JSON.parse(await readFile(path, 'utf8'));
   manifest.files[0].path = '../../outside'; await writeFile(path, JSON.stringify(manifest));
   await assert.rejects(verifyLocalRelease(third.directory), /Forbidden/);
+});
+
+test('a stale single-script plugin cannot be shipped alongside the modular artifact', async t => {
+  const { root, write } = await fixture(t);
+  await write('plugin/build/ArcaneLocalBridge.lua', '-- Old single-script delivery.\n');
+  await assert.rejects(createLocalRelease({ repository: root }), /stale single-script/);
 });
 
 test('actual key/session-link strings and credential-like JSON fields fail packaging', async t => {

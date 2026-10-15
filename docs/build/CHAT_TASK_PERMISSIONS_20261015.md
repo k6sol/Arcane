@@ -1,0 +1,15 @@
+# Chat task permissions — 15 October 2026
+
+Ordinary composer Send now requests workspace editing for its actual native turn, together with the existing managed asset permission when available. Chat setup, model selection, draft restoration and history reads do not grant editing or start inference. The human control route accepts the closed `allowWorkspaceWrites` boolean only on `turn-start`; provider metadata, generic agent credentials and foreign origins cannot supply this authority.
+
+The native client snapshots the request before asynchronous MCP isolation checks. After those checks pass, it binds automatic permission to the actual operation object. The sandbox writes only the selected project, excludes temporary roots and keeps network access disabled. Native approval requests still require explicit review. Arcane sends an explicit sandbox on every turn; this matters because [native turn overrides become later defaults](https://learn.chatgpt.com/docs/app-server#start-a-turn).
+
+Automatic permission expires on the exact terminal acknowledgement/event, failed start, interruption, revocation or disconnect. A delayed previous-turn event cannot clear a newer task's permission. Unknown starts close the owned client and retain the unknown operation, including when completion was observed before a lost acknowledgement. A separate explicit thread grant remains persistent and can deliberately promote an active automatic grant. The next direct start with no automatic request remains read-only unless that explicit grant exists.
+
+A terminal acknowledgement following `turn/started` now advances the current active turn to completed, failed or interrupted without requiring another completion event. Earlier terminal, cancellation and unknown state is preserved rather than revived by a late acknowledgement.
+
+Verification uses the actual Codex session, human-only HTTP route, SQLite action journal and composer code with a spawned Node JSONL peer. It covers wire sandboxes, review eligibility, scope refusal, manual promotion, preflight revocation, stale events, pre-dispatch failures, unknown outcomes and request-ID replay. These are offline integration fixtures, not evidence of native provider sandbox enforcement or customer acceptance.
+
+The affected client, HTTP, composer and isolation suites passed 226 cases with six conditional browser skips. With installed headless Edge enabled, the complete chat UI suite passed 27/27 with no skips, including read-only setup followed by ordinary Send requesting workspace writes without an Advanced grant. The peer received the existing bounded workspace sandbox and no application permission flag; explicit review and interruption still worked.
+
+The full continuous task loop remains incomplete: queued follow-ups/steering, coordinated graph execution, cancellation of already accepted asset workers, connected uploads/insertion and native Studio acceptance require further integration. No Studio or provider operations were performed for this change.
