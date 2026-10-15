@@ -1,6 +1,6 @@
 # Modular plugin delivery — 15 October 2026
 
-The preferred artifact is `ArcaneLocalBridge.rbxmx`: one enabled Script with thirteen child ModuleScripts. Each source remains limited to 199,999 bytes while the combined hierarchy can grow beyond that bound. The XML `.rbxm` compatibility alias remains available. The builder's in-memory factory representation exists only for offline VM fixtures; no single-script `.lua` plugin is emitted or packaged.
+Plugin **0.1.8** uses `ArcaneLocalBridge.rbxmx`: one enabled Script with thirteen child ModuleScripts. The version distinguishes this delivery and identity scheme from the earlier single-script plugin. Each source remains limited to 199,999 bytes while the combined hierarchy can grow beyond that bound. Builder and daemon share the 4 MiB artifact bound, including XML CDATA expansion. The XML `.rbxm` compatibility alias remains available. The builder's in-memory factory representation exists only for offline VM fixtures; no single-script `.lua` plugin is emitted or packaged.
 
 The builder, installer, daemon import-preparation hash, product doctor and local/Windows release requirements now agree on the preferred modular artifact. Deterministic build verification still covers all normalized sources and both XML artifacts. Windows checkout rules preserve XML bytes. Check mode rejects a leftover `.lua`; rebuilding removes only a recognized generated legacy bundle, and release creation refuses a mixed delivery.
 

@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile, lstat, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { STUDIO_PLUGIN_SOURCES, STUDIO_PLUGIN_IDENTITY_SCHEME, STUDIO_PLUGIN_LIMITS } from '../packages/protocol/src/studio-plugin-artifact.ts';
+import { STUDIO_PLUGIN_SOURCES, STUDIO_PLUGIN_IDENTITY_SCHEME, STUDIO_PLUGIN_LIMITS, STUDIO_PLUGIN_VERSION } from '../packages/protocol/src/studio-plugin-artifact.ts';
 
 export const PLUGIN_SOURCES = STUDIO_PLUGIN_SOURCES;
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -85,7 +85,7 @@ export function renderPlugin(sources) {
   const manifest = {
     schemaVersion: 1,
     protocolVersion: 1,
-    pluginVersion: '0.1.7',
+    pluginVersion: STUDIO_PLUGIN_VERSION,
     format: 'roblox-xml-v4',
     preferredArtifact: 'ArcaneLocalBridge.rbxmx',
     entry: 'ArcaneLocalBridge',

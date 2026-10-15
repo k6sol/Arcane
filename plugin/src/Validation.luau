@@ -1,7 +1,7 @@
 --!strict
 local Validation = {}
 Validation.PROTOCOL = 1
-Validation.VERSION = "0.1.7"
+Validation.VERSION = "0.1.8"
 Validation.ARGUMENT_BYTES = 256 * 1024
 Validation.RESULT_BYTES = 512 * 1024
 Validation.SOURCE_BYTES = 100 * 1024
