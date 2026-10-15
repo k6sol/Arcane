@@ -1,4 +1,4 @@
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile, lstat, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,7 +33,7 @@ function item({ name, className, source }, index, children = '') {
     + `</Properties>\n${children}</Item>\n`;
 }
 
-/** Trusted source factories, assembled at build time; no runtime source evaluator. */
+/** Offline VM fixture only; production uses the Script/ModuleScript hierarchy. */
 export function renderLuaBundle(ordered) {
   const moduleNames = new Set(ordered.slice(1).map(source => source.name));
   const rewrite = ({ source, filename, className }) => {
@@ -72,7 +72,6 @@ end
     `-- BEGIN ${module.filename}\n__arcaneFactories["${module.name}"] = function()\n${rewrite(module)}end\n-- END ${module.filename}\n`).join('\n');
   const main = `-- BEGIN ${ordered[0].filename}\nlocal function __arcaneMain(): ()\n${rewrite(ordered[0])}end\n__arcaneMain()\n-- END ${ordered[0].filename}\n`;
   const lua = prelude + factories + '\ntable.freeze(__arcaneFactories)\n\n' + main;
-  if (Buffer.byteLength(lua) > 199999) throw new Error('Native Lua bundle exceeds the portable per-script source bound.');
   return lua;
 }
 
@@ -95,18 +94,17 @@ export function renderPlugin(sources) {
     + '<External>null</External>\n<External>nil</External>\n'
     + item(ordered[0], 0, modules) + '</roblox>\n';
   const lua = renderLuaBundle(ordered);
-  const artifacts = ['ArcaneLocalBridge.rbxm', 'ArcaneLocalBridge.rbxmx', 'ArcaneLocalBridge.lua'];
+  const artifacts = ['ArcaneLocalBridge.rbxm', 'ArcaneLocalBridge.rbxmx'];
   const manifest = {
     schemaVersion: 1,
     protocolVersion: 1,
     pluginVersion: '0.1.7',
     format: 'roblox-xml-v4',
-    preferredArtifact: 'ArcaneLocalBridge.lua',
+    preferredArtifact: 'ArcaneLocalBridge.rbxmx',
     entry: 'ArcaneLocalBridge',
     sources: ordered.map(({ filename, source }) => ({ path: `src/${filename}`, bytes: Buffer.byteLength(source), sha256: sha256(source) })),
     artifacts: artifacts.map(name => {
-      const content = name.endsWith('.lua') ? lua : xml;
-      return { name, format: name.endsWith('.lua') ? 'luau-source' : 'roblox-xml-v4', bytes: Buffer.byteLength(content), sha256: sha256(content) };
+      return { name, format: 'roblox-xml-v4', bytes: Buffer.byteLength(xml), sha256: sha256(xml) };
     }),
   };
   return { xml, lua, manifest, artifacts, sources: ordered };
@@ -115,7 +113,18 @@ export function renderPlugin(sources) {
 export async function buildPlugin({ sourceDir = path.join(repository, 'plugin', 'src'), outDir = path.join(repository, 'plugin', 'build'), check = false } = {}) {
   const sourceFiles = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) => ({ filename, source: await readFile(path.join(sourceDir, filename), 'utf8') })));
   const rendered = renderPlugin(sourceFiles);
-  const files = [...rendered.artifacts.map(name => [name, name.endsWith('.lua') ? rendered.lua : rendered.xml]), ['manifest.json', JSON.stringify(rendered.manifest, null, 2) + '\n']];
+  const files = [...rendered.artifacts.map(name => [name, rendered.xml]), ['manifest.json', JSON.stringify(rendered.manifest, null, 2) + '\n']];
+  // A stale single-script artifact must never be installed or shipped alongside
+  // the modular plugin. Remove only our own generated file, never an unknown one.
+  const legacyPath = path.join(outDir, 'ArcaneLocalBridge.lua');
+  try {
+    const stat = await lstat(legacyPath);
+    if (check) throw new Error('Stale single-script plugin artifact: ArcaneLocalBridge.lua');
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 2 * 1024 * 1024) throw new Error('Refusing to replace an unrecognized legacy plugin artifact.');
+    const legacy = await readFile(legacyPath, 'utf8');
+    if (!legacy.startsWith('--!strict\n-- Generated from plugin/src; install exactly one Arcane artifact.\n') || !legacy.includes('local __arcaneFactories')) throw new Error('Refusing to replace an unrecognized legacy plugin artifact.');
+    await unlink(legacyPath);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (check) {
     for (const [name, expected] of files) {
       if (await readFile(path.join(outDir, name), 'utf8') !== expected) throw new Error(`Plugin artifact is missing or stale: ${name}`);
@@ -138,7 +147,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       else throw new Error('Usage: node scripts/build-plugin.mjs [--out-dir DIRECTORY] [--check]');
     }
     const result = await buildPlugin({ outDir, check });
-    process.stdout.write(`${check ? 'Verified' : 'Built'} Arcane local plugin (native Lua + Roblox XML v4, protocol 1): ${result.outDir}\n`);
+    process.stdout.write(`${check ? 'Verified' : 'Built'} Arcane local plugin (modular Roblox XML v4, protocol 1): ${result.outDir}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

@@ -3,7 +3,7 @@
   "protocolVersion": 1,
   "pluginVersion": "0.1.7",
   "format": "roblox-xml-v4",
-  "preferredArtifact": "ArcaneLocalBridge.lua",
+  "preferredArtifact": "ArcaneLocalBridge.rbxmx",
   "entry": "ArcaneLocalBridge",
   "sources": [
     {
@@ -89,12 +89,6 @@
       "format": "roblox-xml-v4",
       "bytes": 176248,
       "sha256": "fb353832aedf2d74bb203cfb24a60e4610b0557d4e19fa100abfb47f50542bb4"
-    },
-    {
-      "name": "ArcaneLocalBridge.lua",
-      "format": "luau-source",
-      "bytes": 175030,
-      "sha256": "216df1d46728b8dfa74e82a36d69223034f6f5632f5719a12a9a8aa792318122"
     }
   ]
 }

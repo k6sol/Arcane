@@ -31,14 +31,14 @@ export async function studioImportPluginArtifactHash(resourceRoot: string): Prom
     const manifest: unknown = JSON.parse((await bytes(join(root, 'plugin', 'build', 'manifest.json'), 64 * 1024)).toString('utf8'));
     if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) refused();
     const m = manifest as Record<string, unknown>;
-    if (m.schemaVersion !== 1 || m.protocolVersion !== 1 || m.preferredArtifact !== 'ArcaneLocalBridge.lua' ||
+    if (m.schemaVersion !== 1 || m.protocolVersion !== 1 || m.preferredArtifact !== 'ArcaneLocalBridge.rbxmx' ||
       !Array.isArray(m.artifacts) || m.artifacts.length > 8) refused();
-    const artifacts = m.artifacts.filter(a => a && typeof a === 'object' && (a as Record<string, unknown>).name === 'ArcaneLocalBridge.lua');
+    const artifacts = m.artifacts.filter(a => a && typeof a === 'object' && (a as Record<string, unknown>).name === 'ArcaneLocalBridge.rbxmx');
     if (artifacts.length !== 1) refused();
     const artifact = artifacts[0] as Record<string, unknown>;
-    if (artifact.format !== 'luau-source' || typeof artifact.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
+    if (artifact.format !== 'roblox-xml-v4' || typeof artifact.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
       !Number.isSafeInteger(artifact.bytes)) refused();
-    const source = await bytes(join(root, 'plugin', 'build', 'ArcaneLocalBridge.lua'), 2 * 1024 * 1024);
+    const source = await bytes(join(root, 'plugin', 'build', 'ArcaneLocalBridge.rbxmx'), 4 * 1024 * 1024);
     const hash = createHash('sha256').update(source).digest('hex');
     if (artifact.bytes !== source.length || artifact.sha256 !== hash || !source.includes('"scene.import_context"')) refused();
     return hash;

@@ -104,7 +104,11 @@ test('private plugin artifacts render deterministically and compile without inst
     assert.equal(digest(bytes), artifact.sha256);
   }
   if (compile) {
-    const log = run(compile, ['--null', path.join(dir, 'ArcaneLocalBridge.lua')]);
+    const paths = [];
+    for (const source of actual.sources) {
+      const target = path.join(dir, source.filename); await writeFile(target, source.source); paths.push(target);
+    }
+    const log = run(compile, ['--null', ...paths]);
     await writeFile(path.join(dir, 'compile.log'), log);
   }
   await writeFile(path.join(dir, 'verification.json'), JSON.stringify({ deterministic: true, compilerRan: Boolean(compile),

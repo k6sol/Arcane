@@ -4,22 +4,21 @@
 
 Run `node scripts/build-plugin.mjs` from the Arcane repository. The dependency-free builder writes:
 
-- `plugin/build/ArcaneLocalBridge.lua` — preferred native local plugin
 - `plugin/build/ArcaneLocalBridge.rbxm`
-- `plugin/build/ArcaneLocalBridge.rbxmx`
+- `plugin/build/ArcaneLocalBridge.rbxmx` — preferred modular local plugin
 - `plugin/build/manifest.json`
 
-Both model files contain identical **Roblox XML v4**, including the `.rbxm` compatibility filename; this is not a binary RBXM serializer. The manifest reports the format, byte counts and SHA-256 for each normalized source and all three artifacts, with a per-artifact format and preferred filename. `node scripts/build-plugin.mjs --check` verifies every output against current source without writing. Input order, BOM and CRLF differences do not change the package. CDATA terminators are split without altering script text; invalid XML characters, lone surrogates, missing modules and overlarge source are refused.
+Both model files contain identical **Roblox XML v4**, including the `.rbxm` compatibility filename; this is not a binary RBXM serializer. The manifest reports the format, byte counts and SHA-256 for each normalized source and both artifacts. The installer, daemon import preparation, doctor and release package use the preferred `.rbxmx`. `node scripts/build-plugin.mjs --check` verifies every output against current source without writing. Input order, BOM and CRLF differences do not change the package. CDATA terminators are split without altering script text; invalid XML characters, lone surrogates, missing modules and individual sources exceeding 199,999 bytes are refused. The combined hierarchy can exceed that individual-script bound.
 
-The native `.lua` bundle embeds the same source bodies as trusted factory closures. The builder rewrites only literal `require(script.Parent.X)` / `require(script.X)` calls to a private loader for declared module names. It rejects unresolved/dynamic imports, caches each module once, detects cycles, and freezes the factory table before running the original Main. No loadstring, evaluation, runtime source parsing or second implementation is introduced.
+The builder retains an in-memory factory representation for offline VM fixtures; it is never written to the build or shipped as a plugin. It validates literal module imports without runtime source evaluation. A rebuild removes an owned legacy generated `.lua` file; an unrecognized file is preserved and causes failure. Check mode and release packaging refuse a stale single-script delivery.
 
-In the XML alternatives, the only root item is an enabled Script named `ArcaneLocalBridge`. Its children are `Types`, `Validation`, `Registry`, `Properties`, `Operations` and `Transport`, all ModuleScripts. Main requires `script.Validation` and `script.Transport`; each child module requires `script.Parent.<Module>`. `plugin/default.project.json` describes the same source hierarchy. The package contains neither test doubles nor fixtures.
+The only root item is an enabled Script named `ArcaneLocalBridge`. Its thirteen child ModuleScripts preserve the hierarchy declared by `PLUGIN_SOURCES` and `plugin/default.project.json`. Main requires `script.<Module>`; each child module requires `script.Parent.<Module>`. The plugin artifacts contain neither test doubles nor fixtures.
 
 ## Installation handoff
 
 Installation and native testing belong to the parent. Build does not install, open Studio or modify a place.
 
-Before installation, the parent should resolve Studio's local plugin folder using Studio's Plugins Folder UI, verify its actual path, and check whether an Arcane file already exists. Preserve an existing Arcane version in a separate backup folder **outside the active plugin directory**, compare hashes, and replace only Arcane's own filename. Never overwrite another plugin. Prefer `ArcaneLocalBridge.lua`. Install exactly one Arcane artifact to avoid duplicate bridge workers. Back up Arcane’s existing `.rbxm`, `.rbxmx` and `.lua` versions outside the active Plugins folder, and retain other plugins unchanged. The model artifacts remain alternatives; use `.rbxmx` if XML under `.rbxm` is not recognized. Restart only the disposable Studio window as necessary. Record the installed hash and actual model import result.
+Prefer `ArcaneLocalBridge.rbxmx` and install exactly one Arcane artifact to avoid duplicate bridge workers. The installer verifies the complete deterministic build before changing a plugin folder. It preflights all three known filenames, refuses unrelated files, retains backups outside the active directory, installs the preferred artifact, and migrates owned legacy `.lua` and `.rbxm` files. A repeated install with matching bytes and no legacy files reports unchanged. Actual loading, reload and engine behavior remain a separate native acceptance gate. This packaging change does not install anything into Studio or verify that gate.
 
 The plugin exposes exactly one **API Key** input and one red **Connect / Disconnect** button. Its compact charcoal panel uses a white/orange Arcane mark, a subtle divider, a masked field, actual connection status and returned root/write grants. There are no URL, pairing-code, credits or quota controls. Green appears only after a confirmed daemon session; connecting, unavailable, disconnected and reconciliation states remain distinct.
 

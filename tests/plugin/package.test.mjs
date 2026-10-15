@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,7 +41,7 @@ test('Git checkout keeps plugin source bytes intact with Windows line-ending set
     assert.equal(result.status, 0, result.stderr?.toString());
     return result.stdout;
   };
-  for (const file of [...PLUGIN_SOURCES.map(([, , name]) => 'plugin/src/' + name), 'plugin/build/ArcaneLocalBridge.lua']) {
+  for (const file of [...PLUGIN_SOURCES.map(([, , name]) => 'plugin/src/' + name), 'plugin/build/ArcaneLocalBridge.rbxmx']) {
     const original = git(['cat-file', 'blob', 'HEAD:' + file]);
     for (const autocrlf of ['true', 'false']) {
       const checkedOut = git(['-c', 'core.autocrlf=' + autocrlf, '-c', 'core.eol=crlf',
@@ -167,8 +167,7 @@ test('builder and check mode use only a selected output directory and detect sta
     await buildPlugin({ outDir, check: true });
     assert.equal(await readFile(path.join(outDir, 'ArcaneLocalBridge.rbxm'), 'utf8'), first.xml);
     assert.equal(await readFile(path.join(outDir, 'ArcaneLocalBridge.rbxmx'), 'utf8'), first.xml);
-    assert.equal(await readFile(path.join(outDir, 'ArcaneLocalBridge.lua'), 'utf8'), first.lua);
-    const { writeFile } = await import('node:fs/promises');
+    await assert.rejects(access(path.join(outDir, 'ArcaneLocalBridge.lua')), { code: 'ENOENT' });
     await writeFile(path.join(outDir, 'ArcaneLocalBridge.rbxm'), 'stale');
     await assert.rejects(() => buildPlugin({ outDir, check: true }), /stale/);
   } finally {
@@ -272,9 +271,9 @@ test('mutation code uses editor baseline callback, immutable receipts and guarde
   assert.doesNotMatch(byFile['Registry.luau'], /FindFirstChild|WaitForChild|GetFullName/);
 });
 
-test('native Lua artifact contains the same trusted module bodies and Main with declared literal imports', () => {
+test('offline VM representation retains trusted source bodies but is never a shipped artifact', () => {
   const output = renderPlugin(files);
-  assert.equal(output.manifest.preferredArtifact, 'ArcaneLocalBridge.lua');
+  assert.equal(output.manifest.preferredArtifact, 'ArcaneLocalBridge.rbxmx');
   assert.ok(output.lua.startsWith('--!strict\n'));
   assert.doesNotMatch(output.lua, /\brequire\s*\(|\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
   assert.doesNotMatch(output.lua, new RegExp(`\\bscript(?:\\.Parent)?\\.(?:${expectedSources.slice(1).map(([name]) => name).join('|')})\\b`));
@@ -287,12 +286,31 @@ test('native Lua artifact contains the same trusted module bodies and Main with 
     assert.equal(body, wrapper + expected + (index === 0 ? 'end\n__arcaneMain()\n' : 'end\n'));
   }
   assert.match(output.lua, /table\.freeze\(__arcaneFactories\)/);
-  const native = output.manifest.artifacts.find(artifact => artifact.name === 'ArcaneLocalBridge.lua');
-  assert.equal(native.format, 'luau-source');
-  assert.equal(native.bytes, Buffer.byteLength(output.lua));
-  assert.equal(native.sha256, createHash('sha256').update(output.lua).digest('hex'));
+  assert.ok(output.manifest.artifacts.every(artifact => artifact.format === 'roblox-xml-v4' && !artifact.name.endsWith('.lua')));
   const reordered = renderPlugin([...files].reverse());
   assert.equal(output.lua, reordered.lua);
+});
+
+test('aggregate source can exceed one script while every delivered Script remains bounded', () => {
+  const expanded = files.map(file => ({ ...file, source: file.source + '-- ' + 'x'.repeat(18000) + '\n' }));
+  const output = renderPlugin(expanded), items = parseBundle(output.xml);
+  assert.ok(Buffer.byteLength(output.lua) > 199999);
+  assert.ok(items.reduce((total, item) => total + Buffer.byteLength(item.source), 0) > 199999);
+  assert.ok(items.every(item => Buffer.byteLength(item.source) <= 199999));
+  assert.equal(output.manifest.preferredArtifact, 'ArcaneLocalBridge.rbxmx');
+});
+
+test('rebuild removes only an owned legacy bundle and check mode refuses mixed deliveries', async t => {
+  const outDir = await mkdtemp(path.join(tmpdir(), 'arcane-plugin-package-'));
+  t.after(async () => { assert.equal(path.dirname(outDir), path.resolve(tmpdir())); await rm(outDir, { recursive: true, force: true }); });
+  const output = await buildPlugin({ outDir }), legacyPath = path.join(outDir, 'ArcaneLocalBridge.lua');
+  await writeFile(legacyPath, output.lua);
+  await assert.rejects(buildPlugin({ outDir, check: true }), /Stale single-script/);
+  await buildPlugin({ outDir });
+  await assert.rejects(access(legacyPath), { code: 'ENOENT' });
+  await writeFile(legacyPath, '-- Unrelated file; preserve me.\n');
+  await assert.rejects(buildPlugin({ outDir }), /unrecognized legacy/);
+  assert.equal(await readFile(legacyPath, 'utf8'), '-- Unrelated file; preserve me.\n');
 });
 
 test('native bundle rejects dynamic, undeclared and incorrectly parented module imports at build time', () => {

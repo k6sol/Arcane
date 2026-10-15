@@ -41,16 +41,16 @@ export async function productDoctor({ repository = REPOSITORY, nodeVersion = pro
   }
   try {
     const manifest = JSON.parse(await readFile(join(repository, 'plugin/build/manifest.json'), 'utf8'));
-    if (manifest.schemaVersion !== 1 || manifest.preferredArtifact !== 'ArcaneLocalBridge.lua') throw new Error();
+    if (manifest.schemaVersion !== 1 || manifest.preferredArtifact !== 'ArcaneLocalBridge.rbxmx') throw new Error();
     const artifact = manifest.artifacts.find(item => item.name === manifest.preferredArtifact);
     const bytes = await readFile(join(repository, 'plugin/build', manifest.preferredArtifact));
     if (!artifact || bytes.length !== artifact.bytes || sha256(bytes) !== artifact.sha256) throw new Error();
     for (const source of manifest.sources) {
-      if (!/^src\/[A-Za-z]+(?:\.server)?\.luau$/.test(source.path)) throw new Error();
+      if (!/^src\/[A-Za-z][A-Za-z0-9]*(?:\.server)?\.luau$/.test(source.path)) throw new Error();
       const text = (await readFile(join(repository, 'plugin', source.path), 'utf8')).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
       if (sha256(Buffer.from(text)) !== source.sha256) throw new Error();
     }
-    add('plugin-artifact', 'pass', 'Native plugin bundle matches the manifest and current source. Installation and loading are separate.');
+    add('plugin-artifact', 'pass', 'Modular plugin matches the manifest and current source. Installation and loading are separate.');
   } catch { add('plugin-artifact', 'fail', 'Run npm run build:plugin; plugin artifact is missing, stale, or invalid.'); }
   add('studio-runtime', 'unverified', 'No Studio connection/mutation is performed by this checker. Verify the key-only plugin from the workbench.');
   add('provider-runtime', 'unverified', 'No login/inference/client configuration is performed. The native provider owns its session.');

@@ -12,6 +12,8 @@
 *.js text eol=lf
 *.luau text eol=lf
 *.lua text eol=lf
+*.rbxm text eol=lf
+*.rbxmx text eol=lf
 *.css text eol=lf
 *.html text eol=lf
 *.yml text eol=lf

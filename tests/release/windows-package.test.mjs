@@ -64,7 +64,7 @@ async function fixture(t) {
   await writeJson('package-lock.json', { name: 'arcane', version: '0.1.0', lockfileVersion: 3, packages: locked });
   await writeJson('tsconfig.json', {});
   for (const path of ['LICENSE', 'README.md']) await write(path, 'Fixture content.\n');
-  for (const path of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.lua']) await write(path, '// Fixture only.\n');
+  for (const path of ['dist/apps/daemon/src/product-main.js', 'dist/apps/mcp/src/main.js', 'plugin/build/ArcaneLocalBridge.rbxmx']) await write(path, '// Fixture only.\n');
   await writeJson('plugin/build/manifest.json', {});
   for (const path of REQUIRED_MANAGED_LUAU_FILES) await write(path, await readFile(new URL('../../' + path, import.meta.url)));
   const ts = 'export const fixture = true;\n';
