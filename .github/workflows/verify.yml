@@ -15,15 +15,16 @@ concurrency:
 
 jobs:
   local-contracts:
-    name: Local contracts (${{ matrix.os }})
+    name: Local contracts (${{ matrix.os }}, ${{ matrix.suite }})
     runs-on: ${{ matrix.os }}
-    # Current serialized Windows offline inventory: 805 cases, ~11 minutes.
-    # This is a whole-job budget, not a relaxation of per-test/runtime deadlines.
+    # Partition the complete inventory; each lane retains the existing job and
+    # per-test/runtime deadlines, assertions and serialized unit execution.
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        suite: [unit-1, unit-2, release]
     steps:
       - name: Check out source without persistent Git credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,19 +46,35 @@ jobs:
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command '[Security.Principal.WindowsIdentity]::GetCurrent() | Out-Null; [IO.Directory]::GetAccessControl($env:SystemRoot) | Out-Null'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build product for the selected inventory
+        run: npm run build
       - name: Verify private storage on Windows
         if: runner.os == 'Windows'
         run: |
-          npm run build
           node --test --test-concurrency=1 dist/tests/unit/workflow-normal-owner.test.js dist/tests/unit/workflow-permission-equivalence.test.js
-      - name: Build and test metadata, HTTP and offline skill contracts
-        run: npm test
-      - name: Build and verify deterministic Studio plugin
-        run: |
-          npm run build:plugin
-          node scripts/build-plugin.mjs --check
-          npm run test:plugin
+      - name: Test complete unit inventory shard 1 of 2
+        if: matrix.suite == 'unit-1'
+        run: node --test --test-concurrency=1 --test-shard=1/2 dist/tests/unit/*.test.js
+      - name: Test complete unit inventory shard 2 of 2
+        if: matrix.suite == 'unit-2'
+        run: node --test --test-concurrency=1 --test-shard=2/2 dist/tests/unit/*.test.js
+      - name: Test offline skill contracts
+        if: matrix.suite == 'release'
+        run: node --test tests/skills/*.test.mjs
+      - name: Test release contracts
+        if: matrix.suite == 'release'
+        run: node --test --test-concurrency=1 tests/release/*.test.mjs
+      - name: Build deterministic Studio plugin
+        if: matrix.suite == 'release'
+        run: npm run build:plugin
+      - name: Verify deterministic Studio plugin artifacts
+        if: matrix.suite == 'release'
+        run: node scripts/build-plugin.mjs --check
+      - name: Test deterministic Studio plugin
+        if: matrix.suite == 'release'
+        run: npm run test:plugin
       - name: Validate actual skill file integrity
+        if: matrix.suite == 'release'
         run: node scripts/skill-pack.mjs validate
       # No CLI login, provider inference, real Studio, or live project operations.
 
