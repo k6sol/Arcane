@@ -2,23 +2,9 @@ import { readFile, mkdir, writeFile, lstat, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { STUDIO_PLUGIN_SOURCES, STUDIO_PLUGIN_IDENTITY_SCHEME } from '../packages/protocol/src/studio-plugin-artifact.ts';
 
-export const PLUGIN_SOURCES = Object.freeze([
-  ['ArcaneLocalBridge', 'Script', 'Main.server.luau'],
-  ['Types', 'ModuleScript', 'Types.luau'],
-  ['Validation', 'ModuleScript', 'Validation.luau'],
-  ['Registry', 'ModuleScript', 'Registry.luau'],
-  ['Properties', 'ModuleScript', 'Properties.luau'],
-  ['Operations', 'ModuleScript', 'Operations.luau'],
-  ['Transport', 'ModuleScript', 'Transport.luau'],
-  ['TestProof', 'ModuleScript', 'TestProof.luau'],
-  ['Sha256', 'ModuleScript', 'Sha256.luau'],
-  ['AssetMesh', 'ModuleScript', 'AssetMesh.luau'],
-  ['Sha256Stream', 'ModuleScript', 'Sha256Stream.luau'],
-  ['AssetTransfer', 'ModuleScript', 'AssetTransfer.luau'],
-  ['AssetMaterials', 'ModuleScript', 'AssetMaterials.luau'],
-  ['AssetUpload', 'ModuleScript', 'AssetUpload.luau'],
-]);
+export const PLUGIN_SOURCES = STUDIO_PLUGIN_SOURCES;
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const xmlText = value => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -102,6 +88,7 @@ export function renderPlugin(sources) {
     format: 'roblox-xml-v4',
     preferredArtifact: 'ArcaneLocalBridge.rbxmx',
     entry: 'ArcaneLocalBridge',
+    runtimeIdentity: { scheme: STUDIO_PLUGIN_IDENTITY_SCHEME, sha256: sha256(STUDIO_PLUGIN_IDENTITY_SCHEME + '\n' + ordered.map(({ name, source }) => name + '\0' + sha256(source)).join('\n') + '\n') },
     sources: ordered.map(({ filename, source }) => ({ path: `src/${filename}`, bytes: Buffer.byteLength(source), sha256: sha256(source) })),
     artifacts: artifacts.map(name => {
       return { name, format: 'roblox-xml-v4', bytes: Buffer.byteLength(xml), sha256: sha256(xml) };

@@ -4,7 +4,37 @@
 local V = require(script.Validation)
 local Transport = require(script.Transport)
 local Sha256 = require(script.Sha256)
-local artifactHash = if typeof(script) == "Instance" and script:IsA("Script") then Sha256(script.Source) else nil
+-- Identity covers the actual loaded hierarchy, independent of XML serialization.
+local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload"})
+local function loadedArtifactHash(): string?
+	if typeof(script) ~= "Instance" or not script:IsA("Script") then return nil end
+	local ok, value = pcall(function(): string
+		if script.Name ~= "ArcaneLocalBridge" then error("Unexpected plugin root.", 0) end
+		local children = script:GetChildren()
+		if #children ~= #ARTIFACT_MODULES then error("Unexpected plugin hierarchy.", 0) end
+		local modules: {[string]: any} = {}
+		for _, child in ipairs(children) do
+			if not child:IsA("ModuleScript") or modules[child.Name] ~= nil or #child:GetChildren() ~= 0 then error("Unexpected plugin module.", 0) end
+			modules[child.Name] = child
+		end
+		local function digest(source: string): string
+			if string.sub(source, 1, 3) == utf8.char(0xFEFF) then source = string.sub(source, 4) end
+			source = string.gsub(string.gsub(source, "\r\n", "\n"), "\r", "\n")
+			if string.sub(source, -1) ~= "\n" then source ..= "\n" end
+			if #source > 199999 then error("Plugin source exceeds its bound.", 0) end
+			return Sha256(source)
+		end
+		local identities = {"ArcaneLocalBridge\0" .. digest(script.Source)}
+		for _, name in ipairs(ARTIFACT_MODULES) do
+			local child = modules[name]
+			if child == nil then error("Missing plugin module.", 0) end
+			table.insert(identities, name .. "\0" .. digest(child.Source))
+		end
+		return Sha256("arcane-plugin-source-v1\n" .. table.concat(identities, "\n") .. "\n")
+	end)
+	return if ok then value else nil
+end
+local artifactHash = loadedArtifactHash()
 local KEY_SETTING = "Arcane.LocalApiKey.v1"
 local STATE_SETTING = "Arcane.LastConnection.v1"
 local savedKey: string? = nil
