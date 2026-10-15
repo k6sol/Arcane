@@ -1054,6 +1054,17 @@ test('Arcane-only native thread is configured only after the actual scoped MCP i
  const {session,receipts}=await fixture(t,'normal',{},true,undefined,'arcane-only');assert.equal(session.snapshot().mcpIsolation,'arcane-only-pending');session.selectModel({...HUMAN,...PAIR});await session.startThread(HUMAN);assert.equal(session.snapshot().thread?.configured,true);assert.equal(session.snapshot().mcpIsolation,'arcane-only-verified');
  const calls=inputs(await receipts()); assert.equal(calls.find(m=>m.method==='thread/start')!.params!.developerInstructions,ARCANE_TASK_INSTRUCTIONS);assert.equal(calls.filter(m=>m.method==='mcpServerStatus/list').length,1);assert.equal(calls.find(m=>m.method==='mcpServerStatus/list')!.params!.threadId,THREAD);assert.equal(calls.filter(m=>m.method==='turn/start').length,0);
 });
+for (const opening of ['start', 'resume'] as const) test('Arcane-only thread ' + opening + ' refuses a missing source-search tool before model work', async t => {
+  const { session, receipts } = await fixture(t, 'missing-script-search', {}, true, undefined, 'arcane-only');
+  session.selectModel({ ...HUMAN, ...PAIR });
+  await assert.rejects(() => opening === 'start' ? session.startThread(HUMAN) : session.resumeThread({ ...HUMAN, threadId: THREAD }), (error: unknown) => {
+    assert.ok(code('MCP_CAPABILITIES')(error)); assert.match(String(error), /script_search/); return true;
+  });
+  assert.notEqual(session.snapshot().thread?.configured, true);
+  assert.notEqual(session.snapshot().mcpIsolation, 'arcane-only-verified');
+  assert.equal(inputs(await receipts()).filter(message => message.method === 'turn/start').length, 0);
+});
+
 test('unexpected inherited MCP server fences the thread before any native turn can start',async t=>{
  const {session,receipts}=await fixture(t,'inherited-mcp-active',{},true,undefined,'arcane-only');session.selectModel({...HUMAN,...PAIR});await assert.rejects(()=>session.startThread(HUMAN),code('MCP_ISOLATION'));assert.equal(session.snapshot().connected,false);assert.equal(session.snapshot().thread?.configured,false);assert.equal(session.snapshot().operations.at(-1)?.state,'unknown');await assert.rejects(()=>session.startTurn(INPUT),code('DISCONNECTED'));assert.equal(inputs(await receipts()).filter(m=>m.method==='turn/start').length,0);
 });
