@@ -36,7 +36,7 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   const root=makeFixtureDirectory('arcane-scenario-service-'),directory=join(root,'playtests'),store=new StudioStore({directory:join(root,'store')});
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'scenario-plugin-lifetime',placeId:0,universeId:0,name:NAME,pluginVersion:'fixture'},capabilities:[...READ_METHODS,...WRITE_METHODS]});
-  const state={mode:'Edit' as 'Edit'|'Play',epoch:20,source:'print("fixture source")',pluginEnabled:!options.queuedSetup,closes:0,setupEffects:0,restores:0,transparency:0,clientCalls:0,captures:0};
+  const state={mode:'Edit' as 'Edit'|'Play',epoch:20,source:'print("fixture source")',pluginEnabled:!options.queuedSetup,closes:0,setupEffects:0,restores:0,transparency:0,clientCalls:0,captures:0,inputRequests:0,inputEffects:0};
   const calls:{name:string;args:Record<string,unknown>}[]=[],connections:NativeTestConnection[]=[];
   const inputEntered=gate(),inputAck=gate();
   const setupEntered=gate(),setupAck=gate();
@@ -86,7 +86,7 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
         assert.equal(args.datamodel_type,'Client');assert.equal((await records()).at(-1)?.event.kind,'scenario_intent');
         state.clientCalls++;const runId=(await records()).at(-1)!.event.id;
         assert.equal(args.code,buildScenarioProgram(plan,runId,digest(plan)));
-        inputEntered.release();const actual=runScenarioFixture(plan,options.runtime,runId,String(args.code));options.mutateReport?.(actual.report);
+        inputEntered.release();const actual=runScenarioFixture(plan,options.runtime,runId,String(args.code));state.inputRequests+=actual.inputRequests;state.inputEffects+=actual.effects.length;options.mutateReport?.(actual.report);
         if(options.holdInputAck)await inputAck.promise;
         if(options.inputErrorAck)return{isError:true,content:[{type:'text',text:'Fixture lost original ACK after execution'}]};
         return text(actual.report);
@@ -106,6 +106,20 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   const status=(id:string)=>service.requests.status(id,ACTOR);
   return{root,directory,store,service,state,pair,plan,prepare,approve,status,records,calls,inputEntered,inputAck,setupEntered,setupAck};
 }
+
+test('production service runs approved read-only assertions without virtual input and settles owned stop',{timeout:15000},async t=>{
+  const f=await fixture(t,{capture:false,runtime:{inputUnavailable:true}});
+  f.plan.steps=[{id:'snapshot',kind:'assert-gui',targetId:'status',property:'Visible',equals:false,withinMs:100,requireTransition:false}];
+  const job=await f.prepare();assert.equal(f.state.clientCalls,0);assert.equal(f.state.inputRequests,0);await f.approve(job);
+  await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);
+  const report=f.status(job.id);assert.deepEqual(playtestJob.parse(report),report);
+  assert.equal(report.displayDigest,job.displayDigest);assert.equal(report.review.outcome,'succeeded');assert.equal(report.review.cleanup,'complete');
+  assert.equal(report.review.scenario!.inputRelease,'not_started');assert.equal(report.review.scenario!.steps[0]!.observed,false);
+  assert.equal(report.nativeAcceptance,false);assert.equal(f.state.inputRequests,0);assert.equal(f.state.inputEffects,0);assert.equal(f.state.clientCalls,1);
+  assert.deepEqual(f.calls.filter(call=>call.name==='start_stop_play').map(call=>call.args.is_start),[true,false]);
+  const records=await f.records();assert.equal(records.filter(row=>row.event.kind==='terminal').length,1);assert.equal(records.at(-1)?.event.cleanup,'complete');
+  assert.ok(f.calls.filter(call=>call.name==='execute_luau'&&call.args.datamodel_type==='Edit').length>=3,'source scope remains checked around approval and cleanup');
+});
 
 test('production service executes finite gameplay and retains unattested capture without claiming Client screenshot proof',{timeout:15000},async t=>{
   const f=await fixture(t,{temporary:true}),job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.match(job.display.proposal.subjectDigest!,/^[a-f0-9]{64}$/);

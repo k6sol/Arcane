@@ -12,11 +12,11 @@ import { resolveScenarioFixtureRuntime } from './luau-runtime.js';
 const literal=(value:unknown):string=>typeof value==='string'?'"'+[...Buffer.from(value)].map(byte=>'\\'+String(byte).padStart(3,'0')).join('')+'"':
   value===null||value===undefined?'nil':typeof value==='number'||typeof value==='boolean'?String(value):Array.isArray(value)?'{'+value.map(literal).join(',')+'}':
   '{'+Object.entries(value as Record<string,unknown>).map(([key,item])=>'['+literal(key)+']='+literal(item)).join(',')+'}';
-export interface ScenarioFixtureOptions { immobile?:boolean; noInteraction?:boolean; alreadySatisfied?:boolean; inputUnavailable?:boolean;
+export interface ScenarioFixtureOptions { immobile?:boolean; noInteraction?:boolean; alreadySatisfied?:boolean; inputUnavailable?:boolean;externalTransition?:boolean;
   pressError?:boolean; releaseError?:boolean; focus?:boolean; replace?:'character'|'gui'|'target'; replaceDuringMouse?:boolean;hit?:'nested-button'|'passive-label';
   basis?:'topbar'|'cutout'|'extent-mismatch'|'inset-only'|'missing-api'|'missing-inset'|'viewport-mismatch'|'nonfinite'|'oversized'|'zero-size'|'missing-camera';
   changeBasis?:'inset'|'viewport'|'camera';changeDuringMouse?:boolean }
-export interface ScenarioFixtureResult {report:ScenarioRuntimeReport;effects:{kind:string;key:string;pressed:boolean;object:number;x?:number;y?:number}[];creates:number;held:boolean}
+export interface ScenarioFixtureResult {report:ScenarioRuntimeReport;effects:{kind:string;key:string;pressed:boolean;object:number;x?:number;y?:number}[];inputRequests:number;creates:number;held:boolean}
 export function runScenarioFixture(input:ScenarioPlan,options:ScenarioFixtureOptions={},runId='fixture-owned-run',wireProgram?:string):ScenarioFixtureResult {
   const plan=scenarioPlanSchema.parse(input);
   const executable=resolveScenarioFixtureRuntime();
@@ -77,12 +77,13 @@ local status=node("Status","TextLabel",hud);status.Visible=config.alreadySatisfi
 local hit=button
 if config.hit then hit=node("Decoration",if config.hit=="nested-button"then"TextButton"else"TextLabel",button);hit.Active=config.hit=="nested-button"end
 function gui:GetGuiObjectsAtPosition()return {hit}end
-local effects,held,creates={}, {}, 0
+local effects,held,creates,inputRequests={}, {}, 0,0
 local userInput={}
 function userInput:GetFocusedTextBox()return if config.focus then {} else nil end
 function userInput:IsKeyDown(key)return held[key]==true end
 function userInput:IsMouseButtonPressed(key)return held[key]==true end
 function userInput:CreateVirtualInput()
+ inputRequests+=1
  if config.inputUnavailable then return nil end
  creates+=1;local serial=creates;local input={}
  function input:SendKey(pressed,key,repeated)
@@ -104,10 +105,13 @@ end
 local services={RunService={IsClient=function()return true end},Players=players,Workspace=workspace,GuiService=guiService,UserInputService=userInput,
  HttpService={JSONDecode=function(_,json)assert(json==expectedJson,"fixed program passed different plan bytes");return plan end}}
 function game:GetService(name)return assert(services[name],"unavailable fixture service "..name)end
-local replaced=false
+local replaced,transitioned=false,false
 local task={wait=function(seconds)
  now+=math.max(seconds,0.001)
  if held.W and not config.immobile then root.Position=root.Position+vector(0,0,seconds*16)end
+ if config.externalTransition and not transitioned then
+  transitioned=true;status.Visible=true;status.Text="Open";root.Position=root.Position+vector(0,0,2)
+ end
  if not basisChanged and config.changeBasis and (not config.changeDuringMouse or held.MouseButton1)then
   basisChanged=true
   if config.changeBasis=="viewport"then workspace.CurrentCamera.ViewportSize=vector(801,600)
@@ -133,7 +137,7 @@ local function encode(value)
  return "{"..table.concat(parts,",").."}"
 end
 local anyHeld=false;for _,value in pairs(held)do if value then anyHeld=true end end
-print(encode({report=report,effects=effects,creates=creates,held=anyHeld}))
+print(encode({report=report,effects=effects,inputRequests=inputRequests,creates=creates,held=anyHeld}))
 `;
   try {
     const file=join(directory,'scenario.luau');writeFileSync(file,source);

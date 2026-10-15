@@ -123,9 +123,14 @@ export const SCENARIO_RUNTIME_SOURCE = String.raw`function(gameModel, plan, runI
         break
       end
     end
-    local available, value = pcall(function() return userInput:CreateVirtualInput() end)
-    if not available or not value then fail("UNSUPPORTED_TOOL") end
-    input = value
+    for _, step in ipairs(plan.steps) do
+      if step.kind == "hold-key" or step.kind == "click-gui" then
+        local available, value = pcall(function() return userInput:CreateVirtualInput() end)
+        if not available or not value then fail("UNSUPPORTED_TOOL") end
+        input = value
+        break
+      end
+    end
     for _, selector in ipairs(plan.targets) do
       local parent = gui
       for _, segment in ipairs(selector.segments) do

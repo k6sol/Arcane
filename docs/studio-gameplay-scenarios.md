@@ -13,6 +13,15 @@ native tool names, filesystem destinations or URLs. Transition assertions defaul
 to requiring a different initial value, recorded before any input. An already
 satisfied result is reported separately from an observed transition.
 
+Scenarios containing only assertions do not acquire or require virtual input.
+They retain the same private object identities, source checks and owned Play
+start/stop lifecycle. GUI visibility and text checks with
+`requireTransition: false` accept an already satisfied snapshot. With `requireTransition: true`
+(the default), the initial value must differ and the requested value must be
+observed within the bounded wait. A transition observed without scenario input
+does not establish that Arcane caused it. Displacement measures change from the
+original root position; a stationary character still fails a positive minimum.
+
 The production native adapter executes one fixed Client program. It resolves
 literal selectors under the original LocalPlayer's PlayerGui once, then retains
 the actual player, character, root, GUI, target and ancestor objects across every
