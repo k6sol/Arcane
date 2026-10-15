@@ -11,6 +11,46 @@ import { CONVERSATION_WORK_LIMITS, ConversationWorkStore, type ConversationWorkB
 
 const native: NativeConversation = { provider: 'codex', threadId: 'Thread:Exact.1', sessionId: null };
 const code = (expected: string) => (error: unknown) => error instanceof ArcaneError && error.code === 'CONVERSATION_WORK_' + expected;
+
+test('Windows native canonical probes are fresh at every path fence', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t); bind(f);
+  const calls = new Map<string, number>();
+  t.mock.method(realpathSync, 'native', (path: string) => {
+    calls.set(path, (calls.get(path) ?? 0) + 1);
+    return realpathSync(path);
+  });
+  for (const operation of [() => f.store.binding('workflow', 'work-1'), () => f.store.list(native), () => bind(f)]) {
+    calls.clear(); operation();
+    assert.equal(calls.get(f.project), 3);
+    assert.equal(calls.get(f.directory), 3);
+    assert.equal(calls.get(f.database), 3);
+    // Both complete ancestor chains are still inspected at every fence.
+    assert.equal(calls.get(f.root), 6);
+    assert.equal(calls.get(parse(f.root).root), 6);
+  }
+});
+
+test('Windows native lookup differences and failures preserve legacy acceptance and guards', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t); bind(f);
+  for (const result of ['different-spelling', 'unavailable'] as const) {
+    const probe = t.mock.method(realpathSync, 'native', () => {
+      if (result === 'unavailable') throw Object.assign(new Error('synthetic native handle failure'), { code: 'EBUSY' });
+      return join(f.root, 'different-spelling');
+    });
+    try {
+      assert.equal(f.store.binding('workflow', 'work-1')?.id, 'work-1');
+      assert.equal(f.store.list(native).items.length, 1);
+      assert.equal(bind(f).id, 'work-1');
+      const alias = join(f.root, 'native-fallback-alias'); linkSync(f.database, alias);
+      try { assert.throws(() => f.store.binding('workflow', 'work-1'), code('PATH')); }
+      finally { unlinkSync(alias); }
+      const link = join(f.root, 'native-fallback-project-' + result); symlinkSync(f.project, link, 'junction');
+      assert.throws(() => f.open({ directory: f.directory, projectPath: link }), code('PATH'));
+      assert.throws(() => f.open({ directory: f.directory, projectPath: join(f.root, 'missing') }), code('PATH'));
+      assert.equal(f.store.list(native).items.length, 1);
+    } finally { probe.mock.restore(); }
+  }
+});
 const projectHash = (path: string) => createHash('sha256').update(process.platform === 'win32' ? path.toLowerCase() : path).digest('hex');
 function fixture(t: test.TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'arcane-conversation-work-'));

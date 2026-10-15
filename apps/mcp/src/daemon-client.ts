@@ -10,6 +10,8 @@ import { workTask, workRun, workDefinition, leaseToken } from './work-schemas.js
 import type { WorkTask, WorkRun } from '../../../packages/storage/src/work-store.js';
 import { assetInput, assetProbe, assetJob, assetJobPage, assetHistoryInput, assetManifest, assetJobId, safeAssetInput, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel, nativeAssetJobId, nativeAssetCursorMatchesScope, type SafeAssetInput } from './asset-schemas.js';
 import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } from '../../../packages/asset-pipeline/src/studio-import-wire.js';
+import { NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse } from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
+import { parseNativeStudioStagingStatusResponse } from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -94,8 +96,9 @@ export class DaemonClient {
     return { signal: controller.signal, dispose: () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); } };
   }
 
-  private async http(path: string, signal: AbortSignal, body?: object, preparation = false): Promise<unknown> {
+  private async http(path: string, signal: AbortSignal, body?: object, preparation = false, staging = false): Promise<unknown> {
     signal.throwIfAborted();
+    const strictRecord = preparation || staging;
     let response: Response;
     try {
       response = await fetch(this.url + path, {
@@ -109,9 +112,9 @@ export class DaemonClient {
         : 'The wait ended; any submitted command may still execute.');
       throw new BridgeError('DAEMON_UNREACHABLE', 'The local daemon connection failed. Redirects are refused.');
     }
-    const responseLimit = preparation ? NATIVE_STUDIO_IMPORT_RESPONSE_BYTES : RESPONSE_LIMIT;
+    const responseLimit = staging ? NATIVE_STUDIO_STAGING_RESPONSE_BYTES : preparation ? NATIVE_STUDIO_IMPORT_RESPONSE_BYTES : RESPONSE_LIMIT;
     const lengthHeader = response.headers.get('content-length');
-    if (preparation && lengthHeader !== null && !/^(0|[1-9][0-9]*)$/.test(lengthHeader)) {
+    if (strictRecord && lengthHeader !== null && !/^(0|[1-9][0-9]*)$/.test(lengthHeader)) {
       await response.body?.cancel(); throw new BridgeError('PROTOCOL', 'Daemon response has invalid framing.');
     }
     const contentLength = Number(lengthHeader);
@@ -131,7 +134,7 @@ export class DaemonClient {
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
     signal.throwIfAborted();
     let payload: unknown;
-    try { payload = JSON.parse(preparation ? new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) : Buffer.concat(chunks).toString('utf8')); }
+    try { payload = JSON.parse(strictRecord ? new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) : Buffer.concat(chunks).toString('utf8')); }
     catch { throw new BridgeError('PROTOCOL', 'Daemon response is not valid JSON.'); }
     if (!response.ok) {
       const error = z.object({ error: z.string().min(1).max(64), message: z.string().min(1).max(8192) }).safeParse(payload);
@@ -140,8 +143,10 @@ export class DaemonClient {
       throw new BridgeError('DAEMON_HTTP', `The local daemon rejected the request (HTTP ${response.status}).`, rejected);
     }
     if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json')) throw new BridgeError('PROTOCOL', 'Daemon response must be application/json.');
-    if (preparation && (response.status !== 200 || !/^application\/json(?:\s*;\s*charset=utf-8)?\s*$/i.test(response.headers.get('content-type')!))) {
-      throw new BridgeError('PROTOCOL', 'Daemon must return a JSON preparation plan with HTTP 200.');
+    if (strictRecord && (response.status !== 200 || !/^application\/json(?:\s*;\s*charset=utf-8)?\s*$/i.test(response.headers.get('content-type')!))) {
+      throw new BridgeError('PROTOCOL', preparation
+        ? 'Daemon must return a JSON preparation plan with HTTP 200.'
+        : 'Daemon must return a JSON staging receipt with HTTP 200.');
     }
     return payload;
   }
@@ -301,6 +306,29 @@ export class DaemonClient {
     } finally { deadline.dispose(); }
   }
 
+  async assetsStageStudioImport(jobId: string, options: WaitOptions = {}) {
+    if (this.assetAudience !== 'native-session') throw new BridgeError('ASSET_AUDIENCE', 'Studio asset staging requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);
+    // The native route supplies the authoritative project from its captured
+    // actor/binding. This client has only the job; it cannot invent a project.
+    const schema = nativeStudioStagingResponse.refine(value => value.jobId === jobId, 'Wrong staged asset job.');
+    return this.postOnce('/v1/assets/native/stage-studio-import', { jobId }, schema,
+      { jobId, retry: false },
+      'Inspect assets_studio_staging_status for this original jobId in the same native project and conversation scope. assets_jobs identifies the owned generation job but does not confirm staging. Staging may still be running or incomplete; never repeat this operation automatically. operationId is diagnostic, not an idempotency key. No upload or insertion is established.',
+      options, true);
+  }
+
+  async assetsStudioStagingStatus(jobId: string, options: WaitOptions = {}) {
+    if (this.assetAudience !== 'native-session') throw new BridgeError('ASSET_AUDIENCE', 'Studio staging status requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);
+    const deadline = this.deadline(options);
+    try {
+      const value = await this.http('/v1/assets/native/studio-staging-status?jobId=' + encodeURIComponent(jobId), deadline.signal, undefined, false, true);
+      try { return parseNativeStudioStagingStatusResponse(value, jobId); }
+      catch { throw new BridgeError('PROTOCOL', 'Daemon returned invalid Studio staging status evidence.'); }
+    } finally { deadline.dispose(); }
+  }
+
   private async readRecord<T>(path: string, schema: z.ZodType<T>, options: WaitOptions): Promise<T> {
     const deadline = this.deadline(options);
     try {
@@ -310,7 +338,7 @@ export class DaemonClient {
     } finally { deadline.dispose(); }
   }
 
-  private async postOnce<T>(path: string, input: object, schema: z.ZodType<T>, identity: Record<string, string | boolean | null>, nextStep: string, options: WaitOptions) {
+  private async postOnce<T>(path: string, input: object, schema: z.ZodType<T>, identity: Record<string, string | boolean | null>, nextStep: string, options: WaitOptions, nativeStaging = false) {
     const deadline = this.deadline(options);
     // Diagnostic ID only: these endpoints do not promise request-id idempotency.
     const operationId = randomUUID();
@@ -318,12 +346,14 @@ export class DaemonClient {
     try {
       deadline.signal.throwIfAborted();
       attempted = true;
-      const parsed = schema.safeParse(await this.http(path, deadline.signal, input));
+      const parsed = schema.safeParse(await this.http(path, deadline.signal, input, false, nativeStaging));
       if (!parsed.success) throw new BridgeError('PROTOCOL', 'Daemon returned an invalid local operation record.');
       return parsed.data;
     } catch (error) {
       if (!attempted) throw new BridgeError('ABORTED', 'The caller cancelled before the operation was submitted.');
-      if (error instanceof BridgeError && error.rejected) throw error;
+      // Staging may have completed before the route's final actor/binding check
+      // returns 403/404. A post-send HTTP rejection cannot prove no work happened.
+      if (error instanceof BridgeError && error.rejected && !nativeStaging) throw error;
       return { ...identity, operationId, state: 'unknown', terminal: false, ambiguous: true,
         wait: deadline.signal.aborted ? options.signal?.aborted ? 'aborted' : 'timeout' : 'interrupted', nextStep };
     } finally { deadline.dispose(); }

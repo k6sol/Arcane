@@ -2,11 +2,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { types } from 'node:util';
+import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs } from '../../core/src/studio-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
+import type { StudioAssetStageArgs, StudioAssetStageReceipt } from '../../protocol/src/studio.js';
+import type { NativeConversation } from './conversation-work-store.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 interface Options { directory: string; now?: () => number }
@@ -24,6 +28,84 @@ export interface AssetUploadJournalRecord {
 }
 /** Opaque host fact-recording handle. It is NOT permission to upload. */
 export interface AssetUploadJournalTicket {readonly kind: 'asset-upload-journal-ticket'}
+/** Original queue-time continuity facts, not upload permission or current proof. */
+export interface AssetUploadContextPin {
+  readonly sessionId:string;readonly clientLifetimeId:string;readonly pluginArtifactHash:string;
+  readonly playEpoch:number;readonly placeId:number;readonly universeId:number;
+}
+export const STUDIO_STAGE_RUN_LIMITS = Object.freeze({packets:512,envelopeBytes:8*1024*1024,argumentBytes:256*1024,runs:64});
+export interface StageRunHandle {readonly kind:'studio-stage-run-handle'}
+export interface StageRunIntent {
+  projectId:string;jobId:string;conversation:Readonly<NativeConversation>;
+  transferDigest:string;payloadDigest:string;manifestDigest:string;preparedDigest:string;
+  target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];
+  plan:readonly {ordinal:number;argsSha256:string;packetByteLength:number;envelopeByteLength:number;expectedReceipt:StudioAssetStageReceipt}[];
+}
+export interface StageRunCommandAssociation {
+  ordinal:number;commandId:string;requestId:string;leaseEpoch:number;fingerprint:string;command:StudioCommand;
+}
+export interface StageRunRecord {
+  runId:string;intent:StageRunIntent;intentSha256:string;createdAt:string;updatedAt:string;closedAt:string|null;
+  phase:'running'|'cpu-staged'|'stopped'|'needs_reconciliation';
+  commands:StageRunCommandAssociation[];receipt:StudioAssetStageReceipt|null;
+}
+export type StageRunBeginResult =
+  | {created:true;runId:string;handle:StageRunHandle;record:StageRunRecord}
+  | {created:false;runId:string;handle:null;record:StageRunRecord};
+type StageRunStored = Omit<StageRunRecord,'phase'|'commands'|'receipt'>;
+const stageHash=z.string().length(64).regex(/^[a-f0-9]{64}(?![\s\S])/);
+const stageJob=z.string().length(36).regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/);
+const stageId=z.string().min(1).max(256).refine(v=>!/[\x00-\x1f\x7f]/.test(v));
+const stageNumber=z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const uploadContextPinSchema=z.strictObject({sessionId:stageId,clientLifetimeId:stageId,pluginArtifactHash:stageHash,
+  playEpoch:stageNumber,placeId:stageNumber,universeId:stageNumber});
+const stageReceiptSchema=z.strictObject({transferDigest:stageHash,packetCount:z.number().int().min(1).max(512),
+  byteLength:z.number().int().min(1).max(8*1024*1024),state:z.enum(['receiving','sealed']),engineVerification:z.literal('pending')});
+const stageIntentSchema=z.strictObject({projectId:stageHash,jobId:stageJob,
+  conversation:z.strictObject({provider:z.literal('codex'),threadId:stageId,sessionId:stageId.nullable()}),
+  transferDigest:stageHash,payloadDigest:stageHash,manifestDigest:stageHash,preparedDigest:stageHash,
+  target:z.strictObject({sessionId:stageId,placeId:stageNumber,universeId:stageNumber,root:z.literal('Workspace'),parentRef:stageId,
+    creator:z.strictObject({kind:z.enum(['user','group']),id:z.string().regex(/^[1-9][0-9]{0,15}(?![\s\S])/).refine(v=>Number.isSafeInteger(Number(v)))})}),
+  continuity:z.strictObject({clientLifetimeId:stageId,pluginArtifactHash:stageHash,playEpoch:stageNumber}),
+  plan:z.array(z.strictObject({ordinal:z.number().int().min(0).max(511),argsSha256:stageHash,
+    packetByteLength:z.number().int().min(1).max(256*1024),envelopeByteLength:z.number().int().min(1).max(256*1024),expectedReceipt:stageReceiptSchema})).min(1).max(512),
+});
+/** Reject accessors/proxies before serializing host facts; never invoke caller code. */
+function stageSnapshot(value:unknown):unknown {
+  let nodes=0;
+  const copy=(v:unknown,depth:number):unknown=>{
+    if(++nodes>20000||depth>12)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage journal exceeds its bounded structure.');
+    if(v===null||typeof v==='boolean'||typeof v==='number'&&Number.isFinite(v))return v;
+    if(typeof v==='string'){if(Buffer.byteLength(v)>8*1024*1024)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage field exceeds its bound.');return v;}
+    if(!v||typeof v!=='object'||types.isProxy(v))throw new ArcaneError('STUDIO_STAGE_INPUT','Expected plain stage facts.');
+    const array=Array.isArray(v),prototype=Object.getPrototypeOf(v),keys=Reflect.ownKeys(v);
+    if(array?prototype!==Array.prototype:prototype!==Object.prototype&&prototype!==null)throw new ArcaneError('STUDIO_STAGE_INPUT','Expected plain stage facts.');
+    const descriptors=Object.getOwnPropertyDescriptors(v),out:Record<string,unknown>={};
+    if(keys.length>513)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage structure exceeds its bound.');
+    for(const key of keys){
+      if(array&&key==='length')continue;
+      const d=typeof key==='string'?descriptors[key]:undefined;
+      if(!d||!Object.hasOwn(d,'value')||!d.enumerable||key==='__proto__')throw new ArcaneError('STUDIO_STAGE_INPUT','Expected data-only stage facts.');
+      out[key as string]=copy(d.value,depth+1);
+    }
+    if(array){if(keys.length!==(v as unknown[]).length+1||Object.keys(out).some((key,i)=>key!==String(i)))throw new ArcaneError('STUDIO_STAGE_INPUT','Expected dense stage arrays.');return Object.values(out);}
+    return out;
+  };
+  return copy(value,0);
+}
+function stageIntent(value:unknown):StageRunIntent {
+  const parsed=stageIntentSchema.safeParse(stageSnapshot(value));
+  if(!parsed.success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid bounded stage intent.');
+  const intent=parsed.data;let packets=0,envelopes=0;
+  for(const [ordinal,p]of intent.plan.entries()){
+    packets+=p.packetByteLength;envelopes+=p.envelopeByteLength;
+    if(p.ordinal!==ordinal||p.envelopeByteLength<p.packetByteLength||p.expectedReceipt.transferDigest!==intent.transferDigest
+      ||p.expectedReceipt.packetCount!==ordinal+1||p.expectedReceipt.byteLength!==packets
+      ||p.expectedReceipt.state!==(ordinal===intent.plan.length-1?'sealed':'receiving'))throw new ArcaneError('STUDIO_STAGE_INPUT','Stage accounting is inconsistent.');
+  }
+  if(envelopes>STUDIO_STAGE_RUN_LIMITS.envelopeBytes)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage envelopes exceed 8 MiB.');
+  return intent;
+}
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 // Paths are display metadata: a rename is not a different opaque Instance.
@@ -46,6 +128,7 @@ export class StudioStore {
   #activationAdmissions = new WeakMap<object, ScriptSourceVerification>();
   #assetStageAdmissions = new WeakSet<object>();
   #uploadTickets = new WeakMap<object, string>();
+  #stageRunHandles = new WeakMap<object,string>();
   #testOwners = new Map<string, string>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
@@ -67,7 +150,7 @@ export class StudioStore {
     try {
       this.db = new DatabaseSync(join(options.directory, 'studio.sqlite'), { timeout: 2000, allowExtension: false });
       const version = this.db.prepare('PRAGMA user_version').get() as Row;
-      if (Number(version.user_version) > 2) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
+      if (Number(version.user_version) > 3) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS grants (hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT;
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0) STRICT;
@@ -76,7 +159,10 @@ export class StudioStore {
         CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL, kind TEXT NOT NULL, entity_id TEXT NOT NULL, detail TEXT NOT NULL) STRICT;
         CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY,hash TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT;
         CREATE TABLE IF NOT EXISTS asset_uploads (attempt_id TEXT PRIMARY KEY,resource_key TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT;
-        PRAGMA user_version=2;`);
+        CREATE TABLE IF NOT EXISTS asset_upload_context_pins (command_id TEXT PRIMARY KEY REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL) STRICT;
+        CREATE TABLE IF NOT EXISTS asset_stage_runs (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(project_id,job_id)) STRICT;
+        CREATE TABLE IF NOT EXISTS asset_stage_commands (run_id TEXT NOT NULL REFERENCES asset_stage_runs(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
+        PRAGMA user_version=3;`);
       const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Row[];
       if (!columns.some(c=>c.name==='key_id')) this.db.exec('ALTER TABLE sessions ADD COLUMN key_id TEXT');
       this.transaction(() => {
@@ -88,6 +174,10 @@ export class StudioStore {
             record.state = 'needs_reconciliation'; record.updatedAt = this.iso();
             this.db.prepare('UPDATE asset_uploads SET payload=? WHERE attempt_id=?').run(JSON.stringify(record), record.attemptId);
           }
+        }
+        for(const row of this.db.prepare('SELECT payload FROM asset_stage_runs').all() as Row[]){
+          const run=JSON.parse(row.payload as string) as StageRunStored;
+          if(run.closedAt===null){run.closedAt=this.iso();run.updatedAt=run.closedAt;this.saveStageRun(run);}
         }
         this.event('daemon_started', 'local', { protocolVersion: STUDIO_PROTOCOL });
       });
@@ -259,7 +349,11 @@ export class StudioStore {
     // by guessing its request ID, even if its JSON is structurally identical.
     if (method === 'asset.stage_packet' && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Binary staging requires the trusted native import controller.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
-    return this.transaction(() => {
+    return this.transaction(() => this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,internalRestore,admission));
+  }
+  /** Already inside a transaction. No callback, await or second commit here. */
+  private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object):StudioCommand {
+      if(method==='asset.stage_packet'&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Binary staging requires trusted host admission.');
       const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
       if (old) {
         if (!equal(old.fingerprint as string, fingerprint)) throw new ArcaneError('IDEMPOTENCY', 'Request ID was already used with different input.');
@@ -279,9 +373,21 @@ export class StudioStore {
       const row = this.db.prepare('UPDATE sessions SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(sessionId) as Row;
       const c: StudioCommand = { protocolVersion: 1, id: randomUUID(), requestId, sessionId, clientSessionId: s.clientSessionId, method, args, allowedRoots: s.allowedRoots, allowWrites: s.allowWrites, leaseEpoch: Number(row.epoch), expiresAt: new Date(this.now() + 180000).toISOString(), state: 'queued', createdAt: this.iso(), finishedAt: null, result: null, error: null };
       this.db.prepare('INSERT INTO commands(id,request_id,session_id,fingerprint,state,payload,created) VALUES(?,?,?,?,?,?,?)').run(c.id, requestId, sessionId, fingerprint, c.state, JSON.stringify(c), this.now());
+      if(method==='scene.upload_context'){
+        const p=s.proof;
+        // Missing/stale legacy proof remains a plain read; it gains no synthetic pin.
+        if(p&&p.sessionId===s.id&&p.clientLifetimeId===s.clientSessionId&&p.placeId===s.placeId&&p.universeId===s.universeId
+          &&p.mode==='Edit'&&p.connected&&p.continuitySupported&&Number.isFinite(Date.parse(p.observedAt))&&Date.parse(p.observedAt)<=this.now()
+          &&Number.isFinite(Date.parse(p.expiresAt))&&Date.parse(p.expiresAt)>this.now()){
+          const pin=uploadContextPinSchema.safeParse({sessionId:s.id,clientLifetimeId:p.clientLifetimeId,pluginArtifactHash:p.pluginArtifactHash,
+            playEpoch:p.playEpoch,placeId:p.placeId,universeId:p.universeId});
+          if(!pin.success)throw new ArcaneError('UPLOAD_CONTEXT_PIN','Actual upload context continuity is invalid.');
+          this.db.prepare('INSERT INTO asset_upload_context_pins(command_id,request_id,lease_epoch,fingerprint,payload) VALUES(?,?,?,?,?)')
+            .run(c.id,c.requestId,c.leaseEpoch,fingerprint,JSON.stringify(pin.data));
+        }
+      }
       if (verification) this.event('script_syntax_verified', c.id, { ...verification });
       this.event('command_queued', c.id, { sessionId, method, leaseEpoch: c.leaseEpoch }); return c;
-    });
   }
   private activationSource(method: StudioCommand['method'], args: Record<string, Json>): string | null {
     if (method === 'script.set_enabled' && args.enabled === true) return args.expectedSource as string;
@@ -396,6 +502,141 @@ export class StudioStore {
     const row = this.db.prepare('SELECT payload FROM asset_uploads WHERE attempt_id=?').get(attemptId) as Row | undefined;
     if (!row) throw new ArcaneError('UPLOAD_NOT_FOUND', 'Unknown upload attempt.');
     return JSON.parse(row.payload as string) as AssetUploadJournalRecord;
+  }
+  /** Detached historical pin. Never rebind it to a newer poll proof/epoch. */
+  assetUploadContextPin(commandId:string):AssetUploadContextPin|null {
+    if(this.closed||!stageJob.safeParse(commandId).success)throw new ArcaneError('UPLOAD_CONTEXT_PIN','Upload context pin lookup is unavailable or invalid.');
+    const row=this.db.prepare('SELECT p.*,c.payload AS command_payload,c.session_id AS command_session_id,c.fingerprint AS command_fingerprint FROM asset_upload_context_pins p LEFT JOIN commands c ON c.id=p.command_id WHERE p.command_id=?').get(commandId) as Row|undefined;
+    if(!row)return null;
+    if(typeof row.payload!=='string'||Buffer.byteLength(row.payload)>2048||typeof row.command_payload!=='string')throw new ArcaneError('UPLOAD_CONTEXT_PIN','Original upload context command is unavailable.');
+    let pin:AssetUploadContextPin,command:StudioCommand;
+    try{pin=uploadContextPinSchema.parse(JSON.parse(row.payload));command=JSON.parse(row.command_payload) as StudioCommand;}
+    catch{throw new ArcaneError('UPLOAD_CONTEXT_PIN','Stored upload context pin is invalid.');}
+    const session=this.session(pin.sessionId,false);
+    if(command.id!==commandId||command.method!=='scene.upload_context'||command.sessionId!==pin.sessionId||row.command_session_id!==pin.sessionId
+      ||command.clientSessionId!==pin.clientLifetimeId||session.clientSessionId!==pin.clientLifetimeId||session.placeId!==pin.placeId||session.universeId!==pin.universeId
+      ||command.requestId!==row.request_id||command.leaseEpoch!==row.lease_epoch||row.command_fingerprint!==row.fingerprint
+      ||hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args}))!==row.fingerprint
+      ||!command.args||typeof command.args!=='object'||Array.isArray(command.args)||Reflect.ownKeys(command.args).length!==0)
+      throw new ArcaneError('UPLOAD_CONTEXT_PIN','Pin does not name the original upload context role, session and lifetime.');
+    return {...pin};
+  }
+  private saveStageRun(run:StageRunStored):void {
+    this.db.prepare('UPDATE asset_stage_runs SET payload=? WHERE run_id=?').run(JSON.stringify(run),run.runId);
+  }
+  private stageGuard(guard:()=>void):void {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
+    if(typeof guard!=='function'||types.isProxy(guard)||types.isAsyncFunction(guard)||types.isGeneratorFunction(guard))throw new ArcaneError('STUDIO_STAGE_GUARD','Expected a synchronous host scope guard.');
+    const result:unknown=guard();
+    // Never await inside a transaction. Observe an unexpected native Promise's
+    // rejection, then refuse it; it cannot become deferred admission.
+    if(types.isPromise(result))void Promise.prototype.then.call(result,()=>undefined,()=>undefined);
+    if(result!==undefined)throw new ArcaneError('STUDIO_STAGE_GUARD','Expected a synchronous host scope guard.');
+  }
+  private stageTarget(intent:StageRunIntent):void {
+    const session=this.session(intent.target.sessionId);
+    validateCommandArgs('asset.stage_packet',{expected:{digest:intent.transferDigest,payloadDigest:intent.payloadDigest,manifestDigest:intent.manifestDigest},
+      packet:JSON.stringify({formatVersion:1,ordinal:0,kind:'begin',payloadDigest:intent.payloadDigest,manifestDigest:intent.manifestDigest}),
+      target:intent.target,continuity:intent.continuity},session);
+    if(!session.proof||!Number.isFinite(Date.parse(session.proof.expiresAt))||Date.parse(session.proof.expiresAt)<=this.now())throw new ArcaneError('STUDIO_STAGE_SCOPE','Stage continuity has expired.');
+  }
+  /** Host-only facts. The trusted guard owns actual actor/job attribution. */
+  beginStageRun(input:StageRunIntent,guard:()=>void):StageRunBeginResult {
+    this.stageGuard(guard);const intent=stageIntent(input),intentSha256=hash(canonical(intent));
+    let fresh=false;
+    const record=this.transaction(()=>{
+      this.stageGuard(guard);
+      const prior=this.readStageRun(intent.projectId,intent.jobId);
+      if(prior){if(prior.intentSha256!==intentSha256)throw new ArcaneError('STUDIO_STAGE_CONFLICT','This job already has a pinned stage run.');return prior;}
+      this.stageTarget(intent);
+      if(Number((this.db.prepare('SELECT count(*) AS n FROM asset_stage_runs').get() as Row).n)>=STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage journal capacity is full; no history was evicted.');
+      const at=this.iso(),run:StageRunStored={runId:randomUUID(),intent,intentSha256,createdAt:at,updatedAt:at,closedAt:null};
+      this.db.prepare('INSERT INTO asset_stage_runs(run_id,project_id,job_id,intent_sha256,payload) VALUES(?,?,?,?,?)').run(run.runId,intent.projectId,intent.jobId,intentSha256,JSON.stringify(run));
+      this.event('asset_stage_started',run.runId,{projectId:intent.projectId,jobId:intent.jobId});this.stageGuard(guard);fresh=true;
+      return this.stageRunById(run.runId);
+    });
+    if(!fresh)return {created:false,runId:record.runId,handle:null,record};
+    const handle=Object.freeze({kind:'studio-stage-run-handle' as const});this.#stageRunHandles.set(handle,record.runId);
+    return {created:true,runId:record.runId,handle,record};
+  }
+  private stageHandle(handle:StageRunHandle):string {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
+    const id=handle&&typeof handle==='object'?this.#stageRunHandles.get(handle):undefined;
+    if(!id)throw new ArcaneError('STUDIO_STAGE_HANDLE','Stage entry requires the original process-owned handle.');return id;
+  }
+  enqueueStagePacket(handle:StageRunHandle,ordinal:number,input:StudioAssetStageArgs,guard:()=>void):StudioCommand {
+    const runId=this.stageHandle(handle);this.stageGuard(guard);
+    const args=stageSnapshot(input) as unknown as StudioAssetStageArgs,text=JSON.stringify(args);
+    if(Buffer.byteLength(text)>STUDIO_STAGE_RUN_LIMITS.argumentBytes)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage arguments exceed 256 KiB.');
+    const admission=Object.freeze({});this.#assetStageAdmissions.add(admission);
+    try{return this.transaction(()=>{
+      this.stageGuard(guard);const run=this.stageRunById(runId),intent=run.intent,plan=intent.plan[ordinal];
+      if(run.closedAt!==null||!Number.isInteger(ordinal)||!plan||plan.ordinal!==ordinal)throw new ArcaneError('STUDIO_STAGE_STATE','Stage run is closed or ordinal is invalid.');
+      this.stageTarget(intent);
+      if(hash(text)!==plan.argsSha256||Buffer.byteLength(text)!==plan.envelopeByteLength
+        ||canonical(args.target)!==canonical(intent.target)||canonical(args.continuity)!==canonical(intent.continuity)
+        ||canonical(args.expected)!==canonical({digest:intent.transferDigest,payloadDigest:intent.payloadDigest,manifestDigest:intent.manifestDigest})
+        ||typeof args.packet!=='string'||Buffer.byteLength(args.packet)!==plan.packetByteLength)throw new ArcaneError('STUDIO_STAGE_CONFLICT','Stage arguments differ from the pinned plan.');
+      const packet=object(JSON.parse(args.packet));
+      if(packet.ordinal!==ordinal||plan.expectedReceipt.state!==(packet.kind==='seal'?'sealed':'receiving'))throw new ArcaneError('STUDIO_STAGE_CONFLICT','Stage packet accounting differs from its plan.');
+      const associated=run.commands.find(c=>c.ordinal===ordinal);
+      if(associated)return associated.command; // Exact original command only; never replay.
+      if(run.phase==='needs_reconciliation'||ordinal!==run.commands.length||run.commands.some(c=>c.command.state!=='succeeded'))throw new ArcaneError('STUDIO_STAGE_STATE','Finish the preceding original packet before enqueueing the next.');
+      const requestId='assetstage_'+hash(canonical({runId,ordinal,intentSha256:run.intentSha256}));
+      if(this.db.prepare('SELECT id FROM commands WHERE request_id=?').get(requestId))throw new ArcaneError('STUDIO_STAGE_CONFLICT','An unassociated command cannot be adopted.');
+      const sessionId=intent.target.sessionId,method='asset.stage_packet' as const,a=object({sessionId,requestId,method,args});
+      const fingerprint=hash(canonical({sessionId,method,args}));
+      const command=this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,false,admission);
+      this.db.prepare('INSERT INTO asset_stage_commands(run_id,ordinal,command_id,request_id,lease_epoch,fingerprint) VALUES(?,?,?,?,?,?)').run(runId,ordinal,command.id,command.requestId,command.leaseEpoch,fingerprint);
+      const stored:StageRunStored={runId,intent,intentSha256:run.intentSha256,createdAt:run.createdAt,updatedAt:this.iso(),closedAt:null};this.saveStageRun(stored);
+      this.stageGuard(guard);return command;
+    });}finally{this.#assetStageAdmissions.delete(admission);}
+  }
+  /** Outcome recording survives actor retirement; this handle permits no new effect. */
+  closeStageRun(handle:StageRunHandle):StageRunRecord {
+    const runId=this.stageHandle(handle);
+    return this.transaction(()=>{
+      const run=this.stageRunById(runId);
+      if(run.closedAt===null){
+        for(const {command}of run.commands){
+          if(command.state!=='queued'&&command.state!=='dispatched')continue;
+          command.state=command.state==='queued'?'cancelled':'needs_reconciliation';command.error='Native stage run stopped. No automatic replay.';
+          command.finishedAt=this.iso();this.saveCommand(command);this.event('command_'+command.state,command.id,{sessionId:command.sessionId,method:command.method});
+        }
+        const at=this.iso();this.saveStageRun({runId,intent:run.intent,intentSha256:run.intentSha256,createdAt:run.createdAt,updatedAt:at,closedAt:at});
+      }
+      return this.stageRunById(runId);
+    });
+  }
+  /** Local historical evidence only. Caller scope must be checked by the host. */
+  readStageRun(projectId:string,jobId:string):StageRunRecord|null {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
+    if(!stageHash.safeParse(projectId).success||!stageJob.safeParse(jobId).success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid stage lookup.');
+    const row=this.db.prepare('SELECT run_id FROM asset_stage_runs WHERE project_id=? AND job_id=?').get(projectId,jobId) as Row|undefined;
+    return row?this.stageRunById(row.run_id as string):null;
+  }
+  private stageRunById(runId:string):StageRunRecord {
+    const row=this.db.prepare('SELECT * FROM asset_stage_runs WHERE run_id=?').get(runId) as Row|undefined;
+    if(!row)throw new ArcaneError('STUDIO_STAGE_NOT_FOUND','Unknown stage run.');
+    const run=JSON.parse(row.payload as string) as StageRunStored,intent=stageIntent(run.intent);
+    if(run.runId!==runId||intent.projectId!==row.project_id||intent.jobId!==row.job_id||run.intentSha256!==row.intent_sha256||hash(canonical(intent))!==run.intentSha256)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage journal identity differs.');
+    const rows=this.db.prepare('SELECT * FROM asset_stage_commands WHERE run_id=? ORDER BY ordinal LIMIT 513').all(runId) as Row[];
+    if(rows.length>intent.plan.length)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage association exceeds its plan.');
+    let invalidReceipt=false;
+    const commands:StageRunCommandAssociation[]=rows.map((member,ordinal)=>{
+      const command=this.command(member.command_id as string),plan=intent.plan[ordinal]!;
+      const original=this.db.prepare('SELECT fingerprint,state FROM commands WHERE id=?').get(command.id) as Row;
+      const fingerprint=hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args}));
+      if(member.ordinal!==ordinal||command.id!==member.command_id||command.requestId!==member.request_id||command.leaseEpoch!==member.lease_epoch
+        ||command.method!=='asset.stage_packet'||command.sessionId!==intent.target.sessionId||command.clientSessionId!==intent.continuity.clientLifetimeId
+        ||fingerprint!==member.fingerprint||original.fingerprint!==member.fingerprint||original.state!==command.state||hash(JSON.stringify(command.args))!==plan.argsSha256)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original stage command differs from the pinned association.');
+      if(command.state==='succeeded'&&canonical(command.result)!==canonical(plan.expectedReceipt))invalidReceipt=true;
+      return {ordinal,commandId:command.id,requestId:command.requestId,leaseEpoch:command.leaseEpoch,fingerprint,command};
+    });
+    const complete=!invalidReceipt&&commands.length===intent.plan.length&&commands.every(c=>c.command.state==='succeeded');
+    const unresolved=invalidReceipt||commands.some(c=>c.command.state==='needs_reconciliation'||run.closedAt!==null&&(c.command.state==='dispatched'||c.command.state==='succeeded'));
+    const phase=complete?'cpu-staged':unresolved?'needs_reconciliation':run.closedAt!==null||commands.some(c=>['failed','cancelled'].includes(c.command.state))?'stopped':'running';
+    return {...run,intent,phase,commands,receipt:complete?structuredClone(intent.plan.at(-1)!.expectedReceipt):null};
   }
   /** Host-only queue entry. Routes and generic MCP commands use enqueue(), which
    * cannot mint this capability. The controller owns SAME-actor/job checks. */

@@ -71,10 +71,14 @@ async function fixture(t: test.TestContext, configured = true) {
   let lookup = host.bindingNative.bind(host);
   const routeHost: NativeAssetConversationHost = { ...host, bindingNative: (actor, id) => lookup(actor, id) };
   let stage: ReturnType<typeof createStudioImportStagingController>['stage'] | null = null;
+  let status: ReturnType<typeof createStudioImportStagingController>['status'] | null = null;
   let staged = 0;
   const route = nativeAssetRoutes(routed, routeHost, registry, {stage: (...args) => {
     if (!stage) throw new ArcaneError('STUDIO_STAGE_UNAVAILABLE', 'Synthetic staging controller is not configured.');
     staged++; return stage(...args);
+  }, status: (...args) => {
+    if (!status) throw new ArcaneError('STUDIO_STAGE_UNAVAILABLE', 'Synthetic staging status is not configured.');
+    return status(...args);
   }});
   let origin = '', requests = 0; const failures: unknown[] = [], releases: (() => void)[] = [];
   const server = createServer((request, response) => { requests++; void route(request, response, new URL(request.url ?? '/', origin), origin)
@@ -116,6 +120,7 @@ async function fixture(t: test.TestContext, configured = true) {
   };
   return { origin, credential, service, host, store, registry, incarnation, http,
     setStage(fn: NonNullable<typeof stage>) {stage = fn;}, stageCalls: () => staged,
+    setStatus(fn: NonNullable<typeof status>) {status = fn;}, endMutationWindow() {incarnation.ended(operationId);},
     setPrepare(fn: typeof prepare) { prepare = fn; }, setLookup(fn: typeof lookup) { lookup = fn; },
     setBaseline(value: StudioImportBaseline) { baseline = value; },
     counts: () => ({ preparations, selections, requests }), actor: () => lastActor,
@@ -163,10 +168,14 @@ test('native staging ingress accepts only an owned job and the same mutating cap
   f.setStage(async (id, actor) => {
     assert.equal(id, JOB); assertNativeAssetActor(actor, 'mutate');
     return {status: 'staged', imported: false, transferDigest: 'a'.repeat(64), packetCount: 1, byteLength: 4,
-      state: 'sealed', engineVerification: 'pending', commandIds: ['synthetic-stage-receipt']};
+      state: 'sealed', engineVerification: 'pending', commandIds: ['44444444-4444-4444-8444-444444444444']};
   });
   const response = await f.http({jobId: JOB}, {path}).result;
-  assert.equal(response.status, 200); assert.equal(response.data.imported, false); assert.equal(response.data.engineVerification, 'pending');
+  assert.equal(response.status, 200);
+  assert.equal(response.data.jobId, JOB); assert.equal(response.data.projectId, f.store.projectId);
+  assert.deepEqual(Object.keys(response.data).sort(), ['jobId', 'projectId', 'staged']);
+  const receipt=response.data.staged as Record<string,unknown>;
+  assert.equal(receipt.imported, false); assert.equal(receipt.engineVerification, 'pending');
   for (const input of [{jobId: JOB, target: SELECTION.target}, {jobId: JOB, packet: '{}'}, {jobId: JOB, permission: true}]) {
     const refused = await f.http(input, {path}).result; assert.equal(refused.status, 400);
   }
@@ -179,10 +188,86 @@ test('native staging ingress rejects a revoked capture after awaiting its contro
   f.setStage(async () => {
     f.transition('revoke-regrant');
     return {status: 'staged', imported: false, transferDigest: 'a'.repeat(64), packetCount: 1, byteLength: 4,
-      state: 'sealed', engineVerification: 'pending', commandIds: ['synthetic-stage-receipt']};
+      state: 'sealed', engineVerification: 'pending', commandIds: ['44444444-4444-4444-8444-444444444444']};
   });
   const response = await f.http({jobId: JOB}, {path}).result;
   assert.equal(response.status, 403); assert.equal(response.data.error, 'NATIVE_ASSET_AUTHORITY'); assert.equal(response.data.state, undefined);
+});
+
+test('native staging MCP reaches the scoped route once and returns only pending CPU evidence', async t => {
+  const f = await fixture(t), sdk = await linked(t, f.origin, f.credential);
+  const staged = {status: 'staged' as const, imported: false as const, transferDigest: 'a'.repeat(64),
+    packetCount: 1, byteLength: 4, state: 'sealed' as const, engineVerification: 'pending' as const,
+    commandIds: ['44444444-4444-4444-8444-444444444444']};
+  f.setStage(async (id, actor) => {
+    assert.equal(id, JOB); assertNativeAssetActor(actor, 'mutate'); return staged;
+  });
+  const result = CallToolResultSchema.parse(await sdk.client.callTool({name: 'assets_stage_studio_import', arguments: {jobId: JOB}}));
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(result.structuredContent, {jobId: JOB, projectId: f.store.projectId, staged});
+  assert.deepEqual(JSON.parse((result.content[0] as {text: string}).text), result.structuredContent);
+  assert.deepEqual(f.counts(), {preparations: 0, selections: 0, requests: 1});
+  assert.equal(f.stageCalls(), 1);
+  const invalid = CallToolResultSchema.parse(await sdk.client.callTool({name: 'assets_stage_studio_import',
+    arguments: {jobId: JOB, permission: true}}));
+  assert.equal(invalid.isError, true); assert.equal(f.stageCalls(), 1); assert.equal(f.counts().requests, 1);
+});
+
+test('native staging MCP treats a real late scope rejection as unknown without replaying', async t => {
+  const f = await fixture(t), sdk = await linked(t, f.origin, f.credential);
+  f.setStage(async () => {
+    f.transition('revoke-regrant');
+    return {status: 'staged', imported: false, transferDigest: 'a'.repeat(64), packetCount: 1, byteLength: 4,
+      state: 'sealed', engineVerification: 'pending', commandIds: ['44444444-4444-4444-8444-444444444444']};
+  });
+  const result = CallToolResultSchema.parse(await sdk.client.callTool({name: 'assets_stage_studio_import', arguments: {jobId: JOB}}));
+  const outcome = result.structuredContent as Record<string, unknown>;
+  assert.equal(outcome.jobId, JOB); assert.equal(outcome.state, 'unknown');
+  assert.equal(outcome.terminal, false); assert.equal(outcome.ambiguous, true); assert.equal(outcome.retry, false);
+  assert.equal(outcome.staged, undefined); assert.equal(outcome.imported, undefined);
+  assert.equal(f.stageCalls(), 1); assert.equal(f.counts().requests, 1);
+});
+
+test('native staging status MCP can read its owned scope after the mutation window ends without staging again', async t => {
+  const f = await fixture(t), sdk = await linked(t, f.origin, f.credential);
+  f.endMutationWindow();
+  f.setStatus(async (id, actor) => {
+    assert.equal(id, JOB); assertNativeAssetActor(actor, 'read');
+    assert.throws(() => assertNativeAssetActor(actor, 'mutate'), {code: 'NATIVE_ASSET_AUTHORITY'});
+    return {jobId: JOB, projectId: f.store.projectId, stage: null};
+  });
+  const result = CallToolResultSchema.parse(await sdk.client.callTool({name: 'assets_studio_staging_status', arguments: {jobId: JOB}}));
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(result.structuredContent, {jobId: JOB, projectId: f.store.projectId, stage: null});
+  assert.equal(f.stageCalls(), 0); assert.deepEqual(f.counts(), {preparations: 0, selections: 0, requests: 1});
+  const path = '/v1/assets/native/studio-staging-status?jobId=' + JOB;
+  assert.equal((await f.http(undefined, {method: 'GET', path: path + '&projectId=forged'}).result).status, 400);
+  assert.equal((await f.http(undefined, {method: 'GET', path: path + '&jobId=' + JOB}).result).status, 400);
+  assert.equal((await f.http(undefined, {method: 'GET', path: '/v1/assets/native/studio-staging-status?jobId=' + '33333333-3333-4333-8333-333333333333'}).result).status, 404);
+});
+
+test('native staging status route fences its original read actor across an awaited lookup', async t => {
+  const f = await fixture(t);
+  f.setStatus(async () => {f.transition('revoke-regrant'); return {jobId: JOB, projectId: f.store.projectId, stage: null};});
+  const response = await f.http(undefined, {method: 'GET', path: '/v1/assets/native/studio-staging-status?jobId=' + JOB}).result;
+  assert.equal(response.status, 403); assert.equal(response.data.stage, undefined); assert.equal(f.stageCalls(), 0);
+});
+
+test('native staging refuses a changed owned binding or malformed controller evidence without claiming completion', async t => {
+  for (const mode of ['binding', 'receipt'] as const) {
+    const f = await fixture(t), path = '/v1/assets/native/stage-studio-import';
+    f.setStage(async () => {
+      if (mode === 'binding') f.setLookup((actor, id) => {
+        const original = f.host.bindingNative(actor, id); return original ? {...original, id: OTHER} : null;
+      });
+      return {status: 'staged', imported: false, transferDigest: 'a'.repeat(64), packetCount: 1, byteLength: 4,
+        state: 'sealed', engineVerification: 'pending', commandIds: [mode === 'receipt' ? 'invalid-command' : '44444444-4444-4444-8444-444444444444']};
+    });
+    const response = await f.http({jobId: JOB}, {path}).result;
+    assert.equal(response.status, mode === 'binding' ? 404 : 503);
+    assert.equal(response.data.staged, undefined); assert.equal(response.data.projectId, undefined);
+    assert.equal(f.stageCalls(), 1, 'A refusal after execution never replays staging.');
+  }
 });
 
 for (const phase of ['body', 'preparation'] as const) for (const transition of ['revoke-regrant', 'new-intent', 'replacement', 'close'] as const)

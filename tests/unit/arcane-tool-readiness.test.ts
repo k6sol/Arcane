@@ -23,12 +23,12 @@ test('native task instructions require automatic choice and evidence, not invent
  assert.ok(!ARCANE_TASK_INSTRUCTIONS.includes('approvalPolicy=never'));
 });
 
-test('native asset readiness extends the entire generic inventory with prepare only',()=>{
+test('native asset readiness requires preparation, CPU staging and its read-only reconciliation status',()=>{
  assert.equal(Object.isFrozen(ARCANE_TOOL_NAMES),true);
  assert.equal(Object.isFrozen(ARCANE_NATIVE_TOOL_NAMES),true);
- assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_prepare_studio_import']);
+ assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status']);
  assert.equal(new Set(ARCANE_NATIVE_TOOL_NAMES).size,ARCANE_NATIVE_TOOL_NAMES.length);
- assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_prepare_studio_import']);
+ assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status']);
  assert.deepEqual(missingArcaneTools(ARCANE_NATIVE_TOOL_NAMES,true),[]);
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES)]));
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_NATIVE_TOOL_NAMES)],true));
@@ -38,6 +38,6 @@ test('native asset readiness extends the entire generic inventory with prepare o
   assert.deepEqual(missingArcaneTools(partial,true),[omitted]);
   assert.throws(()=>requireArcaneBuildTools([row(partial)],true),{code:'MCP_CAPABILITIES'});
  }
- const inherited={...row(['assets_prepare_studio_import']),name:'inherited',runtimeStatus:'disabled'};
+ const inherited={...row(['assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status']),name:'inherited',runtimeStatus:'disabled'};
  assert.throws(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES),inherited],true),{code:'MCP_CAPABILITIES'});
 });

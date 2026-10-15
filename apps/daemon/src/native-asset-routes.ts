@@ -9,10 +9,12 @@ import type {NativeAssetConversationHost} from './asset-conversation-host.js';
 import {nativeAssetConversationJobPage} from './asset-conversation-page.js';
 import {assertNativeAssetActor,nativeAssetActorScope,type NativeAssetRegistry} from './native-asset-authority.js';
 import {parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
+import {parseNativeStudioStagingResponse} from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
+import {parseNativeStudioStagingStatusResponse} from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
 export {NATIVE_STUDIO_IMPORT_RESPONSE_BYTES,parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import {readAssetJson,discardRejectedAssetBody} from './asset-routes.js';
 const PREFIX='/v1/assets/native/';
-const METHODS=new Map([['start','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['probe','POST'],['jobs','GET'],['manifest','GET']]);
+const METHODS=new Map([['start','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET']]);
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
 function jobId(value:unknown):string {if(typeof value!=='string'||!UUID.test(value))fail('INPUT');return value;}
@@ -35,7 +37,7 @@ function ingress(request:IncomingMessage,url:URL,origin:string):string {
 }
 /** Dedicated native audience. Generic/human bearers cannot acquire registry captures.
  * Caller payloads contain bounded recipe/job/page data only, never authority. */
-export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'>) {
+export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'>>) {
  return async(request:IncomingMessage,response:ServerResponse,url:URL,origin:string):Promise<boolean>=>{
   if(!url.pathname.startsWith(PREFIX))return false;
   const send=async(status:number,payload:unknown,serialized?:string)=>{
@@ -49,7 +51,7 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const mutation=route==='start'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import';
    // Capture BEFORE body reads/queue waits. Never resolve again into a fresh generation.
    const actor=registry.capture(credential,mutation?'mutate':'read');
-   const allowed=route==='manifest'?['jobId']:route==='jobs'?['limit','after']:[];
+   const allowed=route==='manifest'||route==='studio-staging-status'?['jobId']:route==='jobs'?['limit','after']:[];
    const seen=new Set<string>();for(const[key]of url.searchParams){if(!allowed.includes(key)||seen.has(key))fail('INPUT');seen.add(key);}
    if(route==='jobs'){
     const text=url.searchParams.get('limit');if(text!==null&&!/^[1-9][0-9]?$/.test(text))fail('INPUT');const limit=text===null?32:Number(text);
@@ -59,6 +61,16 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
     const id=jobId(url.searchParams.get('jobId'));if(!host.bindingNative(actor,id))fail('NOT_FOUND');
     const manifest=await service.manifest(id);assertNativeAssetActor(actor,'read');
     if(!host.bindingNative(actor,id)||manifest.jobId!==id)fail('NOT_FOUND');await send(200,{manifest});return true;
+   }
+   if(route==='studio-staging-status'){
+    const id=jobId(url.searchParams.get('jobId')),binding=host.bindingNative(actor,id);if(!binding)fail('NOT_FOUND');
+    if(!staging?.status)fail('STUDIO_STAGE_UNAVAILABLE');
+    const scope=nativeAssetActorScope(actor),result=await staging.status(id,actor);
+    assertNativeAssetActor(actor,'read');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    const envelope=parseNativeStudioStagingStatusResponse(result,id,scope.projectId),serialized=JSON.stringify(envelope);
+    if(serialized.includes(credential))fail('STUDIO_STAGE_RESPONSE');
+    assertNativeAssetActor(actor,'read');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    await send(200,envelope,serialized);return true;
    }
    const input=await readAssetJson(request,route==='start');assertNativeAssetActor(actor,mutation?'mutate':'read');
    if(route==='start'){
@@ -88,11 +100,17 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    if(route==='stage-studio-import'){
     const id=jobId(body(input,['jobId']).jobId),binding=host.bindingNative(actor,id);if(!binding)fail('NOT_FOUND');
     if(!staging)fail('STUDIO_STAGE_UNAVAILABLE');
+    const scope=nativeAssetActorScope(actor);
     const result=await staging.stage(id,actor);
     assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
     // Pending CPU intake is not upload/insertion. No caller supplies target,
     // packet bytes, account IDs, permissions or baseline claims to this route.
-    await send(200,result);return true;
+    const envelope=parseNativeStudioStagingResponse({jobId:id,projectId:scope.projectId,staged:result},id,scope.projectId);
+    const serialized=JSON.stringify(envelope);if(serialized.includes(credential))fail('STUDIO_STAGE_RESPONSE');
+    // Scope fields come from the original native capture, never its request.
+    // Parsing is followed by a final fence before the synchronous successful send.
+    assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    await send(200,envelope,serialized);return true;
    }
    body(input,[]);assertNativeAssetActor(actor,'read');
    // Probe is an admitted metadata read, not generation or native write permission.

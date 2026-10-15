@@ -99,12 +99,23 @@ function directPath(value: unknown): string {
   if (result === parse(result).root) fail('PATH', 'Filesystem roots are not project or state directories.');
   return result;
 }
+function isDirectPath(path: string): boolean {
+  if (process.platform === 'win32') {
+    try {
+      // Native lookup avoids the JS resolver's repeated ancestor walks. Only
+      // accept an unchanged result; other spellings/errors retain the legacy
+      // resolver's alias and error behavior. Never retain filesystem authority.
+      if (samePath(realpathSync.native(path), path)) return true;
+    } catch { /* Native handle lookup can fail where the legacy resolver works. */ }
+  }
+  return samePath(realpathSync(path), path);
+}
 function noLinks(path: string, missing = false): void {
   let current = path;
   for (;;) {
     try {
       const stat = lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || !samePath(realpathSync(current), current)) fail('PATH', 'Project and state directories must be direct directories.');
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !isDirectPath(current)) fail('PATH', 'Project and state directories must be direct directories.');
     } catch (error) {
       if (error instanceof ArcaneError) throw error;
       if (!missing || (error as NodeJS.ErrnoException).code !== 'ENOENT') fail('PATH', 'Project or state directory cannot be safely inspected.');
@@ -191,7 +202,7 @@ export class ConversationWorkStore {
       const file = this.#databasePath + suffix;
       try {
         const stat = lstatSync(file);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !samePath(realpathSync(file), file)) fail('PATH', 'SQLite files must be direct single-link regular files.');
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !isDirectPath(file)) fail('PATH', 'SQLite files must be direct single-link regular files.');
         if (stat.size > CONVERSATION_WORK_LIMITS.fileBytes) fail('CAPACITY', 'SQLite file exceeds the storage size bound.');
         if (!suffix && this.#fileIdentity && (stat.dev !== this.#fileIdentity.dev || stat.ino !== this.#fileIdentity.ino)) fail('PATH', 'The open SQLite file was replaced.');
       } catch (error) {

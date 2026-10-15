@@ -10,11 +10,12 @@ import type { StudioImportContextObservation } from '../../packages/protocol/src
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { createAssetService } from '../../apps/daemon/src/asset-service.js';
+import { adaptCompletedStudioImport, assertStudioImportJobScope } from '../../apps/daemon/src/asset-import-adapter.js';
 import { createNativeAssetRegistry, type NativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
 import { createStudioImportPreparationStore, STUDIO_IMPORT_PREPARATION_LIMITS, type StudioImportPreparationStore } from '../../apps/daemon/src/studio-import-preparation-store.js';
 import { parseNativeStudioImportResponse } from '../../packages/asset-pipeline/src/studio-import-wire.js';
 import { saveStudioFixture } from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
-import type { PreparedStudioImport } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { createStudioImportManifestAuthority, type PreparedStudioImport, type StudioImportSelection } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 
 // Real filesystem, SQLite Studio receipts, CWS, registry and production prepared
 // codec. All pairings, observations and exported bytes are synthetic and local;
@@ -58,28 +59,56 @@ async function fixture(t: test.TestContext, local = false) {
   const witness = { initialContextReceiptId: receipt(), confirmedContextReceiptId: receipt(), pluginArtifactHash: HASH,
     clientLifetimeId: 'fixture-plugin-lifetime', playEpoch: 0 };
   const outputRoot = join(root, 'outputs'); await mkdir(outputRoot);
-  for (const job of [JOB, NEXT]) { const directory = join(outputRoot, 'test-kit-' + job); await mkdir(directory); await saveStudioFixture(directory, job); }
+  const sources = new Map<string, { manifest: Awaited<ReturnType<typeof saveStudioFixture>>; exports: Map<'asset.glb' | 'collision.glb', Buffer> }>();
+  for (const job of [JOB, NEXT]) {
+    const directory = join(outputRoot, 'test-kit-' + job); await mkdir(directory);
+    const manifest = await saveStudioFixture(directory, job), exports = new Map<'asset.glb' | 'collision.glb', Buffer>();
+    for (const name of ['asset.glb', 'collision.glb'] as const) exports.set(name, await readFile(join(directory, name)));
+    sources.set(job, { manifest, exports });
+  }
   let studsPerMeter = 1 / 0.28, parentRef = 'fixture-workspace';
-  const assets = await createAssetService({ cwd: projectPath, projectPath, outputRoot, studioImport: { workAssociations: cws,
-    selectTarget: () => ({ target: { sessionId: pair.sessionId, placeId: observation.placeId, universeId: observation.universeId,
+  const selection = (): StudioImportSelection => ({ target: { sessionId: pair.sessionId, placeId: observation.placeId, universeId: observation.universeId,
       root: 'Workspace', parentRef, creator: local ? { kind: 'user', id: '78' } : { kind: 'group', id: '56' } },
-      placement: { mode: 'bottom-centre' }, studsPerMeter }) } });
-  const prepared = await assets.prepareStudioImport(JOB, actor), next = await assets.prepareStudioImport(NEXT, actor);
+      placement: { mode: 'bottom-centre' }, studsPerMeter });
+  // Exercise the production adapter/authority on the unchanged real GLB bytes,
+  // without repeating AssetService's full artifact inventory in every fence setup.
+  // The dedicated equivalence case below retains that actual service integration.
+  async function directPrepared(jobId: string): Promise<PreparedStudioImport> {
+    const scope = assertStudioImportJobScope(projectPath, cws, actor, jobId), source = sources.get(jobId); assert.ok(source);
+    const generated = adaptCompletedStudioImport(source.manifest, source.exports, scope.projectId, selection(), null);
+    const authority = createStudioImportManifestAuthority({ loadGeneratedFiles: async requested => {
+      assert.equal(requested, jobId); assertStudioImportJobScope(projectPath, cws, actor, jobId); return generated;
+    } });
+    try {
+      const admission = await authority.admit(jobId); assertStudioImportJobScope(projectPath, cws, actor, jobId);
+      return authority.prepare(admission);
+    } finally { authority.close(); }
+  }
+  let assets: Awaited<ReturnType<typeof createAssetService>> | undefined;
+  async function servicePrepared(jobId: string): Promise<PreparedStudioImport> {
+    assets ??= await createAssetService({ cwd: projectPath, projectPath, outputRoot,
+      studioImport: { workAssociations: cws, selectTarget: selection } });
+    return assets.prepareStudioImport(jobId, actor);
+  }
+  const prepared = await directPrepared(JOB);
   const directory = join(root, 'preparations'), options = { projectPath, directory, workAssociations: cws, studio, now: () => now };
   let store: StudioImportPreparationStore | undefined; const releases: (() => void)[] = [];
   t.after(async () => {
     releases.forEach(release => release()); t.mock.restoreAll(); syncBuiltinESMExports();
     await store?.close().catch(error => { if (!code('LOCKED')(error) && !code('PATH')(error)) throw error; });
-    await assets.close(); cws.close(); registry.close(); studio.close();
+    await assets?.close(); cws.close(); registry.close(); studio.close();
     const part = relative(boundary, root); assert.ok(part.startsWith('arcane-preparation-store-') && !isAbsolute(part) && !part.startsWith('..' + sep));
     assert.equal((await lstat(root)).isSymbolicLink(), false); await rm(root, { recursive: true, force: true });
   });
-  return { root, options, actor, prepared, next, witness, cws, registry, incarnation, studio, pair, observation, receipt,
+  return { root, options, actor, prepared, witness, cws, registry, incarnation, studio, pair, observation, receipt,
+    directPrepared, servicePrepared, assetServiceCreated: () => assets !== undefined,
+    async nextPrepared() { return directPrepared(NEXT); },
     async create(limits?: Parameters<typeof createStudioImportPreparationStore>[0]['limits']) { store = await createStudioImportPreparationStore({ ...options, ...(limits ? { limits } : {}) }); return store; },
     advance(ms: number) { now += ms; }, play() { studio.poll(pair.sessionId, heartbeat('Play', 1)); },
-    async changedPrepared() { studsPerMeter = 4; return assets.prepareStudioImport(JOB, actor); },
-    async changedTarget() { parentRef = 'fixture-other-workspace'; return assets.prepareStudioImport(JOB, actor); },
+    async changedPrepared() { studsPerMeter = 4; return directPrepared(JOB); },
+    async changedTarget() { parentRef = 'fixture-other-workspace'; return directPrepared(JOB); },
     holdRead() {
+      t.signal.throwIfAborted();
       const entered = gate(), resume = gate(), original = fs.opendir; let held = false; releases.push(resume.release);
       t.mock.method(fs, 'opendir', async (...args: Parameters<typeof fs.opendir>) => {
         const result = await original(...args); if (!held && String(args[0]) === directory) { held = true; entered.release(); await resume.promise; } return result;
@@ -93,6 +122,25 @@ async function fixture(t: test.TestContext, local = false) {
     },
   };
 }
+
+test('direct production fixture preparation equals real AssetService for both jobs, scale and target changes', async t => {
+  const f = await fixture(t); assert.equal(f.assetServiceCreated(), false);
+  async function equivalent(jobId: string) {
+    const direct = await f.directPrepared(jobId), service = await f.servicePrepared(jobId);
+    assert.deepEqual(service, direct);
+    assert.equal(service.digest, direct.digest); assert.equal(service.manifest.digest, direct.manifest.digest);
+    assert.equal(service.delta.nextDigest, direct.delta.nextDigest); assert.equal(service.manifest.revisionId, jobId);
+    return direct;
+  }
+  assert.deepEqual(await equivalent(JOB), f.prepared); await equivalent(NEXT);
+  assert.equal(f.assetServiceCreated(), true);
+  const scaled = await f.changedPrepared(); assert.notEqual(scaled.digest, f.prepared.digest);
+  assert.equal(scaled.manifest.conversion.studsPerMeter, 4);
+  assert.deepEqual(await equivalent(JOB), scaled); await equivalent(NEXT);
+  const targeted = await f.changedTarget(); assert.notEqual(targeted.digest, scaled.digest);
+  assert.equal(targeted.manifest.target.parentRef, 'fixture-other-workspace');
+  assert.deepEqual(await equivalent(JOB), targeted); await equivalent(NEXT);
+});
 
 test('preparation store consumes actual prepared codec and two real synthetic StudioStore receipts; immutable metadata survives reopen', async t => {
   const f = await fixture(t), store = await f.create(); assert.equal(await store.get(f.actor, JOB, guard), null);
@@ -206,7 +254,7 @@ test('incoming changed production prepared data or target conflicts even with in
 
 test('record, byte and file budgets fail without repair, deletion or additional records', async t => {
   const f = await fixture(t), store = await f.create({ records: 1 }); await store.save(f.actor, JOB, f.prepared, f.witness, guard);
-  await assert.rejects(store.save(f.actor, NEXT, f.next, f.witness, guard), code('LIMIT')); await store.close();
+  await assert.rejects(store.save(f.actor, NEXT, await f.nextPrepared(), f.witness, guard), code('LIMIT')); await store.close();
   await assert.rejects(f.create({ recordBytes: 10 }), code('LIMIT'));
   assert.deepEqual(await readdir(f.options.directory), [JOB + '.json']);
 });

@@ -92,14 +92,18 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
     service = await createAssetService({cwd: root, projectPath, outputRoot, studioImport: host.hooks});
     return service;
   }
-  return { studio, work, actor, incarnation, host, ledger, scope, guard, pair, proof, paired,
+  const controller=async()=>{
+    const assets=await setupService();
+    staging ??= createStudioImportStagingController({projectPath,workAssociations:work,studio,assets,host:host.hooks,pluginArtifactHash:HASH});
+    return staging;
+  };
+  return { studio, work, actor, incarnation, registry, host, ledger, scope, guard, pair, proof, paired,
     context, hold: () => { held = true; }, respond: (fn: typeof context) => { response = fn; },
     onStage: (hook: (command: StudioCommand) => boolean) => {stageHook = hook;},
     async stage() {
-      const assets = await setupService();
-      staging ??= createStudioImportStagingController({projectPath, workAssociations: work, studio, assets, host: host.hooks, pluginArtifactHash: HASH});
-      return staging.stage(JOB, actor);
+      return (await controller()).stage(JOB, actor);
     },
+    async status(readActor=registry.capture(incarnation.credential(),'read'),id=JOB){return (await controller()).status(id,readActor);},
     counts: () => ({ saved, reads }), async prepare() {
       return (await setupService()).prepareStudioImport(JOB, actor);
     } };
@@ -134,6 +138,10 @@ test('native controller stages owned bytes through durable bounded queue receipt
   }
   assert.deepEqual(f.counts(), {saved: 1, reads: 3});
   const record = await f.ledger.get(f.actor, JOB, f.guard); assert.equal(record?.engineVerification, 'pending');
+  const before=f.counts(),status=await f.status();assert.equal(status.stage?.phase,'cpu-staged');
+  assert.deepEqual(status.stage?.commands.map(c=>c.commandId),staged.commandIds);assert.equal(status.stage?.receipt?.engineVerification,'pending');
+  assert.equal(status.stage?.imported,false);assert.equal(status.stage?.retry,false);
+  await assert.rejects(f.stage(),refused('STUDIO_STAGE_EXISTS'));assert.deepEqual(f.counts(),before);
 });
 
 test('retired same native capture stops a delivered packet and retains its unknown outcome without replay', async t => {
@@ -143,6 +151,19 @@ test('retired same native capture stops a delivered packet and retains its unkno
   assert.ok(attempted);
   assert.equal(f.studio.command((attempted as StudioCommand).id).state, 'needs_reconciliation');
   assert.equal(f.studio.poll(f.paired.sessionId, f.proof()).length, 0);
+  const status=await f.status();assert.equal(status.stage?.phase,'needs_reconciliation');
+  assert.equal(status.stage?.commands[0]?.commandId,(attempted as StudioCommand).id);assert.equal(status.stage?.receipt,null);
+});
+
+test('stage status needs exact current read actor/job binding and performs no target reads',async t=>{
+  const f=await fixture(t),before=f.counts();assert.equal((await f.status()).stage,null);assert.deepEqual(f.counts(),before);
+  await assert.rejects(f.status({kind:'native-asset-actor'}),refused('NATIVE_ASSET_AUTHORITY'));
+  await assert.rejects(f.status(undefined,'22222222-2222-4222-8222-222222222222'),refused('NOT_FOUND'));
+  const foreign=f.registry.issue();foreign.seal({connectionId:'foreign-connection',provider:'codex',threadId:'foreign-thread',sessionId:null});
+  await assert.rejects(f.status(f.registry.capture(foreign.credential(),'read')),refused('NOT_FOUND'));
+  const old=f.registry.capture(f.incarnation.credential(),'read');f.incarnation.revokeGrant();
+  await assert.rejects(f.status(old),refused('NATIVE_ASSET_AUTHORITY'));assert.equal((await f.status()).stage,null);
+  assert.deepEqual(f.counts(),before);
 });
 
 test('creator change after preparation is refused before any binary staging command', async t => {
