@@ -78,7 +78,7 @@ interface Options {
   projectPath?: string;
   port?: number;
   assetService?: AssetService;
-  studioImportStaging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'>;
+  studioImportStaging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'>>;
   /** Owned by the product launcher; absent in metadata-only labs. */
   learningService?: LearningService;
   /** Test-only service seam. Production creates the trusted personal-local service. */

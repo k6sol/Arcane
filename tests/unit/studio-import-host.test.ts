@@ -12,6 +12,10 @@ import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { READ_METHODS, WRITE_METHODS, ASSET_STAGE_METHODS, ROOTS, type StudioImportContextObservation, type StudioCommand } from '../../packages/protocol/src/studio.js';
 import { saveStudioFixture } from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
+import {createServer} from 'node:http';
+import {createAssetConversationHost} from '../../apps/daemon/src/asset-conversation-host.js';
+import {nativeAssetRoutes} from '../../apps/daemon/src/native-asset-routes.js';
+import {DaemonClient} from '../../apps/mcp/src/daemon-client.js';
 
 // Production host, stores, queue receipts, completed-byte service and pending
 // ledger. The paired plugin and GLBs are synthetic; no real Studio, SDK, worker,
@@ -61,11 +65,19 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
   let staging: ReturnType<typeof createStudioImportStagingController> | undefined;
   const received = new Map<string, {count: number; bytes: number}>();
   let stageHook: ((command: StudioCommand) => boolean) | null = null;
+  let reconstructionHook: ((command:StudioCommand)=>boolean)|null=null;
   const failures: unknown[] = [];
   const pump = setInterval(() => {
     try {
       if (held) return;
       for (const command of studio.poll(paired.sessionId, proof())) {
+        if(command.method==='asset.reconstruct'){
+          if(reconstructionHook&&!reconstructionHook(command))continue;
+          const args=command.args;
+          studio.result({sessionId:paired.sessionId,commandId:command.id,state:'succeeded',result:{runId:args.runId,
+            transferDigest:(args.expected as {digest:string}).digest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending'}});
+          continue;
+        }
         if (command.method === 'asset.stage_packet') {
           if (stageHook && !stageHook(command)) continue;
           const expected = command.args.expected as {digest: string}, packet = JSON.parse(command.args.packet as string);
@@ -129,9 +141,22 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
     },
     context, hold: () => { held = true; }, respond: (fn: typeof context) => { response = fn; },
     onStage: (hook: (command: StudioCommand) => boolean) => {stageHook = hook;},
+    onReconstruction:(hook:(command:StudioCommand)=>boolean)=>{reconstructionHook=hook;},
     resetController() { staging?.close(); staging = undefined; },
     async stage(stageActor = actor, id = JOB) {
       return (await controller()).stage(id, stageActor);
+    },
+    async reconstruct(reconstructActor=actor,id=JOB){return (await controller()).reconstruct(id,reconstructActor);},
+    async reconstructionStatus(readActor=registry.capture(incarnation.credential(),'read'),id=JOB){return (await controller()).reconstructionStatus(id,readActor);},
+    async nativeClient(){
+      const assets=await setupService(),ownedController=await controller();
+      const conversations=createAssetConversationHost({projectPath,workAssociations:work,conversation:()=>{throw Error('Native provider calls are forbidden.');},start:()=>{throw Error('Generation is forbidden.');}});
+      const route=nativeAssetRoutes(assets,conversations,registry,ownedController);let origin='';
+      const server=createServer((request,response)=>{void route(request,response,new URL(request.url??'/',origin),origin).then(handled=>{if(!handled){response.writeHead(404);response.end('{}');}}).catch(error=>{failures.push(error);response.destroy();});});
+      await new Promise<void>((accept,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',accept);});
+      const address=server.address();assert.ok(address&&typeof address!=='string');origin='http://127.0.0.1:'+address.port;
+      t.after(async()=>{server.closeAllConnections();await new Promise<void>(accept=>server.close(()=>accept()));});
+      return new DaemonClient({url:origin,token:incarnation.credential(),assetAudience:'native-session'});
     },
     async status(readActor=registry.capture(incarnation.credential(),'read'),id=JOB){return (await controller()).status(id,readActor);},
     counts: () => ({ saved, reads }), async prepare() {
@@ -173,6 +198,79 @@ test('native controller stages owned bytes through durable bounded queue receipt
   assert.deepEqual(status.stage?.commands.map(c=>c.commandId),staged.commandIds);assert.equal(status.stage?.receipt?.engineVerification,'pending');
   assert.equal(status.stage?.imported,false);assert.equal(status.stage?.retry,false);
   await assert.rejects(f.stage(),refused('STUDIO_STAGE_EXISTS'));assert.deepEqual(f.counts(),before);
+});
+
+test('production controller reconstructs the original sealed run once with exact bounded source metadata',async t=>{
+  const f=await fixture(t),staged=await f.stage(),original=f.studio.readStageRun(f.scope.projectId,JOB)!;
+  const result=await f.reconstruct();assert.equal(result.runId,staged.runId);assert.equal(result.state,'reconstructed');
+  assert.equal(result.transferDigest,staged.transferDigest);assert.equal(result.imported,false);assert.equal(result.engineVerification,'pending');
+  assert.equal(result.objects.length,8);assert.ok(result.objects.every(o=>o.vertexCount===4&&o.triangleCount===4));
+  const command=f.studio.command(result.commandId);assert.equal(command.method,'asset.reconstruct');
+  assert.throws(()=>f.studio.enqueue({sessionId:command.sessionId,requestId:command.requestId,method:command.method,args:command.args}),{code:'ASSET_STAGE_AUTHORITY'});
+  await assert.rejects(f.studio.enqueueVerified({sessionId:command.sessionId,requestId:command.requestId,method:command.method,args:command.args},null),{code:'ASSET_STAGE_AUTHORITY'});
+  assert.throws(()=>f.studio.restore({commandId:command.id,requestId:'fixture_restore_reconstruction'}),{code:'RESTORE'});
+  assert.deepEqual(f.studio.readStageRun(f.scope.projectId,JOB),original,'engine allocation evidence cannot rewrite CPU history');
+  f.resetController();await assert.rejects(f.reconstruct(f.newActor()),refused('STUDIO_RECONSTRUCT_EXISTS'));
+  assert.equal(f.studio.commands().filter(c=>c.method==='asset.reconstruct').length,1);
+  const status=await f.reconstructionStatus();assert.equal(status.reconstruction?.state,'succeeded');
+  assert.equal(status.reconstruction?.receiptScope,'historical-reconstruction');assert.equal(status.reconstruction?.currentResources,'unobserved');
+  assert.equal(status.reconstruction?.retry,false);assert.equal(status.reconstruction?.imported,false);
+});
+
+test('native HTTP and production client reach the real staging/reconstruction controller and private Store admission',async t=>{
+  const f=await fixture(t),client=await f.nativeClient(),staged=await client.assetsStageStudioImport(JOB);
+  assert.ok('staged'in staged);assert.equal(staged.staged.imported,false);
+  const result=await client.assetsReconstructStudioImport(JOB);assert.ok('reconstructed'in result);
+  assert.equal(result.projectId,f.scope.projectId);assert.equal(result.reconstructed.runId,staged.staged.runId);
+  assert.equal(result.reconstructed.objects.length,8);assert.equal(result.reconstructed.imported,false);assert.equal(result.reconstructed.engineVerification,'pending');
+  f.incarnation.revokeGrant();const status=await client.assetsStudioReconstructionStatus(JOB);
+  assert.equal(status.reconstruction?.commandId,result.reconstructed.commandId);assert.equal(status.reconstruction?.currentResources,'unobserved');
+  assert.equal(f.studio.commands().filter(c=>c.method==='asset.reconstruct').length,1);
+});
+
+test('reconstruction refuses absent sealed evidence and changed original Edit continuity before allocating',async t=>{
+  const f=await fixture(t);await assert.rejects(f.reconstruct(),refused('STUDIO_RECONSTRUCT_STATE'));
+  const staged=await f.stage(),before=f.studio.commands().length;f.loseBuffers();
+  await assert.rejects(f.reconstruct(f.newActor()),refused('STUDIO_STAGE_CONTINUITY'));
+  assert.equal(f.studio.commands().length,before);assert.equal(f.studio.readStageReconstruction(f.scope.projectId,JOB,staged.runId),null);
+});
+
+test('fresh creator observation must still equal the original target before reconstruction admission',async t=>{
+  const f=await fixture(t),staged=await f.stage();f.respond(()=>({...f.context(),creator:{status:'available',kind:'group',id:57,provenance:'game.CreatorType/CreatorId'}}));
+  await assert.rejects(f.reconstruct(),refused('STUDIO_RECONSTRUCT_TARGET'));
+  assert.equal(f.studio.readStageReconstruction(f.scope.projectId,JOB,staged.runId),null);
+  assert.equal(f.studio.commands().filter(c=>c.method==='asset.reconstruct').length,0);
+});
+
+test('actor retirement after dispatch retains unknown reconstruction and never admits a replacement command',async t=>{
+  const f=await fixture(t),staged=await f.stage();
+  f.onReconstruction(()=>{f.incarnation.revokeGrant();return false;});
+  await assert.rejects(f.reconstruct(),refused('NATIVE_ASSET_AUTHORITY'));
+  const record=f.studio.readStageReconstruction(f.scope.projectId,JOB,staged.runId)!;
+  assert.equal(record.command.state,'needs_reconciliation');assert.equal(record.receipt,null);
+  f.incarnation.grant({connectionId:'fixture-connection',threadId:conversation.threadId});
+  f.resetController();await assert.rejects(f.reconstruct(f.newActor()),refused('STUDIO_RECONSTRUCT_EXISTS'));
+  assert.equal(f.studio.commands().filter(c=>c.method==='asset.reconstruct').length,1);
+});
+
+test('known successful reconstruction fact survives late native retirement without claiming current resources',async t=>{
+  const f=await fixture(t),staged=await f.stage();
+  f.onReconstruction(command=>{
+    const a=command.args;f.studio.result({sessionId:command.sessionId,commandId:command.id,state:'succeeded',result:{runId:a.runId,
+      transferDigest:(a.expected as {digest:string}).digest,state:'reconstructed',objects:a.objects,imported:false,engineVerification:'pending'}});
+    f.incarnation.revokeGrant();return false;
+  });
+  await assert.rejects(f.reconstruct(),refused('NATIVE_ASSET_AUTHORITY'));
+  assert.equal(f.studio.readStageReconstruction(f.scope.projectId,JOB,staged.runId)?.command.state,'succeeded');
+  const status=await f.reconstructionStatus();assert.equal(status.reconstruction?.receipt?.runId,staged.runId);
+  assert.equal(status.reconstruction?.currentResources,'unobserved');assert.equal(status.reconstruction?.imported,false);
+});
+
+test('backend restart retains detached reconstruction facts but cannot allocate again from old pairing',async t=>{
+  const f=await fixture(t),staged=await f.stage(),result=await f.reconstruct();await f.restartBackend();
+  const status=await f.reconstructionStatus();assert.equal(status.reconstruction?.commandId,result.commandId);
+  assert.equal(status.reconstruction?.receipt?.runId,staged.runId);assert.equal(status.reconstruction?.currentResources,'unobserved');
+  await assert.rejects(f.reconstruct(),refused('STUDIO_RECONSTRUCT_EXISTS'));
 });
 
 test('fresh native operation and advanced epoch append a CPU run and witnessed preparation without replay', async t => {
