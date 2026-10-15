@@ -115,8 +115,12 @@ export class BoundedStudioTestController {
     await this.#run; return this.status();
   }
   async stop(input: unknown): Promise<Readonly<TestReview>> {
-    const { runId } = parse(idSchema, input); if (!this.#run || runId !== this.#runId) fail('INVALID_REQUEST');
-    this.#requestStop('CANCELLED'); await this.#run; return this.status();
+    const { runId } = parse(idSchema, input);
+    if ((!this.#run && !this.#admission) || runId !== this.#runId) fail('INVALID_REQUEST');
+    // Admission already owns this run ID. Fence synchronously while its durable
+    // consume/admit is pending, then await that same admission and owned cleanup.
+    // A rejected admission keeps its original rejection outcome/code.
+    this.#requestStop('CANCELLED'); await this.#admission; await this.#run; return this.status();
   }
   /** Trusted connection/lifecycle hooks; exact current run is captured internally. */
   onDisconnect(): void { this.#requestStop('DISCONNECTED'); }
