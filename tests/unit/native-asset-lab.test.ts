@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, realpathSync, lstatSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, lstatSync, rmSync, existsSync } from 'node:fs';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -50,11 +50,35 @@ function temporaryProject() {
   return { root, projectPath: realpathSync(projectPath), cleanup };
 }
 
-async function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext, options:{signal?:AbortSignal;setupStarted?:(root:string)=>void}={}) {
   const { root, projectPath, cleanup } = temporaryProject(), stateDirectory = join(root, 'lab');
-  const studio = new StudioStore({ directory: join(root, 'studio') });
-  const work = new WorkStore({ directory: join(root, 'work'), projectPath });
   const threadAck = gate(), threadEntered = gate(), turnAck = gate(), turnEntered = gate();
+  const signal=options.signal?AbortSignal.any([t.signal,options.signal]):t.signal,requests=new AbortController();
+  const owned:{studio?:StudioStore;work?:WorkStore;lab?:Awaited<ReturnType<typeof createConnectionLab>>;sdk?:Client;sdkServer?:ReturnType<typeof createMcpServer>}={};
+  let creatingLab:Promise<Awaited<ReturnType<typeof createConnectionLab>>>|null=null,closing:Promise<void>|null=null;
+  let phase='creating stores';const began=performance.now();
+  const close=():Promise<void>=>{
+    // Cancellation must release the original fake ACKs before SDK/service close
+    // can wait for an HTTP action that is still inside those same gates.
+    requests.abort();threadAck.release();turnAck.release();
+    if(closing)return closing;
+    closing=(async()=>{
+      const errors:unknown[]=[];
+      const attempt=async(action:()=>unknown)=>{try{await action();}catch(error){errors.push(error);}};
+      try{
+        if(!owned.lab&&creatingLab){try{owned.lab=await creatingLab;}catch{/* The creating call retains its original failure. */}}
+        await attempt(()=>owned.sdk?.close());await attempt(()=>owned.sdkServer?.close());await attempt(()=>owned.lab?.close());
+        await attempt(()=>owned.work?.close());await attempt(()=>owned.studio?.close());
+        if(errors.length===0)await attempt(cleanup);else t.diagnostic('Retained LAB fixture after uncertain cleanup: '+root);
+      }finally{signal.removeEventListener('abort',cancel);}
+      if(errors.length)throw new AggregateError(errors,'LAB fixture cleanup failed.');
+    })();
+    void closing.catch(()=>{});return closing;
+  };
+  const cancel=()=>{t.diagnostic('LAB fixture cancelled during '+phase+' after '+Math.round(performance.now()-began)+' ms.');void close();};
+  t.after(close);signal.addEventListener('abort',cancel,{once:true});signal.throwIfAborted();
+  const studio = owned.studio = new StudioStore({ directory: join(root, 'studio') });
+  const work = owned.work = new WorkStore({ directory: join(root, 'work'), projectPath });
   const connectionId = randomUUID(), threadId = 'LAB.fake-provider.original-chat', sessionId = 'LAB.fake-provider.session';
   let hooks: NativeAssetHooks | undefined, localKey = '', starts = 0, cancels = 0, closes = 0;
   const snapshot: Snapshot = { connectionId, provenance: 'spawned-node-fixture', mcpIsolation: 'arcane-only-pending',
@@ -68,7 +92,7 @@ async function fixture(t: test.TestContext) {
       assert.equal(input.initiatedBy, 'human');
       snapshot.mcpIsolation = 'arcane-only-verified';
       snapshot.thread = { threadId, sessionId, selection: snapshot.selection!, configured: true, writeGranted: false, turnId: null, turnStatus: 'idle' };
-      threadEntered.release(); await threadAck.promise; return structuredClone(snapshot.thread);
+      phase='waiting for thread ACK';threadEntered.release(); await threadAck.promise;phase='running assertions';return structuredClone(snapshot.thread);
     },
     async resumeThread() { throw new Error('Fake provider does not resume'); },
     grantThreadWrites() { throw new Error('Fake provider has no native file writes'); },
@@ -76,18 +100,21 @@ async function fixture(t: test.TestContext) {
     async startTurn(input) {
       assert.equal(input.initiatedBy, 'human'); assert.equal(input.threadId, threadId); assert.ok(snapshot.thread && hooks);
       hooks.dispatched({ connectionId, threadId, operationId: randomUUID() });
-      snapshot.thread.turnStatus = 'starting'; turnEntered.release();
-      await turnAck.promise; snapshot.thread.turnId = 'LAB.fake-turn'; snapshot.thread.turnStatus = 'inProgress';
+      snapshot.thread.turnStatus = 'starting';phase='waiting for turn ACK';turnEntered.release();
+      await turnAck.promise; snapshot.thread.turnId = 'LAB.fake-turn'; snapshot.thread.turnStatus = 'inProgress';phase='running assertions';
       return structuredClone(snapshot.thread);
     },
     async interruptTurn() { throw new Error('Fake provider does not interrupt'); },
     respondApproval() { throw new Error('Fake provider has no approvals'); },
     async close() {
       // The owned service must fence BEFORE asking its provider double to close.
-      assert.ok(hooks);
-      assert.throws(() => hooks!.dispatched({ connectionId, threadId, operationId: randomUUID() }), { code: 'ASSET_AUTHORITY' });
-      closes++; snapshot.connected = false; snapshot.ready = false; hooks.retired();
-      threadAck.release(); turnAck.release();
+      try{
+        assert.ok(hooks);
+        assert.throws(() => hooks!.dispatched({ connectionId, threadId, operationId: randomUUID() }), { code: 'ASSET_AUTHORITY' });
+      }finally{
+        closes++; snapshot.connected = false; snapshot.ready = false;
+        try{hooks?.retired();}finally{threadAck.release();turnAck.release();}
+      }
     },
   };
   const jobs: AssetJobRecord[] = [];
@@ -112,22 +139,21 @@ async function fixture(t: test.TestContext) {
     async artifact() { throw new Error('No generated artifacts in LAB proof'); },
     async close() {},
   };
-  const lab = await createConnectionLab({ cwd: ROOT, projectPath, stateDirectory, studioStore: studio, workStore: work,
+  phase='creating owned LAB';
+  creatingLab = createConnectionLab({ cwd: ROOT, projectPath, stateDirectory, studioStore: studio, workStore: work,
     assetService: fakeAssetService, probe: async () => { throw new Error('No provider probes in LAB proof'); },
     codexConnect: async value => {
       assert.ok(value && Object.isFrozen(value)); hooks = value; localKey = value.finalCredential();
       assert.ok(/^[a-f0-9]{64}$/.test(localKey)); return fakeCodexHostClient;
     } });
+  options.setupStarted?.(root);
+  const lab=owned.lab=await creatingLab;if(signal.aborted){await close();signal.throwIfAborted();}phase='running assertions';
   let sdk: Client | null = null, sdkServer: ReturnType<typeof createMcpServer> | null = null;
-  t.after(async () => {
-    try { await sdk?.close(); await sdkServer?.close(); }
-    finally { try { await lab.close(); } finally { work.close(); studio.close(); cleanup(); } }
-  });
   type Reply<T> = { status: number; data: T };
   const http = async <T = Record<string, unknown>>(path: string, bearer: string, input?: unknown, headers: Record<string, string> = {}): Promise<Reply<T>> => {
     const response = await fetch(lab.origin + path, { method: input === undefined ? 'GET' : 'POST',
       headers: { Authorization: 'Bearer ' + bearer, ...(input === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
-      ...(input === undefined ? {} : { body: JSON.stringify(input) }), signal: AbortSignal.timeout(6000) });
+      ...(input === undefined ? {} : { body: JSON.stringify(input) }), signal: AbortSignal.any([signal,requests.signal,AbortSignal.timeout(6000)]) });
     const text = await response.text();
     if (localKey) assert.equal(text.includes(localKey), false, 'LAB HTTP must not disclose the native local key');
     return { status: response.status, data: JSON.parse(text) as T };
@@ -138,14 +164,14 @@ async function fixture(t: test.TestContext) {
     if (!sdk) {
       assert.ok(localKey);
       const server = createMcpServer({ client: new DaemonClient({ url: lab.origin, token: localKey, assetAudience: 'native-session' }), projectRoot: projectPath });
-      sdkServer = server;
-      sdk = new Client({ name: 'LAB.explicit-provider-runtime-doubles', version: '1.0.0' });
+      sdkServer = owned.sdkServer = server;
+      sdk = owned.sdk = new Client({ name: 'LAB.explicit-provider-runtime-doubles', version: '1.0.0' });
       const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
       await server.connect(serverTransport); await sdk.connect(clientTransport);
     }
     return CallToolResultSchema.parse(await sdk.callTool({ name, arguments: { timeoutMs: 2000, ...input } }));
   };
-  return { lab, work, studio, snapshot, fakeAssetService, projectPath, threadId, sessionId, connectionId, tool, action,
+  return { root, lab, work, studio, snapshot, fakeAssetService, projectPath, threadId, sessionId, connectionId, tool, action,dispose:close,
     threadEntered: threadEntered.promise, turnEntered: turnEntered.promise, releaseThread: threadAck.release, releaseTurn: turnAck.release,
     native: (path: string, input?: unknown, headers?: Record<string, string>) => http(path, localKey, input, headers),
     human: (path: string, input?: unknown, headers?: Record<string, string>) => http(path, lab.token, input, headers),
@@ -302,16 +328,36 @@ test('LAB disconnect retires native and inherited Core keys, including a body al
   assert.equal(f.starts, 0); assert.equal(f.cancels, 0);
 });
 
+for(const held of ['thread','turn']as const)test('LAB fixture cancellation drains its original held '+held+' ACK before resource teardown',{timeout:15000},async t=>{
+  const cancellation=new AbortController(),f=await fixture(t,{signal:cancellation.signal});
+  if(held==='thread')assert.equal((await f.action('connect')).status,200);else await f.ready();
+  const pending=held==='thread'?f.action('thread-start'):f.action('turn-start',{threadId:f.threadId,text:'Explicit held cleanup fixture turn'});
+  const rejected=assert.rejects(pending,error=>error instanceof Error&&error.name==='AbortError');
+  await(held==='thread'?f.threadEntered:f.turnEntered);cancellation.abort();await rejected;await f.dispose();await f.dispose();
+  assert.equal(f.closes,1);assert.equal(f.snapshot.connected,false);assert.equal(f.lab.server.listening,false);assert.equal(existsSync(f.root),false);
+  assert.equal(f.starts,0);assert.equal(f.cancels,0);
+});
+
+test('LAB fixture cancellation during owned setup joins the original construction and removes its real resources',{timeout:15000},async t=>{
+  const cancellation=new AbortController();let root='';
+  await assert.rejects(fixture(t,{signal:cancellation.signal,setupStarted(path){root=path;cancellation.abort();}}),error=>error instanceof Error&&error.name==='AbortError');
+  assert.ok(root);assert.equal(existsSync(root),false,'the original lab is closed before its stores and temporary project are removed');
+});
+
 test('LAB existing codexService injection takes precedence over the trusted connect seam', { timeout: 10000 }, async t => {
   const { root, projectPath, cleanup } = temporaryProject(); let ownedConnects = 0, injectedConnects = 0;
-  const service = createCodexService({ directory: join(root, 'injected-journal'), projectPath, connect: async () => {
+  let service:ReturnType<typeof createCodexService>|undefined,lab:Awaited<ReturnType<typeof createConnectionLab>>|undefined,creatingLab:Promise<Awaited<ReturnType<typeof createConnectionLab>>>|undefined;
+  t.after(async()=>{const errors:unknown[]=[];const attempt=async(action:()=>unknown)=>{try{await action();}catch(error){errors.push(error);}};
+    if(!lab&&creatingLab){try{lab=await creatingLab;}catch{/* Preserve construction failure. */}}
+    await attempt(()=>lab?.close());await attempt(()=>service?.close());await attempt(cleanup);if(errors.length)throw new AggregateError(errors,'Injected LAB fixture cleanup failed.');});
+  service = createCodexService({ directory: join(root, 'injected-journal'), projectPath, connect: async () => {
     injectedConnects++; throw new CodexClientError('FIXTURE_INJECTED', 'Explicit injected service fixture');
   } });
-  const lab = await createConnectionLab({ cwd: ROOT, projectPath, stateDirectory: join(root, 'lab'), codexService: service,
+  creatingLab = createConnectionLab({ cwd: ROOT, projectPath, stateDirectory: join(root, 'lab'), codexService: service,
     codexConnect: async () => { ownedConnects++; throw new Error('Owned factory must not run'); } });
-  t.after(async () => { try { await lab.close(); } finally { await service.close(); cleanup(); } });
+  lab=await creatingLab;t.signal.throwIfAborted();
   const response = await fetch(lab.origin + '/v1/codex/action', { method: 'POST', headers: { Authorization: 'Bearer ' + lab.token,
-    'Content-Type': 'application/json', Origin: lab.origin }, body: JSON.stringify({ requestId: randomUUID(), connectionId: null, action: 'connect' }) });
+    'Content-Type': 'application/json', Origin: lab.origin }, body: JSON.stringify({ requestId: randomUUID(), connectionId: null, action: 'connect' }),signal:AbortSignal.any([t.signal,AbortSignal.timeout(6000)]) });
   assert.equal(response.status, 409); const outcome = await response.json() as CodexActionOutcome;
   assert.equal(outcome.record.errorCode, 'FIXTURE_INJECTED'); assert.equal(injectedConnects, 1); assert.equal(ownedConnects, 0);
 });
