@@ -122,6 +122,13 @@ compiled SHA-256 is
 Both identities match the final integrated build. The retained replay, JSON
 receipt and screenshots are `runtime/scenario-panel-browser*`.
 
+The Windows package built from signed main `46273cd` also passed all 30 actual
+executable checks, including bundled MCP discovery, local guidance, desktop
+startup and independent parent-loss shutdown. Its 4,090-file inventory remained
+unchanged during verification. The package identity, timings and retained
+reports are recorded in
+[`build/PACKAGED_MCP_VERIFICATION_20261015.md`](build/PACKAGED_MCP_VERIFICATION_20261015.md).
+
 All process and gameplay fixtures in this validation use owned isolated profiles
 and explicit synthetic peers. Studio sessions, installed model providers and
 customer gameplay acceptance were not exercised.
