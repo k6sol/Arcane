@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { sqliteTransportPath } from './sqlite-path.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, parse, resolve, sep } from 'node:path';
@@ -74,7 +75,7 @@ export class WorkflowStore {
     for (const name of ['workflow.sqlite', 'work.sqlite']) {
       for (const suffix of ['', '-wal', '-shm']) noLinks(join(realpathSync(options.directory), name) + suffix);
     }
-    this.db = new DatabaseSync(file, { timeout: 2000, allowExtension: false });
+    this.db = new DatabaseSync(sqliteTransportPath(file), { timeout: 2000, allowExtension: false });
     try {
       const version = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
       if (version > 1) fail('MIGRATION', 'Workflow database is newer than this build.');

@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { sqliteTransportPath } from './sqlite-path.js';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -24,7 +25,7 @@ export class WorkStore {
   private now: () => number;
   constructor(options: { directory: string; projectPath: string; now?: () => number }) {
     mkdirSync(options.directory, { recursive: true }); this.project = realpathSync(options.projectPath); this.now = options.now ?? Date.now;
-    this.db = new DatabaseSync(join(options.directory, 'work.sqlite'), { timeout: 2000, allowExtension: false });
+    this.db = new DatabaseSync(sqliteTransportPath(join(options.directory, 'work.sqlite')), { timeout: 2000, allowExtension: false });
     const version = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
     if (version > 1) { this.db.close(); throw new ArcaneError('MIGRATION', 'Work database is newer than this build.'); }
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;

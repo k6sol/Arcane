@@ -1,5 +1,6 @@
 import type { NativeWorkflowModelProof } from '../../../packages/protocol/src/workflow-model.js';
 import { DatabaseSync } from 'node:sqlite';
+import { sqliteTransportPath } from '../../../packages/storage/src/sqlite-path.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -109,7 +110,7 @@ export function createCodexService(options: CodexServiceOptions) {
   const filename = join(directory, 'codex-actions.sqlite');
   try { const stat = lstatSync(filename); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new CodexClientError('PATH', 'Unsafe native action journal.'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const db = new DatabaseSync(filename, { timeout: 2000, allowExtension: false });
+  const db = new DatabaseSync(sqliteTransportPath(filename), { timeout: 2000, allowExtension: false });
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
   if (version > 3) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal is newer than this build.'); }
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;

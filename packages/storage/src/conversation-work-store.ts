@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { sqliteTransportPath } from './sqlite-path.js';
 import { createHash } from 'node:crypto';
 import { closeSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
@@ -165,7 +166,7 @@ export class ConversationWorkStore {
       this.#checkPaths();
       const stat = lstatSync(this.#databasePath);
       this.#fileIdentity = { dev: stat.dev, ino: stat.ino };
-      this.#db = new DatabaseSync(this.#databasePath, { timeout: 2000, allowExtension: false });
+      this.#db = new DatabaseSync(sqliteTransportPath(this.#databasePath), { timeout: 2000, allowExtension: false });
       this.#db.exec('PRAGMA trusted_schema=OFF;');
       this.#transaction(true, () => {
         const version = this.#version();
