@@ -34,6 +34,8 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
       - name: Install pinned dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Acquire and verify pinned standalone Luau for mandatory VM tests
