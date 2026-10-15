@@ -35,6 +35,7 @@ interface BrowserFixture {
   releaseDigests(): void;
   holdReads(): void;
   releaseReads(): void;
+  recording(threadId: string): unknown;
   transition(away: ChatState, back: ChatState): void;
 }
 declare global { interface Window { attachmentFixture: BrowserFixture } }
@@ -70,7 +71,7 @@ function receipt(input: Extract<ChatAction, { action: 'turn-start' }>, current: 
 
 /** The actual modules and HTML run in Edge. Only state and turn ACKs are synthetic;
  * this fixture has no daemon, provider client, inference, credentials, or Studio. */
-async function fixture(t: TestContext, options: { tabs?: boolean; initial?: ChatState; setup?: boolean } = {}) {
+async function fixture(t: TestContext, options: { tabs?: boolean; initial?: ChatState; setup?: boolean; historyLimitThread?: string } = {}) {
   const build = resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist');
   const root = await mkdtemp(join(tmpdir(), 'arcane-attachment-files-'));
   let observed = structuredClone(options.initial ?? state()), failState = false;
@@ -83,7 +84,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     setupEntered = new Promise<void>(done => { enterSetup = done; });
   };
   t.after(() => releaseSetup());
-  if (options.tabs) observed.nativeThreads = [{ provider: 'codex', projectPath: observed.projectPath,
+  if (options.tabs) observed.nativeThreads ??= [{ provider: 'codex', projectPath: observed.projectPath,
     threadId: observed.snapshot!.thread!.threadId, sessionId: observed.snapshot!.thread!.sessionId,
     selection: { ...observed.snapshot!.thread!.selection } }];
   const posts: Extract<ChatAction, { action: 'turn-start' }>[] = [], errors: string[] = [], unexpected: string[] = [];
@@ -110,6 +111,8 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
       releaseReads(){const done=release;readGate=null;done();},
       holdDigests(){digestGate=new Promise(done=>{releaseDigest=done;});},
       releaseDigests(){const done=releaseDigest;digestGate=null;done();},
+      // Read-only fixture inspection of the actual per-tab public recording.
+      recording(threadId){const tab=chat.chatTabsView().find(row=>row.threadId===threadId);return tab?chat.tabs.recording(tab):null;},
       // Exercise synchronous A -> B -> A publication without waiting for another
       // prepareText/getScope call. Private methods are a runtime fixture seam only.
       transition(away,back){chat.applyState(readCodexState(away));chat.applyState(readCodexState(back));chat.render();}
@@ -177,22 +180,24 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
         } else if (input.action === 'select') observed.snapshot!.selection = { model: input.model, effort: input.effort };
         else if (input.action === 'thread-start' || input.action === 'thread-resume') {
           const threadId = input.action === 'thread-start' ? 'synthetic-created-thread' : input.threadId;
-          observed.snapshot!.thread = { threadId, sessionId: 'synthetic-created-session',
+          const saved = input.action === 'thread-resume' ? observed.nativeThreads?.find(row => row.threadId === threadId) : null;
+          observed.snapshot!.thread = { threadId, sessionId: saved ? saved.sessionId : 'synthetic-created-session',
             selection: { ...observed.snapshot!.selection! }, configured: true, writeGranted: false, turnId: null, turnStatus: 'idle' };
           observed.nativeThreads = [...(observed.nativeThreads ?? []).filter(row => row.threadId !== threadId),
             { provider: 'codex', projectPath: observed.projectPath, threadId, sessionId: observed.snapshot!.thread.sessionId,
               selection: { ...observed.snapshot!.selection! } }];
-        } else if (input.action === 'history-load') {
+        } else if (input.action === 'history-load' && input.threadId !== options.historyLimitThread) {
           observed.nativeHistory = { projectPath: observed.projectPath, threadId: input.threadId,
             sessionId: observed.snapshot!.thread!.sessionId, recorded: null };
         }
+        const historyLimited = input.action === 'history-load' && input.threadId === options.historyLimitThread;
         const record: ChatActionRecord = { requestId: input.requestId,
           connectionId: input.action === 'connect' ? observed.snapshot!.connectionId : input.connectionId,
-          action: input.action, state: 'acknowledged', errorCode: null, threadId: observed.snapshot?.thread?.threadId ?? null,
+          action: input.action, state: historyLimited ? 'rejected' : 'acknowledged', errorCode: historyLimited ? 'FRAME_LIMIT' : null, threadId: observed.snapshot?.thread?.threadId ?? null,
           turnId: null, model: observed.snapshot?.selection?.model ?? null, effort: observed.snapshot?.selection?.effort ?? null,
           createdAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
         observed.actions = [...observed.actions, record].slice(-100);
-        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.writeHead(historyLimited ? 409 : 200, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify({ record, state: observed, replayed: false })); return;
       }
       assert.equal(path, input.references ? '/v1/codex/reference-turn' : '/v1/codex/action');
@@ -642,3 +647,50 @@ for (const change of ['project-away-back', 'provider-away-back', 'stop'] as cons
     assert.equal(f.setup.length, 0);
   });
 }
+
+test('Edge opens the selected saved conversation after an outgoing history limit while retaining its recording and draft', browserOptions, async t => {
+  const initial = state(), old = initial.snapshot!.thread!, targetThread = 'attachment-target-thread';
+  old.turnId = 'outgoing-completed-turn'; old.turnStatus = 'completed';
+  const earlierText = 'Earlier public recording for the outgoing conversation.';
+  initial.nativeHistory = { projectPath: initial.projectPath, threadId: old.threadId, sessionId: old.sessionId,
+    recorded: { requestId: randomUUID(), connectionId: initial.snapshot!.connectionId, provenance: 'spawned-node-fixture',
+      loadedAt: new Date().toISOString(), result: { entries: [{ role: 'assistant', text: earlierText,
+        ids: { threadId: old.threadId, sessionId: old.sessionId, turnId: old.turnId, itemId: 'outgoing-recorded-item' } }],
+        completeness: 'complete', gaps: [], truncated: false, marker: null, excludedItems: 0, droppedGaps: 0, redacted: false } } };
+  initial.nativeThreads = [{ provider: 'codex', projectPath: initial.projectPath, threadId: old.threadId,
+    sessionId: old.sessionId, selection: { ...old.selection } },
+    { provider: 'codex', projectPath: initial.projectPath, threadId: targetThread, sessionId: 'attachment-target-session', selection: { ...old.selection } }];
+  const originalRecording = structuredClone(initial.nativeHistory), originalConnection = initial.snapshot!.connectionId;
+  const f = await fixture(t, { tabs: true, setup: true, initial, historyLimitThread: old.threadId }), { page } = f;
+  await page.locator('#codex-messages').getByText(earlierText, { exact: true }).waitFor({ state: 'visible' });
+  const outgoingKey = await page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]').getAttribute('data-chat-key');
+  assert.ok(outgoingKey);
+  const draft = 'Keep this outgoing draft.\n  Exact whitespace stays.  ';
+  await page.locator('#codex-composer').fill(draft);
+  const before = join(f.root, 'history-limit-before.png'); await page.screenshot({ path: before });
+  await page.locator('.chat-tabs-history > summary').click();
+  await page.getByRole('button', { name: targetThread, exact: true }).click();
+  const notice = 'Opened this conversation. The previous conversation’s history exceeded the display limit; its earlier recording and unsent draft were retained.';
+  try { await page.waitForFunction(value => document.getElementById('codex-notice')?.textContent === value, notice); }
+  catch (error) {
+    const failure = join(f.root, 'history-limit-failure.png'); await page.screenshot({ path: failure });
+    t.diagnostic('History navigation failure: ' + JSON.stringify({ notice: await page.locator('#codex-notice').innerText(),
+      actions: f.setup, state: f.observed(), tabs: await page.evaluate(() => window.attachmentFixture.chat.chatTabsView()), screenshot: failure }));
+    throw error;
+  }
+  const views = await page.evaluate(() => window.attachmentFixture.chat.chatTabsView());
+  const outgoing = views.find(row => row.threadId === old.threadId), target = views.find(row => row.threadId === targetThread);
+  assert.ok(outgoing && target); assert.equal(outgoing.key, outgoingKey); assert.equal(outgoing.draft, draft);
+  assert.equal(await page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]').getAttribute('data-chat-key'), target.key);
+  assert.equal(await page.locator('#codex-composer').inputValue(), '');
+  assert.equal((await page.locator('#codex-messages').innerText()).includes(earlierText), false);
+  assert.deepEqual(await page.evaluate(id => window.attachmentFixture.recording(id), old.threadId), originalRecording);
+  assert.deepEqual(f.setup.map(row => row.action), ['history-load', 'disconnect', 'connect', 'select', 'thread-resume', 'history-load']);
+  assert.deepEqual(f.setup.filter(row => row.action === 'history-load').map(row => row.threadId), [old.threadId, targetThread]);
+  assert.equal((f.setup.find(row => row.action === 'disconnect') as Extract<ChatAction, { action: 'disconnect' }>).preserveAssetWork, true);
+  assert.equal(f.posts.length, 0); assert.notEqual(f.observed().snapshot!.connectionId, originalConnection);
+  assert.equal(f.observed().snapshot!.thread!.threadId, targetThread); assert.equal(f.observed().snapshot!.thread!.writeGranted, false);
+  assert.deepEqual(f.observed().nativeAssets, { available: true, sealed: true, granted: false, admissionOpen: false });
+  const after = join(f.root, 'history-limit-after.png'); await page.screenshot({ path: after });
+  t.diagnostic('Synthetic history-limit navigation screenshots: ' + before + ' ; ' + after);
+});

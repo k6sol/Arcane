@@ -37,6 +37,14 @@ an exact active-turn identity remains unknown and cannot authorize another Send.
 Explicit history loading uses a separate bounded process; an oversized response
 is refused without killing the live task client. Such a refusal does not provide
 a complete text or image history. The existing frame/read limits are unchanged.
+An exact, durably recorded terminal `FRAME_LIMIT` rejection of the outgoing
+history read can allow explicit navigation to another owned conversation after
+fresh scope and all ordinary navigation blockers are checked again. Arcane keeps
+the previous recording and unsent draft and displays a history-limit notice;
+it does not label that read successful. Pending, unknown, lost, stale or other
+rejected reads still block navigation. This exception applies only to the
+outgoing history read; connection and other lifecycle actions still require
+acknowledgement. Background task ownership remains with its original client.
 
 The dedicated human-only reference route preserves Host, Origin and control-token
 checks before reading its bounded body. Ordinary text action requests keep their

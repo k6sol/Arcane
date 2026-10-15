@@ -36,7 +36,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(method==='model/list')return reply(id,{data:[{id:'fixture',model:'fixture',displayName:'Fixture',supportedReasoningEfforts:[{reasoningEffort:'low'}],...(s.modalities?{inputModalities:s.modalities}:{})}],nextCursor:null});
  if(method==='thread/start'||method==='thread/resume'){threadId=params.threadId??s.newThread;const result={thread:{id:threadId,sessionId:s.session,turns:[],status:{type:'idle'}},model:params.model,modelProvider:'openai',cwd:process.cwd(),approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}};
   if(s.mode==='hold-resume'&&method==='thread/resume'){const timer=setInterval(()=>{if(existsSync(s.gate+'-resume')){clearInterval(timer);reply(id,result);}},5);return;}return reply(id,result);}
- if(method==='thread/read')return reply(id,{thread:{id:params.threadId,sessionId:s.session,cwd:process.cwd(),ephemeral:false,turns:[]}});
+ if(method==='thread/read')return reply(id,{thread:{id:params.threadId,sessionId:s.session,cwd:process.cwd(),ephemeral:false,turns:s.mode==='history-frame-limit'?[{id:'large-history-turn',status:'completed',error:null,items:[{type:'userMessage',id:'large-history-item',content:[{type:'text',text:'x'.repeat(1048576),text_elements:[]}]}]}]:[]}});
  if(method==='mcpServerStatus/list'){
   checks++;const result={data:[{name:'arcane',runtimeStatus:'connected',toolsError:null,pluginId:null,tools:Object.fromEntries(s.tools.map(n=>[n,{}]))}],nextCursor:null};
   if(s.mode==='hold-preflight'&&checks>1||s.mode==='hold-repair'&&checks>2){const timer=setInterval(()=>{if(existsSync(s.gate+'-preflight')){clearInterval(timer);reply(id,result);}},5);return;}
@@ -415,4 +415,18 @@ for(const mode of ['hold-preflight','hold-resume'])test('wrong-scope Stop/revoke
  if(mode==='hold-resume'){const stale=f.task().taskId;assert.equal((await f.post({requestId:randomUUID(),connectionId,action:'task-stop',threadId:THREAD,taskId:stale})).data.record.state,'acknowledged');}
  if(mode==='hold-resume')await writeFile(join(f.root,'finish-1-resume'),'release',{flag:'wx'});else await f.releasePreflight();
  assert.equal((await pending).data.record.state,'acknowledged');assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,mode==='hold-resume'?2:1);
+});
+
+test('actual oversized history rejection preserves the original task owner across navigation and cannot lend its repair to a new chat',async t=>{
+  const f=await fixture(t,{mode:'history-frame-limit',newThread:index=>index===0?THREAD:'history-target.thread'});
+  await f.ready();await f.send();const original=f.clients[0]!,origin=f.taskOrigin(),report=packet();f.prepare(origin,report);
+  await f.finish();await until(()=>original.snapshot().thread!.turnStatus==='completed');
+  const rejected=await f.action('history-load',{threadId:THREAD});assert.equal(rejected.data.record.state,'rejected');assert.equal(rejected.data.record.errorCode,'FRAME_LIMIT');assert.ok(rejected.data.record.finishedAt);
+  assert.equal(original.snapshot().connected,true);assert.equal(original.snapshot().ready,true);assert.deepEqual(f.cancelled,[]);
+  assert.equal((await f.action('disconnect',{preserveAssetWork:true})).data.record.state,'acknowledged');assert.equal(original.snapshot().connected,true);
+  await f.ready();const current=f.service.state().snapshot!;assert.equal(current.thread!.threadId,'history-target.thread');assert.notEqual(current.connectionId,original.snapshot().connectionId);
+  await f.service.playtestTasks!.terminal(origin,report);await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===2);
+  assert.deepEqual((await f.wire()).filter(row=>row.method==='turn/start').map(row=>row.process),[0,0]);
+  assert.equal(f.clients[1]!.snapshot().thread!.turnStatus,'idle');assert.deepEqual(f.cancelled,[]);
+  const receipt=f.service.state().actions.find(row=>row.requestId===rejected.data.record.requestId)!;assert.equal(receipt.state,'rejected');assert.equal(receipt.errorCode,'FRAME_LIMIT');
 });

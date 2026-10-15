@@ -6,8 +6,8 @@ import { join, resolve, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { ChatTabs, nativeChatKey, validateSavedThreads, CHAT_TAB_LIMITS, startChatTabs, readWorkspacePreferencesBridge, type ChatTabPreferences } from '../../apps/desktop/src/chat-tabs.js';
-import { CodexChat, CodexChatApi, readCodexState, type ChatState } from '../../apps/desktop/src/codex-chat.js';
-import { createCodexService, type CodexHostClient, type CodexService } from '../../apps/daemon/src/codex-service.js';
+import { CodexChat, CodexChatApi, readCodexState, type ChatAction, type ChatState } from '../../apps/desktop/src/codex-chat.js';
+import { createCodexService, type CodexActionOutcome, type CodexHostClient, type CodexService } from '../../apps/daemon/src/codex-service.js';
 import { CodexClientError, type Snapshot, type ThreadState } from '../../packages/codex-client/src/types.js';
 
 // Controlled SDK/document fixtures only. No CLI, browser install, Studio or inference.
@@ -257,13 +257,13 @@ test('optional native token reports and duration events survive state projection
 
 async function serviceFixture(t:test.TestContext) {
   const temp=await realpath(tmpdir()),directory=await mkdtemp(join(temp,'arcane-chat-tabs-fixture-')),project=join(directory,'project');await mkdir(project);const projectPath=await realpath(project);
-  const actual=new Map<string,ThreadState>(),calls:string[]=[],services:CodexService[]=[];let current:Snapshot|null=null,number=0,live=0,maxLive=0;
+  const actual=new Map<string,ThreadState>(),calls:string[]=[],services:CodexService[]=[],cleanup:(()=>void)[]=[];let current:Snapshot|null=null,number=0,live=0,maxLive=0,historyHook:((threadId:string)=>Promise<void>)|null=null;
   const factory=async():Promise<CodexHostClient>=>{
     live++;maxLive=Math.max(maxLive,live);const s=snapshot();current=s;let closed=false;
     return {snapshot:()=>structuredClone(s),selectModel:action=>{s.selection={model:action.model,effort:action.effort};if(s.thread){s.thread.selection={...s.selection};s.thread.writeGranted=false;}return {...s.selection};},
       startThread:async()=>{const n=++number;const thread:ThreadState={threadId:'fixture-thread-'+n,sessionId:'fixture-session-'+n,selection:{...s.selection!},configured:true,writeGranted:false,turnId:null,turnStatus:'idle'};actual.set(thread.threadId,structuredClone(thread));s.thread=thread;return structuredClone(thread);},
       resumeThread:async action=>{const owned=actual.get(action.threadId);if(!owned)throw new CodexClientError('THREAD','Unknown fixture thread');s.thread={...structuredClone(owned),selection:{...s.selection!},writeGranted:false};return structuredClone(s.thread);},
-      readThreadHistory:async action=>({entries:[{role:'user',text:'Public question for '+action.threadId,ids:{threadId:action.threadId,sessionId:action.sessionId??null,turnId:'turn-'+action.threadId,itemId:'user'}},{role:'assistant',text:'Public answer for '+action.threadId,ids:{threadId:action.threadId,sessionId:action.sessionId??null,turnId:'turn-'+action.threadId,itemId:'answer'}}],completeness:'complete',gaps:[],truncated:false,marker:null,excludedItems:0,droppedGaps:0,redacted:false}),
+      readThreadHistory:async action=>{await historyHook?.(action.threadId);return {entries:[{role:'user',text:'Public question for '+action.threadId,ids:{threadId:action.threadId,sessionId:action.sessionId??null,turnId:'turn-'+action.threadId,itemId:'user'}},{role:'assistant',text:'Public answer for '+action.threadId,ids:{threadId:action.threadId,sessionId:action.sessionId??null,turnId:'turn-'+action.threadId,itemId:'answer'}}],completeness:'complete',gaps:[],truncated:false,marker:null,excludedItems:0,droppedGaps:0,redacted:false};},
       grantThreadWrites:()=>{s.thread!.writeGranted=true;return structuredClone(s.thread!);},revokeThreadWrites:()=>{s.thread!.writeGranted=false;},
       startTurn:async()=>{assert.fail('No automatic turn is permitted');},interruptTurn:async()=>{},respondApproval:()=>{},
       close:async()=>{if(!closed){closed=true;live--;}s.connected=false;s.ready=false;if(s.thread)s.thread.writeGranted=false;},};
@@ -271,8 +271,8 @@ async function serviceFixture(t:test.TestContext) {
   const open=()=>{const service=createCodexService({directory:join(directory,'journal'),projectPath,connect:factory});services.push(service);return service;};
   const service=open(),act=async(value:Record<string,unknown>)=>{calls.push(value.action as string);return service.action({requestId:randomUUID(),...value});};
   const seed=async(model='fixture-sol',effort='low')=>{const connected=await act({action:'connect',connectionId:null}),connectionId=connected.state.snapshot!.connectionId;await act({action:'select',connectionId,model,effort});const started=await act({action:'thread-start',connectionId});assert.equal(started.record.state,'acknowledged');const threadId=started.record.threadId!;await act({action:'history-load',connectionId,threadId});await act({action:'disconnect',connectionId});return threadId;};
-  t.after(async()=>{for(const owned of services)await owned.close();const target=resolve(directory),child=relative(temp,target);assert.ok(!isAbsolute(child)&&child.startsWith('arcane-chat-tabs-fixture-')&&!child.includes('..'));await rm(target,{recursive:true,force:true});});
-  return {service,open,seed,calls,actual,projectPath,directory,current:()=>current,maxLive:()=>maxLive};
+  t.after(async()=>{for(const close of cleanup)close();for(const owned of services)await owned.close();const target=resolve(directory),child=relative(temp,target);assert.ok(!isAbsolute(child)&&child.startsWith('arcane-chat-tabs-fixture-')&&!child.includes('..'));await rm(target,{recursive:true,force:true});});
+  return {service,open,seed,calls,actual,projectPath,directory,current:()=>current,maxLive:()=>maxLive,setHistoryHook:(hook:typeof historyHook)=>{historyHook=hook;},onCleanup:(close:()=>void)=>cleanup.push(close)};
 }
 
 test('real service journal preserves multiple public histories across reload; explicit idle switches resume only exact owned chats and separate models/drafts',async t=>{
@@ -313,3 +313,154 @@ test('explicit start binds only its local draft to a real acknowledged native th
   assert.equal(await chat.selectChat(oldKey),true);assert.equal(doc.getElementById('codex-composer').value,'Old unsent draft');assert.equal(doc.getElementById('codex-model').value,'fixture-sol');
 });
 
+
+async function historyNavigationFixture(t:test.TestContext) {
+  const f=await serviceFixture(t),a=await f.seed(),b=await f.seed('fixture-alt','high'),doc=new DocumentFixture(),posts:ChatAction[]=[];
+  let stateTransform=(value:ChatState)=>value,replyTransform=(value:CodexActionOutcome,_input:ChatAction)=>value,getHook:(()=>Promise<void>)|null=null;
+  const api=new CodexChatApi(TOKEN,async(path,init)=>{
+    if(path==='/v1/codex/state'){await getHook?.();return Response.json({state:stateTransform(f.service.state())});}
+    const input=JSON.parse(String(init?.body))as ChatAction;posts.push(input);
+    const outcome=replyTransform(await f.service.action(input),input);
+    return Response.json({...outcome,state:stateTransform(outcome.state)},{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});
+  });
+  const chat=new CodexChat(doc.asDocument(),api);f.onCleanup(()=>chat.stop());await chat.enableChatTabs({storage:memoryStorage()});await chat.start();
+  assert.equal(await chat.openSavedChat(a),true);posts.length=0;
+  const source=chat.currentStateView().activeChat!,reader=new DatabaseSync(join(f.directory,'journal','codex-actions.sqlite'));
+  const recording=()=>((reader.prepare('SELECT payload FROM native_threads WHERE thread_id=?').get(a)as {payload:string|null}).payload);
+  const originalRecording=recording();f.onCleanup(()=>reader.close());
+  return {...f,a,b,doc,chat,posts,source,reader,recording,originalRecording,
+    transformState:(transform:typeof stateTransform)=>{stateTransform=transform;},
+    transformReply:(transform:typeof replyTransform)=>{replyTransform=transform;},
+    beforeGet:(hook:typeof getHook)=>{getHook=hook;},
+    limit:()=>f.setHistoryHook(async id=>{if(id===a)throw new CodexClientError('FRAME_LIMIT','Synthetic bounded history response.',true);})};
+}
+function historyGate(t:test.TestContext) {
+  let release!:()=>void,entered!:()=>void;
+  const wait=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  t.after(()=>release());return{wait,started,release,entered};
+}
+const HISTORY_LIMIT_NOTICE='Opened this conversation. The previous conversation\u2019s history exceeded the display limit; its earlier recording and unsent draft were retained.';
+
+for(const source of ['native','draft']as const)test('exact terminal history FRAME_LIMIT permits only scoped outgoing navigation from a '+source+' while retaining prior recording and edits',async t=>{
+  const gate=historyGate(t),f=await historyNavigationFixture(t);
+  if(source==='draft')assert.equal(await f.chat.newChat(),true);
+  const sourceTab=f.chat.currentStateView().activeChat!;
+  f.doc.getElementById('codex-composer').value='Original unsent '+source;f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  f.setHistoryHook(async id=>{if(id===f.a){gate.entered();await gate.wait;throw new CodexClientError('FRAME_LIMIT','Synthetic large history.',true);}});
+  const switching=f.chat.openSavedChat(f.b);await gate.started;
+  // Same-tab text edits are retained; they do not change navigation authority.
+  f.doc.getElementById('codex-composer').value='Edited while history awaited';f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));gate.release();
+  assert.equal(await switching,true);assert.equal(f.chat.currentStateView().conversation!.threadId,f.b);
+  assert.deepEqual(f.posts.map(row=>row.action),['history-load','disconnect','connect','select','thread-resume','history-load']);
+  assert.equal((f.posts[1]as Extract<ChatAction,{action:'disconnect'}>).preserveAssetWork,true);
+  assert.equal(f.doc.getElementById('codex-notice').textContent,HISTORY_LIMIT_NOTICE);
+  assert.equal(f.recording(),f.originalRecording);
+  assert.equal(f.chat.chatTabsView().find(row=>row.localId===sourceTab.localId)!.draft,'Edited while history awaited');
+  const rejection=f.service.state().actions.find(row=>row.action==='history-load'&&row.threadId===f.a&&row.state==='rejected')!;
+  assert.equal(rejection.errorCode,'FRAME_LIMIT');assert.ok(rejection.finishedAt);
+  const stored=JSON.parse((f.reader.prepare('SELECT payload FROM actions WHERE id=?').get(rejection.requestId)as {payload:string}).payload);
+  assert.equal(stored.state,'rejected');assert.equal(stored.errorCode,'FRAME_LIMIT');assert.equal(f.maxLive(),1);
+  assert.equal(f.posts.some(row=>['turn-start','grant-assets','grant-writes'].includes(row.action)),false);
+});
+
+for(const change of ['active','unknown','operation','approval','writes','assets','busy','limited','connection','session','selection','account','binding','saved','receipt','stale']as const)
+test('fresh '+change+' evidence after held history refusal blocks disconnect',async t=>{
+  const gate=historyGate(t),f=await historyNavigationFixture(t);
+  f.setHistoryHook(async id=>{if(id===f.a){gate.entered();await gate.wait;throw new CodexClientError('FRAME_LIMIT','Synthetic large history.',true);}});
+  const switching=f.chat.openSavedChat(f.b);await gate.started;
+  if(change==='stale')f.beforeGet(async()=>{throw new Error('Synthetic unavailable current state');});
+  else f.transformState(value=>{
+    const next=structuredClone(value),s=next.snapshot!,thread=s.thread!;
+    if(change==='active'){thread.turnStatus='inProgress';thread.turnId='live-turn';}
+    if(change==='unknown')thread.turnStatus='unknown';
+    if(change==='operation')s.operations=[{operationId:'pending-op',method:'turn/start',requestId:9,threadId:f.a,turnId:null,state:'pending',errorCode:null}];
+    if(change==='approval')s.approvals=[{handle:'pending-review',connectionId:s.connectionId,threadId:f.a,turnId:'review-turn',itemId:'command',serverRequestId:7,method:'item/commandExecution/requestApproval',reason:null,command:'synthetic',cwd:f.projectPath,changes:null,canAccept:false,expiresAt:Date.now()+10000}];
+    if(change==='writes')thread.writeGranted=true;
+    if(change==='assets')next.nativeAssets={available:true,sealed:true,granted:true,admissionOpen:false};
+    if(change==='busy')next.busy=true;
+    if(change==='limited')next.displayLimited=true;
+    if(change==='connection')s.connectionId='11111111-1111-4111-8111-111111111111';
+    if(change==='session')thread.sessionId='foreign-session';
+    if(change==='selection')thread.selection={model:'fixture-alt',effort:'high'};
+    if(change==='account')s.account={auth:'signed-out',plan:null,requiresOpenaiAuth:true};
+    if(change==='binding')next.nativeHistory=null;
+    if(change==='saved')next.nativeThreads=next.nativeThreads!.filter(row=>row.threadId!==f.a);
+    if(change==='receipt')next.actions=next.actions.filter(row=>row.action!=='history-load'||row.threadId!==f.a);
+    return next;
+  });
+  gate.release();assert.equal(await switching,false);assert.deepEqual(f.posts.map(row=>row.action),['history-load']);assert.equal(f.recording(),f.originalRecording);
+});
+
+for(const reply of ['pending','unknown','TIMEOUT','JOURNAL_FAILURE','PROTOCOL','wrong-thread','wrong-connection','wrong-request','unfinished','lost']as const)
+test('outgoing history '+reply+' reply cannot become a successful lifecycle action',async t=>{
+  const f=await historyNavigationFixture(t);f.limit();
+  f.transformReply((outcome,input)=>{
+    if(input.action!=='history-load'||input.threadId!==f.a)return outcome;
+    if(reply==='lost')throw new Error('Synthetic lost HTTP acknowledgement');
+    const value=structuredClone(outcome);
+    if(reply==='pending'||reply==='unknown')value.record.state=reply;
+    else if(reply==='wrong-thread')value.record.threadId='foreign-thread';
+    else if(reply==='wrong-connection')value.record.connectionId=randomUUID();
+    else if(reply==='wrong-request')value.record.requestId=randomUUID();
+    else if(reply==='unfinished')value.record.finishedAt=null;
+    else value.record.errorCode=reply;
+    return value;
+  });
+  assert.equal(await f.chat.openSavedChat(f.b),false);assert.deepEqual(f.posts.map(row=>row.action),['history-load']);assert.equal(f.recording(),f.originalRecording);
+});
+
+for(const phase of ['initial-refresh','held-history']as const)for(const change of ['project-away-back','provider-away-back','stop','source-tab']as const)
+test(phase+' cannot regain navigation authority after '+change,async t=>{
+  const gate=historyGate(t),f=await historyNavigationFixture(t);
+  if(phase==='initial-refresh')f.beforeGet(async()=>{gate.entered();await gate.wait;});
+  else f.setHistoryHook(async id=>{if(id===f.a){gate.entered();await gate.wait;throw new CodexClientError('FRAME_LIMIT','Synthetic large history.',true);}});
+  const switching=f.chat.openSavedChat(f.b);await gate.started;
+  if(change==='project-away-back'){
+    const internal=f.chat as unknown as {applyState(value:ChatState):void},baseline=f.service.state();
+    internal.applyState(state(f.projectPath+'-away'));internal.applyState(baseline);
+  }else if(change==='provider-away-back'){f.chat.setChatProviderPreference('claude');f.chat.setChatProviderPreference('codex');}
+  else if(change==='stop')f.chat.stop();
+  else (f.chat as unknown as {tabs:ChatTabs}).tabs.createDraft();
+  gate.release();assert.equal(await switching,false);
+  assert.deepEqual(f.posts.map(row=>row.action),phase==='initial-refresh'?[]:['history-load']);
+  assert.equal(f.recording(),f.originalRecording);
+});
+
+test('a failed durable history rejection commit blocks navigation and retains the unresolved receipt',async t=>{
+  const f=await historyNavigationFixture(t);f.limit();
+  f.reader.exec("CREATE TRIGGER reject_history_receipt BEFORE UPDATE OF payload ON actions WHEN json_extract(NEW.payload,'$.action')='history-load' BEGIN SELECT RAISE(FAIL,'synthetic journal rejection'); END");
+  try{
+    assert.equal(await f.chat.openSavedChat(f.b),false);assert.deepEqual(f.posts.map(row=>row.action),['history-load']);assert.equal(f.recording(),f.originalRecording);
+    const row=f.reader.prepare("SELECT payload FROM actions WHERE json_extract(payload,'$.state')='pending'").get()as {payload:string};
+    assert.ok(row);assert.equal(JSON.parse(row.payload).action,'history-load');
+  }finally{f.reader.exec('DROP TRIGGER reject_history_receipt');}
+});
+
+test('target history failure keeps its own truthful notice after outgoing FRAME_LIMIT navigation',async t=>{
+  const f=await historyNavigationFixture(t);
+  f.setHistoryHook(async id=>{throw new CodexClientError(id===f.a?'FRAME_LIMIT':'TIMEOUT','Synthetic isolated history failure.',true);});
+  assert.equal(await f.chat.openSavedChat(f.b),true);assert.equal(f.chat.currentStateView().conversation!.threadId,f.b);
+  const notice=f.doc.getElementById('codex-notice').textContent;
+  assert.match(notice,/history-load.*rejected/);assert.notEqual(notice,HISTORY_LIMIT_NOTICE);assert.equal(f.recording(),f.originalRecording);
+});
+
+test('FRAME_LIMIT on disconnect remains a rejected lifecycle action and prevents reconnect',async t=>{
+  const f=await historyNavigationFixture(t);f.limit();
+  f.transformReply((outcome,input)=>input.action==='disconnect'?{...outcome,record:{...outcome.record,state:'rejected',errorCode:'FRAME_LIMIT'}}:outcome);
+  assert.equal(await f.chat.openSavedChat(f.b),false);assert.deepEqual(f.posts.map(row=>row.action),['history-load','disconnect']);
+  assert.notEqual(f.doc.getElementById('codex-notice').textContent,HISTORY_LIMIT_NOTICE);
+});
+
+test('outgoing history limit with no prior recording does not invent saved history or claim a successful read',async t=>{
+  const f=await historyNavigationFixture(t);
+  f.reader.prepare('UPDATE native_threads SET payload=NULL WHERE thread_id=?').run(f.a);
+  f.reader.prepare('UPDATE native_history SET payload=NULL WHERE thread_id=?').run(f.a);
+  await f.chat.refresh();assert.equal(f.service.state().nativeHistory!.recorded,null);
+  f.doc.getElementById('codex-composer').value='Keep the unhydrated draft';f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));f.limit();
+  assert.equal(await f.chat.openSavedChat(f.b),true);assert.equal(f.recording(),null);
+  const oldTab=f.chat.chatTabsView().find(row=>row.threadId===f.a)!;assert.equal(oldTab.draft,'Keep the unhydrated draft');
+  const recording=(f.chat as unknown as {tabs:ChatTabs}).tabs.recording(oldTab);assert.ok(recording);assert.equal(recording.recorded,null);
+  assert.equal(f.doc.getElementById('codex-notice').textContent,'Opened this conversation. The previous conversation\u2019s history exceeded the display limit; no earlier recording was available. Your unsent draft was retained.');
+  const failure=f.service.state().actions.find(row=>row.action==='history-load'&&row.threadId===f.a&&row.state==='rejected')!;
+  assert.equal(failure.errorCode,'FRAME_LIMIT');assert.equal(failure.state,'rejected');
+});

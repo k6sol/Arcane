@@ -592,14 +592,20 @@ export class CodexChat {
   }
   private async bindNativeChat(action:'thread-start'|'thread-resume',selection:ChatSelection,threadId?:string):Promise<boolean> {
     if(!this.providerAllowsCodex()){this.text('codex-notice','Choose Codex to open this saved chat. Claude Code uses its native handoff.');return false;}
+    const lifetime=this.messageLifetime,originProject=this.state?.projectPath,provider=this.providerPreference(),source=this.tabs?.active();
+    const sameNavigation=()=>this.messageLifetime===lifetime&&this.state?.projectPath===originProject&&this.providerPreference()===provider;
+    const sameSource=()=>{const current=this.tabs?.active();return !!source&&!!current&&current.localId===source.localId&&current.key===source.key&&
+      current.kind===source.kind&&current.projectPath===source.projectPath&&current.threadId===source.threadId&&current.sessionId===source.sessionId;};
     await this.refresh();const project=this.state?.projectPath;
+    if(!sameNavigation()||!sameSource())return false;
     const blocked=this.tabBlockReason();if(!project||blocked){if(blocked)this.text('codex-notice',blocked);return false;}
     const saved=this.state?.nativeThreads?.find(row=>row.threadId===threadId),retained=action==='thread-resume'?this.state?.chatTasks?.filter(task=>task.retained===true&&task.threadId===threadId&&task.sessionId===saved?.sessionId)??[]:[];
     if(retained.length>1){this.text('codex-notice','Multiple retained task owners require review before opening this conversation.');return false;}
     if(!retained.length&&this.snapshot()&&!this.snapshot()!.models.some(row=>row.model===selection.model&&row.efforts.includes(selection.effort))){this.text('codex-notice','The saved model and effort are absent from the current catalogue. No fallback was selected.');return false;}
     this.tabTransition=true;this.render();this.publishState();
-    const exact=()=>this.state?.projectPath===project&&this.fresh&&!this.stopped&&this.providerAllowsCodex();
+    const exact=()=>sameNavigation()&&this.state?.projectPath===project&&this.fresh&&!this.stopped&&this.providerAllowsCodex();
     const perform=async(name:string,fields:Record<string,unknown>={})=>{if(!exact())return false;const receipt=await this.dispatch(name,fields,true);return exact()&&receipt?.state==='acknowledged';};
+    let historyLimited=false,historyHadRecording=false;
     try {
       if(retained.length===1){
         if(!this.snapshot()&&!await perform('connect'))return false;
@@ -608,9 +614,24 @@ export class CodexChat {
         if(IDLE.includes(live.turnStatus))await perform('history-load',{threadId:live.threadId});
         return exact();
       }
-      const old=this.snapshot()?.thread;
+      const oldConnection=this.snapshot()?.connectionId,old=this.snapshot()?.thread;
       if(old?.configured&&this.state?.nativeHistory?.threadId===old.threadId) {
-        if(!await perform('history-load',{threadId:old.threadId}))return false;
+        const receipt=exact()?await this.dispatch('history-load',{threadId:old.threadId},true):undefined;
+        if(!exact())return false;
+        if(receipt?.state!=='acknowledged') {
+          const live=this.snapshot(),savedOld=this.state?.nativeThreads?.find(row=>row.threadId===old.threadId&&row.sessionId===old.sessionId&&row.projectPath===project),binding=this.state?.nativeHistory;
+          const recorded=this.state?.actions.find(row=>row.requestId===receipt?.requestId);
+          // A terminal display-size refusal is not a successful read. It may
+          // release only this outgoing navigation gate after fresh exact scope
+          // and every ordinary navigation blocker have been checked again.
+          if(!receipt||receipt.action!=='history-load'||receipt.connectionId!==oldConnection||receipt.threadId!==old.threadId||receipt.state!=='rejected'||receipt.errorCode!=='FRAME_LIMIT'||receipt.finishedAt===null||
+            !recorded||recorded.action!==receipt.action||recorded.connectionId!==receipt.connectionId||recorded.threadId!==receipt.threadId||recorded.state!==receipt.state||recorded.errorCode!==receipt.errorCode||recorded.finishedAt!==receipt.finishedAt||
+            !sameSource()||this.tabBlockReason(false)||live?.connectionId!==oldConnection||!live.thread?.configured||live.thread.threadId!==old.threadId||live.thread.sessionId!==old.sessionId||
+            live.thread.selection.model!==old.selection.model||live.thread.selection.effort!==old.selection.effort||live.account?.auth!=='subscription'||!live.account.requiresOpenaiAuth||
+            !savedOld||!binding||binding.projectPath!==project||binding.threadId!==old.threadId||binding.sessionId!==old.sessionId)return false;
+          historyLimited=true;
+          historyHadRecording=binding.recorded!==null;
+        }
       }
       if(this.snapshot()?.thread&&!await perform('disconnect',{preserveAssetWork:true}))return false;
       if(!this.snapshot()&&!await perform('connect'))return false;
@@ -626,7 +647,10 @@ export class CodexChat {
         if(draft){const context=this.tabDraftContexts.get(draft.key);if(context)this.tabDraftContexts.set(this.tabs.active()!.key,context);this.tabDraftContexts.delete(draft.key);}
       }
       // Public history loading is part of the explicit open gesture; it never sends a turn.
-      if(IDLE.includes(live.turnStatus))await perform('history-load',{threadId:live.threadId});
+      const targetHistoryReady=!IDLE.includes(live.turnStatus)||await perform('history-load',{threadId:live.threadId});
+      if(historyLimited&&targetHistoryReady&&exact())this.text('codex-notice',historyHadRecording
+        ?'Opened this conversation. The previous conversation\u2019s history exceeded the display limit; its earlier recording and unsent draft were retained.'
+        :'Opened this conversation. The previous conversation\u2019s history exceeded the display limit; no earlier recording was available. Your unsent draft was retained.');
       return exact();
     } finally {this.tabTransition=false;this.syncTabs();this.render();this.publishState();}
   }
