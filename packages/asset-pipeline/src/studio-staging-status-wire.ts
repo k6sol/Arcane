@@ -15,7 +15,8 @@ const command = z.strictObject({ordinal: z.number().int().min(0).max(511), comma
 const stage = z.strictObject({runId: uuid, phase: z.enum(['running', 'cpu-staged', 'stopped', 'needs_reconciliation']),
   transferDigest: hash, plannedPacketCount: z.number().int().min(1).max(512),
   plannedEnvelopeBytes: z.number().int().min(1).max(8 * 1024 * 1024), commands: z.array(command).max(512),
-  receipt: receipt.nullable(), engineVerification: z.literal('pending'), imported: z.literal(false), retry: z.literal(false),
+  receipt: receipt.nullable(), receiptScope: z.literal('historical-cpu'), currentBuffers: z.literal('unobserved'),
+  engineVerification: z.literal('pending'), imported: z.literal(false), retry: z.literal(false),
 }).refine(value => {
   if (value.commands.some((c, i) => c.ordinal !== i)
     || new Set(value.commands.map(c => c.commandId)).size !== value.commands.length
@@ -32,7 +33,7 @@ const stage = z.strictObject({runId: uuid, phase: z.enum(['running', 'cpu-staged
 const envelope = z.strictObject({jobId: uuid, projectId: hash, stage: stage.nullable()});
 const OUTER = ['jobId', 'projectId', 'stage'];
 const STAGE = ['runId', 'phase', 'transferDigest', 'plannedPacketCount', 'plannedEnvelopeBytes',
-  'commands', 'receipt', 'engineVerification', 'imported', 'retry'];
+  'commands', 'receipt', 'receiptScope', 'currentBuffers', 'engineVerification', 'imported', 'retry'];
 const RECEIPT = ['transferDigest', 'packetCount', 'byteLength', 'state', 'engineVerification'];
 
 function record(value: unknown, fields: readonly string[]): Record<string, unknown> | null {

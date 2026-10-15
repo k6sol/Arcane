@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,sep} from 'node:path';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {StudioStore,type StageRunIntent} from '../../packages/storage/src/studio-store.js';
 import type {StudioAssetStageArgs,Json} from '../../packages/protocol/src/studio.js';
@@ -51,7 +51,7 @@ test('queue and association rollback together on a real SQLite insert failure',t
   const f=fixture(t),started=f.store.beginStageRun(f.intent,guard);assert.ok(started.created);
   const db=new DatabaseSync(join(f.directory,'studio.sqlite'));
   try{
-    db.exec("CREATE TRIGGER fixture_stage_failure BEFORE INSERT ON asset_stage_commands BEGIN SELECT RAISE(ABORT,'fixture fault'); END;");
+    db.exec("CREATE TRIGGER fixture_stage_failure BEFORE INSERT ON asset_stage_attempt_commands BEGIN SELECT RAISE(ABORT,'fixture fault'); END;");
     assert.throws(()=>f.store.enqueueStagePacket(started.handle,0,f.args[0]!,guard),/fixture fault/);
     assert.equal(f.store.commands().length,0);assert.equal(f.store.readStageRun(projectId,jobId)!.commands.length,0);
     assert.equal((db.prepare('SELECT epoch FROM sessions WHERE id=?').get(f.pair.sessionId) as {epoch:number}).epoch,0);
@@ -109,4 +109,51 @@ test('bad cumulative original ACK remains reconciliation evidence, never a seale
   const read=f.store.readStageRun(projectId,jobId)!;assert.equal(read.phase,'needs_reconciliation');assert.equal(read.receipt,null);assert.equal(read.commands[0]!.commandId,c.id);
   assert.throws(()=>f.store.enqueueStagePacket(started.handle,1,f.args[1]!,guard),{code:'STUDIO_STAGE_STATE'});
   assert.equal(f.store.closeStageRun(started.handle).phase,'needs_reconciliation');
+});
+
+test('attempt migration preserves original stage rows and associations',t=>{
+  const f=fixture(t),started=f.store.beginStageRun(f.intent,guard);assert.ok(started.created);
+  const c=f.store.enqueueStagePacket(started.handle,0,f.args[0]!,guard);f.ack(c.id,0);f.store.closeStageRun(started.handle);
+  const original=f.store.readStageRun(projectId,jobId)!;f.store.close();
+  const db=new DatabaseSync(join(f.directory,'studio.sqlite'));let oldPayload:unknown;
+  try{
+    db.exec('INSERT INTO asset_stage_runs SELECT run_id,project_id,job_id,intent_sha256,payload FROM asset_stage_attempts; INSERT INTO asset_stage_commands SELECT * FROM asset_stage_attempt_commands;');
+    oldPayload=db.prepare('SELECT payload FROM asset_stage_runs').get()?.payload;
+    db.exec('DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts; PRAGMA user_version=3;');
+  }finally{db.close();}
+  f.restart();const migrated=f.store.readStageRun(projectId,jobId)!;
+  assert.equal(migrated.runId,original.runId);assert.deepEqual(migrated.commands,original.commands);assert.deepEqual(migrated.intent,original.intent);
+  const check=new DatabaseSync(join(f.directory,'studio.sqlite'));
+  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,4);}finally{check.close();}
+});
+
+test('fresh paired session admits a CPU attempt at the same actual plugin lifetime and epoch',t=>{
+  const f=fixture(t),first=f.store.beginStageRun({...f.intent,preparationAttemptId:randomUUID()},guard);assert.ok(first.created);
+  f.store.closeStageRun(first.handle);const original=f.store.readStageRun(projectId,jobId)!;
+  f.store.revoke(f.pair.sessionId,'synthetic Transport re-pair');
+  const grant=f.store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
+  const paired=f.store.pair({code:grant.code,protocolVersion:1,capabilities:['asset.stage_packet'],identity:{clientSessionId:'fixture-client',placeId:12,universeId:34,name:'Fixture',pluginVersion:'0.1.7'}});
+  f.store.poll(paired.sessionId,{sessionId:paired.sessionId,clientLifetimeId:'fixture-client',pluginArtifactHash:'b'.repeat(64),markerName:'ArcaneTestProof_fixture',placeId:12,universeId:34,placeName:'Fixture',mode:'Edit',playEpoch:0,continuitySupported:true,connected:true});
+  const target={...f.intent.target,sessionId:paired.sessionId},args=f.args.map(a=>({...a,target}));
+  const next={...f.intent,target,preparationAttemptId:randomUUID(),plan:f.intent.plan.map((p,i)=>({...p,argsSha256:sha(JSON.stringify(args[i])),envelopeByteLength:Buffer.byteLength(JSON.stringify(args[i]))}))};
+  const second=f.store.beginStageAttempt(next,first.runId,guard);assert.ok(second.created);f.store.closeStageRun(second.handle);
+  assert.notEqual(second.runId,first.runId);assert.deepEqual(second.record.intent.continuity,original.intent.continuity);
+  assert.deepEqual(f.store.readStageRun(projectId,jobId,first.runId),original);
+  assert.throws(()=>f.store.beginStageAttempt({...next,preparationAttemptId:randomUUID()},second.runId,guard),{code:'STUDIO_STAGE_EXISTS'});
+});
+
+test('64 retained CPU attempts have no eviction and same continuity never repeats',t=>{
+  const f=fixture(t),firstPrep=randomUUID(),first=f.store.beginStageRun({...f.intent,preparationAttemptId:firstPrep},guard);assert.ok(first.created);f.store.closeStageRun(first.handle);
+  const ids=[first.runId];let prior=first.runId;
+  function next(epoch:number){
+    f.store.poll(f.pair.sessionId,{sessionId:f.pair.sessionId,clientLifetimeId:'fixture-client',pluginArtifactHash:'b'.repeat(64),markerName:'ArcaneTestProof_fixture',placeId:12,universeId:34,placeName:'Fixture',mode:'Edit',playEpoch:epoch,continuitySupported:true,connected:true});
+    const continuity={...f.intent.continuity,playEpoch:epoch},args=f.args.map(a=>({...a,continuity}));
+    return {...f.intent,continuity,preparationAttemptId:randomUUID(),plan:f.intent.plan.map((p,i)=>({...p,argsSha256:sha(JSON.stringify(args[i])),envelopeByteLength:Buffer.byteLength(JSON.stringify(args[i]))}))};
+  }
+  assert.throws(()=>f.store.beginStageAttempt(next(0),prior,guard),{code:'STUDIO_STAGE_EXISTS'});
+  assert.throws(()=>f.store.beginStageAttempt({...next(1),preparationAttemptId:firstPrep},prior,guard),{code:'STUDIO_STAGE_CONFLICT'});
+  for(let epoch=1;epoch<64;epoch++){const begun=f.store.beginStageAttempt(next(epoch),prior,guard);assert.ok(begun.created);f.store.closeStageRun(begun.handle);ids.push(begun.runId);prior=begun.runId;}
+  assert.throws(()=>f.store.beginStageAttempt(next(64),prior,guard),{code:'STUDIO_STAGE_BUDGET'});
+  assert.equal(new Set(ids).size,64);for(const id of ids)assert.equal(f.store.readStageRun(projectId,jobId,id)?.runId,id);
+  assert.equal(f.store.commands().length,0);
 });

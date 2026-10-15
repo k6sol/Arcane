@@ -20,7 +20,8 @@ export interface StudioImportPreparationWitness {
 }
 type Immutable<T> = T extends object ? { readonly [K in keyof T]: Immutable<T[K]> } : T;
 export type StudioImportPreparationRecord = Immutable<{
-  schemaVersion: 1; kind: 'studio-import-preparation'; projectId: string; jobId: string;
+  schemaVersion: 1 | 2; kind: 'studio-import-preparation' | 'studio-import-preparation-attempt'; projectId: string; jobId: string;
+  preparationAttempt?: { id: string; previousId: string | null };
   conversation: { provider: 'codex'; threadId: string; sessionId: string | null };
   engineVerification: 'pending'; recordedAt: string; prepared: PreparedStudioImport;
   witness: StudioImportPreparationWitness;
@@ -30,8 +31,9 @@ export type StudioImportPreparationRecord = Immutable<{
   recordSha256: string;
 }>;
 export interface StudioImportPreparationStore {
-  save(actor: NativeAssetActor, jobId: string, prepared: PreparedStudioImport, witness: StudioImportPreparationWitness, guard: () => void): Promise<void>;
-  get(actor: NativeAssetActor, jobId: string, guard: () => void): Promise<StudioImportPreparationRecord | null>;
+  save(actor: NativeAssetActor, jobId: string, prepared: PreparedStudioImport, witness: StudioImportPreparationWitness, guard: () => void, attemptId?: string): Promise<void>;
+  saveAttempt(actor: NativeAssetActor, jobId: string, attemptId: string, prepared: PreparedStudioImport, witness: StudioImportPreparationWitness, guard: () => void): Promise<void>;
+  get(actor: NativeAssetActor, jobId: string, guard: () => void, attemptId?: string): Promise<StudioImportPreparationRecord | null>;
   close(): Promise<void>;
 }
 type Limits = { -readonly [K in keyof typeof STUDIO_IMPORT_PREPARATION_LIMITS]: number };
@@ -50,11 +52,14 @@ const witnessSchema = z.strictObject({ initialContextReceiptId: z.string().lengt
   pluginArtifactHash: hashSchema, clientLifetimeId: opaque, playEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) })
   .refine(w => w.initialContextReceiptId !== w.confirmedContextReceiptId);
 const readSchema = z.strictObject({ requestId: opaque, finishedAt: time });
-const recordSchema = z.strictObject({ schemaVersion: z.literal(1), kind: z.literal('studio-import-preparation'), projectId: hashSchema,
+const recordSchema = z.strictObject({ schemaVersion: z.union([z.literal(1), z.literal(2)]), kind: z.enum(['studio-import-preparation', 'studio-import-preparation-attempt']), projectId: hashSchema,
+  preparationAttempt: z.strictObject({ id: z.string().regex(UUID), previousId: z.string().regex(UUID).nullable() }).optional(),
   jobId: z.string().length(36).regex(UUID), conversation: z.strictObject({ provider: z.literal('codex'), threadId: opaque, sessionId: opaque.nullable() }),
   engineVerification: z.literal('pending'), recordedAt: time, prepared: z.unknown(), witness: witnessSchema,
   contextReads: z.strictObject({ method: z.literal('scene.import_context'), mode: z.literal('Edit'), modeProvenance: z.literal('StudioTestService.EditModeActive'),
-    creatorProvenance: z.enum(['game.CreatorType/CreatorId', 'StudioService:GetUserId']), initial: readSchema, confirmed: readSchema }), recordSha256: hashSchema });
+    creatorProvenance: z.enum(['game.CreatorType/CreatorId', 'StudioService:GetUserId']), initial: readSchema, confirmed: readSchema }), recordSha256: hashSchema })
+  .refine(r => r.schemaVersion === 1 ? r.kind === 'studio-import-preparation' && r.preparationAttempt === undefined
+    : r.kind === 'studio-import-preparation-attempt' && r.preparationAttempt !== undefined);
 function fail(code: string): never { throw new ArcaneError('STUDIO_IMPORT_PREPARATION_' + code, 'Studio import preparation storage is refused, changed or unavailable.'); }
 function errno(error: unknown): unknown { return error && typeof error === 'object' && 'code' in error ? error.code : null; }
 function fields(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -174,12 +179,13 @@ export async function createStudioImportPreparationStore(options: {
     try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return fail('CORRUPT'); }
     const parsed = recordSchema.safeParse(value); if (!parsed.success) fail('CORRUPT');
     const { recordSha256, ...content } = parsed.data;
-    if (content.projectId !== projectId || content.jobId !== id || recordSha256 !== digest(content) ||
+    if (content.projectId !== projectId || (content.preparationAttempt?.id ?? content.jobId) !== id || recordSha256 !== digest(content) ||
       Date.parse(content.contextReads.initial.finishedAt) > Date.parse(content.contextReads.confirmed.finishedAt) ||
       Date.parse(content.contextReads.confirmed.finishedAt) > Date.parse(content.recordedAt)) fail('CORRUPT');
     let prepared: PreparedStudioImport;
-    try { prepared = parseNativeStudioImportResponse({ prepared: content.prepared }, id, projectId).prepared; } catch { return fail('CORRUPT'); }
-    return freeze({ ...content, prepared, recordSha256 });
+    try { prepared = parseNativeStudioImportResponse({ prepared: content.prepared }, content.jobId, projectId).prepared; } catch { return fail('CORRUPT'); }
+    const {preparationAttempt, ...rest} = content;
+    return freeze({ ...rest, ...(preparationAttempt === undefined ? {} : {preparationAttempt}), prepared, recordSha256 });
   }
   async function inventory(io: IO, check: () => void = () => {}): Promise<Map<string, { record: StudioImportPreparationRecord; pin: FilePin }>> {
     check(); paths(); const result = new Map<string, { record: StudioImportPreparationRecord; pin: FilePin }>();
@@ -194,6 +200,21 @@ export async function createStudioImportPreparationStore(options: {
         bytes += pin.bytes.length; if (bytes > limits.totalBytes) fail('LIMIT'); result.set(id, { pin, record: decode(pin.bytes, id) });
       }
     } finally { await closeResource(entries, io); }
+    const successors = new Map<string, string>(), roots = new Set<string>();
+    for (const [id, {record}] of result) {
+      const previous = record.preparationAttempt?.previousId ?? null;
+      if (previous === null) { if (roots.has(record.jobId)) fail('CORRUPT'); roots.add(record.jobId); }
+      else {
+        const parent = result.get(previous)?.record;
+        if (!parent || parent.jobId !== record.jobId || !isDeepStrictEqual(parent.conversation, record.conversation) || successors.has(previous)) fail('CORRUPT');
+        successors.set(previous, id);
+      }
+      const seen = new Set<string>(); let cursor: string | null = id;
+      while (cursor !== null) {
+        if (seen.has(cursor) || seen.size >= limits.records) fail('CORRUPT'); seen.add(cursor);
+        const member: StudioImportPreparationRecord | undefined = result.get(cursor)?.record; if (!member) fail('CORRUPT'); cursor = member.preparationAttempt?.previousId ?? null;
+      }
+    }
     check(); paths(); return result;
   }
   function capture(actor: NativeAssetActor, id: string, operation: NativeAssetOperation): ConversationWorkBinding {
@@ -249,39 +270,85 @@ export async function createStudioImportPreparationStore(options: {
     lockPin = await readPinned(lockPath, 1024, startupIO); if (!lockPin) fail('LOCKED'); await inventory(startupIO);
   } catch (error) { if (owners.get(key) === owner) owners.delete(key); if (error instanceof ArcaneError) throw error; fail(lockAttempted && errno(error) === 'EEXIST' ? 'LOCKED' : 'UNAVAILABLE'); }
   return Object.freeze({
-    save(actor: NativeAssetActor, inputId: string, value: PreparedStudioImport, inputWitness: StudioImportPreparationWitness, guard: () => void): Promise<void> {
+    save(actor: NativeAssetActor, inputId: string, value: PreparedStudioImport, inputWitness: StudioImportPreparationWitness, guard: () => void, attemptId?: string): Promise<void> {
       return operation(actor, inputId, 'mutate', guard, async (id, binding, io, check, markWrite) => {
+        const storageId = attemptId === undefined ? id : jobId(attemptId);
+        if (attemptId !== undefined && storageId === id) fail('INPUT');
         const prepared = freeze(parseNativeStudioImportResponse({ prepared: value }, id, projectId).prepared);
         const parsed = witnessSchema.safeParse(fields(inputWitness, ['initialContextReceiptId', 'confirmedContextReceiptId', 'pluginArtifactHash', 'clientLifetimeId', 'playEpoch']));
         if (!parsed.success) fail('INPUT'); const witness = freeze(parsed.data), contextReads = verifyWitness(prepared, witness); check();
-        const records = await inventory(io, check), prior = records.get(id);
+        const records = await inventory(io, check), prior = records.get(storageId);
         if (prior) {
           if (prior.record.projectId !== projectId || prior.record.jobId !== id || !isDeepStrictEqual(prior.record.conversation, binding.conversation) ||
-            !isDeepStrictEqual(prior.record.prepared, prepared)) fail('CONFLICT');
+            !isDeepStrictEqual(prior.record.prepared, prepared) || (attemptId !== undefined &&
+              (prior.record.preparationAttempt?.id !== attemptId || !isDeepStrictEqual(prior.record.witness, witness)))) fail('CONFLICT');
           // A fresh host read may have new immutable receipt IDs. Validate it
           // independently, then retain the first record as pending metadata only.
           verifyWitness(prepared, witness); check(); return;
         }
-        const content = { schemaVersion: 1 as const, kind: 'studio-import-preparation' as const, projectId, jobId: id,
+        const history = [...records.entries()].filter(([, r]) => r.record.jobId === id);
+        let previousId: string | null = null;
+        if (attemptId === undefined && history.length) {
+          // A later ordinary prepare cannot introduce a second historical root.
+          const referenced = new Set(history.map(([, r]) => r.record.preparationAttempt?.previousId));
+          const tips = history.filter(([key]) => !referenced.has(key));
+          if (tips.length !== 1 || !isDeepStrictEqual(tips[0]![1].record.conversation, binding.conversation) || !isDeepStrictEqual(tips[0]![1].record.prepared, prepared)) fail('CONFLICT');
+          verifyWitness(prepared, witness); check(); return;
+        }
+        if (attemptId !== undefined) {
+          const referenced = new Set(history.map(([, r]) => r.record.preparationAttempt?.previousId).filter(x => x !== null && x !== undefined));
+          const tips = history.filter(([key]) => !referenced.has(key));
+          if (history.length && tips.length !== 1) fail('CORRUPT');
+          previousId = tips[0]?.[0] ?? null;
+          // Witnessed preparation metadata is not a CPU-stage admission. A
+          // known later preflight failure may be repaired in the same epoch
+          // only before this exact paired-session/lifetime/epoch has durable
+          // stage history. Transport re-pair recreates CPU buffers but retains
+          // lifetime/epoch; the server-issued paired session is part of identity.
+          // Keep every plan/receipt immutable; never refund an unknown stage.
+          const staged = studio.readStageRun(projectId, id); check();
+          const stagedHere = staged !== null && staged.intent.target.sessionId === prepared.manifest.target.sessionId &&
+            staged.intent.continuity.clientLifetimeId === witness.clientLifetimeId && staged.intent.continuity.playEpoch === witness.playEpoch;
+          for (const [, {record}] of history) {
+            if (!isDeepStrictEqual(record.conversation, binding.conversation) || record.prepared.manifest.assetId !== prepared.manifest.assetId ||
+                record.prepared.manifest.sourceSha256 !== prepared.manifest.sourceSha256 || !isDeepStrictEqual(record.prepared.manifest.files, prepared.manifest.files)) fail('CONFLICT');
+            if (record.preparationAttempt && record.prepared.manifest.target.sessionId === prepared.manifest.target.sessionId &&
+                record.witness.clientLifetimeId === witness.clientLifetimeId &&
+                (record.witness.playEpoch > witness.playEpoch || (record.witness.playEpoch === witness.playEpoch && stagedHere))) fail('CONTINUITY');
+          }
+        }
+        const content = { schemaVersion: attemptId === undefined ? 1 as const : 2 as const,
+          kind: attemptId === undefined ? 'studio-import-preparation' as const : 'studio-import-preparation-attempt' as const,
+          ...(attemptId === undefined ? {} : {preparationAttempt: {id: attemptId, previousId}}), projectId, jobId: id,
           conversation: { ...binding.conversation, provider: 'codex' as const }, engineVerification: 'pending' as const,
           recordedAt: new Date(clock()).toISOString(), prepared, witness, contextReads };
         const record = { ...content, recordSha256: digest(content) }, text = JSON.stringify(record), bytes = Buffer.byteLength(text);
         if (bytes > limits.recordBytes || [...records.values()].reduce((n, r) => n + r.pin.bytes.length, 0) + bytes > limits.totalBytes) fail('LIMIT');
-        decode(Buffer.from(text), id);
+        decode(Buffer.from(text), storageId);
         if (records.size >= limits.records) fail('LIMIT'); check(); verifyWitness(prepared, witness); check();
         let handle: FileHandle | undefined;
         try {
-          handle = await io(() => { markWrite(); return open(join(directory, id + '.json'), 'wx', 0o600); }, h => h.close());
+          handle = await io(() => { markWrite(); return open(join(directory, storageId + '.json'), 'wx', 0o600); }, h => h.close());
           await io(() => handle!.writeFile(text, 'utf8')); await io(() => handle!.sync());
         } finally { if (handle) await closeResource(handle, io); }
-        check(); const written = await readPinned(join(directory, id + '.json'), limits.recordBytes, io);
+        check(); const written = await readPinned(join(directory, storageId + '.json'), limits.recordBytes, io);
         if (!written || !written.bytes.equals(Buffer.from(text))) fail('CORRUPT'); verifyWitness(prepared, witness); check();
       });
     },
-    get(actor: NativeAssetActor, id: string, guard: () => void): Promise<StudioImportPreparationRecord | null> {
+    saveAttempt(actor: NativeAssetActor, id: string, attemptId: string, value: PreparedStudioImport, witness: StudioImportPreparationWitness, guard: () => void): Promise<void> {
+      return this.save(actor, id, value, witness, guard, attemptId);
+    },
+    get(actor: NativeAssetActor, id: string, guard: () => void, attemptId?: string): Promise<StudioImportPreparationRecord | null> {
       return operation(actor, id, 'read', guard, async (requested, binding, io, check) => {
-        const record = (await inventory(io, check)).get(requested)?.record ?? null;
-        if (record && !isDeepStrictEqual(record.conversation, binding.conversation)) fail('SCOPE'); return record;
+        const records = await inventory(io, check), key = attemptId === undefined ? requested : jobId(attemptId);
+        let record = records.get(key)?.record ?? null;
+        if (!record && attemptId === undefined) {
+          const history = [...records.entries()].filter(([, r]) => r.record.jobId === requested);
+          const referenced = new Set(history.map(([, r]) => r.record.preparationAttempt?.previousId));
+          const tips = history.filter(([k]) => !referenced.has(k));
+          if (history.length && tips.length !== 1) fail('CORRUPT'); record = tips[0]?.[1].record ?? null;
+        }
+        if (record && (record.jobId !== requested || !isDeepStrictEqual(record.conversation, binding.conversation))) fail('SCOPE'); return record;
       });
     },
     async close(): Promise<void> {

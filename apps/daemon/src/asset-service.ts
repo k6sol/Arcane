@@ -9,7 +9,7 @@ import type { AssetInput, AssetJob, AssetJobEvent, AssetJobState, AssetManifest,
 import { artifactPath, noLinks, prepareOutputRoot, readRegularFile, regularFile } from '../../../packages/asset-pipeline/src/paths.js';
 import { inspectPng, readJson, record, sha256 } from '../../../packages/asset-pipeline/src/validation.js';
 import { createStudioImportManifestAuthority, snapshotStudioImportSelection, STUDIO_IMPORT_LIMITS, type PreparedStudioImport } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
-import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImportHostOptions } from './asset-import-adapter.js';
+import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImportHostOptions, type StudioImportPreparationAttempt } from './asset-import-adapter.js';
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor } from './native-asset-authority.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
@@ -207,8 +207,8 @@ export async function createAssetService(options: AssetServiceOptions) {
   } catch (e) { outputOwners.delete(ownerKey); throw e; }
 
   function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: false): Promise<PreparedStudioImport>;
-  function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: true): Promise<PreparedStudioImportPayload>;
-  async function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: boolean): Promise<PreparedStudioImport | PreparedStudioImportPayload> {
+  function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: true, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImportPayload>;
+  async function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: boolean, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImport | PreparedStudioImportPayload> {
     ensureOpen();
     if (!importHost) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Studio import host target/receipt selection has not been configured.');
     const requested = id(jobId);
@@ -273,7 +273,8 @@ export async function createAssetService(options: AssetServiceOptions) {
       const payload = includePayload ? decodeStudioImportPayload(prepared, payloadFiles) : null;
       const transfer = payload ? createStudioImportTransfer(prepared, payload) : null;
       check();
-      if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard));
+      if (attempt && !importHost.recordPrepared) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Preparation attempt persistence is required.');
+      if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard, attempt));
       check();
       if (includePayload) {
         if (!payload || !transfer) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
@@ -395,8 +396,8 @@ export async function createAssetService(options: AssetServiceOptions) {
     /** Trusted host-only staging from the SAME completed-job admission and owned
      * bytes. The returned data does not authorize uploads or editor writes and
      * is never exposed by the native HTTP/MCP preparation endpoint. */
-    prepareStudioImportPayload(jobId: unknown, actor: NativeAssetActor): Promise<PreparedStudioImportPayload> {
-      return prepareImport(jobId, actor, this, true);
+    prepareStudioImportPayload(jobId: unknown, actor: NativeAssetActor, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImportPayload> {
+      return prepareImport(jobId, actor, this, true, attempt);
     },
     async preview(jobId: unknown, path: unknown): Promise<Buffer> {
       ensureOpen();

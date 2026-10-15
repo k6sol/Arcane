@@ -9,10 +9,11 @@ export const NATIVE_STUDIO_STAGING_RESPONSE_BYTES = 64 * 1024;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 const HASH = /^[a-f0-9]{64}(?![\s\S])/;
 const ENVELOPE_FIELDS = ['jobId', 'projectId', 'staged'] as const;
-const RECEIPT_FIELDS = ['status', 'imported', 'transferDigest', 'packetCount', 'byteLength',
+const RECEIPT_FIELDS = ['status', 'imported', 'runId', 'transferDigest', 'packetCount', 'byteLength',
   'state', 'engineVerification', 'commandIds'] as const;
 const receipt = z.strictObject({
   status: z.literal('staged'), imported: z.literal(false), engineVerification: z.literal('pending'),
+  runId: z.string().length(36).regex(UUID),
   state: z.literal('sealed'), transferDigest: z.string().length(64).regex(HASH),
   packetCount: z.number().int().min(1).max(512),
   byteLength: z.number().int().min(1).max(8 * 1024 * 1024),

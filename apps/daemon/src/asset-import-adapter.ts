@@ -10,6 +10,8 @@ import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor, t
 export interface StudioImportHostOptions {
   /** Borrowed canonical project store. No generic bearer or request identity can substitute. */
   workAssociations: ConversationWorkStore;
+  /** Fresh controller-owned preparation identity, never a request argument. */
+  beginPreparationAttempt?(scope: NativeAssetScope, jobId: string, actor: NativeAssetActor, guard: () => void): StudioImportPreparationAttempt;
   /** Host selects an observed Studio target/placement, without editor discovery here.
    * Never construct this callback from HTTP target/session/project fields. */
   selectTarget(scope: NativeAssetScope, jobId: string, actor: NativeAssetActor, guard: () => void): StudioImportSelection | Promise<StudioImportSelection>;
@@ -20,10 +22,12 @@ export interface StudioImportHostOptions {
   loadObservedBaseline?(scope: NativeAssetScope, assetId: string, target: StudioImportSelection['target']): StudioImportBaseline | null | Promise<StudioImportBaseline | null>;
   /** Commit pending metadata only, never import authority or an engine baseline. */
   recordPrepared?(scope: NativeAssetScope, jobId: string, prepared: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').PreparedStudioImport,
-    actor: NativeAssetActor, guard: () => void): void | Promise<void>;
+    actor: NativeAssetActor, guard: () => void, attempt?: StudioImportPreparationAttempt): void | Promise<void>;
   /** Release only this host capture, even when its native actor has retired. */
   releaseTarget?(scope: NativeAssetScope, jobId: string): void;
 }
+/** The producing host also checks the exact object/actor in its WeakMap. */
+export interface StudioImportPreparationAttempt { readonly kind: 'studio-import-preparation-attempt'; readonly id: string }
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const stable = z.string().regex(/^arcane_[a-f0-9]{64}$/);
 const key = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);

@@ -35,6 +35,9 @@ export interface NativeAssetRegistry {
   close(): void;
 }
 const MAX_INCARNATIONS = 128, MAX_INTENTS = 128;
+// Bounded, non-evicting claims across a registry incarnation. Stage history is
+// itself capped at 64; failed admissions must not make an old claim reusable.
+const MAX_STAGE_CLAIMS = MAX_INTENTS * 64;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}(?![\s\S])/;
 const TOKEN = /^[a-f0-9]{64}(?![\s\S])/;
 const DUMMY = Buffer.alloc(32);
@@ -45,6 +48,7 @@ interface Entry {
 }
 interface Admission {entry: Entry; generation: number; operation: NativeAssetOperation; scope: NativeAssetScope}
 const actors = new WeakMap<object, Admission>();
+const stagedOperations = new WeakMap<Entry, Set<string>>();
 function fail(): never {throw new ArcaneError('NATIVE_ASSET_AUTHORITY', 'Native asset authority is unavailable or changed.');}
 function data(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || types.isProxy(value)) fail();
@@ -84,6 +88,28 @@ export function assertNativeAssetActor(actor: NativeAssetActor, operation: Nativ
 }
 export function nativeAssetActorScope(actor: NativeAssetActor): NativeAssetScope {
   assertNativeAssetActor(actor,'read');return actors.get(actor)!.scope;
+}
+function stageClaim(actor: NativeAssetActor, jobId: string): {entry: Entry; key: string; consumed: Set<string>} {
+  assertNativeAssetActor(actor, 'mutate');
+  if (typeof jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(jobId)) fail();
+  const admission = actors.get(actor)!;
+  const operation = admission.entry.active!;
+  const key = JSON.stringify([operation, admission.scope.projectId, jobId]);
+  const consumed = stagedOperations.get(admission.entry) ?? new Set<string>();
+  if (consumed.has(key) || consumed.size >= MAX_STAGE_CLAIMS) fail();
+  return {entry: admission.entry, key, consumed};
+}
+/** Non-consuming rejection before preflight prevents a spent turn/job from
+ * creating orphan preparation records. Claim rechecks atomically at admission. */
+export function assertNativeAssetStageOperationAvailable(actor: NativeAssetActor, jobId: string): void {
+  stageClaim(actor, jobId);
+}
+/** Consume this actual native mutation operation once PER owned project/job,
+ * across captures/controllers. One turn may stage several different owned jobs.
+ * It grants CPU staging only; no upload or engine admission is created. */
+export function claimNativeAssetStageOperation(actor: NativeAssetActor, jobId: string): void {
+  const {entry, key, consumed} = stageClaim(actor, jobId);
+  consumed.add(key); stagedOperations.set(entry, consumed);
 }
 /** Volatile host authority only. It never reads provider auth/config or persists secrets.
  * Registry lifetime is one daemon/project. Restart retires every credential/intent;

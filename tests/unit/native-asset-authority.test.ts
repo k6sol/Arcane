@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,lstatSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,relative,isAbsolute,sep} from 'node:path';
-import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
 const refused={code:'NATIVE_ASSET_AUTHORITY'};
 function fixture(t:test.TestContext) {
   const directory=realpathSync(mkdtempSync(join(tmpdir(),'arcane-native-assets-'))),registry=createNativeAssetRegistry({projectPath:directory});
@@ -14,6 +14,21 @@ function fixture(t:test.TestContext) {
   const ready=()=>{incarnation.seal(seal);incarnation.grant(bound);incarnation.dispatched({...bound,operationId:'intent-a'});};
   return {directory,registry,incarnation,token,seal,bound,ready};
 }
+
+test('stage claims require whole bounded job IDs and retain per-operation/per-job one-use ownership',t=>{
+  const f=fixture(t);f.ready();const actor=f.registry.capture(f.token,'mutate');
+  const first='11111111-1111-4111-8111-111111111111',second='22222222-2222-4222-8222-222222222222';
+  for(const value of [first+'\n',first+'\r\n',first+'\u2028',first+'\0','../job',''])
+    for(const check of [assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation])assert.throws(()=>check(actor,value),refused);
+  assertNativeAssetStageOperationAvailable(actor,first);assertNativeAssetStageOperationAvailable(actor,first);
+  claimNativeAssetStageOperation(actor,first);
+  for(const check of [assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation])
+    assert.throws(()=>check(f.registry.capture(f.token,'mutate'),first),refused);
+  assertNativeAssetStageOperationAvailable(actor,second);claimNativeAssetStageOperation(actor,second);
+  f.incarnation.ended('intent-a');f.incarnation.dispatched({...f.bound,operationId:'intent-b'});
+  assert.throws(()=>claimNativeAssetStageOperation(actor,first),refused);
+  assert.doesNotThrow(()=>claimNativeAssetStageOperation(f.registry.capture(f.token,'mutate'),first));
+});
 
 test('new native key is private, unbound and admits no operation or generic classification',t=>{
   const f=fixture(t);assert.match(f.token,/^[a-f0-9]{64}$/);assert.equal(f.registry.recognizes(f.token),false);

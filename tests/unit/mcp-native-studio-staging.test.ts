@@ -20,13 +20,26 @@ const TOOL = 'assets_stage_studio_import';
 const PATH = '/v1/assets/native/stage-studio-import';
 const commandId = (index: number) => index.toString(16).padStart(8, '0') + '-1111-4111-8111-111111111111';
 function staged(): NativeStudioStagingResponse['staged'] {
-  return {status: 'staged', imported: false, engineVerification: 'pending', state: 'sealed',
+  return {status: 'staged', runId: '33333333-3333-4333-8333-333333333333', imported: false, engineVerification: 'pending', state: 'sealed',
     transferDigest: 'a'.repeat(64), packetCount: 3, byteLength: 4096,
     commandIds: [commandId(1), commandId(2), commandId(3)]};
 }
 function response(jobId = JOB, projectId = PROJECT): NativeStudioStagingResponse {
   return {jobId, projectId, staged: staged()};
 }
+
+test('stage runId is a required exact closed receipt field and normalization stays detached', () => {
+  const input=response(), parsed=parseNativeStudioStagingResponse(input,JOB,PROJECT);
+  assert.equal(parsed.staged.runId,input.staged.runId);assert.notEqual(parsed.staged,input.staged);
+  const {runId,...without}=input.staged;
+  for(const stagedValue of [without,{...input.staged,runId:null},{...input.staged,runId:undefined},
+    {...input.staged,runId:runId+'\n'},{...input.staged,runId:'x'},
+    {...input.staged,attempt:2}])assert.equal(nativeStudioStagingResponse.safeParse({...input,staged:stagedValue}).success,false);
+  assert.equal(nativeStudioStagingResponse.safeParse({...input,runId}).success,false);
+  let reads=0;const getter={...input.staged};Object.defineProperty(getter,'runId',{enumerable:true,get(){reads++;throw Error('never');}});
+  assert.equal(nativeStudioStagingResponse.safeParse({...input,staged:getter}).success,false);assert.equal(reads,0);
+  input.staged.runId=OTHER_JOB;assert.equal(parsed.staged.runId,runId);
+});
 function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json; charset=utf-8', ...headers}});
 }

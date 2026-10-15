@@ -152,14 +152,17 @@ function productServiceFixture({ closeFailAt } = {}) {
   return {initialize,shutdown,services,events,get hostConfiguration(){return hostConfiguration;},get savedArgs(){return savedArgs;},get exitCode(){return exitCode;},get descriptorRemoved(){return descriptorRemoved;}};
 }
 
-test('product import wiring shares exact stores, awaited artifact, host hooks and ledger persistence', async () => {
+test('product import wiring forwards original and explicit preparation attempts to the same owned ledger', async () => {
   const f=productServiceFixture(); await f.initialize();
   const resources=f.events.filter(value => value.operation === 'create').map(value => value.resource);
   assert.ok(resources.indexOf('host') > resources.indexOf('preparations'));
   assert.ok(resources.indexOf('host') > resources.indexOf('artifact')); assert.ok(resources.indexOf('assets') > resources.indexOf('host'));
   const args=[Object.freeze({fixture:'actor'}),'synthetic-job',Object.freeze({fixture:'plan'}),Object.freeze({fixture:'witness'}),()=>assert.fail('Forward the guard without invoking it.')];
-  await f.hostConfiguration.persistPreparation(...args);
-  assert.equal(f.savedArgs.length,args.length); for(let i=0;i<args.length;i++) assert.equal(f.savedArgs[i],args[i]);
+  for (const forwarded of [args,[...args,undefined],[...args,'22222222-2222-4222-8222-222222222222']]) {
+    await f.hostConfiguration.persistPreparation(...forwarded);
+    assert.equal(f.savedArgs.length,forwarded.length,'Do not discard the optional sixth preparation-attempt argument.');
+    for(let i=0;i<forwarded.length;i++) assert.equal(f.savedArgs[i],forwarded[i],'Preserve actor, plan, witness, guard and attempt identity/order.');
+  }
   await f.shutdown();
   assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','staging','studio','work']);
   assert.equal(f.exitCode,0); assert.equal(f.descriptorRemoved,true);
@@ -302,6 +305,7 @@ test('source contract: renderer isolation, exact navigation and deny-by-default 
 });
 
 test('source contract: bundled resource entry executes in owned writable cwd over private IPC', () => {
+  assert.match(mainSource, /const entry = await policy\.directPath\(join\(productRoot, 'dist\/apps\/daemon\/src\/product-main\.js'\), 'file'\)/);
   assert.match(mainSource, /spawn\(nodeExecutable,\s*\[entry\]/);
   assert.match(mainSource, /cwd:\s*userRoot/);
   assert.match(mainSource, /shell:\s*false/);

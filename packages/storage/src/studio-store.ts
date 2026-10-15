@@ -39,12 +39,14 @@ export interface StageRunIntent {
   projectId:string;jobId:string;conversation:Readonly<NativeConversation>;
   transferDigest:string;payloadDigest:string;manifestDigest:string;preparedDigest:string;
   target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];
+  preparationAttemptId?:string;
   plan:readonly {ordinal:number;argsSha256:string;packetByteLength:number;envelopeByteLength:number;expectedReceipt:StudioAssetStageReceipt}[];
 }
 export interface StageRunCommandAssociation {
   ordinal:number;commandId:string;requestId:string;leaseEpoch:number;fingerprint:string;command:StudioCommand;
 }
 export interface StageRunRecord {
+  attempt:number;previousRunId:string|null;
   runId:string;intent:StageRunIntent;intentSha256:string;createdAt:string;updatedAt:string;closedAt:string|null;
   phase:'running'|'cpu-staged'|'stopped'|'needs_reconciliation';
   commands:StageRunCommandAssociation[];receipt:StudioAssetStageReceipt|null;
@@ -52,7 +54,7 @@ export interface StageRunRecord {
 export type StageRunBeginResult =
   | {created:true;runId:string;handle:StageRunHandle;record:StageRunRecord}
   | {created:false;runId:string;handle:null;record:StageRunRecord};
-type StageRunStored = Omit<StageRunRecord,'phase'|'commands'|'receipt'>;
+type StageRunStored = Omit<StageRunRecord,'phase'|'commands'|'receipt'|'attempt'|'previousRunId'>;
 const stageHash=z.string().length(64).regex(/^[a-f0-9]{64}(?![\s\S])/);
 const stageJob=z.string().length(36).regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/);
 const stageId=z.string().min(1).max(256).refine(v=>!/[\x00-\x1f\x7f]/.test(v));
@@ -62,6 +64,7 @@ const uploadContextPinSchema=z.strictObject({sessionId:stageId,clientLifetimeId:
 const stageReceiptSchema=z.strictObject({transferDigest:stageHash,packetCount:z.number().int().min(1).max(512),
   byteLength:z.number().int().min(1).max(8*1024*1024),state:z.enum(['receiving','sealed']),engineVerification:z.literal('pending')});
 const stageIntentSchema=z.strictObject({projectId:stageHash,jobId:stageJob,
+  preparationAttemptId:stageJob.optional(),
   conversation:z.strictObject({provider:z.literal('codex'),threadId:stageId,sessionId:stageId.nullable()}),
   transferDigest:stageHash,payloadDigest:stageHash,manifestDigest:stageHash,preparedDigest:stageHash,
   target:z.strictObject({sessionId:stageId,placeId:stageNumber,universeId:stageNumber,root:z.literal('Workspace'),parentRef:stageId,
@@ -96,7 +99,8 @@ function stageSnapshot(value:unknown):unknown {
 function stageIntent(value:unknown):StageRunIntent {
   const parsed=stageIntentSchema.safeParse(stageSnapshot(value));
   if(!parsed.success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid bounded stage intent.');
-  const intent=parsed.data;let packets=0,envelopes=0;
+  const {preparationAttemptId,...rest}=parsed.data;
+  const intent:StageRunIntent=preparationAttemptId===undefined?rest:{...rest,preparationAttemptId};let packets=0,envelopes=0;
   for(const [ordinal,p]of intent.plan.entries()){
     packets+=p.packetByteLength;envelopes+=p.envelopeByteLength;
     if(p.ordinal!==ordinal||p.envelopeByteLength<p.packetByteLength||p.expectedReceipt.transferDigest!==intent.transferDigest
@@ -107,6 +111,7 @@ function stageIntent(value:unknown):StageRunIntent {
   return intent;
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+const stageContinuityKey = (intent:StageRunIntent) => hash(canonical({sessionId:intent.target.sessionId,clientLifetimeId:intent.continuity.clientLifetimeId,playEpoch:intent.continuity.playEpoch}));
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 // Paths are display metadata: a rename is not a different opaque Instance.
 // Both references still require valid bounded paths and exact scope/class/ID.
@@ -150,7 +155,7 @@ export class StudioStore {
     try {
       this.db = new DatabaseSync(join(options.directory, 'studio.sqlite'), { timeout: 2000, allowExtension: false });
       const version = this.db.prepare('PRAGMA user_version').get() as Row;
-      if (Number(version.user_version) > 3) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
+      if (Number(version.user_version) > 4) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS grants (hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT;
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0) STRICT;
@@ -162,7 +167,21 @@ export class StudioStore {
         CREATE TABLE IF NOT EXISTS asset_upload_context_pins (command_id TEXT PRIMARY KEY REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL) STRICT;
         CREATE TABLE IF NOT EXISTS asset_stage_runs (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(project_id,job_id)) STRICT;
         CREATE TABLE IF NOT EXISTS asset_stage_commands (run_id TEXT NOT NULL REFERENCES asset_stage_runs(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
-        PRAGMA user_version=3;`);
+        CREATE TABLE IF NOT EXISTS asset_stage_attempts (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,attempt_no INTEGER NOT NULL CHECK(attempt_no>0),previous_run_id TEXT REFERENCES asset_stage_attempts(run_id),continuity_key TEXT NOT NULL,UNIQUE(project_id,job_id,attempt_no),UNIQUE(project_id,job_id,continuity_key)) STRICT;
+        CREATE TABLE IF NOT EXISTS asset_stage_attempt_commands (run_id TEXT NOT NULL REFERENCES asset_stage_attempts(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;`);
+      this.transaction(() => {
+        if (Number(version.user_version) < 4) {
+          const old = this.db.prepare('SELECT * FROM asset_stage_runs LIMIT 65').all() as Row[];
+          if (old.length > STUDIO_STAGE_RUN_LIMITS.runs) throw new ArcaneError('STUDIO_STAGE_BUDGET','Retained stage history exceeds its cap.');
+          for (const row of old) {
+            const stored = JSON.parse(row.payload as string) as StageRunStored, intent = stageIntent(stored.intent);
+            if (stored.runId !== row.run_id || intent.projectId !== row.project_id || intent.jobId !== row.job_id || stored.intentSha256 !== row.intent_sha256 || hash(canonical(intent)) !== stored.intentSha256) throw new ArcaneError('STUDIO_STAGE_RECEIPT','Legacy stage identity differs.');
+            this.db.prepare('INSERT INTO asset_stage_attempts VALUES(?,?,?,?,?,1,NULL,?)').run(row.run_id!,row.project_id!,row.job_id!,row.intent_sha256!,row.payload!,stageContinuityKey(intent));
+          }
+          this.db.exec('INSERT INTO asset_stage_attempt_commands SELECT * FROM asset_stage_commands;');
+        }
+        this.db.exec('PRAGMA user_version=4;');
+      });
       const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Row[];
       if (!columns.some(c=>c.name==='key_id')) this.db.exec('ALTER TABLE sessions ADD COLUMN key_id TEXT');
       this.transaction(() => {
@@ -175,7 +194,7 @@ export class StudioStore {
             this.db.prepare('UPDATE asset_uploads SET payload=? WHERE attempt_id=?').run(JSON.stringify(record), record.attemptId);
           }
         }
-        for(const row of this.db.prepare('SELECT payload FROM asset_stage_runs').all() as Row[]){
+        for(const row of this.db.prepare('SELECT payload FROM asset_stage_attempts').all() as Row[]){
           const run=JSON.parse(row.payload as string) as StageRunStored;
           if(run.closedAt===null){run.closedAt=this.iso();run.updatedAt=run.closedAt;this.saveStageRun(run);}
         }
@@ -522,7 +541,7 @@ export class StudioStore {
     return {...pin};
   }
   private saveStageRun(run:StageRunStored):void {
-    this.db.prepare('UPDATE asset_stage_runs SET payload=? WHERE run_id=?').run(JSON.stringify(run),run.runId);
+    this.db.prepare('UPDATE asset_stage_attempts SET payload=? WHERE run_id=?').run(JSON.stringify(run),run.runId);
   }
   private stageGuard(guard:()=>void):void {
     if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
@@ -549,13 +568,37 @@ export class StudioStore {
       const prior=this.readStageRun(intent.projectId,intent.jobId);
       if(prior){if(prior.intentSha256!==intentSha256)throw new ArcaneError('STUDIO_STAGE_CONFLICT','This job already has a pinned stage run.');return prior;}
       this.stageTarget(intent);
-      if(Number((this.db.prepare('SELECT count(*) AS n FROM asset_stage_runs').get() as Row).n)>=STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage journal capacity is full; no history was evicted.');
+      if(Number((this.db.prepare('SELECT count(*) AS n FROM asset_stage_attempts').get() as Row).n)>=STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage journal capacity is full; no history was evicted.');
       const at=this.iso(),run:StageRunStored={runId:randomUUID(),intent,intentSha256,createdAt:at,updatedAt:at,closedAt:null};
-      this.db.prepare('INSERT INTO asset_stage_runs(run_id,project_id,job_id,intent_sha256,payload) VALUES(?,?,?,?,?)').run(run.runId,intent.projectId,intent.jobId,intentSha256,JSON.stringify(run));
+      this.db.prepare('INSERT INTO asset_stage_attempts VALUES(?,?,?,?,?,1,NULL,?)').run(run.runId,intent.projectId,intent.jobId,intentSha256,JSON.stringify(run),stageContinuityKey(intent));
       this.event('asset_stage_started',run.runId,{projectId:intent.projectId,jobId:intent.jobId});this.stageGuard(guard);fresh=true;
       return this.stageRunById(run.runId);
     });
     if(!fresh)return {created:false,runId:record.runId,handle:null,record};
+    const handle=Object.freeze({kind:'studio-stage-run-handle' as const});this.#stageRunHandles.set(handle,record.runId);
+    return {created:true,runId:record.runId,handle,record};
+  }
+  /** A new CPU attempt, never a replay of old command or upload authority. */
+  beginStageAttempt(input:StageRunIntent,previousRunId:string,guard:()=>void):StageRunBeginResult {
+    this.stageGuard(guard);const intent=stageIntent(input),intentSha256=hash(canonical(intent));
+    if(!stageJob.safeParse(previousRunId).success||!intent.preparationAttemptId)throw new ArcaneError('STUDIO_STAGE_INPUT','A fresh witnessed preparation attempt is required.');
+    const record=this.transaction(()=>{
+      this.stageGuard(guard);this.stageTarget(intent);
+      const prior=this.readStageRun(intent.projectId,intent.jobId);
+      if(!prior||prior.runId!==previousRunId||prior.closedAt===null)throw new ArcaneError('STUDIO_STAGE_STATE','The exact preceding attempt must be closed.');
+      if(canonical(prior.intent.conversation)!==canonical(intent.conversation))throw new ArcaneError('STUDIO_STAGE_CONFLICT','Native conversation changed.');
+      if(prior.intent.target.sessionId===intent.target.sessionId&&prior.intent.continuity.clientLifetimeId===intent.continuity.clientLifetimeId&&intent.continuity.playEpoch<=prior.intent.continuity.playEpoch)throw new ArcaneError('STUDIO_STAGE_EXISTS','This live continuity cannot repeat its attempt.');
+      for(const row of this.db.prepare('SELECT payload FROM asset_stage_attempts WHERE project_id=? AND job_id=? LIMIT 65').iterate(intent.projectId,intent.jobId)){
+        const old=JSON.parse(row.payload as string) as StageRunStored;
+        if(old.intent.preparationAttemptId===intent.preparationAttemptId)throw new ArcaneError('STUDIO_STAGE_CONFLICT','A historical preparation cannot be upgraded into a new attempt.');
+      }
+      if(this.db.prepare('SELECT run_id FROM asset_stage_attempts WHERE project_id=? AND job_id=? AND continuity_key=?').get(intent.projectId,intent.jobId,stageContinuityKey(intent)))throw new ArcaneError('STUDIO_STAGE_EXISTS','This continuity already has retained evidence.');
+      if(Number((this.db.prepare('SELECT count(*) AS n FROM asset_stage_attempts').get() as Row).n)>=STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage journal capacity is full; no history was evicted.');
+      const at=this.iso(),run:StageRunStored={runId:randomUUID(),intent,intentSha256,createdAt:at,updatedAt:at,closedAt:null};
+      this.db.prepare('INSERT INTO asset_stage_attempts VALUES(?,?,?,?,?,?,?,?)').run(run.runId,intent.projectId,intent.jobId,intentSha256,JSON.stringify(run),prior.attempt+1,prior.runId,stageContinuityKey(intent));
+      this.event('asset_stage_started',run.runId,{projectId:intent.projectId,jobId:intent.jobId,previousRunId:prior.runId});this.stageGuard(guard);
+      return this.stageRunById(run.runId);
+    });
     const handle=Object.freeze({kind:'studio-stage-run-handle' as const});this.#stageRunHandles.set(handle,record.runId);
     return {created:true,runId:record.runId,handle,record};
   }
@@ -587,7 +630,7 @@ export class StudioStore {
       const sessionId=intent.target.sessionId,method='asset.stage_packet' as const,a=object({sessionId,requestId,method,args});
       const fingerprint=hash(canonical({sessionId,method,args}));
       const command=this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,false,admission);
-      this.db.prepare('INSERT INTO asset_stage_commands(run_id,ordinal,command_id,request_id,lease_epoch,fingerprint) VALUES(?,?,?,?,?,?)').run(runId,ordinal,command.id,command.requestId,command.leaseEpoch,fingerprint);
+      this.db.prepare('INSERT INTO asset_stage_attempt_commands(run_id,ordinal,command_id,request_id,lease_epoch,fingerprint) VALUES(?,?,?,?,?,?)').run(runId,ordinal,command.id,command.requestId,command.leaseEpoch,fingerprint);
       const stored:StageRunStored={runId,intent,intentSha256:run.intentSha256,createdAt:run.createdAt,updatedAt:this.iso(),closedAt:null};this.saveStageRun(stored);
       this.stageGuard(guard);return command;
     });}finally{this.#assetStageAdmissions.delete(admission);}
@@ -609,18 +652,23 @@ export class StudioStore {
     });
   }
   /** Local historical evidence only. Caller scope must be checked by the host. */
-  readStageRun(projectId:string,jobId:string):StageRunRecord|null {
+  readStageRun(projectId:string,jobId:string,runId?:string):StageRunRecord|null {
     if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
     if(!stageHash.safeParse(projectId).success||!stageJob.safeParse(jobId).success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid stage lookup.');
-    const row=this.db.prepare('SELECT run_id FROM asset_stage_runs WHERE project_id=? AND job_id=?').get(projectId,jobId) as Row|undefined;
+    if(runId!==undefined&&!stageJob.safeParse(runId).success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid run identity.');
+    const row=(runId===undefined?this.db.prepare('SELECT run_id FROM asset_stage_attempts WHERE project_id=? AND job_id=? ORDER BY attempt_no DESC LIMIT 1').get(projectId,jobId)
+      :this.db.prepare('SELECT run_id FROM asset_stage_attempts WHERE project_id=? AND job_id=? AND run_id=?').get(projectId,jobId,runId)) as Row|undefined;
     return row?this.stageRunById(row.run_id as string):null;
   }
   private stageRunById(runId:string):StageRunRecord {
-    const row=this.db.prepare('SELECT * FROM asset_stage_runs WHERE run_id=?').get(runId) as Row|undefined;
+    const row=this.db.prepare('SELECT * FROM asset_stage_attempts WHERE run_id=?').get(runId) as Row|undefined;
     if(!row)throw new ArcaneError('STUDIO_STAGE_NOT_FOUND','Unknown stage run.');
     const run=JSON.parse(row.payload as string) as StageRunStored,intent=stageIntent(run.intent);
     if(run.runId!==runId||intent.projectId!==row.project_id||intent.jobId!==row.job_id||run.intentSha256!==row.intent_sha256||hash(canonical(intent))!==run.intentSha256)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage journal identity differs.');
-    const rows=this.db.prepare('SELECT * FROM asset_stage_commands WHERE run_id=? ORDER BY ordinal LIMIT 513').all(runId) as Row[];
+    if(!Number.isSafeInteger(row.attempt_no)||Number(row.attempt_no)<1||Number(row.attempt_no)>64||row.continuity_key!==stageContinuityKey(intent)
+      ||(row.attempt_no===1?row.previous_run_id!==null:typeof row.previous_run_id!=='string'||!stageJob.safeParse(row.previous_run_id).success
+        ||!this.db.prepare('SELECT 1 FROM asset_stage_attempts WHERE run_id=? AND project_id=? AND job_id=? AND attempt_no=?').get(row.previous_run_id,intent.projectId,intent.jobId,Number(row.attempt_no)-1)))throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage attempt metadata differs.');
+    const rows=this.db.prepare('SELECT * FROM asset_stage_attempt_commands WHERE run_id=? ORDER BY ordinal LIMIT 513').all(runId) as Row[];
     if(rows.length>intent.plan.length)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage association exceeds its plan.');
     let invalidReceipt=false;
     const commands:StageRunCommandAssociation[]=rows.map((member,ordinal)=>{
@@ -636,7 +684,7 @@ export class StudioStore {
     const complete=!invalidReceipt&&commands.length===intent.plan.length&&commands.every(c=>c.command.state==='succeeded');
     const unresolved=invalidReceipt||commands.some(c=>c.command.state==='needs_reconciliation'||run.closedAt!==null&&(c.command.state==='dispatched'||c.command.state==='succeeded'));
     const phase=complete?'cpu-staged':unresolved?'needs_reconciliation':run.closedAt!==null||commands.some(c=>['failed','cancelled'].includes(c.command.state))?'stopped':'running';
-    return {...run,intent,phase,commands,receipt:complete?structuredClone(intent.plan.at(-1)!.expectedReceipt):null};
+    return {...run,intent,attempt:Number(row.attempt_no),previousRunId:row.previous_run_id as string|null,phase,commands,receipt:complete?structuredClone(intent.plan.at(-1)!.expectedReceipt):null};
   }
   /** Host-only queue entry. Routes and generic MCP commands use enqueue(), which
    * cannot mint this capability. The controller owns SAME-actor/job checks. */

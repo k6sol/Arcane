@@ -29,7 +29,7 @@ function gate() { let release!: () => void; const promise = new Promise<void>(ac
 
 async function fixture(t: test.TestContext, local = false) {
   const boundary = await realpath(tmpdir()), root = await mkdtemp(join(boundary, 'arcane-preparation-store-')), projectPath = await realpath(root);
-  let now = Date.now();
+  let now = Date.now(), epoch = 0;
   const cws = new ConversationWorkStore({ directory: join(root, 'bindings'), projectPath });
   cws.bind({ kind: 'asset-job', id: JOB, conversation: THREAD }); cws.bind({ kind: 'asset-job', id: NEXT, conversation: THREAD });
   const registry = createNativeAssetRegistry({ projectPath }), incarnation = registry.issue(), binding = { connectionId: 'fixture-connection', threadId: THREAD.threadId };
@@ -46,7 +46,7 @@ async function fixture(t: test.TestContext, local = false) {
       : { status: 'available', kind: 'group', id: 56, provenance: 'game.CreatorType/CreatorId' },
     studioUser: local ? { status: 'available', id: 78, provenance: 'StudioService:GetUserId' }
       : { status: 'not_applicable', id: null, provenance: 'StudioService:GetUserId' } };
-  function heartbeat(mode: 'Edit' | 'Play' = 'Edit', playEpoch = 0) {
+  function heartbeat(mode: 'Edit' | 'Play' = 'Edit', playEpoch = epoch) {
     return { sessionId: pair.sessionId, clientLifetimeId: 'fixture-plugin-lifetime', pluginArtifactHash: HASH,
       markerName: 'ArcaneTestProof_fixture', placeId: observation.placeId, universeId: observation.universeId,
       placeName: 'Synthetic preparation receipts', mode, playEpoch, continuitySupported: true, connected: true };
@@ -101,6 +101,7 @@ async function fixture(t: test.TestContext, local = false) {
     assert.equal((await lstat(root)).isSymbolicLink(), false); await rm(root, { recursive: true, force: true });
   });
   return { root, options, actor, prepared, witness, cws, registry, incarnation, studio, pair, observation, receipt,
+    nextWitness() { epoch++; studio.poll(pair.sessionId, heartbeat()); return {...witness,initialContextReceiptId:receipt(),confirmedContextReceiptId:receipt(),playEpoch:epoch}; },
     directPrepared, servicePrepared, assetServiceCreated: () => assets !== undefined,
     async nextPrepared() { return directPrepared(NEXT); },
     async create(limits?: Parameters<typeof createStudioImportPreparationStore>[0]['limits']) { store = await createStudioImportPreparationStore({ ...options, ...(limits ? { limits } : {}) }); return store; },
@@ -140,6 +141,21 @@ test('direct production fixture preparation equals real AssetService for both jo
   const targeted = await f.changedTarget(); assert.notEqual(targeted.digest, scaled.digest);
   assert.equal(targeted.manifest.target.parentRef, 'fixture-other-workspace');
   assert.deepEqual(await equivalent(JOB), targeted); await equivalent(NEXT);
+});
+
+test('explicit preparation attempts preserve originals and share the hard record cap',async t=>{
+  const f=await fixture(t),store=await f.create({records:2});
+  await store.save(f.actor,JOB,f.prepared,f.witness,guard);
+  const original=await readFile(join(f.options.directory,JOB+'.json'));
+  const attempt='33333333-3333-4333-8333-333333333333';
+  await store.saveAttempt(f.actor,JOB,attempt,f.prepared,f.witness,guard);
+  const record=await store.get(f.actor,JOB,guard,attempt);assert.equal(record?.schemaVersion,2);assert.equal(record?.preparationAttempt?.previousId,JOB);
+  assert.deepEqual(await readFile(join(f.options.directory,JOB+'.json')),original);
+  await assert.rejects(store.get(f.actor,NEXT,guard,attempt),code('SCOPE'));
+  const next=f.nextWitness();
+  await assert.rejects(store.saveAttempt(f.actor,JOB,'44444444-4444-4444-8444-444444444444',f.prepared,next,guard),code('LIMIT'));
+  assert.deepEqual((await readdir(f.options.directory)).filter(n=>n.endsWith('.json')&&n!=='preparation-owner.json').sort(),[JOB+'.json',attempt+'.json'].sort());
+  assert.deepEqual(await readFile(join(f.options.directory,JOB+'.json')),original);
 });
 
 test('preparation store consumes actual prepared codec and two real synthetic StudioStore receipts; immutable metadata survives reopen', async t => {

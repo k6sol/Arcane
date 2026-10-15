@@ -75,6 +75,7 @@ async function fixture(t) {
     const data = (directory, file) => existsSync(join(directory,file)) ? JSON.parse(readFileSync(join(directory,file),'utf8')) : [];
     const lifecycle = [], artifactHash = 'd'.repeat(64);
     let sharedStudioStore, sharedConversationStore, sharedPreparations, sharedImportHost, sharedAssets, sharedStaging, persistPreparation, savedArgs;
+    const persistenceArgumentCounts = [];
     const created = resource => {
       if (process.env.FIXTURE_SERVICE_FAIL === resource) throw new Error('Fixture startup failure: ' + resource);
       lifecycle.push({operation:'create',resource});
@@ -153,8 +154,12 @@ async function fixture(t) {
       assert.equal(options.studioImport.workAssociations, sharedConversationStore);
       assert.ok(options.studioImport.workAssociations instanceof ConversationWorkStore);
       const args = [Object.freeze({fixture:'actor'}), 'synthetic-job', Object.freeze({fixture:'plan'}), Object.freeze({fixture:'witness'}), () => assert.fail('Forward the guard without invoking it.')];
-      await persistPreparation(...args);
-      assert.equal(savedArgs.length, args.length); for (let i=0;i<args.length;i++) assert.equal(savedArgs[i],args[i], 'Forward persistence arguments unchanged to the same ledger.');
+      for (const forwarded of [args,[...args,undefined],[...args,'22222222-2222-4222-8222-222222222222']]) {
+        await persistPreparation(...forwarded);
+        assert.equal(savedArgs.length, forwarded.length, 'Do not discard the optional sixth preparation-attempt argument.');
+        for (let i=0;i<forwarded.length;i++) assert.equal(savedArgs[i],forwarded[i], 'Forward persistence arguments unchanged to the same ledger.');
+        persistenceArgumentCounts.push(savedArgs.length);
+      }
       created('assets');
       const outputRoot = options.outputRoot ?? join(options.cwd,'runtime','assets');
       sharedAssets={options,outputRoot,jobs:data(outputRoot,'index.json'),close:async()=>{closed('assets');}};
@@ -183,7 +188,7 @@ async function fixture(t) {
         assetProject:options.assetService.options.projectPath,assetCwd:options.assetService.options.cwd,
         assetOutputOverride:options.assetService.options.outputRoot??null,assetRoot:options.assetService.outputRoot,
         assetJobs:options.assetService.jobs,preparationDirectory:sharedPreparations.directory,preparationProject:sharedPreparations.projectPath,
-        importHostWired:options.assetService.options.studioImport===sharedImportHost.hooks,pluginArtifactHash:artifactHash}));
+        importHostWired:options.assetService.options.studioImport===sharedImportHost.hooks,pluginArtifactHash:artifactHash,persistenceArgumentCounts}));
       return {origin:'http://127.0.0.1:49999',token:'offline-fixture',url:'offline-fixture',close:async()=>{closed('lab');}};
     }
   `);
@@ -323,6 +328,14 @@ test('preexisting hashed state cannot be a junction to another project', async t
   if (!await directoryLink(t, f.projectB, plan.stateDirectory)) return;
   const result = f.run([f.projectA]);
   assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /links|redirected/);
+});
+
+test('actual product entry forwards original and explicit preparation attempts without changing guard order', async t => {
+  const f = await fixture(t), result = f.runProduct();
+  assert.equal(result.status, 0, result.stderr);
+  const product = observed(result.stdout, 'fixture-product:');
+  assert.equal(product.importHostWired, true);
+  assert.deepEqual(product.persistenceArgumentCounts, [5,6,6]);
 });
 
 test('product configuration preserves default product/lab/asset paths and default port', async t => {

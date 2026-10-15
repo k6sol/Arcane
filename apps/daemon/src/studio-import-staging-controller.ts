@@ -10,7 +10,7 @@ import {createStudioImportTransfer} from '../../../packages/asset-pipeline/src/s
 import type {AssetService} from './asset-service.js';
 import {assertStudioImportJobScope} from './asset-import-adapter.js';
 import type {StudioImportHostOptions} from './asset-import-adapter.js';
-import {assertNativeAssetActor,nativeAssetActorScope,type NativeAssetActor} from './native-asset-authority.js';
+import {assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,type NativeAssetActor} from './native-asset-authority.js';
 
 export interface StudioImportStagingConfiguration {
   projectPath: string;
@@ -26,7 +26,7 @@ export interface NativeStageStatus {
   jobId:string;projectId:string;
   stage:null|{runId:string;phase:'running'|'cpu-staged'|'stopped'|'needs_reconciliation';transferDigest:string;
     plannedPacketCount:number;plannedEnvelopeBytes:number;commands:{ordinal:number;commandId:string;state:StudioCommand['state']}[];
-    receipt:StudioAssetStageReceipt|null;engineVerification:'pending';imported:false;retry:false};
+    receipt:StudioAssetStageReceipt|null;receiptScope:'historical-cpu';currentBuffers:'unobserved';engineVerification:'pending';imported:false;retry:false};
 }
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 function fail(code: string): never {throw new ArcaneError(code, 'Native asset staging is unavailable, changed or incomplete. No import/upload was accepted.');}
@@ -39,7 +39,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
   if (!(studio instanceof StudioStore) || !(workAssociations instanceof ConversationWorkStore)
     || workAssociations.projectPath !== projectPath || host.workAssociations !== workAssociations
     || typeof assets.prepareStudioImportPayload !== 'function' || typeof host.validateTarget !== 'function'
-    || typeof host.releaseTarget !== 'function' || !/^[a-f0-9]{64}$/.test(pluginArtifactHash)) fail('STUDIO_STAGE_CONFIGURATION');
+    || typeof host.releaseTarget !== 'function' || typeof host.beginPreparationAttempt !== 'function' || !/^[a-f0-9]{64}$/.test(pluginArtifactHash)) fail('STUDIO_STAGE_CONFIGURATION');
   const now = config.now ?? Date.now;
   let busy = false, closed = false;
   return Object.freeze({
@@ -56,12 +56,20 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       return {jobId,projectId:scope.projectId,stage:run?{runId:run.runId,phase:run.phase,transferDigest:run.intent.transferDigest,
         plannedPacketCount:run.intent.plan.length,plannedEnvelopeBytes:run.intent.plan.reduce((n,p)=>n+p.envelopeByteLength,0),
         commands:run.commands.map(({ordinal,commandId,command})=>({ordinal,commandId,state:command.state})),
-        receipt:run.receipt,engineVerification:'pending',imported:false,retry:false}:null};
+        receipt:run.receipt,receiptScope:'historical-cpu',currentBuffers:'unobserved',engineVerification:'pending',imported:false,retry:false}:null};
     },
-    async stage(jobId: string, actor: NativeAssetActor, guard: () => void = () => {}): Promise<StudioAssetStageReceipt & {status: 'staged'; imported: false; commandIds: string[]}> {
+    async stage(jobId: string, actor: NativeAssetActor, guard: () => void = () => {}): Promise<StudioAssetStageReceipt & {status: 'staged'; imported: false; runId: string; commandIds: string[]}> {
       const scope = assertStudioImportJobScope(projectPath, workAssociations, actor, jobId);
       guard(); if (closed || busy) fail(closed ? 'STUDIO_STAGE_CLOSED' : 'STUDIO_STAGE_BUSY');
-      if(studio.readStageRun(scope.projectId,jobId))fail('STUDIO_STAGE_EXISTS');
+      const previous=studio.readStageRun(scope.projectId,jobId);
+      if(previous){
+        if(previous.closedAt===null)fail('STUDIO_STAGE_BUSY');
+        const current=studio.activeSessions().filter(s=>!s.revokedAt&&Number.isFinite(Date.parse(s.lastSeenAt))&&Date.parse(s.lastSeenAt)<=now()&&now()-Date.parse(s.lastSeenAt)<=30_000);
+        const proof=current.length===1?current[0]!.proof:null;
+        if(!proof)fail('STUDIO_STAGE_CONTINUITY');
+        if(current[0]!.id===previous.intent.target.sessionId&&proof.clientLifetimeId===previous.intent.continuity.clientLifetimeId&&proof.playEpoch<=previous.intent.continuity.playEpoch)fail('STUDIO_STAGE_EXISTS');
+      }
+      assertNativeAssetStageOperationAvailable(actor, jobId);
       busy = true;
       const expires = now() + STUDIO_STAGING_LIMITS.totalDeadlineMs;
       const base = () => {
@@ -73,7 +81,8 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       let captured = false, handle:StageRunHandle|null=null;
       try {
         base();
-        const data = await assets.prepareStudioImportPayload(jobId, actor);
+        const preparationAttempt = host.beginPreparationAttempt!(scope,jobId,actor,base);
+        const data = await assets.prepareStudioImportPayload(jobId, actor, preparationAttempt);
         base(); assertDecodedStudioImportPayload(data.payload);
         // Rebuild from process-branded immutable decoded chunks. Serialized
         // lookalikes and caller-mutated convenience buffers grant nothing.
@@ -105,14 +114,19 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         if (argumentsList.length > STUDIO_STAGING_LIMITS.packets || sizes.some(size => size > 256 * 1024)
           || sizes.reduce((sum, size) => sum + size, 0) > STUDIO_STAGING_LIMITS.envelopeBytes) fail('STUDIO_STAGE_BUDGET');
         let cumulativeBytes=0;
-        const started=studio.beginStageRun({projectId:scope.projectId,jobId,conversation:scope.conversation,
+        const intent={projectId:scope.projectId,jobId,conversation:scope.conversation,preparationAttemptId:preparationAttempt.id,
           transferDigest:transfer.digest,payloadDigest:transfer.payloadDigest,manifestDigest:data.prepared.manifest.digest,preparedDigest:data.prepared.digest,
           target:selection.target,continuity,plan:argumentsList.map((args,ordinal)=>{
             const packetByteLength=transfer.packets[ordinal]!.byteLength;cumulativeBytes+=packetByteLength;
             return {ordinal,argsSha256:sha(JSON.stringify(args)),packetByteLength,envelopeByteLength:sizes[ordinal]!,expectedReceipt:{
               transferDigest:transfer.digest,packetCount:ordinal+1,byteLength:cumulativeBytes,
               state:ordinal===argumentsList.length-1?'sealed' as const:'receiving' as const,engineVerification:'pending' as const}};
-          })},boundary);
+          })};
+        // Known source/context/target/budget preflight failures consume no stage
+        // claim. Latch immediately before durable admission, with NO refund:
+        // begin/queue uncertainty must never authorize replay in this turn.
+        boundary(); claimNativeAssetStageOperation(actor, jobId);
+        const started=previous?studio.beginStageAttempt(intent,previous.runId,boundary):studio.beginStageRun(intent,boundary);
         if(!started.created)fail('STUDIO_STAGE_EXISTS');handle=started.handle;
         const commandIds: string[] = [];
         let last: StudioAssetStageReceipt | null = null, bytes = 0;
@@ -140,7 +154,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           }
         }
         boundary(); if (!last || last.state !== 'sealed') fail('STUDIO_STAGE_RECEIPT');
-        return {...last, status: 'staged', imported: false, commandIds};
+        return {...last, status: 'staged', imported: false, runId:started.runId, commandIds};
       } finally {
         // Cancel only an undispatched packet; a delivered unknown result is
         // retained in the durable queue for reconciliation, never replayed.

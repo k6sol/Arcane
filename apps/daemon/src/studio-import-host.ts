@@ -7,6 +7,7 @@ import { ConversationWorkStore } from '../../../packages/storage/src/conversatio
 import { snapshotStudioImportSelection, type PreparedStudioImport, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { assertStudioImportJobScope, type StudioImportHostOptions } from './asset-import-adapter.js';
 import type { NativeAssetActor, NativeAssetScope } from './native-asset-authority.js';
+import type { StudioImportPreparationAttempt } from './asset-import-adapter.js';
 
 export interface ImportContextReceiptWitness {
   initialContextReceiptId: string;
@@ -22,7 +23,7 @@ export interface StudioImportHostConfiguration {
   pluginArtifactHash: string;
   /** Owned host persistence. JSON claims and receipts never grant engine access. */
   persistPreparation(actor: NativeAssetActor, jobId: string, prepared: PreparedStudioImport,
-    witness: ImportContextReceiptWitness, guard: () => void): Promise<void>;
+    witness: ImportContextReceiptWitness, guard: () => void, attemptId?: string): Promise<void>;
   now?: () => number;
 }
 const CONTEXT_DEADLINE_MS = 10_000;
@@ -55,6 +56,7 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
     typeof configuration.persistPreparation !== 'function') fail('STUDIO_IMPORT_CONFIGURATION');
   const now = configuration.now ?? Date.now;
   const captures = new Map<string, Capture>();
+  const attempts = new WeakMap<StudioImportPreparationAttempt, { actor: NativeAssetActor; jobId: string; scope: string; used: boolean }>();
   let closed = false;
   function live(session: StudioSession): void {
     if (closed) fail('STUDIO_IMPORT_CLOSED');
@@ -107,6 +109,12 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
   }
   const hooks: StudioImportHostOptions = {
     workAssociations,
+    beginPreparationAttempt(scope, jobId, actor, guard) {
+      check(actor, scope, jobId, guard);
+      const attempt = Object.freeze({kind: 'studio-import-preparation-attempt' as const, id: randomUUID()});
+      attempts.set(attempt, {actor, jobId, scope: scopeKey(scope), used: false});
+      return attempt;
+    },
     async selectTarget(scope, jobId, actor, guard) {
       check(actor, scope, jobId, guard);
       if (captures.has(jobId) || captures.size >= MAX_CAPTURES) fail('STUDIO_IMPORT_BUSY');
@@ -133,8 +141,10 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
       return selection;
     },
     validateTarget(scope, jobId, selection) { validate(scope, jobId, selection); },
-    async recordPrepared(scope, jobId, prepared, actor, guard) {
+    async recordPrepared(scope, jobId, prepared, actor, guard, attempt) {
       check(actor, scope, jobId, guard);
+      const admission = attempt ? attempts.get(attempt) : undefined;
+      if (attempt && (!admission || admission.actor !== actor || admission.jobId !== jobId || admission.scope !== scopeKey(scope) || admission.used)) fail('STUDIO_IMPORT_SCOPE');
       const captured = validate(scope, jobId, snapshotStudioImportSelection({ target: prepared.manifest.target,
         placement: prepared.manifest.placement, studsPerMeter: prepared.manifest.conversion.studsPerMeter }));
       // Observe again after export validation. Account, creator and opaque root
@@ -143,9 +153,10 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
       if (!isDeepStrictEqual(captured.context, confirmed.context)) fail('STUDIO_IMPORT_CONTINUITY');
       check(actor, scope, jobId, guard); validate(scope, jobId, captured.selection);
       const proof = studio.session(captured.sessionId).proof!;
+      if (admission) admission.used = true;
       await configuration.persistPreparation(actor, jobId, prepared, { initialContextReceiptId: captured.contextReceiptId,
         confirmedContextReceiptId: confirmed.receiptId, pluginArtifactHash, clientLifetimeId: proof.clientLifetimeId,
-        playEpoch: proof.playEpoch }, guard);
+        playEpoch: proof.playEpoch }, guard, attempt?.id);
       check(actor, scope, jobId, guard); validate(scope, jobId, captured.selection);
     },
     releaseTarget(scope, jobId) {

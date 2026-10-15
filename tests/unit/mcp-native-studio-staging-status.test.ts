@@ -18,9 +18,18 @@ function stage(): Stage {
   return {runId: OTHER, phase: 'cpu-staged', transferDigest: DIGEST, plannedPacketCount: 1,
     plannedEnvelopeBytes: 4096, commands: [{ordinal: 0, commandId: JOB, state: 'succeeded'}],
     receipt: {transferDigest: DIGEST, packetCount: 1, byteLength: 1024, state: 'sealed', engineVerification: 'pending'},
-    engineVerification: 'pending', imported: false, retry: false};
+    receiptScope: 'historical-cpu', currentBuffers: 'unobserved', engineVerification: 'pending', imported: false, retry: false};
 }
 function response(value: Stage | null = stage()): NativeStudioStagingStatusResponse {return {jobId: JOB, projectId: PROJECT, stage: value};}
+
+test('historical CPU receipt cannot normalize into currently held buffers or engine verification',()=>{
+  const input=response(),parsed=parseNativeStudioStagingStatusResponse(input,JOB,PROJECT);
+  assert.equal(parsed.stage?.receiptScope,'historical-cpu');assert.equal(parsed.stage?.currentBuffers,'unobserved');
+  for(const patch of [{receiptScope:'current'},{currentBuffers:'held'},{engineVerification:'verified'},{imported:true}]){
+    assert.equal(nativeStudioStagingStatusResponse.safeParse(response({...stage(),...patch} as Stage)).success,false);
+  }
+  const {currentBuffers,...without}=stage();assert.equal(nativeStudioStagingStatusResponse.safeParse({...response(),stage:without}).success,false);
+});
 function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json; charset=utf-8', ...headers}});
 }
