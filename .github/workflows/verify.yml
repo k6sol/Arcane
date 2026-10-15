@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: arcane-verify-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep checks for earlier commits running when another update is pushed.
+  group: arcane-verify-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   local-contracts:
