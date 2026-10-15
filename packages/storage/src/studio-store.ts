@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { sqliteTransportPath } from './sqlite-path.js';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -155,7 +156,7 @@ export class StudioStore {
     catch { throw new ArcaneError('LOCKED', 'Another daemon acquired this workspace.'); }
     writeFileSync(this.lockFd, JSON.stringify({ pid: process.pid, openedAt: this.iso() }));
     try {
-      this.db = new DatabaseSync(join(options.directory, 'studio.sqlite'), { timeout: 2000, allowExtension: false });
+      this.db = new DatabaseSync(sqliteTransportPath(join(options.directory, 'studio.sqlite')), { timeout: 2000, allowExtension: false });
       const version = this.db.prepare('PRAGMA user_version').get() as Row;
       if (Number(version.user_version) > 5) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;

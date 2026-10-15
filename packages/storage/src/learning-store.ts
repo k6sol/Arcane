@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { sqliteTransportPath } from './sqlite-path.js';
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
@@ -164,7 +165,7 @@ export class LearningStore {
     }
     noLinks(this.directory, true); mkdirSync(this.directory, { recursive: true, mode: 0o700 }); this.checkPaths();
     try {
-      this.db = new DatabaseSync(this.databasePath, { timeout: 2000, allowExtension: false });
+      this.db = new DatabaseSync(sqliteTransportPath(this.databasePath), { timeout: 2000, allowExtension: false });
       const version = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
       if (version > 1) fail('LEARNING_MIGRATION', 'Learning database is newer than this build; refusing to overwrite.');
       if (version !== 0 && version !== 1) fail('LEARNING_CORRUPT', 'Invalid learning schema version.');
