@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {realpathSync} from 'node:fs';
 import {dirname,isAbsolute,join,relative} from 'node:path';
 import {copyFile,lstat,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -24,8 +25,10 @@ test('the mandatory host VM and compiler resolve only to their verified official
 test('a changed installed member is rejected while the original pinned installation remains intact',async t=>{
   assert.ok(process.env.ARCANE_LUAU_BIN,'Acquire the mandatory VM with scripts/luau-test-runtime.mjs --install.');
   const source=dirname(process.env.ARCANE_LUAU_BIN),pin=LUAU_TEST_PINS[process.platform];
-  const owned=await mkdtemp(join(tmpdir(),'arcane-luau-member-'));
-  t.after(()=>{const tail=relative(tmpdir(),owned);assert.ok(!isAbsolute(tail)&&tail.startsWith('arcane-luau-member-')&&!tail.includes('..'));return rm(owned,{recursive:true,force:true});});
+  // Windows TEMP can name an 8.3/case alias; verify the fresh canonical fixture,
+  // so the intended corruption reaches the unchanged strict member-hash guard.
+  const boundary=realpathSync.native(tmpdir()),owned=realpathSync.native(await mkdtemp(join(boundary,'arcane-luau-member-')));
+  t.after(()=>{const tail=relative(boundary,owned);assert.ok(!isAbsolute(tail)&&tail.startsWith('arcane-luau-member-')&&!tail.includes('..'));return rm(owned,{recursive:true,force:true});});
   for(const name of [pin.archive,pin.runtime.name,pin.compiler.name])await copyFile(join(source,name),join(owned,name));
   const runtime=join(owned,pin.runtime.name),bytes=await readFile(runtime);bytes[bytes.length-1]^=1;await writeFile(runtime,bytes);
   await assert.rejects(verifyLuauTestInstallation(owned),/member identity/);

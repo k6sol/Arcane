@@ -6,6 +6,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { LUAU_TEST_PINS } from '../../packages/studio-test-controller/testing/luau-runtime-pins.ts';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const modulePath = path.join(repository, 'plugin/src/Sha256Stream.luau');
@@ -13,11 +14,6 @@ const legacyPath = path.join(repository, 'plugin/src/Sha256.luau');
 // Explicit injection only: no discovery, downloads, services, or product/Studio launches.
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compiler = process.env.ARCANE_LUAU_COMPILE;
-const offlineOptions = { skip: (!runtime || !compiler) && 'Inject both verified standalone Luau tools.' };
-const toolHashes = {
-  runtime: '4e86c0399aca661753d918bb775a152e35fd8f7a788b67076e1e03f81bc43703',
-  compiler: '74cf7ed3621b8966bac6fec7f1a0caf13616655fa06d346133cd31f6aac439d8',
-};
 const MAX_UPDATE = 512 * 1024;
 const MAX_TOTAL = 32 * 1024 * 1024;
 const nodeDigest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -27,13 +23,21 @@ const streamCheck = (expression, bytes, sizes) =>
   `checkStream(${expression}, "${nodeDigest(bytes)}", {${sizes.join(',')}})`;
 
 let verifiedTools;
-function verifyTools() {
-  return verifiedTools ??= Promise.all([
-    [runtime, toolHashes.runtime], [compiler, toolHashes.compiler],
+async function verifyToolPair(vm, compile) {
+  assert.equal(process.arch, 'x64', 'Pinned standalone Luau tools require x64.');
+  assert.ok(Object.hasOwn(LUAU_TEST_PINS, process.platform), 'Pinned standalone Luau tools require Windows or Linux.');
+  assert.ok(typeof vm === 'string' && vm.length > 0 && typeof compile === 'string' && compile.length > 0,
+    'Inject both verified standalone Luau tools.');
+  const pins = LUAU_TEST_PINS[process.platform];
+  await Promise.all([
+    [vm, pins.runtime], [compile, pins.compiler],
   ].map(async ([file, expected]) => {
-    assert.equal(nodeDigest(await readFile(file)), expected, `Unverified offline executable: ${file}`);
+    const bytes = await readFile(file);
+    assert.equal(bytes.length, expected.bytes, `Unverified offline executable size: ${file}`);
+    assert.equal(nodeDigest(bytes), expected.sha256, `Unverified offline executable: ${file}`);
   }));
 }
+function verifyTools() { return verifiedTools ??= verifyToolPair(runtime, compiler); }
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -118,12 +122,20 @@ test('stream reuses the existing SHA-256 constants and compression exactly', asy
   }
 });
 
-test('stream compiles with both explicitly injected, hash-verified offline tools', offlineOptions, async () => {
+test('stream admission requires both exact host-platform VM and compiler identities', async () => {
+  await verifyTools();
+  await assert.rejects(verifyToolPair(undefined, compiler), /Inject both/);
+  await assert.rejects(verifyToolPair(runtime, undefined), /Inject both/);
+  await assert.rejects(verifyToolPair(compiler, compiler), /Unverified offline executable/);
+  await assert.rejects(verifyToolPair(runtime, runtime), /Unverified offline executable/);
+});
+
+test('stream compiles with both explicitly injected, hash-verified offline tools', async () => {
   await verifyTools();
   run(compiler, ['--null', modulePath]);
 });
 
-test('stream matches NIST empty, abc, multi-block, and million-a vectors', offlineOptions, async () => {
+test('stream matches NIST empty, abc, multi-block, and million-a vectors', async () => {
   const vectors = [
     ['', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'],
     ['abc', 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'],
@@ -142,7 +154,7 @@ test('stream matches NIST empty, abc, multi-block, and million-a vectors', offli
   await runFixture(checks.join('\n'));
 });
 
-test('stream preserves all padding boundaries, split UTF-8, NULs, and random bytes', offlineOptions, async () => {
+test('stream preserves all padding boundaries, split UTF-8, NULs, and random bytes', async () => {
   const checks = [];
   for (let length = 0; length <= 130; length++) {
     const bytes = Buffer.from(Array.from({ length }, (_, index) => (index * 73 + 19) & 255));
@@ -161,7 +173,7 @@ test('stream preserves all padding boundaries, split UTF-8, NULs, and random byt
   await runFixture(checks.join('\n'));
 });
 
-test('actual 720 KiB binary stream exceeds the old cap with varying valid chunks', offlineOptions, async () => {
+test('actual 720 KiB binary stream exceeds the old cap with varying valid chunks', async () => {
   const payload = randomBytes(720 * 1024);
   const checks = [`local payload = ${luauBytes(payload)}`];
   for (const sizes of [[MAX_UPDATE], [128 * 1024], [1, 63, 64, 65, 104729, MAX_UPDATE]]) {
@@ -178,7 +190,7 @@ assert(legacyDigest(string.rep("x", ${MAX_UPDATE})) == "${nodeDigest(Buffer.allo
   await runFixture(checks.join('\n'), true);
 });
 
-test('private frozen handles isolate streams, cache finalization, and reject post-final updates', offlineOptions, async () => {
+test('private frozen handles isolate streams, cache finalization, and reject post-final updates', async () => {
   await runFixture(`
 assert(table.isfrozen(Sha256Stream) and getmetatable(Sha256Stream) == nil)
 local moduleFields = 0
@@ -219,7 +231,7 @@ ${streamCheck('"fresh"', Buffer.from('fresh'), [1])}
 `);
 });
 
-test('nonstring data, getter, and metatable inputs are rejected without invoking user code', offlineOptions, async () => {
+test('nonstring data, getter, and metatable inputs are rejected without invoking user code', async () => {
   await runFixture(`
 local hasher = Sha256Stream.new()
 hasher:update("a")
@@ -249,7 +261,7 @@ assert(hasher:digest() == "${nodeDigest(Buffer.from('abc'))}", "rejections must 
 `);
 });
 
-test('inclusive 32 MiB budget validates before mutation and encodes the full bit length', offlineOptions, async () => {
+test('inclusive 32 MiB budget validates before mutation and encodes the full bit length', async () => {
   const expected = nodeDigest(Buffer.alloc(MAX_TOTAL, 120));
   await runFixture(`
 local hasher = Sha256Stream.new()
