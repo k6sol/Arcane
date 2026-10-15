@@ -9,7 +9,7 @@ import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField
 import { canonical, validateCommandArgs } from '../../core/src/studio-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
-import type { StudioAssetStageArgs, StudioAssetStageReceipt } from '../../protocol/src/studio.js';
+import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
 import type { NativeConversation } from './conversation-work-store.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
@@ -54,6 +54,7 @@ export interface StageRunRecord {
 export type StageRunBeginResult =
   | {created:true;runId:string;handle:StageRunHandle;record:StageRunRecord}
   | {created:false;runId:string;handle:null;record:StageRunRecord};
+export interface StageReconstructionRecord {runId:string;command:StudioCommand;receipt:StudioAssetReconstructReceipt|null}
 type StageRunStored = Omit<StageRunRecord,'phase'|'commands'|'receipt'|'attempt'|'previousRunId'>;
 const stageHash=z.string().length(64).regex(/^[a-f0-9]{64}(?![\s\S])/);
 const stageJob=z.string().length(36).regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/);
@@ -134,6 +135,7 @@ export class StudioStore {
   #assetStageAdmissions = new WeakSet<object>();
   #uploadTickets = new WeakMap<object, string>();
   #stageRunHandles = new WeakMap<object,string>();
+  #reconstructionClaims = new Set<string>();
   #testOwners = new Map<string, string>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
@@ -155,7 +157,7 @@ export class StudioStore {
     try {
       this.db = new DatabaseSync(join(options.directory, 'studio.sqlite'), { timeout: 2000, allowExtension: false });
       const version = this.db.prepare('PRAGMA user_version').get() as Row;
-      if (Number(version.user_version) > 4) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
+      if (Number(version.user_version) > 5) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS grants (hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT;
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0) STRICT;
@@ -168,7 +170,8 @@ export class StudioStore {
         CREATE TABLE IF NOT EXISTS asset_stage_runs (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(project_id,job_id)) STRICT;
         CREATE TABLE IF NOT EXISTS asset_stage_commands (run_id TEXT NOT NULL REFERENCES asset_stage_runs(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
         CREATE TABLE IF NOT EXISTS asset_stage_attempts (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,attempt_no INTEGER NOT NULL CHECK(attempt_no>0),previous_run_id TEXT REFERENCES asset_stage_attempts(run_id),continuity_key TEXT NOT NULL,UNIQUE(project_id,job_id,attempt_no),UNIQUE(project_id,job_id,continuity_key)) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_attempt_commands (run_id TEXT NOT NULL REFERENCES asset_stage_attempts(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;`);
+        CREATE TABLE IF NOT EXISTS asset_stage_attempt_commands (run_id TEXT NOT NULL REFERENCES asset_stage_attempts(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
+        CREATE TABLE IF NOT EXISTS asset_stage_reconstructions (run_id TEXT PRIMARY KEY REFERENCES asset_stage_attempts(run_id),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT;`);
       this.transaction(() => {
         if (Number(version.user_version) < 4) {
           const old = this.db.prepare('SELECT * FROM asset_stage_runs LIMIT 65').all() as Row[];
@@ -180,7 +183,7 @@ export class StudioStore {
           }
           this.db.exec('INSERT INTO asset_stage_attempt_commands SELECT * FROM asset_stage_commands;');
         }
-        this.db.exec('PRAGMA user_version=4;');
+        this.db.exec('PRAGMA user_version=5;');
       });
       const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Row[];
       if (!columns.some(c=>c.name==='key_id')) this.db.exec('ALTER TABLE sessions ADD COLUMN key_id TEXT');
@@ -366,13 +369,13 @@ export class StudioStore {
     const method = methodField(a.method);
     // Before idempotent lookup: a model cannot read/reuse a host staging receipt
     // by guessing its request ID, even if its JSON is structurally identical.
-    if (method === 'asset.stage_packet' && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Binary staging requires the trusted native import controller.');
+    if ((method === 'asset.stage_packet'||method==='asset.reconstruct') && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Asset intake and reconstruction require the trusted native import controller.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     return this.transaction(() => this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,internalRestore,admission));
   }
   /** Already inside a transaction. No callback, await or second commit here. */
   private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object):StudioCommand {
-      if(method==='asset.stage_packet'&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Binary staging requires trusted host admission.');
+      if((method==='asset.stage_packet'||method==='asset.reconstruct')&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require trusted host admission.');
       const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
       if (old) {
         if (!equal(old.fingerprint as string, fingerprint)) throw new ArcaneError('IDEMPOTENCY', 'Request ID was already used with different input.');
@@ -429,6 +432,7 @@ export class StudioStore {
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
     const method = methodField(a.method);
+    if(method==='asset.stage_packet'||method==='asset.reconstruct')throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require private host admission, including idempotent lookup.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
     if (old) {
@@ -686,6 +690,74 @@ export class StudioStore {
     const phase=complete?'cpu-staged':unresolved?'needs_reconciliation':run.closedAt!==null||commands.some(c=>['failed','cancelled'].includes(c.command.state))?'stopped':'running';
     return {...run,intent,attempt:Number(row.attempt_no),previousRunId:row.previous_run_id as string|null,phase,commands,receipt:complete?structuredClone(intent.plan.at(-1)!.expectedReceipt):null};
   }
+  /** Derive a reconstruction from ORIGINAL associated packet bytes, never a
+   * caller's source list. Only the plugin owns the actual sealed receiver. */
+  private stageReconstructionArgs(run:StageRunRecord):StudioAssetReconstructArgs {
+    if(run.closedAt===null||run.phase!=='cpu-staged'||!run.receipt)throw new ArcaneError('STUDIO_RECONSTRUCT_STATE','Only a closed, fully sealed original stage run may reconstruct.');
+    const objects:StudioAssetReconstructArgs['objects']=[];
+    for(const {command}of run.commands){
+      const packet=object(JSON.parse(command.args.packet as string));
+      if(packet.kind!=='object')continue;
+      const source=object(packet.object),primitives=packet.primitives;
+      if(!Array.isArray(primitives))throw new ArcaneError('STUDIO_RECONSTRUCT_SOURCE','Original source primitives are unavailable.');
+      objects.push({sourceObjectId:source.sourceObjectId as string,meshExportSha256:source.meshExportSha256 as string,
+        vertexCount:primitives.reduce((n,p)=>n+Number(object(p).vertexCount),0),triangleCount:primitives.reduce((n,p)=>n+Number(object(p).triangleCount),0)});
+    }
+    const args:StudioAssetReconstructArgs={runId:run.runId,expected:{digest:run.intent.transferDigest,payloadDigest:run.intent.payloadDigest,manifestDigest:run.intent.manifestDigest},
+      packetCount:run.receipt.packetCount,byteLength:run.receipt.byteLength,target:run.intent.target,continuity:run.intent.continuity,objects};
+    return args;
+  }
+  /** Private host admission with one durable command association per original
+   * stage run. Repetition only reads the original command, never dispatches anew. */
+  enqueueStageReconstruction(projectId:string,jobId:string,runId:string,guard:()=>void):StudioCommand {
+    this.stageGuard(guard);
+    const run=this.readStageRun(projectId,jobId,runId);
+    if(!run)throw new ArcaneError('STUDIO_STAGE_NOT_FOUND','Original stage run is unavailable.');
+    const args=this.stageReconstructionArgs(run);
+    validateCommandArgs('asset.reconstruct',args,this.session(run.intent.target.sessionId));this.stageTarget(run.intent);
+    const prior=this.readStageReconstruction(projectId,jobId,runId);
+    if(prior)return prior.command;
+    if(this.#reconstructionClaims.has(runId))throw new ArcaneError('STUDIO_RECONSTRUCT_EXISTS','This original reconstruction has an uncertain admission; never replay.');
+    this.stageGuard(guard);this.#reconstructionClaims.add(runId); // BEFORE any uncertain transaction.
+    const admission=Object.freeze({});this.#assetStageAdmissions.add(admission);
+    try{return this.transaction(()=>{
+      this.stageGuard(guard);const current=this.readStageRun(projectId,jobId,runId);
+      if(!current||canonical(this.stageReconstructionArgs(current))!==canonical(args))throw new ArcaneError('STUDIO_RECONSTRUCT_SOURCE','Original stage association changed.');
+      this.stageTarget(current.intent);
+      const sessionId=current.intent.target.sessionId,method='asset.reconstruct' as const;
+      const requestId='assetreconstruct_'+hash(canonical({runId,intentSha256:current.intentSha256}));
+      if(this.db.prepare('SELECT id FROM commands WHERE request_id=?').get(requestId))throw new ArcaneError('STUDIO_RECONSTRUCT_CONFLICT','An unassociated command cannot be adopted.');
+      const fingerprint=hash(canonical({sessionId,method,args}));
+      const command=this.enqueueInTransaction(object({sessionId,requestId,method,args}),sessionId,requestId,method,fingerprint,false,admission);
+      this.db.prepare('INSERT INTO asset_stage_reconstructions VALUES(?,?,?,?,?)').run(runId,command.id,command.requestId,command.leaseEpoch,fingerprint);
+      this.stageGuard(guard);return command;
+    });}finally{this.#assetStageAdmissions.delete(admission);}
+  }
+  /** Historical facts only; this cannot observe current plugin resource life. */
+  readStageReconstruction(projectId:string,jobId:string,runId:string):StageReconstructionRecord|null {
+    const run=this.readStageRun(projectId,jobId,runId);if(!run)return null;
+    const row=this.db.prepare('SELECT * FROM asset_stage_reconstructions WHERE run_id=?').get(runId) as Row|undefined;
+    if(!row)return null;
+    const command=this.command(row.command_id as string),args=this.stageReconstructionArgs(run);
+    const fingerprint=hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args}));
+    const actual=this.db.prepare('SELECT fingerprint,state FROM commands WHERE id=?').get(command.id) as Row;
+    if(command.method!=='asset.reconstruct'||command.sessionId!==run.intent.target.sessionId||command.clientSessionId!==run.intent.continuity.clientLifetimeId
+      ||command.requestId!==row.request_id||command.leaseEpoch!==row.lease_epoch||canonical(command.args)!==canonical(args)
+      ||fingerprint!==row.fingerprint||actual.fingerprint!==fingerprint||actual.state!==command.state)throw new ArcaneError('STUDIO_RECONSTRUCT_RECEIPT','Original reconstruction command differs.');
+    const expected:StudioAssetReconstructReceipt={runId,transferDigest:run.intent.transferDigest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending'};
+    if(command.state==='succeeded'&&canonical(command.result)!==canonical(expected))throw new ArcaneError('STUDIO_RECONSTRUCT_RECEIPT','Original reconstruction receipt differs.');
+    return {runId,command,receipt:command.state==='succeeded'?structuredClone(expected):null};
+  }
+  /** Retire a request without authorizing another allocation or erasing facts. */
+  abandonStageReconstruction(projectId:string,jobId:string,runId:string):void {
+    this.transaction(()=>{
+      const record=this.readStageReconstruction(projectId,jobId,runId);if(!record)return;
+      const command=record.command;if(command.state!=='queued'&&command.state!=='dispatched')return;
+      command.state=command.state==='queued'?'cancelled':'needs_reconciliation';command.finishedAt=this.iso();
+      command.error='Native reconstruction stopped. Inspect the original receipt; never replay.';this.saveCommand(command);
+      this.event('command_'+command.state,command.id,{sessionId:command.sessionId,method:command.method});
+    });
+  }
   /** Host-only queue entry. Routes and generic MCP commands use enqueue(), which
    * cannot mint this capability. The controller owns SAME-actor/job checks. */
   enqueueAssetStage(input: unknown, guard: () => void): StudioCommand {
@@ -720,9 +792,29 @@ export class StudioStore {
     const q = sessionId ? this.db.prepare('SELECT payload FROM commands WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 100').all(sessionId) : this.db.prepare('SELECT payload FROM commands ORDER BY created DESC,rowid DESC LIMIT 100').all();
     return (q as Row[]).map(r => JSON.parse(r.payload as string) as StudioCommand);
   }
-  poll(sessionId: string, observation?: unknown): StudioCommand[] {
+  poll(sessionId: string, observation?: unknown, executingCommand?:unknown): StudioCommand[] {
     return this.transaction(() => {
       const s = this.session(sessionId); s.lastSeenAt = this.iso(); this.saveSession(s);
+      if(executingCommand!==undefined){
+        // No-new-work progress: validate the ORIGINAL admitted allocation before
+        // refreshing proof. Wrong/expired/terminal commands cannot revive it.
+        const progress=jsonObject(executingCommand,1024);
+        if(Object.keys(progress).length!==2||Object.keys(progress).some(k=>!['commandId','leaseEpoch'].includes(k)))throw new ArcaneError('COMMAND_STATE','Expected exact executing reconstruction identity.');
+        const command=this.command(textField(progress.commandId,'executing command ID'));
+        const association=this.db.prepare('SELECT run_id FROM asset_stage_reconstructions WHERE command_id=?').get(command.id) as Row|undefined;
+        const proof=s.proof,continuity=object(command.args.continuity);
+        if(!association||command.method!=='asset.reconstruct'||command.state!=='dispatched'||command.sessionId!==sessionId||command.clientSessionId!==s.clientSessionId
+          ||progress.leaseEpoch!==command.leaseEpoch||!Number.isFinite(Date.parse(command.expiresAt))||Date.parse(command.expiresAt)<=this.now()
+          ||!proof||!Number.isFinite(Date.parse(proof.expiresAt))||Date.parse(proof.expiresAt)<=this.now()
+          ||proof.mode!=='Edit'||!proof.connected||!proof.continuitySupported||proof.clientLifetimeId!==continuity.clientLifetimeId
+          ||proof.pluginArtifactHash!==continuity.pluginArtifactHash||proof.playEpoch!==continuity.playEpoch)throw new ArcaneError('COMMAND_STATE','Executing reconstruction is absent, stale or requires reconciliation.');
+        const row=this.db.prepare('SELECT project_id,job_id FROM asset_stage_attempts WHERE run_id=?').get(association.run_id!) as Row|undefined;
+        if(!row||this.readStageReconstruction(row.project_id as string,row.job_id as string,association.run_id as string)?.command.id!==command.id)throw new ArcaneError('COMMAND_STATE','Original reconstruction association differs.');
+        validateCommandArgs('asset.reconstruct',command.args,s);
+        const observed=jsonObject(observation,4096);
+        if(observed.mode!=='Edit'||observed.connected!==true||observed.continuitySupported!==true||observed.clientLifetimeId!==continuity.clientLifetimeId
+          ||observed.pluginArtifactHash!==continuity.pluginArtifactHash||observed.playEpoch!==continuity.playEpoch)throw new ArcaneError('IDENTITY','Executing reconstruction Edit continuity changed.');
+      }
       if (observation !== undefined) {
         if (!s.allowWrites || !s.allowedRoots.includes('ServerStorage')) throw new ArcaneError('SCOPE','A continuity marker requires explicit writable ServerStorage scope.');
         const p = jsonObject(observation, 4096);
@@ -734,6 +826,7 @@ export class StudioStore {
         s.proof={sessionId:s.id,clientLifetimeId:s.clientSessionId,pluginArtifactHash:p.pluginArtifactHash,markerName:p.markerName,placeId:s.placeId,universeId:s.universeId,placeName:s.name,mode:p.mode as 'Edit'|'Play',playEpoch:p.playEpoch as number,continuitySupported:p.continuitySupported,connected:p.connected,observedAt:this.iso(),expiresAt:new Date(this.now()+6000).toISOString()};
         this.saveSession(s);
       }
+      if(executingCommand!==undefined)return []; // Never dispatch, renew a lease or adopt new work.
       const active = this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state IN ('dispatched','needs_reconciliation') ORDER BY created,rowid LIMIT 1").get(sessionId) as Row | undefined;
       if (active) {
         const c = JSON.parse(active.payload as string) as StudioCommand;
@@ -772,7 +865,12 @@ export class StudioStore {
           || !Number.isSafeInteger(receipt.byteLength) || (receipt.byteLength as number) < Buffer.byteLength(c.args.packet as string) || (receipt.byteLength as number) > 48 * 1024 * 1024
           || receipt.state !== (packet.kind === 'seal' ? 'sealed' : 'receiving') || receipt.engineVerification !== 'pending') throw new ArcaneError('RECEIPT', 'Asset staging receipt differs from its exact packet.');
       }
-      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet') {
+      if(a.state==='succeeded'&&c.method==='asset.reconstruct'){
+        const args=c.args as unknown as StudioAssetReconstructArgs;
+        const expected:StudioAssetReconstructReceipt={runId:args.runId,transferDigest:args.expected.digest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending'};
+        if(canonical(result)!==canonical(expected))throw new ArcaneError('RECEIPT','Reconstruction receipt differs from the exact original sources.');
+      }
+      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet' && c.method !== 'asset.reconstruct') {
         const mutation = object(object(result).mutation, 'mutation receipt');
         if (mutation.kind !== c.method) throw new ArcaneError('RECEIPT', 'Mutation receipt kind mismatch.');
         const r = object(mutation.ref);
@@ -797,7 +895,7 @@ export class StudioStore {
   }
   private restoreInput(input: unknown): Record<string, Json> {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
-    if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
+    if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet'||prior.method==='asset.reconstruct') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
     return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };
   }

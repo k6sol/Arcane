@@ -14,6 +14,8 @@ The builder retains an in-memory factory representation for offline VM fixtures;
 
 The only root item is an enabled Script named `ArcaneLocalBridge`. Its thirteen child ModuleScripts preserve the hierarchy declared by `PLUGIN_SOURCES` and `plugin/default.project.json`. Main requires `script.<Module>`; each child module requires `script.Parent.<Module>`. The plugin artifacts contain neither test doubles nor fixtures.
 
+Plugin 0.1.9 also advertises the private host-owned `asset.reconstruct` capability. It consumes the actual sealed receiver once, allocates detached EditableMeshes through AssetService, and keeps their ownership private until cleanup. Its metadata receipt remains `imported:false` and `engineVerification:"pending"`; historical receipts never establish current resource lifetime, upload rights or native acceptance. See [the reconstruction boundary and verification note](STUDIO_RECONSTRUCTION_20261015.md).
+
 ## Installation handoff
 
 Installation and native testing belong to the parent. Build does not install, open Studio or modify a place.

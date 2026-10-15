@@ -225,7 +225,7 @@ function AssetMesh.create(data: Data, assetService: MeshService, guard: () -> bo
 	if not ok then
 		if ownedMesh ~= nil then
 			local cleaned = pcall(function() (ownedMesh :: EditableMesh):Destroy() end)
-			if not cleaned then fail("ENGINE", "Mesh reconstruction failed; owned resource destruction also failed.") end
+			if not cleaned then error(table.freeze({code = "ENGINE", message = "Mesh reconstruction failed; owned resource destruction also failed.", cleanupFailed = true}), 0) end
 		end
 		if type(result) == "table" and type(result.code) == "string" then error(result, 0) end
 		fail("ENGINE", "Mesh reconstruction or injected callback failed: " .. tostring(result))

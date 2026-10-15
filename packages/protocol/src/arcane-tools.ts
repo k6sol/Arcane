@@ -11,6 +11,7 @@ export const ARCANE_TOOL_NAMES = Object.freeze([
 /** Reviewed native asset surface; selected only by trusted host native hooks. */
 export const ARCANE_NATIVE_TOOL_NAMES = Object.freeze([
   ...ARCANE_TOOL_NAMES, 'assets_adopt_glb', 'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_studio_staging_status',
+  'assets_reconstruct_studio_import','assets_studio_reconstruction_status',
 ] as const);
 
 /** Read-only connection discovery is not adequate readiness for a build task. */

@@ -297,7 +297,7 @@ function Transport:exchange(desired: any): ()
 	if self.generation ~= desired.generation then self.disconnectRequested = true; return end
 	if intent and self.recovery == intent then intent.sessionId = result.sessionId; intent.needsStatus = false; intent.attempts = 0 end
 	self:checkIdentity(result) -- Before resolving any roots in the current engine.
-	self.operations = Operations.new(result, self.gameModel, self.http)
+	self.operations = Operations.new(result, self.gameModel, self.http, function(): () self:assetProgress() end)
 	local editor = self.operations.editor
 	-- Fence the yielding editor call's return before Operations can reread source.
 	-- Existing operation/callback guards still own lease, baseline and recovery.
@@ -371,6 +371,50 @@ function Transport:guard(command: any, pair: any): ()
 			or continuity.clientLifetimeId ~= proof.clientLifetimeId or continuity.pluginArtifactHash ~= proof.pluginArtifactHash
 			or continuity.playEpoch ~= proof.playEpoch or not self:isEdit() then V.fail("SCOPE", "Asset staging Edit continuity changed or is unavailable.") end
 	end
+	if command.method == "asset.reconstruct" and self.assetEngineAdmitted then
+		local renewal = self.assetRenewal
+		local wall, monotonic = DateTime.now().UnixTimestampMillis, os.clock()
+		if not renewal or renewal.commandId ~= command.id or renewal.leaseEpoch ~= command.leaseEpoch
+			or wall < renewal.observedAt or wall >= renewal.expiresAt or monotonic < renewal.monotonicStartedAt or monotonic >= renewal.monotonicExpiresAt then
+			V.fail("SCOPE", "Authenticated reconstruction renewal expired; no further engine work is admitted.")
+		end
+	end
+end
+
+-- The same single worker refreshes only its exact dispatched reconstruction.
+-- Called from existing mesh batch yields; no parallel task or lease extension.
+function Transport:assetProgress(): ()
+	local command, pair = self.executingCommand, self.pair
+	if not command or command.method ~= "asset.reconstruct" then return end
+	self:guard(command, pair)
+	local started = os.clock()
+	if self.assetEngineAdmitted and self.assetProgressAt and started >= self.assetProgressAt and started - self.assetProgressAt < 2 then return end
+	local proof = if self.testProof then self.testProof:snapshot() else nil
+	self:guard(command, pair)
+	self.assetProgressAt = started
+	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = proof,
+		executingCommand = {commandId = command.id, leaseEpoch = command.leaseEpoch}}, pair.token)
+	V.fields(response, {"commands", "progress"}, "reconstruction progress")
+	if #V.list(response.commands, 1, "progress commands") ~= 0 then V.fail("RECONCILE", "Reconstruction progress cannot dispatch new work.") end
+	local progress = V.fields(response.progress, {"commandId", "leaseEpoch", "observedAt", "expiresAt"}, "progress renewal")
+	if progress.commandId ~= command.id or progress.leaseEpoch ~= command.leaseEpoch then V.fail("RECONCILE", "Progress renewal belongs to another command or lease.") end
+	local function timestamp(value: any): number
+		if type(value) ~= "string" or #value > 64 or not string.match(value, "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$") then V.fail("SCOPE", "Progress renewal requires exact UTC timestamps.") end
+		local parsed, result = pcall(function(): any return DateTime.fromIsoDate(value) end)
+		if not parsed or not result or type(result.UnixTimestampMillis) ~= "number" then V.fail("SCOPE", "Progress renewal timestamp is unavailable.") end
+		return result.UnixTimestampMillis
+	end
+	local observed, expires = timestamp(progress.observedAt), timestamp(progress.expiresAt)
+	local elapsed, received = os.clock() - started, DateTime.now().UnixTimestampMillis
+	if elapsed < 0 or elapsed >= 4 or observed > received or expires - observed ~= 6000 or received >= expires then
+		V.fail("SCOPE", "Progress acknowledgement is stale or exceeded its bounded wait; no engine work is admitted.")
+	end
+	-- Candidate is checked BEFORE replacing the prior permit. Every subsequent
+	-- reconstruction guard enforces both server UTC and request-start duration.
+	self.assetRenewal = {commandId = command.id, leaseEpoch = command.leaseEpoch, observedAt = observed, expiresAt = expires,
+		monotonicStartedAt = started, monotonicExpiresAt = started + 6}
+	self.assetEngineAdmitted = true
+	self:guard(command, pair)
 end
 
 function Transport:dispatch(command: any): ()
@@ -390,11 +434,14 @@ function Transport:dispatch(command: any): ()
 	end
 	self.highEpoch = command.leaseEpoch
 	local pair = self.pair
+	self.executingCommand, self.assetProgressAt, self.assetRenewal, self.assetEngineAdmitted = command, nil, nil, false
 	self:status("executing", command.method, command.id)
 	local ok, output = pcall(function()
 		self:guard(command, pair)
 		return self.operations:execute(command, function() self:guard(command, pair) end)
 	end)
+	self.executingCommand = nil
+	if self.stopped then return end
 	local unsafe = not ok and type(output) == "table" and output.unsafe == true
 	local payload: any = {sessionId = pair.sessionId, commandId = command.id,
 		state = if ok then "succeeded" else "failed"}
@@ -502,6 +549,18 @@ function Transport:tick(): number
 		return Transport.POLL_SECONDS
 	end
 	self:observeIdentity(pair.identityFence)
+	-- Retained buffers/EditableMeshes belong to one Edit epoch, including while
+	-- idle. Retirement is local and never turns a historical receipt into a retry.
+	local observed, observation = pcall(function(): any return if self.testProof then self.testProof:snapshot() else nil end)
+	if not observed then observation = nil end
+	if self.operations and self.operations.retireAssetContinuity then
+		local cleaned = pcall(function() self.operations:retireAssetContinuity(observation) end)
+		if not cleaned then
+			self:disposeOperations()
+			self.assetCleanupFailed = true; self.blocked = true
+			V.fail("CLEANUP", ASSET_CLEANUP_FAILED)
+		end
+	end
 	if self.pending then
 		local receipt = self.pending
 		local response = self:post(pair.url, ROUTES.result, receipt.body, pair.token)
@@ -513,7 +572,6 @@ function Transport:tick(): number
 		return Transport.POLL_SECONDS
 	end
 	if self.blocked then return Transport.POLL_SECONDS end
-	local observation = if self.testProof then self.testProof:snapshot() else nil
 	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = observation}, pair.token)
 	-- A poll that returns after disconnect/re-pair can never dispatch old work.
 	if self.stopped or self.pair ~= pair or self.generation ~= pair.generation or self.disconnectRequested then return Transport.POLL_SECONDS end

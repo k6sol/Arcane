@@ -371,3 +371,75 @@ rejects(function() client:guard(command, client.pair) end, "SCOPE")
 client.testProof = nil; rejects(function() client:guard(command, client.pair) end, "SCOPE")
 client:stop()
 `));
+
+const progressSetup=`
+local client=connected();fixture.expiry=1000000;fixture.monotonic=fixture.now/1000
+getfenv(Transport.assetProgress).os={clock=function() return fixture.monotonic end}
+local parse=DateTime.fromIsoDate
+DateTime.fromIsoDate=function(value)
+ local seconds,millis=string.match(value,'^2026%-01%-01T00:00:(%d%d)%.(%d%d%d)Z$')
+ if seconds then return {UnixTimestampMillis=tonumber(seconds)*1000+tonumber(millis)} end
+ return parse(value)
+end
+local function iso(value) return string.format('2026-01-01T00:00:%02d.%03dZ',math.floor(value/1000),value%1000) end
+local proof=proofFor(client)
+client.testProof={snapshot=function() return table.clone(proof) end,stop=function() end}
+local command=stageCommand(client,proof);command.method='asset.reconstruct'
+client.executingCommand=command;client.assetEngineAdmitted=false;client.assetRenewal=nil
+local function advance(ms) fixture.now+=ms;fixture.monotonic+=ms/1000 end
+local delay=0;local change=nil;local commandList=nil
+fixture.httpHook=function(request)
+ table.insert(requests,request);assert(client.inFlight==true,'progress uses the single existing flight')
+ local body=V.decode(request.Body,http)
+ assert(body.sessionId==client.pair.sessionId and body.executingCommand.commandId==command.id and body.executingCommand.leaseEpoch==command.leaseEpoch)
+ assert(body.observation.playEpoch==proof.playEpoch and body.observation.clientLifetimeId==proof.clientLifetimeId)
+ local accepted=fixture.now
+ advance(delay)
+ local progress={commandId=command.id,leaseEpoch=command.leaseEpoch,observedAt=iso(accepted),expiresAt=iso(accepted+6000)}
+ if change then change(progress) end
+ return reply({commands=commandList or V.array({}),progress=progress})
+end
+`;
+test('exact progress renews across a long reconstruction without second flight, lease, queue or work dispatch',options,t=>run(t,progressSetup+`
+local before=#requests;client.assetProgressAt=fixture.monotonic -- stale timing marker cannot skip initial admission
+client:assetProgress();assert(#requests==before+1 and client.assetEngineAdmitted and client.assetRenewal)
+client:assetProgress();assert(#requests==before+1,'ordinary repeated guards cannot flood progress')
+for step=1,9 do advance(2000);client:assetProgress();client:guard(command,client.pair) end
+assert(#requests==before+10 and fixture.now>6000 and client.pending==nil and client.cacheCount==0 and client.highEpoch==command.leaseEpoch)
+assert(command.expiresAt=='2099-01-01T00:00:00.000Z' and client.inFlight==false)
+client:stop()
+`));
+test('late and overlong progress ACKs cannot admit initial engine allocation',options,t=>run(t,progressSetup+`
+delay=7000;rejects(function() client:assetProgress() end,'SCOPE')
+assert(not client.assetEngineAdmitted and client.assetRenewal==nil)
+-- Five seconds is still inside a six-second server expiry, but exceeds the
+-- conservative monotonic request bound and cannot start the small-mesh path.
+client.assetProgressAt=nil;delay=5000
+rejects(function() client:assetProgress() end,'SCOPE');assert(not client.assetEngineAdmitted and client.assetRenewal==nil)
+client:stop()
+`));
+test('every subsequent reconstruction guard enforces retained UTC and monotonic renewal expiry',options,t=>run(t,progressSetup+`
+client:assetProgress();local renewed=client.assetRenewal;advance(5900)
+client:guard(command,client.pair);advance(101)
+rejects(function() client:guard(command,client.pair) end,'SCOPE')
+assert(client.assetRenewal==renewed)
+-- A backward wall-clock correction cannot revive a monotonic expired permit.
+fixture.now=renewed.observedAt+1000
+rejects(function() client:guard(command,client.pair) end,'SCOPE')
+client:stop()
+`));
+test('wrong command/lease/TTL and malicious nonempty progress ACK cannot replace the original permit',options,t=>run(t,progressSetup+`
+client:assetProgress();local original=client.assetRenewal
+advance(2000);change=function(progress) progress.commandId='different' end
+rejects(function() client:assetProgress() end,'RECONCILE');assert(client.assetRenewal==original)
+change=function(progress) progress.leaseEpoch+=1 end
+client.assetProgressAt=nil
+rejects(function() client:assetProgress() end,'RECONCILE');assert(client.assetRenewal==original)
+change=function(progress) progress.expiresAt=iso(fixture.now+12000) end
+client.assetProgressAt=nil
+rejects(function() client:assetProgress() end,'SCOPE');assert(client.assetRenewal==original)
+change=nil;commandList=V.array({{id='untrusted-new-work'}})
+client.assetProgressAt=nil
+rejects(function() client:assetProgress() end,'RECONCILE');assert(client.assetRenewal==original and client.pending==nil and client.cacheCount==0)
+client:stop()
+`));

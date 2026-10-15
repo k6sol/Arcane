@@ -66,7 +66,13 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         if (url.pathname === '/v1/plugin/connect') {send(200,store.connectWithKey(a,Number(new URL(origin).port)));return true;}
         if (url.pathname === '/v1/plugin/pair') { send(200, store.pair(a)); return true; }
         const sessionId = textField(a.sessionId, 'session ID'); store.authenticate(sessionId, bearer);
-        if (url.pathname === '/v1/plugin/poll') send(200, { commands: store.poll(sessionId, a.observation) });
+        if (url.pathname === '/v1/plugin/poll') {
+          const commands=store.poll(sessionId,a.observation,a.executingCommand);
+          if(a.executingCommand!==undefined){
+            const command=store.command(textField(object(a.executingCommand).commandId,'executing command ID')),proof=store.session(sessionId).proof!;
+            send(200,{commands,progress:{commandId:command.id,leaseEpoch:command.leaseEpoch,observedAt:proof.observedAt,expiresAt:proof.expiresAt}});
+          }else send(200,{commands});
+        }
         else if (url.pathname === '/v1/plugin/result') { store.result(a); send(200, { accepted: true }); }
         else if (url.pathname === '/v1/plugin/disconnect') { store.revoke(sessionId); send(200, { revoked: true }); }
         else send(404, { error: 'NOT_FOUND', message: 'Unknown plugin endpoint.' });

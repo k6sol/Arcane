@@ -109,7 +109,7 @@ assert(keyInput.Active and keyInput.Selectable and keyInput.TextEditable, "key i
 assert(keyInput.Position[1] == 0 and keyInput.Position[2] == 0 and keyInput.Position[3] == 0 and keyInput.Position[4] == 0 and keyInput.Size[1] == 1 and keyInput.Size[2] == 0 and keyInput.Size[3] == 1 and keyInput.Size[4] == 0, "the entire key entry is an editable hit area")
 assert(fixture.widgetInfo[1] == Enum.InitialDockState.Float and fixture.widgetInfo[2] == true and fixture.widgetInfo[3] == true, "startup opens a floating popup even after a previously hidden session")
 assert(fixture.widgetInfo[4] == 260 and fixture.widgetInfo[5] == 184 and fixture.widgetInfo[6] == 230, "compact default content area and minimum width")
-assert(__arcaneRequire("Validation").VERSION == "0.1.8", "runtime advertises plugin 0.1.8")
+assert(__arcaneRequire("Validation").VERSION == "0.1.9", "runtime advertises plugin 0.1.9")
 local bottomPadding
 for _, child in ipairs(control.Parent:GetChildren()) do
   if child:IsA("UIPadding") then bottomPadding = child.PaddingBottom.Offset end

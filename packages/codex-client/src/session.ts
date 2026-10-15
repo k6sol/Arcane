@@ -166,6 +166,8 @@ export class CodexSession {
   #failureCode: string | null = null;
   #threadOperation: Operation | null = null;
   #turnOperation: Operation | null = null;
+  #automaticWriteOperation: Operation | null = null;
+  #automaticWriteStarts = new WeakSet<Operation>();
   #catalogueLoading = false;
   #cancelledTurnId: string | null = null;
   #knownTurnIds = new Set<string>();
@@ -282,10 +284,12 @@ export class CodexSession {
     this.#ensureReady();
     try { return await this.#readAccount(); }
     catch (error) {
+      const automatic = this.#endAutomaticWrites();
       this.#retireNativeAssets();
       this.#account = null;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel');
+      if (automatic) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Account verification failed during a writable turn.'));
       throw error;
     }
   }
@@ -305,6 +309,7 @@ export class CodexSession {
     if (this.#selection?.model === pair.model && this.#selection.effort === pair.effort &&
         (!thread || thread.selection.model === pair.model && thread.selection.effort === pair.effort)) return structuredClone(pair);
     if (thread) {
+      this.#endAutomaticWrites();
       thread.writeGranted = false;
       // Only stale, non-active previews can remain here. Invalidate locally without an RPC.
       this.#clearApprovals(null);
@@ -343,6 +348,8 @@ export class CodexSession {
     const thread = this.#requireThread(action.threadId);
     if (this.#turnPreflight) fail('STATE', 'Wait for the current turn isolation check before granting writes.');
     if (thread.turnStatus === 'cancelling' || thread.turnStatus === 'unknown' || thread.turnStatus === 'starting') fail('STATE', 'Writes cannot be granted during an uncertain lifecycle.');
+    // An explicit thread grant may promote an active one-turn permission.
+    this.#automaticWriteOperation = null;
     thread.writeGranted = true;
     return structuredClone(thread);
   }
@@ -350,6 +357,7 @@ export class CodexSession {
     exact(action, ['initiatedBy','threadId']); human({ initiatedBy: action.initiatedBy });
     const thread = this.#requireThread(action.threadId, false);
     if (this.#turnPreflight?.thread === thread) this.#turnPreflight.revoked = true;
+    this.#endAutomaticWrites();
     thread.writeGranted = false;
     this.#clearApprovals('cancel');
     // Stop the active turn as well: a sandbox already sent on turn/start cannot be downgraded locally.
@@ -357,8 +365,10 @@ export class CodexSession {
       this.#transport.stop(new CodexClientError('GRANT_REVOKED', 'Write grant revoked during an active turn; explicit recovery is required.'));
     }
   }
-  async startTurn(action: HumanAction & { threadId: string; text: string }): Promise<ThreadState> {
-    exact(action, ['initiatedBy','threadId','text']); human({ initiatedBy: action.initiatedBy });
+  async startTurn(action: HumanAction & { threadId: string; text: string; allowWorkspaceWrites?: boolean }): Promise<ThreadState> {
+    exact(action, ['initiatedBy','threadId','text','allowWorkspaceWrites']); human({ initiatedBy: action.initiatedBy });
+    if (Object.hasOwn(action, 'allowWorkspaceWrites') && typeof action.allowWorkspaceWrites !== 'boolean') fail('ARGUMENTS', 'Send workspace permission must be a boolean.');
+    const allowWorkspaceWrites = action.allowWorkspaceWrites === true;
     const thread = this.#requireThread(action.threadId);
     if (this.#turnPreflight || this.#threadOperation || this.#turnOperation || this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown') ||
         !['idle','completed','failed','interrupted'].includes(thread.turnStatus)) fail('BUSY', 'The previous turn must be reconciled before starting another.');
@@ -391,6 +401,13 @@ export class CodexSession {
     this.#clearApprovals('cancel');
     thread.turnId = null; thread.turnStatus = 'starting';
     delete thread.durationMs;
+    // Arm only the actual operation after every asynchronous isolation check.
+    // The flag is host intent, never provider metadata or a persistent grant.
+    if (allowWorkspaceWrites && !thread.writeGranted) {
+      this.#automaticWriteOperation = operation;
+      this.#automaticWriteStarts.add(operation);
+      thread.writeGranted = true;
+    }
     try {
       const result = await this.#requestOperation(operation, {
         threadId: thread.threadId, input: [{ type: 'text', text, text_elements: [] }],
@@ -407,8 +424,9 @@ export class CodexSession {
         if (operation.turnId && operation.turnId !== turnId) fail('PROTOCOL', 'Turn acknowledgement changed the observed ID.');
         operation.turnId = turnId; thread.turnId = turnId; this.#knownTurnIds.add(turnId);
         // A late acknowledgement cannot resurrect a completed or cancelled turn.
-        if (thread.turnStatus === 'starting') thread.turnStatus = turnStatus;
+        if (thread.turnStatus === 'starting' || TERMINAL.has(turnStatus) && thread.turnStatus === 'inProgress') thread.turnStatus = turnStatus;
         if (TERMINAL.has(turnStatus) && usageCount(turn.durationMs, 31_536_000_000)) thread.durationMs = turn.durationMs;
+        if (TERMINAL.has(turnStatus)) this.#endAutomaticWrites(operation);
         if (TERMINAL.has(turnStatus) && !this.#endNativeAssetIntent(operation)) {
           throw new CodexClientError('UNKNOWN', 'Native asset completion is uncertain.', true);
         }
@@ -431,6 +449,7 @@ export class CodexSession {
     const operation = this.#newOperation('turn/interrupt', thread.threadId, turnId);
     // Fence first, synchronously, before any write or acknowledgement. Late prompts cannot be accepted.
     this.#cancelledTurnId = turnId; thread.turnStatus = 'cancelling'; thread.writeGranted = false;
+    this.#endAutomaticWrites();
     this.#endNativeAssetIntent();
     this.#clearApprovals('cancel');
     try {
@@ -517,7 +536,11 @@ export class CodexSession {
         plan: raw?.type === 'chatgpt' && typeof raw.planType === 'string' && PLANS.has(raw.planType) ? raw.planType : null,
         requiresOpenaiAuth: result.requiresOpenaiAuth,
       };
-      if ((this.#ready || this.#thread) && this.#account && (this.#account.auth !== account.auth || this.#account.plan !== account.plan || this.#account.requiresOpenaiAuth !== account.requiresOpenaiAuth)) this.#retireNativeAssets();
+      if ((this.#ready || this.#thread) && this.#account && (this.#account.auth !== account.auth || this.#account.plan !== account.plan || this.#account.requiresOpenaiAuth !== account.requiresOpenaiAuth)) {
+        const automatic = this.#endAutomaticWrites();
+        this.#retireNativeAssets();
+        if (automatic) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Account metadata changed during a writable turn.'));
+      }
       this.#account = account;
       if (account.auth !== 'subscription' && this.#thread) {
         this.#thread.writeGranted = false; this.#clearApprovals('cancel');
@@ -700,13 +723,22 @@ export class CodexSession {
       throw new CodexClientError(code, 'Invalid native lifecycle acknowledgement.', true);
     }
   }
+  #endAutomaticWrites(operation?: Operation): boolean {
+    const automatic = this.#automaticWriteOperation;
+    if (!automatic || operation && operation !== automatic) return false;
+    this.#automaticWriteOperation = null;
+    if (this.#thread?.threadId === automatic.threadId) this.#thread.writeGranted = false;
+    return true;
+  }
   #operationFailed(operation: Operation, error: unknown): void {
     const native = error instanceof CodexClientError ? error : new CodexClientError('PROTOCOL', 'Invalid native response.', true);
     operation.errorCode = native.code;
     const observed = operation.method === 'thread/start' ? operation.threadId !== null : operation.method === 'turn/start' ? operation.turnId !== null : false;
     operation.state = native.code === 'REMOTE_REJECTED' && !observed ? 'rejected' : native.dispatched ? 'unknown' : operation.state === 'unknown' || observed ? 'unknown' : 'not-sent';
+    const automatic = this.#automaticWriteStarts.has(operation);
+    this.#endAutomaticWrites(operation);
     if (operation.method === 'turn/start') this.#endNativeAssetIntent(operation);
-    if (this.#nativeAssetHooks && operation.state === 'unknown') {
+    if ((this.#nativeAssetHooks || automatic) && operation.state === 'unknown') {
       this.#retireNativeAssets(); this.#transport.stop(native);
     }
     if (native.code === 'SETTINGS_MISMATCH' || native.code === 'PROTOCOL') {
@@ -714,6 +746,7 @@ export class CodexSession {
     }
   }
   #disconnect(error: CodexClientError): void {
+    this.#endAutomaticWrites();
     this.#retireNativeAssets();
     this.#ready = false; this.#failureCode ??= error.code;
     if (this.mcpPolicy === 'arcane-only') {
@@ -752,13 +785,14 @@ export class CodexSession {
       return;
     }
     if (method === 'account/updated') {
+      const automatic = this.#endAutomaticWrites();
       if (!this.#initializing || this.#ready || this.#thread) this.#retireNativeAssets();
       this.#accountRevision++;
       this.#account = null;
       if (this.#thread) this.#thread.writeGranted = false;
       this.#clearApprovals('cancel'); this.#event({ type: 'account-changed' });
       const auth = object(message.params).authMode;
-      if (auth !== 'chatgpt' && this.#thread && ['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
+      if ((auth !== 'chatgpt' || automatic) && this.#thread && ['starting','inProgress','cancelling'].includes(this.#thread.turnStatus)) this.#transport.stop(new CodexClientError('ACCOUNT_CHANGED', 'Subscription authentication changed during an active turn.'));
       return;
     }
     // Ignore all other auth, configuration, raw reasoning and unknown notifications.
@@ -798,7 +832,7 @@ export class CodexSession {
       if (method === 'turn/started' && TERMINAL.has(thread.turnStatus)) return;
       thread.turnStatus = state;
       if (TERMINAL.has(state) && usageCount(raw.durationMs, 31_536_000_000)) thread.durationMs = raw.durationMs;
-      if (TERMINAL.has(state)) { this.#endNativeAssetIntent(); this.#clearApprovals(null); }
+      if (TERMINAL.has(state)) { this.#endAutomaticWrites(); this.#endNativeAssetIntent(); this.#clearApprovals(null); }
       this.#event({ type: 'turn', threadId: thread.threadId, turnId: id, status: state,
         ...(TERMINAL.has(state) && thread.durationMs !== undefined ? { durationMs: thread.durationMs } : {}) }); return;
     }

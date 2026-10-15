@@ -35,6 +35,11 @@ test('browser action envelopes exactly match service schemas, with UUIDs and no 
   assert.throws(()=>prepareCodexAction(st,'connect',{},'not-uuid'),/UUID/);
   assert.throws(()=>prepareCodexAction(st,'turn-start',{threadId:'fixture-thread',text:'🧩'.repeat(32769)}),/128 KiB/);
   assert.throws(()=>prepareCodexAction(st,'turn-start',{threadId:'fixture-thread',text:'  '}),/nonempty/);
+  for(const preserveAssetWork of [true,false]) {
+    const request=prepareCodexAction(st,'disconnect',{preserveAssetWork});assert.deepEqual(codexActionInput.parse(request),request);
+  }
+  for(const preserveAssetWork of ['true',1,null,undefined])assert.throws(()=>prepareCodexAction(st,'disconnect',{preserveAssetWork}),/boolean/);
+  assert.throws(()=>prepareCodexAction(st,'thread-start',{preserveAssetWork:true}),/exact browser envelope/);
 });
 
 test('public deltas deduplicate by seq while preserving identical consecutive text and ignoring private item payloads',()=>{
@@ -90,7 +95,7 @@ test('Codex bundle is browser-only and boot shares takeControlToken without new 
   const js=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/codex-chat.js'),'utf8');assert.doesNotMatch(js,/^\s*import\s|\brequire\s*\(|\bprocess\.|node:/m);
 });
 
-function mockClient(projectPath:string) {
+function mockClient(projectPath:string,threadSuffix='') {
   const s=snapshot(); const calls:{method:string;value:unknown}[]=[];let hold:Promise<void>|null=null;let release:()=>void=()=>{};let number=0;let loseAck=false;
   const record=(method:string,value:unknown)=>{calls.push({method,value:structuredClone(value)});};
   const push=(delta:string)=>{const t=s.thread!;s.events.push({seq:++s.lastEventSeq,type:'delta',threadId:t.threadId,turnId:t.turnId!,itemId:'public-message',text:delta});};
@@ -98,7 +103,7 @@ function mockClient(projectPath:string) {
     snapshot(){return structuredClone(s);},
     async readThreadHistory(a){record('history-read',a);return {entries:[{role:'user' as const,text:'Fixture saved user message',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-user'}},{role:'assistant' as const,text:'Fixture imported native history <img src=x onerror=alert(1)>',ids:{threadId:a.threadId,sessionId:s.thread!.sessionId,turnId:'saved-turn',itemId:'saved-assistant'}}],completeness:'incomplete' as const,gaps:[{reason:'context-compaction' as const,turnId:'saved-turn'}],truncated:false,marker:'[History incomplete: some content was omitted or truncated.]',excludedItems:1,droppedGaps:0,redacted:false};},
     selectModel(a){record('select',a);s.selection={model:a.model,effort:a.effort};return {...s.selection};},
-    async startThread(a){record('thread-start',a);s.thread=thread();return structuredClone(s.thread);},
+    async startThread(a){record('thread-start',a);s.thread={...thread(),threadId:'fixture-thread'+threadSuffix};return structuredClone(s.thread);},
     async resumeThread(a){record('thread-resume',a);s.thread={...thread(),threadId:a.threadId};return structuredClone(s.thread);},
     grantThreadWrites(a){record('grant-writes',a);s.thread!.writeGranted=true;for(const p of s.approvals)p.canAccept=true;return structuredClone(s.thread!);},
     revokeThreadWrites(a){record('revoke-writes',a);s.thread!.writeGranted=false;s.approvals=[];if(s.thread!.turnStatus==='inProgress'){s.connected=false;s.ready=false;s.thread!.turnStatus='unknown';}},
@@ -109,13 +114,13 @@ function mockClient(projectPath:string) {
   };
   return {host,s,calls,push,loseAck(){loseAck=true;},hold(){hold=new Promise<void>(done=>{release=done;});},release(){release();hold=null;}};
 }
-async function harness(t:test.TestContext,spawned=false) {
+async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
   const directory=await mkdtemp(join(tmpdir(),'arcane-codex-chat-')),projectPath=join(directory,'project');await mkdir(projectPath);
   const clients:ReturnType<typeof mockClient>[]=[];const children:CodexSession[]=[];let connected=0;
   const service=createCodexService({directory:join(directory,'journal'),projectPath,nativeToolsConfigured:true,connect:async()=>{
     connected++;
     if(spawned){const client=new CodexSession({command:process.execPath,args:[resolve('packages/codex-client/fixtures/protocol.mjs'),'approvals',join(directory,'audit-'+connected+'.jsonl')],cwd:projectPath,env:nativeEnvironment()},limits({requestTimeoutMs:1500,approvalTimeoutMs:15000}),'spawned-node-fixture');children.push(client);await client.initialize();return client;}
-    const client=mockClient(projectPath);clients.push(client);return client.host;
+    const client=mockClient(projectPath,distinctThreads?'-'+connected:'');clients.push(client);return client.host;
   }});
   const routes=codexRoutes(service);let origin='';
   const build=process.env.ARCANE_UI_BUILD_DIR??'dist';
@@ -172,7 +177,7 @@ async function browser(t:test.TestContext,origin:string) {
     await text('codex-effort-label','ultra');await ready('codex-thread-start');
     assert.equal(posts.length,before,'A draft model choice is local until its explicit native open gesture');
   };
-  const grant=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-grant')).click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await text('codex-policy','Workspace writes granted');};
+  const grant=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-grant')).click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await text('codex-policy','Workspace editing enabled');};
   return {page,errors,posts,text,ready,refresh,open,connect,select,grant,instance};
 }
 
@@ -207,6 +212,27 @@ test('real Edge Send opens a selected draft and submits once; Enter sends and St
   t.diagnostic('Actual Edge, production UI and durable service with labelled synthetic native clients. No paid inference or Studio operations.');
 });
 
+test('real Edge chat navigation preserves asynchronous work while the explicit Disconnect button keeps stop semantics', {skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t,false,true),b=await browser(t,h.origin),{page}=b;
+  await b.open();await b.connect();await b.select();
+  await page.locator('#codex-composer').fill('First synthetic navigation task');await b.ready('codex-submit');await page.locator('#codex-submit').click();
+  await b.text('codex-scope','fixture-thread-1');await b.text('codex-messages','samesame public');
+  h.clients[0]!.s.thread!.turnStatus='completed';await b.refresh();await b.text('codex-policy','completed');
+  if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+  await page.locator('#workspace-new-chat').click();await b.select();
+  await page.locator('#codex-composer').fill('Second synthetic navigation task');await b.ready('codex-submit');await page.locator('#codex-submit').click();
+  await b.text('codex-scope','fixture-thread-2');await b.text('codex-messages','Second synthetic navigation task');
+  const navigation=b.posts.filter(row=>row.action==='disconnect');assert.equal(navigation.length,1);
+  assert.equal(navigation[0].preserveAssetWork,true);assert.equal(h.clients[0]!.s.connected,false);
+  await openAdvancedSettings(page);await b.ready('codex-disconnect');await (await visibleControl(page,'#codex-disconnect')).click();
+  await b.text('codex-status','Not connected');
+  const disconnects=b.posts.filter(row=>row.action==='disconnect');assert.equal(disconnects.length,2);
+  assert.equal(Object.hasOwn(disconnects[1],'preserveAssetWork'),false,'Explicit Disconnect keeps the default stop-owned-work intent.');
+  for(const client of h.clients)for(const call of client.calls)assert.equal(Object.hasOwn(call.value as object,'preserveAssetWork'),false,'Teardown intent is never forwarded to the native provider.');
+  assert.deepEqual(b.errors,[]);
+  t.diagnostic('Actual Edge navigation/button envelopes and durable service; accepted-worker survival is independently exercised with bounded child processes.');
+});
+
 test('actual HTTP service denies every agent lifecycle/approval and malformed host input before connecting',async t=>{
   const h=await harness(t),st=state(),id=randomUUID();
   for(const token of [AGENT,'']){const response=await fetch(h.origin+'/v1/codex/state',{headers:{Authorization:'Bearer '+token}});assert.equal(response.status,token?403:401);}
@@ -236,12 +262,12 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   await (await visibleControl(page,'#codex-confirm-check')).check();c.s.thread!.threadId='changed-thread-scope';await b.text('codex-scope','changed-thread-scope');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-cancel')).click();assert.equal(c.s.thread!.writeGranted,false);
   c.s.thread!.threadId='fixture-thread';await b.refresh();await b.text('codex-scope','fixture-thread');await b.grant();
   // Delay a granted HTTP snapshot, revoke without emitting events, then deliver the old reply.
-  await (await visibleControl(page,'#codex-revoke')).click();await b.text('codex-policy','Read-only thread');
+  await (await visibleControl(page,'#codex-revoke')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
   let releaseGrant:()=>void=()=>{},grantReady:()=>void=()=>{};
   const grantHeld=new Promise<void>(done=>{releaseGrant=done;}),grantAccepted=new Promise<void>(done=>{grantReady=done;});
   await page.route('**/v1/codex/action',async(route:any)=>{const response=await route.fetch();grantReady();await grantHeld;await route.fulfill({response});},{times:1});
   await (await visibleControl(page,'#codex-grant')).click();await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await grantAccepted;
-  await (await visibleControl(page,'#codex-revoke')).click();await b.text('codex-policy','Read-only thread');
+  await (await visibleControl(page,'#codex-revoke')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
   await page.evaluate(()=>{const seen:string[]=[];(window as unknown as {policySeen:string[]}).policySeen=seen;new MutationObserver(()=>{seen.push(document.getElementById('codex-policy')!.textContent!);}).observe(document.getElementById('codex-policy')!,{childList:true});});
   const grantResponse=page.waitForResponse('**/v1/codex/action');releaseGrant();await (await grantResponse).finished();await b.ready('codex-grant');
   assert.equal(c.s.thread!.writeGranted,false);assert.equal(await page.evaluate(()=>(window as unknown as {policySeen:string[]}).policySeen.some(s=>s.includes('writes granted'))),false);await b.grant();
@@ -278,7 +304,7 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   // reconnect restores the header; collapsing still pauses ordinary reads.
   await b.connect();
   await (await visibleControl(page,'#codex-panel>summary')).click();await page.waitForTimeout(1800);const collapsedGets=h.gets;await page.waitForTimeout(1700);assert.equal(h.gets,collapsedGets);await (await visibleControl(page,'#go-codex')).click();await page.waitForFunction(()=>Boolean((document.getElementById('codex-panel') as HTMLDetailsElement).open));
-  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
+  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
   // A native timeout stays unknown after GET reconciliation and reload. No turn is replayed.
   const latest=h.clients.at(-1)!;latest.loseAck();await (await visibleControl(page,'#codex-composer')).fill('Synthetic native unknown acknowledgement');await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-unknown-requests','unknown');
   assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
@@ -288,7 +314,7 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   await b.text('codex-unknown-requests','unknown');await b.refresh();assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
   await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');await b.ready('codex-acknowledge');await (await visibleControl(page,'#codex-acknowledge')).click();
   await b.connect();await page.locator('[data-settings-close]').click();await page.locator('#workspace-new-chat').click();
-  assert.equal(await page.locator('#codex-model').inputValue(),'');assert.equal(await page.locator('#codex-thread-start').isDisabled(),true);await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
+  assert.equal(await page.locator('#codex-model').inputValue(),'');assert.equal(await page.locator('#codex-thread-start').isDisabled(),true);await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-desktop.png'});
   await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-mobile.png'});
@@ -314,21 +340,24 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   t.diagnostic('Installed Edge '+b.instance.version()+'; actual human-only service + synthetic host; '+h.connected+' fixture connections; no live inference or Studio calls.');
 });
 
-test('real Edge + spawned Node native client: metadata-only connect, native readonly thread, public approvals and human interruption', {skip:!browserModule,timeout:60000},async t=>{
+test('real Edge + spawned Node native client: metadata-only connect, read-only setup then one-turn workspace editing, approvals and interruption', {skip:!browserModule,timeout:60000},async t=>{
   const h=await harness(t,true),b=await browser(t,h.origin),{page}=b;await b.open();await b.ready('codex-connect');assert.equal(h.connected,0);
   await b.connect();assert.equal(h.connected,1);assert.equal(h.children[0]!.snapshot().thread,null);
-  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');await b.ready('codex-grant');await b.grant();
+  await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Send enables workspace editing for the next task');assert.equal(h.children[0]!.snapshot().thread!.writeGranted,false);
   await (await visibleControl(page,'#codex-composer')).fill('Synthetic human turn; spawned Node only');await (await visibleControl(page,'#codex-submit')).click();await b.text('codex-policy','inProgress');await b.text('codex-approvals','fixture test command');await b.text('codex-approvals','@@ fixture diff @@');
+  assert.equal(h.children[0]!.snapshot().thread!.writeGranted,true);
+  assert.equal(b.posts.some(input=>input.action==='grant-writes'),false,'Ordinary Send needs no Advanced thread-grant gesture.');
   assert.equal(await page.locator('.codex-approval').count(),2);assert.equal(await page.locator('#codex-submit').isDisabled(),false);assert.equal(await page.locator('#codex-submit').getAttribute('aria-label'),'Stop task');
   await visibleControl(page,'#codex-approvals');const file=page.locator('.codex-approval').filter({hasText:'Review scoped file changes'});
   await file.locator('[data-decision="accept"]').click();await b.text('codex-confirm-preview','review.txt');await b.text('codex-confirm-preview',h.children[0]!.snapshot().connectionId);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await page.waitForFunction(()=>document.querySelectorAll('.codex-approval').length===1);
   await (await visibleControl(page,'.codex-approval [data-decision="decline"]')).click();await page.waitForFunction(()=>document.querySelectorAll('.codex-approval').length===0);
-  await (await visibleControl(page,'#codex-interrupt')).click();await b.text('codex-policy','interrupted');await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');
+  await (await visibleControl(page,'#codex-interrupt')).click();await b.text('codex-policy','interrupted');assert.equal(h.children[0]!.snapshot().thread!.writeGranted,false);await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');
   const audit=(await readFile(join(h.directory,'audit-1.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
   const inputs=audit.filter(v=>v.type==='input').map(v=>v.message);
   assert.equal(inputs.filter(v=>v.method==='thread/start').length,1);assert.equal(inputs.filter(v=>v.method==='turn/start').length,1);
   assert.equal(inputs.find(v=>v.method==='thread/start').params.sandbox,'read-only');
   assert.equal(inputs.find(v=>v.method==='turn/start').params.sandboxPolicy.type,'workspaceWrite');
+  assert.equal(inputs.find(v=>v.method==='turn/start').params.allowWorkspaceWrites,undefined);
   assert.equal(inputs.find(v=>v.method==='turn/start').params.effort,'ultra');
   assert.equal(inputs.filter(v=>v.result?.decision==='accept').length,1);assert.equal(inputs.filter(v=>v.result?.decision==='decline').length,1);
   assert.equal(inputs.filter(v=>v.method==='turn/interrupt').length,1);assert.deepEqual(b.errors,[]);
@@ -357,7 +386,7 @@ test('malformed action receipts remain unknown even when the HTTP status says ac
 
 
 test('oversized native state is explicitly compacted without lying about accepted actions or hiding stop controls', {skip:!browserModule,timeout:60000},async t=>{
-  const h=await harness(t),b=await browser(t,h.origin);await b.open();await b.connect();await b.select();await (await visibleControl(b.page,'#codex-thread-start')).click();await b.text('codex-policy','Read-only thread');
+  const h=await harness(t),b=await browser(t,h.origin);await b.open();await b.connect();await b.select();await (await visibleControl(b.page,'#codex-thread-start')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
   const client=h.clients[0]!;client.s.thread={...client.s.thread!,writeGranted:true,turnId:'fixture-large-turn',turnStatus:'inProgress'};
   const a=approval(client.s,h.projectPath);a.command=null;a.cwd=null;a.method='item/fileChange/requestApproval';a.changes=[{path:'src/review.ts',kind:'update',movePath:null,diff:'x'.repeat(65536)}];
   client.s.approvals=Array.from({length:16},(_,n)=>({...a,handle:randomUUID(),itemId:'fixture-large-'+n,changes:Array.from({length:8},()=>({...a.changes![0]!}))}));

@@ -23,12 +23,12 @@ test('native task instructions require automatic choice and evidence, not invent
  assert.ok(!ARCANE_TASK_INSTRUCTIONS.includes('approvalPolicy=never'));
 });
 
-test('native asset readiness requires GLB adoption, preparation, CPU staging and read-only reconciliation status',()=>{
+test('native asset readiness requires adoption, preparation, staging, detached reconstruction and historical status',()=>{
  assert.equal(Object.isFrozen(ARCANE_TOOL_NAMES),true);
  assert.equal(Object.isFrozen(ARCANE_NATIVE_TOOL_NAMES),true);
- assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status']);
+ assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status']);
  assert.equal(new Set(ARCANE_NATIVE_TOOL_NAMES).size,ARCANE_NATIVE_TOOL_NAMES.length);
- assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status']);
+ assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status']);
  assert.deepEqual(missingArcaneTools(ARCANE_NATIVE_TOOL_NAMES,true),[]);
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES)]));
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_NATIVE_TOOL_NAMES)],true));
@@ -38,6 +38,6 @@ test('native asset readiness requires GLB adoption, preparation, CPU staging and
   assert.deepEqual(missingArcaneTools(partial,true),[omitted]);
   assert.throws(()=>requireArcaneBuildTools([row(partial)],true),{code:'MCP_CAPABILITIES'});
  }
- const inherited={...row(['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status']),name:'inherited',runtimeStatus:'disabled'};
+ const inherited={...row(['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status']),name:'inherited',runtimeStatus:'disabled'};
  assert.throws(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES),inherited],true),{code:'MCP_CAPABILITIES'});
 });

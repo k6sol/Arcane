@@ -12,6 +12,7 @@ import { nativeAdoptGlbInput, assetInput, assetProbe, assetJob, assetJobPage, as
 import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import { NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse } from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
 import { parseNativeStudioStagingStatusResponse } from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
+import {nativeStudioReconstructionResponse,parseNativeStudioReconstructionStatusResponse} from '../../../packages/asset-pipeline/src/studio-reconstruction-wire.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -333,6 +334,23 @@ export class DaemonClient {
       try { return parseNativeStudioStagingStatusResponse(value, jobId); }
       catch { throw new BridgeError('PROTOCOL', 'Daemon returned invalid Studio staging status evidence.'); }
     } finally { deadline.dispose(); }
+  }
+
+  async assetsReconstructStudioImport(jobId:string,options:WaitOptions={}) {
+    if(this.assetAudience!=='native-session')throw new BridgeError('ASSET_AUDIENCE','Detached reconstruction requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);
+    const schema=nativeStudioReconstructionResponse.refine(value=>value.jobId===jobId,'Wrong reconstructed asset job.');
+    return this.postOnce('/v1/assets/native/reconstruct-studio-import',{jobId},schema,{jobId,retry:false},
+      'Inspect assets_studio_reconstruction_status for this original jobId in the same project/conversation. Reconstruction may still be running or unknown; never repeat automatically. Retained receipts do not prove current editable resources. No upload, insertion or native acceptance is established.',options,true);
+  }
+
+  async assetsStudioReconstructionStatus(jobId:string,options:WaitOptions={}) {
+    if(this.assetAudience!=='native-session')throw new BridgeError('ASSET_AUDIENCE','Reconstruction status requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);const deadline=this.deadline(options);
+    try {
+      const value=await this.http('/v1/assets/native/studio-reconstruction-status?jobId='+encodeURIComponent(jobId),deadline.signal,undefined,false,true);
+      try{return parseNativeStudioReconstructionStatusResponse(value,jobId);}catch{throw new BridgeError('PROTOCOL','Daemon returned invalid historical reconstruction evidence.');}
+    }finally{deadline.dispose();}
   }
 
   private async readRecord<T>(path: string, schema: z.ZodType<T>, options: WaitOptions): Promise<T> {

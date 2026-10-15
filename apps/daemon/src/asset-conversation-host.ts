@@ -10,7 +10,7 @@ import {
 } from '../../../packages/storage/src/conversation-work-store.js';
 import type { AssetStartAdmission } from './asset-service.js';
 import {
-  assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor,
+  assertNativeAssetActor, nativeAssetActorScope, nativeAssetOperationSignal, type NativeAssetActor,
 } from './native-asset-authority.js';
 
 export interface AssetConversationHostOptions {
@@ -173,6 +173,7 @@ export function createAssetConversationHost(options: AssetConversationHostOption
       let id: string | null = null, association: 'bound' | 'unknown' = 'unknown';
       let admissionFailure: unknown;
       const admission: AssetStartAdmission = Object.freeze({
+        signal: nativeAssetOperationSignal(actor),
         beforeCreate(): void {
           if (!active || attempted || witnessed) { uncertain = true; fail('ADMISSION'); }
           attempted = true;

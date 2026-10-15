@@ -7,10 +7,18 @@ local AssetTransfer = require(script.Parent.AssetTransfer)
 local Operations = {}
 Operations.__index = Operations
 type Operations = any
+-- Engine objects never enter command data or public fields. This private owner
+-- retains exact meshes until retirement; receiver ownership ends at reconstruct.
+local assetOwners: {[any]: any} = setmetatable({}, {__mode = "k"})
 
-function Operations.new(pair: any, gameModel: any, http: any): Operations
+local function cleanupFailure(): never
+	error(table.freeze({code = "CLEANUP", message = "Owned editable meshes may remain; reconnect cannot establish cleanup.",
+		unsafe = true, recovery = table.freeze({partial = true, imported = false, engineVerification = "pending"})}), 0)
+end
+
+function Operations.new(pair: any, gameModel: any, http: any, assetProgress: (() -> ())?): Operations
 	return setmetatable({registry = Registry.new(pair.sessionId, pair.allowedRoots, gameModel, http),
-		gameModel = gameModel, assetTransfers = {},
+		gameModel = gameModel, assetTransfers = {}, assetProgress = assetProgress,
 		http = http, editor = gameModel:GetService("ScriptEditorService"),
 		history = gameModel:GetService("ChangeHistoryService"), selection = gameModel:GetService("Selection"),
 		collection = gameModel:GetService("CollectionService"), mutations = {}, restored = {}}, Operations)
@@ -32,7 +40,10 @@ function Operations:receiveAssetPacket(expected: any, packet: string, guard: () 
 		owned = {guard = guard, expected = V.immutable(expected)}
 		owned.receiver = AssetTransfer.new(owned.expected, function(json: string): any
 			return self.http:JSONDecode(json)
-		end, function(): () owned.guard() end, function(): () task.wait() end)
+		end, function(): () owned.guard() end, function(): ()
+			task.wait()
+			if self.assetProgress then self.assetProgress() end
+		end)
 		self.assetTransfers[id] = owned
 	elseif owned.expected.payloadDigest ~= expected.payloadDigest or owned.expected.manifestDigest ~= expected.manifestDigest then
 		V.fail("SCOPE", "Transfer identity changed.")
@@ -59,14 +70,41 @@ function Operations:cancelAssetTransfers(): ()
 		self.assetTransfers[id] = nil
 		if not ok then failures += 1 end
 	end
-	if failures > 0 then V.fail("CLEANUP", "Owned asset staging resources could not all be released.") end
+	local owners = assetOwners[self]
+	if owners then
+		for id, owner in pairs(owners.resources) do
+			owner.retired = true
+			for _, resource in ipairs(owner.meshes) do
+				if not resource.disposed then
+					resource.disposed = true -- Detach BEFORE a reentrant engine callback.
+					local mesh = resource.mesh
+					resource.mesh = nil
+					if not pcall(function() mesh:Destroy() end) then failures += 1 end
+				end
+			end
+			if owner.finished then owners.resources[id] = nil end
+		end
+	end
+	if failures > 0 then self.assetCleanupFailed = true end
+	if self.assetCleanupFailed then cleanupFailure() end
 end
 
-function Operations:stageAssetPacket(args: any, guard: () -> ()): any
-	V.fields(args, {"expected", "packet", "target", "continuity"}, "asset staging arguments")
-	local target = V.fields(args.target, {"sessionId", "placeId", "universeId", "root", "parentRef", "creator"}, "asset staging target")
-	local function current(): ()
-		guard() -- Transport checks same lifetime, artifact, mode and play epoch.
+function Operations:retireAssetContinuity(proof: any): ()
+	local retired = false
+	for _, owned in pairs(self.assetTransfers) do
+		local c = owned.continuity
+		if c and (type(proof) ~= "table" or proof.sessionId ~= owned.target.sessionId or proof.mode ~= "Edit"
+			or proof.placeId ~= owned.target.placeId or proof.universeId ~= owned.target.universeId
+			or proof.connected ~= true or proof.continuitySupported ~= true or proof.clientLifetimeId ~= c.clientLifetimeId
+			or proof.pluginArtifactHash ~= c.pluginArtifactHash or proof.playEpoch ~= c.playEpoch) then retired = true end
+	end
+	if retired then self:cancelAssetTransfers() end
+end
+
+function Operations:assetTargetGuard(target: any, guard: () -> ()): () -> ()
+	return function(): ()
+		guard()
+		if self.assetCleanupFailed then cleanupFailure() end
 		local context = self:importContext({})
 		local creator: any
 		if context.creator.status == "available" then creator = {kind = context.creator.kind, id = tostring(context.creator.id)}
@@ -78,20 +116,90 @@ function Operations:stageAssetPacket(args: any, guard: () -> ()): any
 		if context.mode ~= "Edit" or not V.equal(observed, target) then V.fail("SCOPE", "Import target, creator or Workspace changed.") end
 		guard()
 	end
+end
+
+function Operations:stageAssetPacket(args: any, guard: () -> ()): any
+	V.fields(args, {"expected", "packet", "target", "continuity"}, "asset staging arguments")
+	local target = V.fields(args.target, {"sessionId", "placeId", "universeId", "root", "parentRef", "creator"}, "asset staging target")
+	local current = self:assetTargetGuard(target, guard)
 	current()
 	local packet = V.string(args.packet, "asset packet", V.ARGUMENT_BYTES)
 	local identity = V.fields(args.expected, {"digest", "payloadDigest", "manifestDigest"}, "asset transfer identity")
 	local owned = self.assetTransfers[identity.digest]
 	if owned then
-		if not owned.target or not V.equal(owned.target, target) then V.fail("SCOPE", "Staging target changed.") end
+		if not owned.target or not V.equal(owned.target, target) or not V.equal(owned.continuity, args.continuity) then V.fail("SCOPE", "Staging target or lifetime changed.") end
 	else
 		local first = V.object(self.http:JSONDecode(packet), "first asset packet")
 		if first.kind ~= "begin" or first.ordinal ~= 0 or not V.equal(first.target, target) then V.fail("SCOPE", "Initial packet does not name the observed target.") end
 	end
 	local result = self:receiveAssetPacket(identity, packet, current)
 	self.assetTransfers[identity.digest].target = V.immutable(target)
+	self.assetTransfers[identity.digest].continuity = V.immutable(args.continuity)
 	return {transferDigest = identity.digest, packetCount = result.packetCount, byteLength = result.byteLength,
 		state = result.state, engineVerification = "pending"}
+end
+
+-- Fixed host-owned queue operation. It resolves the actual retained receiver;
+-- neither the digest, source summary nor JSON runId grants engine ownership.
+function Operations:reconstructAsset(args: any, guard: () -> ()): any
+	V.fields(args, {"runId", "expected", "packetCount", "byteLength", "objects", "target", "continuity"}, "asset reconstruction")
+	local runId = V.string(args.runId, "original stage run", 36)
+	local identity = V.fields(args.expected, {"digest", "payloadDigest", "manifestDigest"}, "asset transfer identity")
+	local owned = self.assetTransfers[identity.digest]
+	local current = self:assetTargetGuard(args.target, guard)
+	current()
+	if not owned or not V.equal(owned.expected, identity) or not V.equal(owned.target, args.target)
+		or not V.equal(owned.continuity, args.continuity) then V.fail("SCOPE", "Original staged buffers are absent or changed.") end
+	local owners = assetOwners[self]
+	if not owners then owners = {resources = {}, consumed = {}, count = 0}; assetOwners[self] = owners end
+	if owners.consumed[runId] or owners.resources[identity.digest] then V.fail("STATE", "Reconstruction was already consumed; inspect its original receipt.") end
+	if owners.count >= 64 then V.fail("CAPACITY", "Reconstruction history is full; no consumed attempt is evicted.") end
+	owned.guard = current
+	local status = owned.receiver:status()
+	if status.state ~= "sealed" or status.packetCount ~= args.packetCount or status.byteLength ~= args.byteLength then V.fail("STATE", "Original sealed packet accounting changed.") end
+	local plan = owned.receiver:reconstructionPlan()
+	local expectedObjects = V.list(args.objects, 128, "reconstructed sources")
+	if #expectedObjects ~= #plan then V.fail("SCOPE", "Reconstruction source count differs from the sealed transfer.") end
+	for index, source in ipairs(plan) do
+		if not V.equal(source, expectedObjects[index]) then V.fail("SCOPE", "Reconstruction sources differ from the sealed transfer.") end
+	end
+	current()
+	owners.consumed[runId] = true; owners.count += 1 -- BEFORE resolving/allocating an engine service.
+	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false}
+	owners.resources[identity.digest] = owner
+	owned.guard = function(): ()
+		current()
+		if owner.retired or self.assetTransfers[identity.digest] ~= owned then V.fail("SCOPE", "Reconstruction owner was retired.") end
+	end
+	local ok, output = pcall(function(): any
+		if self.assetProgress then self.assetProgress() end -- Fresh authenticated progress BEFORE allocation.
+		local service = self.gameModel:GetService("AssetService")
+		owned.guard()
+		local entries = owned.receiver:reconstruct(service)
+		-- No guard/yield between receiving ownership and registering EVERY mesh.
+		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false} end
+		owned.guard()
+		local summary = {}
+		for _, entry in ipairs(entries) do
+			summary[#summary + 1] = {sourceObjectId = entry.object.sourceObjectId, meshExportSha256 = entry.object.meshExportSha256,
+				vertexCount = entry.mesh.vertexCount, triangleCount = entry.mesh.triangleCount}
+		end
+		if owner.retired or not V.equal(summary, plan) then V.fail("SCOPE", "Reconstructed ownership or source accounting changed.") end
+		owned.guard()
+		owner.finished = true
+		local receipt = {runId = runId, transferDigest = identity.digest, state = "reconstructed", objects = V.array(summary), imported = false, engineVerification = "pending"}
+		if #V.encode(receipt, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Reconstruction receipt exceeds its bound.") end
+		local frozen = V.immutable(receipt)
+		owned.guard()
+		return frozen
+	end)
+	if not ok then
+		owner.finished = true
+		if type(output) == "table" and (output.code == "CLEANUP" or output.cleanupFailed == true) then self.assetCleanupFailed = true end
+		self:cancelAssetTransfers()
+		error(output, 0)
+	end
+	return output
 end
 
 function Operations:source(instance: any): string
@@ -413,6 +521,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	local result: any
 	if method == "scene.children" then result = self:children(args)
 	elseif method == "asset.stage_packet" then result = self:stageAssetPacket(args, guard)
+	elseif method == "asset.reconstruct" then return self:reconstructAsset(args, guard)
 	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)

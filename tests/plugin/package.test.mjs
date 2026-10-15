@@ -121,8 +121,8 @@ test('portable bundle has one enabled Script and all strict ModuleScripts as chi
   items.forEach((item, index) => assert.equal(item.source, files[index].source.replace(/\r\n?/g, '\n')));
   assert.equal(manifest.format, 'roblox-xml-v4');
   assert.equal(manifest.protocolVersion, 1);
-  assert.equal(manifest.pluginVersion, '0.1.8');
-  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.8"$/m);
+  assert.equal(manifest.pluginVersion, '0.1.9');
+  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.9"$/m);
   assert.deepEqual(manifest.sources, expectedSources.map(([, , filename], index) => ({
     path: `src/${filename}`, bytes: Buffer.byteLength(items[index].source),
     sha256: createHash('sha256').update(items[index].source).digest('hex'),
@@ -213,9 +213,14 @@ test('method/root/class/material allowlists exactly match the shared protocol an
 test('packaged source has no arbitrary evaluation, asset insertion, unscoped persistence or publishing API', () => {
   assert.doesNotMatch(allSource, /\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
   assert.doesNotMatch(allSource, /(?:InsertService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
-  // AssetMesh receives an injected mesh service; mentioning AssetService in
-  // its documentation grants no service acquisition, asset insertion or upload.
-  assert.doesNotMatch(allSource, /GetService\s*\(\s*["']AssetService["']|:CreateMeshPartAsync\s*\(/);
+  // The one production acquisition belongs only to the guarded host-owned
+  // reconstruction operation. It grants no MeshPart/insertion/upload command.
+  const acquisition=/GetService\s*\(\s*["']AssetService["']\s*\)/g;
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(acquisition)].map(()=>file.filename)),['Operations.luau']);
+  const operations=byFile['Operations.luau'],start=operations.indexOf('function Operations:reconstructAsset('),end=operations.indexOf('function Operations:source(',start);
+  assert.ok(start>=0&&end>start);assert.equal([...operations.slice(start,end).matchAll(acquisition)].length,1);
+  assert.doesNotMatch(operations.slice(0,start)+operations.slice(end),acquisition);
+  assert.doesNotMatch(allSource, /:CreateMeshPartAsync\s*\(/);
   assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
   assert.doesNotMatch(byFile['TestProof.luau'], /AddTag|SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
