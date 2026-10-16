@@ -175,6 +175,11 @@ function validateInstallerSources(files) {
   if (files.some(file => file.path === 'tests/release/windows-installer-kit.test.mjs') && !files.some(file => file.path === 'installer/KitVerifier.cs')) {
     throw new Error('Installer kit verification requires its matching C# source.');
   }
+  if (files.some(file => file.path === 'tests/release/windows-installed-launcher.test.mjs')) {
+    for (const name of ['InstalledRecord.cs', 'Launcher.cs', 'PayloadArchive.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Installed launcher verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => file.path === 'scripts/build-windows-setup.mjs')) {
     for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'setup.manifest']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup builder requires its complete native source: ' + name);
