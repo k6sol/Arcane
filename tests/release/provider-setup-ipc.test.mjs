@@ -237,7 +237,16 @@ function fixture({ smoke = false } = {}) {
 }
 
 function snapshot(value, provider, message) {
-  assert.deepEqual(Object.keys(value).sort(), fields);
+  const keys = Object.keys(value).sort();
+  if (provider === 'claude' && keys.includes('claudeChoices')) {
+    assert.deepEqual(keys, [...fields, 'claudeChoices'].sort());
+    if (value.claudeChoices !== null) {
+      assert.deepEqual(Object.keys(value.claudeChoices).sort(), ['aliases', 'cliVersion', 'efforts']);
+      assert.equal(value.claudeChoices.cliVersion, value.cliVersion);
+      assert.ok(Array.isArray(value.claudeChoices.aliases) && Array.isArray(value.claudeChoices.efforts));
+      assert.equal(Object.isFrozen(value.claudeChoices), false, 'IPC serializes the private metadata snapshot.');
+    }
+  } else assert.deepEqual(keys, fields);
   assert.equal(value.version, 1); assert.equal(value.provider, provider);
   assert.equal(typeof value.installed, 'boolean'); assert.equal(typeof value.busy, 'boolean');
   assert.ok(['unknown', 'signed-out', 'subscription', 'api-or-cloud'].includes(value.auth));
@@ -252,6 +261,19 @@ function inert(f) {
   assert.equal(f.processes.length, 0); assert.equal(f.dialogs.length, 0);
   assert.equal(f.urls.length, 0); assert.deepEqual(f.nativeFallbacks, []);
 }
+
+test('non-null Claude help metadata survives IPC as detached presentation data', bounded, async () => {
+  const f = fixture();
+  const help = "Options:\n  --effort <level>  Choose low, high, or max\n  --model <model>  Use 'opus' or 'sonnet'\n  -n, --name <name>  Name this session\n";
+  f.hooks.reply = record => record.args[0] === '--help' ? { code: 0, stdout: help } : null;
+  const value = await f.bridge.status('claude'); snapshot(value, 'claude');
+  assert.deepEqual(value.claudeChoices, { cliVersion: '2.1.211', aliases: ['opus', 'sonnet'], efforts: ['low', 'high', 'max'] });
+  const original = f.hostReplies.at(-1).claudeChoices;
+  assert.ok(Object.isFrozen(original) && Object.isFrozen(original.aliases) && Object.isFrozen(original.efforts));
+  value.claudeChoices.aliases.push('changed');
+  assert.deepEqual(Array.from(original.aliases), ['opus', 'sonnet']);
+  assert.equal(JSON.stringify(value).includes(sensitive), false);
+});
 async function denied(pending) {
   await assert.rejects(pending, error => {
     assert.equal(error.message, unavailable); assert.equal(error.message.includes(sensitive), false);
@@ -549,12 +571,12 @@ test('successful IPC operations use only fixed probes/pages/vendor intents and m
   }
   assert.deepEqual(f.processes.map(record => [record.command, record.args, record.options.cwd]), [
     [f.codex, ['--version'], home], [f.codex, ['login', 'status'], home],
-    [f.claude, ['--version'], home], [f.claude, ['auth', 'status', '--json'], home],
+    [f.claude, ['--version'], home], [f.claude, ['auth', 'status', '--json'], home], [f.claude, ['--help'], home],
   ]);
   f.hooks.dialog = () => ({ response: 1 });
   for (const provider of providers) snapshot(await f.bridge.install(provider), provider);
   assert.deepEqual(f.urls, ['https://learn.chatgpt.com/docs/codex/cli', 'https://code.claude.com/docs/en/setup']);
-  assert.equal(f.processes.length, 4);
+  assert.equal(f.processes.length, 5);
   f.hooks.account = read => read === 1 ? { account: null, requiresOpenaiAuth: true } : signedIn;
   const pending = await f.bridge.login('codex'); snapshot(pending, 'codex');
   assert.equal(pending.auth, 'unknown'); assert.equal(pending.busy, true);
@@ -579,9 +601,9 @@ test('successful IPC operations use only fixed probes/pages/vendor intents and m
     "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '" + home + "'; & '" + f.claude + "' 'auth' 'login'",
     "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '" + nextProject.replaceAll("'", "''") + "'; & '" + f.claude + "'",
   ];
-  assert.deepEqual(f.processes[4].args, ['--version']);
-  assert.equal(f.processes[5].command, f.codex); assert.deepEqual(f.processes[5].args, appServerArgs);
-  for (const [index, record] of f.processes.slice(6).entries()) {
+  assert.deepEqual(f.processes[5].args, ['--version']);
+  assert.equal(f.processes[6].command, f.codex); assert.deepEqual(f.processes[6].args, appServerArgs);
+  for (const [index, record] of f.processes.slice(7).entries()) {
     assert.equal(record.command, f.powershell);
     const scripts = terminalScript(record); assert.equal(scripts.inner, expected[index]);
     assert.equal(/ExecutionPolicy|Bypass|setup-token|--console|--with-api-key|device-auth|Invoke-Expression|RunAs|curl/.test(scripts.launcher + scripts.inner), false);

@@ -96,7 +96,16 @@ function fixture(settings = {}) {
 }
 
 function snapshot(value, provider) {
-  assert.deepEqual(Object.keys(value).sort(), fields);
+  // claudeChoices is optional and Claude-only: exact frozen {cliVersion, aliases, efforts} or null.
+  const keys = Object.keys(value).sort();
+  if (provider === 'claude' && keys.includes('claudeChoices')) {
+    assert.deepEqual(keys, [...fields, 'claudeChoices'].sort());
+    const c = value.claudeChoices;
+    if (c !== null) {
+      assert.deepEqual(Object.keys(c).sort(), ['aliases', 'cliVersion', 'efforts']); assert.ok(Object.isFrozen(c) && Object.isFrozen(c.aliases) && Object.isFrozen(c.efforts));
+      assert.equal(c.cliVersion, value.cliVersion);
+    }
+  } else assert.deepEqual(keys, fields);
   assert.equal(value.version, 1); assert.equal(value.provider, provider);
   assert.equal(typeof value.installed, 'boolean'); assert.equal(typeof value.busy, 'boolean');
   assert.ok(['signed-out', 'subscription', 'api-or-cloud', 'unknown'].includes(value.auth));
@@ -154,7 +163,8 @@ test('native status uses only fixed metadata argv and returns only sanitized enu
     assert.equal(result.installed, true); assert.equal(result.auth, 'subscription'); assert.equal(result.message, null);
     assert.equal(result.cliVersion, provider === 'codex' ? '0.143.0' : '2.1.211');
   }
-  assert.deepEqual(f.processes.map(item => item.args), [['--version'], ['login', 'status'], ['--version'], ['auth', 'status', '--json']]);
+  // Claude status adds exactly one fixed metadata argv, `--help`, after verified version and auth.
+  assert.deepEqual(f.processes.map(item => item.args), [['--version'], ['login', 'status'], ['--version'], ['auth', 'status', '--json'], ['--help']]);
   for (const child of f.processes) {
     assert.equal(child.options.shell, false); assert.equal(child.options.windowsHide, true);
     assert.equal(child.options.cwd, f.home); assert.deepEqual(child.options.stdio, ['ignore', 'pipe', 'pipe']);
@@ -432,7 +442,7 @@ test('terminal failure is honest; no hidden login fallback or automatic status f
 
 test('POSIX native status works, but unverified terminal integrations remain unavailable', async () => {
   const f = fixture({ platform: 'linux' });
-  snapshot(await f.host.status('claude'), 'claude'); assert.equal(f.processes.length, 2); f.processes.length = 0;
+  snapshot(await f.host.status('claude'), 'claude'); assert.equal(f.processes.length, 3, 'version, auth and fixed --help metadata'); f.processes.length = 0;
   for (const method of ['login', 'launch']) {
     assert.match((await f.host[method]('claude')).message, /unavailable on this platform/);
   }
@@ -449,3 +459,135 @@ test('trusted option validation rejects malformed disable flags, required access
 });
 
 test('published multi-component native prerelease version is bounded and supported',async()=>{const f=fixture();f.state.reply=(command,args)=>args[0]==='--version'?{code:0,stdout:'codex-cli 0.162.0-alpha.17.2\n'}:{code:0,stderr:'Logged in using ChatGPT\n'};const value=await f.host.status('codex');assert.equal(value.cliVersion,'0.162.0-alpha.17.2');assert.equal(value.auth,'subscription');});
+
+
+// ---- Claude handoff metadata and trusted terminal ports (fake spawn/filesystem only; no PowerShell or CLI) ----
+const HELP = ['Usage: claude [options] [command] [prompt]', '', 'Options:',
+  '  --effort <level>                      Effort level for the current session',
+  '                                        (low, medium, high, xhigh, max)',
+  '  --model <model>                       Model for the current session. Provide',
+  "                                        an alias for the latest model (e.g.",
+  "                                        'fable', 'opus', or 'sonnet') or a",
+  "                                        model's full name (e.g.",
+  "                                        'claude-fable-5').",
+  '  -n, --name <name>                     Set a display name for this session', ''].join('\n');
+const TOKEN = 'Q'.repeat(20) + '_-' + 'z'.repeat(21);
+async function handoffFixture(settings = {}, help = HELP) {
+  const f = fixture(settings);
+  f.state.reply = (command, args) => args[0] === '--help' ? (typeof help === 'function' ? help() : { code: 0, stdout: help }) : null;
+  const value = await f.host.status('claude'); f.processes.length = 0;
+  return { ...f, value };
+}
+const session = f => ({ projectPath: f.project, runtimeDirectory: 'C:\\Users\\fixture\\AppData\\Roaming\\Arcane\\native-handoffs', nodePath: 'C:\\Program Files\\Arcane\\node.exe',
+  mcpEntry: 'C:\\Program Files\\Arcane\\main.js', origin: f.state.origin, controlToken: 'a'.repeat(64), epoch: {} });
+const profile = (overrides = {}) => ({ provider: 'claude', model: 'opus', effort: 'high', cliVersion: '2.1.211', ...overrides });
+const handoffRequest = (f, overrides = {}) => ({ argv: ['--mcp-config', 'C:\\Users\\fixture\\AppData\\Roaming\\Arcane\\native-handoffs\\claude-handoff-1\\arcane.mcp.json', '--strict-mcp-config',
+  '--model', 'opus', '--effort', 'high', '--permission-mode', 'default'], env: { ARCANE_DAEMON_URL: f.state.origin, ARCANE_LOCAL_TOKEN: TOKEN }, projectPath: f.project, epoch: {}, ...overrides });
+const decode = value => Buffer.from(value, 'base64').toString('utf16le');
+function launcherScripts(processRecord) {
+  const outer = decode(processRecord.args.at(-1)), inner = decode(/'-EncodedCommand', '([A-Za-z0-9+/=]+)'/.exec(outer)[1]);
+  return { outer, inner };
+}
+
+test('Claude status records fixed --help aliases/efforts with no default; metadata failure keeps legacy auth and gives null', async () => {
+  const f = await handoffFixture(); snapshot(f.value, 'claude');
+  assert.equal(f.value.auth, 'subscription');
+  assert.deepEqual(f.value.claudeChoices, { cliVersion: '2.1.211', aliases: ['fable', 'opus', 'sonnet'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] });
+  assert.deepEqual(f.host.getHandoffChoices(), f.value.claudeChoices); assert.notEqual(f.host.getHandoffChoices().aliases, f.value.claudeChoices.aliases, 'detached copy');
+  assert.ok(!('default' in f.value.claudeChoices) && !('defaultModel' in f.value.claudeChoices));
+  for (const [what, help] of [['no model paragraph', HELP.replace(/--model <model>[\s\S]*claude-fable-5'\)\./, '')], ['no effort list', HELP.replace('(low, medium, high, xhigh, max)', '(see docs)')],
+    ['only full names', HELP.replace("'fable', 'opus', or 'sonnet'", "'claude-opus-5'")], ['failed help', () => ({ code: 1, stdout: HELP })], ['help error', () => ({ error: true })],
+    ['help hang', () => ({ hang: true })], ['oversize help', 'x'.repeat(70000) + HELP], ['empty help', '']]) {
+    const g = await handoffFixture({}, help); snapshot(g.value, 'claude');
+    assert.deepEqual([g.value.auth, g.value.claudeChoices, g.host.getHandoffChoices()], ['subscription', null, null], what);
+  }
+  const codex = await f.host.status('codex'); assert.ok(!('claudeChoices' in codex), 'Codex snapshots are unchanged');
+  const v = fixture(); v.state.reply = (command, args) => args[0] === '--version' ? { code: 0, stdout: 'garbage' } : null;
+  const unverified = await v.host.status('claude'); assert.ok(!('claudeChoices' in unverified), 'the optional field only appears after a help read'); assert.ok(!v.processes.some(item => item.args[0] === '--help'), 'no help before a verified version');
+  const disabled = createProviderSetup({ ...f.options, enabled: false }); assert.equal(disabled.getHandoffChoices(), null);
+  assert.deepEqual(Object.keys(f.host).sort(), ['install', 'launch', 'login', 'status']);
+  for (const name of ['getHandoffChoices', 'confirmHandoff', 'launchHandoffTerminal']) assert.equal(Object.getOwnPropertyDescriptor(f.host, name).enumerable, false, name);
+});
+
+test('handoff choices are null unless current subscription metadata is eligible, not busy, not stale and not disposed', async () => {
+  const api = await handoffFixture(); api.state.reply = (command, args) => args[0] === '--help' ? { code: 0, stdout: HELP } : args[0] === 'auth' ? { code: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'api_key' }) } : null;
+  await api.host.status('claude'); assert.equal(api.host.getHandoffChoices(), null, 'API/cloud authentication is not eligible');
+  const cancelled = await handoffFixture(); cancelled.host.cancelPending(); assert.equal(cancelled.host.getHandoffChoices(), null, 'stale after cancelPending');
+  const moved = await handoffFixture(); moved.put('C:\\Projects\\other'); moved.state.project = 'C:\\Projects\\other'; assert.equal(moved.host.getHandoffChoices(), null, 'stale after a project change');
+  const window = await handoffFixture(); window.state.window = { isDestroyed: () => false }; assert.equal(window.host.getHandoffChoices(), null, 'stale after a window change');
+  const failed = await handoffFixture(); failed.state.reply = () => ({ code: 0, stdout: 'garbage' }); await failed.host.status('claude');
+  assert.equal(failed.host.getHandoffChoices(), null, 'a later failed status clears metadata');
+  const busy = await handoffFixture(); busy.state.reply = () => ({ hang: true }); const pending = busy.host.status('codex');
+  assert.equal(busy.host.getHandoffChoices(), null, 'busy'); await pending;
+  const disposed = await handoffFixture(); disposed.host.dispose(); assert.equal(disposed.host.getHandoffChoices(), null);
+});
+
+test('confirmHandoff shows exactly one native confirmation for an explicit current selection; any doubt is false', async () => {
+  const f = await handoffFixture();
+  assert.equal(await f.host.confirmHandoff(profile(), session(f)), true); assert.equal(f.dialogs.length, 1);
+  const { config } = f.dialogs[0];
+  assert.equal(config.message, 'Open Claude Code with Arcane project tools?'); assert.deepEqual([config.buttons, config.defaultId, config.cancelId], [['Cancel', 'Open terminal'], 0, 0]);
+  for (const text of ['model opus', 'effort high', '2.1.211', 'temporary project credential', 'expires in 30 minutes', 'does not verify', f.project]) assert.ok(config.detail.includes(text), text);
+  assert.ok(!config.detail.includes('a'.repeat(64)), 'no human token in the dialog');
+  f.state.response = 0; assert.equal(await f.host.confirmHandoff(profile(), session(f)), false, 'cancel'); f.state.response = 1;
+  const before = f.dialogs.length;
+  for (const [what, pr, se] of [['unknown model', profile({ model: 'haiku' }), session(f)], ['unsupported effort', profile({ effort: 'ultra' }), session(f)], ['other CLI', profile({ cliVersion: '2.1.212' }), session(f)],
+    ['codex', profile({ provider: 'codex' }), session(f)], ['extra key', { ...profile(), fallback: 'sonnet' }, session(f)], ['missing effort', (({ effort, ...rest }) => rest)(profile()), session(f)],
+    ['proxy profile', new Proxy(profile(), {}), session(f)], ['other origin', profile(), { ...session(f), origin: 'http://127.0.0.1:1' }], ['other project', profile(), { ...session(f), projectPath: 'C:\\Projects\\other' }],
+    ['partial session', profile(), (({ epoch, ...rest }) => rest)(session(f))]])
+    assert.equal(await f.host.confirmHandoff(pr, se), false, what);
+  assert.equal(f.dialogs.length, before, 'no dialog for any invalid request');
+  f.state.beforeConfirm = () => { f.host.cancelPending(); }; assert.equal(await f.host.confirmHandoff(profile(), session(f)), false, 'cancelled during the dialog');
+  const g = await handoffFixture(); g.state.beforeConfirm = () => { g.put('C:\\Projects\\other'); g.state.project = 'C:\\Projects\\other'; };
+  assert.equal(await g.host.confirmHandoff(profile(), session(g)), false, 'project changed during the dialog');
+  assert.equal(await g.host.confirmHandoff(profile(), session(g)), false, 'metadata is stale afterwards');
+});
+
+test('launchHandoffTerminal puts the overlay only in the launcher spawn env; argv and both encoded scripts never carry it; plain launch is unchanged', async () => {
+  const f = await handoffFixture(), outcome = await f.host.launchHandoffTerminal(handoffRequest(f));
+  assert.equal(outcome, 'opened'); assert.equal(f.dialogs.length, 0, 'no second approval flow inside the port');
+  const scoped = f.processes.at(-1); assert.equal(scoped.command, f.powershell);
+  assert.equal(scoped.options.env.ARCANE_LOCAL_TOKEN, TOKEN); assert.equal(scoped.options.env.ARCANE_DAEMON_URL, f.state.origin);
+  const { outer, inner } = launcherScripts(scoped);
+  for (const text of [JSON.stringify(scoped.args), outer, inner]) { assert.ok(!text.includes(TOKEN), 'credential absent'); assert.ok(!text.includes(secret)); }
+  for (const arg of ['--mcp-config', 'arcane.mcp.json', '--strict-mcp-config', "'--model' 'opus'", "'--effort' 'high'", "'--permission-mode' 'default'"]) assert.ok(inner.includes(arg), arg);
+  assert.ok(inner.includes(f.claude));
+  f.processes.length = 0; const plain = await f.host.launch('claude'); assert.match(plain.message, /Native Claude Code terminal requested/);
+  const plainLauncher = f.processes.at(-1), plainScripts = launcherScripts(plainLauncher);
+  assert.ok(!Object.keys(plainLauncher.options.env).some(key => key.startsWith('ARCANE_')), 'plain launch env has no Arcane overlay');
+  assert.deepEqual({ ...scoped.options.env, ARCANE_LOCAL_TOKEN: undefined, ARCANE_DAEMON_URL: undefined }, { ...plainLauncher.options.env, ARCANE_LOCAL_TOKEN: undefined, ARCANE_DAEMON_URL: undefined },
+    'the scoped env is exactly the preserved plain environment plus the fixed overlay');
+  assert.ok(plainScripts.inner.endsWith('& ' + "'" + f.claude + "'"), 'plain launch: no injected args or model');
+  assert.ok(!JSON.stringify(plain).includes(TOKEN));
+});
+
+test('malformed or unauthorised handoff requests fail before any process', async () => {
+  const f = await handoffFixture(), good = handoffRequest(f);
+  const argv = (index, value) => { const copy = [...good.argv]; copy[index] = value; return copy; };
+  for (const [what, request] of [['extra flag', { ...good, argv: [...good.argv, '--dangerously-skip-permissions'] }], ['model not offered', { ...good, argv: argv(4, 'haiku') }],
+    ['effort not offered', { ...good, argv: argv(6, 'ultra') }], ['permission mode', { ...good, argv: argv(8, 'bypassPermissions') }], ['config name', { ...good, argv: argv(1, 'C:\\x\\other.json') }],
+    ['relative config', { ...good, argv: argv(1, 'arcane.mcp.json') }], ['token in argv', { ...good, argv: argv(1, 'C:\\' + TOKEN + '\\arcane.mcp.json') }],
+    ['human 64-hex token', { ...good, env: { ...good.env, ARCANE_LOCAL_TOKEN: 'a'.repeat(64) } }], ['extra env', { ...good, env: { ...good.env, ANTHROPIC_API_KEY: 'x' } }],
+    ['other daemon', { ...good, env: { ...good.env, ARCANE_DAEMON_URL: 'http://127.0.0.1:1' } }], ['other project', { ...good, projectPath: 'C:\\Projects\\other' }],
+    ['missing epoch', (({ epoch, ...rest }) => rest)(good)], ['proxy request', new Proxy(good, {})], ['accessor env', Object.defineProperty({ ...good }, 'env', { get() { return good.env; }, enumerable: true })]])
+    assert.equal(await f.host.launchHandoffTerminal(request), 'failed', what);
+  assert.equal(f.processes.length + f.dialogs.length, 0);
+  const stale = await handoffFixture(); stale.host.cancelPending(); assert.equal(await stale.host.launchHandoffTerminal(handoffRequest(stale)), 'failed', 'stale metadata');
+  const linux = await handoffFixture({ platform: 'linux' }); assert.equal(await linux.host.launchHandoffTerminal(handoffRequest(linux)), 'failed', 'unverified platform');
+  assert.equal(stale.processes.length + linux.processes.length, 0);
+});
+
+test('launcher failure is failed; timeout and post-launch context change are unknown; busy refuses; never opened without a clean launcher exit', async () => {
+  const outcomes = [];
+  for (const reply of [{ code: 1 }, { error: true }, { hang: true }]) {
+    const f = await handoffFixture(); f.state.reply = command => command === f.powershell ? reply : null;
+    outcomes.push(await f.host.launchHandoffTerminal(handoffRequest(f)));
+    if (reply.hang) assert.equal(f.children.at(-1).killed, 'SIGKILL', 'timed-out launcher helper is killed');
+  }
+  assert.deepEqual(outcomes, ['failed', 'failed', 'unknown']);
+  const moved = await handoffFixture(); moved.state.reply = command => { if (command === moved.powershell) { moved.put('C:\\Projects\\other'); moved.state.project = 'C:\\Projects\\other'; } return null; };
+  assert.equal(await moved.host.launchHandoffTerminal(handoffRequest(moved)), 'unknown', 'context changed after the launcher started');
+  const busy = await handoffFixture(); busy.state.reply = () => ({ hang: true }); const pending = busy.host.status('codex');
+  assert.equal(await busy.host.launchHandoffTerminal(handoffRequest(busy)), 'failed'); await pending;
+  assert.ok(!busy.processes.some(item => item.command === busy.powershell), 'busy: no launcher');
+});

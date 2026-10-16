@@ -11,8 +11,35 @@ const PAGES = Object.freeze({
 });
 const DISABLED = 'CLI setup checks are disabled in verification mode.';
 const MAX_BYTES = 16384;
+// Claude `--help` is longer than the status helpers (2.1.177: 15,388 bytes); it gets its own fixed bound.
+const HELP_MAX_BYTES = 65536;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+const EFFORT_ORDER = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const HANDOFF_CREDENTIAL = /^[A-Za-z0-9_-]{43}$/;
+const HANDOFF_DAEMON = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/;
 const fail = () => { throw new Error('Provider setup request is unavailable.'); };
+/** Exact plain own data fields; proxies are refused before any trap and accessors are never invoked. */
+function plainFields(value, keys) {
+  const { types } = require('node:util');
+  if (!value || typeof value !== 'object' || types.isProxy(value)) fail();
+  const prototype = Object.getPrototypeOf(value), own = Reflect.ownKeys(value);
+  if (prototype !== Object.prototype && prototype !== null || own.length !== keys.length || own.some(key => typeof key !== 'string' || !keys.includes(key))) fail();
+  const out = Object.create(null);
+  for (const key of keys) { const field = Object.getOwnPropertyDescriptor(value, key); if (!field || !Object.hasOwn(field, 'value')) fail(); out[key] = field.value; }
+  return out;
+}
+/** Native CLI aliases/efforts from the fixed `--help` paragraphs (the catalogue.ts claudeModelsFromHelp logic).
+ * Help text is CLI metadata, never per-account entitlement; no default is chosen. */
+function parseClaudeChoices(result, cliVersion) {
+  if (!result.ok || result.code !== 0 || typeof result.stdout !== 'string') return null;
+  const help = result.stdout.replace(/\r\n/g, '\n');
+  const modelParagraph = /--model\s+<model>([\s\S]*?)(?:\n\s{2}--|\n\s{2}-[a-z])/m.exec(help)?.[1] ?? '';
+  const aliases = [...new Set([...modelParagraph.matchAll(/'([a-z][a-z0-9-]+)'/g)].map(m => m[1]).filter(v => !v.startsWith('claude-')))];
+  const effortParagraph = /--effort\s+<level>([\s\S]*?)(?:\n\s{2}--|\n\s{2}-[a-z])/m.exec(help)?.[1] ?? '';
+  const efforts = EFFORT_ORDER.filter(e => new RegExp('\\b' + e + '\\b').test(effortParagraph));
+  if (!aliases.length || aliases.length > 32 || aliases.some(alias => alias.length > 64) || !efforts.length) return null;
+  return Object.freeze({ cliVersion, aliases: Object.freeze(aliases), efforts: Object.freeze(efforts) });
+}
 
 function createProviderSetup(options) {
   if (!options || typeof options.getWindow !== 'function' || typeof options.getOrigin !== 'function' ||
@@ -31,7 +58,7 @@ function createProviderSetup(options) {
   const snapshots = new Map(['codex', 'claude'].map(provider => [provider, {
     version: 1, provider, installed: false, auth: 'unknown', cliVersion: null, busy: false, message: null,
   }]));
-  let active = false, ownedLogin = null, disposed = false, epoch = 0;
+  let active = false, ownedLogin = null, disposed = false, epoch = 0, claudeMetadataScope = null;
   const copy = provider => Object.freeze({ ...snapshots.get(provider), busy: active || !!ownedLogin?.session.status().pending });
   const update = (provider, values) => snapshots.set(provider, { ...snapshots.get(provider), ...values });
   function providerArgument(args) {
@@ -145,19 +172,20 @@ function createProviderSetup(options) {
     return null;
   }
   // Bounded one-shot helpers only. Raw output never escapes this closure.
-  function run(command, args, cwd, capture = true) {
+  // `overlay` is used ONLY by the scoped handoff launcher: a fixed env addition for that one spawn, never argv/logs.
+  function run(command, args, cwd, capture = true, overlay = null, maxBytes = MAX_BYTES) {
     return new Promise(resolve => {
       let child, done = false, bytes = 0, stdout = [], stderr = [];
-      const finish = (ok, code = null) => {
+      const finish = (ok, code = null, timedOut = false) => {
         if (done) return;
         done = true; clearTimeout(timer);
         if (!ok) { try { child?.kill('SIGKILL'); } catch { /* Closed child. */ } }
-        resolve({ ok, code, stdout: ok ? Buffer.concat(stdout).toString('utf8') : '', stderr: ok ? Buffer.concat(stderr).toString('utf8') : '' });
+        resolve({ ok, code, timedOut, stdout: ok ? Buffer.concat(stdout).toString('utf8') : '', stderr: ok ? Buffer.concat(stderr).toString('utf8') : '' });
         stdout = []; stderr = [];
       };
-      const timer = setTimeout(() => finish(false), timeoutMs);
+      const timer = setTimeout(() => finish(false, null, true), timeoutMs);
       try {
-        child = spawn(command, args, { cwd, env: nativeEnvironment(), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        child = spawn(command, args, { cwd, env: overlay ? { ...nativeEnvironment(), ...overlay } : nativeEnvironment(), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
         child.once('error', () => finish(false));
         child.once('close', code => finish(Number.isInteger(code), code));
         for (const [stream, chunks] of [[child.stdout, stdout], [child.stderr, stderr]]) {
@@ -165,7 +193,7 @@ function createProviderSetup(options) {
             if (done) return;
             const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
             bytes += chunk.length;
-            if (bytes > MAX_BYTES) return finish(false);
+            if (bytes > maxBytes) return finish(false);
             if (capture) chunks.push(chunk);
           });
           stream.once('error', () => finish(false));
@@ -222,8 +250,13 @@ function createProviderSetup(options) {
     return result?.response === 1;
   }
   async function terminal(command, args, cwd, scope) {
+    return (await terminalOutcome(command, args, cwd, scope, null)) === 'opened';
+  }
+  /** opened: the short launcher exited 0 after Start-Process; failed: refused or exited non-zero before any
+   * visible terminal; unknown: timed out or killed. Never a claim that the native client or MCP connected. */
+  async function terminalOutcome(command, args, cwd, scope, overlay, progress = {}) {
     // Fail closed on other OSes until their visible-terminal contract is verified.
-    if (platform !== 'win32') return false;
+    if (platform !== 'win32') return 'failed';
     const systemRoot = absolute(env.SystemRoot ?? env.SYSTEMROOT ?? env.WINDIR);
     const requested = p.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     const powershell = await checked(requested, 'file');
@@ -237,9 +270,10 @@ function createProviderSetup(options) {
       literal(cwd) + ' -WindowStyle Normal | Out-Null';
     // Only this short launcher is bounded/captured; the user owns the visible child.
     stillCurrent(scope);
+    progress.spawned = true; // from here a launcher process may exist; later uncertainty is unknown, not failed
     const result = await run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-      Buffer.from(launcher, 'utf16le').toString('base64')], cwd, false);
-    return result.ok && result.code === 0;
+      Buffer.from(launcher, 'utf16le').toString('base64')], cwd, false, overlay);
+    return result.ok && result.code === 0 ? 'opened' : result.timedOut ? 'unknown' : 'failed';
   }
   function cancelPending() {
     // Revoke intent even before the owned login exists (dialog/version awaits).
@@ -349,6 +383,8 @@ function createProviderSetup(options) {
           const cwd = await checked(action === 'launch' ? scope.project : home(), 'directory');
           stillCurrent(scope);
           if (action === 'status') {
+            // Stale metadata is withdrawn immediately; the optional field only appears once a help read happened.
+            if (provider === 'claude') { claudeMetadataScope = null; if (Object.hasOwn(snapshots.get('claude'), 'claudeChoices')) update(provider, { claudeChoices: null }); }
             const cliVersion = parseVersion(provider, await run(command, ['--version'], cwd));
             stillCurrent(scope);
             if (!cliVersion) update(provider, { cliVersion: null, auth: 'unknown', message: 'Native CLI version could not be verified.' });
@@ -357,6 +393,13 @@ function createProviderSetup(options) {
               stillCurrent(scope);
               update(provider, { cliVersion, auth, message: auth === 'unknown' ? 'Native authentication status is unavailable or unrecognized.' :
                 auth === 'api-or-cloud' ? 'Native CLI reports API or cloud authentication. Usage may incur charges; Arcane has not started a request.' : null });
+              if (provider === 'claude') {
+                // Optional handoff metadata: a failure leaves the legacy auth result and plain launch untouched.
+                const choices = parseClaudeChoices(await run(command, ['--help'], cwd, true, null, HELP_MAX_BYTES), cliVersion);
+                stillCurrent(scope);
+                update(provider, { claudeChoices: choices });
+                claudeMetadataScope = choices ? scope : null;
+              }
             }
           } else if (action === 'login' && provider === 'codex') {
             if (!await confirm(scope, action, provider)) update(provider, { message: 'Native browser sign-in was cancelled.' });
@@ -378,8 +421,79 @@ function createProviderSetup(options) {
       }
     } catch {
       update(provider, { auth: 'unknown', message: 'Provider setup is unavailable. No completion was verified.' });
+      if (provider === 'claude' && Object.hasOwn(snapshots.get('claude'), 'claudeChoices')) { claudeMetadataScope = null; update('claude', { claudeChoices: null }); }
     } finally { active = false; }
     return copy(provider);
+  }
+  /** Trusted host port: verified current Claude metadata or null. No default, no entitlement claim. */
+  function getHandoffChoices() {
+    if (!enabled || disposed || active || ownedLogin?.session.status().pending || !claudeMetadataScope) return null;
+    const s = snapshots.get('claude'), c = s.claudeChoices;
+    if (!s.installed || s.auth !== 'subscription' || !s.cliVersion || !c || c.cliVersion !== s.cliVersion) return null;
+    try { stillCurrent(claudeMetadataScope); } catch { return null; }
+    return Object.freeze({ cliVersion: c.cliVersion, aliases: Object.freeze([...c.aliases]), efforts: Object.freeze([...c.efforts]) });
+  }
+  const sameProject = (value, project) => typeof value === 'string' && typeof project === 'string' && equal(p.normalize(value), p.normalize(project));
+  /** Trusted host port: one native confirmation with the exact explicit selection. Any doubt is false. */
+  async function confirmHandoff(profile, session) {
+    if (!enabled || disposed || active || platform !== 'win32') return false;
+    let selection, scope;
+    try {
+      const pr = plainFields(profile, ['provider', 'model', 'effort', 'cliVersion']);
+      const choices = getHandoffChoices();
+      if (pr.provider !== 'claude' || !choices || pr.cliVersion !== choices.cliVersion || !choices.aliases.includes(pr.model) || !choices.efforts.includes(pr.effort)) return false;
+      const se = plainFields(session, ['projectPath', 'runtimeDirectory', 'nodePath', 'mcpEntry', 'origin', 'controlToken', 'epoch']);
+      scope = context();
+      if (se.origin !== scope.origin || !sameProject(se.projectPath, scope.project)) return false;
+      selection = { model: pr.model, effort: pr.effort, cliVersion: pr.cliVersion };
+    } catch { return false; }
+    active = true;
+    try {
+      const dialog = options.dialog ?? require('electron').dialog;
+      const result = await dialog.showMessageBox(scope.window, {
+        type: 'question', title: 'Arcane provider setup', message: 'Open Claude Code with Arcane project tools?',
+        detail: 'Open the installed Claude Code ' + selection.cliVersion + ' in a visible terminal for this project with model ' + selection.model + ' and effort ' + selection.effort +
+          '. Arcane adds only its own project tools and a temporary project credential (work coordination and Studio commands you already allowed; it expires in 30 minutes and can be revoked). ' +
+          'That terminal session can read the credential. Claude Code keeps its own sign-in, billing and permission prompts; Arcane sends no prompt and does not verify that Claude Code or its tools connect.\n\nProject: ' + scope.project,
+        buttons: ['Cancel', 'Open terminal'], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      stillCurrent(scope);
+      active = false; // release before re-reading the eligibility gate, which refuses while busy
+      const after = getHandoffChoices();
+      return result?.response === 1 && !!after && after.cliVersion === selection.cliVersion && after.aliases.includes(selection.model) && after.efforts.includes(selection.effort);
+    } catch { return false; } finally { active = false; }
+  }
+  /** Trusted host port: scoped visible terminal. The overlay goes ONLY into the launcher spawn env. */
+  async function launchHandoffTerminal(request) {
+    if (!enabled || disposed || active || ownedLogin || platform !== 'win32') return 'failed';
+    let argv, overlay, scope;
+    try {
+      const r = plainFields(request, ['argv', 'env', 'projectPath', 'epoch']);
+      const e = plainFields(r.env, ['ARCANE_DAEMON_URL', 'ARCANE_LOCAL_TOKEN']);
+      scope = context();
+      const port = typeof e.ARCANE_DAEMON_URL === 'string' ? HANDOFF_DAEMON.exec(e.ARCANE_DAEMON_URL) : null;
+      if (!port || Number(port[1]) > 65535 || e.ARCANE_DAEMON_URL !== scope.origin || typeof e.ARCANE_LOCAL_TOKEN !== 'string' || !HANDOFF_CREDENTIAL.test(e.ARCANE_LOCAL_TOKEN)) return 'failed';
+      const { types } = require('node:util');
+      const a = r.argv;
+      if (!Array.isArray(a) || types.isProxy(a) || Object.getPrototypeOf(a) !== Array.prototype || a.length !== 9 || !a.every((v, i) => Object.hasOwn(a, i) && typeof v === 'string')) return 'failed';
+      const choices = getHandoffChoices();
+      if (!choices || a[0] !== '--mcp-config' || a[2] !== '--strict-mcp-config' || a[3] !== '--model' || !choices.aliases.includes(a[4]) || a[5] !== '--effort' ||
+          !choices.efforts.includes(a[6]) || a[7] !== '--permission-mode' || a[8] !== 'default' || p.basename(absolute(a[1])) !== 'arcane.mcp.json') return 'failed';
+      if (a.some(v => v.includes(e.ARCANE_LOCAL_TOKEN)) || !sameProject(r.projectPath, scope.project) || r.epoch === null || r.epoch === undefined) return 'failed';
+      argv = Object.freeze([...a]); overlay = Object.freeze({ ARCANE_DAEMON_URL: e.ARCANE_DAEMON_URL, ARCANE_LOCAL_TOKEN: e.ARCANE_LOCAL_TOKEN });
+    } catch { return 'failed'; }
+    active = true; const progress = { spawned: false };
+    try {
+      const command = await locate('claude', scope); stillCurrent(scope);
+      if (!command) return 'failed';
+      const cwd = await checked(scope.project, 'directory'); stillCurrent(scope);
+      if (!equal(await checked(command, 'file'), command) || !equal(await checked(cwd, 'directory'), cwd)) return 'failed';
+      stillCurrent(scope);
+      const outcome = await terminalOutcome(command, argv, cwd, scope, overlay, progress);
+      try { stillCurrent(scope); } catch { return outcome === 'failed' ? 'failed' : 'unknown'; }
+      return outcome;
+    } catch { return progress.spawned ? 'unknown' : 'failed'; }
+    finally { active = false; }
   }
   const host = {
     status: (...args) => act('status', args), login: (...args) => act('login', args),
@@ -389,6 +503,9 @@ function createProviderSetup(options) {
   Object.defineProperties(host, {
     cancelPending: { value: cancelPending },
     dispose: { value: () => { disposed = true; cancelPending(); } },
+    getHandoffChoices: { value: getHandoffChoices },
+    confirmHandoff: { value: confirmHandoff },
+    launchHandoffTerminal: { value: launchHandoffTerminal },
   });
   return Object.freeze(host);
 }
