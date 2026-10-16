@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
+import fsPromises from 'node:fs/promises';
+import fsSync from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, relative, isAbsolute, sep } from 'node:path';
+import { join, relative, isAbsolute, sep, basename } from 'node:path';
 import { createWindowsInstallation, WindowsInstallationError } from '../../scripts/windows-installation.mjs';
 
 // Actual filesystem and transaction engine. The small inventory verifier below is SCRIPTED:
@@ -190,4 +193,104 @@ test('a cancellation at the publishing boundary refuses before pointer replaceme
     onProgress: event => { if (event.phase === 'installed') after.abort(); } });
   assert.equal(installed.state, 'installed'); assert.equal(installed.previousReleaseId, first.activeReleaseId);
   assert.equal((await f.engine.status(f.target)).activeReleaseId, installed.activeReleaseId);
+});
+
+// Same-setup recovery: a recorded release whose ENTIRE directory is genuinely absent (for example after a partial uninstall
+// removed it) is repaired from the fully verified bundle into a NEW exclusive id that replaces only that record entry.
+const releasePath = (f, id) => join(f.target, 'releases', id);
+const absentAt = async path => { await assert.rejects(fs.lstat(path), { code: 'ENOENT' }); };
+test('a same-source install repairs an entirely absent active release into a new id, preserving the installation id', async t => {
+  const f = await fixture(t), bundle = await f.makeBundle('first'), first = await f.engine.install({ bundle, installRoot: f.target });
+  const before = JSON.parse(await f.record()); await fs.rm(releasePath(f, first.activeReleaseId), { recursive: true });
+  const repaired = await f.engine.install({ bundle, installRoot: f.target });
+  assert.equal(repaired.state, 'installed'); assert.equal(repaired.repairedReleaseId, first.activeReleaseId); assert.equal(repaired.previousReleaseId, first.activeReleaseId);
+  assert.notEqual(repaired.activeReleaseId, first.activeReleaseId); assert.ok(repaired.activeReleaseId.startsWith(first.manifestSha256 + '-'));
+  const after = JSON.parse(await f.record());
+  assert.equal(after.installationId, before.installationId); assert.equal(after.activeReleaseId, repaired.activeReleaseId); assert.equal(after.releases.length, 1);
+  const [entry] = after.releases, [old] = before.releases;
+  assert.deepEqual([entry.version, entry.manifestSha256, entry.files, entry.bytes], [old.version, old.manifestSha256, old.files, old.bytes]);
+  assert.equal(hash(await fs.readFile(join(repaired.releaseDirectory, 'Arcane.exe'))), hash('fixture first'), 'actual copied bytes');
+  await absentAt(releasePath(f, first.activeReleaseId)); assert.equal(await f.profileText(), 'user work');
+  await assert.rejects(fs.stat(join(f.target, 'installation.lock')), { code: 'ENOENT' });
+  const again = await f.engine.install({ bundle, installRoot: f.target });
+  assert.deepEqual([again.state, again.repairedReleaseId], ['already-active', null], 'the repaired release is now ordinary');
+});
+
+test('a retained absent release is replaced in its own slot; unrelated entries and files stay byte-identical', async t => {
+  const f = await fixture(t), a = await f.makeBundle('first'), b = await f.makeBundle('second');
+  const first = await f.engine.install({ bundle: a, installRoot: f.target }), second = await f.engine.install({ bundle: b, installRoot: f.target });
+  const before = JSON.parse(await f.record()), secondFile = await fs.readFile(join(second.releaseDirectory, 'Arcane.exe'));
+  await fs.rm(releasePath(f, first.activeReleaseId), { recursive: true });
+  const repaired = await f.engine.install({ bundle: a, installRoot: f.target });
+  assert.deepEqual([repaired.state, repaired.repairedReleaseId, repaired.previousReleaseId], ['installed', first.activeReleaseId, second.activeReleaseId]);
+  const after = JSON.parse(await f.record());
+  assert.equal(after.installationId, before.installationId); assert.equal(after.activeReleaseId, repaired.activeReleaseId);
+  assert.deepEqual(after.releases.map(r => r.id), [repaired.activeReleaseId, second.activeReleaseId], 'only the absent slot was replaced, in place');
+  assert.deepEqual(after.releases[1], before.releases[1]); assert.deepEqual(await fs.readFile(join(second.releaseDirectory, 'Arcane.exe')), secondFile);
+});
+
+test('replacing one absent slot works with 32 recorded releases and does not raise the retention limit', async t => {
+  const f = await fixture(t), bundles = [], results = [];
+  for (let i = 0; i < 32; i++) { bundles.push(await f.makeBundle('r' + i)); results.push(await f.engine.install({ bundle: bundles[i], installRoot: f.target })); }
+  await fs.rm(releasePath(f, results[5].activeReleaseId), { recursive: true });
+  const repaired = await f.engine.install({ bundle: bundles[5], installRoot: f.target }), after = JSON.parse(await f.record());
+  assert.equal(repaired.repairedReleaseId, results[5].activeReleaseId); assert.equal(after.releases.length, 32); assert.equal(after.releases[5].id, repaired.activeReleaseId);
+  await assert.rejects(f.engine.install({ bundle: await f.makeBundle('r32'), installRoot: f.target }), error => error.code === 'RETENTION');
+});
+
+test('present, partial, changed, file and redirected release targets keep their existing refusals and stay untouched', async t => {
+  const cases = [
+    ['partial', async dir => fs.rm(join(dir, 'resources'), { recursive: true }), 'IO'],
+    ['changed', async dir => fs.writeFile(join(dir, 'Arcane.exe'), 'changed bytes'), 'IO'],
+    ['file', async dir => { await fs.rm(dir, { recursive: true }); await fs.writeFile(dir, 'not a release'); }, 'PATH'],
+    ...(process.platform === 'win32' ? [['redirect', async (dir, f) => { await fs.rm(dir, { recursive: true }); const away = join(f.root, 'away'); await fs.mkdir(away); await fs.symlink(away, dir, 'junction'); }, 'REDIRECT']] : []),
+  ];
+  for (const [name, mutate, code] of cases) {
+    const f = await fixture(t), bundle = await f.makeBundle('first'), first = await f.engine.install({ bundle, installRoot: f.target });
+    await mutate(releasePath(f, first.activeReleaseId), f); const record = await f.record(), entries = (await fs.readdir(join(f.target, 'releases'))).sort();
+    await assert.rejects(f.engine.install({ bundle, installRoot: f.target }), error => error.code === code && error.published === false, name);
+    assert.equal(await f.record(), record, name); assert.deepEqual((await fs.readdir(join(f.target, 'releases'))).sort(), entries, name + ': no candidate created');
+  }
+});
+
+test('an absent release path that appears before publication is refused and kept; candidate failure keeps the original record', async t => {
+  const f = await fixture(t), bundle = await f.makeBundle('first'), first = await f.engine.install({ bundle, installRoot: f.target }), old = releasePath(f, first.activeReleaseId);
+  await fs.rm(old, { recursive: true }); const record = await f.record();
+  let appeared = false;
+  await assert.rejects(f.engine.install({ bundle, installRoot: f.target, onProgress: event => { if (event.phase === 'publishing' && !appeared) { appeared = true; fsSync.mkdirSync(old); fsSync.writeFileSync(join(old, 'manual.txt'), 'manual'); } } }),
+    error => error.code === 'RELEASE_CHANGED' && error.published === false && typeof error.stagingDirectory === 'string');
+  assert.equal(await f.record(), record); assert.deepEqual(await fs.readdir(old), ['manual.txt'], 'the appeared path is never cleaned or adopted');
+  const f2 = await fixture(t), first2 = await f2.engine.install({ bundle: await f2.makeBundle('first'), installRoot: f2.target });
+  await fs.rm(releasePath(f2, first2.activeReleaseId), { recursive: true }); const record2 = await f2.record();
+  const failing = createWindowsInstallation({ verifyBundle: async directory => { if (directory.includes(join(f2.target, 'releases'))) throw new Error('fixture candidate verification refused'); return f2.verify(directory); } });
+  await assert.rejects(failing.install({ bundle: join(f2.root, 'first'), installRoot: f2.target }), error => error.published === false);
+  assert.equal(await f2.record(), record2); await absentAt(releasePath(f2, first2.activeReleaseId));
+  await fs.rm(join(f2.target, 'releases'), { recursive: true });
+  await assert.rejects(f2.engine.install({ bundle: join(f2.root, 'first'), installRoot: f2.target }), error => error.code === 'RELEASE_MISSING', 'a missing releases container stays out of scope');
+});
+
+test('repair rechecks the releases parent after the final child absence observation', async t => {
+  const f = await fixture(t), bundle = await f.makeBundle('first');
+  const first = await f.engine.install({ bundle, installRoot: f.target });
+  const releases = join(f.target, 'releases'), old = releasePath(f, first.activeReleaseId), movedParent = join(f.target, 'releases-moved');
+  await fs.rm(old, { recursive: true }); const record = await f.record();
+  const originalLstat = fsPromises.lstat;
+  let armed = false, moved = false, failure;
+  // A test-owned wrapper exposes the exact namespace change inside the final awaited observation.
+  // No engine seam or timing race; the builtin binding is restored before any other test runs.
+  fsPromises.lstat = async function (path, ...options) {
+    if (armed && !moved && String(path) === old) { fsSync.renameSync(releases, movedParent); moved = true; }
+    return originalLstat.call(this, path, ...options);
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(f.engine.install({ bundle, installRoot: f.target, onProgress: event => { if (event.phase === 'publishing') armed = true; } }), error => {
+      failure = error;
+      return error.code === 'IO' && error.published === false && typeof error.stagingDirectory === 'string';
+    });
+  } finally { fsPromises.lstat = originalLstat; syncBuiltinESMExports(); }
+  assert.equal(moved, true); assert.equal(await f.record(), record, 'no pointer is published into the vanished parent');
+  await absentAt(releases);
+  await f.verify(join(movedParent, basename(failure.stagingDirectory))); // The verified candidate is retained, not adopted or deleted.
+  assert.equal(await f.profileText(), 'user work');
 });

@@ -176,7 +176,18 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
         await assertRoot();
         if (!identity(releasesStat, await direct(releasesRoot)) || !sameFile(observed.stat, await direct(recordPath, 'file')) || digest((await bounded(recordPath, 65536)).bytes) !== digest(observed.bytes)) fail('CHANGED');
       };
-      const existing = record.releases.find(entry => entry.manifestSha256 === manifestSha256);
+      const recorded = record.releases.find(entry => entry.manifestSha256 === manifestSha256);
+      // A recorded release whose ENTIRE directory is genuinely absent (ENOENT beneath the same real releases parent) is
+      // repaired from this fully verified bundle into a NEW exclusive release id that replaces only that record entry.
+      // The missing id's path is never recreated, reused or adopted; any present, partial, changed or redirected target
+      // keeps the existing verification and its refusals.
+      const absentPath = async id => {
+        try { await fs.lstat(join(releasesRoot, id)); return false; }
+        catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+      };
+      let absent = null;
+      if (recorded) { await assertCurrent(); if (await absentPath(recorded.id)) { await assertCurrent(); absent = recorded; } }
+      const existing = absent ? undefined : recorded;
       let entry = existing;
       let assertCopied = async () => {};
       if (entry) {
@@ -190,7 +201,8 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
         const proof = await verifyBundle(directory); await assertCopied();
         if (proof.manifestSha256 !== manifestSha256 || proof.files !== entry.files || proof.bytes !== entry.bytes || entry.version !== manifest.version) fail('RELEASE_CHANGED');
       } else {
-        if (record.releases.length >= LIMITS.releases) fail('RETENTION');
+        // Replacing an absent recorded slot keeps the entry count unchanged.
+        if (!absent && record.releases.length >= LIMITS.releases) fail('RETENTION');
         entry = { id: manifestSha256 + '-' + randomUUID(), version: manifest.version, manifestSha256, files: sourceProof.files, bytes: sourceProof.bytes, installedAt: new Date().toISOString() };
         stagingDirectory = join(releasesRoot, entry.id);
         await assertCurrent(); await fs.mkdir(stagingDirectory, { mode: 0o700 }); const stageStat = await direct(stagingDirectory);
@@ -225,19 +237,24 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
       }
       await assertCurrent(); await assertCopied();
       if (record.activeReleaseId !== entry.id) {
-        const next = { ...record, activeReleaseId: entry.id, releases: existing ? record.releases : [...record.releases, entry] };
+        const next = { ...record, activeReleaseId: entry.id,
+          releases: existing ? record.releases : absent ? record.releases.map(item => item.id === absent.id ? entry : item) : [...record.releases, entry] };
         const temporary = join(root, 'installation-' + randomUUID() + '.json');
         const temporaryStat = await writeExclusive(temporary, Buffer.from(JSON.stringify(next) + '\n'));
         await assertCurrent(); await assertCopied();
         if (!sameFile(temporaryStat, await direct(temporary, 'file'))) fail('CHANGED');
         progress('publishing'); await assertCurrent(); await assertCopied();
+        // The replaced slot must still be absent at the publication boundary; anything that appeared there is kept untouched (existing RELEASE_CHANGED code).
+        if (absent && !await absentPath(absent.id)) fail('RELEASE_CHANGED');
+        // ENOENT can also mean the parent moved during that await. Rebind the namespace and candidate before publication.
+        if (absent) { await assertCurrent(); await assertCopied(); }
         publishing = true; await fs.rename(temporary, recordPath); published = true;
         if (digest((await bounded(recordPath, 65536)).bytes) !== digest(Buffer.from(JSON.stringify(next) + '\n'))) fail('PUBLISH_UNCONFIRMED');
       }
       const state = existing && record.activeReleaseId === entry.id ? 'already-active' : 'installed'; progress(state);
       return Object.freeze({ state, installationId: record.installationId,
         activeReleaseId: entry.id, previousReleaseId: record.activeReleaseId, releaseDirectory: join(releasesRoot, entry.id), manifestSha256,
-        files: entry.files, bytes: entry.bytes, previousReleasesRetained: true, launched: false, registration: false, shortcuts: false, signed: false });
+        files: entry.files, bytes: entry.bytes, repairedReleaseId: absent ? absent.id : null, previousReleasesRetained: true, launched: false, registration: false, shortcuts: false, signed: false });
     } catch (error) {
       primaryError = error instanceof WindowsInstallationError && !published && !stagingDirectory ? error :
         new WindowsInstallationError(error.code === 'EEXIST' && !lock ? 'LOCKED' : error instanceof WindowsInstallationError ? error.code : 'IO', { cause: error, published: published ? true : publishing ? null : false, stagingDirectory });
