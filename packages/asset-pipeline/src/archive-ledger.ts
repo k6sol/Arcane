@@ -32,9 +32,9 @@ export interface LedgerEntry {
 export interface Ledger { readonly schemaVersion: 1; readonly kind: 'arcane-asset-archive'; readonly entries: readonly LedgerEntry[] }
 export type LedgerParse = { readonly ok: true; readonly ledger: Ledger } | { readonly ok: false; readonly reason: 'oversized' | 'malformed' | 'invalid-entry' | 'duplicate' | 'too-many' };
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const SHA = /^[a-f0-9]{64}$/;
-const DECIMAL = /^(?:0|[1-9][0-9]{0,24})$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/;
+const SHA = /^[a-f0-9]{64}(?![\s\S])/;
+const DECIMAL = /^(?:0|[1-9][0-9]{0,24})(?![\s\S])/;
 const STATES: readonly string[] = ['succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
 const TEMPLATES: readonly string[] = ['hero-prop', 'environment-kit', 'custom-assembly', 'adopted-glb'];
 const sha256 = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
@@ -43,7 +43,7 @@ export const isoTimestamp = (value: unknown): value is string =>
   typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
 /** The asset pipeline's own slug rule (lowercase, ≤48 chars, no device names). Repeated names across different
  * UUIDs are legitimate; directory identity is `<name>-<jobId>`, unique by jobId. */
-const safeName = (value: unknown): value is string => { try { assetName(value); return true; } catch { return false; } };
+const safeName = (value: unknown): value is string => { try { assetName(value); return typeof value==='string'&&/^[a-z][a-z0-9-]{0,47}(?![\s\S])/.test(value); } catch { return false; } };
 
 function dataObject(value: unknown, keys: string): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;

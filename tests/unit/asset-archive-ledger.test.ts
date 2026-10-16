@@ -49,6 +49,14 @@ test('round trip is frozen; serialization and copies re-validate', () => {
   assert.throws(() => copyLedger({ ...ledgerOf([]), extra: 1 }), /Invalid archive ledger/);
 });
 
+test('stored archive identities, slugs, hashes and fingerprints reject trailing line endings',()=>{
+  for(const suffix of ['\n','\r','\r\n','\u2028','\u2029']){
+    for(const field of ['jobId','name','journalSha256'] as const)assert.equal(parseLedgerEntry(entry(1,{[field]:String(entry(1)[field])+suffix})),null,field);
+    for(const field of ['dev','ino','size','mtimeNs','ctimeNs'] as const)assert.equal(parseLedgerEntry(entry(1,{journal:{...FP,[field]:FP[field]+suffix}})),null,field);
+    assert.equal(parseLedgerEntry(entry(1,{state:'interrupted',manifestAvailable:false,resolutionMarkerSha256:'a'.repeat(64)+suffix})),null);
+  }
+});
+
 test('every malformed, unbounded or unsafe input invalidates the whole ledger', () => {
   const good = (entries: unknown[]) => bytes(ledgerOf(entries));
   const cases: [Uint8Array, string][] = [
