@@ -20,6 +20,72 @@ const providerSetup = Object.freeze({version:1,
   status:(...args)=>providerInvoke('status',args),login:(...args)=>providerInvoke('login',args),
   install:(...args)=>providerInvoke('install',args),launch:(...args)=>providerInvoke('launch',args),
 });
+const handoffError = () => { throw new Error('Native handoff is unavailable.'); };
+const handoffFields = (value, required, optional = []) => {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype) handoffError();
+  const keys = Reflect.ownKeys(value);
+  if (keys.some(key => typeof key !== 'string' || !required.includes(key) && !optional.includes(key)) ||
+      required.some(key => !keys.includes(key))) handoffError();
+  for (const key of keys) {
+    const field = Object.getOwnPropertyDescriptor(value, key);
+    if (!field?.enumerable || !Object.hasOwn(field, 'value')) handoffError();
+  }
+  return value;
+};
+const handoffId = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
+const handoffTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value));
+const handoffChoice = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
+const handoffReply = value => {
+  const state = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'state') : null;
+  if (!state || !Object.hasOwn(state, 'value')) handoffError();
+  if (state.value === 'listed') {
+    handoffFields(value, ['state', 'projectId', 'handoffs']);
+    if (typeof value.projectId !== 'string' || !/^[a-f0-9]{64}$/.test(value.projectId) || !Array.isArray(value.handoffs) ||
+        Object.getPrototypeOf(value.handoffs) !== Array.prototype || value.handoffs.length > 256 ||
+        Reflect.ownKeys(value.handoffs).length !== value.handoffs.length + 1) handoffError();
+    const ids = new Set(), handoffs = [];
+    for (let i = 0; i < value.handoffs.length; i++) {
+      const field = Object.getOwnPropertyDescriptor(value.handoffs, String(i));
+      if (!field?.enumerable || !Object.hasOwn(field, 'value')) handoffError();
+      const row = handoffFields(field.value, ['handoffId', 'state', 'createdAt', 'expiresAt', 'sealedAt', 'endedAt', 'owned']);
+      if (!handoffId(row.handoffId) || ids.has(row.handoffId) || typeof row.owned !== 'boolean' ||
+          !['pending', 'sealed', 'expired', 'revoked', 'project_changed', 'closed'].includes(row.state) ||
+          !handoffTime(row.createdAt) || !handoffTime(row.expiresAt) || !(row.sealedAt === null || handoffTime(row.sealedAt)) ||
+          !(row.endedAt === null || handoffTime(row.endedAt))) handoffError();
+      ids.add(row.handoffId); handoffs.push({ ...row });
+    }
+    return { state: 'listed', projectId: value.projectId, handoffs };
+  }
+  handoffFields(value, ['state', 'reason', 'message'], ['handoffId', 'expiresAt', 'revocation', 'cleanup']);
+  if (!['opened', 'cancelled', 'refused', 'unknown', 'revoked'].includes(value.state) ||
+      !(value.reason === null || typeof value.reason === 'string' && /^[a-z_]{1,64}$/.test(value.reason)) ||
+      typeof value.message !== 'string' || value.message.length > 512 || /[\x00-\x1f\x7f]/.test(value.message) ||
+      (Object.hasOwn(value, 'handoffId') && !handoffId(value.handoffId)) ||
+      (Object.hasOwn(value, 'expiresAt') && !handoffTime(value.expiresAt)) ||
+      (Object.hasOwn(value, 'revocation') && !['revoked', 'unknown'].includes(value.revocation)) ||
+      (Object.hasOwn(value, 'cleanup') && !['removed', 'retained', 'not_owned'].includes(value.cleanup)) ||
+      (value.state === 'opened' && (!handoffId(value.handoffId) || !handoffTime(value.expiresAt))) ||
+      (value.state === 'revoked' && !handoffId(value.handoffId))) handoffError();
+  return { ...value };
+};
+const handoffInvoke = async (action, args) => {
+  try {
+    let input;
+    if (action === 'list') { if (args.length) handoffError(); }
+    else if (action === 'revoke') { if (args.length !== 1 || !handoffId(args[0])) handoffError(); input = args[0]; }
+    else {
+      if (args.length !== 1) handoffError();
+      const value = handoffFields(args[0], ['model', 'effort']);
+      if (!handoffChoice(value.model) || !handoffChoice(value.effort)) handoffError();
+      input = { model: value.model, effort: value.effort };
+    }
+    return handoffReply(await ipcRenderer.invoke('arcane:native-handoff-' + action, ...(action === 'list' ? [] : [input])));
+  } catch { handoffError(); }
+};
+const nativeHandoff = Object.freeze({ version: 1,
+  launch: (...args) => handoffInvoke('launch', args), list: (...args) => handoffInvoke('list', args),
+  revoke: (...args) => handoffInvoke('revoke', args),
+});
 const studioKeyError = () => { throw new Error('Arcane Studio key storage is unavailable.'); };
 const studioKeyFields = (value, names) => {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== names.length ||
@@ -124,4 +190,4 @@ const workspacePreferenceInvoke = async (action, args) => {
 const workspacePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args), save: (...args) => workspacePreferenceInvoke('save', args),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, studioKeys, workspacePreferences }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences }));
