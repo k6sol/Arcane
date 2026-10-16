@@ -55,6 +55,21 @@ createInterface({input:process.stdin}).on('line',line=>{
 });`;
 
 interface Wire { process:number; method:string; params:Record<string,unknown>;id?:string|number;result?:unknown }
+/** A live append can be observed between writes. Only LF-terminated records
+ * exist yet; malformed complete records still fail instead of being skipped. */
+function completedFixtureWire(text:string):Wire[]{
+  const end=text.lastIndexOf('\n');if(end<0)return[];
+  return text.slice(0,end).split('\n').map(line=>JSON.parse(line)as Wire);
+}
+test('live wire observations wait for complete UTF-8 JSONL records and reject corrupt completed records',()=>{
+  const first={process:0,method:'initialize',params:{}},second={process:1,method:'thread/resume',params:{threadId:'exact.café.🌿'}};
+  const prefix=JSON.stringify(first)+'\n',next=Buffer.from(JSON.stringify(second)+'\n');
+  assert.deepEqual(completedFixtureWire(''),[]);
+  for(let offset=0;offset<next.length;offset++)assert.deepEqual(completedFixtureWire(prefix+next.subarray(0,offset).toString('utf8')),[first]);
+  assert.deepEqual(completedFixtureWire(prefix+next.toString('utf8')),[first,second]);
+  assert.throws(()=>completedFixtureWire(prefix+'{"corrupt":\n'),SyntaxError);
+  assert.throws(()=>completedFixtureWire('\n'),SyntaxError);
+});
 async function until(check:()=>boolean|Promise<boolean>){const end=Date.now()+6000;while(!await check()){assert.ok(Date.now()<end,'Expected managed task fixture state.');await delay(5);}}
 function packet(jobId=randomUUID(),outcome:'passed'|'failed'='failed'):StudioTestTaskSettled {
   return {jobId,displayDigest:HASH,scenarioDigest:HASH,subjectDigest:SUBJECT,reportDigest:createHash('sha256').update(jobId+outcome).digest('hex'),
@@ -98,7 +113,7 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
  const task=()=>service.state().chatTasks!.at(-1)!;
  const taskOrigin=(index=0)=>service.playtestTasks!.capture('agent-'+createHash('sha256').update(tokens[index]!).digest('hex'))!;
  const prepare=(binding:StudioTestTaskOrigin,report:StudioTestTaskSettled)=>service.playtestTasks!.prepared(binding,{jobId:report.jobId,displayDigest:report.displayDigest,scenarioDigest:report.scenarioDigest,subjectDigest:report.subjectDigest});
- const wire=async():Promise<Wire[]>=>(await readFile(audit,'utf8')).trim().split('\n').map(line=>JSON.parse(line)as Wire);
+ const wire=async():Promise<Wire[]>=>completedFixtureWire(await readFile(audit,'utf8'));
  return {service,registry,clients,tokens,cancelled,validated,root,project,post,excessiveReferenceBody,action,ready,send,task,taskOrigin,prepare,wire,
    finish:(process=0,turn=1)=>writeFile(join(root,'finish-'+process+'-'+turn),'complete',{flag:'wx'}),
    releasePreflight:(process=0)=>writeFile(join(root,'finish-'+process+'-preflight'),'release',{flag:'wx'}),control,generic};
