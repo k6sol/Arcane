@@ -3,8 +3,13 @@ import type { ProviderConnectionStatus } from './codex-chat.js';
 
 export type SetupProvider = 'codex' | 'claude';
 export type ChatSurface = 'codex' | 'claude';
-/** Codex conversation nodes hidden (never removed) while the embedded Claude chat is shown. */
-export const CODEX_SURFACE_SELECTORS = ['#codex-panel .conversation-scroll', '#codex-compose', '#codex-notice', '#codex-status', '#workspace-chat-tabs', '#workspace-new-chat'] as const;
+/**
+ * Both providers share one chat surface (tabs strip, transcript, composer and model picker). Only these
+ * provider-specific nodes swap: Codex's are hidden (never removed) while the Claude chat owns the surface.
+ */
+export const CODEX_SURFACE_SELECTORS = ['#codex-notice', '#codex-status', '#workspace-chat-tabs', '#workspace-saved-chats'] as const;
+/** Claude's counterparts, shown only while the Claude chat owns the shared surface. */
+export const CLAUDE_SURFACE_SELECTORS = ['#claude-chat-notice', '#claude-chat-status', '#claude-chat-tabs', '#claude-saved-chats'] as const;
 export interface ClaudeSetupChoices {
   cliVersion: string; aliases: readonly string[]; efforts: readonly string[];
 }
@@ -41,7 +46,7 @@ export interface ProviderSetupController {
   /** Current Claude CLI choices; null when status, sign-in or provider selection is stale. */
   handoffChoices(): ClaudeSetupChoices | null;
   subscribeHandoffChoices(listener: () => void): () => void;
-  /** Which in-app chat the workspace shows: Codex, or the embedded Claude chat after a signed-in Claude status. */
+  /** Which provider owns the shared in-app chat surface: Codex, or Claude after a signed-in Claude status. */
   chatSurface(): ChatSurface;
   subscribeChatSurface(listener: () => void): () => void;
   stop(): void;
@@ -166,11 +171,10 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (next === surface) return;
     surface = next;
     const claude = next === 'claude';
-    const root = doc.getElementById('claude-chat'); if (root) root.hidden = !claude;
-    for (const selector of CODEX_SURFACE_SELECTORS) {
+    for (const [selectors, hidden] of [[CODEX_SURFACE_SELECTORS, claude], [CLAUDE_SURFACE_SELECTORS, !claude]] as const) for (const selector of selectors) {
       let node: HTMLElement | null = null;
-      try { node = selector.startsWith('#') && !selector.includes(' ') ? doc.getElementById(selector.slice(1)) : doc.querySelector?.(selector) ?? null; } catch { node = null; }
-      if (node) node.hidden = claude;
+      try { node = doc.getElementById(selector.slice(1)); } catch { node = null; }
+      if (node) node.hidden = hidden;
     }
     for (const listener of [...surfaceListeners]) { try { listener(); } catch { /* Observers cannot interrupt setup. */ } }
   };

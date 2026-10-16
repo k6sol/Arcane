@@ -2119,12 +2119,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const codexApi=new CodexChatApi(token);
   const codexChat = new CodexChat(document, codexApi);
   const providerSetup = startProviderSetup(document, {chat:codexChat, autoSelectSignedIn:true});
-  // Claude chat replaces the Codex panel only while provider setup reports the Claude surface.
-  // Codex state is never destroyed; its nodes are only hidden.
-  const claudeRoot = document.getElementById('claude-chat');
-  const claudeChat = claudeRoot ? new ClaudeChat(claudeRoot) : null;
+  // Both providers share one chat surface (tabs, transcript, composer and model picker). While provider setup reports
+  // the Claude surface, Codex pauses drawing there (its state is never destroyed) and the Claude chat renders instead.
+  const claudeChat = document.getElementById('codex-compose') ? new ClaudeChat(document) : null;
   let claudeChatStopped = false;
-  const showClaudeChat = () => { if (!claudeChatStopped && providerSetup.chatSurface() === 'claude') void claudeChat?.refresh(); };
+  const showClaudeChat = () => {
+    const claude = !claudeChatStopped && !!claudeChat && providerSetup.chatSurface() === 'claude';
+    try {
+      if (claude) { codexChat.yieldSurface(true); claudeChat!.activate(); void claudeChat!.refresh(); }
+      else { claudeChat?.deactivate(); codexChat.yieldSurface(false); }
+    } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
+  };
   providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat();
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);

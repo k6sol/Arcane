@@ -210,13 +210,17 @@ test('Edge native-contract fixture: metadata status reads, explicit login/connec
     await page.locator('#provider-login-start').click();
     await page.waitForFunction(() => document.getElementById('provider-login-start')?.textContent === 'Open Claude Code');
     const beforeLaunch = (await f.calls()).length;
-    // A fresh signed-in Claude status unlocks the embedded Claude chat in place of the Codex panel.
+    // A fresh signed-in Claude status hands the shared chat surface to Claude: the same composer and transcript stay,
+    // only the provider-specific tabs strip and notices swap.
     assert.equal(await page.locator('#provider-login-gate').isVisible(), false);
-    assert.equal(await page.locator('#claude-chat').isVisible(), true);
-    assert.equal(await page.locator('#codex-compose').isVisible(), false, 'Codex composer is hidden, not destroyed');
+    assert.equal(await page.locator('#codex-compose').isVisible(), true, 'both providers use the same composer');
+    assert.equal(await page.locator('#claude-chat-notice').evaluate(node => (node as HTMLElement).hidden), false, 'the Claude notice line is shown');
+    assert.equal(await page.locator('#codex-notice').isVisible(), false, 'Codex notices are hidden, not destroyed');
+    assert.equal(await page.locator('#workspace-chat-tabs').isVisible(), false);
+    assert.equal(await page.locator('#workspace-new-chat').isVisible(), true);
     await page.locator('#claude-chat-terminal').click(); await page.waitForFunction(n => (window as any).providerUI.calls.length === n + 1, beforeLaunch);
     assert.deepEqual((await f.calls()).at(-1), { action: 'launch', provider: 'claude' });
-    assert.equal(await page.locator('#claude-chat').isVisible(), true, 'Terminal handoff stays a secondary action beside the embedded chat');
+    assert.equal(await page.locator('#claude-chat-terminal').isVisible(), true, 'Terminal handoff stays a secondary action beside the chat');
     assert.equal(await page.locator('#codex-submit').isDisabled(), true);
     assert.equal(await page.locator('#codex-composer').inputValue(), 'Keep my unsent draft.');
     assert.equal((await f.calls()).some((call: any) => call.action === 'install'), false);

@@ -366,7 +366,9 @@ export class ChatTabs {
       if(next<0)return;event.preventDefault();const target=this.rows[next]!.key;
       void this.callbacks.select(target).then(ok=>{if(ok)Array.from(mount.querySelectorAll<HTMLElement>('[role=tab]')).find(button=>button.dataset.chatKey===target)?.focus();});
     });
-    this.savedMenu=this.doc.createElement('details');this.savedMenu.className='chat-tabs-history';mount.after(this.savedMenu);
+    // The id lets provider setup hide Codex's saved list while another provider's chat owns the surface.
+    this.savedMenu=this.doc.createElement('details');this.savedMenu.className='chat-tabs-history';this.savedMenu.id='workspace-saved-chats';
+    if(mount.hidden===true)this.savedMenu.hidden=true;mount.after(this.savedMenu);
   }
   render(blocked: boolean): void {
     if (!this.mounted) return;

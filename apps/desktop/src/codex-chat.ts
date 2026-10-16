@@ -435,6 +435,56 @@ export function appendWorkflowText(doc: Document, value: string): boolean {
   input.dispatchEvent(new EventType('input',{bubbles:true}));input.focus({preventScroll:true});return true;
 }
 
+/** Composer nodes shared with another provider's chat; Codex handlers on them pause while the surface is yielded. */
+const SHARED_SURFACE_IDS=new Set(['codex-composer','codex-compose','codex-submit']);
+/** Shared model-picker placement: above or below the trigger, inside the visual viewport. */
+export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger:HTMLElement,wide:boolean):void {
+  const view = doc.defaultView;
+  if (popover.hidden || !view) return;
+  const viewport = view.visualViewport, margin = 12, gap = 8;
+  const leftEdge = (viewport?.offsetLeft ?? 0) + margin, topEdge = (viewport?.offsetTop ?? 0) + margin;
+  const width = Math.max(0, (viewport?.width ?? view.innerWidth) - margin * 2);
+  const bottomEdge = topEdge + Math.max(0, (viewport?.height ?? view.innerHeight) - margin * 2);
+  const rect = trigger.getBoundingClientRect(), panelWidth = Math.min(wide?300:240, width);
+  const above = Math.max(0, rect.top - topEdge - gap), below = Math.max(0, bottomEdge - rect.bottom - gap);
+  const useAbove = above >= below;
+  popover.style.width = panelWidth + 'px';
+  popover.style.maxHeight = Math.min(480, useAbove ? above : below) + 'px';
+  popover.style.left = Math.max(leftEdge, Math.min(rect.left, leftEdge + width - panelWidth)) + 'px';
+  const height = popover.getBoundingClientRect().height;
+  popover.style.top = Math.max(topEdge, Math.min(useAbove ? rect.top - gap - height : rect.bottom + gap, bottomEdge - height)) + 'px';
+}
+/**
+ * Shared assistant text rendering for both providers. Plain text stays one pre.message-text. Text with ``` fences becomes
+ * div.message-text.claude-message-body holding <p> paragraphs and <pre><code> blocks. DOM nodes and textContent only.
+ */
+export function renderMessageText(doc:Document,value:string):HTMLElement {
+  if(!value.includes('```')){const pre=doc.createElement('pre');pre.className='message-text';pre.textContent=value;return pre;}
+  const box=doc.createElement('div');box.className='message-text claude-message-body';box.dataset.format='rich';
+  value.split('```').forEach((part,index)=>{
+    if(index%2===1){
+      let code=part,language='';const newline=code.indexOf('\n');
+      if(newline>=0&&/^[A-Za-z0-9_+#.-]{0,32}$/.test(code.slice(0,newline).trim())){language=code.slice(0,newline).trim();code=code.slice(newline+1);}
+      const pre=doc.createElement('pre'),element=doc.createElement('code');element.textContent=code.replace(/\n$/,'');
+      if(language)element.setAttribute('data-language',language);pre.append(element);box.append(pre);return;
+    }
+    for(const paragraph of part.split(/\n[ \t]*\n/)){
+      const trimmed=paragraph.replace(/^\n+|\n+$/g,'');if(!trimmed.trim())continue;
+      const p=doc.createElement('p');p.textContent=trimmed;box.append(p);
+    }
+  });
+  return box;
+}
+/** Shared selected-row check mark for model and reasoning options. */
+export function composerPickerCheck(doc:Document,selected:boolean):SVGSVGElement {
+  const icon=doc.createElementNS('http://www.w3.org/2000/svg','svg');
+  icon.setAttribute('class','icon picker-selected-check');icon.setAttribute('viewBox','0 0 24 24');
+  icon.setAttribute('fill','none');icon.setAttribute('stroke','currentColor');icon.setAttribute('stroke-width','1.8');
+  icon.setAttribute('aria-hidden','true');icon.setAttribute('data-selected',String(selected));
+  const path=doc.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','m5 12 4 4L19 6');
+  if(selected)icon.append(path);return icon;
+}
+
 interface Uncertain { input:ChatAction; read:boolean }
 interface Confirmation { action:'grant-writes'|'approval'|'review-draft'; fields:Record<string,unknown>; fingerprint:string; connectionId:string; generation:number }
 interface ReviewedDraft { context:string; text:string }
@@ -486,6 +536,9 @@ export class CodexChat {
   private attachments: ChatAttachmentsController | null = null;
   private imageRequest:AbortController|null=null;
   private proposals:TaskProposalPanel|null=null;
+  /** While another provider's chat renders into the shared transcript/composer/picker, Codex keeps its state but stops drawing there. */
+  private surfaceYielded=false;
+  private yieldedComposer='';
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
   /** Presentation-only attachment mount; it creates no native thread or task. */
   enableTextAttachments(controller:ChatAttachmentsController):void {
@@ -528,8 +581,20 @@ export class CodexChat {
   private el<T extends HTMLElement=HTMLElement>(id:string) {const e=this.doc.getElementById(id);if(!e)throw new Error('Missing Codex UI '+id);return e as T;}
   private make<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string) {const e=this.doc.createElement(tag);if(text!==undefined)e.textContent=this.api.safe(text);if(className)e.className=className;return e;}
   private text(id:string,value:string){this.el(id).textContent=this.api.safe(value);}
-  private value(id:string){return this.el<HTMLInputElement>(id).value;}
-  private on(id:string,event:string,fn:(e:Event)=>void){this.el(id).addEventListener(event,fn);}
+  private value(id:string){return this.surfaceYielded&&id==='codex-composer'?this.yieldedComposer:this.el<HTMLInputElement>(id).value;}
+  private setComposer(value:string){if(this.surfaceYielded)this.yieldedComposer=value;else this.el<HTMLTextAreaElement>('codex-composer').value=value;}
+  private on(id:string,event:string,fn:(e:Event)=>void){this.el(id).addEventListener(event,e=>{if(this.surfaceYielded&&SHARED_SURFACE_IDS.has(id))return;fn(e);});}
+  /**
+   * Presentation hand-off of the shared chat surface (transcript, composer, model picker) to another provider's chat.
+   * Codex state, polling, drafts and native authority are untouched; only its drawing into the shared nodes pauses.
+   */
+  yieldSurface(yielded:boolean):void {
+    if(yielded===this.surfaceYielded)return;
+    if(yielded){this.closePicker();this.flushDraft();this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
+    else {this.surfaceYielded=false;this.el<HTMLTextAreaElement>('codex-composer').value=this.yieldedComposer;this.yieldedComposer='';this.messageSignature='';this.pickerSignature='';this.selectionSignature='';}
+    this.render();
+  }
+  surfaceIsYielded():boolean {return this.surfaceYielded;}
   private readonly workflowContextListeners = new Set<() => void>();
   /** Parent boot seam: the only dynamic module load; it starts no native action. */
   async enableChatTabs(options: ChatTabsOptions = {}): Promise<void> {
@@ -631,7 +696,7 @@ export class CodexChat {
   }
   private loadTabDraft():void {
     const active=this.tabs?.active();if(!active)return;
-    this.el<HTMLTextAreaElement>('codex-composer').value=active.draft;
+    this.setComposer(active.draft);
     const context=this.tabDraftContexts.get(active.key);
     this.workflowDraftOrigins=structuredClone(context?.origins??[]);this.reviewedDraftTarget=context?.reviewed??null;
     this.restoredWorkflowDraft=context?.restored??active.workflowDraft;
@@ -821,7 +886,7 @@ export class CodexChat {
   /** Host-prepared metadata is context, never a write grant or workflow acceptance. */
   appendWorkflowDraft(value: string, provenance: WorkflowDraftProvenance): boolean {
     const native = this.workflowConversation(), model = this.workflowModelSelection();
-    if (!this.fresh || this.stopped || !native || !model || this.workflowDraftOrigins.length >= 20 ||
+    if (!this.fresh || this.stopped || this.surfaceYielded || !native || !model || this.workflowDraftOrigins.length >= 20 ||
         provenance.projectPath !== this.state?.projectPath || provenance.conversation.provider !== native.provider ||
         provenance.conversation.threadId !== native.threadId || provenance.conversation.sessionId !== native.sessionId ||
         !sameWorkflowModel(provenance.model,model)) return false;
@@ -1011,7 +1076,7 @@ export class CodexChat {
     return this.canSelectModel();
   }
   private closePicker(restore = false) {
-    const popover = this.picker(); if (!popover) return;
+    const popover = this.picker(); if (!popover || this.surfaceYielded) return;
     const wasOpen = !popover.hidden; popover.hidden = true;
     this.el('codex-model-trigger').setAttribute('aria-expanded', 'false');
     this.setReasoningOpen(false);
@@ -1022,20 +1087,9 @@ export class CodexChat {
     }
   }
   private positionPicker() {
-    const popover = this.picker(), view = this.doc.defaultView;
-    if (!popover || popover.hidden || !view) return;
-    const viewport = view.visualViewport, margin = 12, gap = 8;
-    const leftEdge = (viewport?.offsetLeft ?? 0) + margin, topEdge = (viewport?.offsetTop ?? 0) + margin;
-    const width = Math.max(0, (viewport?.width ?? view.innerWidth) - margin * 2);
-    const bottomEdge = topEdge + Math.max(0, (viewport?.height ?? view.innerHeight) - margin * 2);
-    const rect = this.el('codex-model-trigger').getBoundingClientRect(), panelWidth = Math.min(this.pickerModelsOpen?300:240, width);
-    const above = Math.max(0, rect.top - topEdge - gap), below = Math.max(0, bottomEdge - rect.bottom - gap);
-    const useAbove = above >= below;
-    popover.style.width = panelWidth + 'px';
-    popover.style.maxHeight = Math.min(480, useAbove ? above : below) + 'px';
-    popover.style.left = Math.max(leftEdge, Math.min(rect.left, leftEdge + width - panelWidth)) + 'px';
-    const height = popover.getBoundingClientRect().height;
-    popover.style.top = Math.max(topEdge, Math.min(useAbove ? rect.top - gap - height : rect.bottom + gap, bottomEdge - height)) + 'px';
+    const popover = this.picker();
+    if (!popover || this.surfaceYielded) return;
+    positionComposerPopover(this.doc, popover, this.el('codex-model-trigger'), this.pickerModelsOpen);
   }
   private openPicker() {
     const popover = this.picker();
@@ -1076,14 +1130,7 @@ export class CodexChat {
     }
     this.positionPicker();
   }
-  private pickerCheck(selected:boolean):SVGSVGElement {
-    const icon=this.doc.createElementNS('http://www.w3.org/2000/svg','svg');
-    icon.setAttribute('class','icon picker-selected-check');icon.setAttribute('viewBox','0 0 24 24');
-    icon.setAttribute('fill','none');icon.setAttribute('stroke','currentColor');icon.setAttribute('stroke-width','1.8');
-    icon.setAttribute('aria-hidden','true');icon.setAttribute('data-selected',String(selected));
-    const path=this.doc.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','m5 12 4 4L19 6');
-    if(selected)icon.append(path);return icon;
-  }
+  private pickerCheck(selected:boolean):SVGSVGElement {return composerPickerCheck(this.doc,selected);}
   private bindPicker() {
     if (!this.picker() || this.pickerCleanup.length) return;
     // Upgrade the existing effort section without requiring a second catalogue or settings control.
@@ -1095,7 +1142,9 @@ export class CodexChat {
     reasoning.setAttribute('aria-controls','codex-picker-efforts');reasoning.setAttribute('aria-expanded','false');reasoning.setAttribute('aria-haspopup','true');
     this.el('codex-picker-effort-heading').hidden=true;this.el('codex-picker-effort-hint').hidden=true;
     this.el('codex-picker-efforts').setAttribute('aria-label','Reasoning effort');this.setReasoningOpen(false);
-    const listen = (target: EventTarget, type: string, fn: (event: Event) => void, capture = false) => {
+    const listen = (target: EventTarget, type: string, handler: (event: Event) => void, capture = false) => {
+      // The shared picker belongs to the other provider's chat while the surface is yielded.
+      const fn = (event: Event) => { if (!this.surfaceYielded) handler(event); };
       target.addEventListener(type, fn, capture);
       this.pickerCleanup.push(() => target.removeEventListener(type, fn, capture));
     };
@@ -1189,7 +1238,7 @@ export class CodexChat {
     }
   }
   private renderPicker() {
-    const popover = this.picker(); if (!popover) return;
+    const popover = this.picker(); if (!popover || this.surfaceYielded) return;
     const snapshot = this.snapshot(), selection = this.displaySelection();
     const reported = snapshot?.models.find(model => model.model === selection?.model);
     this.text('codex-model-label', reported?.displayName ?? 'Choose model');
@@ -1429,11 +1478,11 @@ export class CodexChat {
     const sentDraft=input.action==='turn-start'?{text:this.value('codex-composer'),origins:structuredClone(this.workflowDraftOrigins),reviewed:this.reviewedDraftTarget,restored:this.restoredWorkflowDraft,tab:this.tabs?.active()?.key??null}:null;
     const restoreRejectedDraft=()=>{
       if(!sentDraft||!sentDraft.text||this.stopped||this.value('codex-composer')!==''||(this.tabs?.active()?.key??null)!==sentDraft.tab)return;
-      this.el<HTMLTextAreaElement>('codex-composer').value=sentDraft.text;
+      this.setComposer(sentDraft.text);
       this.workflowDraftOrigins=sentDraft.origins;this.reviewedDraftTarget=sentDraft.reviewed;this.restoredWorkflowDraft=sentDraft.restored;this.stashTabDraft();
       this.text('codex-notice',(this.el('codex-notice').textContent??'')+' Your message text was restored to the composer.');
     };
-    if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.el<HTMLTextAreaElement>('codex-composer').value='';this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
+    if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
     this.render();this.publishState();
     try {
       const outcome=await this.api.action(input,imageRequest?.signal);
@@ -1489,7 +1538,7 @@ export class CodexChat {
     const s=this.snapshot(),t=s?.thread;
     const notice=this.el('codex-notice').textContent??'';
     if(['Connect your local CLI when you’re ready.','No connection or model request is started automatically.','Choose a model to start this conversation.'].includes(notice)) this.text('codex-notice',s?.connected?(t?'Continue in this conversation.':s.selection?'Start your conversation when you’re ready.':'Choose a model to start this conversation.'):'Connect your local CLI when you’re ready.');
-    const welcome=this.doc.getElementById('welcome-connect');if(welcome){welcome.hidden=!!s?.connected;welcome.textContent='Connect your local CLI';}
+    const welcome=this.surfaceYielded?null:this.doc.getElementById('welcome-connect');if(welcome){welcome.hidden=!!s?.connected;welcome.textContent='Connect your local CLI';}
     this.text('codex-status',this.state?.connecting?'Connecting':this.state?.closing?'Disconnecting':s?.connected?s.provenance==='spawned-node-fixture'?'Test connection':'Connected':s?'Disconnected':'Not connected');
     this.text('codex-scope',s?'Connection '+s.connectionId+(t?'\nThread '+t.threadId+'\nTurn '+(t.turnId??'Not started'):'\nNo thread started'):'No native connection selected.');
     this.text('codex-account',s?.account?'Native account: '+s.account.auth+' · reported plan '+(s.account.plan??'not reported')+' · model access unverified':'Connect reads account and model metadata only.');
@@ -1506,12 +1555,12 @@ export class CodexChat {
     if(catalogueChanged||selectionSignature!==this.selectionSignature){this.selectionSignature=selectionSignature;this.el<HTMLSelectElement>('codex-model').value=selection?.model??'';this.populateEfforts();if(selection)this.el<HTMLSelectElement>('codex-effort').value=selection.effort;}
     this.text('codex-selection',s?.selection?'Reported selection: '+s.selection.model+' · '+s.selection.effort:'No model/effort selection acknowledged.');
     const displayedMessages=this.displayMessages(),messageSignature=JSON.stringify(displayedMessages);
-    if(messageSignature!==this.messageSignature){
+    if(!this.surfaceYielded&&messageSignature!==this.messageSignature){
     this.messageSignature=messageSignature;
     const messages=this.el('codex-messages'),bottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<80;messages.replaceChildren();
     if(!displayedMessages.length)messages.append(this.make('p',this.tabs?.active()?.kind==='draft'?'Local draft. Starting a conversation will not send your message.':this.tabs?.recording()?.recorded?'No public text entries in this saved recording.':'No public history has been loaded for this conversation.','empty'));
     for(const message of displayedMessages){
-      const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');if(message.role==='tool')card.setAttribute('aria-label','Public tool output');card.append(this.make('pre',message.text,'message-text'));
+      const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');if(message.role==='tool')card.setAttribute('aria-label','Public tool output');card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text)):this.make('pre',message.text,'message-text'));
       if(message.acknowledgement){const acknowledgement=message.acknowledgement==='Native acknowledgement: acknowledged'?'Accepted':message.acknowledgement==='Native acknowledgement: rejected'?'Not accepted':'Awaiting confirmation';card.append(this.make('p',acknowledgement,'message-acknowledgement'));}
       const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));card.append(metadata);messages.append(card);
     }
@@ -1550,14 +1599,14 @@ export class CodexChat {
     const disable=(id:string,value:boolean)=>{this.el<HTMLButtonElement>(id).disabled=value;};
     const pending=(action:string)=>[...this.pending.values()].some(p=>p.action===action);
     disable('codex-connect',!this.fresh||this.stopped||connected||!!this.pending.size||!!this.uncertain.size||!!this.state?.connecting||!!this.state?.closing);
-    this.el<HTMLTextAreaElement>('codex-composer').disabled=this.tabs?.persistenceStatus()==='native-loading';
+    if(!this.surfaceYielded)this.el<HTMLTextAreaElement>('codex-composer').disabled=this.tabs?.persistenceStatus()==='native-loading';
     disable('codex-disconnect',this.stopped||!s||pending('disconnect'));
     const reportedPair=s?.models.some(model=>model.model===this.value('codex-model')&&model.efforts.includes(this.value('codex-effort')));
     disable('codex-select',!this.canSelectModel()||pair||!reportedPair);
     disable('codex-model',!this.canSelectModel());disable('codex-effort',!this.canSelectModel());
     const subscription=s?.account?.auth==='subscription'&&s.account.requiresOpenaiAuth;
     disable('codex-thread-start',this.preparingMessage||!this.canStartThread());disable('codex-thread-resume',this.preparingMessage||(this.tabs?!!this.tabBlockReason()||!this.tabs.saved().some(row=>row.threadId===this.value('codex-resume-id')):!normal||!!t||!pair||!subscription||!text(this.value('codex-resume-id'))));
-    const start = this.doc.getElementById('codex-conversation-start') as HTMLButtonElement | null;
+    const start = this.surfaceYielded ? null : this.doc.getElementById('codex-conversation-start') as HTMLButtonElement | null;
     if (start) {
       start.hidden = !s?.connected || (this.tabs?this.tabs.active()?.kind!=='draft':!!t);
       start.disabled = this.preparingMessage||!this.canStartConversation();
@@ -1583,6 +1632,7 @@ export class CodexChat {
   }
   /** The input hot path only validates the composer; no tabs, catalogue or state notifications. */
   private renderComposer():void {
+    if(this.surfaceYielded)return;
     const s=this.snapshot(),t=(!this.tabs||this.tabs.bound(this.state))?s?.thread:null;
     const normal=this.normal()&&!this.tabTransition,message=this.value('codex-composer'),size=utf8(message),draftBlocked=this.draftNeedsReview();
     const disabled=(id:string,value:boolean)=>{const button=this.el<HTMLButtonElement>(id);if(button.disabled!==value)button.disabled=value;};

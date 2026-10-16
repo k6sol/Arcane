@@ -1,7 +1,9 @@
 /// <reference lib="dom" />
-// Browser-only Claude chat surface. It talks exclusively to the Electron preload
-// bridge `window.arcaneDesktop.claudeChat`; it imports nothing and renders model
-// output with textContent only (never innerHTML).
+// Claude chat controller for the shared workspace chat surface. While the Claude provider is active it renders into
+// the same nodes as the Codex chat (tabs strip, Saved chats, #codex-messages transcript, composer and the composer
+// model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
+// the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
+import { composerPickerCheck, positionComposerPopover, renderMessageText } from './codex-chat.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
@@ -13,11 +15,6 @@ export interface ClaudeChatStatus {
 }
 export interface ClaudeChatConversation { conversationId: string; title: string; updatedAt: string; model: string; effort: string }
 export interface ClaudeChatUsage { inputTokens: number; outputTokens: number; costUsd: number | null }
-export type ClaudeChatEvent =
-  | { turnId: string; conversationId: string; type: 'delta'; text: string }
-  | { turnId: string; conversationId: string; type: 'message'; message: ClaudeChatMessage }
-  | { turnId: string; conversationId: string; type: 'tool'; message: ClaudeChatMessage }
-  | { turnId: string; conversationId: string; type: 'done'; ok: boolean; error: string | null; usage: ClaudeChatUsage | null };
 export interface ClaudeChatBridge {
   version: 1;
   status(): Promise<unknown>;
@@ -35,9 +32,13 @@ export interface ClaudeChatOptions {
 }
 
 export const CLAUDE_CHAT_CHOICE_KEY = 'arcane.claude-chat.choice.v1';
-export const CLAUDE_CHAT_EMPTY_TEXT = 'Ask Claude to build something in your Studio place';
+/** Presentation only: which saved Claude conversations are open as tabs. Never message text or authority. */
+export const CLAUDE_CHAT_TABS_KEY = 'arcane.claude-chat.tabs.v1';
+export const CLAUDE_CHAT_EMPTY_TEXT = 'New Claude chat. Your first message starts the conversation.';
 export const CLAUDE_CHAT_NO_BRIDGE_TEXT = 'Claude chat requires the Arcane desktop app.';
-const MAX_TEXT = 1024 * 1024, MAX_INPUT = 100000, MAX_BUFFERED = 2000;
+export const CLAUDE_CHAT_TAB_LIMIT = 16;
+const MAX_TEXT = 1024 * 1024, MAX_INPUT = 100000, MAX_BUFFERED = 2000, DEFAULT_EFFORT = 'high';
+const SEND_PATH = 'M12 19V5m-6 6 6-6 6 6', STOP_PATH = 'M7 7h10v10H7Z';
 // Fixed, already-safe messages the preload bridge may reject with; anything else is replaced by a generic message.
 const KNOWN_BRIDGE_ERRORS = new Set(['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.']);
@@ -103,101 +104,147 @@ export function formatClaudeUsage(value: unknown): string | null {
   return parts.length ? 'Done · ' + parts.join(' · ') : null;
 }
 
-/** Safe text rendering: blank-line paragraphs and ``` fenced code, all via DOM nodes and textContent. */
-export function renderClaudeText(doc: Document, target: HTMLElement, value: string): void {
-  const nodes: HTMLElement[] = [];
-  value.split('```').forEach((part, index) => {
-    if (index % 2 === 1) {
-      let code = part, language = '';
-      const newline = code.indexOf('\n');
-      if (newline >= 0 && /^[A-Za-z0-9_+#.-]{0,32}$/.test(code.slice(0, newline).trim())) { language = code.slice(0, newline).trim(); code = code.slice(newline + 1); }
-      const pre = doc.createElement('pre'), element = doc.createElement('code');
-      element.textContent = code.replace(/\n$/, '');
-      if (language) element.setAttribute('data-language', language);
-      pre.append(element); nodes.push(pre);
-      return;
-    }
-    for (const paragraph of part.split(/\n[ \t]*\n/)) {
-      const trimmed = paragraph.replace(/^\n+|\n+$/g, '');
-      if (!trimmed.trim()) continue;
-      const element = doc.createElement('p'); element.textContent = trimmed; nodes.push(element);
-    }
-  });
-  target.replaceChildren(...nodes);
+const FAMILIES = ['opus', 'sonnet', 'haiku'] as const;
+const title = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
+/**
+ * Friendly Claude model names derived from CLI aliases or versioned ids, e.g. 'opus' -> Opus, 'claude-opus-4-1-20250805'
+ * -> Opus 4.1, 'claude-3-5-haiku-20241022' -> Haiku 3.5, 'sonnet[1m]' -> Sonnet (1M context). Unknown ids stay verbatim.
+ */
+export function claudeModelName(id: string): { short: string; full: string } {
+  const raw = id.trim().toLowerCase();
+  let rest = raw, context = '';
+  const size = /\[(\d+)([km])\]$/.exec(rest);
+  if (size) { context = ' (' + size[1] + size[2]!.toUpperCase() + ' context)'; rest = rest.slice(0, size.index); }
+  rest = rest.replace(/^(?:anthropic\.|us\.anthropic\.)/, '').replace(/^claude-/, '').replace(/-\d{8}(?:-v\d+(?::\d+)?)?$/, '').replace(/-latest$/, '');
+  const parts = rest.split(/[-_.]/).filter(Boolean);
+  const family = parts.find(part => (FAMILIES as readonly string[]).includes(part));
+  let short: string;
+  if (family) {
+    const version = parts.filter(part => /^\d{1,2}$/.test(part)).join('.');
+    short = title(family) + (version ? ' ' + version : '');
+  } else if (rest === 'opusplan') short = 'Opus Plan';
+  else if (rest === 'default') short = 'Default';
+  else return { short: id, full: id };
+  return { short: short + context, full: 'Claude ' + short + context };
 }
+const EFFORT_LABELS: Record<string, string> = { xhigh: 'Extra high', max: 'Max' };
+export function claudeEffortLabel(effort: string): string { return EFFORT_LABELS[effort] ?? title(effort); }
 
 interface Turn {
-  turnId: string | null; conversationId: string | null; stopping: boolean;
+  turnId: string | null; conversationId: string | null; tabKey: string; stopping: boolean;
   bubble: HTMLElement | null; text: string; echo: string | null;
 }
-type Elements = {
-  messages: HTMLElement; input: HTMLTextAreaElement; send: HTMLButtonElement; composer: HTMLElement; list: HTMLElement;
-  stop: HTMLButtonElement | null; model: HTMLSelectElement | null; effort: HTMLSelectElement | null; status: HTMLElement | null; create: HTMLButtonElement | null;
-};
+interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string }
+type El = HTMLElement;
 
 export class ClaudeChat {
-  private readonly doc: Document;
   private readonly bridge: ClaudeChatBridge | null;
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'> | null;
-  private readonly els: Elements | null;
   private state: ClaudeChatStatus | null = null;
   private statusError: string | null = null;
   private conversations: ClaudeChatConversation[] = [];
-  private activeId: string | null = null;
+  private listed = false;
+  private tabs: Tab[] = [];
+  private activeKey: string | null = null;
+  private tabSeq = 0;
   private turn: Turn | null = null;
   private buffered: Record<string, unknown>[] = [];
   private notice = '';
   private messageCount = 0;
+  private loading = false;
   private viewEpoch = 0;
   private refreshing: Promise<void> | null = null;
   private started = false;
+  private active = false;
   private removers: (() => void)[] = [];
-  private tools = new Map<string, HTMLElement>();
-  private choiceSignature = '';
-  /** Conversation whose delete control is waiting for its confirming second click. */
-  private confirmingDelete: string | null = null;
+  private tools = new Map<string, { body: HTMLElement; name: string; text: string }>();
+  private confirmingDelete = false;
   private deleting = new Set<string>();
-  private focusConfirm = false;
+  private pickerModels = false;
+  private reasoningOpen = false;
+  private restoreAttach: boolean | null = null;
 
-  constructor(readonly root: HTMLElement, options: ClaudeChatOptions = {}) {
-    this.doc = root.ownerDocument;
-    this.bridge = Object.hasOwn(options, 'bridge') ? readClaudeChatBridge({ arcaneDesktop: { claudeChat: options.bridge } }) : readClaudeChatBridge(this.doc?.defaultView);
+  constructor(readonly doc: Document, options: ClaudeChatOptions = {}) {
+    this.bridge = Object.hasOwn(options, 'bridge') ? readClaudeChatBridge({ arcaneDesktop: { claudeChat: options.bridge } }) : readClaudeChatBridge(doc?.defaultView);
     let storage: Pick<Storage, 'getItem' | 'setItem'> | null = null;
     if (Object.hasOwn(options, 'storage')) storage = options.storage ?? null;
-    else { try { storage = this.doc?.defaultView?.localStorage ?? null; } catch { storage = null; } }
+    else { try { storage = doc?.defaultView?.localStorage ?? null; } catch { storage = null; } }
     this.storage = storage;
-    const find = <T extends HTMLElement>(name: string) => root.querySelector<T>('.' + name);
-    const messages = find('claude-chat-messages'), input = find<HTMLTextAreaElement>('claude-chat-input'), send = find<HTMLButtonElement>('claude-chat-send');
-    const composer = find('claude-chat-composer'), list = find('claude-chat-list');
-    this.els = messages && input && send && composer && list ? {
-      messages, input, send, composer, list, stop: find('claude-chat-stop'), model: find('claude-chat-model'),
-      effort: find('claude-chat-effort'), status: find('claude-chat-status'), create: find('claude-chat-new'),
-    } : null;
+    this.restoreTabs();
   }
 
   /** True when the preload bridge is present; otherwise the surface explains it needs the desktop app. */
   available(): boolean { return !!this.bridge; }
-  activeConversation(): string | null { return this.activeId; }
+  /** True while this controller owns the shared chat surface. */
+  isActive(): boolean { return this.active; }
+  activeConversation(): string | null { return this.activeTab()?.conversationId ?? null; }
   running(): boolean { return !!this.turn; }
+  openTabs(): readonly { key: string; conversationId: string | null; model: string; effort: string }[] {
+    return this.tabs.map(tab => ({ key: tab.key, conversationId: tab.conversationId, model: tab.model, effort: tab.effort }));
+  }
 
+  private el<T extends El = El>(id: string): T | null { return this.doc.getElementById?.(id) as T | null ?? null; }
+  private make<K extends keyof HTMLElementTagNameMap>(tag: K, value?: string, className?: string): HTMLElementTagNameMap[K] {
+    const node = this.doc.createElement(tag); if (value !== undefined) node.textContent = value; if (className) node.className = className; return node;
+  }
+  private activeTab(): Tab | null { return this.tabs.find(tab => tab.key === this.activeKey) ?? null; }
+  private input(): HTMLTextAreaElement | null { return this.el<HTMLTextAreaElement>('codex-composer'); }
+
+  /** Binds listeners once. Every handler is inert unless this controller owns the shared surface. */
   start(): void {
-    if (this.started || !this.els) { this.render(); return; }
+    if (this.started) { this.render(); return; }
     this.started = true;
-    const { input, composer, stop, model, effort, create } = this.els;
-    const listen = (target: EventTarget | null, name: string, handler: (event: Event) => void) => {
-      if (!target) return; target.addEventListener(name, handler); this.removers.push(() => target.removeEventListener(name, handler));
+    const listen = (target: EventTarget | null, name: string, handler: (event: Event) => void, capture = false) => {
+      if (!target) return;
+      const fn = (event: Event) => { if (this.active) handler(event); };
+      target.addEventListener(name, fn, capture); this.removers.push(() => target.removeEventListener(name, fn, capture));
     };
-    listen(composer, 'submit', event => { event.preventDefault(); void this.send(); });
+    const input = this.input();
+    listen(this.el('codex-compose'), 'submit', event => { event.preventDefault(); if (!this.turnOwnsActiveTab()) void this.send(); });
+    listen(this.el('codex-submit'), 'click', event => { if (this.turnOwnsActiveTab()) { event.preventDefault(); void this.stopTurn(); } });
     listen(input, 'keydown', event => {
       const key = event as KeyboardEvent;
       if (key.key !== 'Enter' || key.shiftKey || key.isComposing || key.altKey || key.ctrlKey || key.metaKey) return;
       event.preventDefault(); void this.send();
     });
-    listen(input, 'input', () => this.renderControls());
-    listen(stop, 'click', () => { void this.stopTurn(); });
-    listen(create, 'click', () => this.newChat());
-    listen(model, 'change', () => this.saveChoice());
-    listen(effort, 'change', () => this.saveChoice());
+    listen(input, 'input', () => { const tab = this.activeTab(); if (tab && input) tab.draft = input.value; this.renderControls(); });
+    // Model picker: the same popover and controls as Codex, backed by Claude Code's reported aliases and efforts.
+    listen(this.el('codex-model-trigger'), 'click', () => { if (this.pickerOpen()) this.closePicker(true); else this.openPicker(); });
+    listen(this.el('codex-picker-current-model'), 'click', () => { if (this.pickerOpen()) { this.showModels(true); this.el('codex-model-search')?.focus({ preventScroll: true }); } });
+    listen(this.el('codex-picker-back'), 'click', () => { this.showModels(false); this.el('codex-picker-current-model')?.focus({ preventScroll: true }); });
+    listen(this.el('codex-model-search'), 'input', () => this.renderPicker());
+    const slider = this.el<HTMLInputElement>('codex-picker-effort-slider');
+    listen(slider, 'input', () => {
+      const efforts = this.efforts(), index = Number(slider?.value);
+      if (!this.pickerOpen() || !Number.isInteger(index) || index < 0 || index >= efforts.length) return;
+      this.chooseEffort(efforts[index]!);
+    });
+    listen(this.el('codex-picker-reset'), 'click', () => { if (this.pickerOpen() && this.efforts().includes(DEFAULT_EFFORT)) this.chooseEffort(DEFAULT_EFFORT); });
+    // The Codex chat may create the reasoning trigger after this binds, so delegate from the popover.
+    listen(this.el('codex-model-popover'), 'click', event => {
+      const target = event.target as Element | null;
+      if (this.pickerOpen() && target?.closest?.('#codex-picker-reasoning-trigger')) { this.reasoningOpen = !this.reasoningOpen; this.renderPicker(); }
+    });
+    listen(this.el('codex-model-popover'), 'keydown', event => this.pickerKey(event as KeyboardEvent));
+    const outside = (event: Event) => {
+      const target = event.target as Node | null, popover = this.el('codex-model-popover'), trigger = this.el('codex-model-trigger');
+      if (this.pickerOpen() && target && !popover?.contains(target) && !trigger?.contains(target)) this.closePicker();
+    };
+    listen(this.doc, 'pointerdown', outside); listen(this.doc, 'focusin', outside);
+    const reposition = () => this.positionPicker();
+    listen(this.doc, 'scroll', reposition, true);
+    if (this.doc.defaultView) listen(this.doc.defaultView, 'resize', reposition);
+    const strip = this.el('claude-chat-tabs');
+    listen(strip, 'keydown', event => {
+      const key = event as KeyboardEvent, target = (key.target as HTMLElement | null)?.dataset?.chatKey;
+      if (!target || key.altKey || key.ctrlKey || key.metaKey || key.shiftKey) return;
+      const index = this.tabs.findIndex(tab => tab.key === target); if (index < 0) return;
+      if (key.key === 'Delete') { event.preventDefault(); this.closeTab(target); return; }
+      const next = key.key === 'Home' ? 0 : key.key === 'End' ? this.tabs.length - 1 : key.key === 'ArrowRight' ? (index + 1) % this.tabs.length : key.key === 'ArrowLeft' ? (index + this.tabs.length - 1) % this.tabs.length : -1;
+      if (next < 0) return;
+      event.preventDefault(); const nextKey = this.tabs[next]!.key; this.selectTab(nextKey);
+      Array.from(strip?.querySelectorAll<HTMLElement>('[role=tab]') ?? []).find(node => node.dataset.chatKey === nextKey)?.focus();
+    });
     if (this.bridge) {
       try {
         const remove = this.bridge.onEvent(event => { try { this.onEvent(event); } catch { /* A malformed event cannot break the chat. */ } });
@@ -208,67 +255,107 @@ export class ClaudeChat {
   }
 
   stop(): void {
+    this.deactivate();
     this.started = false;
     for (const remove of this.removers.splice(0)) remove();
+  }
+
+  /** Takes over the shared transcript, composer and picker. The caller first pauses Codex drawing there. */
+  activate(): void {
+    if (this.active) return;
+    if (!this.started) this.start();
+    this.active = true;
+    if (!this.tabs.length) this.createTab(null);
+    if (!this.activeTab()) this.activeKey = this.tabs[0]!.key;
+    const input = this.input(); if (input) input.value = this.activeTab()?.draft ?? '';
+    const attach = this.el('workspace-add-context');
+    if (attach) { this.restoreAttach = attach.hidden === true; attach.hidden = true; }
+    for (const id of ['welcome-connect', 'codex-conversation-start', 'codex-attachments', 'codex-draft-review']) { const node = this.el(id); if (node) node.hidden = true; }
+    this.showTab(this.activeKey!);
+  }
+
+  /** Returns the shared surface to Codex, keeping Claude tabs, drafts and any running turn. */
+  deactivate(): void {
+    if (!this.active) return;
+    const tab = this.activeTab(), input = this.input();
+    if (tab && input) tab.draft = input.value;
+    this.closePicker();
+    const attach = this.el('workspace-add-context'); if (attach && this.restoreAttach !== null) attach.hidden = this.restoreAttach;
+    this.restoreAttach = null;
+    const provider = this.el('codex-model-provider'); if (provider) provider.textContent = 'ChatGPT';
+    this.el('codex-messages')?.removeAttribute('aria-busy');
+    this.active = false; this.tools.clear(); this.messageCount = 0;
+    if (this.turn) { this.turn.bubble = null; }
   }
 
   /** Reads status and the conversation list. Concurrent calls share one read. */
   refresh(): Promise<void> {
     if (!this.started) this.start();
-    if (!this.bridge || !this.els) { this.render(); return Promise.resolve(); }
+    if (!this.bridge) { this.render(); return Promise.resolve(); }
     if (this.refreshing) return this.refreshing;
     const bridge = this.bridge;
     this.refreshing = (async () => {
       try { this.state = readClaudeChatStatus(await bridge.status()); this.statusError = null; }
       catch { this.state = null; this.statusError = 'Claude Code status is unavailable. Reopen the chat to try again.'; }
-      this.populateChoices();
+      this.applyDefaults();
       await this.reloadList();
     })().finally(() => { this.refreshing = null; this.render(); });
     this.render();
     return this.refreshing;
   }
 
+  /** New chat: reuses an empty draft tab, otherwise opens a new one. */
   newChat(): void {
-    if (!this.els || this.turn && this.turn.turnId === null) return;
-    this.activeId = null; this.viewEpoch++; this.notice = ''; this.confirmingDelete = null;
-    this.clearMessages(); this.render();
-    try { this.els.input.focus(); } catch { /* Focus is presentation only. */ }
+    if (this.turn && this.turn.turnId === null) return;
+    this.saveDraft();
+    const empty = this.tabs.find(tab => tab.conversationId === null && !tab.draft.trim());
+    if (!empty && this.tabs.length >= CLAUDE_CHAT_TAB_LIMIT) { this.notice = 'Close a tab before opening another chat.'; this.render(); return; }
+    const tab = empty ?? this.createTab(null);
+    this.showTab(tab.key);
+    try { this.input()?.focus(); } catch { /* Focus is presentation only. */ }
   }
 
+  /** Opens a saved conversation as a tab (or switches to its existing tab). */
   async open(conversationId: string): Promise<void> {
-    if (!this.els || !this.bridge || this.turn && this.turn.turnId === null) return;
-    const row = this.conversations.find(item => item.conversationId === conversationId);
-    this.activeId = conversationId; const epoch = ++this.viewEpoch; this.confirmingDelete = null;
-    this.notice = 'Loading conversation…'; this.clearMessages();
-    if (row) this.applyChoice(row.model, row.effort);
-    if (this.turn?.conversationId === conversationId) { this.turn.bubble = null; this.turn.text = ''; }
-    this.render();
-    try {
-      const value = record(await this.bridge.history(conversationId));
-      if (epoch !== this.viewEpoch) return;
-      const messages = Array.isArray(value?.messages) ? value.messages : null;
-      if (!messages) throw Error('history');
-      this.clearMessages();
-      for (const item of messages) { const message = readClaudeChatMessage(item); if (message) this.appendMessage(message, false); }
-      this.notice = '';
-      this.scrollToBottom();
-    } catch (error) {
-      if (epoch !== this.viewEpoch) return;
-      this.notice = bridgeError(error, 'This conversation could not be loaded. Try again.');
+    if (!this.bridge || this.turn && this.turn.turnId === null) return;
+    this.saveDraft();
+    let tab = this.tabs.find(row => row.conversationId === conversationId);
+    if (!tab) {
+      const reusable = this.activeTab()?.conversationId === null && !this.activeTab()!.draft.trim() ? this.activeTab() : null;
+      if (!reusable && this.tabs.length >= CLAUDE_CHAT_TAB_LIMIT) { this.notice = 'Close a tab before opening another chat.'; this.render(); return; }
+      tab = reusable ?? this.createTab(conversationId);
+      tab.conversationId = conversationId;
+      const row = this.conversations.find(item => item.conversationId === conversationId);
+      if (row) this.applyChoice(tab, row.model, row.effort);
     }
-    this.render();
+    await this.showTab(tab.key);
+  }
+
+  selectTab(key: string): void {
+    if (key === this.activeKey || this.turn && this.turn.turnId === null || !this.tabs.some(tab => tab.key === key)) return;
+    this.saveDraft(); void this.showTab(key);
+  }
+
+  closeTab(key: string): void {
+    const index = this.tabs.findIndex(tab => tab.key === key);
+    if (index < 0 || this.turn && this.turn.turnId === null && this.turn.tabKey === key) return;
+    this.saveDraft();
+    this.tabs.splice(index, 1);
+    if (!this.tabs.length) this.createTab(null);
+    if (this.activeKey === key) void this.showTab(this.tabs[Math.max(0, index - 1)]!.key);
+    else { this.persistTabs(); this.render(); }
   }
 
   async send(): Promise<void> {
-    const els = this.els, bridge = this.bridge;
-    if (!els || !bridge || !this.canSend() || this.turn) return;
-    const message = els.input.value.trim();
-    if (!message || message.length > MAX_INPUT) return;
-    const model = els.model?.value ?? this.state?.defaultModel ?? '', effort = els.effort?.value ?? '';
-    const epoch = this.viewEpoch, conversationId = this.activeId;
-    const turn: Turn = this.turn = { turnId: null, conversationId, stopping: false, bubble: null, text: '', echo: message };
+    const bridge = this.bridge, input = this.input(), tab = this.activeTab();
+    if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn) return;
+    const message = input.value.trim();
+    if (!message) return;
+    if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return; }
+    const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
+    const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message };
     this.buffered = []; this.notice = '';
-    els.input.value = '';
+    input.value = ''; tab.draft = '';
     this.appendMessage({ id: '', role: 'user', text: message, at: new Date().toISOString() }, true);
     this.render();
     let reply: Record<string, unknown> | null, failure = 'Claude could not start this message. Try again.';
@@ -277,15 +364,17 @@ export class ClaudeChat {
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
     if (!turnId || !nextConversation) {
       this.turn = null; this.buffered = [];
-      if (epoch === this.viewEpoch) this.appendMessage({ id: '', role: 'error', text: failure, at: '' }, true);
-      if (!els.input.value) els.input.value = message;
+      const visible = this.active && epoch === this.viewEpoch;
+      if (visible) this.appendMessage({ id: '', role: 'error', text: failure, at: '' }, true);
+      if (visible && !input.value) input.value = message; else if (!tab.draft) tab.draft = message;
       this.render(); return;
     }
     turn.turnId = turnId; turn.conversationId = nextConversation;
-    if (epoch === this.viewEpoch && this.activeId === null) this.activeId = nextConversation;
+    if (this.tabs.includes(tab) && tab.conversationId === null) tab.conversationId = nextConversation;
     if (!this.conversations.some(row => row.conversationId === nextConversation)) {
       this.conversations.unshift({ conversationId: nextConversation, title: message.split('\n')[0]!.slice(0, 80), updatedAt: new Date().toISOString(), model, effort });
     }
+    this.persistTabs();
     const pending = this.buffered.splice(0);
     this.render();
     for (const event of pending) this.onEvent(event);
@@ -300,11 +389,11 @@ export class ClaudeChat {
     if (!stopped && this.turn === turn) { turn.stopping = false; this.notice = 'Claude could not stop this turn.'; this.render(); }
   }
 
-  /** Deletes a saved conversation after the confirm click. A conversation with a running turn cannot be deleted. */
+  /** Deletes a saved conversation. A conversation with a running turn cannot be deleted. */
   async deleteConversation(conversationId: string): Promise<void> {
     const bridge = this.bridge;
-    if (!this.els || !bridge || this.deleting.has(conversationId) || !this.canDelete(conversationId)) return;
-    this.confirmingDelete = null; this.deleting.add(conversationId); this.render();
+    if (!bridge || this.deleting.has(conversationId) || !this.canDelete(conversationId)) return;
+    this.confirmingDelete = false; this.deleting.add(conversationId); this.render();
     try { await bridge.remove(conversationId); }
     catch (error) {
       this.deleting.delete(conversationId);
@@ -312,7 +401,8 @@ export class ClaudeChat {
     }
     this.deleting.delete(conversationId);
     this.conversations = this.conversations.filter(row => row.conversationId !== conversationId);
-    if (this.activeId === conversationId) this.newChat();
+    const tab = this.tabs.find(row => row.conversationId === conversationId);
+    if (tab) { tab.draft = ''; this.closeTab(tab.key); }
     await this.reloadList();
     this.render();
   }
@@ -321,21 +411,68 @@ export class ClaudeChat {
     const turn = this.turn;
     return !!this.bridge && !this.deleting.has(conversationId) && !(turn && (turn.turnId === null || turn.conversationId === conversationId));
   }
-
-  private canSend(): boolean { return this.ready() && !!this.els?.model?.value && !!this.els.effort?.value; }
   private ready(): boolean { return !!this.bridge && !!this.state?.installed && !!this.state.signedIn && !this.statusError; }
+  private models(): string[] { const state = this.state; return state ? state.models.length ? state.models : state.defaultModel ? [state.defaultModel] : [] : []; }
+  private efforts(): string[] { return this.state?.efforts ?? []; }
+  private canSend(): boolean { const tab = this.activeTab(); return this.ready() && !!tab && this.models().includes(tab.model) && this.efforts().includes(tab.effort); }
+  private turnOwnsActiveTab(): boolean { return !!this.turn && this.turn.tabKey === this.activeKey; }
+
+  private createTab(conversationId: string | null): Tab {
+    const saved = this.readChoice();
+    const tab: Tab = { key: 'claude-tab-' + (++this.tabSeq), conversationId, model: saved.model, effort: saved.effort, draft: '' };
+    this.tabs.push(tab); this.applyDefaultsTo(tab);
+    return tab;
+  }
+  private saveDraft(): void { const tab = this.activeTab(), input = this.input(); if (this.active && tab && input) tab.draft = input.value; }
+
+  private async showTab(key: string): Promise<void> {
+    const tab = this.tabs.find(row => row.key === key); if (!tab) return;
+    this.activeKey = key; this.confirmingDelete = false; this.persistTabs();
+    if (!this.active) { this.render(); return; }
+    const epoch = ++this.viewEpoch;
+    const input = this.input(); if (input) input.value = tab.draft;
+    if (this.turn) { this.turn.bubble = null; this.turn.text = ''; }
+    this.closePicker();
+    this.loading = !!tab.conversationId; this.clearMessages();
+    this.render();
+    if (!tab.conversationId || !this.bridge) return;
+    try {
+      const value = record(await this.bridge.history(tab.conversationId));
+      if (epoch !== this.viewEpoch || !this.active) return;
+      const messages = Array.isArray(value?.messages) ? value.messages : null;
+      if (!messages) throw Error('history');
+      this.loading = false; this.clearMessages();
+      for (const item of messages) { const message = readClaudeChatMessage(item); if (message) this.appendMessage(message, false); }
+      this.scrollToBottom();
+    } catch (error) {
+      if (epoch !== this.viewEpoch || !this.active) return;
+      this.loading = false; this.clearMessages();
+      this.notice = bridgeError(error, 'This conversation could not be loaded. Try again.');
+    }
+    this.render();
+  }
 
   private async reloadList(): Promise<void> {
     if (!this.bridge) return;
     const previous = this.conversations;
-    try { this.conversations = readConversations(await this.bridge.list()); }
+    let ok = false;
+    try { this.conversations = readConversations(await this.bridge.list()); ok = true; this.listed = true; }
     catch { if (!this.statusError) this.notice = 'Saved Claude conversations could not be read.'; }
-    // Keep the open or just-started conversation visible until the engine lists it.
-    for (const id of [this.activeId, this.turn?.conversationId ?? null]) {
+    // Keep open or just-started conversations visible until the engine lists them.
+    for (const id of [...this.tabs.map(tab => tab.conversationId), this.turn?.conversationId ?? null]) {
       if (!id || this.conversations.some(row => row.conversationId === id)) continue;
       const row = previous.find(item => item.conversationId === id);
       if (row) this.conversations.unshift(row);
     }
+    if (!ok) return;
+    // Tabs restored from presentation storage close when their conversation no longer exists.
+    const known = new Set(this.conversations.map(row => row.conversationId));
+    const gone = this.tabs.filter(tab => tab.conversationId !== null && !known.has(tab.conversationId) && tab.conversationId !== this.turn?.conversationId);
+    if (!gone.length) return;
+    const activeGone = gone.some(tab => tab.key === this.activeKey);
+    this.tabs = this.tabs.filter(tab => !gone.includes(tab));
+    if (!this.tabs.length) this.createTab(null);
+    if (activeGone) await this.showTab(this.tabs[0]!.key); else this.persistTabs();
   }
 
   private onEvent(value: unknown): void {
@@ -347,15 +484,14 @@ export class ClaudeChat {
       if (event.type === 'done') void this.reloadList().then(() => this.render());
       return;
     }
-    const visible = turn.conversationId === this.activeId;
+    const visible = this.active && turn.conversationId !== null && turn.conversationId === this.activeTab()?.conversationId && !this.loading;
     switch (event.type) {
       case 'delta': {
         turn.text = (turn.text + text(event.text)).slice(-MAX_TEXT);
         if (!visible) return;
         const near = this.nearBottom();
         if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '' }, false); turn.bubble.setAttribute('aria-busy', 'true'); }
-        const body = turn.bubble.querySelector<HTMLElement>('.claude-message-body');
-        if (body) renderClaudeText(this.doc, body, turn.text);
+        this.setText(turn.bubble, turn.text);
         if (near) this.scrollToBottom();
         return;
       }
@@ -365,8 +501,7 @@ export class ClaudeChat {
         if (message.role === 'user' && turn.echo !== null && message.text.trim() === turn.echo) { turn.echo = null; return; }
         if (!visible) { if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; } return; }
         if (message.role === 'assistant' && turn.bubble) {
-          const body = turn.bubble.querySelector<HTMLElement>('.claude-message-body');
-          if (body) renderClaudeText(this.doc, body, message.text || turn.text);
+          this.setText(turn.bubble, message.text || turn.text);
           turn.bubble.setAttribute('aria-busy', 'false');
           turn.bubble = null; turn.text = ''; return;
         }
@@ -383,105 +518,294 @@ export class ClaudeChat {
         if (visible && !ok && !(turn.stopping && !error)) this.appendMessage({ id: '', role: 'error', text: error ?? 'Claude stopped before finishing.', at: '' }, true);
         this.notice = turn.stopping && !ok ? 'Stopped.' : formatClaudeUsage(event.usage) ?? (ok ? 'Done.' : '');
         this.render();
-        void this.reloadList().then(() => this.renderList());
+        void this.reloadList().then(() => this.render());
         return;
       }
     }
   }
 
+  /** Codex transcript markup: article.codex-message.{human|codex|tool} > pre.message-text + Message details. */
   private messageElement(message: ClaudeChatMessage): HTMLElement {
-    const article = this.doc.createElement('article');
-    article.className = 'claude-message';
+    const role = message.role === 'user' ? 'human' : message.role === 'assistant' ? 'codex' : 'tool';
+    const article = this.make('article', undefined, 'codex-message ' + role);
     article.setAttribute('data-role', message.role);
-    article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Claude' : message.role === 'tool' ? 'Tool activity' : 'Error');
+    article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : message.role === 'tool' ? 'Public tool output' : 'Error');
+    const body = this.make('pre', undefined, 'message-text');
     if (message.tool || message.role === 'tool') {
-      const chip = this.doc.createElement('span');
-      chip.className = 'claude-tool-chip';
-      this.updateChip(chip, message.tool ?? { name: message.text || 'Tool', status: 'finished' });
-      article.append(chip);
-      if (message.id) this.tools.set(message.id, chip);
-      if (message.tool && message.text && message.text !== message.tool.name) {
-        const body = this.doc.createElement('div'); body.className = 'claude-message-body'; body.textContent = message.text; article.append(body);
-      }
-      return article;
-    }
-    const body = this.doc.createElement('div');
-    body.className = 'claude-message-body';
-    if (message.role === 'error') body.textContent = message.text;
-    else renderClaudeText(this.doc, body, message.text);
-    article.append(body);
+      const tool = message.tool ?? { name: message.text || 'Tool', status: 'finished' as const };
+      const extra = message.tool && message.text && message.text !== message.tool.name ? message.text : '';
+      body.textContent = this.toolText(tool, extra);
+      if (message.id) this.tools.set(message.id, { body, name: tool.name, text: extra });
+      article.append(body);
+    } else article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text) : Object.assign(body, { textContent: message.text }));
+    if (message.role === 'error') article.append(this.make('p', 'Not completed', 'message-acknowledgement'));
+    const details = this.make('details', undefined, 'message-details');
+    details.append(this.make('summary', 'Message details'), this.make('pre', 'Claude · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : ''), 'hint mono'));
+    article.append(details);
     return article;
   }
-
-  private updateChip(chip: HTMLElement, tool: ClaudeChatTool) {
-    chip.setAttribute('data-status', tool.status);
-    chip.textContent = tool.name + (tool.status === 'started' ? ' · running' : tool.status === 'failed' ? ' · failed' : ' · done');
+  /** Replaces an assistant message body; fenced code renders as <pre><code>, never as HTML. */
+  private setText(article: HTMLElement, value: string): void {
+    const body = article.querySelector<HTMLElement>(".message-text"), next = renderMessageText(this.doc, value);
+    if (body) body.replaceWith(next); else article.prepend(next);
+  }
+  private toolText(tool: ClaudeChatTool, extra: string): string {
+    return tool.name + (tool.status === 'started' ? ' · running' : tool.status === 'failed' ? ' · failed' : ' · done') + (extra ? '\n' + extra : '');
   }
 
   private appendMessage(message: ClaudeChatMessage, scroll: boolean): HTMLElement {
-    const els = this.els!;
-    if (message.id && message.tool && this.tools.has(message.id)) {
-      const chip = this.tools.get(message.id)!; this.updateChip(chip, message.tool);
-      return chip;
-    }
-    const near = scroll || this.nearBottom();
-    if (this.messageCount === 0) els.messages.replaceChildren();
+    const known = message.id && message.tool ? this.tools.get(message.id) : undefined;
+    if (known) { known.body.textContent = this.toolText(message.tool!, known.text); return known.body; }
+    const box = this.el('codex-messages');
     const element = this.messageElement(message);
-    els.messages.append(element); this.messageCount++;
+    if (!box) return element;
+    const near = scroll || this.nearBottom();
+    if (this.messageCount === 0) box.replaceChildren();
+    box.append(element); this.messageCount++;
     if (near) this.scrollToBottom();
     return element;
   }
 
-  private clearMessages() {
-    if (!this.els) return;
+  private clearMessages(): void {
     this.tools.clear(); this.messageCount = 0;
-    const empty = this.doc.createElement('p');
-    empty.className = 'claude-chat-empty'; empty.textContent = CLAUDE_CHAT_EMPTY_TEXT;
-    this.els.messages.replaceChildren(empty);
+    const box = this.el('codex-messages'); if (!box || !this.active) return;
+    box.replaceChildren(this.make('p', this.loading ? 'Loading conversation…' : CLAUDE_CHAT_EMPTY_TEXT, 'empty'));
   }
-
   private nearBottom(): boolean {
-    const box = this.els?.messages; if (!box) return false;
+    const box = this.el('codex-messages'); if (!box) return false;
     return box.scrollHeight - box.scrollTop - box.clientHeight < 96;
   }
-  private scrollToBottom() { const box = this.els?.messages; if (box) box.scrollTop = box.scrollHeight; }
+  private scrollToBottom(): void { const box = this.el('codex-messages'); if (box) box.scrollTop = box.scrollHeight; }
 
+  // ---- Model and reasoning choice (per tab; the last choice is remembered for new chats) ----
   private readChoice(): { model: string; effort: string } {
     try {
       const value = record(JSON.parse(this.storage?.getItem(CLAUDE_CHAT_CHOICE_KEY) ?? 'null'));
       return { model: text(value?.model, 128), effort: text(value?.effort, 64) };
     } catch { return { model: '', effort: '' }; }
   }
-  private saveChoice() {
-    const model = this.els?.model?.value ?? '', effort = this.els?.effort?.value ?? '';
-    try { this.storage?.setItem(CLAUDE_CHAT_CHOICE_KEY, JSON.stringify({ model, effort })); } catch { /* Only the remembered choice is lost. */ }
+  private saveChoice(tab: Tab): void {
+    try { this.storage?.setItem(CLAUDE_CHAT_CHOICE_KEY, JSON.stringify({ model: tab.model, effort: tab.effort })); } catch { /* Only the remembered choice is lost. */ }
   }
-  private fill(select: HTMLSelectElement | null, values: string[], label: (value: string) => string) {
-    if (!select) return;
-    select.replaceChildren(...values.map(value => {
-      const option = this.doc.createElement('option'); option.value = value; option.textContent = label(value); return option;
-    }));
+  private applyDefaultsTo(tab: Tab): void {
+    const models = this.models(), efforts = this.efforts();
+    if (!models.length) return;
+    if (!models.includes(tab.model)) tab.model = this.state?.defaultModel && models.includes(this.state.defaultModel) ? this.state.defaultModel : models[0]!;
+    if (!efforts.includes(tab.effort)) tab.effort = efforts.includes(DEFAULT_EFFORT) ? DEFAULT_EFFORT : efforts[0] ?? '';
   }
-  private populateChoices() {
-    const state = this.state;
-    const models = state ? state.models.length ? state.models : state.defaultModel ? [state.defaultModel] : [] : [];
-    const efforts = state?.efforts ?? [];
-    const signature = JSON.stringify([models, efforts]);
-    if (signature === this.choiceSignature) return;
-    this.choiceSignature = signature;
-    this.fill(this.els?.model ?? null, models, value => value === state?.defaultModel ? value + ' (default)' : value);
-    this.fill(this.els?.effort ?? null, efforts, value => value);
+  private applyDefaults(): void {
     const saved = this.readChoice();
-    const model = models.includes(saved.model) ? saved.model : state?.defaultModel && models.includes(state.defaultModel) ? state.defaultModel : models[0] ?? '';
-    const effort = efforts.includes(saved.effort) ? saved.effort : efforts.includes('high') ? 'high' : efforts[0] ?? '';
-    this.setSelect(this.els?.model ?? null, model); this.setSelect(this.els?.effort ?? null, effort);
+    for (const tab of this.tabs) {
+      if (!tab.model) tab.model = saved.model; if (!tab.effort) tab.effort = saved.effort;
+      this.applyDefaultsTo(tab);
+    }
   }
-  private applyChoice(model: string, effort: string) {
-    const els = this.els; if (!els) return;
-    if (model && this.state?.models.includes(model)) this.setSelect(els.model, model);
-    if (effort && this.state?.efforts.includes(effort)) this.setSelect(els.effort, effort);
+  private applyChoice(tab: Tab, model: string, effort: string): void {
+    if (model && this.models().includes(model)) tab.model = model;
+    if (effort && this.efforts().includes(effort)) tab.effort = effort;
   }
-  private setSelect(select: HTMLSelectElement | null, value: string) { if (select) select.value = value; }
+  private chooseModel(model: string): void {
+    const tab = this.activeTab(); if (!tab || !this.models().includes(model)) return;
+    tab.model = model; this.applyDefaultsTo(tab); this.saveChoice(tab);
+    this.showModels(false); this.render();
+  }
+  private chooseEffort(effort: string): void {
+    const tab = this.activeTab(); if (!tab || !this.efforts().includes(effort)) return;
+    tab.effort = effort; this.saveChoice(tab); this.render();
+  }
+
+  private pickerOpen(): boolean { const popover = this.el('codex-model-popover'); return !!popover && !popover.hidden; }
+  private pickerEnabled(): boolean { return this.ready() && this.models().length > 0; }
+  private openPicker(): void {
+    const popover = this.el('codex-model-popover'); if (!popover || !this.pickerEnabled()) return;
+    popover.hidden = false; this.el('codex-model-trigger')?.setAttribute('aria-expanded', 'true');
+    const search = this.el<HTMLInputElement>('codex-model-search'); if (search) search.value = '';
+    this.reasoningOpen = false; this.showModels(false); this.renderPicker();
+    (this.el('codex-picker-effort-slider') ?? this.el('codex-picker-current-model'))?.focus({ preventScroll: true });
+    this.positionPicker();
+  }
+  private closePicker(restore = false): void {
+    const popover = this.el('codex-model-popover'); if (!popover) return;
+    const wasOpen = !popover.hidden; popover.hidden = true;
+    this.el('codex-model-trigger')?.setAttribute('aria-expanded', 'false');
+    this.reasoningOpen = false; this.showModels(false);
+    if (restore && wasOpen) this.el('codex-model-trigger')?.focus({ preventScroll: true });
+  }
+  private showModels(open: boolean): void {
+    this.pickerModels = open;
+    const summary = this.el('codex-picker-summary'), list = this.el('codex-picker-model-list');
+    if (summary) summary.hidden = open; if (list) list.hidden = !open;
+    this.el('codex-picker-current-model')?.setAttribute('aria-expanded', String(open));
+    const popover = this.el('codex-model-popover'); if (popover?.dataset) popover.dataset.view = open ? 'models' : 'reasoning';
+    this.positionPicker();
+  }
+  private positionPicker(): void {
+    const popover = this.el('codex-model-popover'), trigger = this.el('codex-model-trigger');
+    if (!this.active || !popover || !trigger || popover.hidden) return;
+    try { positionComposerPopover(this.doc, popover, trigger, this.pickerModels); } catch { /* Placement is presentation only. */ }
+  }
+  private pickerKey(key: KeyboardEvent): void {
+    if (key.isComposing || key.altKey || key.ctrlKey || key.metaKey) return;
+    if (key.key === 'Escape') {
+      key.preventDefault();
+      if (this.pickerModels) { this.showModels(false); this.el('codex-picker-current-model')?.focus({ preventScroll: true }); } else this.closePicker(true);
+      return;
+    }
+    const target = key.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts'), search = this.el('codex-model-search');
+    const inModels = !!models?.contains(target), inEfforts = !!efforts?.contains(target);
+    if (target === search && key.key === 'Enter') { key.preventDefault(); models?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.click(); return; }
+    if (target === search && ['ArrowDown', 'ArrowUp'].includes(key.key)) {
+      const rows = Array.from(models?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+      const row = key.key === 'ArrowDown' ? rows[0] : rows.at(-1); if (row) { key.preventDefault(); row.focus({ preventScroll: true }); }
+      return;
+    }
+    if ((inModels || inEfforts) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key.key)) {
+      const rows = Array.from((inModels ? models! : efforts!).querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+      const index = rows.indexOf(target as HTMLButtonElement), step = key.key === 'ArrowUp' ? -1 : 1;
+      const next = key.key === 'Home' ? 0 : key.key === 'End' ? rows.length - 1 : (index + step + rows.length) % rows.length;
+      const row = rows[next]; if (!row) return;
+      key.preventDefault(); row.focus({ preventScroll: true });
+      if (inEfforts) row.click();
+    }
+  }
+
+  private renderPicker(): void {
+    const tab = this.activeTab(), models = this.models(), efforts = this.efforts();
+    const model = tab && models.includes(tab.model) ? tab.model : '', effort = tab && efforts.includes(tab.effort) ? tab.effort : '';
+    const name = model ? claudeModelName(model) : null, enabled = this.pickerEnabled();
+    const set = (id: string, value: string) => { const node = this.el(id); if (node && node.textContent !== value) node.textContent = value; };
+    set('codex-model-provider', 'Claude');
+    set('codex-model-label', name?.short ?? 'Choose model');
+    set('codex-effort-label', effort); const effortLabel = this.el('codex-effort-label'); if (effortLabel) effortLabel.hidden = !effort;
+    const trigger = this.el<HTMLButtonElement>('codex-model-trigger');
+    if (trigger) {
+      trigger.disabled = !enabled; trigger.setAttribute('aria-busy', 'false');
+      const label = name ? 'Claude model: ' + name.full + ' (' + model + ')' + (effort ? ', reasoning: ' + claudeEffortLabel(effort) : '') : 'Choose Claude model and reasoning';
+      trigger.setAttribute('aria-label', label); trigger.title = label;
+    }
+    set('codex-model-picker-status', !this.bridge ? CLAUDE_CHAT_NO_BRIDGE_TEXT : !this.ready() ? 'Sign in to Claude Code to choose a model.' :
+      !models.length ? 'Claude Code reported no models.' : name ? 'Claude · ' + name.short + ' · reasoning ' + (effort || 'not chosen') : 'Choose a Claude model.');
+    if (!enabled && this.pickerOpen()) this.closePicker();
+    if (!this.pickerOpen()) return;
+    const search = this.el<HTMLInputElement>('codex-model-search');
+    const query = (search?.value ?? '').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const host = this.el('codex-model-options');
+    if (host) {
+      const focusModel = (this.doc.activeElement as HTMLElement | null)?.dataset?.pickerModel;
+      host.replaceChildren();
+      const rows = models.filter(item => query.every(word => (claudeModelName(item).full + ' ' + item).toLocaleLowerCase().includes(word)));
+      for (const item of rows) {
+        const row = this.make('button', undefined, 'picker-model-option'); row.type = 'button';
+        row.dataset.pickerModel = item; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item === model));
+        row.tabIndex = item === (rows.includes(model) ? model : rows[0]) ? 0 : -1;
+        row.title = item + (item === this.state?.defaultModel ? ' · Claude Code default' : '');
+        row.append(this.make('span', claudeModelName(item).full), composerPickerCheck(this.doc, item === model));
+        row.addEventListener('click', () => { if (this.active && this.pickerOpen()) this.chooseModel(item); });
+        host.append(row);
+      }
+      const empty = this.el('codex-model-empty');
+      if (empty) { empty.hidden = rows.length > 0; empty.textContent = models.length ? 'No Claude models match your search.' : 'Claude Code reported no models.'; }
+      if (focusModel) Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(row => row.dataset.pickerModel === focusModel)?.focus({ preventScroll: true });
+    }
+    const effortHost = this.el('codex-picker-efforts');
+    if (effortHost) {
+      effortHost.replaceChildren();
+      for (const value of efforts) {
+        const button = this.make('button', claudeEffortLabel(value), 'picker-effort-option'); button.type = 'button'; button.dataset.pickerEffort = value;
+        button.append(composerPickerCheck(this.doc, value === effort)); button.setAttribute('role', 'radio'); button.setAttribute('aria-checked', String(value === effort));
+        button.tabIndex = value === (effort || efforts[0]) ? 0 : -1;
+        button.addEventListener('click', () => { if (this.active && this.pickerOpen()) this.chooseEffort(value); });
+        effortHost.append(button);
+      }
+      effortHost.hidden = !this.reasoningOpen;
+    }
+    const reasoning = this.el<HTMLButtonElement>('codex-picker-reasoning-trigger');
+    if (reasoning) { reasoning.textContent = 'Reasoning' + (effort ? ' · ' + effort : ''); reasoning.disabled = !efforts.length; reasoning.setAttribute('aria-expanded', String(this.reasoningOpen)); }
+    const hint = this.el('codex-picker-effort-hint'); if (hint) hint.textContent = efforts.length ? 'Reasoning levels reported by Claude Code.' : 'Claude Code reported no reasoning levels.';
+    set('codex-picker-effort-value', effort ? claudeEffortLabel(effort) : 'Reasoning');
+    set('codex-picker-current-model-label', name?.full ?? 'Choose model');
+    const slider = this.el<HTMLInputElement>('codex-picker-effort-slider');
+    if (slider) {
+      const index = efforts.indexOf(effort), ratio = efforts.length > 1 && index >= 0 ? Math.min(1, index / (efforts.length - 1)) : 0;
+      slider.max = String(Math.max(0, efforts.length - 1)); slider.value = String(Math.max(0, index)); slider.disabled = efforts.length < 2 || index < 0;
+      slider.setAttribute('aria-valuetext', effort ? claudeEffortLabel(effort) : 'Reasoning');
+      slider.style?.setProperty('--effort-position', String(ratio * 100) + '%'); slider.style?.setProperty('--effort-offset', String(ratio * 24) + 'px');
+      slider.dataset.effortTone = effort === 'max' ? 'ultra' : 'standard';
+    }
+    const reset = this.el<HTMLButtonElement>('codex-picker-reset');
+    if (reset) { reset.disabled = !efforts.includes(DEFAULT_EFFORT) || effort === DEFAULT_EFFORT; reset.setAttribute('aria-label', 'Use the standard reasoning level (' + claudeEffortLabel(DEFAULT_EFFORT) + ')'); }
+    this.positionPicker();
+  }
+
+  // ---- Tabs strip and Saved chats (same markup as the Codex chat tabs) ----
+  private restoreTabs(): void {
+    try {
+      const value = record(JSON.parse(this.storage?.getItem(CLAUDE_CHAT_TABS_KEY) ?? 'null'));
+      if (!value || value.version !== 1 || !Array.isArray(value.open)) return;
+      const ids = [...new Set(value.open.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 256))].slice(0, CLAUDE_CHAT_TAB_LIMIT);
+      for (const id of ids) this.createTab(id);
+      const active = this.tabs.find(tab => tab.conversationId === value.active);
+      this.activeKey = active?.key ?? this.tabs[0]?.key ?? null;
+    } catch { /* Presentation storage is optional. */ }
+  }
+  private persistTabs(): void {
+    try {
+      this.storage?.setItem(CLAUDE_CHAT_TABS_KEY, JSON.stringify({ version: 1,
+        open: this.tabs.map(tab => tab.conversationId).filter((id): id is string => !!id), active: this.activeTab()?.conversationId ?? null }));
+    } catch { /* Only the remembered tabs are lost. */ }
+  }
+  private tabTitle(tab: Tab): string {
+    if (!tab.conversationId) return 'New chat';
+    return this.conversations.find(row => row.conversationId === tab.conversationId)?.title || 'Chat';
+  }
+  private renderTabs(): void {
+    const strip = this.el('claude-chat-tabs'); if (!strip) return;
+    const sending = !!this.turn && this.turn.turnId === null;
+    const focusKey = (this.doc.activeElement as HTMLElement | null)?.dataset?.chatKey;
+    strip.replaceChildren();
+    for (const tab of this.tabs) {
+      const wrap = this.make('span', undefined, 'chat-tab'); wrap.setAttribute('role', 'presentation');
+      const button = this.make('button', this.tabTitle(tab)); button.type = 'button'; button.setAttribute('role', 'tab'); button.dataset.chatKey = tab.key;
+      button.title = tab.conversationId ? this.tabTitle(tab) + ' · Claude' : 'New Claude chat';
+      button.setAttribute('aria-selected', String(tab.key === this.activeKey)); button.setAttribute('aria-controls', 'codex-messages');
+      button.tabIndex = tab.key === this.activeKey ? 0 : -1; button.disabled = sending && tab.key !== this.activeKey;
+      if (this.turn?.tabKey === tab.key) button.setAttribute('aria-busy', 'true');
+      button.addEventListener('click', () => { if (this.active) this.selectTab(tab.key); });
+      const close = this.make('button', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close ' + button.textContent);
+      close.disabled = sending && this.turn?.tabKey === tab.key;
+      close.addEventListener('click', () => { if (this.active) this.closeTab(tab.key); });
+      wrap.append(button, close); strip.append(wrap);
+    }
+    if (focusKey) Array.from(strip.querySelectorAll<HTMLElement>('[role=tab]')).find(node => node.dataset.chatKey === focusKey)?.focus({ preventScroll: true });
+  }
+  private renderSaved(): void {
+    const menu = this.el<HTMLDetailsElement>('claude-saved-chats'); if (!menu) return;
+    const sending = !!this.turn && this.turn.turnId === null, current = this.activeTab()?.conversationId ?? null;
+    const summary = this.make('summary', 'Saved chats');
+    const rows: HTMLElement[] = [summary];
+    for (const row of sortConversations(this.conversations)) {
+      const button = this.make('button', row.title || 'Untitled chat'); button.type = 'button';
+      button.dataset.conversationId = row.conversationId; button.setAttribute('aria-current', String(row.conversationId === current));
+      const name = row.model ? claudeModelName(row.model).full : '';
+      button.title = [name, row.effort, row.updatedAt].filter(Boolean).join(' · ');
+      button.disabled = sending || !this.bridge;
+      button.addEventListener('click', () => { if (!this.active) return; menu.open = false; void this.open(row.conversationId); });
+      rows.push(button);
+    }
+    if (!this.conversations.length) rows.push(this.make('p', this.listed ? 'No saved Claude chats.' : 'Saved Claude chats have not been read.'));
+    if (current) {
+      const remove = this.make('button', this.confirmingDelete ? 'Click again to delete this chat' : 'Delete this chat'); remove.type = 'button';
+      remove.className = 'claude-chat-delete'; remove.disabled = !this.canDelete(current);
+      if (this.confirmingDelete) remove.setAttribute('data-confirm', 'true');
+      remove.addEventListener('click', () => {
+        if (!this.active || !this.canDelete(current)) return;
+        if (!this.confirmingDelete) { this.confirmingDelete = true; this.renderSaved(); this.el('claude-saved-chats')?.querySelector<HTMLButtonElement>('.claude-chat-delete')?.focus(); return; }
+        void this.deleteConversation(current);
+      });
+      rows.push(remove);
+    }
+    menu.replaceChildren(...rows);
+  }
 
   private statusText(): string {
     if (!this.bridge) return CLAUDE_CHAT_NO_BRIDGE_TEXT;
@@ -489,61 +813,38 @@ export class ClaudeChat {
     if (!this.state) return this.refreshing ? 'Checking Claude Code…' : 'Claude Code status has not been read.';
     if (!this.state.installed) return this.state.message ?? 'Install Claude Code to chat with Claude.';
     if (!this.state.signedIn) return this.state.message ?? 'Sign in to Claude Code to chat with Claude.';
-    if (!this.els?.model?.value || !this.els.effort?.value) return 'Claude Code reported no model or effort choices. Update Claude Code, then reopen the chat.';
-    if (this.turn) return this.turn.turnId === null ? 'Sending…' : this.turn.stopping ? 'Stopping…' : 'Claude is working…';
-    return this.notice || (this.state.cliVersion ? 'Claude Code ' + this.state.cliVersion + ' · signed in' : 'Claude Code signed in');
+    if (!this.models().length || !this.efforts().length) return 'Claude Code reported no model or reasoning choices. Update Claude Code, then reopen the chat.';
+    if (this.turn) return this.turn.turnId === null ? 'Sending…' : this.turn.stopping ? 'Stopping…' : this.turnOwnsActiveTab() ? 'Claude is working…' : 'Claude is replying in another chat.';
+    return this.notice || 'Continue in this conversation.';
   }
 
-  private renderList() {
-    const els = this.els; if (!els) return;
-    sortConversations(this.conversations);
-    if (this.confirmingDelete && !this.conversations.some(row => row.conversationId === this.confirmingDelete && this.canDelete(row.conversationId))) this.confirmingDelete = null;
-    let confirmButton: HTMLButtonElement | null = null;
-    els.list.replaceChildren(...this.conversations.map(row => {
-      const item = this.doc.createElement('button');
-      item.type = 'button'; item.className = 'claude-chat-item';
-      item.textContent = row.title || 'Untitled chat';
-      item.setAttribute('data-conversation-id', row.conversationId);
-      item.setAttribute('aria-current', String(row.conversationId === this.activeId));
-      if (row.updatedAt) item.title = row.updatedAt;
-      item.disabled = !this.bridge || !!this.turn && this.turn.turnId === null;
-      item.addEventListener('click', () => { if (row.conversationId !== this.activeId) void this.open(row.conversationId); });
-      const remove = this.doc.createElement('button'), confirming = this.confirmingDelete === row.conversationId;
-      remove.type = 'button'; remove.className = 'claude-chat-delete';
-      remove.setAttribute('aria-label', 'Delete conversation ' + (row.title || 'Untitled chat'));
-      remove.textContent = confirming ? 'Delete?' : '×';
-      remove.title = confirming ? 'Click again to delete this conversation' : 'Delete conversation';
-      if (confirming) { remove.setAttribute('data-confirm', 'true'); confirmButton = remove; }
-      remove.disabled = !this.canDelete(row.conversationId);
-      remove.addEventListener('click', () => {
-        if (!this.canDelete(row.conversationId)) return;
-        if (this.confirmingDelete !== row.conversationId) { this.confirmingDelete = row.conversationId; this.focusConfirm = true; this.renderList(); return; }
-        void this.deleteConversation(row.conversationId);
-      });
-      const wrap = this.doc.createElement('div');
-      wrap.className = 'claude-chat-row'; wrap.append(item, remove);
-      return wrap;
-    }));
-    // Keep keyboard focus on the control that now asks for confirmation (only right after the first click).
-    if (this.focusConfirm) { this.focusConfirm = false; try { (confirmButton as HTMLButtonElement | null)?.focus(); } catch { /* Focus is presentation only. */ } }
+  private renderControls(): void {
+    const input = this.input(), submit = this.el<HTMLButtonElement>('codex-submit');
+    const ready = this.ready(), turn = this.turn, stopMode = this.turnOwnsActiveTab();
+    if (input) input.disabled = !ready;
+    if (submit) {
+      submit.type = stopMode ? 'button' : 'submit';
+      const state = stopMode ? 'active' : 'idle';
+      if (submit.dataset.taskState !== state) {
+        submit.dataset.taskState = state; submit.setAttribute('aria-label', stopMode ? 'Stop task' : 'Send message');
+        const path = submit.querySelector?.('svg path'); path?.setAttribute('d', stopMode ? STOP_PATH : SEND_PATH); path?.setAttribute('fill', stopMode ? 'currentColor' : 'none');
+      }
+      const controls = submit.closest?.<HTMLElement>('.composer-controls'); if (controls) controls.dataset.taskActive = String(stopMode);
+      submit.disabled = stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || !(input?.value.trim());
+    }
+    const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create) create.disabled = !!turn && turn.turnId === null;
   }
 
-  private renderControls() {
-    const els = this.els; if (!els) return;
-    const ready = this.ready(), turn = this.turn;
-    els.input.disabled = !ready;
-    els.send.disabled = !this.canSend() || !!turn || !els.input.value.trim();
-    if (els.stop) { els.stop.hidden = !turn; els.stop.disabled = !turn?.turnId || turn.stopping; }
-    for (const select of [els.model, els.effort]) if (select) select.disabled = !ready || !!turn || select.options.length === 0;
-    if (els.create) els.create.disabled = !this.bridge || !!turn && turn.turnId === null;
-    this.root.setAttribute('aria-busy', String(!!turn || !!this.refreshing));
-  }
-
-  private render() {
-    const els = this.els; if (!els) return;
-    if (els.status) els.status.textContent = this.statusText();
-    if (this.messageCount === 0 && !els.messages.querySelector('.claude-chat-empty')) this.clearMessages();
-    this.renderList();
+  private render(): void {
+    if (!this.active) return;
+    const notice = this.el('claude-chat-notice'); if (notice) notice.textContent = this.statusText();
+    const status = this.el('claude-chat-status');
+    if (status) status.textContent = !this.bridge ? 'Unavailable' : this.turn ? 'Working' : this.ready() ? (this.state?.cliVersion ? 'Claude Code ' + this.state.cliVersion : 'Signed in') : this.state ? 'Not signed in' : 'Checking';
+    const box = this.el('codex-messages');
+    if (box) { box.setAttribute('aria-busy', String(this.loading || !!this.turn)); if (this.messageCount === 0 && !box.querySelector?.('.empty')) this.clearMessages(); }
+    this.renderTabs();
+    this.renderSaved();
     this.renderControls();
+    this.renderPicker();
   }
 }
