@@ -345,13 +345,17 @@ test('explicit start binds only its local draft to a real acknowledged native th
 });
 
 
-async function historyNavigationFixture(t:test.TestContext) {
+async function historyNavigationFixture(t:test.TestContext,options:{timers?:boolean}={}) {
   const f=await serviceFixture(t),a=await f.seed(),b=await f.seed('fixture-alt','high'),doc=new DocumentFixture(),posts:ChatAction[]=[];
-  let stateTransform=(value:ChatState)=>value,replyTransform=(value:CodexActionOutcome,_input:ChatAction)=>value,getHook:(()=>Promise<void>)|null=null;
+  let stateTransform=(value:ChatState)=>value,replyTransform=(value:CodexActionOutcome,_input:ChatAction)=>value,getHook:(()=>Promise<void>)|null=null,settleHook:((input:ChatAction)=>Promise<void>)|null=null;
+  // Mocked before the chat exists, so its 1500 ms background poll fires only on an explicit tick.
+  if(options.timers)t.mock.timers.enable({apis:['setTimeout']});
   const api=new CodexChatApi(TOKEN,async(path,init)=>{
     if(path==='/v1/codex/state'){await getHook?.();return Response.json({state:stateTransform(f.service.state())});}
     const input=JSON.parse(String(init?.body))as ChatAction;posts.push(input);
-    const outcome=replyTransform(await f.service.action(input),input);
+    const acknowledged=await f.service.action(input);
+    await settleHook?.(input); // The service journal has settled; only the HTTP reply is held.
+    const outcome=replyTransform(acknowledged,input);
     return Response.json({...outcome,state:stateTransform(outcome.state)},{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});
   });
   const chat=new CodexChat(doc.asDocument(),api);f.onCleanup(()=>chat.stop());await chat.enableChatTabs({storage:memoryStorage()});await chat.start();
@@ -363,6 +367,7 @@ async function historyNavigationFixture(t:test.TestContext) {
     transformState:(transform:typeof stateTransform)=>{stateTransform=transform;},
     transformReply:(transform:typeof replyTransform)=>{replyTransform=transform;},
     beforeGet:(hook:typeof getHook)=>{getHook=hook;},
+    holdReply:(hook:typeof settleHook)=>{settleHook=hook;},
     limit:()=>f.setHistoryHook(async id=>{if(id===a)throw new CodexClientError('FRAME_LIMIT','Synthetic bounded history response.',true);})};
 }
 function historyGate(t:test.TestContext) {
@@ -494,4 +499,71 @@ test('outgoing history limit with no prior recording does not invent saved histo
   assert.equal(f.doc.getElementById('codex-notice').textContent,'Opened this conversation. The previous conversation\u2019s history exceeded the display limit; no earlier recording was available. Your unsent draft was retained.');
   const failure=f.service.state().actions.find(row=>row.action==='history-load'&&row.threadId===f.a&&row.state==='rejected')!;
   assert.equal(failure.errorCode,'FRAME_LIMIT');assert.equal(failure.state,'rejected');
+});
+
+// D4-111: a background poll must not fence a tab transition's own acknowledged receipt.
+const WAITING='Waiting for confirmation\u2026',drain=async()=>{for(let i=0;i<20;i++)await tick();};
+async function stagedDraft(f:Awaited<ReturnType<typeof historyNavigationFixture>>,text='') {
+  assert.equal(await f.chat.newChat(),true);
+  f.doc.getElementById('codex-model').value='fixture-alt';f.doc.getElementById('codex-effort').value='high';f.doc.getElementById('codex-select').dispatchEvent(new Event('click'));await tick();
+  if(text){f.doc.getElementById('codex-composer').value=text;f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));}
+  f.posts.length=0;
+}
+for(const path of ['resume-from-draft','resume-from-native','start-from-draft','first-send-from-draft']as const)
+test('a scheduled poll observing the held acknowledged '+path+' receipt cannot fence the transition',async t=>{
+  const gate=historyGate(t),f=await historyNavigationFixture(t,{timers:true}),held=path.startsWith('resume')?'thread-resume':'thread-start';
+  if(path==='resume-from-draft'||path==='start-from-draft')await stagedDraft(f);
+  if(path==='first-send-from-draft')await stagedDraft(f,'Build a simple cube');
+  let gets=0;f.beforeGet(async()=>{gets++;});
+  f.holdReply(async input=>{if(input.action===held){gate.entered();await gate.wait;}});
+  const running=path.startsWith('resume')?f.chat.openSavedChat(f.b):path==='start-from-draft'?f.chat.startCurrentChat():
+    (f.chat as unknown as {submitMessage():Promise<void>}).submitMessage().then(()=>true);
+  await gate.started;
+  // The service journal already acknowledged the thread; only its HTTP reply is held.
+  const acknowledged=f.service.state().snapshot!.thread!;assert.equal(acknowledged.configured,true);
+  if(held==='thread-resume')assert.equal(acknowledged.threadId,f.b);
+  gets=0;t.mock.timers.tick(1500);await drain();const polled=gets;
+  gate.release();assert.equal(await running,true);
+  const expected=['history-load','disconnect','connect','select',held];
+  if(held==='thread-resume')expected.push('history-load');
+  if(path==='first-send-from-draft')expected.push('turn-start');
+  assert.deepEqual(f.posts.map(row=>row.action),expected);
+  assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,true);
+  assert.equal(f.chat.currentStateView().conversation!.threadId,acknowledged.threadId);
+  if(held==='thread-resume')assert.match(f.doc.getElementById('codex-messages').textContent,new RegExp('Public answer for '+f.b));
+  if(path==='first-send-from-draft'){const sent=f.posts.at(-1) as Extract<ChatAction,{action:'turn-start'}>;assert.equal(sent.threadId,acknowledged.threadId);assert.equal(sent.text,'Build a simple cube');}
+  else assert.notEqual(f.doc.getElementById('codex-notice').textContent,WAITING);
+  assert.equal(polled,0,'the scheduled background poll is suppressed during the transition');
+  // Background polling resumes after the transition (an open panel keeps the idle poll active).
+  f.doc.getElementById('codex-panel').open=true;gets=0;t.mock.timers.tick(1500);await drain();assert.ok(gets>0,'the scheduled poll keeps rescheduling');
+});
+
+test('a background poll already in flight when a saved-chat transition begins cannot apply its late state',async t=>{
+  const initial=historyGate(t),poll=historyGate(t),resume=historyGate(t),f=await historyNavigationFixture(t,{timers:true});
+  await stagedDraft(f);f.doc.getElementById('codex-panel').open=true;
+  let gets=0;f.beforeGet(async()=>{gets++;if(gets===1){initial.entered();await initial.wait;}else if(gets===2){poll.entered();await poll.wait;}});
+  f.holdReply(async input=>{if(input.action==='thread-resume'){resume.entered();await resume.wait;}});
+  const switching=f.chat.openSavedChat(f.b);await initial.started;
+  t.mock.timers.tick(1500);await poll.started; // The scheduled poll is now in flight before the transition starts.
+  initial.release();await resume.started;
+  poll.release();await drain(); // Its GET now reads the acknowledged resume.
+  resume.release();assert.equal(await switching,true);
+  assert.deepEqual(f.posts.map(row=>row.action),['history-load','disconnect','connect','select','thread-resume','history-load']);
+  assert.equal(f.chat.currentStateView().conversation!.threadId,f.b);assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,true);
+  assert.notEqual(f.doc.getElementById('codex-notice').textContent,WAITING);
+});
+
+for(const change of ['project-away-back','stop','explicit-foreign-connection']as const)
+test('a held acknowledged resume is still fenced by '+change,async t=>{
+  const gate=historyGate(t),f=await historyNavigationFixture(t,{timers:true});await stagedDraft(f);
+  f.holdReply(async input=>{if(input.action==='thread-resume'){gate.entered();await gate.wait;}});
+  const switching=f.chat.openSavedChat(f.b);await gate.started;
+  if(change==='project-away-back'){
+    const internal=f.chat as unknown as {applyState(value:ChatState):void},baseline=f.service.state();
+    internal.applyState(state(f.projectPath+'-away'));internal.applyState(baseline);
+  }else if(change==='stop')f.chat.stop();
+  else {f.transformState(value=>({...value,snapshot:{...value.snapshot!,connectionId:'11111111-1111-4111-8111-111111111111'}}));await f.chat.refresh();}
+  gate.release();assert.equal(await switching,false);
+  assert.deepEqual(f.posts.map(row=>row.action),['history-load','disconnect','connect','select','thread-resume']);
+  assert.notEqual(f.chat.currentStateView().nativeBoundToActiveChat,true);
 });

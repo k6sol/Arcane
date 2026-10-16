@@ -706,7 +706,9 @@ export class CodexChat {
     const saved=this.state?.nativeThreads?.find(row=>row.threadId===threadId),retained=action==='thread-resume'?this.state?.chatTasks?.filter(task=>task.retained===true&&task.threadId===threadId&&task.sessionId===saved?.sessionId)??[]:[];
     if(retained.length>1){this.text('codex-notice','Multiple retained task owners require review before opening this conversation.');return false;}
     if(!retained.length&&this.snapshot()&&!this.snapshot()!.models.some(row=>row.model===selection.model&&row.efforts.includes(selection.effort))){this.text('codex-notice','The saved model and effort are absent from the current catalogue. No fallback was selected.');return false;}
-    this.tabTransition=true;this.render();this.publishState();
+    // A background read may observe this transition's own acknowledged thread before its HTTP
+    // receipt settles; that would bump the asset-scope generation and fence the receipt.
+    this.tabTransition=true;this.readVersion++;this.readController?.abort();this.render();this.publishState();
     const exact=()=>sameNavigation()&&this.state?.projectPath===project&&this.fresh&&!this.stopped&&this.providerAllowsCodex();
     const perform=async(name:string,fields:Record<string,unknown>={})=>{if(!exact())return false;const receipt=await this.dispatch(name,fields,true);return exact()&&receipt?.state==='acknowledged';};
     let historyLimited=false,historyHadRecording=false;
@@ -1310,7 +1312,7 @@ export class CodexChat {
   resume(){this.stopped=false;this.attachments?.resume();this.tabs?.mount();this.preferenceController?.resume();this.bindPicker();this.bindDraftLifecycle();void this.refresh().finally(()=>this.schedule());}
   private schedule() {
     if(this.stopped)return;if(this.timer)clearTimeout(this.timer);
-    this.timer=setTimeout(()=>{const active=!this.doc.hidden&&(this.el<HTMLDetailsElement>('codex-panel').open||this.pending.size>0||this.uncertain.size>0||!!this.confirmation);if(active)void this.refresh().finally(()=>this.schedule());else this.schedule();},1500);
+    this.timer=setTimeout(()=>{const active=!this.doc.hidden&&(this.el<HTMLDetailsElement>('codex-panel').open||this.pending.size>0||this.uncertain.size>0||!!this.confirmation);if(active&&!this.tabTransition)void this.refresh().finally(()=>this.schedule());else this.schedule();},1500); // Transition receipts carry their own state.
   }
   async refresh() {
     if(this.stopped)return;
