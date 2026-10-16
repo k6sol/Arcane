@@ -10,6 +10,8 @@ namespace Arcane.Installer
     /// This window cannot create consent, retry an operation or start another executable.</summary>
     internal sealed class UninstallForm : Form
     {
+        /// <summary>Trusted native fixture observation only; null in production.</summary>
+        internal static Action<UninstallForm> Observe;
         private readonly InstalledRecordSnapshot displayed;
         private readonly UninstallAuthorization authorization;
         private readonly Label status, detail;
@@ -39,6 +41,7 @@ namespace Arcane.Installer
             AcceptButton = close; CancelButton = close;
             FormClosing += delegate(object sender, FormClosingEventArgs args) { if (busy) { args.Cancel = true; RequestCancel(); } };
             Shown += BeginRemoval;
+            Load += delegate { Action<UninstallForm> observe = Observe; if (observe != null) observe(this); };
         }
 
         private void RequestCancel()

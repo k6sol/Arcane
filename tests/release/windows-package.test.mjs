@@ -478,6 +478,11 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-uninstall-stage.test.mjs', '// Fixture uninstall staging verification source.\n');
   await assert.rejects(packageWindows(options), /Uninstall staging verification requires its matching C# source: UninstallStage.cs/);
   await write('installer/UninstallStage.cs', '// Fixture native uninstall staging source.\n');
+  await write('tests/release/windows-uninstall-handoff.test.mjs', '// Fixture uninstall handoff verification source.\n');
+  await assert.rejects(packageWindows(options), /Uninstall handoff verification requires its matching C# source: UninstallEntry.cs/);
+  await write('installer/UninstallEntry.cs', '// Fixture native uninstall entrypoint source.\n');
+  await assert.rejects(packageWindows(options), /Uninstall handoff verification requires its matching C# source: UninstallHandoff.cs/);
+  await write('installer/UninstallHandoff.cs', '// Fixture native uninstall handoff source.\n');
   await write('tests/release/windows-setup-form.test.mjs', '// Fixture setup form verification source.\n');
   await rm(join(options.repository, 'installer/SetupForm.cs'));
   await assert.rejects(packageWindows(options), /Setup form verification requires its matching C# source: SetupForm.cs/);

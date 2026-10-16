@@ -255,6 +255,11 @@ function validateInstallerSources(files) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Uninstall staging verification requires its matching C# source: ' + name);
     }
   }
+  if (files.some(file => file.path === 'tests/release/windows-uninstall-handoff.test.mjs')) {
+    for (const name of ['UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'StageDirectory.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Uninstall handoff verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => file.path === 'scripts/build-windows-setup.mjs')) {
     for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'setup.manifest', 'launcher.manifest']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup builder requires its complete native source: ' + name);
