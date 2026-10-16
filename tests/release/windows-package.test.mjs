@@ -461,6 +461,9 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-uninstall-transaction.test.mjs', '// Fixture uninstall transaction verification source.\n');
   await assert.rejects(packageWindows(options), /Uninstall transaction verification requires its matching C# source: UninstallTransaction.cs/);
   await write('installer/UninstallTransaction.cs', '// Fixture native uninstall transaction source.\n');
+  await write('tests/release/windows-uninstall-form.test.mjs', '// Fixture uninstall form verification source.\n');
+  await assert.rejects(packageWindows(options), /Uninstall form verification requires its matching C# source: UninstallForm.cs/);
+  await write('installer/UninstallForm.cs', '// Fixture native uninstall form source.\n');
   await write('tests/release/windows-setup-form.test.mjs', '// Fixture setup form verification source.\n');
   await rm(join(options.repository, 'installer/SetupForm.cs'));
   await assert.rejects(packageWindows(options), /Setup form verification requires its matching C# source: SetupForm.cs/);
