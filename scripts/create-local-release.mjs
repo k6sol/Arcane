@@ -200,8 +200,13 @@ function validateInstallerSources(files) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Postinstall verification requires its matching C# source: ' + name);
     }
   }
+  if (files.some(file => file.path === 'tests/release/windows-setup-path.test.mjs')) {
+    for (const name of ['SetupPath.cs', 'PayloadArchive.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup path verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => file.path === 'scripts/build-windows-setup.mjs')) {
-    for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'setup.manifest', 'launcher.manifest']) {
+    for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'setup.manifest', 'launcher.manifest']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup builder requires its complete native source: ' + name);
     }
   }

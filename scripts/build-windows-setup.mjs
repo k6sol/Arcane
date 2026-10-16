@@ -8,7 +8,7 @@ import { runBoundedChild } from './check-windows-executable.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NATIVE_SOURCES = ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs',
-  'InstalledRecord.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs'].map(name => 'installer/' + name);
+  'InstalledRecord.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs'].map(name => 'installer/' + name);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 async function digest(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }
 async function direct(path, directory = false, allowHardlinks = false) {

@@ -107,7 +107,7 @@ namespace Arcane.Installer
                     PayloadReceipt extracted = null; bool kitValidated = false, cleanupAllowed = false;
                     try
                     {
-                        extracted = PayloadArchive.VerifyAndExtract(Application.ExecutablePath, stage, SetupPins.PayloadSha256);
+                        extracted = PayloadArchive.VerifyAndExtract(SetupPath.CanonicalExecutable(Application.ExecutablePath), stage, SetupPins.PayloadSha256);
                         token.ThrowIfCancellationRequested();
                         KitReceipt kit = KitVerifier.Verify(stage, SetupPins.KitManifestSha256); kitValidated = true;
                         token.ThrowIfCancellationRequested(); preparingPrograms = true;
