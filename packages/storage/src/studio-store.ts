@@ -97,6 +97,14 @@ const stageHash=z.string().length(64).regex(/^[a-f0-9]{64}(?![\s\S])/);
 const stageJob=z.string().length(36).regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/);
 const stageId=z.string().min(1).max(256).refine(v=>!/[\x00-\x1f\x7f]/.test(v));
 const stageNumber=z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const uploadText=(max:number,min=1)=>z.string().min(min).max(max).refine(value=>!value.includes('\0'));
+const uploadJournalSchema=z.strictObject({attemptId:stageJob,resourceKey:stageHash,intentSha256:stageHash,
+  intent:z.strictObject({projectId:stageHash,jobId:stageJob,sourceId:uploadText(256),sourceSha256:stageHash,assetType:z.enum(['Mesh','Image']),
+    sessionId:uploadText(256),clientLifetimeId:uploadText(256),pluginArtifactHash:stageHash,playEpoch:stageNumber,placeId:stageNumber,universeId:stageNumber,
+    creator:z.strictObject({kind:z.enum(['user','group']),id:z.number().int().positive().max(Number.MAX_SAFE_INTEGER)}),
+    uploaderId:z.number().int().positive().max(Number.MAX_SAFE_INTEGER),rightsGrantId:uploadText(256),name:uploadText(100),description:uploadText(1000,0)}),
+  state:z.enum(['intent','succeeded','needs_reconciliation']),assetId:z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+  createdAt:z.iso.datetime(),updatedAt:z.iso.datetime()}).refine(record=>record.state==='succeeded'?record.assetId!==null:record.assetId===null);
 const uploadContextPinSchema=z.strictObject({sessionId:stageId,clientLifetimeId:stageId,pluginArtifactHash:stageHash,
   playEpoch:stageNumber,placeId:stageNumber,universeId:stageNumber});
 const stageReceiptSchema=z.strictObject({transferDigest:stageHash,packetCount:z.number().int().min(1).max(512),
@@ -734,6 +742,41 @@ export class StudioStore {
     const unresolved=invalidReceipt||commands.some(c=>c.command.state==='needs_reconciliation'||run.closedAt!==null&&(c.command.state==='dispatched'||c.command.state==='succeeded'));
     const phase=complete?'cpu-staged':unresolved?'needs_reconciliation':run.closedAt!==null||commands.some(c=>['failed','cancelled'].includes(c.command.state))?'stopped':'running';
     return {...run,intent,attempt:Number(row.attempt_no),previousRunId:row.previous_run_id as string|null,phase,commands,receipt:complete?structuredClone(intent.plan.at(-1)!.expectedReceipt):null};
+  }
+  /** Host-only archival pin for one exact project/job (no actor, model or HTTP exposure).
+   * True unless EVERY retained stage attempt is provably ended and every upload for the job has a
+   * known successful outcome:
+   * - a stage attempt pins unless it is closed AND its derived phase is 'stopped' (running, cpu-staged
+   *   awaiting engine completion, needs_reconciliation, or any reconstruction association all pin);
+   * - an upload pins in 'intent' (effect unknown) or 'needs_reconciliation'.
+   * Invalid ids, closed storage, corrupt or over-bound journals refuse (throw) rather than imply absence.
+   * Read-only: one deferred read transaction; no write, pruning, migration, queueing or engine effect. */
+  hasPendingStageWork(projectId:string,jobId:string):boolean {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
+    if(!stageHash.safeParse(projectId).success||!stageJob.safeParse(jobId).success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid stage lookup.');
+    this.db.exec('BEGIN DEFERRED');
+    try{
+      const attempts=this.db.prepare('SELECT run_id FROM asset_stage_attempts WHERE project_id=? AND job_id=? ORDER BY attempt_no LIMIT ?').all(projectId,jobId,STUDIO_STAGE_RUN_LIMITS.runs+1) as Row[];
+      if(attempts.length>STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage history exceeds its bound; refusing to infer absence.');
+      for(const {run_id}of attempts){
+        const run=this.stageRunById(run_id as string); // Validates identity, chain and every original command association.
+        if(run.closedAt===null||run.phase!=='stopped')return true;
+        if(this.db.prepare('SELECT 1 FROM asset_stage_reconstructions WHERE run_id=?').get(run.runId))return true;
+      }
+      const limit=8192,uploads=this.db.prepare('SELECT attempt_id,resource_key,payload FROM asset_uploads LIMIT ?').all(limit+1) as Row[];
+      if(uploads.length>limit)throw new ArcaneError('UPLOAD_JOURNAL','Upload journal exceeds its bound; refusing to infer absence.');
+      for(const row of uploads){
+        let record:AssetUploadJournalRecord;
+        try{
+          if(typeof row.payload!=='string'||Buffer.byteLength(row.payload)>16*1024)throw new Error('Oversized journal.');
+          record=uploadJournalSchema.parse(JSON.parse(row.payload));
+          const intent=record.intent,resourceKey=hash(canonical({projectId:intent.projectId,jobId:intent.jobId,sourceId:intent.sourceId,sourceSha256:intent.sourceSha256,assetType:intent.assetType}));
+          if(record.attemptId!==row.attempt_id||record.resourceKey!==row.resource_key||record.resourceKey!==resourceKey||record.intentSha256!==hash(canonical(intent)))throw new Error('Journal identity differs.');
+        }catch{throw new ArcaneError('UPLOAD_JOURNAL','Stored upload journal is invalid.');}
+        if(record.intent.projectId===projectId&&record.intent.jobId===jobId&&record.state!=='succeeded')return true;
+      }
+      return false;
+    }finally{this.db.exec('COMMIT');}
   }
   /** Derive a reconstruction from ORIGINAL associated packet bytes, never a
    * caller's source list. Only the plugin owns the actual sealed receiver. */

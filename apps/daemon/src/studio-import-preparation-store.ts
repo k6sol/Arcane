@@ -36,6 +36,13 @@ export interface StudioImportPreparationStore {
   get(actor: NativeAssetActor, jobId: string, guard: () => void, attemptId?: string): Promise<StudioImportPreparationRecord | null>;
   close(): Promise<void>;
 }
+/** Additive host-only archival pin (no actor, model or HTTP exposure). Kept separate so existing
+ * StudioImportPreparationStore implementations and mocks stay valid. */
+export interface StudioImportPreparationPins {
+  /** True when ANY retained record (root or historical attempt) names this job. Corrupt, unsafe, busy,
+   * poisoned or closed storage refuses rather than implying absence. Read-only: no write, prune or migration. */
+  hasRecordForJob(jobId: string): Promise<boolean>;
+}
 type Limits = { -readonly [K in keyof typeof STUDIO_IMPORT_PREPARATION_LIMITS]: number };
 interface DirectoryPin { path: string; stat: BigIntStats }
 interface FilePin { stat: BigIntStats; bytes: Buffer }
@@ -136,7 +143,7 @@ async function readPinned(path: string, limit: number, io: IO, optional = false)
 export async function createStudioImportPreparationStore(options: {
   projectPath: string; directory: string; workAssociations: ConversationWorkStore; studio: StudioStore;
   limits?: Partial<Limits>; now?: () => number;
-}): Promise<StudioImportPreparationStore> {
+}): Promise<StudioImportPreparationStore & StudioImportPreparationPins> {
   const input = fields(options, ['projectPath', 'directory', 'workAssociations', 'studio'], ['limits', 'now']);
   const projectPath = directPath(input.projectPath), directory = directPath(input.directory), store = input.workAssociations, studio = input.studio;
   if (!(store instanceof ConversationWorkStore) || types.isProxy(store) || store.projectPath !== projectPath || !(studio instanceof StudioStore) || types.isProxy(studio)) fail('SCOPE');
@@ -350,6 +357,26 @@ export async function createStudioImportPreparationStore(options: {
         }
         if (record && (record.jobId !== requested || !isDeepStrictEqual(record.conversation, binding.conversation))) fail('SCOPE'); return record;
       });
+    },
+    async hasRecordForJob(inputId: string): Promise<boolean> {
+      if (closed) fail('CLOSED'); if (poisoned) fail('WRITE_UNKNOWN'); if (busy) fail('BUSY');
+      const id = jobId(inputId);
+      const check = () => { if (closed) fail('CLOSED'); paths(); };
+      check(); busy = true; idle = new Promise<void>(accept => { releaseIdle = accept; });
+      const io: IO = async (run, abandon) => {
+        check(); let value;
+        try { value = await run(); } catch (error) { check(); throw error; }
+        try { check(); } catch (error) { if (abandon) await abandon(value); throw error; } return value;
+      };
+      try {
+        // The same bounded, pinned, chain-validated inventory as every other operation; historical attempts included.
+        const records = await inventory(io, check); check();
+        for (const { record } of records.values()) if (record.jobId === id) return true;
+        return false;
+      } catch (error) {
+        if (error instanceof ArcaneError && ['STUDIO_IMPORT_PREPARATION_PATH', 'STUDIO_IMPORT_PREPARATION_LOCKED', 'STUDIO_IMPORT_PREPARATION_CORRUPT'].includes(error.code)) poisoned = true;
+        if (error instanceof ArcaneError) throw error; return fail('UNAVAILABLE');
+      } finally { busy = false; releaseIdle?.(); releaseIdle = undefined; }
     },
     async close(): Promise<void> {
       if (closed) return; closed = true; await idle;

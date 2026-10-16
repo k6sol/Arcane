@@ -28,6 +28,8 @@ Broad optional hosted/cloud/enterprise backlog is separate from the complete loc
 
 The cooperative work graph records dependencies, leases and reviews; an Arcane-hosted agent dispatcher remains work to complete. Optional cloud accounts, teams, shared assets, billing and operator tooling remain tracked in the full plan.
 
+The [asset retention core and storage pins](../asset-history-retention.md) define bounded reversible classification and conservative retained-work checks. Automatic archival, persisted ledger recovery, history lookup and restore are not yet wired into the service or desktop; the existing history bound remains in force.
+
 The [native proposal-worker component](../native-proposal-workers.md) provides fresh account-matched read-only sessions, parent ownership at the dispatch boundary, effective MCP isolation and bounded completed proposal text. Native lifecycle cleanup waits for observed process closure or reports uncertainty. Parent-task dispatcher integration and native Windows descendant containment remain required. Executable startup/shutdown receipts without active native workers do not establish those workers' cleanup.
 
 Current implementation details and receipts are recorded in [chat task permissions](CHAT_TASK_PERMISSIONS_20261015.md), [PNG references](../chat-reference-images.md), [gameplay scenarios](../studio-gameplay-scenarios.md) and [packaged verification](PACKAGED_MCP_VERIFICATION_20261015.md). Keep native engine behavior, synthetic fixtures, real browser rendering, Blender runtime evidence and packaged startup distinct. Unknown effects retain reconciliation fences; completed commands are not silently dispatched again.

@@ -1,0 +1,11 @@
+# Asset history retention
+
+The archive core defines reversible job classification without moving or deleting files. Its ledger holds at most 4096 entries within 4 MiB; active history remains bounded at 256 jobs. Archive and restore plans preserve unique job identities and allow a single ledger replacement to swap one eligible active job for an archived job at capacity. These plans are not yet connected to service admission, history routes or the desktop.
+
+A terminal journal alone does not establish that its artifacts are usable. Manifest availability comes from an already verified host fact. An interrupted job additionally needs a currently valid worker-resolution marker bound to its exact journal. Outstanding worker reservations, live operations, read leases, preparation records, stage work and uncertain outcomes prevent archival.
+
+Host storage queries retain preparation history across every attempt. Stage work stays pinned while running, awaiting engine completion or needing reconciliation. A closed, fully staged transfer remains pinned because there is no engine-completion release record yet. Upload intents and uncertain outcomes also retain a pin; only a valid successful receipt with a positive asset ID and matching stored intent can release it. Invalid, corrupt, busy or closed storage refuses the query instead of reporting absence. These queries neither issue engine commands nor modify retained storage.
+
+Journal digests and filesystem fingerprints detect observed changes; they do not authenticate a same-user writer able to replace all matching records. A startup fingerprint is only a checkpoint. Full lookup and restore must validate current bounded journal and resolution bytes again. Missing or conflicting evidence must retain admission fences.
+
+The core and storage hooks are covered by pure, owned filesystem and SQLite fixtures, including retained attempts, corruption, unchanged storage after reads, capacity swaps and simulated crashes around a test-local atomic writer. Production ledger persistence, automatic archival, lookup, restore, degraded history and human rebuild remain integration work. Existing history limits continue to apply until that work is complete.
