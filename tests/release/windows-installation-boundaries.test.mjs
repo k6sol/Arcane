@@ -106,4 +106,3 @@ test('unlisted entries added to a retained release after verification prevent re
   assert.equal(await f.record(), before); assert.equal(JSON.parse(before).activeReleaseId, second.activeReleaseId);
   assert.notEqual(first.activeReleaseId, second.activeReleaseId);
 });
-
