@@ -255,6 +255,15 @@ async function checkSmoke() {
       document.getElementById('desktop-verification-refresh')?.disabled === false
   })`));
   const prefs = window.webContents.getLastWebPreferences();
+  checks.taskStatusModules = await window.webContents.executeJavaScript(`(async () => {
+    for (const path of ['/task-plan-boot.js', '/codex-task-plan.js']) {
+      const response = await fetch(path, { cache: 'no-store', credentials: 'omit', redirect: 'error' });
+      if (response.status !== 200 || !/^text\\/javascript(?:;|$)/i.test(response.headers.get('content-type') || '')) return false;
+      if ((await response.text()).length > 262144) return false;
+    }
+    const boot = await import('/task-plan-boot.js'), card = await import('/codex-task-plan.js');
+    return typeof boot.startTaskPlanCard === 'function' && typeof card.TaskPlanCard?.mount === 'function';
+  })()`);
   const workspacePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.workspacePreferences.read()');
   await writeFile(join(smokeRoot, 'workspace.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
   // Exercise only the actual packaged renderer's local draft controllers. No

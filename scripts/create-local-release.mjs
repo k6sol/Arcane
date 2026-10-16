@@ -13,6 +13,8 @@ export const BRAND_BITMAP_PATH = 'apps/desktop/public/brand/arcane-ridges.png';
 export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/public/studio.html', 'apps/desktop/public/studio.css',
   'dist/apps/desktop/src/studio.js', 'dist/apps/desktop/src/codex-chat.js',
+  'apps/desktop/src/codex-task-plan.ts', 'dist/apps/desktop/src/codex-task-plan.js', 'dist/apps/desktop/src/codex-task-plan.js.map',
+  'apps/desktop/src/task-plan-boot.ts', 'dist/apps/desktop/src/task-plan-boot.js', 'dist/apps/desktop/src/task-plan-boot.js.map',
   'apps/desktop/src/chat-tabs.ts', 'dist/apps/desktop/src/chat-tabs.js', 'dist/apps/desktop/src/chat-tabs.js.map',
   'apps/desktop/src/chat-attachments.ts', 'dist/apps/desktop/src/chat-attachments.js', 'dist/apps/desktop/src/chat-attachments.js.map',
   'apps/desktop/src/task-usage.ts', 'dist/apps/desktop/src/task-usage.js', 'dist/apps/desktop/src/task-usage.js.map',

@@ -222,3 +222,13 @@ test('desktop verification is required by doctor, source release, and the exact 
   assert.equal(doctor.checks.find(item=>item.id==='desktop-verification-entry').status,'fail');
   assert.equal(doctor.credentialsRead,false);assert.equal(doctor.networkUsed,false);
 });
+
+test('task status modules are required in source releases and expose only their fixed browser routes',async()=>{
+  const lab=await readFile(new URL('../../apps/daemon/src/lab-server.ts',import.meta.url),'utf8');
+  for(const name of ['codex-task-plan','task-plan-boot']){
+    for(const path of ['apps/desktop/src/'+name+'.ts','dist/apps/desktop/src/'+name+'.js','dist/apps/desktop/src/'+name+'.js.map'])assert.ok(REQUIRED_FRONTEND_FILES.includes(path),path);
+    assert.ok(lab.includes("['/"+name+".js', [join(options.cwd, 'dist/apps/desktop/src/"+name+".js'), 'text/javascript']]"));
+    const {root}=await fixture({omit:'dist/apps/desktop/src/'+name+'.js'});
+    await assert.rejects(createLocalRelease({repository:root}),error=>error.message.includes('missing dist/apps/desktop/src/'+name+'.js'));
+  }
+});
