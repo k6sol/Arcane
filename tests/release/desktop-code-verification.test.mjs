@@ -236,7 +236,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   f.disk.nodes.delete(f.disk.key(f.compilerPath));
   const begin = mainSource.indexOf('async function startDaemon('), end = mainSource.indexOf('function makeWindow()', begin);
   assert.ok(begin >= 0 && end > begin);
-  const warnings = [], requested = [], child = new EventEmitter();
+  const warnings = [], requested = [], owned = [], child = new EventEmitter();
   const warning = /const CODE_VERIFICATION_WARNING = ('[^']*');/.exec(mainSource)?.[1];
   assert.ok(warning);
   const context = { projectSession: null, child: null, origin: '', token: '', closing: false, switching: false,
@@ -246,7 +246,18 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
     fs: { ...f.disk.filesystem, writeFileSync(fd, bytes) { const value = Buffer.from(bytes); f.disk.filesystem.writeSync(fd, value, 0, value.length); } },
     codeVerification: f.api, managedBootstrap, URL, setTimeout: () => 1, clearTimeout() {}, console: { warn: text => warnings.push(text) },
     policy: { ...f.policy, directPath: async value => value },
-    ownedDirectory: async value => { assert.equal(value, f.stateRoot); return value; },
+    ownedDirectory: async value => { owned.push(value); return value; },
+    smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
+    // Compiler isolation is the boundary under test. The separate handoff suite
+    // executes its actual broker; here the newly mounted host capability has no actions.
+    require(name) {
+      assert.equal(name, './native-handoff-host.cjs');
+      return { createNativeHandoffHost(ports) {
+        assert.deepEqual(Object.keys(ports).sort(), ['confirm', 'getChoices', 'getSession', 'launchTerminal']);
+        assert.equal(ports.getSession(), null, 'A compiler fixture has no desktop window.');
+        return Object.freeze({ dispose: async () => ({ revoked: 0, unknown: 0, retained: 0 }), cancelPending() {} });
+      } };
+    },
     readFile: async () => { throw Object.assign(new Error('Fixture has no saved listener.'), { code: 'ENOENT' }); },
     writeFile: async (name, bytes) => { assert.equal(name, f.stateRoot + '\\listener-port.json'); assert.equal(JSON.parse(bytes).port, 45871); },
     spawn: (executable, args, options) => {
@@ -264,6 +275,8 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   vm.runInContext('const CODE_VERIFICATION_WARNING = ' + warning + ';\n' + bootstrap.replace(moduleLoad, 'managedBootstrap') + '\nglobalThis.coldStart = startDaemon;', context);
   await context.coldStart(f.projectPath);
   assert.equal(requested.length, 1, 'Only an in-memory core daemon spawn request is observed; no process executes.');
+  // State ownership precedes the spawn; the handoff directory is owned only after readiness.
+  assert.deepEqual(owned, [f.stateRoot, f.stateRoot + '\\native-handoffs']);
   for (const key of f.host.ENV_KEYS) assert.equal(Object.hasOwn(requested[0].options.env, key), false);
   assert.equal(context.projectSession.activeSettingsHash, null);
   assert.equal(context.projectSession.verificationUnavailable, true); assert.equal(context.projectSession.verificationEnvironmentAbsent, true);

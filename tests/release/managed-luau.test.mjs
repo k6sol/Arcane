@@ -223,7 +223,19 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
     projectSession: null, child: null, origin: '', token: '', closing: false, switching: false,
     performance, started: performance.now(), daemonReadyMs: 0, projectPath: '',
     setTimeout, clearTimeout, console: { warn: value => warnings.push(value) }, CODE_VERIFICATION_WARNING: 'Compiler unavailable',
-    ownedDirectory: async full => { await policy.directPath(full); return full; },
+    // Same semantics as main's ownedDirectory: direct-path policy, private creation, then physical revalidation.
+    ownedDirectory: async full => { await policy.directPath(full, 'directory', true); fs.mkdirSync(full, { recursive: true, mode: 0o700 }); return policy.directPath(full); },
+    smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
+    // Managed compiler wiring is the boundary under test. The separate handoff suite
+    // executes its actual broker; here the newly mounted host capability has no actions.
+    require(name) {
+      assert.equal(name, './native-handoff-host.cjs');
+      return { createNativeHandoffHost(ports) {
+        assert.deepEqual(Object.keys(ports).sort(), ['confirm', 'getChoices', 'getSession', 'launchTerminal']);
+        assert.equal(ports.getSession(), null, 'A compiler fixture has no desktop window.');
+        return Object.freeze({ dispose: async () => ({ revoked: 0, unknown: 0, retained: 0 }), cancelPending() {} });
+      } };
+    },
     spawn(executable, args, options) { calls.push({ executable, args, options });
       queueMicrotask(() => child.emit('message', { type: 'arcane-ready', protocolVersion: 1, origin: 'http://127.0.0.1:45873', token: 'a'.repeat(64) })); return child; },
     failStartup() { assert.fail('No runtime process executed.'); },
@@ -238,6 +250,9 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
   assert.equal(env.ARCANE_LUAU_COMPILER_SHA256, managed.MANAGED_LUAU_SHA256);
   assert.equal(env.ARCANE_LUAU_EVIDENCE_DIRECTORY, managed.MANAGED_LUAU_EVIDENCE_DIRECTORY);
   assert.equal(context.projectSession.verificationUnavailable, false); assert.equal(context.projectSession.verificationEnvironmentAbsent, false);
+  const handoffs = join(context.projectSession.stateRoot, 'native-handoffs'), created = fs.lstatSync(handoffs);
+  assert.ok(created.isDirectory() && !created.isSymbolicLink(), 'The owned handoff directory is a real directory.');
+  assert.equal(await policy.directPath(handoffs), handoffs);
 });
 
 async function compiledAdapters(t) {
