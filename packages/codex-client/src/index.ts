@@ -15,7 +15,7 @@ export { CODEX_LIMITS, CodexClientError } from './types.js';
 export type { Account, ArcaneMcpLaunchProfile, Approval, ConnectOptions, FileChangePreview, HumanAction, LimitOptions, LocalUse, Model, NativeAssetHooks, NativeAssetIntent, Operation, Selection, SessionEvent, SessionEventValue, Snapshot, ThreadState } from './types.js';
 export type CodexClient = CodexSession;
 export type { NativeRateLimits, NativeRateLimitBucket, NativeRateLimitWindow, NativeLimitReason } from './rate-limits.js';
-export type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
+export type { NativeTaskContinuation, ManagedTaskStart, NativeIncorporationChain, NativeIncorporationPermit } from './types.js';
 
 export interface ProposalWorker {
   snapshot(): Snapshot;

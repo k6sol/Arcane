@@ -30,6 +30,10 @@ export interface HumanAction { initiatedBy: 'human' }
 /** Host-only continuation token. Session object identity, not this JSON shape,
  * binds one additional turn to the original human task and its local policy. */
 export interface NativeTaskContinuation { readonly kind: 'native-task-continuation' }
+/** Host-only bounded chain of parent incorporation turns, separate from the single repair continuation.
+ * Chains and permits are opaque objects compared by identity; structural copies are never accepted. */
+export interface NativeIncorporationChain { readonly kind: 'native-incorporation-chain' }
+export interface NativeIncorporationPermit { readonly kind: 'native-incorporation-permit' }
 export interface ManagedTaskStart { thread: ThreadState; continuation: NativeTaskContinuation }
 export interface Selection { model: string; effort: string }
 export interface Model {

@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { types } from 'node:util';
 import { spawn } from 'node:child_process';
 import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -8,7 +9,7 @@ import { ARCANE_TASK_INSTRUCTIONS, ARCANE_NATIVE_TOOL_NAMES } from '../../protoc
 import { CodexClientError, validateNativeAssetHooks, type Account, type Approval, type ApprovalMethod, type FileChangePreview, type HumanAction, type Limits, type Model, type NativeAssetHooks, type NativeAssetIntent, type Operation, type Selection, type SessionEvent, type SessionEventValue, type Snapshot, type ThreadState } from './types.js';
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
-import type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
+import type { NativeTaskContinuation, ManagedTaskStart, NativeIncorporationChain, NativeIncorporationPermit } from './types.js';
 import { snapshotReferenceImages, type ReferenceImage } from './reference-images.js';
 import { parseNativeRateLimits, mergeNativeRateLimitUpdate, type NativeRateLimits } from './rate-limits.js';
 
@@ -44,6 +45,26 @@ export function parseNativeTokenUsage(value: unknown): NativeTokenUsage | null {
 }
 
 interface PendingApproval { value: Approval; timer: NodeJS.Timeout; wireKey: string; safeToAccept: boolean }
+export const INCORPORATION_MAX_STEPS = 3;
+interface IncorporationChain {
+  readonly chain: NativeIncorporationChain; readonly continuation: NativeTaskContinuation; readonly thread: ThreadState; readonly sessionId: string | null;
+  readonly selection: Selection; readonly accountRevision: number; readonly accountIdentity: string; readonly allowWrites: boolean; readonly maxSteps: number;
+  issued: number; last: Operation; permit: { readonly token: NativeIncorporationPermit; readonly step: number; used: boolean } | null; inFlight: boolean; revoked: boolean;
+}
+/** Exact own data properties only: accessors and extra or symbol keys are refused before any use. */
+function ownData(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value) ||
+      ![Object.prototype,null].includes(Object.getPrototypeOf(value))) fail('ARGUMENTS', 'Expected an exact host capability envelope.');
+  const own = Reflect.ownKeys(value);
+  if (own.length !== keys.length || own.some(key => typeof key !== 'string' || !keys.includes(key))) fail('ARGUMENTS', 'Unexpected field.');
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    const field = Object.getOwnPropertyDescriptor(value, key);
+    if (!field || !Object.hasOwn(field, 'value')) fail('ARGUMENTS', 'Capability fields must be plain data.');
+    result[key] = field.value;
+  }
+  return result;
+}
 interface TurnPreflight { thread: ThreadState; selection: Selection; accountRevision: number; turnId: string | null; turnStatus: ThreadState['turnStatus']; revoked: boolean }
 const APPROVALS = new Set(['item/commandExecution/requestApproval','item/fileChange/requestApproval']);
 const TERMINAL = new Set(['completed','failed','interrupted']);
@@ -177,6 +198,8 @@ export class CodexSession {
   #automaticWriteStarts = new WeakSet<Operation>();
   #taskContinuation: { token: NativeTaskContinuation; thread: ThreadState; operation: Operation;
     selection: Selection; accountRevision: number; accountIdentity:string; allowWrites: boolean; used: boolean; revoked: boolean } | null = null;
+  #incorporation: IncorporationChain | null = null;
+  readonly #incorporationOpened = new WeakSet<NativeTaskContinuation>();
   #managedStarting = false;
   #catalogueLoading = false;
   #cancelledTurnId: string | null = null;
@@ -439,16 +462,75 @@ export class CodexSession {
         this.#selection?.model !== permit.selection.model || this.#selection.effort !== permit.selection.effort ||
         !permit.allowWrites && thread.writeGranted) fail('TASK_SCOPE', 'The original task identity, policy or terminal operation changed.');
     const text = str(action.text, this.bounds.maxInputBytes);
+    if (this.#incorporation?.inFlight) fail('BUSY', 'An incorporation turn is still being dispatched.');
     permit.used = true; // Reserve before asynchronous preflight; uncertain starts are never retried.
+    this.#revokeIncorporation(); // Repair ends incorporation continuity; incorporation never spends repair.
     return this.#startTurn({ threadId: thread.threadId, text, allowWorkspaceWrites: permit.allowWrites }, false);
   }
+  /** Open the one bounded incorporation chain for this exact live managed task. It does not spend repair. */
+  openIncorporationChain(action: { continuation: NativeTaskContinuation; maxSteps: number }): NativeIncorporationChain {
+    const input = ownData(action, ['continuation','maxSteps']), repair = this.#taskContinuation;
+    if (this.mcpPolicy !== 'arcane-only' || !repair || input.continuation !== repair.token || repair.used || repair.revoked || this.#incorporationOpened.has(repair.token))
+      fail('TASK_SCOPE', 'Incorporation requires the exact live managed task continuation.');
+    const maxSteps = input.maxSteps;
+    if (typeof maxSteps !== 'number' || !Number.isSafeInteger(maxSteps) || maxSteps < 1 || maxSteps > INCORPORATION_MAX_STEPS) fail('ARGUMENTS', 'Incorporation steps must be 1..3.');
+    this.#incorporationOpened.add(repair.token);
+    const chain: NativeIncorporationChain = Object.freeze({ kind: 'native-incorporation-chain' });
+    this.#revokeIncorporation();
+    this.#incorporation = { chain, continuation: repair.token, thread: repair.thread, sessionId: repair.thread.sessionId, selection: { ...repair.selection },
+      accountRevision: repair.accountRevision, accountIdentity: repair.accountIdentity, allowWrites: repair.allowWrites, maxSteps,
+      issued: 0, last: repair.operation, permit: null, inFlight: false, revoked: false };
+    return chain;
+  }
+  /** Issue exactly the next single-use step after the previous owned turn is acknowledged and terminal. */
+  issueIncorporationPermit(action: { chain: NativeIncorporationChain }): NativeIncorporationPermit {
+    const input = ownData(action, ['chain']), state = this.#incorporation;
+    if (!state || input.chain !== state.chain || state.revoked || state.inFlight || state.permit && !state.permit.used || state.issued >= state.maxSteps)
+      fail('TASK_SCOPE', 'No incorporation step is available.');
+    this.#checkIncorporation(state);
+    const token: NativeIncorporationPermit = Object.freeze({ kind: 'native-incorporation-permit' });
+    state.issued++; state.permit = { token, step: state.issued, used: false };
+    return token;
+  }
+  /** Private application port. The permit is consumed before asynchronous preflight and is never replayed. */
+  async continueIncorporation(action: { chain: NativeIncorporationChain; permit: NativeIncorporationPermit; text: string }): Promise<ThreadState> {
+    const input = ownData(action, ['chain','permit','text']), state = this.#incorporation, record = state?.permit;
+    if (!state || input.chain !== state.chain || state.revoked || state.inFlight || !record || input.permit !== record.token || record.used || record.step !== state.issued)
+      fail('TASK_SCOPE', 'Incorporation permit is unavailable.');
+    const text = str(input.text, this.bounds.maxInputBytes);
+    this.#checkIncorporation(state);
+    record.used = true; state.inFlight = true;
+    try { return await this.#startTurn({ threadId: state.thread.threadId, text, allowWorkspaceWrites: state.allowWrites }, false, state); }
+    catch (error) { state.revoked = true; throw error; } // Refused or uncertain: fence the whole chain; no replacement step.
+    finally { state.inFlight = false; }
+  }
+  #checkIncorporation(state: IncorporationChain): void {
+    const repair = this.#taskContinuation;
+    if (!repair || repair.token !== state.continuation || repair.revoked || repair.used) fail('TASK_SCOPE', 'The original task continuation is unavailable.');
+    const thread = this.#requireThread(state.thread.threadId), last = state.last;
+    if (this.#managedStarting || thread !== state.thread || this.#thread !== thread || thread.sessionId !== state.sessionId ||
+        last.method !== 'turn/start' || last.state !== 'acknowledged' || !last.turnId || thread.turnId !== last.turnId || !['completed','failed'].includes(thread.turnStatus) ||
+        this.#accountReads || this.#accountRevision !== state.accountRevision || this.#accountIdentity !== state.accountIdentity ||
+        thread.selection.model !== state.selection.model || thread.selection.effort !== state.selection.effort ||
+        this.#selection?.model !== state.selection.model || this.#selection.effort !== state.selection.effort ||
+        !state.allowWrites && thread.writeGranted || this.#turnPreflight || this.#turnOperation || this.#threadOperation ||
+        this.#operations.some(operation => operation.state === 'pending' || operation.state === 'unknown'))
+      fail('TASK_SCOPE', 'The original task identity, policy or terminal operation changed.');
+  }
+  #revokeIncorporation(): void {
+    const state = this.#incorporation;
+    if (!state || state.revoked) return;
+    state.revoked = true;
+    if (state.inFlight && this.#turnPreflight) this.#turnPreflight.revoked = true;
+  }
   revokeTaskContinuation(): void {
+    this.#revokeIncorporation(); // Works even after repair was spent or revoked.
     if (this.#managedStarting && this.#turnPreflight) this.#turnPreflight.revoked = true;
     if (!this.#taskContinuation || this.#taskContinuation.revoked) return;
     this.#taskContinuation.revoked = true;
     if (this.#turnPreflight) this.#turnPreflight.revoked = true;
   }
-  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean; references?:readonly ReferenceImage[] }, managed: boolean): Promise<ThreadState> {
+  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean; references?:readonly ReferenceImage[] }, managed: boolean, incorporation?: IncorporationChain): Promise<ThreadState> {
     const allowWorkspaceWrites = action.allowWorkspaceWrites === true;
     if(this.mcpPolicy==='proposal'&&(allowWorkspaceWrites||this.#operations.some(operation=>operation.method==='turn/start')))
       fail('PROPOSAL_READ_ONLY','Proposal workers permit one read-only turn and no automatic replay.');
@@ -495,7 +577,10 @@ export class CodexSession {
     // Include the complete UTF-8 envelope before allocating an operation/grant.
     if(references?.length&&Buffer.byteLength(JSON.stringify({id:Number.MAX_SAFE_INTEGER,method:'turn/start',params})+'\n')>this.bounds.maxFrameBytes)
       fail('FRAME_LIMIT','The complete native message and references exceed the frame limit. Reduce the message or images.');
+    if (incorporation?.revoked) fail('GRANT_REVOKED', 'The incorporation chain was revoked before dispatch. No turn was sent.');
+    if (incorporation) this.#checkIncorporation(incorporation);
     const operation = this.#newOperation('turn/start', thread.threadId, null);
+    if (incorporation) incorporation.last = operation; // Continuity is only this exact owned operation.
     if (managed) this.#taskContinuation = { token: Object.freeze({ kind: 'native-task-continuation' }), thread, operation,
       selection: { ...thread.selection }, accountRevision: this.#accountRevision,
       accountIdentity:this.#accountIdentity!,
