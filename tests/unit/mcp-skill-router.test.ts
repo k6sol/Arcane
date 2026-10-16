@@ -63,6 +63,13 @@ test('SDK initialize supplies automatic planning and exact scene contracts while
   const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Metadata must not contact a daemon.'); });
   const client = await linked(t), instructions = client.getInstructions()!;
   assert.equal(instructions, productInstructions());
+  // Deferred discovery: the first 512 characters name the build tools and tell clients to search/load before claiming absence.
+  const head = instructions.slice(0, 512);
+  for (const text of ['scene_create', 'scene_update', 'script_update', 'tool search', 'unloaded rather than unavailable', 'before concluding it is missing']) assert.ok(head.includes(text), text);
+  assert.match(head, /Only if search is unavailable or fails, report that actual boundary; never fabricate a call or claim an edit\./);
+  assert.doesNotMatch(instructions, /report that exact inventory mismatch/);
+  // A standalone server cannot claim a host preflight; only managed-host instructions may.
+  assert.doesNotMatch(instructions, /verified before (?:the|every) turn|host verified/i);
   assert.match(instructions,/playtest_request.*scenario/);assert.match(instructions,/one same-thread repair followed by one reverify/);
   assert.match(instructions,/no Client datamodel attestation/);assert.match(instructions,/assets_reconstruct_studio_import/);
   assert.doesNotMatch(instructions,/exposes no viewport capture, playtest|Script enabling and arbitrary executable-class creation are not exposed|exposes no Studio asset-import tool/);

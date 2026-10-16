@@ -22,6 +22,11 @@ test('native task instructions require automatic choice and evidence, not invent
  for(const text of ['skills_recommend','scene_create','scene_update','script_update','user should not choose','exact session/root/edit-mode','mutation receipts'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text));
  assert.ok(!ARCANE_TASK_INSTRUCTIONS.includes('approvalPolicy=never'));
 });
+test('managed task instructions state the host-verified inventory and require tool search before reporting build tools missing',()=>{
+ for(const text of ['This managed host verified before the turn','scene_create, scene_update and script_update','tool search','instead of reporting them missing or applying nothing',
+   'If search is unavailable or fails, report that actual boundary and never fabricate a call'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text),text);
+ assert.ok(!/report that exact inventory mismatch/.test(ARCANE_TASK_INSTRUCTIONS));
+});
 
 test('native asset readiness requires adoption, preparation, staging, detached reconstruction and historical status',()=>{
  assert.equal(Object.isFrozen(ARCANE_TOOL_NAMES),true);
