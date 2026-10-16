@@ -25,7 +25,8 @@ type Mode = 'normal' | 'discovery-init-failure' | 'inventory-failure' | 'unsafe-
   'arcane-active' | 'arcane-missing' | 'arcane-null' | 'arcane-plugin' | 'arcane-metadata' | 'final-init-failure' | 'final-inherited' | 'final-null' |
   'proposal-discovery-account' | 'proposal-final-account' | 'proposal-reviewer' | 'proposal-sandbox' | 'proposal-approval' | 'proposal-model' |
   'proposal-tools' | 'proposal-active' | 'proposal-account-change' | 'proposal-late-inherited' | 'proposal-lost-turn' |
-  'proposal-empty'|'proposal-overflow'|'proposal-failed'|'proposal-disconnect'|'proposal-gap'|'proposal-terminal-before-ack'|'proposal-deadline';
+  'proposal-empty'|'proposal-overflow'|'proposal-failed'|'proposal-disconnect'|'proposal-gap'|'proposal-terminal-before-ack'|'proposal-deadline'|
+  'proposal-coalesced'|'proposal-coalesced-wrong-ack';
 type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'invalid-id' | 'extra-field' | 'disconnected' | 'close-pending' | 'busy-pending';
 type HistoryResponse = 'wrong-thread' | 'wrong-session' | 'wrong-project';
 type ParentRetirement='before-launch'|'discovery-init'|'discovery-inventory'|'final-init'|'thread-inventory'|'turn-inventory'|'before-write'|'reentrant-abort'|'active'|'after-connect'|'mutated-owner'|'joined-close';
@@ -58,7 +59,8 @@ record({ event: 'child', args, cwd: process.cwd(), envKeys: Object.keys(process.
   envHasEntry: Object.values(process.env).some(value => value.includes(require('node:path').join(process.cwd(), 'apps', 'mcp', 'src', 'main.js'))),
   tokenHash: process.env.ARCANE_LOCAL_TOKEN ? createHash('sha256').update(process.env.ARCANE_LOCAL_TOKEN).digest('hex') : null,
   daemonUrl: process.env.ARCANE_DAEMON_URL || null });
-const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+let batch = null;
+const send = value => batch ? batch.push(value) : process.stdout.write(JSON.stringify(value) + '\n');
 const result = (id, value) => send({ id, result: value });
 const reject = id => send({ id, error: { code: -32017, message: 'Synthetic refusal' } });
 const row = (name, runtimeStatus, pluginId = null) => ({ name, runtimeStatus, pluginId, toolsError: null,
@@ -104,8 +106,9 @@ createInterface({ input: process.stdin }).on('line', line => {
     approvalsReviewer: mode==='proposal-reviewer'?'auto_review':'user', sandbox: { type: mode==='proposal-sandbox'?'workspaceWrite':'readOnly', networkAccess: false } });
   if(method==='turn/start'&&scenario.proposal) {
     if(mode==='proposal-lost-turn')return;
+    if(mode==='proposal-coalesced'||mode==='proposal-coalesced-wrong-ack')batch=[];
     if(mode==='proposal-terminal-before-ack')send({method:'turn/started',params:{threadId:'fixture-thread',turn:{id:'proposal-turn',status:'inProgress'}}});
-    else result(id,{turn:{id:'proposal-turn',status:'inProgress'}});
+    else result(id,{turn:{id:mode==='proposal-coalesced-wrong-ack'?'foreign-turn':'proposal-turn',status:'inProgress'}});
     send({method:'item/commandExecution/requestApproval',id:'proposal-approval',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-command',command:'synthetic command',cwd:process.cwd()}});
     if(mode==='proposal-account-change')send({method:'account/updated',params:{authMode:'chatgpt'}});
     else {
@@ -116,6 +119,7 @@ createInterface({ input: process.stdin }).on('line', line => {
       send({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'proposal-turn',status:mode==='proposal-failed'?'failed':'completed'}}});
       if(mode==='proposal-terminal-before-ack')result(id,{turn:{id:'proposal-turn',status:'completed'}});
     }
+    if(batch){const messages=batch;batch=null;process.stdout.write(messages.map(value=>JSON.stringify(value)+'\n').join(''));}
     return;
   }
   if(!method)return;
@@ -579,6 +583,20 @@ test('proposal result requires the exact acknowledgement even when completion ar
   assert.equal(events(records,'error').length,0);
   assert.equal(events(records,'proposal-result')[0]?.proposalResult?.text,'Synthetic code proposal');
   assert.equal(events(records,'close').length,2);
+});
+
+test('proposal retains every item when acknowledgement and notifications share one frame batch',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,mode:'proposal-coalesced'});
+  assert.equal(events(records,'error').length,0);
+  assert.equal(events(records,'proposal-result')[0]?.proposalResult?.text,'Synthetic code proposal');
+  assert.equal(calls(records,'turn/start').length,1);assert.equal(events(records,'close').length,2);
+});
+
+test('coalesced proposal items cannot replace the exact acknowledged turn',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,mode:'proposal-coalesced-wrong-ack'});
+  assert.equal(events(records,'error')[0]?.code,'PROTOCOL');
+  assert.equal(events(records,'proposal-result').length,0);
+  assert.equal(calls(records,'turn/start').length,1);assert.equal(events(records,'close').length,2);
 });
 
 test('proposal isolation accepts only explicit disabled empty inventories',()=>{

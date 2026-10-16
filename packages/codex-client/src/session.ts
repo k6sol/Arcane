@@ -1051,6 +1051,17 @@ export class CodexSession {
       this.#event({ type: 'turn', threadId: thread.threadId, turnId: id, status: state,
         ...(TERMINAL.has(state) && thread.durationMs !== undefined ? { durationMs: thread.durationMs } : {}) }); return;
     }
+    // A response and its first item notifications can share one transport chunk.
+    // Promise continuations decode the ACK after this synchronous notification
+    // pass, so retain the provisional exact turn while its start is pending.
+    // The eventual ACK must still match, and known previous turns cannot bind it.
+    if (thread.turnId === null && this.#turnOperation?.method === 'turn/start' &&
+        ['item/started','item/completed','item/agentMessage/delta','error'].includes(method as string)) {
+      const turnId = str(params.turnId);
+      if (this.#knownTurnIds.has(turnId)) return;
+      if (this.#turnOperation.turnId && this.#turnOperation.turnId !== turnId) fail('PROTOCOL', 'Item notification changed the pending turn ID.');
+      thread.turnId = turnId; this.#turnOperation.turnId = turnId; this.#knownTurnIds.add(turnId);
+    }
     if (params.turnId !== thread.turnId || !this.#scopeActive(thread.threadId, thread.turnId)) return;
     const turnId = thread.turnId!;
     if (method === 'item/agentMessage/delta') {
