@@ -8,7 +8,7 @@ import {CallToolResultSchema,type CallToolResult} from '@modelcontextprotocol/sd
 import {discoverNativeStudioExecutable} from '../../../packages/studio-adapter/src/discovery.js';
 import {StudioStore,type StudioTestReservation} from '../../../packages/storage/src/studio-store.js';
 import {validateCommandArgs} from '../../../packages/core/src/studio-policy.js';
-import {createStudioTestControl,NativeTestAdapter,TestLedger,digest,StudioTestError,type ConsentDisplay,type TestBinding,type TestReview} from '../../../packages/studio-test-controller/src/index.js';
+import {createStudioTestControl,NativeTestAdapter,TestLedger,digest,StudioTestError,type ConsentDisplay,type TestBinding,type TestReview,type Scheduler} from '../../../packages/studio-test-controller/src/index.js';
 import {decodeTestInventory,decodeTestState,decodeTestMode,decodeTestLogs,decodeTestFocus} from './studio-test-decoders.js';
 import {scenarioPlanSchema,SCENARIO_LIMITS} from '../../../packages/studio-test-controller/src/scenario.js';
 import {createStudioTestCaptureStore} from './studio-test-captures.js';
@@ -21,7 +21,9 @@ const approval=z.strictObject({id,displayDigest:hash});
 const witnessSchema=z.strictObject({placeId:z.number().int().nonnegative(),universeId:z.number().int().nonnegative(),placeName:z.string().max(512),sessionId:id,clientLifetimeId:id,pluginArtifactHash:hash});
 type Witness=z.infer<typeof witnessSchema>;
 export interface NativeTestConnection {client:Client;evidence:'native'|'fixture';witness(studioId:string,markerName:string,mode:'Edit'|'Play',signal:AbortSignal):Promise<Witness>;close():Promise<void>}
-interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;connect?:()=>Promise<NativeTestConnection>;taskPort?:StudioTestTaskPort}
+interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;connect?:()=>Promise<NativeTestConnection>;taskPort?:StudioTestTaskPort;
+  /** Trusted fixture clock only; never request data and never accepted for a native connection. */
+  fixtureScheduler?:Scheduler}
 export interface StudioTestView {id:string;targetName:string;actor:string;state:'needs_approval'|'running'|'complete'|'cancelled';display:Readonly<ConsentDisplay>;displayDigest:string;review:Readonly<TestReview>;evidence:'fixture'|'native';nativeAcceptance:false}
 type Job={view:StudioTestView;control:ReturnType<typeof createStudioTestControl>;connection:NativeTestConnection;proposalId:string;expiry:ReturnType<typeof setTimeout>;closing:Promise<void>|null;cancelled:boolean;reserved:boolean;reservation:StudioTestReservation|null;verifySubjects:((signal:AbortSignal)=>Promise<void>)|null;
   origin:StudioTestTaskOrigin|null;terminalSent:boolean;reportDigest:string|null;subjects:'current'|'changed'|'unobserved';revalidate:((signal:AbortSignal)=>Promise<'current'|'changed'|'unobserved'>)|null};
@@ -56,6 +58,7 @@ async function connectNativeTest():Promise<NativeTestConnection>{
  * Current native safety admission remains unpublished local places only. */
 export async function createStudioTestService(options:Options){
   if(!hash.safeParse(options.pluginArtifactHash).success)rejected('INVALID_REQUEST');
+  if(options.fixtureScheduler&&!options.connect)rejected('INVALID_REQUEST');
   await mkdir(options.directory,{recursive:true,mode:0o700});const root=await realpath(options.directory);
   const ledger=await TestLedger.open(join(root,'ledger'),root);
   const captures=await createStudioTestCaptureStore(root).catch(async error=>{
@@ -93,6 +96,7 @@ export async function createStudioTestService(options:Options){
     preparing=true;let connection:NativeTestConnection|undefined;
     try{
       connection=await(options.connect??connectNativeTest)();
+      if(options.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');
       const result=await connection.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{timeout:5000,maxTotalTimeout:5000});
       const inventory=decodeTestInventory(result) as {id:string;name:string}[];
       const candidates=a.nativeStudioId?inventory.filter(s=>s.id===a.nativeStudioId):inventory.filter(s=>s.name===session.name);
@@ -139,6 +143,7 @@ export async function createStudioTestService(options:Options){
       };
       const verifySubjects=async(signal:AbortSignal)=>{const final=control.requests.status().phase==='stopping';if(final)j.subjects='unobserved';if(subjectDigest!==await adapter.readScenarioSubjects(binding,signal)){if(final)j.subjects='changed';rejected('BINDING_CHANGED');}if(final)j.subjects='current';};
       control=createStudioTestControl({adapter,ledger,requestTimeoutMs:15000,cleanupGraceMs:15000,proofMaxAgeMs:6000,
+        ...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{}),
         ...(a.scenario?{temporary:{
           async setup(signal:AbortSignal){try{for(const edit of a.scenario!.temporaryEdits??[]){signal.throwIfAborted();if(j.origin)options.taskPort!.assert(j.origin);if(!j.reservation)rejected('FENCED');const command=options.store.enqueueTestSetup(j.reservation,edit.id);setupCommands.push(command.id);await waitCommand(command.id,signal);}}catch(error){if(j.reservation)options.store.cancelTestSetup(j.reservation);throw error;}},
           async restore(signal:AbortSignal){if(!j.reservation)rejected('FENCED');options.store.cancelTestSetup(j.reservation);let unknown=false;for(const commandId of [...setupCommands].reverse()){try{let original=options.store.command(commandId);if(original.state==='cancelled')continue;if(original.state==='dispatched')original=await waitCommand(commandId,signal);if(original.state!=='succeeded'){unknown=true;continue;}const restore=options.store.enqueueTestRestore(j.reservation,commandId);await waitCommand(restore.id,signal);}catch{unknown=true;}}if(unknown)throw new StudioTestError('EFFECT_UNKNOWN');},
