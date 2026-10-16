@@ -6,9 +6,9 @@ import { MANAGED_LUAU_FILES, REQUIRED_MANAGED_LUAU_FILES, validateManagedLuauFil
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT_FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'LICENSE', 'README.md'];
-const SOURCE_ROOTS = ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skills', 'docs', 'tests', 'dist', '.github'];
+const SOURCE_ROOTS = ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skills', 'docs', 'tests', 'dist', '.github', 'installer'];
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', 'runtime', '.runtime', '.tmp', '.git', '.codex', '.agents', 'generated', '__pycache__', '.worker', 'cache']);
-const EXTENSIONS = /\.(?:ts|js|mjs|cjs|json|map|html|css|md|csv|py|luau|lua|rbxm|rbxmx|yml|yaml|txt)$/;
+const EXTENSIONS = /\.(?:ts|js|mjs|cjs|cs|json|map|html|css|md|csv|py|luau|lua|rbxm|rbxmx|yml|yaml|txt)$/;
 export const BRAND_BITMAP_PATH = 'apps/desktop/public/brand/arcane-ridges.png';
 export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/public/studio.html', 'apps/desktop/public/studio.css',
@@ -121,7 +121,12 @@ async function collect(repository) {
     }
   }
   for (const path of ROOT_FILES) await add(path);
-  for (const root of SOURCE_ROOTS) await walk(root);
+  for (const root of SOURCE_ROOTS) {
+    // Older source fixtures predate the installer; when present its reviewed source
+    // belongs to the release closure alongside the build scripts and component tests.
+    if (root === 'installer') { try { await lstat(join(repository, root)); } catch (error) { if (error.code === 'ENOENT') continue; throw error; } }
+    await walk(root);
+  }
   return { files, totalBytes };
 }
 function validateCompiledSources(files) {
@@ -163,9 +168,15 @@ function validateWorkspaceLock(files) {
     if (!entry || entry.name !== workspace.name || entry.version !== workspace.version || !linked || linked.link !== true || linked.resolved !== path) throw new Error('Workspace is missing/stale in package-lock.json: ' + path);
   }
 }
+function validateInstallerSources(files) {
+  if (files.some(file => file.path === 'tests/release/windows-installer-payload.test.mjs') && !files.some(file => file.path === 'installer/PayloadArchive.cs')) {
+    throw new Error('Installer payload verification requires its matching C# source.');
+  }
+}
 export async function createLocalRelease({ repository = REPOSITORY } = {}) {
   repository = resolve(repository); await noLinks(repository); repository = await realpath(repository);
   const { files, totalBytes } = await collect(repository);
+  validateInstallerSources(files);
   validateWorkspaceLock(files);
   const packageJson = JSON.parse(files.find(file => file.path === 'package.json').bytes.toString('utf8'));
   const firstRunDeclared = packageJson.scripts?.['setup:arcane'] !== undefined || files.some(file => FIRST_RUN_FILES.includes(file.path));
@@ -206,6 +217,7 @@ export async function verifyLocalRelease(directory) {
   const manifest = JSON.parse(manifestBytes.toString('utf8'));
   if (manifest.schemaVersion !== 1 || manifest.kind !== 'arcane-local-source-release' || !Array.isArray(manifest.files) || manifest.files.length > MAX_FILES || manifest.fileCount !== manifest.files.length) throw new Error('Invalid release manifest.');
   const seen = new Set(), verifiedFiles = []; let totalBytes = 0;
+  validateInstallerSources(manifest.files);
   for (const entry of manifest.files) {
     const path = validPath(entry.path);
     if (seen.has(path) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || entry.bytes > MAX_FILE_BYTES || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error('Invalid release file descriptor.');

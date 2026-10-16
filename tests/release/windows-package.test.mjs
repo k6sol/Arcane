@@ -415,3 +415,13 @@ test('production runtime, cache and generated code are not private Arcane runtim
   assert.ok(data.files.every(f=>!f.path.includes('resources/product/runtime/')));
   await verifyWindowsBundle(result.directory);
 });
+
+test('installer verification source belongs to the reproducible source closure', async t => {
+  const { write, options } = await fixture(t);
+  await write('tests/release/windows-installer-payload.test.mjs', '// Fixture payload verification source.\n');
+  await assert.rejects(packageWindows(options), /requires its matching C# source/);
+  await write('installer/PayloadArchive.cs', '// Fixture C# payload reader source.\n');
+  const result = await packageWindows(options), data = await manifest(result.directory);
+  assert.ok(data.files.some(file => file.path === 'resources/product/installer/PayloadArchive.cs'));
+  await verifyWindowsBundle(result.directory);
+});
