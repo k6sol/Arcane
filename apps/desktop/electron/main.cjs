@@ -6,6 +6,7 @@ const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const policy = require('./policy.cjs');
+policy.protectConsolePipes([process.stdout, process.stderr]);
 const { createCodeVerification } = require('./code-verification.cjs');
 const { createProviderSetup } = require('./provider-setup.cjs');
 const { createStudioKeyVault } = require('./studio-key-vault.cjs');
@@ -180,8 +181,9 @@ function makeWindow() {
   window = new BrowserWindow({ width: 1512, height: 960, minWidth: 1000, minHeight: 680, show: false, title: 'Arcane', backgroundColor: '#0b0b0d', autoHideMenuBar: true, icon: join(__dirname, 'icon.png'),
     webPreferences: { preload: join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, navigateOnDragDrop: false, spellcheck: false, devTools: !app.isPackaged, partition: 'arcane-workspace' } });
   const session = window.webContents.session;
-  session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  session.setPermissionCheckHandler(() => false); session.setDevicePermissionHandler(() => false);
+  const permissionWindow = window;
+  policy.installClipboardPermissions(session, () => ({ window: permissionWindow, origin, active: !closing && !switching && window === permissionWindow }));
+  session.setDevicePermissionHandler(() => false);
   session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => callback({ cancel: !policy.requestAllowed(origin, details.url) }));
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   for (const type of ['will-navigate', 'will-redirect', 'will-frame-navigate']) window.webContents.on(type, event => { if (!event.isMainFrame || !policy.navigationAllowed(origin, event.url)) event.preventDefault(); });

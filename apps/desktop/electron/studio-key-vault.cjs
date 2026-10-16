@@ -240,8 +240,10 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
             guard(scope, event); checkSnapshot(snapshot);
             // Only a validated key in this window's encrypted project vault.
             // No arbitrary renderer strings, shell commands or clipboard reads.
-            clipboard.writeText(found.apiKey);
-            guard(scope, event); return { copied: true };
+            // Electron resolves once the text is on the clipboard. Acknowledge only after settlement and
+            // an exact scope recheck; a rejection maps to the generic error. Never retried.
+            await clipboard.writeText(found.apiKey);
+            guard(scope, event); checkSnapshot(snapshot); return { copied: true };
           }
           if (action === 'remember' || action === 'replace') {
             // Immutable UUID binding: another value must never replace a remembered credential.

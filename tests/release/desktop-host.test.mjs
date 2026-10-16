@@ -337,8 +337,8 @@ test('source contract: renderer isolation, exact navigation and deny-by-default 
   assert.match(mainSource, /policy\.navigationAllowed\(origin,\s*event\.url\)/);
   assert.match(mainSource, /onBeforeRequest[\s\S]*policy\.requestAllowed\(origin,\s*details\.url\)/);
   assert.match(mainSource, /setWindowOpenHandler\([\s\S]*?action:\s*'deny'/);
-  assert.match(mainSource, /setPermissionRequestHandler[\s\S]*?callback\(false\)/);
-  assert.match(mainSource, /setPermissionCheckHandler\(\(\)\s*=>\s*false\)/);
+  assert.match(mainSource, /policy\.installClipboardPermissions\(session,/);
+  assert.match(mainSource, /active: !closing && !switching && window === permissionWindow/);
   assert.match(mainSource, /setDevicePermissionHandler\(\(\)\s*=>\s*false\)/);
 });
 
@@ -457,7 +457,7 @@ test('regression: empty smoke fixture creates its profile before Electron setPat
       if (name === './workspace-preferences.cjs') return { createWorkspacePreferences() { assert.fail('Fixture must not start preference storage work.'); } };
       throw new Error('Unexpected host dependency: ' + name);
     },
-    process: { argv: ['C:\\Arcane\\Arcane.exe', '--arcane-smoke', 'C:\\Smoke\\new-empty'], platform: 'win32', resourcesPath: 'C:\\Arcane\\resources', env: {} },
+    process: { argv: ['C:\\Arcane\\Arcane.exe', '--arcane-smoke', 'C:\\Smoke\\new-empty'], platform: 'win32', resourcesPath: 'C:\\Arcane\\resources', env: {}, stdout: new EventEmitter(), stderr: new EventEmitter() },
     __dirname: 'C:\\Arcane\\resources\\app', performance: { now: () => 0 },
   }, { filename: 'main.cjs' }));
   assert.equal(paths.get('userData'), 'C:\\Smoke\\new-empty\\profile');

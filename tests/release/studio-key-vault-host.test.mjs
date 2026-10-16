@@ -95,7 +95,8 @@ function encryptedTestDouble() {
 }
 
 function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32' } = {}) {
-  const copied = [];
+  // Asynchronous clipboard TEST DOUBLE matching Electron 44's writeText(): Promise<void>. Never the native clipboard.
+  const copied = [], clipboardDouble = { impl: value => { copied.push(value); return Promise.resolve(); } };
   const userRoot = 'C:\\Owned', projectPath = 'C:\\Project', projectId = hash(projectPath.toLowerCase());
   const stateRoot = win32.join(userRoot, 'runtime', 'projects', projectId), handlers = new Map(), ipcCalls = [];
   disk.ensure(projectPath); disk.ensure(stateRoot);
@@ -119,7 +120,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
   const begin = mainSource.indexOf('studioKeyVault = createStudioKeyVault(');
   const end = mainSource.indexOf('studioKeyVault.installIpc(ipcMain);', begin) + 'studioKeyVault.installIpc(ipcMain);'.length;
   assert.ok(begin > 0 && end > begin);
-  const mainContext = vm.createContext({ safeStorage, smoke, clipboard: { writeText(value) { copied.push(value); } }, initial: { window, origin, userRoot, token: 'fixture-token',
+  const mainContext = vm.createContext({ safeStorage, smoke, clipboard: { writeText(value) { return clipboardDouble.impl(value); } }, initial: { window, origin, userRoot, token: 'fixture-token',
     projectSession: Object.freeze({ projectId, projectPath, stateRoot }) },
     createStudioKeyVault: module.exports.createStudioKeyVault,
     ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
@@ -147,7 +148,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
   vm.runInContext(preloadSource, preloadContext, { filename: 'preload.cjs' });
   const full = win32.join(stateRoot, 'studio-key-vault.v1.json');
   return { disk, safeStorage, copied, event, window, full, projectId, projectPath, stateRoot, userRoot, handlers, exposed, ipcCalls,
-    setState: mainContext.setState, setEvent(value) { activeEvent = value; },
+    setState: mainContext.setState, setEvent(value) { activeEvent = value; }, setClipboard(impl) { clipboardDouble.impl = impl; },
     setInvokeError(value) { invokeError = value; }, setReply(value) { replyOverride = value; },
     raw(action, ...args) {
       vaultContext.serialized = JSON.stringify(args);
@@ -348,6 +349,62 @@ test('copy uses the validated project vault, not renderer strings or clipboard p
   await assert.rejects(f.call('copy', { keyId: id(1) }), ERROR);
   assert.deepEqual(f.copied, [secret('a')]);
   assert.equal(f.disk.descriptors.size, 0);
+});
+
+const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+const turns = async (n = 5) => { for (let i = 0; i < n; i++) await new Promise(done => setImmediate(done)); };
+
+test('copy acknowledges only after the asynchronous clipboard write settles and holds the vault while pending', async () => {
+  const f = fixture(), write = deferred(), calls = [];
+  await f.call('remember', { keyId: id(1), apiKey: secret('a') });
+  f.setClipboard(value => { calls.push(value); return write.promise; });
+  let settled = false;
+  const pending = f.raw('copy', { keyId: id(1) }).then(value => { settled = true; return value; }, error => { settled = true; throw error; });
+  await turns();
+  assert.equal(settled, false, 'no acknowledgement before the clipboard write settles');
+  assert.deepEqual(calls, [secret('a')]);
+  await assert.rejects(f.raw('list'), ERROR, 'the vault stays busy until the write settles');
+  write.resolve();
+  assert.deepEqual(json(await pending), { copied: true });
+  assert.deepEqual(calls, [secret('a')], 'written exactly once');
+  assert.deepEqual(json(await f.raw('list')), { available: true, items: [{ keyId: id(1) }] });
+  assert.equal(f.disk.descriptors.size, 0);
+});
+
+test('a rejected clipboard write maps to the generic error, is never retried and leaves no unhandled rejection', async () => {
+  const unhandled = [], listener = reason => unhandled.push(reason);
+  process.on('unhandledRejection', listener);
+  try {
+    for (const failure of [() => Promise.reject(new Error('Sensitive clipboard failure: ' + secret('a'))),
+      () => { throw new Error('Sensitive synchronous clipboard failure: ' + secret('a')); }]) {
+      const f = fixture(), calls = [];
+      await f.call('remember', { keyId: id(1), apiKey: secret('a') });
+      f.setClipboard(value => { calls.push(value); return failure(); });
+      await assert.rejects(f.call('copy', { keyId: id(1) }), ERROR);
+      await assert.rejects(f.raw('copy', { keyId: id(1) }), error => error.message === ERROR.message && !error.message.includes(secret('a')));
+      assert.equal(calls.length, 2, 'one write attempt per request; no retry');
+      assert.equal(f.disk.descriptors.size, 0);
+      assert.deepEqual(json(await f.raw('list')), { available: true, items: [{ keyId: id(1) }] }, 'busy released after rejection');
+    }
+    await turns(); assert.deepEqual(unhandled, []);
+  } finally { process.off('unhandledRejection', listener); }
+});
+
+test('an owner, frame, project or path change while the clipboard write is pending cannot report success', async () => {
+  for (const invalidate of [f => f.setState({ switching: true }), f => f.setState({ closing: true }),
+    f => f.setState({ projectSession: { projectId: f.projectId, projectPath: f.projectPath, stateRoot: f.stateRoot } }),
+    f => { f.window.webContents.mainFrame = { url: origin + '/studio#fixture' }; },
+    f => { f.event.senderFrame.url = origin + '/studio#reloaded'; },
+    f => { f.disk.node(f.stateRoot).physical = 'C:\\Elsewhere'; },
+    f => { f.disk.node(f.full).mtimeNs++; }]) {
+    const f = fixture(), write = deferred();
+    await f.call('remember', { keyId: id(1), apiKey: secret('a') });
+    f.setClipboard(() => write.promise);
+    const pending = f.raw('copy', { keyId: id(1) });
+    await turns(); invalidate(f); write.resolve();
+    await assert.rejects(pending, ERROR);
+    assert.equal(f.disk.descriptors.size, 0);
+  }
 });
 
 test('replace saves exactly one key and removes the previous vault secret atomically', async () => {

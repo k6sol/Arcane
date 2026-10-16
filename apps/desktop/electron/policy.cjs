@@ -13,6 +13,30 @@ function requestAllowed(origin, input) {
   if (!validOrigin(origin) || typeof input !== 'string' || input.length > 8192) return false;
   try { const url = new URL(input); return url.origin === origin && url.username === '' && url.password === '' && ['http:', 'blob:'].includes(url.protocol); } catch { return false; }
 }
+function protectConsolePipes(outputs) {
+  // Desktop launchers can close their inherited pipes while the app remains open.
+  // Preserve other stream errors; a disconnected console must not crash an IPC reply.
+  for (const output of outputs) output.on('error', error => { if (error?.code !== 'EPIPE') throw error; });
+}
+function installClipboardPermissions(session, getOwner) {
+  function allowed(contents, permission, requestingOrigin, details) {
+    try {
+      const owner = getOwner(), window = owner?.window;
+      if (!owner?.active || !window || window.isDestroyed() || permission !== 'clipboard-sanitized-write' ||
+          !contents || contents !== window.webContents || contents.isDestroyed() || details?.isMainFrame !== true ||
+          !validOrigin(owner.origin) || requestingOrigin !== owner.origin && requestingOrigin !== owner.origin + '/') return false;
+      const frame = contents.mainFrame;
+      return !!frame && navigationAllowed(owner.origin, frame.url) && navigationAllowed(owner.origin, details.requestingUrl) &&
+        details.requestingUrl === frame.url;
+    } catch { return false; }
+  }
+  session.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => allowed(contents, permission, requestingOrigin, details));
+  session.setPermissionRequestHandler((contents, permission, callback, details) => {
+    let requestingOrigin;
+    try { requestingOrigin = new URL(details.requestingUrl).origin; } catch { callback(false); return; }
+    callback(allowed(contents, permission, requestingOrigin, details));
+  });
+}
 function within(root, path) { const rel = relative(resolve(root), resolve(path)); return rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep); }
 function localPath(value) {
   if (typeof value !== 'string' || value.length > 4096 || !isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value) || /^(?:\\\\|\/\/)/.test(value) || resolve(value) === parse(value).root) throw new Error('Expected a direct local directory.');
@@ -95,4 +119,4 @@ function startupFailureMessage(message) {
   if (!message || typeof message !== 'object' || Object.getPrototypeOf(message) !== Object.prototype || Object.keys(message).sort().join(',') !== 'code,protocolVersion,type' || message.type !== 'arcane-startup-failure' || message.protocolVersion !== 1 || typeof message.code !== 'string' || !STARTUP_FAILURE_CODES.includes(message.code)) throw new Error('Invalid private daemon failure report.');
   return message.code;
 }
-module.exports = { validOrigin, navigationAllowed, requestAllowed, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage, STARTUP_FAILURE_CODES, startupFailureMessage };
+module.exports = { validOrigin, navigationAllowed, requestAllowed, protectConsolePipes, installClipboardPermissions, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage, STARTUP_FAILURE_CODES, startupFailureMessage };
