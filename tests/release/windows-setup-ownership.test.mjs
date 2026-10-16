@@ -1,0 +1,205 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative, isAbsolute, sep } from 'node:path';
+import { createWindowsInstallation } from '../../scripts/windows-installation.mjs';
+
+// Compiles the ACTUAL installer/SetupOwnership.cs with OwnedFiles.cs, InstalledRecord.cs and PayloadArchive.cs (read-only
+// helpers) via the in-box .NET Framework csc.exe into a SEPARATE owned op-script harness, so one journal snapshot can be
+// carried across steps while the test changes the owned root in between. Installed roots come from the ACTUAL engine with
+// a labelled SCRIPTED small verifier. Races use OwnedFiles' existing trusted Barrier seam (assigned only by this harness).
+// No launcher binaries are run; no user Programs, registry, shortcuts, providers or Studio. Windows-only.
+const windows = { skip: process.platform !== 'win32' };
+const csc = join(process.env.SystemRoot ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const HARNESS = String.raw`using System; using System.IO; using System.Collections.Generic; using System.Security.Cryptography; using System.Text; using System.Web.Script.Serialization; using Arcane.Installer;
+internal static class Harness {
+  private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+  private static object D(OwnedFileDescriptor d) { if (d == null) return null; Dictionary<string, object> v = new Dictionary<string, object>();
+    v["root"] = d.Root; v["name"] = d.Name; v["bytes"] = d.Bytes; v["sha256"] = d.Sha256; v["volume"] = d.Identity.Volume.ToString("x8"); v["index"] = d.Identity.Index.ToString("x16"); return v; }
+  private static void Out(Dictionary<string, object> v) { Console.WriteLine(Json.Serialize(v)); Console.Out.Flush(); }
+  private static string Sha(byte[] b) { using (SHA256 s = SHA256.Create()) { StringBuilder x = new StringBuilder(); foreach (byte c in s.ComputeHash(b)) x.Append(c.ToString("x2")); return x.ToString(); } }
+  private static int Main(string[] a) {
+    string root = a[0]; SetupOwnershipSnapshot S = null; OwnedFileDescriptor L = null, U = null;
+    for (int i = 1; i < a.Length; i++) {
+      Dictionary<string, object> v = new Dictionary<string, object>(); v["op"] = a[i];
+      switch (a[i]) {
+        case "read": {
+          try { OwnershipRead r = SetupOwnership.Read(InstalledRecord.Read(root)); S = r.Snapshot; v["state"] = r.State.ToString(); v["code"] = r.Code;
+            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); }
+          catch (InstalledRecordException e) { v["state"] = "RecordError"; v["code"] = e.Code; S = null; }
+          break; }
+        case "place-launcher": case "place-uninstaller": {
+          bool launcher = a[i] == "place-launcher"; byte[] bytes = File.ReadAllBytes(a[++i]);
+          OwnedFileResult r = OwnedFiles.Place(root, launcher ? SetupOwnership.LauncherName : SetupOwnership.UninstallerName, bytes, Sha(bytes), launcher ? (L ?? (S == null ? null : S.Launcher)) : (U ?? (S == null ? null : S.Uninstaller)));
+          if (launcher) L = r.Descriptor; else U = r.Descriptor; v["state"] = r.State.ToString(); v["code"] = r.Code; break; }
+        case "save": {
+          OwnedFileDescriptor l = Pick(a[++i], L, S == null ? null : S.Launcher, S), u = Pick(a[++i], U, S == null ? null : S.Uninstaller, S);
+          OwnershipSave r = SetupOwnership.Save(S, l, u); v["state"] = r.State.ToString(); v["code"] = r.Code;
+          v["placement"] = r.Placement == null ? null : (object)new Dictionary<string, object> { { "state", r.Placement.State.ToString() }, { "code", r.Placement.Code }, { "backup", r.Placement.RetainedBackup } };
+          if (r.Snapshot != null) S = r.Snapshot; break; }
+        case "wait": Out(v); Console.In.ReadLine(); continue;
+        case "barrier": OwnedFiles.Barrier = delegate(string stage) { Dictionary<string, object> b = new Dictionary<string, object>(); b["op"] = "barrier"; b["stage"] = stage; Out(b); Console.In.ReadLine(); }; continue;
+      }
+      Out(v);
+    }
+    return 0;
+  }
+  private static OwnedFileDescriptor Pick(string token, OwnedFileDescriptor placed, OwnedFileDescriptor kept, SetupOwnershipSnapshot s) {
+    if (token == "placed") return placed; if (token == "keep") return kept; if (token == "null") return null;
+    FileIdentity other = new FileIdentity(); other.Volume = 1; other.Index = 2;
+    if (placed == null) placed = kept;
+    if (token == "foreign") return new OwnedFileDescriptor(placed.Root, other, placed.Name, placed.Bytes, placed.Sha256, placed.Identity);
+    if (token == "badname") return new OwnedFileDescriptor(placed.Root, placed.RootIdentity, "Other.exe", placed.Bytes, placed.Sha256, placed.Identity);
+    throw new ArgumentException(token);
+  } }`;
+
+let shared;
+async function setup() {
+  if (shared) return shared;
+  const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-ownership-test-')));
+  process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-ownership-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
+  const build = join(root, 'build'); fs.mkdirSync(build);
+  const sources = ['SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs'];
+  for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
+  fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);
+  const harness = join(build, 'harness.exe');
+  const compiled = spawnSync(csc, ['/nologo', '/target:exe', '/platform:x64', '/out:' + harness, '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll',
+    ...[...sources, 'Harness.cs'].map(f => join(build, f))], { windowsHide: true, encoding: 'utf8', timeout: 120000 });
+  assert.equal(compiled.status, 0, 'csc failed: ' + compiled.stdout + compiled.stderr);
+  let count = 0;
+  const owned = name => { const dir = join(root, name + '-' + ++count); fs.mkdirSync(dir); return dir; };
+  // SCRIPTED verifier (fixture hashes only); the actual engine writes the record the journal binds to.
+  const engine = createWindowsInstallation({ verifyBundle: async directory => {
+    const bytes = fs.readFileSync(join(directory, 'windows-manifest.json')), manifest = JSON.parse(bytes);
+    for (const f of manifest.files) assert.equal(hash(fs.readFileSync(join(directory, f.path))), f.sha256);
+    return { manifestSha256: hash(bytes), files: manifest.fileCount, bytes: manifest.totalBytes };
+  } });
+  const bundle = tag => {
+    const dir = owned('bundle'); fs.mkdirSync(join(dir, 'resources', 'node'), { recursive: true }); const files = [];
+    for (const [path, text] of [['Arcane.exe', 'fixture app ' + tag], ['resources/node/node.exe', 'fixture node']]) { fs.writeFileSync(join(dir, path), text); files.push({ path, bytes: Buffer.byteLength(text), sha256: hash(text) }); }
+    fs.writeFileSync(join(dir, 'windows-manifest.json'), JSON.stringify({ schemaVersion: 1, kind: 'arcane-windows-directory', version: '0.1.0', platform: 'win32', arch: 'x64', fileCount: 2, totalBytes: files.reduce((n, f) => n + f.bytes, 0), files }));
+    return dir;
+  };
+  const installed = async () => { const target = join(owned('install'), 'Arcane'); await engine.install({ bundle: bundle('one'), installRoot: target }); return target; };
+  const bytesFile = text => { const file = join(owned('bytes'), 'file.bin'); fs.writeFileSync(file, text); return file; };
+  /** Runs an op script; at each wait/barrier line the next action (sync or async) runs before the harness continues. */
+  const run = (target, ops, actions = []) => new Promise((resolve, reject) => {
+    const child = spawn(harness, [target, ...ops], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const lines = []; let out = '', err = '', chain = Promise.resolve();
+    child.stdout.on('data', d => {
+      out += d; const parts = out.split(/\r?\n/); out = parts.pop();
+      for (const line of parts) {
+        const value = JSON.parse(line); lines.push(value);
+        if (value.op === 'wait' || value.op === 'barrier') { const action = actions.shift() ?? (() => {}); chain = chain.then(() => action(value)).then(() => child.stdin.write('go\n'), reject); }
+      }
+    });
+    child.stderr.on('data', d => { err += d; });
+    child.on('close', () => chain.then(() => { if (err) reject(new Error(err)); else { child.stdin.destroy(); resolve(lines.filter(l => l.op !== 'wait' && l.op !== 'barrier')); } }));
+  });
+  shared = { root, owned, engine, bundle, installed, bytesFile, run };
+  return shared;
+}
+const journalOf = target => join(target, 'setup-ownership.json');
+const pick = (lines, op) => lines.filter(l => l.op === op);
+
+test('absent journal is created exclusively; saved descriptors round-trip exactly; identical saves are unchanged; updates use the observed journal', windows, async () => {
+  const s = await setup(), target = await s.installed(), launcher = s.bytesFile('launcher bytes'), uninstaller = s.bytesFile('uninstaller bytes');
+  let lines = await s.run(target, ['read', 'place-launcher', launcher, 'save', 'placed', 'null']);
+  assert.deepEqual([lines[0].state, lines[0].present], ['Absent', false]); assert.deepEqual([lines[1].state, lines[2].state, lines[2].code], ['Placed', 'Saved', null]);
+  const text = fs.readFileSync(journalOf(target), 'utf8'), journal = JSON.parse(text), record = JSON.parse(fs.readFileSync(join(target, 'installation.json'), 'utf8'));
+  assert.equal(text, JSON.stringify(journal) + '\n', 'canonical bytes');
+  assert.deepEqual(Object.keys(journal), ['schemaVersion', 'kind', 'installationId', 'root', 'rootVolume', 'rootIndex', 'launcher', 'uninstaller', 'shortcut', 'registration']);
+  assert.deepEqual([journal.installationId, journal.root, journal.uninstaller, journal.shortcut, journal.registration], [record.installationId, target, null, null, null]);
+  assert.match(journal.rootVolume, /^[0-9a-f]{8}$/); assert.match(journal.rootIndex, /^[0-9a-f]{16}$/); assert.match(journal.launcher.volume, /^[0-9a-f]{8}$/); assert.match(journal.launcher.index, /^[0-9a-f]{16}$/);
+  assert.deepEqual([journal.launcher.name, journal.launcher.bytes, journal.launcher.sha256], ['Arcane.exe', 14, hash('launcher bytes')]);
+  assert.equal(text.includes(hash(text)), false, 'no self-reference');
+  const ino = fs.statSync(journalOf(target), { bigint: true }).ino;
+  lines = await s.run(target, ['read', 'save', 'keep', 'keep']);
+  assert.equal(lines[0].state, 'Valid'); assert.deepEqual(lines[0].launcher, { root: target, name: 'Arcane.exe', bytes: 14, sha256: hash('launcher bytes'), volume: journal.launcher.volume, index: journal.launcher.index });
+  assert.deepEqual([lines[1].state, lines[1].placement], ['Unchanged', { state: 'Unchanged', code: null, backup: null }], 'verified through OwnedFiles, not from the old hash');
+  assert.equal(fs.statSync(journalOf(target), { bigint: true }).ino, ino);
+  lines = await s.run(target, ['read', 'place-uninstaller', uninstaller, 'save', 'keep', 'placed', 'read']);
+  assert.deepEqual([lines[2].state, lines[2].placement.state], ['Saved', 'Replaced']);
+  assert.deepEqual([lines[3].launcher.name, lines[3].uninstaller.name, lines[3].uninstaller.sha256], ['Arcane.exe', 'Uninstall Arcane.exe', hash('uninstaller bytes')]);
+  // Descriptors are metadata only: an edited launcher stays recorded; the journal never claims fresh integrity.
+  fs.writeFileSync(join(target, 'Arcane.exe'), 'edited by hand');
+  lines = await s.run(target, ['read', 'save', 'keep', 'keep']);
+  assert.deepEqual([lines[0].launcher.sha256, lines[1].state], [hash('launcher bytes'), 'Unchanged']);
+  lines = await s.run(target, ['read', 'place-launcher', launcher, 'save', 'foreign', 'keep', 'save', 'badname', 'keep']);
+  assert.deepEqual([lines[1].state, lines[1].code], ['Kept', 'CHANGED'], 'the edited launcher is kept by OwnedFiles');
+  for (const save of pick(lines, 'save')) assert.deepEqual([save.state, save.code, save.placement], ['Refused', 'DESCRIPTOR', null], 'foreign root identity or wrong role name');
+  assert.deepEqual(JSON.parse(fs.readFileSync(journalOf(target), 'utf8')).launcher.sha256, hash('launcher bytes'));
+});
+
+test('malformed, foreign, oversize, linked and redirected journals are kept byte-identical with no writes', windows, async () => {
+  const s = await setup(), target = await s.installed();
+  await s.run(target, ['read', 'place-launcher', s.bytesFile('launcher'), 'save', 'placed', 'null']);
+  const valid = fs.readFileSync(journalOf(target), 'utf8'), j = JSON.parse(valid);
+  const reorder = { kind: j.kind, ...j };
+  const variants = [
+    ['MALFORMED', '{'], ['MALFORMED', JSON.stringify(j, null, 2) + '\n'], ['MALFORMED', JSON.stringify(j)], ['MALFORMED', valid + ' '],
+    ['MALFORMED', JSON.stringify({ ...j, extra: 1 }) + '\n'], ['MALFORMED', JSON.stringify(reorder) + '\n'],
+    ['MALFORMED', valid.replace('"kind":', '"kind":"x","kind":')], ['MALFORMED', JSON.stringify({ ...j, rootVolume: j.rootVolume.toUpperCase() === j.rootVolume ? 'ABCDEF12' : j.rootVolume.toUpperCase() }) + '\n'],
+    ['MALFORMED', JSON.stringify({ ...j, rootIndex: parseInt(j.rootIndex.slice(-6), 16) }) + '\n'], ['MALFORMED', JSON.stringify({ ...j, shortcut: {} }) + '\n'],
+    ['MALFORMED', JSON.stringify({ ...j, launcher: { ...j.launcher, name: 'Other.exe' } }) + '\n'], ['MALFORMED', JSON.stringify({ ...j, launcher: { ...j.launcher, bytes: -1 } }) + '\n'],
+    ['MALFORMED', JSON.stringify({ ...j, launcher: { ...j.launcher, sha256: j.launcher.sha256 + '\n' } }) + '\n'],
+    ['MALFORMED', JSON.stringify({ ...j, rootVolume: j.rootVolume + '\n' }) + '\n'],
+    ['MALFORMED', JSON.stringify({ ...j, launcher: { ...j.launcher, index: j.launcher.index + '\n' } }) + '\n'],
+    ['MALFORMED', 'x'.repeat(9000)], ['MALFORMED', JSON.stringify({ ...j, schemaVersion: 2 }) + '\n'],
+    ['FOREIGN', JSON.stringify({ ...j, installationId: '00000000-0000-4000-8000-000000000000' }) + '\n'], ['FOREIGN', JSON.stringify({ ...j, rootIndex: '0000000000000001' }) + '\n'],
+    ['FOREIGN', JSON.stringify({ ...j, root: j.root.toUpperCase() }) + '\n'],
+  ];
+  for (const [code, text] of variants) {
+    fs.writeFileSync(journalOf(target), text);
+    const lines = await s.run(target, ['read', 'save', 'null', 'null']);
+    assert.deepEqual([lines[0].state, lines[0].code], ['Kept', code], text.slice(0, 80));
+    assert.deepEqual([lines[1].state, lines[1].code], ['Refused', 'SNAPSHOT']); assert.equal(fs.readFileSync(journalOf(target), 'utf8'), text);
+  }
+  fs.writeFileSync(journalOf(target), valid);
+  const link = join(s.owned('link'), 'journal.json'); fs.linkSync(journalOf(target), link);
+  assert.deepEqual(Object.values((await s.run(target, ['read']))[0]).slice(1, 3), ['Kept', 'LINKED']); fs.unlinkSync(link);
+  fs.unlinkSync(journalOf(target)); const away = s.owned('away'); fs.symlinkSync(away, journalOf(target), 'junction');
+  assert.deepEqual(Object.values((await s.run(target, ['read', 'save', 'null', 'null']))[0]).slice(1, 3), ['Kept', 'REDIRECT']);
+  assert.deepEqual(fs.readdirSync(away), []); assert.equal(fs.lstatSync(journalOf(target)).isSymbolicLink(), true);
+});
+
+test('a stale snapshot never overwrites a newer journal, and installation changes fence saves before and after publication', windows, async () => {
+  const s = await setup(); let target = await s.installed();
+  await s.run(target, ['read', 'place-launcher', s.bytesFile('one'), 'save', 'placed', 'null']);
+  let lines = await s.run(target, ['read', 'wait', 'save', 'null', 'null'], [async () => { await s.run(target, ['read', 'save', 'keep', 'keep']); const text = fs.readFileSync(journalOf(target)); fs.unlinkSync(journalOf(target)); fs.writeFileSync(journalOf(target), text); }]);
+  const newer = fs.readFileSync(journalOf(target), 'utf8');
+  assert.deepEqual([lines[1].state, lines[1].code], ['Kept', 'CHANGED']); assert.equal(fs.readFileSync(journalOf(target), 'utf8'), newer);
+  // Stale idempotence: a no-change save after the journal was replaced (same bytes, new identity) or edited is not Unchanged.
+  for (const mutate of [() => { const text = fs.readFileSync(journalOf(target)); fs.unlinkSync(journalOf(target)); fs.writeFileSync(journalOf(target), text); },
+    () => fs.writeFileSync(journalOf(target), fs.readFileSync(journalOf(target), 'utf8').replace('"registration":null', '"registration":null '))]) {
+    lines = await s.run(target, ['read', 'wait', 'save', 'keep', 'keep'], [mutate]);
+    const current = fs.readFileSync(journalOf(target), 'utf8');
+    assert.equal(lines[0].state, 'Valid'); assert.deepEqual([lines[1].state, lines[1].code], ['Kept', 'CHANGED'], 'no Unchanged from a stale snapshot');
+    assert.equal(fs.readFileSync(journalOf(target), 'utf8'), current);
+    if (!current.endsWith('}\n')) fs.writeFileSync(journalOf(target), current.replace('"registration":null ', '"registration":null'));
+  }
+  for (const change of [t => fs.writeFileSync(join(t, 'installation.lock'), 'fixture'), async t => { await s.engine.install({ bundle: s.bundle('two'), installRoot: t }); }]) {
+    target = await s.installed(); await s.run(target, ['read', 'place-launcher', s.bytesFile('one'), 'save', 'placed', 'null']); const before = fs.readFileSync(journalOf(target), 'utf8');
+    lines = await s.run(target, ['read', 'wait', 'save', 'null', 'null'], [() => change(target)]);
+    assert.deepEqual([lines[1].state, lines[1].code, lines[1].placement], ['Refused', 'RECORD_CHANGED', null]); assert.equal(fs.readFileSync(journalOf(target), 'utf8'), before);
+  }
+  target = await s.installed();
+  lines = await s.run(target, ['read', 'place-launcher', s.bytesFile('one'), 'barrier', 'save', 'placed', 'null'],
+    [async () => { await s.engine.install({ bundle: s.bundle('two'), installRoot: target }); }]);
+  assert.deepEqual([lines[2].state, lines[2].code, lines[2].placement.state], ['Unknown', 'RECORD_CHANGED', 'Placed'], 'published under a changed installation is not a confirmed save');
+});
+
+test('OwnedFiles kept and unknown placements pass through without claiming a save', windows, async () => {
+  const s = await setup(); let target = await s.installed();
+  let lines = await s.run(target, ['read', 'place-launcher', s.bytesFile('one'), 'barrier', 'save', 'placed', 'null'], [() => fs.writeFileSync(journalOf(target), 'manual journal')]);
+  assert.deepEqual([lines[2].state, lines[2].code, lines[2].placement.state], ['Kept', 'TARGET_APPEARED', 'Kept']); assert.equal(fs.readFileSync(journalOf(target), 'utf8'), 'manual journal');
+  target = await s.installed(); await s.run(target, ['read', 'place-launcher', s.bytesFile('one'), 'save', 'placed', 'null']); const before = fs.readFileSync(journalOf(target));
+  lines = await s.run(target, ['read', 'barrier', 'save', 'null', 'null'], [() => {}, () => fs.writeFileSync(journalOf(target), 'manual during replace')]);
+  assert.deepEqual([lines[1].state, lines[1].code, lines[1].placement.state], ['Unknown', 'INTERRUPTED', 'Unknown']);
+  assert.equal(fs.readFileSync(journalOf(target), 'utf8'), 'manual during replace'); assert.deepEqual(fs.readFileSync(lines[1].placement.backup), before);
+  const after = await s.run(target, ['read']); assert.deepEqual([after[0].state, after[0].code], ['Kept', 'MALFORMED'], 'the manual file is never adopted');
+});

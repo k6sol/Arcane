@@ -185,6 +185,11 @@ function validateInstallerSources(files) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup file verification requires its matching C# source: ' + name);
     }
   }
+  if (files.some(file => file.path === 'tests/release/windows-setup-ownership.test.mjs')) {
+    for (const name of ['SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup ownership verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => file.path === 'scripts/build-windows-setup.mjs')) {
     for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'setup.manifest']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup builder requires its complete native source: ' + name);
