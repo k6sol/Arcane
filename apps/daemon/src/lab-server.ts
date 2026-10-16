@@ -1,4 +1,5 @@
 import { createNativeAssetRegistry } from './native-asset-authority.js';
+import { createNativeHandoffRoutes } from './native-handoff-routes.js';
 import { nativeAssetRoutes } from './native-asset-routes.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import { createWorkflowCodeHostVerifier, type WorkflowCodeHostConfiguration } from './workflow-code-host.js';
@@ -107,9 +108,13 @@ export async function createConnectionLab(options: Options) {
   }
   const token = randomBytes(32).toString('hex');
   const agentToken = randomBytes(32).toString('hex');
+  let origin = '';
+  const handoffs=options.studioStore&&options.workStore
+    ?createNativeHandoffRoutes({projectPath:options.projectPath??options.cwd}):null;
   const nativeAssetRegistry = options.assetService && options.workStore
     ? createNativeAssetRegistry({projectPath:workflowProjectIdentity(options.projectPath ?? options.cwd).projectPath}) : null;
   const coreAgentToken = (request: IncomingMessage): string => {
+    const handoff=handoffs?.agentToken(request,origin);if(handoff)return handoff;
     const value = request.headers.authorization;
     const bearer = typeof value==='string' && /^Bearer [a-f0-9]{64}(?![\s\S])/.test(value) ? value.slice(7) : '';
     return nativeAssetRegistry?.recognizes(bearer) ? bearer : agentToken;
@@ -127,7 +132,6 @@ export async function createConnectionLab(options: Options) {
   let savedStateFailed = false;
   try { selection = await store.read(); } catch { savedStateFailed = true; stateWarnings.push('Saved preference unreadable; original file has not been overwritten. Repair or back it up before saving a new preference.'); }
   let busy = false;
-  let origin = '';
   let shuttingDown = false;
   const codex = options.codexService ?? (options.studioStore ? createCodexService({
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
@@ -233,7 +237,7 @@ export async function createConnectionLab(options: Options) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
     fenceTasks();
-    nativeAssetRegistry?.close();
+    handoffs?.close(); nativeAssetRegistry?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
@@ -305,6 +309,7 @@ export async function createConnectionLab(options: Options) {
         response.end(data); return;
       }
       if(testApi&&await testApi(request,response,url,origin))return;
+      if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;
       if (learning && await learning(request,response,url,token,origin,agentToken)) return;
       if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
@@ -345,7 +350,7 @@ export async function createConnectionLab(options: Options) {
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
     fenceTasks();
-    nativeAssetRegistry?.close();
+    handoffs?.close(); nativeAssetRegistry?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
@@ -361,7 +366,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; const fenceErrors = fenceTasks(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose();
+      shuttingDown = true; const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
