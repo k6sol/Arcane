@@ -70,6 +70,22 @@ jobs:
       - name: Test release contracts
         if: matrix.suite == 'release'
         run: node --test --test-concurrency=1 tests/release/*.test.mjs
+      - name: Verify desktop key controls in Edge
+        if: runner.os == 'Windows' && matrix.suite == 'release'
+        shell: pwsh
+        env:
+          ARCANE_UI_BROWSER_MODULE: ${{ github.workspace }}/node_modules/playwright-core/index.mjs
+          ARCANE_UI_BUILD_DIR: ${{ github.workspace }}/dist
+        run: |
+          $edgeCandidates = @(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+          )
+          $edgeExecutable = $edgeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $edgeExecutable) { throw 'Microsoft Edge is required for desktop key control verification.' }
+          $env:ARCANE_UI_BROWSER_EXE = $edgeExecutable
+          node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build deterministic Studio plugin
         if: matrix.suite == 'release'
         run: npm run build:plugin

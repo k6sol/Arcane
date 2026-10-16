@@ -15,6 +15,9 @@ interface StudioKeyBridge {
   replace?(input: { keyId: string; apiKey: string }): Promise<unknown>;
 }
 const MASK = '••••••••••••••••••••••••';
+// Recovery guidance only. Nothing here regenerates, rereads or rewrites a saved key on its own.
+const UNREADABLE = 'The saved key cannot be read on this desktop. Use Regenerate API key to create a new connection key.';
+const COPY_FAILED = 'The saved key could not be copied. Use Show to view it, or Regenerate API key to create a new connection key.';
 const keyIdValid = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
 
 // Do not run accessors when checking a page-supplied bridge or response.
@@ -182,7 +185,7 @@ export class StudioKeySettings {
       if (!response || !this.validSecret(response.apiKey)) throw new Error();
       this.secret = response.apiKey;
     } catch {
-      if (generation === this.epoch) this.notice('This key could not be shown. Check desktop storage or issue a new key.');
+      if (generation === this.epoch) this.notice(UNREADABLE);
     } finally { if (generation === this.epoch) { this.busy = false; this.render(); } }
   }
 
@@ -190,6 +193,8 @@ export class StudioKeySettings {
     const key = this.active();
     if (!this.open() || !key || this.busy) return;
     const generation = this.epoch, project = this.projectId;
+    // Which step failed decides the guidance: the saved key (native copy or read) versus the browser clipboard.
+    let stage: 'native' | 'read' | 'clipboard' = 'native';
     try {
       if (this.native?.copy && this.available && this.saved.has(key.keyId)) {
         const result = fields(await this.native.copy({ keyId: key.keyId }), ['copied']);
@@ -197,6 +202,7 @@ export class StudioKeySettings {
         if (result?.copied !== true) throw new Error();
         this.notice('API key copied.'); return;
       }
+      stage = 'read';
       let value = this.secret || (this.fresh?.keyId === key.keyId ? this.fresh.apiKey : '');
       if (!this.validSecret(value)) {
         if (!this.native || !this.available || !this.saved.has(key.keyId)) throw new Error();
@@ -205,11 +211,16 @@ export class StudioKeySettings {
         value = response.apiKey;
       }
       if (generation !== this.epoch || project !== this.projectId || !this.open() || this.active()?.keyId !== key.keyId) return;
+      stage = 'clipboard';
       const clipboard = this.doc.defaultView?.navigator.clipboard;
       if (!clipboard) throw new Error();
       await clipboard.writeText(value);
       if (generation === this.epoch) this.notice('API key copied.');
-    } catch { if (generation === this.epoch) this.notice('Clipboard unavailable. Select the shown key to copy it.'); }
+    } catch {
+      if (generation !== this.epoch) return;
+      this.notice(stage === 'native' ? COPY_FAILED : stage === 'read' ? UNREADABLE
+        : this.secret ? 'Clipboard unavailable. Select the shown key to copy it.' : 'Clipboard unavailable. Use Show, then select the key to copy it.');
+    }
   }
 
   private render(): void {
@@ -230,7 +241,8 @@ export class StudioKeySettings {
     const show = this.button('settings-key-show');
     if (show) { show.textContent = this.secret ? 'Hide' : this.busy ? 'Showing…' : 'Show'; show.setAttribute('aria-pressed', String(!!this.secret)); show.disabled = !this.open() || !active || this.busy || !(this.fresh?.keyId === active.keyId || this.available && this.saved.has(active.keyId)); }
     const copy = this.button('settings-key-copy'); if (copy) copy.disabled = !this.open() || !active || this.busy || !(this.secret || this.fresh?.keyId === active.keyId || this.available && this.saved.has(active.keyId));
-    this.text('settings-key-storage', active && this.available && this.saved.has(active.keyId) ? 'Saved in this project’s encrypted desktop vault.' : this.fresh?.keyId === active?.keyId && this.fresh ? 'Fresh key. Closing or navigating clears it.' : !this.native ? 'Browser keys are temporary. Existing secrets cannot be recovered here.' : !this.available ? 'Desktop key storage is unavailable.' : 'This key is not saved on this desktop.');
+    this.text('settings-key-storage', active && this.available && this.saved.has(active.keyId) ? 'Saved in this project’s encrypted desktop vault.' : this.fresh?.keyId === active?.keyId && this.fresh ? 'Fresh key. Closing or navigating clears it.' : !this.native ? 'Browser keys are temporary. Existing secrets cannot be recovered here.' : !this.available ? (active ? UNREADABLE : 'Desktop key storage is unavailable.')
+      : active ? 'This key is not saved on this desktop. Use Regenerate API key to create a new connection key.' : 'This key is not saved on this desktop.');
   }
 
   stop(): void { this.stopped = true; this.hide(); }
