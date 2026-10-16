@@ -424,8 +424,12 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-installer-kit.test.mjs', '// Fixture kit verification source.\n');
   await assert.rejects(packageWindows(options), /Installer kit verification requires its matching C# source/);
   await write('installer/KitVerifier.cs', '// Fixture C# kit verifier source.\n');
+  await write('scripts/build-windows-setup.mjs', '// Fixture setup builder source.\n');
+  await assert.rejects(packageWindows(options), /Setup builder requires its complete native source/);
+  for (const name of ['InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'setup.manifest']) await write('installer/' + name, '// Fixture native setup source.\n');
   const result = await packageWindows(options), data = await manifest(result.directory);
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/PayloadArchive.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/KitVerifier.cs'));
+  assert.ok(data.files.some(file => file.path === 'resources/product/installer/setup.manifest'));
   await verifyWindowsBundle(result.directory);
 });

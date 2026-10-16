@@ -18,7 +18,7 @@ It never:
 ## Invocation
 
 ```
-"<stage>\bundle\resources\node\node.exe" "<stage>\kit\windows-install-cli.mjs" --bundle <ABSOLUTE> --install-root <ABSOLUTE>
+"<stage>\bundle\resources\node\node.exe" "<stage>\kit\scripts\windows-install-cli.mjs" --bundle <ABSOLUTE> --install-root <ABSOLUTE>
 ```
 
 - **Arguments:** exactly these four, in this order. Each path is drive-absolute (`X:\…`), with no surrounding spaces, control characters or leading `-`, and at most 4096 characters. The engine then applies its own path rules (`PATH`, `PATH_LENGTH`, `OVERLAP`, `REDIRECT`).

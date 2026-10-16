@@ -16,6 +16,7 @@
 *.rbxmx text eol=lf
 *.css text eol=lf
 *.cs text eol=lf
+installer/setup.manifest text eol=lf
 *.html text eol=lf
 *.yml text eol=lf
 

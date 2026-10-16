@@ -33,6 +33,7 @@
     "test:release": "node --test tests/release/*.test.mjs",
     "start:desktop": "electron apps/desktop/electron",
     "package:windows": "npm run build && npm run build:plugin && node scripts/package-windows.mjs",
+    "package:setup": "node scripts/build-windows-setup.mjs",
     "release:desktop": "node scripts/desktop-pipeline.mjs",
     "check:desktop": "node scripts/check-windows-executable.mjs",
     "check:memory": "node scripts/check-project-memory.mjs"

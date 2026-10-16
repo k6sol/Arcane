@@ -1,6 +1,6 @@
 # Windows installation engine
 
-The installation engine stages verified Windows directory packages and publishes an active release record. The setup executable, launcher, shortcuts, uninstall registration and clean-machine acceptance remain separate work.
+The installation engine stages verified Windows directory packages and publishes an active release record. A runnable unsigned setup executable composes payload extraction, kit verification, progress and cancellation. Stable launch, shortcuts, uninstall registration and clean-machine acceptance remain delivery gates.
 
 `createWindowsInstallation()` from `scripts/windows-installation.mjs` exposes two host-only operations:
 
@@ -19,8 +19,24 @@ Failures preserve the primary cause and report `published: false`, `true` or `nu
 
 Focused tests use actual temporary filesystems with a labelled small-inventory verifier. Full package acceptance uses the production verifier and separately records the engine source hash and bundle manifest. Neither fixture coverage nor package copying establishes a complete installer or an authenticated customer task.
 
-`createWindowsSetupPayload()` from `scripts/windows-setup-payload.mjs` streams a deterministic stored ZIP containing the verified bundle and a fixed five-module installation kit. The kit manifest independently pins the bundle manifest, bundled Node and each kit file; the returned receipt also pins the entire payload and kit manifest. Changed inputs or replaced outputs refuse acceptance and retain the candidate. The actual C# reader extracts the writer's data-descriptor format in a separate console fixture. This component supplies bytes for a setup executable; the graphical bootstrapper, launcher and registration are still required.
+`createWindowsSetupPayload()` from `scripts/windows-setup-payload.mjs` streams a deterministic stored ZIP containing the verified bundle and a fixed five-module installation kit. The kit manifest independently pins the bundle manifest, bundled Node and each kit file; the returned receipt also pins the entire payload and kit manifest. Changed inputs or replaced outputs refuse acceptance and retain the candidate. The actual C# reader extracts the writer's data-descriptor format in a separate console fixture.
 
 `KitVerifier.Verify(stage, expectedKitManifestSha256)` supplies the separate check before executing extracted code. It admits exactly the fixed installation modules, checks their hashes and sizes, checks the bundled Node hash and x64 PE header, and binds the bundle manifest to its approved hash. Unexpected kit entries and redirected ancestors refuse admission. Native C# harness tests use synthetic runtimes without executing them. These filesystem checks assume cooperative ownership; they do not isolate the installer from other processes running as the same user.
 
 The signed installation-engine snapshot `b898ff2c9749e13a285f9228370bed74acd7917e` installed the existing application package from `186787684c1b964ea03c02d10c00c474889dcb5a` into a fresh owned temporary directory. Production verification covered all 4,174 payload files and the manifest before and after copying; activation took 67,955 ms and retained the separate profile fixture. The installed executable then passed all 32 startup, renderer, bundled MCP and shutdown checks in 32,555 ms. Its screenshot was reviewed. The application manifest remains `d4f015fd7275886ced9f784c6ce4efffc2d812efaec54eb8fe985ac810e422ae`; later application changes are excluded. No setup GUI, shortcuts, registration, application signature, provider inference or Studio operation was involved.
+
+## Setup executable
+
+On Windows x64, build setup from an existing verified bundle and an existing output directory:
+
+```powershell
+npm run package:setup -- --bundle "C:\ArcaneBuild\Bundle" --output-parent "C:\ArcaneBuild\Output"
+```
+
+The build uses the in-box .NET Framework compiler and emits a unique directory containing `Arcane-Setup.exe`, its payload and a build receipt. The receipt pins native sources, build helpers, icon, compiler and kit files. Payload and kit-manifest hashes are compiled into the executable; assembly rechecks every copied input. The build never launches setup. Setup runs as the current user and selects `%LOCALAPPDATA%\Programs\Arcane` after the human clicks Install. Bundled Node supplies installation execution; the installed customer needs no separate Node or npm installation. Native components require .NET Framework 4.7.2 or later; clean-machine runtime acceptance remains open.
+
+The [internal protocol](WINDOWS_INSTALLER_PROTOCOL.md) carries bounded progress and exactly one terminal result. Closing during work requests cancellation and waits for the actual outcome. The UI distinguishes unchanged selection, completed publication and unconfirmed state. It neither retries automatically nor kills active installation work.
+
+Temporary-stage selection expands existing short path aliases and reserves the complete payload path budget. Successful extraction records each created file's bytes, hash and handle identity, and each directory's identity. After a confirmed outcome, cleanup consumes that receipt once and deletes only unchanged owned files through verified handles and owned empty directories. Added, edited, replaced, hardlinked or redirected entries remain. Unconfirmed work, extraction/kit failures and cleanup failures retain their files and report retention without changing the installation result.
+
+The integrated native components were compiled with the actual setup sources and exercised through a separate acceptance harness against the real appended payload. They installed the existing application bundle through its extracted, verified Node and CLI, acknowledged the selected release, then removed all 4,181 extracted files and 655 directories. The active record matched the result, the stage was absent afterward, and the separate profile fixture was unchanged. All 16 build-source hashes matched the executable's receipt. Idle native controls were rendered and reviewed without input. This proves component composition with an owned temporary target; the production GUI was not clicked, the fixed user Programs target was not used, and neither registration nor shortcuts were created. This candidate still contains application source `186787684c1b964ea03c02d10c00c474889dcb5a`; a source-current application rebuild, signed distribution and complete customer acceptance remain separate gates.
