@@ -9,6 +9,24 @@ test('native setup accepts exact sanitized state and rejects authority fields, s
 test('a missing mount does not invoke the native bridge or connection',()=>{
  const doc={getElementById:()=>null} as unknown as Document;assert.doesNotThrow(()=>startProviderSetup(doc,{chat:{providerConnectionStatus:()=>null,subscribeProviderStateChange:()=>()=>{}},nativeBridge:Object.freeze({version:1,status(){assert.fail('no probe');},login(){assert.fail('no login');},install(){assert.fail('no install');},launch(){assert.fail('no launch');}})}));
 });
+test('Claude help choices remain explicit detached metadata with exact version and bounded own arrays',()=>{
+ const native={...state,provider:'claude',auth:'subscription',cliVersion:'2.1.177'};
+ const choices={cliVersion:'2.1.177',aliases:['opus','sonnet'],efforts:['low','high','max']};
+ const out=readProviderSetupState({...native,claudeChoices:choices},'claude');
+ assert.deepEqual(out.claudeChoices,choices); assert.ok(Object.isFrozen(out.claudeChoices)&&Object.isFrozen(out.claudeChoices?.aliases)&&Object.isFrozen(out.claudeChoices?.efforts));
+ choices.aliases.push('changed');assert.deepEqual(out.claudeChoices?.aliases,['opus','sonnet']);choices.aliases.pop();
+ assert.equal(readProviderSetupState({...native,claudeChoices:null},'claude').claudeChoices,null);
+ assert.ok(!Object.hasOwn(readProviderSetupState(native,'claude'),'claudeChoices'),'legacy status remains compatible');
+ for(const bad of [{...choices,token:'secret'},{...choices,cliVersion:'2.1.178'},{...choices,aliases:[]},{...choices,aliases:['opus','opus']},
+  {...choices,aliases:['--model']},{...choices,efforts:new Array(2)},{...choices,efforts:['x'.repeat(65)]},{...choices,aliases:Array(33).fill('opus')}])
+  assert.throws(()=>readProviderSetupState({...native,claudeChoices:bad},'claude'));
+ assert.throws(()=>readProviderSetupState({...state,claudeChoices:choices},'codex'));
+ assert.throws(()=>readProviderSetupState({...native,installed:false,cliVersion:null,auth:'unknown',claudeChoices:choices},'claude'));
+ let reads=0;const aliases=['opus'];Object.defineProperty(aliases,'0',{enumerable:true,get(){reads++;return 'opus';}});
+ assert.throws(()=>readProviderSetupState({...native,claudeChoices:{...choices,aliases}},'claude'));assert.equal(reads,0);
+ const accessor={...choices};Object.defineProperty(accessor,'efforts',{enumerable:true,get(){reads++;return ['high'];}});
+ assert.throws(()=>readProviderSetupState({...native,claudeChoices:accessor},'claude'));assert.equal(reads,0);
+});
 test('remembered provider accepts only bounded presentation metadata, never auth or credentials',()=>{
  for(const provider of ['codex','claude'])assert.equal(readProviderPresentation(JSON.stringify({version:1,provider})),provider);
  for(const value of [null,{},'null','[]','{','"codex"',JSON.stringify({version:2,provider:'codex'}),JSON.stringify({version:1,provider:'other'}),JSON.stringify({version:1,provider:'codex',auth:'subscription'}),JSON.stringify({version:1,provider:'claude',token:'secret'}),' '.repeat(81)+JSON.stringify({version:1,provider:'codex'})]) {

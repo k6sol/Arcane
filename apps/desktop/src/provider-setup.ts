@@ -2,10 +2,15 @@
 import type { ProviderConnectionStatus } from './codex-chat.js';
 
 export type SetupProvider = 'codex' | 'claude';
+export interface ClaudeSetupChoices {
+  cliVersion: string; aliases: readonly string[]; efforts: readonly string[];
+}
 export interface ProviderSetupState {
   version: 1; provider: SetupProvider; installed: boolean;
   auth: 'unknown' | 'signed-out' | 'subscription' | 'api-or-cloud';
   cliVersion: string | null; busy: boolean; message: string | null;
+  /** Native CLI help metadata; aliases do not establish model entitlement. */
+  claudeChoices?: ClaudeSetupChoices | null;
 }
 export interface ProviderSetupBridge {
   version: 1;
@@ -51,13 +56,33 @@ function data(value: unknown, keys: string[]): Record<string, unknown> | null {
   } catch { return null; }
 }
 export function readProviderSetupState(value: unknown, provider: SetupProvider): ProviderSetupState {
-  const state = data(value, ['version', 'provider', 'installed', 'auth', 'cliVersion', 'busy', 'message']);
+  const keys = ['version', 'provider', 'installed', 'auth', 'cliVersion', 'busy', 'message'];
+  const state = data(value, keys) ?? (provider === 'claude' ? data(value, [...keys, 'claudeChoices']) : null);
   const bounded = (value: unknown, max: number) => typeof value === 'string' && value.length <= max && !/[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/.test(value);
   if (!state || state.version !== 1 || state.provider !== provider || typeof state.installed !== 'boolean' || typeof state.busy !== 'boolean' ||
       typeof state.auth !== 'string' || !['unknown', 'signed-out', 'subscription', 'api-or-cloud'].includes(state.auth) ||
       !(state.cliVersion === null || bounded(state.cliVersion, 100)) || !(state.message === null || bounded(state.message, 2048)) ||
       (!state.installed && (state.cliVersion !== null || state.auth !== 'unknown'))) throw Error('Native provider status unavailable.');
-  return Object.freeze({ ...state }) as unknown as ProviderSetupState;
+  let choices: ClaudeSetupChoices | null = null;
+  if (Object.hasOwn(state, 'claudeChoices') && state.claudeChoices !== null) {
+    const raw = data(state.claudeChoices, ['cliVersion', 'aliases', 'efforts']);
+    const list = (value: unknown, max: number): readonly string[] => {
+      if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || !value.length || value.length > max ||
+          Reflect.ownKeys(value).length !== value.length + 1) throw Error('Native provider status unavailable.');
+      const output: string[] = [];
+      for (let index = 0; index < value.length; index++) {
+        const field = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!field?.enumerable || !Object.hasOwn(field, 'value') || typeof field.value !== 'string' ||
+            !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(field.value) || output.includes(field.value)) throw Error('Native provider status unavailable.');
+        output.push(field.value);
+      }
+      return Object.freeze(output);
+    };
+    if (!raw || !state.installed || raw.cliVersion !== state.cliVersion || typeof raw.cliVersion !== 'string' ||
+        !/^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}(?:-[A-Za-z0-9.-]{1,32})?$/.test(raw.cliVersion)) throw Error('Native provider status unavailable.');
+    choices = Object.freeze({ cliVersion: raw.cliVersion, aliases: list(raw.aliases, 32), efforts: list(raw.efforts, 16) });
+  }
+  return Object.freeze({ ...state, ...(Object.hasOwn(state, 'claudeChoices') ? { claudeChoices: choices } : {}) }) as unknown as ProviderSetupState;
 }
 function bridge(doc: Document, options: ProviderSetupOptions): ProviderSetupBridge | null {
   try {
