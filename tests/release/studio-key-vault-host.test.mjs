@@ -422,3 +422,109 @@ test('replace saves exactly one key and removes the previous vault secret atomic
   assert.deepEqual(json(await f.call('reveal', { keyId: id(3) })), { apiKey: secret('c') });
   assert.equal(f.disk.descriptors.size, 0);
 });
+
+// Explicit regeneration preserves unreadable records before replacing them.
+const BACKUP = /\\studio-key-vault\.v1\.json\.unreadable-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const backups = f => [...f.disk.nodes.values()].filter(node => BACKUP.test(node.path));
+const staging = f => [...f.disk.nodes.values()].filter(node => /\.(?:tmp|lock)$/.test(node.path));
+const BAD_ENVELOPE = '{"version":1,"ciphertext":"bad"}\n';
+const envelope = (f, plain) => Buffer.from(JSON.stringify({ version: 1, ciphertext: f.safeStorage.encryptString(plain).toString('base64') }) + '\n');
+const unreadable = {
+  'corrupt canonical ciphertext': () => Buffer.from(JSON.stringify({ version: 1, ciphertext: crypto.randomBytes(48).toString('base64') }) + '\n'),
+  'malformed envelope content': () => Buffer.from(BAD_ENVELOPE),
+  'empty or truncated record': () => Buffer.alloc(0),
+  'old-port item': f => envelope(f, JSON.stringify({ version: 1, projectId: f.projectId, items: [{ keyId: id(1), apiKey: secret('a').replace('45871', '45872') }] })),
+  'foreign project payload': f => envelope(f, JSON.stringify({ version: 1, projectId: 'f'.repeat(64), items: [] })),
+};
+
+test('only an explicit replace recovers unreadable content; every other action stays read-only and the original bytes are backed up verbatim', async () => {
+  for (const [name, make] of Object.entries(unreadable)) {
+    const f = fixture(), original = make(f);
+    f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(original) });
+    await assert.rejects(f.raw('list'), ERROR, name);
+    for (const [action, input] of [['reveal', { keyId: id(1) }], ['copy', { keyId: id(1) }], ['forget', { keyId: id(1) }],
+      ['remember', { keyId: id(9), apiKey: secret('e') }]]) await assert.rejects(f.raw(action, input), ERROR, name + ' ' + action);
+    assert.equal(f.disk.writes.length, 0, name + ': disallowed actions write nothing'); assert.deepEqual(backups(f), []);
+    assert.deepEqual(json(await f.raw('replace', { keyId: id(9), apiKey: secret('e') })), { remembered: true }, name);
+    assert.deepEqual(json(await f.raw('list')), { available: true, items: [{ keyId: id(9) }] }, name);
+    assert.deepEqual(json(await f.raw('reveal', { keyId: id(9) })), { apiKey: secret('e') }, name);
+    const kept = backups(f); assert.equal(kept.length, 1, name); assert.ok(kept[0].bytes.equals(original), name + ': byte-identical backup');
+    assert.deepEqual(staging(f), [], name); assert.equal(f.disk.descriptors.size, 0, name);
+    const before = f.disk.writes.length, readSync = f.disk.filesystem.readSync; let backupReads = 0;
+    f.disk.filesystem.readSync = (fd, ...args) => { if (BACKUP.test(f.disk.descriptors.get(fd).node.path)) backupReads++; return readSync(fd, ...args); };
+    await f.raw('list'); await f.raw('reveal', { keyId: id(9) });
+    assert.equal(backupReads, 0, name + ': later calls do not read the backup');
+    assert.equal(f.disk.writes.length, before, name + ': the backup is never rewritten or removed');
+    assert.ok(backups(f)[0].bytes.equals(original));
+  }
+});
+
+test('identity, path, lock and owner fences still refuse replace over unreadable content without any backup', async () => {
+  for (const [name, setup] of [
+    ['hardlinked record', f => f.disk.put(f.full, { kind: 'file', nlink: 2n, bytes: Buffer.from(BAD_ENVELOPE) })],
+    ['linked record', f => f.disk.put(f.full, { kind: 'link', physical: 'C:\\Provider\\auth.json', bytes: Buffer.from(BAD_ENVELOPE) })],
+    ['redirected state root', f => { f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(BAD_ENVELOPE) }); f.disk.node(f.stateRoot).physical = 'C:\\Elsewhere'; }],
+    ['linked user root', f => { f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(BAD_ENVELOPE) }); f.disk.node(f.userRoot).kind = 'link'; }],
+    ['foreign lock', f => { f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(BAD_ENVELOPE) }); f.disk.put(f.full + '.lock', { kind: 'file', bytes: Buffer.from('foreign') }); }],
+  ]) {
+    const f = fixture(); setup(f); const before = Buffer.from(f.disk.node(f.full).bytes);
+    await assert.rejects(f.raw('replace', { keyId: id(9), apiKey: secret('e') }), ERROR, name);
+    assert.deepEqual(backups(f), [], name); assert.ok(f.disk.node(f.full).bytes.equals(before), name);
+    assert.equal(f.disk.descriptors.size, 0, name);
+  }
+  for (const invalidate of [f => f.setState({ switching: true }), f => f.setState({ closing: true }),
+    f => { f.window.webContents.mainFrame = { url: origin + '/studio#fixture' }; }, f => { f.event.senderFrame.url = origin + '/studio#reloaded'; }]) {
+    const f = fixture(), original = unreadable['corrupt canonical ciphertext'](f);
+    f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(original) });
+    const pending = f.raw('replace', { keyId: id(9), apiKey: secret('e') }); invalidate(f);
+    await assert.rejects(pending, ERROR); assert.deepEqual(backups(f), []);
+    assert.ok(f.disk.node(f.full).bytes.equals(original)); assert.equal(f.disk.writes.length, 0); assert.equal(f.disk.descriptors.size, 0);
+  }
+});
+
+test('backup and replacement failures keep the primary record; incomplete owned backups are removed, completed ones retained', async () => {
+  // [name, failing method, which call fails, a completed backup is retained]
+  const cases = [['backup write', 'writeSync', 1, false], ['backup flush', 'fsyncSync', 1, false],
+    ['new vault write', 'writeSync', 2, true], ['new vault flush', 'fsyncSync', 2, true], ['new vault publication', 'renameSync', 1, true]];
+  for (const [name, method, nth, retained] of cases) {
+    const f = fixture(), original = unreadable['corrupt canonical ciphertext'](f);
+    f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(original) });
+    const real = f.disk.filesystem[method]; let calls = 0;
+    f.disk.filesystem[method] = (...args) => { if (++calls === nth) throw new Error('Owned fixture failure: ' + secret('e')); return real(...args); };
+    await assert.rejects(f.raw('replace', { keyId: id(9), apiKey: secret('e') }), ERROR, name);
+    f.disk.filesystem[method] = real;
+    assert.ok(f.disk.node(f.full).bytes.equals(original), name + ': primary unchanged until a successful replacement');
+    const kept = backups(f);
+    assert.equal(kept.length, retained ? 1 : 0, name);
+    if (retained) assert.ok(kept[0].bytes.equals(original), name + ': completed backup is byte-identical');
+    assert.deepEqual(staging(f), [], name); assert.equal(f.disk.descriptors.size, 0, name);
+    await assert.rejects(f.raw('list'), ERROR, name + ': still unreadable, no silent reset');
+  }
+});
+
+test('a backup removed, replaced or altered during the staged write blocks replacement of the unreadable primary', async () => {
+  for (const [name, mutate] of [
+    ['altered bytes', (f, node) => { node.bytes = Buffer.from('tampered'); node.mtimeNs++; }],
+    ['removed', (f, node) => { f.disk.nodes.delete(f.disk.key(node.path)); }],
+    ['replaced node', (f, node) => { f.disk.put(node.path, { kind: 'file', bytes: Buffer.from(node.bytes) }); }],
+  ]) {
+    const f = fixture(), original = unreadable['corrupt canonical ciphertext'](f);
+    f.disk.put(f.full, { kind: 'file', bytes: Buffer.from(original) });
+    const real = f.disk.filesystem.writeSync; let calls = 0;
+    // Call 1 writes the backup; call 2 stages the new vault: the race lands between backup completion and publication.
+    f.disk.filesystem.writeSync = (...args) => { if (++calls === 2) mutate(f, backups(f)[0]); return real(...args); };
+    await assert.rejects(f.raw('replace', { keyId: id(9), apiKey: secret('e') }), ERROR, name);
+    f.disk.filesystem.writeSync = real;
+    assert.ok(f.disk.node(f.full).bytes.equals(original), name + ': the primary keeps its bytes when the backup is not proven');
+    assert.deepEqual(staging(f), [], name); assert.equal(f.disk.descriptors.size, 0, name);
+  }
+});
+
+test('replace over a readable vault keeps immutable semantics and creates no backup', async () => {
+  const f = fixture();
+  await f.raw('remember', { keyId: id(1), apiKey: secret('a') });
+  assert.deepEqual(json(await f.raw('replace', { keyId: id(2), apiKey: secret('b') })), { remembered: true });
+  assert.deepEqual(json(await f.raw('list')), { available: true, items: [{ keyId: id(2) }] });
+  await assert.rejects(f.raw('remember', { keyId: id(2), apiKey: secret('c') }), ERROR, 'a remembered UUID never rebinds to another value');
+  assert.deepEqual(backups(f), []); assert.deepEqual(staging(f), []); assert.equal(f.disk.descriptors.size, 0);
+});

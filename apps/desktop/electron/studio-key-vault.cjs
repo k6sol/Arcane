@@ -136,18 +136,29 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
     if (missing(snapshot.full)) return { ...snapshot, items: [], pin: null };
     const { pin, bytes } = openPin(snapshot.full); snapshot.pin = pin;
     try {
-      const envelope = fields(JSON.parse(bytes.toString('utf8')), ['version', 'ciphertext']);
-      if (envelope.version !== 1 || typeof envelope.ciphertext !== 'string' || !envelope.ciphertext ||
-          !bytes.equals(Buffer.from(JSON.stringify(envelope) + '\n'))) fail();
-      const encrypted = Buffer.from(envelope.ciphertext, 'base64');
-      if (encrypted.length > MAX_FILE_BYTES / 2 || encrypted.toString('base64') !== envelope.ciphertext) fail();
+      // Only CONTENT problems (envelope, base64, decryption, payload validation) are classified as unreadable.
+      // Owner/frame/project/path/node/pin checks run OUTSIDE the classification and still throw.
+      let encrypted = null, items = null;
+      try {
+        const envelope = fields(JSON.parse(bytes.toString('utf8')), ['version', 'ciphertext']);
+        if (envelope.version !== 1 || typeof envelope.ciphertext !== 'string' || !envelope.ciphertext ||
+            !bytes.equals(Buffer.from(JSON.stringify(envelope) + '\n'))) fail();
+        encrypted = Buffer.from(envelope.ciphertext, 'base64');
+        if (encrypted.length > MAX_FILE_BYTES / 2 || encrypted.toString('base64') !== envelope.ciphertext) fail();
+      } catch { encrypted = null; }
       guard(scope, event); checkSnapshot(snapshot);
-      const plain = safeStorage.decryptString(encrypted);
+      if (encrypted) {
+        try {
+          const plain = safeStorage.decryptString(encrypted);
+          if (typeof plain !== 'string' || Buffer.byteLength(plain) > MAX_PLAIN_BYTES) fail();
+          const decoded = payload(JSON.parse(plain), scope);
+          if (JSON.stringify(decoded) !== plain) fail();
+          items = decoded.items;
+        } catch { items = null; }
+      }
       guard(scope, event); checkSnapshot(snapshot);
-      if (typeof plain !== 'string' || Buffer.byteLength(plain) > MAX_PLAIN_BYTES) fail();
-      const decoded = payload(JSON.parse(plain), scope);
-      if (JSON.stringify(decoded) !== plain) fail();
-      return { ...snapshot, items: decoded.items };
+      // An unreadable record keeps its pinned bytes so an explicit replace can back them up verbatim.
+      return items ? { ...snapshot, items, unreadable: false } : { ...snapshot, items: [], unreadable: true, bytes };
     } catch (error) { fs.closeSync(pin.fd); throw error; }
   }
   function persist(scope, event, snapshot, items) {
@@ -160,12 +171,33 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
     const bytes = Buffer.from(JSON.stringify({ version: 1, ciphertext: encrypted.toString('base64') }) + '\n');
     if (bytes.length > MAX_FILE_BYTES) fail();
     const lock = snapshot.full + '.lock', temp = snapshot.full + '.' + randomUUID() + '.tmp';
-    let lockFd, tempFd, lockChain, tempChain;
+    const backup = snapshot.unreadable ? snapshot.full + '.unreadable-' + randomUUID() : null;
+    let lockFd, tempFd, lockChain, tempChain, backupFd, backupChain, backupPin = null, backupComplete = false;
     try {
       guard(scope, event); checkSnapshot(snapshot);
       lockFd = fs.openSync(lock, 'wx+', 0o600); lockChain = checkedPath(lock, 'file');
       if (!sameFile(lockChain.at(-1).stat, fs.fstatSync(lockFd, { bigint: true }))) fail();
       guard(scope, event); checkSnapshot(snapshot);
+      if (backup) {
+        // Explicit-replace recovery only: a verified, byte-identical, exclusive copy of the unreadable record,
+        // written while the primary stays pinned at its path. It is never read, listed, rewritten or deleted later.
+        // An empty or truncated record is unreadable content too; a verified zero-byte backup is valid.
+        if (!Buffer.isBuffer(snapshot.bytes) || snapshot.bytes.length > MAX_FILE_BYTES) fail();
+        backupFd = fs.openSync(backup, 'wx+', 0o600); backupChain = checkedPath(backup, 'file');
+        if (!sameFile(backupChain.at(-1).stat, fs.fstatSync(backupFd, { bigint: true }))) fail();
+        let copied = 0;
+        while (copied < snapshot.bytes.length) {
+          const count = fs.writeSync(backupFd, snapshot.bytes, copied, snapshot.bytes.length - copied);
+          if (!Number.isSafeInteger(count) || count < 1 || count > snapshot.bytes.length - copied) fail();
+          copied += count;
+        }
+        fs.fsyncSync(backupFd); backupChain = checkedPath(backup, 'file');
+        if (!sameFile(backupChain.at(-1).stat, fs.fstatSync(backupFd, { bigint: true })) || !readBounded(backupFd).equals(snapshot.bytes)) fail();
+        // Keep the completed backup pinned (open handle, node identity, digest) until the primary is replaced.
+        backupPin = { full: backup, fd: backupFd, chain: backupChain, before: backupChain.at(-1).stat, digest: hash(snapshot.bytes) };
+        backupComplete = true;
+        guard(scope, event); checkSnapshot(snapshot);
+      }
       tempFd = fs.openSync(temp, 'wx+', 0o600); tempChain = checkedPath(temp, 'file');
       if (!sameFile(tempChain.at(-1).stat, fs.fstatSync(tempFd, { bigint: true }))) fail();
       let written = 0;
@@ -181,6 +213,8 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
       if (!sameFile(lockChain.at(-1).stat, lockStat) || !sameFile(lockStat, fs.fstatSync(lockFd, { bigint: true }))) fail();
       checkChain(tempChain);
       if (!sameFile(tempChain.at(-1).stat, fs.fstatSync(tempFd, { bigint: true }))) fail();
+      // The preserved bytes must still be exactly in place before the unreadable primary can be replaced.
+      if (backupPin) checkPin(backupPin);
       // Close our handles for Windows rename; never truncate/unlink the previous vault.
       if (snapshot.pin) { fs.closeSync(snapshot.pin.fd); snapshot.pin = null; }
       fs.closeSync(tempFd); tempFd = undefined;
@@ -201,8 +235,19 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
         } catch { /* A changed/redirected stage remains untouched. */ }
         fs.closeSync(tempFd);
       }
+      if (backupFd !== undefined && backupComplete) fs.closeSync(backupFd); // completed: always retained
+      else if (backupFd !== undefined) {
+        // An incomplete backup is ours to remove only when its identity is still proven; otherwise it is retained.
+        try {
+          const after = checkChain(backupChain), stat = fs.fstatSync(backupFd, { bigint: true });
+          if (!sameNode(backupChain.at(-1).stat, stat) || !sameFile(after.at(-1).stat, stat)) fail();
+          backupChain = after;
+        } catch { backupChain = undefined; }
+        fs.closeSync(backupFd);
+      }
       if (lockFd !== undefined) fs.closeSync(lockFd);
-      for (const chain of [tempChain, lockChain]) if (chain) {
+      // A completed backup is always retained (with the primary when replacement did not finish).
+      for (const chain of [tempChain, lockChain, backupComplete ? undefined : backupChain]) if (chain) {
         try {
           if (!sameFile(chain.at(-1).stat, checkChain(chain).at(-1).stat)) fail();
           fs.unlinkSync(chain.at(-1).path);
@@ -232,6 +277,8 @@ function createStudioKeyVault({ safeStorage, clipboard, getSession, enabled = tr
           await Promise.resolve(); guard(scope, event);
           if (!available()) fail(); guard(scope, event);
           snapshot = readSnapshot(scope, event, paths); guard(scope, event); checkSnapshot(snapshot);
+          // Unreadable content is recoverable ONLY by the explicit human replace (Regenerate after daemon rotation).
+          if (snapshot.unreadable && action !== 'replace') fail();
           if (action === 'list') return { available: true, items: snapshot.items.map(item => ({ keyId: item.keyId })) };
           const found = snapshot.items.find(item => item.keyId === input.keyId);
           if (action === 'reveal') { if (!found) fail(); return { apiKey: found.apiKey }; }
