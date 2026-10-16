@@ -52,7 +52,7 @@ function setup() {
   const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-setup-root-files-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-setup-root-files-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  const sources = ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs'];
+  const sources = ['PostInstall.cs', 'ShellLink.cs', 'Registration.cs', 'RegistrationPlan.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs'];
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);
   const file = (name, text) => { const p = join(build, name); fs.writeFileSync(p, text); return { path: p, bytes: Buffer.from(text), sha: sha(text) }; };

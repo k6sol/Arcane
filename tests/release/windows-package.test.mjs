@@ -430,7 +430,7 @@ test('directory pin verification belongs to the native source closure', async t 
 test('setup root file verification belongs to the native source closure', async t => {
   const { write, options } = await fixture(t);
   await write('tests/release/windows-setup-root-files.test.mjs', '// Fixture setup root file verification source.\n');
-  for (const name of ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+  for (const name of ['PostInstall.cs', 'ShellLink.cs', 'Registration.cs', 'RegistrationPlan.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
     await assert.rejects(packageWindows(options), new RegExp('Setup root file verification requires its matching C# source: ' + name.replace('.', '\\.')));
     await write('installer/' + name, '// Fixture native setup root file source.\n');
   }
@@ -461,6 +461,10 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-shell-link.test.mjs', '// Fixture shortcut verification source.\n');
   await assert.rejects(packageWindows(options), /Shortcut verification requires its matching C# source/);
   await write('installer/ShellLink.cs', '// Fixture native shortcut source.\n');
+  await write('installer/Registration.cs', '// Fixture native registration source.\n');
+  await write('tests/release/windows-registration-plan.test.mjs', '// Fixture registration plan source.\n');
+  await assert.rejects(packageWindows(options), /Registration plan verification requires its matching C# source/);
+  await write('installer/RegistrationPlan.cs', '// Fixture native registration plan source.\n');
   await write('tests/release/windows-post-install.test.mjs', '// Fixture postinstall verification source.\n');
   await assert.rejects(packageWindows(options), /Postinstall verification requires its matching C# source/);
   await write('installer/PostInstall.cs', '// Fixture native postinstall source.\n');
@@ -470,9 +474,6 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-installation-activity.test.mjs', '// Fixture installation activity source.\n');
   await assert.rejects(packageWindows(options), /Installation activity verification requires its matching C# source/);
   await write('installer/InstallationActivity.cs', '// Fixture native installation activity source.\n');
-  await write('tests/release/windows-registration-plan.test.mjs', '// Fixture registration plan source.\n');
-  await assert.rejects(packageWindows(options), /Registration plan verification requires its matching C# source/);
-  await write('installer/RegistrationPlan.cs', '// Fixture native registration plan source.\n');
   await write('tests/release/windows-operation-lease.test.mjs', '// Fixture operation lease verification source.\n');
   await write('tests/release/windows-release-removal.test.mjs', '// Fixture release removal verification source.\n');
   await assert.rejects(packageWindows(options), /Release removal verification requires its matching C# source/);
@@ -517,4 +518,18 @@ test('installer verification source belongs to the reproducible source closure',
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/PostInstall.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/OperationLease.cs'));
   await verifyWindowsBundle(result.directory);
+});
+
+
+test('registration store and lifecycle verification include their actual native dependency closure', async t => {
+  for (const [file, sources, label] of [["windows-registration-store.test.mjs",["Registration.cs","RegistrationPlan.cs","SetupOwnership.cs","OwnedFiles.cs","InstalledRecord.cs","OperationLease.cs","PayloadArchive.cs"],"Registration store"],["windows-registration-lifecycle.test.mjs",["SetupForm.cs","PayloadArchive.cs","KitVerifier.cs","InstallProcess.cs","StageDirectory.cs","InstalledRecord.cs","OperationLease.cs","Launcher.cs","OwnedFiles.cs","SetupOwnership.cs","PostInstall.cs","ShellLink.cs","SetupPath.cs","UninstallEntry.cs","UninstallHandoff.cs","UninstallStage.cs","UninstallForm.cs","UninstallTransaction.cs","UninstallConsent.cs","ReleaseRemoval.cs","InstallationActivity.cs","Registration.cs","RegistrationPlan.cs"],"Registration lifecycle"]]) {
+    const { write, options } = await fixture(t);
+    await write('tests/release/' + file, '// Fixture native registration test source.\n');
+    for (const name of sources) {
+      await assert.rejects(packageWindows(options), new RegExp(label + ' verification requires its matching C# source: ' + name.replace('.', '\\.')));
+      await write('installer/' + name, '// Fixture native registration dependency.\n');
+    }
+    const result = await packageWindows(options), data = await manifest(result.directory);
+    assert.ok(data.files.some(f => f.path === 'resources/product/installer/Registration.cs'));
+  }
 });

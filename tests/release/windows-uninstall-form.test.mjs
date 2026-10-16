@@ -77,7 +77,7 @@ function setup() {
   if (fixture) return fixture;
   const boundary = fs.realpathSync.native(tmpdir()), owner = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-uninstall-form-test-')));
   process.on('exit', () => { const path = relative(boundary, owner); if (path.startsWith('arcane-uninstall-form-test-') && !isAbsolute(path) && !path.includes(sep)) fs.rmSync(owner, { recursive: true, force: true }); });
-  const sources = ['UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'PayloadArchive.cs'];
+  const sources = ['Registration.cs', 'RegistrationPlan.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'PayloadArchive.cs'];
   const build = join(owner, 'build'); fs.mkdirSync(build);
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);

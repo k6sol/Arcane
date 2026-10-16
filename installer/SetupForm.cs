@@ -22,6 +22,7 @@ namespace Arcane.Installer
         private bool stageRetained;
         private SetupCompletionOutcome completion;
         private ShortcutSetupOutcome shortcut;
+        private RegistrationSetupOutcome registration;
 
         public SetupForm()
         {
@@ -80,7 +81,7 @@ namespace Arcane.Installer
         {
             if (finished)
             {
-                if (completion != null && completion.Ready && (shortcut == null || shortcut.RetainedLock == null))
+                if (completion != null && completion.Ready && (shortcut == null || shortcut.RetainedLock == null) && (registration == null || registration.RetainedLock == null))
                 {
                     busy = true; primary.Enabled = false; cancel.Enabled = false;
                     status.Text = "Opening Arcane...";
@@ -133,6 +134,7 @@ namespace Arcane.Installer
                                     uninstaller, SetupPins.UninstallerBytes, SetupPins.UninstallerSha256);
                                 if (completion.Ready)
                                     shortcut = PostInstall.CompleteShortcut(completion, Environment.GetFolderPath(Environment.SpecialFolder.Programs));
+                                if (completion.Ready) registration = PostInstall.CompleteRegistration(completion);
                             }
                             catch (Exception) { completion = null; }
                         }
@@ -161,10 +163,10 @@ namespace Arcane.Installer
                     else if (completion == null || !completion.Ready)
                         detail.Text += "\nSetup needs review before the installation tools are ready. Keep this setup file.";
                     else if (completion.Code == "BACKUP_RETAINED") detail.Text += "\nPrevious setup files have been retained for review.";
-                    if (shortcut != null && shortcut.RetainedLock != null)
-                        detail.Text += "\nThe Start Menu operation needs review. Keep the installation files and operation record.";
-                    else if (completion != null && completion.Ready && (shortcut == null || !shortcut.Ready))
-                        detail.Text += "\nThe Start Menu shortcut needs review. Open Arcane from its installation folder.";
+                    if (shortcut != null && shortcut.RetainedLock != null || registration != null && registration.RetainedLock != null)
+                        detail.Text += "\nA Windows setup operation needs review. Keep the installation files and operation record.";
+                    else if (completion != null && completion.Ready && (shortcut == null || !shortcut.Ready || registration == null || !registration.Ready))
+                        detail.Text += "\nWindows shortcuts or app settings need review. Open Arcane from its folder.";
                 }
                 else if (outcome.Published == false)
                 {
@@ -192,7 +194,7 @@ namespace Arcane.Installer
             {
                 busy = false; finished = true; progress.Style = ProgressBarStyle.Continuous;
                 if (stageRetained) detail.Text += "\nSetup files have been retained for review.";
-                bool canOpen = completion != null && completion.Ready && (shortcut == null || shortcut.RetainedLock == null);
+                bool canOpen = completion != null && completion.Ready && (shortcut == null || shortcut.RetainedLock == null) && (registration == null || registration.RetainedLock == null);
                 primary.Text = canOpen ? "Open Arcane" : "Close"; primary.Enabled = true;
                 cancel.Text = "Close"; cancel.Enabled = canOpen; operation.Dispose(); operation = null;
             }

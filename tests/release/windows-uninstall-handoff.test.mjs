@@ -108,7 +108,7 @@ function setup() {
   if (shared) return shared;
   const boundary = fs.realpathSync.native(tmpdir()), owner = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-uninstall-handoff-test-')));
   process.on('exit', () => { const p = relative(boundary, owner); if (p.startsWith('arcane-uninstall-handoff-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(owner, { recursive: true, force: true }); });
-  const sources = ['UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'StageDirectory.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'];
+  const sources = ['Registration.cs', 'RegistrationPlan.cs', 'UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'StageDirectory.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'];
   const build = join(owner, 'build'); fs.mkdirSync(build);
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);

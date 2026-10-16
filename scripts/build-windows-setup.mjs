@@ -7,11 +7,11 @@ import { createWindowsSetupPayload, WINDOWS_SETUP_KIT_FILES } from './windows-se
 import { runBoundedChild } from './check-windows-executable.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const UNINSTALLER_SOURCES = ['UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs',
+const UNINSTALLER_SOURCES = ['Registration.cs', 'RegistrationPlan.cs', 'UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs',
   'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'StageDirectory.cs', 'OwnedFiles.cs', 'SetupOwnership.cs',
   'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'];
 const NATIVE_SOURCES = [...new Set(['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs',
-  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'ShellLink.cs', 'SetupPath.cs',
+  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'ShellLink.cs', 'Registration.cs', 'RegistrationPlan.cs', 'SetupPath.cs',
   ...UNINSTALLER_SOURCES])].map(name => 'installer/' + name);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 async function digest(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }

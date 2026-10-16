@@ -54,6 +54,23 @@ namespace Arcane.Installer
         { Ready = ready; Code = code; Placement = placement; Journal = journal; LeaseCleanup = cleanup; RetainedLock = retainedLock; }
     }
 
+    internal sealed class RegistrationSetupOutcome
+    {
+        public readonly bool Ready;
+        public readonly string Code, RetainedLock;
+        public readonly RegistrationResult Registration;
+        public readonly OwnershipSave Journal;
+        public readonly OwnershipSave PendingJournal, RecoveryJournal;
+        public readonly bool Recovered;
+        public readonly LeaseReleaseState? LeaseCleanup;
+        internal RegistrationSetupOutcome(bool ready, string code, RegistrationResult registration, OwnershipSave journal, LeaseReleaseState? cleanup, string retainedLock, OwnershipSave pendingJournal, OwnershipSave recoveryJournal)
+        {
+            Ready = ready; Code = code; Registration = registration; Journal = journal; LeaseCleanup = cleanup; RetainedLock = retainedLock;
+            PendingJournal = pendingJournal; RecoveryJournal = recoveryJournal;
+            Recovered = recoveryJournal != null && recoveryJournal.Snapshot != null && (recoveryJournal.State == OwnershipSaveState.Saved || recoveryJournal.State == OwnershipSaveState.Unchanged);
+        }
+    }
+
     internal static class PostInstall
     {
         private static LauncherSetupOutcome Result(bool ready, string code, string root, string id, OwnedFileResult placement, OwnershipSave journal)
@@ -100,13 +117,19 @@ namespace Arcane.Installer
             return a.Root == b.Root && a.Name == b.Name && a.Bytes == b.Bytes && a.Sha256 == b.Sha256 && a.RootIdentity.SameAs(b.RootIdentity) && a.Identity.SameAs(b.Identity);
         }
 
+        private static bool SameRegistration(RegistrationDescriptor a, RegistrationDescriptor b)
+        { return a == null || b == null ? a == b : a.OwnerId == b.OwnerId && a.ValuesSha256 == b.ValuesSha256 && a.LastWriteTime == b.LastWriteTime; }
+
+        private static bool SameIntent(RegistrationIntent a, RegistrationIntent b)
+        { return a == null || b == null ? a == b : a.OwnerId == b.OwnerId && a.ValuesSha256 == b.ValuesSha256; }
+
         /// <summary>A fresh leased read must still be exactly <paramref name="expected"/> (journal file and both descriptors) for the current record.</summary>
         private static bool Fenced(InstalledRecordSnapshot record, OperationLease lease, SetupOwnershipSnapshot expected)
         {
             if (expected == null || !InstalledRecord.StillCurrent(record, lease)) return false;
             OwnershipRead fresh = SetupOwnership.Read(record, lease);
             return fresh.State == OwnershipReadState.Valid && fresh.Snapshot != null && fresh.Snapshot.Present && expected.Present &&
-                Same(fresh.Snapshot.Journal, expected.Journal) && Same(fresh.Snapshot.Launcher, expected.Launcher) && Same(fresh.Snapshot.Uninstaller, expected.Uninstaller) && Same(fresh.Snapshot.Shortcut, expected.Shortcut);
+                Same(fresh.Snapshot.Journal, expected.Journal) && Same(fresh.Snapshot.Launcher, expected.Launcher) && Same(fresh.Snapshot.Uninstaller, expected.Uninstaller) && Same(fresh.Snapshot.Shortcut, expected.Shortcut) && SameRegistration(fresh.Snapshot.Registration, expected.Registration) && SameIntent(fresh.Snapshot.PendingRegistration, expected.PendingRegistration);
         }
 
         private static bool Accepted(OwnedFileResult placement)
@@ -199,6 +222,97 @@ namespace Arcane.Installer
                 }
             }
             return new ShortcutSetupOutcome(ready, code, placement, saved, released == null ? (LeaseReleaseState?)null : released.State, retainedLock);
+        }
+
+        public static RegistrationSetupOutcome CompleteRegistration(SetupCompletionOutcome completion)
+        { return CompleteRegistration(completion, null); }
+
+        /// <summary>Only the trusted fixture host supplies a target. Production uses the fixed current-user destination,
+        /// opened after the installation, root file bytes and live lease have been proven. No key path comes from the CLI.</summary>
+        internal static RegistrationSetupOutcome CompleteRegistration(SetupCompletionOutcome completion, RegistrationTarget supplied)
+        {
+            bool ready = false; string code = null, retainedLock = null;
+            RegistrationResult registration = null; OwnershipSave journal = null, pendingJournal = null, recoveryJournal = null;
+            OperationLease lease = null; LeaseRelease released = null;
+            try
+            {
+                if (completion == null || !completion.Ready || completion.Launcher == null || completion.Launcher.Placement == null ||
+                    completion.Uninstaller == null || completion.Journal == null || completion.Journal.Snapshot == null) code = "INSTALLATION";
+                else
+                {
+                    InstalledRecordSnapshot record = InstalledRecord.Read(completion.Root);
+                    if (record.InstallationId != completion.InstallationId || record.RecordSha256 != completion.Journal.Snapshot.Record.RecordSha256) code = "RECORD_CHANGED";
+                    else
+                    {
+                        LeaseResult acquired = OperationLease.Acquire(record); retainedLock = acquired.RetainedLock;
+                        if (acquired.State != LeaseState.Acquired || acquired.Lease == null) code = acquired.Code ?? "LEASE";
+                        else
+                        {
+                            lease = acquired.Lease;
+                            code = Register(record, lease, completion, supplied, ref registration, ref journal, ref pendingJournal, ref recoveryJournal);
+                            ready = code == null || code == "BACKUP_RETAINED";
+                        }
+                    }
+                }
+            }
+            catch (InstalledRecordException error) { code = error.Code; }
+            catch (Exception) { code = "IO"; }
+            finally
+            {
+                if (lease != null)
+                {
+                    try { released = lease.Release(); } catch (Exception) { released = new LeaseRelease(LeaseReleaseState.Unknown, "IO"); }
+                    try { lease.Dispose(); } catch (Exception) { }
+                    if (released.State != LeaseReleaseState.Released)
+                    { retainedLock = lease.Root + "\\" + InstalledRecord.LockName; if (ready) { ready = false; code = "LEASE"; } }
+                }
+            }
+            return new RegistrationSetupOutcome(ready, code, registration, journal, released == null ? (LeaseReleaseState?)null : released.State, retainedLock, pendingJournal, recoveryJournal);
+        }
+
+        private static string Register(InstalledRecordSnapshot record, OperationLease lease, SetupCompletionOutcome completion, RegistrationTarget supplied,
+            ref RegistrationResult registration, ref OwnershipSave saved, ref OwnershipSave pendingJournal, ref OwnershipSave recoveryJournal)
+        {
+            OwnershipRead read = SetupOwnership.Read(record, lease);
+            SetupOwnershipSnapshot current = read.Snapshot;
+            if (read.State != OwnershipReadState.Valid || current == null) return "JOURNAL";
+            if (!Same(current.Launcher, completion.Launcher.Placement.Descriptor) || !Same(current.Uninstaller, completion.Uninstaller.Descriptor) ||
+                VerifiedBytes(current.Launcher) == null || VerifiedBytes(current.Uninstaller) == null) return "ROOT_FILES";
+            RegistrationPlanResult planned = RegistrationPlanner.Create(record, current, completion.Uninstaller, completion.Launcher.Placement);
+            if (!planned.Ok || planned.Plan == null) return "PLAN";
+            if (!Fenced(record, lease, current)) return "JOURNAL_CHANGED";
+            using (RegistrationTarget target = supplied ?? RegistrationTarget.CurrentUser(true))
+            {
+                if (current.PendingRegistration != null)
+                {
+                    registration = RegistrationStore.Reconcile(current.Registration, current.PendingRegistration, record.InstallationId, target);
+                    if (registration.State != RegistrationState.Unchanged && registration.State != RegistrationState.Absent) return "REGISTRATION";
+                    if (!Fenced(record, lease, current)) return "JOURNAL_CHANGED";
+                    recoveryJournal = SetupOwnership.SaveRegistration(current, registration.Descriptor, lease);
+                    saved = recoveryJournal;
+                    if (!Saved(saved)) return "REGISTRATION_JOURNAL";
+                    current = saved.Snapshot;
+                    if (!Fenced(record, lease, current)) return "JOURNAL_CHANGED";
+                }
+                RegistrationPreparation prepared = RegistrationStore.Prepare(planned.Plan, current.Registration, target);
+                registration = prepared.Observation;
+                if (prepared.Intent != null)
+                {
+                    pendingJournal = SetupOwnership.SaveRegistrationIntent(current, prepared.Intent, lease);
+                    saved = pendingJournal;
+                    if (!Saved(saved)) return "REGISTRATION_INTENT";
+                    current = saved.Snapshot;
+                    if (!Fenced(record, lease, current)) return "JOURNAL_CHANGED";
+                    registration = RegistrationStore.Apply(planned.Plan, current.Registration, current.PendingRegistration, target);
+                }
+                if (registration.Descriptor == null || (registration.State != RegistrationState.Created && registration.State != RegistrationState.Updated && registration.State != RegistrationState.Unchanged)) return "REGISTRATION";
+                if (!Fenced(record, lease, current)) return "JOURNAL_CHANGED";
+                saved = SetupOwnership.SaveRegistration(current, registration.Descriptor, lease);
+                if (!Saved(saved)) return "REGISTRATION_JOURNAL";
+                if (!Fenced(record, lease, saved.Snapshot) || VerifiedBytes(current.Launcher) == null || VerifiedBytes(current.Uninstaller) == null ||
+                    RegistrationStore.Verify(registration.Descriptor, record.InstallationId, target).State != RegistrationState.Unchanged) return "CHANGED";
+                return Retained(null, saved) || Retained(null, pendingJournal) || Retained(null, recoveryJournal) ? "BACKUP_RETAINED" : null;
+            }
         }
 
         /// <summary>After a confirmed installation, places and records the approved launcher, then the approved uninstaller, under ONE

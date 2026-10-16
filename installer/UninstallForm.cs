@@ -98,6 +98,8 @@ namespace Arcane.Installer
                     detail.Text += result.Shortcut.Code == "ROOT" ? "\nThe Start Menu location could not be confirmed, so its shortcut was kept."
                         : result.Shortcut.Code == "CHANGED" || result.Shortcut.Code == "LINKED" || result.Shortcut.Code == "REDIRECT" ? "\nThe Start Menu shortcut was kept because it was changed after setup."
                         : "\nThe Start Menu shortcut could not be removed and was kept.";
+                if (result.Registration != null && (result.Registration.State == RegistrationState.Kept || result.Registration.State == RegistrationState.Deleted && result.Registration.Code != null))
+                    detail.Text += result.Registration.Code == "DESTINATION_UNKNOWN" ? "\nThe Windows app entry needs review." : "\nThe Windows app entry was kept for review.";
             }
             else if (result.State == UninstallState.Cancelled)
             {
