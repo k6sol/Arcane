@@ -152,6 +152,18 @@ test('a context or epoch change after each await stops later steps and revokes o
   }
 });
 
+test('a refused launch with an unknown revocation reports uncertainty without claiming the credential was retired', async t => {
+  const f = await fixture(t, { launch: () => 'failed' });
+  f.daemon.faults['/v1/native-handoffs/revoke'] = () => { throw new Error('revocation acknowledgement lost'); };
+  const out = await f.host.launch(pick);
+  assert.deepEqual([out.state, out.reason, out.revocation, out.cleanup], ['refused', 'launch_failed', 'unknown', 'removed']);
+  assert.doesNotMatch(out.message, /was revoked|were revoked/);
+  assert.match(out.message, /Check the handoff list/);
+  assert.equal(f.daemon.paths().filter(p => p.endsWith('/revoke')).length, 1, 'one attempt without replay');
+  assert.deepEqual(await f.entries(), [], 'owned config cleanup still completes');
+  leakFree(out, f.controlToken, f.launches[0].env.ARCANE_LOCAL_TOKEN);
+});
+
 test('cancelPending aborts a held read with no late launch; list and revoke use the current human scope and clean only owned configs', async t => {
   const f = await fixture(t);
   f.daemon.faults['/v1/native-handoffs/begin'] = ({ init }) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));

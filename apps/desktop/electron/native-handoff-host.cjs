@@ -23,7 +23,7 @@ const SESSION_KEYS = ['projectPath', 'runtimeDirectory', 'nodePath', 'mcpEntry',
 const MESSAGES = Object.freeze({
   opened: 'Claude Code terminal opened for this project with Arcane tools configured. Arcane has not verified that Claude Code or its Arcane tools connected.',
   cancelled: 'Claude Code handoff was cancelled. Nothing was started.',
-  refused: 'Claude Code handoff did not start. Any handoff it created was revoked.',
+  refused: 'Claude Code handoff needs attention. Check the handoff list before opening another terminal.',
   unknown: 'Claude Code handoff outcome is unknown. Nothing was retried; review and revoke it from the handoff list.',
   revoked: 'The handoff was revoked.', unavailable: 'Native handoff is unavailable.',
 });
