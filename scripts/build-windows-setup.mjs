@@ -7,10 +7,21 @@ import { createWindowsSetupPayload, WINDOWS_SETUP_KIT_FILES } from './windows-se
 import { runBoundedChild } from './check-windows-executable.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const NATIVE_SOURCES = ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs',
-  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs'].map(name => 'installer/' + name);
+const UNINSTALLER_SOURCES = ['UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs',
+  'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'StageDirectory.cs', 'OwnedFiles.cs', 'SetupOwnership.cs',
+  'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'];
+const NATIVE_SOURCES = [...new Set(['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs',
+  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs',
+  ...UNINSTALLER_SOURCES])].map(name => 'installer/' + name);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 async function digest(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }
+async function verifyPe(path) {
+  const file = await fs.open(path, 'r');
+  try {
+    const bytes = Buffer.alloc(64), read = await file.read(bytes, 0, bytes.length, 0);
+    if (read.bytesRead !== 64 || bytes.toString('ascii', 0, 2) !== 'MZ') throw new Error('Setup compiler did not produce a PE executable.');
+  } finally { await file.close(); }
+}
 async function direct(path, directory = false, allowHardlinks = false) {
   const stat = await fs.lstat(path), canonical = await fs.realpath(path);
   if (stat.isSymbolicLink() || canonical.toLowerCase() !== path.toLowerCase() || (directory ? !stat.isDirectory() : !stat.isFile() || !allowHardlinks && stat.nlink !== 1)) throw new Error('Setup build inputs must be direct paths.');
@@ -24,7 +35,7 @@ export async function buildWindowsSetup({ bundle, outputParent, repository = REP
   }
   await direct(outputParent, true); await direct(repository, true);
   const sources = [];
-  for (const path of [...NATIVE_SOURCES, 'installer/setup.manifest', 'installer/launcher.manifest', 'apps/desktop/electron/icon.ico',
+  for (const path of [...NATIVE_SOURCES, 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/electron/icon.ico',
     'scripts/build-windows-setup.mjs', 'scripts/windows-setup-payload.mjs', 'scripts/check-windows-executable.mjs',
     'apps/desktop/electron/policy.cjs', ...WINDOWS_SETUP_KIT_FILES]) {
     await direct(join(repository, path)); sources.push({ path, sha256: await digest(join(repository, path)) });
@@ -59,11 +70,27 @@ export async function buildWindowsSetup({ bundle, outputParent, repository = REP
     if (launcherBuild.code !== 0) throw new Error('Launcher compilation failed; inspect retained launcher-compile.log.');
     const launcherStat = await direct(launcher), launcherSha256 = await digest(launcher);
     if (launcherStat.size < 1 || launcherStat.size > 64 * 1024 * 1024) throw new Error('Launcher size is invalid.');
+    await verifyPe(launcher);
+    progress('compile-uninstaller');
+    const uninstaller = join(owned, 'uninstaller.exe');
+    const uninstallBuild = await runBoundedChild(compiler, ['/nologo', '/target:winexe', '/platform:x64', '/optimize+',
+      '/main:Arcane.Installer.UninstallEntry', '/out:' + uninstaller, '/win32icon:' + icon,
+      '/win32manifest:' + join(repository, 'installer/uninstaller.manifest'), '/reference:System.Windows.Forms.dll',
+      '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll',
+      ...UNINSTALLER_SOURCES.map(name => join(repository, 'installer', name))],
+    { cwd: owned, env: environment, deadlineMs: 120000 });
+    await fs.writeFile(join(owned, 'uninstaller-compile.log'), uninstallBuild.output, { flag: 'wx' });
+    if (uninstallBuild.code !== 0) throw new Error('Uninstaller compilation failed; inspect retained uninstaller-compile.log.');
+    const uninstallerStat = await direct(uninstaller), uninstallerSha256 = await digest(uninstaller);
+    if (uninstallerStat.size < 1 || uninstallerStat.size > 64 * 1024 * 1024) throw new Error('Uninstaller size is invalid.');
+    await verifyPe(uninstaller);
     const pinSource = join(owned, 'SetupPins.cs');
-    await fs.writeFile(pinSource, 'namespace Arcane.Installer { internal static class SetupPins { public const string PayloadSha256 = "' + payload.payloadSha256 + '"; public const string KitManifestSha256 = "' + payload.kitManifestSha256 + '"; public const int MaximumRelativePathChars = ' + payload.maximumRelativePathChars + '; public const long LauncherBytes = ' + launcherStat.size + '; public const string LauncherSha256 = "' + launcherSha256 + '"; } }\n', { flag: 'wx' });
+    await fs.writeFile(pinSource, 'namespace Arcane.Installer { internal static class SetupPins { public const string PayloadSha256 = "' + payload.payloadSha256 + '"; public const string KitManifestSha256 = "' + payload.kitManifestSha256 + '"; public const int MaximumRelativePathChars = ' + payload.maximumRelativePathChars + '; public const long LauncherBytes = ' + launcherStat.size + '; public const string LauncherSha256 = "' + launcherSha256 + '"; public const long UninstallerBytes = ' + uninstallerStat.size + '; public const string UninstallerSha256 = "' + uninstallerSha256 + '"; } }\n', { flag: 'wx' });
     const args = ['/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/main:Arcane.Installer.SetupEntry', '/out:' + bootstrap,
       '/win32icon:' + icon, '/win32manifest:' + join(repository, 'installer/setup.manifest'),
-      '/resource:' + launcher + ',Arcane.Launcher',
+      // Fixed relative names avoid the compiler's comma-separated resource syntax parsing parent directory names.
+      '/resource:launcher.exe,Arcane.Launcher',
+      '/resource:uninstaller.exe,Arcane.Uninstaller',
       '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll',
       ...NATIVE_SOURCES.map(path => join(repository, path)), pinSource];
     progress('compile');
@@ -71,9 +98,10 @@ export async function buildWindowsSetup({ bundle, outputParent, repository = REP
     await fs.writeFile(join(owned, 'compile.log'), result.output, { flag: 'wx' });
     if (result.code !== 0) throw new Error('Setup compilation failed; inspect retained compile.log.');
     if (await digest(launcher) !== launcherSha256) throw new Error('Launcher changed during setup compilation.');
+    if (await digest(uninstaller) !== uninstallerSha256) throw new Error('Uninstaller changed during setup compilation.');
     if (await digest(compiler) !== compilerSha256) throw new Error('Setup compiler changed during the build.');
-    const prefixStat = await direct(bootstrap), prefixSha256 = await digest(bootstrap), header = await fs.open(bootstrap, 'r');
-    try { const bytes = Buffer.alloc(64); const read = await header.read(bytes, 0, bytes.length, 0); if (read.bytesRead !== 64 || bytes.toString('ascii', 0, 2) !== 'MZ') throw new Error('Setup compiler did not produce a PE executable.'); } finally { await header.close(); }
+    const prefixStat = await direct(bootstrap), prefixSha256 = await digest(bootstrap);
+    await verifyPe(bootstrap);
     progress('assemble');
     const output = await fs.open(executable, 'wx', 0o600);
     try {
@@ -91,6 +119,7 @@ export async function buildWindowsSetup({ bundle, outputParent, repository = REP
     if (stat.size !== prefixStat.size + payload.bytes + 64) throw new Error('Incomplete setup assembly.');
     const receipt = { schemaVersion: 1, kind: 'arcane-windows-setup-build', owned, executable, executableSha256: await digest(executable), bytes: stat.size,
       payload, sources, launcher: { path: launcher, bytes: launcherStat.size, sha256: launcherSha256 },
+      uninstaller: { path: uninstaller, bytes: uninstallerStat.size, sha256: uninstallerSha256 },
       manifestSha256: sha(await fs.readFile(join(repository, 'installer/setup.manifest'))), compiler, compilerSha256,
       runnableSetupBuilt: true, setupLaunched: false, guiAccepted: false, applicationSigned: false, installerSigned: false,
       shortcuts: false, registration: false, cleanMachineAccepted: false, studioOperations: 0, inferenceStarted: false, fullProductVerified: false };

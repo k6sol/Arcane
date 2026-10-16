@@ -20,7 +20,7 @@ namespace Arcane.Installer
         private bool installationBegan;
         private bool preparingPrograms;
         private bool stageRetained;
-        private LauncherSetupOutcome launcherSetup;
+        private SetupCompletionOutcome completion;
 
         public SetupForm()
         {
@@ -79,18 +79,18 @@ namespace Arcane.Installer
         {
             if (finished)
             {
-                if (launcherSetup != null && launcherSetup.Ready)
+                if (completion != null && completion.Ready)
                 {
                     busy = true; primary.Enabled = false; cancel.Enabled = false;
                     status.Text = "Opening Arcane...";
                     detail.Text = "Checking the selected release before opening your workspace.";
                     LaunchOutcome launched;
-                    try { launched = await Task.Run(delegate { return PostInstall.Open(launcherSetup); }); }
+                    try { launched = await Task.Run(delegate { return PostInstall.Open(completion.Launcher); }); }
                     finally { busy = false; }
                     if (launched.Started) { Close(); return; }
                     status.Text = "Arcane could not be opened.";
                     detail.Text = "The installation has changed or is busy. Open Arcane after setup has finished.";
-                    launcherSetup = null; primary.Text = "Close"; primary.Enabled = true;
+                    completion = null; primary.Text = "Close"; primary.Enabled = true;
                 }
                 else Close();
                 return;
@@ -127,9 +127,11 @@ namespace Arcane.Installer
                             try
                             {
                                 byte[] launcher = PostInstall.LauncherResource(typeof(SetupForm).Assembly, SetupPins.LauncherBytes, SetupPins.LauncherSha256);
-                                launcherSetup = PostInstall.CompleteLauncher(target, selected, launcher, SetupPins.LauncherBytes, SetupPins.LauncherSha256);
+                                byte[] uninstaller = PostInstall.UninstallerResource(typeof(SetupForm).Assembly, SetupPins.UninstallerBytes, SetupPins.UninstallerSha256);
+                                completion = PostInstall.CompleteRootFiles(target, selected, launcher, SetupPins.LauncherBytes, SetupPins.LauncherSha256,
+                                    uninstaller, SetupPins.UninstallerBytes, SetupPins.UninstallerSha256);
                             }
-                            catch (Exception) { launcherSetup = null; }
+                            catch (Exception) { completion = null; }
                         }
                         return selected;
                     }
@@ -151,11 +153,11 @@ namespace Arcane.Installer
                 if (outcome.State == InstallState.Installed || outcome.State == InstallState.AlreadyActive)
                 {
                     status.Text = "Arcane is installed."; detail.Text = "Your projects and app profiles have been kept separate."; progress.Value = 1000;
-                    if (launcherSetup == null || !launcherSetup.Ready)
-                        detail.Text += launcherSetup != null && launcherSetup.Placement != null && launcherSetup.Placement.Descriptor != null
-                            ? "\nA launcher file remains, but setup could not confirm its record. Keep this setup file for review."
-                            : "\nSetup could not finish the launcher. Keep this setup file for review.";
-                    else if (launcherSetup.Code == "BACKUP_RETAINED") detail.Text += "\nPrevious launcher files have been retained for review.";
+                    if (completion != null && completion.RetainedLock != null)
+                        detail.Text += "\nAn installation operation needs review. Keep the installation files and operation record.";
+                    else if (completion == null || !completion.Ready)
+                        detail.Text += "\nSetup needs review before the installation tools are ready. Keep this setup file.";
+                    else if (completion.Code == "BACKUP_RETAINED") detail.Text += "\nPrevious setup files have been retained for review.";
                 }
                 else if (outcome.Published == false)
                 {
@@ -183,7 +185,7 @@ namespace Arcane.Installer
             {
                 busy = false; finished = true; progress.Style = ProgressBarStyle.Continuous;
                 if (stageRetained) detail.Text += "\nSetup files have been retained for review.";
-                bool canOpen = launcherSetup != null && launcherSetup.Ready;
+                bool canOpen = completion != null && completion.Ready;
                 primary.Text = canOpen ? "Open Arcane" : "Close"; primary.Enabled = true;
                 cancel.Text = "Close"; cancel.Enabled = canOpen; operation.Dispose(); operation = null;
             }

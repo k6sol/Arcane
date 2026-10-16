@@ -427,6 +427,17 @@ test('directory pin verification belongs to the native source closure', async t 
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/OwnedFiles.cs'));
 });
 
+test('setup root file verification belongs to the native source closure', async t => {
+  const { write, options } = await fixture(t);
+  await write('tests/release/windows-setup-root-files.test.mjs', '// Fixture setup root file verification source.\n');
+  for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+    await assert.rejects(packageWindows(options), new RegExp('Setup root file verification requires its matching C# source: ' + name.replace('.', '\\.')));
+    await write('installer/' + name, '// Fixture native setup root file source.\n');
+  }
+  const result = await packageWindows(options), data = await manifest(result.directory);
+  assert.ok(data.files.some(file => file.path === 'resources/product/installer/PostInstall.cs'));
+});
+
 test('installer verification source belongs to the reproducible source closure', async t => {
   const { write, options } = await fixture(t);
   await write('tests/release/windows-installer-payload.test.mjs', '// Fixture payload verification source.\n');
@@ -493,6 +504,8 @@ test('installer verification source belongs to the reproducible source closure',
   await write('installer/setup.manifest', '<!-- Fixture setup manifest. -->\n');
   await assert.rejects(packageWindows(options), /Setup builder requires its complete native source: launcher.manifest/);
   await write('installer/launcher.manifest', '<!-- Fixture launcher manifest. -->\n');
+  await assert.rejects(packageWindows(options), /Setup builder requires its complete native source: uninstaller.manifest/);
+  await write('installer/uninstaller.manifest', '<!-- Fixture uninstaller manifest. -->\n');
   const result = await packageWindows(options), data = await manifest(result.directory);
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/PayloadArchive.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/KitVerifier.cs'));

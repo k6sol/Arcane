@@ -46,7 +46,7 @@ test('setup progress belongs only to its live installation operation, including 
     assert.ok(names.includes('SetupForm.cs'));
     for (const name of names) fs.copyFileSync(new URL(name, sourceDirectory), join(owner, name));
     fs.writeFileSync(join(owner, 'Harness.cs'), HARNESS);
-    fs.writeFileSync(join(owner, 'SetupPins.cs'), 'namespace Arcane.Installer { internal static class SetupPins { public const string PayloadSha256="' + '0'.repeat(64) + '"; public const string KitManifestSha256="' + '0'.repeat(64) + '"; public const int MaximumRelativePathChars=134; public const long LauncherBytes=1; public const string LauncherSha256="' + '0'.repeat(64) + '"; } }');
+    fs.writeFileSync(join(owner, 'SetupPins.cs'), 'namespace Arcane.Installer { internal static class SetupPins { public const string PayloadSha256="' + '0'.repeat(64) + '"; public const string KitManifestSha256="' + '0'.repeat(64) + '"; public const int MaximumRelativePathChars=134; public const long LauncherBytes=1; public const string LauncherSha256="' + '0'.repeat(64) + '"; public const long UninstallerBytes=1; public const string UninstallerSha256="' + '0'.repeat(64) + '"; } }');
     const harness = join(owner, 'harness.exe'), compiler = join(process.env.SystemRoot ?? 'C:\\Windows', 'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
     const built = spawnSync(compiler, ['/nologo', '/target:exe', '/platform:x64', '/main:Harness', '/out:' + harness,
       '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll',

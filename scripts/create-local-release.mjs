@@ -35,7 +35,7 @@ export const REQUIRED_FRONTEND_FILES = [
   ...['build/three.module.js', 'build/three.core.js', 'examples/jsm/loaders/GLTFLoader.js', 'examples/jsm/controls/OrbitControls.js', 'examples/jsm/utils/BufferGeometryUtils.js', 'examples/jsm/utils/SkeletonUtils.js'].map(path => 'apps/desktop/public/vendor/three/' + path),
   'apps/desktop/src/learning-panel.ts', 'dist/apps/desktop/src/learning-panel.js', 'dist/apps/desktop/src/learning-panel.js.map', 'apps/desktop/src/codex-history.ts','apps/desktop/src/workflow-panel.ts', 'dist/apps/desktop/src/codex-history.js','dist/apps/desktop/src/workflow-panel.js', 'dist/apps/desktop/src/codex-history.js.map','dist/apps/desktop/src/workflow-panel.js.map', BRAND_BITMAP_PATH,
 ];
-const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...MANAGED_LUAU_FILES]);
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...MANAGED_LUAU_FILES]);
 const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
 const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
 export function validateBrandBitmap(bytes) {
@@ -205,6 +205,11 @@ function validateInstallerSources(files) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Postinstall verification requires its matching C# source: ' + name);
     }
   }
+  if (files.some(file => file.path === 'tests/release/windows-setup-root-files.test.mjs')) {
+    for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup root file verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => file.path === 'tests/release/windows-setup-path.test.mjs')) {
     for (const name of ['SetupPath.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup path verification requires its matching C# source: ' + name);
@@ -226,7 +231,7 @@ function validateInstallerSources(files) {
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-setup-form.test.mjs')) {
-    for (const name of ['SetupForm.cs', 'PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs']) {
+    for (const name of ['SetupForm.cs', 'PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup form verification requires its matching C# source: ' + name);
     }
   }
@@ -261,7 +266,7 @@ function validateInstallerSources(files) {
     }
   }
   if (files.some(file => file.path === 'scripts/build-windows-setup.mjs')) {
-    for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'setup.manifest', 'launcher.manifest']) {
+    for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'setup.manifest', 'launcher.manifest', 'uninstaller.manifest']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup builder requires its complete native source: ' + name);
     }
   }

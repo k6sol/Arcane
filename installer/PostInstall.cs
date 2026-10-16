@@ -20,24 +20,183 @@ namespace Arcane.Installer
         }
     }
 
+    /// <summary>Immutable result of placing and recording both fixed root files under one operation lease. Null fields were not reached.</summary>
+    internal sealed class SetupCompletionOutcome
+    {
+        public readonly bool Ready;
+        /// <summary>null, BACKUP_RETAINED, INSTALLATION, SOURCE, RECORD_CHANGED, LOCKED, PATH, IO, JOURNAL_(read code), LAUNCHER,
+        /// LAUNCHER_JOURNAL, JOURNAL_CHANGED, UNINSTALLER, UNINSTALLER_JOURNAL or LEASE.</summary>
+        public readonly string Code, Root, InstallationId;
+        /// <summary>The launcher placement and its own journal save.</summary>
+        public readonly LauncherSetupOutcome Launcher;
+        public readonly OwnedFileResult Uninstaller;
+        /// <summary>The latest known journal save.</summary>
+        public readonly OwnershipSave Journal;
+        /// <summary>null when no lease was issued.</summary>
+        public readonly LeaseReleaseState? LeaseCleanup;
+        public readonly string LeaseCleanupCode, RetainedLock;
+        internal SetupCompletionOutcome(bool ready, string code, string root, string installationId, LauncherSetupOutcome launcher, OwnedFileResult uninstaller,
+            OwnershipSave journal, LeaseReleaseState? leaseCleanup, string leaseCleanupCode, string retainedLock)
+        {
+            Ready = ready; Code = code; Root = root; InstallationId = installationId; Launcher = launcher; Uninstaller = uninstaller; Journal = journal;
+            LeaseCleanup = leaseCleanup; LeaseCleanupCode = leaseCleanupCode; RetainedLock = retainedLock;
+        }
+    }
+
     internal static class PostInstall
     {
         private static LauncherSetupOutcome Result(bool ready, string code, string root, string id, OwnedFileResult placement, OwnershipSave journal)
         { return new LauncherSetupOutcome(ready, code, root, id, placement, journal); }
 
         /// <summary>Reads only the compiled resource; verifies its exact size and pin before returning any bytes.</summary>
-        public static byte[] LauncherResource(Assembly assembly, long bytes, string sha256)
+        public static byte[] LauncherResource(Assembly assembly, long bytes, string sha256) { return Resource(assembly, "Arcane.Launcher", bytes, sha256, "Launcher unavailable."); }
+
+        /// <summary>Reads only the compiled uninstaller resource; verifies its exact size and pin before returning any bytes.</summary>
+        public static byte[] UninstallerResource(Assembly assembly, long bytes, string sha256) { return Resource(assembly, "Arcane.Uninstaller", bytes, sha256, "Uninstaller unavailable."); }
+
+        /// <summary>One of the fixed compiled resource names only, bounded and pinned.</summary>
+        private static byte[] Resource(Assembly assembly, string name, long bytes, string sha256, string unavailable)
         {
-            if (assembly == null || bytes < 1 || bytes > OwnedFiles.MaxBytes) throw new IOException("Launcher unavailable.");
-            using (Stream stream = assembly.GetManifestResourceStream("Arcane.Launcher"))
+            if (assembly == null || bytes < 1 || bytes > OwnedFiles.MaxBytes) throw new IOException(unavailable);
+            using (Stream stream = assembly.GetManifestResourceStream(name))
             {
-                if (stream == null || stream.Length != bytes) throw new IOException("Launcher unavailable.");
+                if (stream == null || stream.Length != bytes) throw new IOException(unavailable);
                 byte[] value = new byte[(int)bytes]; int read = 0;
-                while (read < value.Length) { int count = stream.Read(value, read, value.Length - read); if (count == 0) throw new IOException("Launcher unavailable."); read += count; }
-                if (stream.ReadByte() != -1 || Sha(value) != sha256) throw new IOException("Launcher unavailable.");
+                while (read < value.Length) { int count = stream.Read(value, read, value.Length - read); if (count == 0) throw new IOException(unavailable); read += count; }
+                if (stream.ReadByte() != -1 || Sha(value) != sha256) throw new IOException(unavailable);
                 return value;
             }
         }
+
+        private static bool Confirmed(InstallOutcome installation)
+        {
+            return installation != null && (installation.State == InstallState.Installed || installation.State == InstallState.AlreadyActive) &&
+                installation.Started && installation.ExitCode == 0 && installation.Published.HasValue && !installation.LockRetained &&
+                installation.Code == null && installation.StderrBytes == 0;
+        }
+
+        /// <summary>A private verified copy of approved bytes, or null.</summary>
+        private static byte[] Approved(byte[] source, long bytes, string sha256)
+        {
+            if (source == null || bytes < 1 || bytes > OwnedFiles.MaxBytes || source.LongLength != bytes || sha256 == null) return null;
+            byte[] copy = (byte[])source.Clone();
+            return Sha(copy) == sha256 ? copy : null;
+        }
+
+        private static bool Same(OwnedFileDescriptor a, OwnedFileDescriptor b)
+        {
+            if (a == null || b == null) return a == null && b == null;
+            return a.Root == b.Root && a.Name == b.Name && a.Bytes == b.Bytes && a.Sha256 == b.Sha256 && a.RootIdentity.SameAs(b.RootIdentity) && a.Identity.SameAs(b.Identity);
+        }
+
+        /// <summary>A fresh leased read must still be exactly <paramref name="expected"/> (journal file and both descriptors) for the current record.</summary>
+        private static bool Fenced(InstalledRecordSnapshot record, OperationLease lease, SetupOwnershipSnapshot expected)
+        {
+            if (expected == null || !InstalledRecord.StillCurrent(record, lease)) return false;
+            OwnershipRead fresh = SetupOwnership.Read(record, lease);
+            return fresh.State == OwnershipReadState.Valid && fresh.Snapshot != null && fresh.Snapshot.Present && expected.Present &&
+                Same(fresh.Snapshot.Journal, expected.Journal) && Same(fresh.Snapshot.Launcher, expected.Launcher) && Same(fresh.Snapshot.Uninstaller, expected.Uninstaller);
+        }
+
+        private static bool Accepted(OwnedFileResult placement)
+        {
+            return placement != null && placement.Descriptor != null &&
+                (placement.State == OwnedFileState.Placed || placement.State == OwnedFileState.Replaced || placement.State == OwnedFileState.Unchanged);
+        }
+
+        private static bool Saved(OwnershipSave save)
+        { return save != null && save.Snapshot != null && (save.State == OwnershipSaveState.Saved || save.State == OwnershipSaveState.Unchanged); }
+
+        private static bool Retained(OwnedFileResult placement, OwnershipSave save)
+        { return placement != null && placement.RetainedBackup != null || save != null && save.Placement != null && save.Placement.RetainedBackup != null; }
+
+        /// <summary>After a confirmed installation, places and records the approved launcher, then the approved uninstaller, under ONE
+        /// operation lease for the current record. The launcher is recorded before the uninstaller is placed, so a later failure keeps
+        /// its authority. Never adopts unrecorded files, retries, takes over a lock or rewrites the record. Ready only when both are
+        /// recorded exactly, the record is unchanged and the lease was released.</summary>
+        public static SetupCompletionOutcome CompleteRootFiles(string root, InstallOutcome installation, byte[] launcher, long launcherBytes, string launcherSha,
+            byte[] uninstaller, long uninstallerBytes, string uninstallerSha)
+        {
+            string id = installation == null ? null : installation.InstallationId, code = null, retainedLock = null;
+            bool ready = false;
+            LauncherSetupOutcome launcherOutcome = null; OwnedFileResult uninstallerPlacement = null; OwnershipSave journal = null;
+            OperationLease lease = null; LeaseRelease released = null;
+            try
+            {
+                if (!Confirmed(installation)) code = "INSTALLATION";
+                else
+                {
+                    // Both approved sources are proven before anything is placed.
+                    byte[] approvedLauncher = Approved(launcher, launcherBytes, launcherSha), approvedUninstaller = Approved(uninstaller, uninstallerBytes, uninstallerSha);
+                    if (approvedLauncher == null || approvedUninstaller == null) code = "SOURCE";
+                    else
+                    {
+                        InstalledRecordSnapshot record = InstalledRecord.Read(root);
+                        if (record.InstallationId != installation.InstallationId || record.ActiveReleaseId != installation.ActiveReleaseId) code = "RECORD_CHANGED";
+                        else
+                        {
+                            LeaseResult acquired = OperationLease.Acquire(record);
+                            retainedLock = acquired.RetainedLock;
+                            if (acquired.State != LeaseState.Acquired || acquired.Lease == null) code = acquired.Code ?? "LEASE";
+                            else
+                            {
+                                lease = acquired.Lease;
+                                code = Complete(record, lease, approvedLauncher, launcherSha, approvedUninstaller, uninstallerSha, id, ref launcherOutcome, ref uninstallerPlacement, ref journal);
+                                ready = code == null || code == "BACKUP_RETAINED";
+                            }
+                        }
+                    }
+                }
+            }
+            catch (InstalledRecordException error) { code = error.Code; ready = false; }
+            catch (Exception) { code = "IO"; ready = false; }
+            finally
+            {
+                if (lease != null)
+                {
+                    try { released = lease.Release(); } catch (Exception) { released = new LeaseRelease(LeaseReleaseState.Unknown, "IO"); }
+                    try { lease.Dispose(); } catch (Exception) { }
+                    if (released.State != LeaseReleaseState.Released)
+                    {
+                        retainedLock = lease.Root + "\\" + InstalledRecord.LockName;
+                        // Never Ready on an unconfirmed release; a primary failure stays the code.
+                        if (ready) { ready = false; code = "LEASE"; }
+                    }
+                }
+            }
+            return new SetupCompletionOutcome(ready, code, root, id, launcherOutcome, uninstallerPlacement, journal,
+                released == null ? (LeaseReleaseState?)null : released.State, released == null ? null : released.Code, retainedLock);
+        }
+
+        private static string Complete(InstalledRecordSnapshot record, OperationLease lease, byte[] launcher, string launcherSha, byte[] uninstaller, string uninstallerSha,
+            string id, ref LauncherSetupOutcome launcherOutcome, ref OwnedFileResult uninstallerPlacement, ref OwnershipSave journal)
+        {
+            OwnershipRead ownership = SetupOwnership.Read(record, lease);
+            if (ownership.State == OwnershipReadState.Kept || ownership.Snapshot == null)
+                return ownership.Code == "RECORD_CHANGED" ? "RECORD_CHANGED" : "JOURNAL_" + ownership.Code;
+            if (!InstalledRecord.StillCurrent(record, lease)) return "RECORD_CHANGED";
+
+            // Launcher first, recorded under the lease before the uninstaller is touched.
+            OwnedFileResult placed = OwnedFiles.Place(record.Root, SetupOwnership.LauncherName, launcher, launcherSha, ownership.Snapshot.Launcher);
+            if (!Accepted(placed)) { launcherOutcome = new LauncherSetupOutcome(false, "PLACEMENT", record.Root, id, placed, null); return "LAUNCHER"; }
+            journal = SetupOwnership.Save(ownership.Snapshot, placed.Descriptor, ownership.Snapshot.Uninstaller, lease);
+            launcherOutcome = new LauncherSetupOutcome(Saved(journal), Saved(journal) ? null : "JOURNAL", record.Root, id, placed, journal);
+            if (!Saved(journal)) return "LAUNCHER_JOURNAL";
+            SetupOwnershipSnapshot afterLauncher = journal.Snapshot;
+            if (!Fenced(record, lease, afterLauncher)) return "JOURNAL_CHANGED";
+
+            // Then the uninstaller, keeping the launcher descriptor exactly as recorded.
+            uninstallerPlacement = OwnedFiles.Place(record.Root, SetupOwnership.UninstallerName, uninstaller, uninstallerSha, afterLauncher.Uninstaller);
+            if (!Accepted(uninstallerPlacement)) return "UNINSTALLER";
+            OwnershipSave second = SetupOwnership.Save(afterLauncher, afterLauncher.Launcher, uninstallerPlacement.Descriptor, lease);
+            journal = second;
+            if (!Saved(second)) return "UNINSTALLER_JOURNAL";
+            // The final journal must name exactly the issued launcher and uninstaller for the unchanged record.
+            if (!Same(second.Snapshot.Launcher, placed.Descriptor) || !Same(second.Snapshot.Uninstaller, uninstallerPlacement.Descriptor) || !Fenced(record, lease, second.Snapshot))
+                return "JOURNAL_CHANGED";
+            return Retained(placed, launcherOutcome.Journal) || Retained(uninstallerPlacement, second) ? "BACKUP_RETAINED" : null;
+        }
+
 
         /// <summary>Places and records the approved launcher only after a confirmed successful installation.
         /// A failure here does not change the engine result. Partial files remain explicit and are never adopted on retry.</summary>

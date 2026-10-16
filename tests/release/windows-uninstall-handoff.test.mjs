@@ -13,14 +13,31 @@ import { createWindowsInstallation } from '../../scripts/windows-installation.mj
 // on owned temporary installations. A fixture-only delete probe confirms the original image is no longer mapped.
 const HARNESS = String.raw`using System; using System.Diagnostics; using System.Drawing; using System.IO; using System.Security.Cryptography; using System.Text; using System.Threading; using System.Windows.Forms; using System.Web.Script.Serialization; using Arcane.Installer;
 internal static class Harness {
+  delegate bool OwnWindow(IntPtr window,IntPtr data);
+  [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool EnumThreadWindows(uint thread,OwnWindow visit,IntPtr data);
+  [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern int GetClassNameW(IntPtr window,StringBuilder text,int length);
+  [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window,StringBuilder text,int length);
+  [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessageW(IntPtr window,uint message,IntPtr w,IntPtr l);
   [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h,int i);
   [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="SetWindowLongPtrW")] static extern IntPtr SetWindowLongPtr(IntPtr h,int i,IntPtr v);
   static JavaScriptSerializer json=new JavaScriptSerializer();
+  static bool refusedDialog;
+  static int RunOwnedEntry(string[] a) {
+    // Dismiss only an information MessageBox created by THIS fixture thread, never the consent form or any other app.
+    uint thread=GetCurrentThreadId();using(ManualResetEvent stop=new ManualResetEvent(false)) {
+      Thread watcher=new Thread(delegate() { while(!stop.WaitOne(20))EnumThreadWindows(thread,delegate(IntPtr window,IntPtr ignored) {
+        StringBuilder kind=new StringBuilder(80),title=new StringBuilder(80);GetClassNameW(window,kind,80);GetWindowTextW(window,title,80);
+        if(kind.ToString()=="#32770" && title.ToString()=="Arcane") { refusedDialog=true;PostMessageW(window,0x10,IntPtr.Zero,IntPtr.Zero); }return true;
+      },IntPtr.Zero); });watcher.IsBackground=true;watcher.Start();
+      try { return UninstallEntry.Run(a); }finally { stop.Set();if(!watcher.Join(5000))throw new Exception("Owned dialog watcher did not finish."); }
+    }
+  }
   static string Sha(byte[] b) { using(SHA256 h=SHA256.Create()) { StringBuilder s=new StringBuilder(); foreach(byte c in h.ComputeHash(b))s.Append(c.ToString("x2"));return s.ToString(); } }
   static void Out(object o) { Console.WriteLine(json.Serialize(o)); Console.Out.Flush(); }
   static ulong Birth(Process p) { ulong t; if(!UninstallHandoff.Creation(p.Handle,out t))throw new Exception("Owned process identity unavailable.");return t; }
   [STAThread] static int Main(string[] a) {
-    if(a[0]=="host-parent")return UninstallEntry.Run(new string[0]);
+    if(a[0]=="host-parent")return RunOwnedEntry(new string[0]);
     if(a[0]=="prepare") {
       var record=InstalledRecord.Read(a[1]);byte[] bytes=File.ReadAllBytes(typeof(Harness).Assembly.Location);
       var file=OwnedFiles.Place(a[1],SetupOwnership.UninstallerName,bytes,Sha(bytes),null);
@@ -68,8 +85,9 @@ internal static class Harness {
         foreach(Form open in Application.OpenForms) { UninstallForm progress=open as UninstallForm;if(progress==null)continue;
           if(progress.Result!=null) { outcome=progress.Result.State.ToString();progress.Close();return; } }
       };
-      int code=UninstallEntry.Run(a);
-      File.WriteAllText(Path.Combine(folder,"child-terminal.json"),json.Serialize(new { code=code,prompts=prompts,outcome=outcome }));return code;
+      if(mode=="host-invalid")a[7]="0000000000000001";
+      int code=RunOwnedEntry(a);
+      File.WriteAllText(Path.Combine(folder,"child-terminal.json"),json.Serialize(new { code=code,prompts=prompts,outcome=outcome,refused=refusedDialog }));return code;
     }
     using(UninstallParent parent=UninstallParent.Read(a)) {
       if(parent==null)return 3;
@@ -152,7 +170,7 @@ test('a rejected command-line handle never closes an existing owned handle', win
   assert.deepEqual(await p.row(), { accepted: false, originalValid: true }); await p.terminal;
 });
 
-for (const mode of ['host', 'host-cancel']) test('actual installed entrypoint and staged native window: ' + mode, windows, async () => {
+for (const mode of ['host', 'host-cancel', 'host-invalid']) test('actual installed entrypoint and staged native window: ' + mode, windows, async () => {
   const s = setup(), folder = join(s.owner, mode); fs.mkdirSync(folder); const root = join(folder, 'Arcane');
   fs.writeFileSync(join(folder, 'fixture-timeout.txt'), mode);
   await s.engine.install({ bundle: s.bundle, installRoot: root });
@@ -168,9 +186,9 @@ for (const mode of ['host', 'host-cancel']) test('actual installed entrypoint an
     imageIdentity = fs.lstatSync(ready.image, { bigint: true }); directoryIdentity = fs.lstatSync(stageDirectory, { bigint: true });
     observer = s.command(s.exe, ['observe', String(ready.id), ready.created]); assert.equal((await observer.row()).ready, true);
     fs.writeFileSync(join(folder, 'proceed'), 'continue owned fixture');
-    await observer.terminal; const exited = await observer.row(); assert.equal(exited.exitCode, 0);
+    await observer.terminal; const exited = await observer.row(); assert.equal(exited.exitCode, mode === 'host-invalid' ? 2 : 0);
     const result = await s.jsonFile(join(folder, 'child-terminal.json'));
-    assert.deepEqual([result.code, result.prompts, result.outcome], mode === 'host' ? [0, 1, 'Removed'] : [0, 1, null], 'the actual host always asks once');
+    assert.deepEqual([result.code, result.prompts, result.outcome, result.refused], mode === 'host' ? [0, 1, 'Removed', false] : mode === 'host-cancel' ? [0, 1, null, false] : [2, 0, null, true], 'valid handoff always asks; an invalid parent is refused before consent');
     if (mode === 'host') assert.equal(fs.existsSync(root), false, 'actual consent-bound transaction removed the owned installation');
     else { assert.deepEqual(fs.readFileSync(join(root, 'installation.json')), before); assert.deepEqual(fs.readFileSync(join(root, 'Uninstall Arcane.exe')), original); }
     assert.equal(fs.existsSync(join(root, 'installation.lock')), false);
