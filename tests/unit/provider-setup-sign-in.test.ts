@@ -22,7 +22,7 @@ class Control {
   }
   click() { this.emit('click', false); }
 }
-function fixture(options: { preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: () => Promise<void>; noBridge?: boolean } = {}) {
+function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: () => Promise<void>; noBridge?: boolean } = {}) {
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
@@ -40,7 +40,7 @@ function fixture(options: { preferred?: SetupProvider; state?: Partial<ProviderS
   let reply: (() => Promise<unknown>) | null = null;
   const native = Object.freeze({ version: 1, ...Object.fromEntries(['status', 'login', 'install', 'launch'].map(action =>
     [action, async (provider: string) => { calls.push(action + ':' + provider); return reply ? reply() : { ...state, provider }; }])) });
-  const controller = startProviderSetup(doc as unknown as Document, { nativeBridge: options.noBridge ? null : native, chat: {
+  const controller = startProviderSetup(doc as unknown as Document, { ...(options.autoSelect ? { autoSelectSignedIn: true } : {}), nativeBridge: options.noBridge ? null : native, chat: {
     providerConnectionStatus: () => connection,
     subscribeProviderStateChange(listener) { subscriber = listener; return () => { subscriber = () => {}; }; },
     ...(options.connectSavedLogin ? { connectForSavedLogin: options.connectSavedLogin } : {}),
@@ -283,4 +283,34 @@ test('ChatGPT browser labels and sanitized native pending/failure messages remai
   const failure = 'Native browser sign-in expired. No completion was verified.';
   f.state({ busy: false, message: failure }); f.control('provider-login-start').emit('click'); await settled();
   assert.equal(f.control('provider-login-message').textContent, failure); assert.equal(f.controller.isSignedIn(), false);
+});
+
+// Sign in once: a saved sign-in on the other provider is used automatically until the human picks explicitly.
+const signedInOnly = (f: ReturnType<typeof fixture>, signed: SetupProvider) => f.reply(async () => {
+  const provider = f.calls.at(-1)!.split(':')[1] as SetupProvider;
+  return { version: 1, provider, installed: true, auth: provider === signed ? 'subscription' : 'signed-out', cliVersion: '2.1.301', busy: false, message: null };
+});
+test('startup switches to the provider that already reports a saved sign-in', async t => {
+  const f = fixture({ autoSelect: true }); t.after(() => f.controller.cleanup());
+  signedInOnly(f, 'claude');
+  for (let i = 0; i < 10; i++) await settled();
+  assert.deepEqual(f.calls.slice(0, 3), ['status:codex', 'status:claude', 'status:claude']);
+  assert.equal(f.controller.chatSurface(), 'claude');
+  assert.equal(JSON.parse(f.stored.get(PROVIDER_PRESENTATION_KEY)!).provider, 'claude');
+});
+test('an explicit provider choice is never overridden by automatic selection', async t => {
+  const f = fixture({ autoSelect: true }); t.after(() => f.controller.cleanup());
+  f.reply(() => new Promise(() => {})); // hold the startup status
+  f.control('provider-login-codex').emit('click');
+  signedInOnly(f, 'claude');
+  f.control('provider-setup-refresh').emit('click');
+  for (let i = 0; i < 10; i++) await settled();
+  assert.equal(f.calls.includes('status:claude'), false);
+  assert.equal(f.controller.chatSurface(), 'codex');
+});
+test('no switch happens when neither provider reports a saved sign-in', async t => {
+  const f = fixture({ autoSelect: true }); t.after(() => f.controller.cleanup());
+  for (let i = 0; i < 10; i++) await settled();
+  assert.deepEqual(f.calls, ['status:codex', 'status:claude']);
+  assert.equal(f.controller.chatSurface(), 'codex');
 });

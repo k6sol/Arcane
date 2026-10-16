@@ -151,6 +151,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/workspace-shell.js', ['dist/apps/desktop/src/workspace-shell.js', 'text/javascript; charset=utf-8']],
     ['/desktop-verification.js', ['dist/apps/desktop/src/desktop-verification.js', 'text/javascript; charset=utf-8']],
     ['/provider-setup.js',['dist/apps/desktop/src/provider-setup.js','text/javascript; charset=utf-8']],
+    ['/claude-chat.js',['dist/apps/desktop/src/claude-chat.js','text/javascript; charset=utf-8']],
     ['/brand/arcane-ridges.png', ['apps/desktop/public/brand/arcane-ridges.png', 'image/png']],
   ]);
   const server = createServer(async (request, response) => {

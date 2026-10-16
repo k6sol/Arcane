@@ -2118,7 +2118,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const token = takeControlToken(window.location, window.history, storage);
   const codexApi=new CodexChatApi(token);
   const codexChat = new CodexChat(document, codexApi);
-  const providerSetup = startProviderSetup(document, {chat:codexChat});
+  const providerSetup = startProviderSetup(document, {chat:codexChat, autoSelectSignedIn:true});
   // Claude chat replaces the Codex panel only while provider setup reports the Claude surface.
   // Codex state is never destroyed; its nodes are only hidden.
   const claudeRoot = document.getElementById('claude-chat');

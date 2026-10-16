@@ -23,6 +23,8 @@ export interface ProviderSetupBridge {
   launch(provider: SetupProvider): Promise<unknown>;
 }
 export interface ProviderSetupOptions {
+  /** Sign in once: at startup, use the other provider when it already reports a saved sign-in and the selected one does not. */
+  autoSelectSignedIn?: boolean;
   chat: {
     providerConnectionStatus(): ProviderConnectionStatus | null;
     subscribeProviderStateChange(listener: () => void): () => void;
@@ -146,6 +148,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   let pendingStatus = false, cancelStatus: (() => void) | null = null;
   let activeAction: 'status' | 'login' | 'install' | 'launch' | null = null;
   let savedConnectionPending = false;
+  // Sign in once: until the human explicitly picks a provider, a startup status that finds the selected provider
+  // signed out may switch to the other provider when that one already reports a saved subscription sign-in.
+  let autoSelect = options.autoSelectSignedIn === true;
   const savedLoginConnections = new Set<string>();
   const signInListeners = new Set<() => void>();
   const choiceListeners = new Set<() => void>();
@@ -281,7 +286,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const invoke = async (action: 'status' | 'login' | 'install' | 'launch') => {
     if (!native || busy || stopped || disposed) return;
     const target = provider, generation = epoch; busy = true; activeAction = action; actionError = null; render();
-    let connectAfterLogin = false, connectSavedLogin = false;
+    let connectAfterLogin = false, connectSavedLogin = false, observed: ProviderSetupState | null = null;
     try {
       const request = native[action](target);
       const result = action === 'status' ? await new Promise<unknown>((resolve, reject) => {
@@ -291,6 +296,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       }) : await request;
       const value = readProviderSetupState(result, target);
       if (!stopped && !disposed && generation === epoch) {
+        observed = value;
         states.set(target, { state: value, observed: Date.now() });
         if (target === 'claude') {
           if (value.auth !== 'subscription') claudeChatEvidence = false;
@@ -344,7 +350,17 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         } else if (loginWatch && loginWatch.remaining <= 0) clearLoginWatch();
       }
       if (pendingStatus && !stopped && !disposed) requestStatus();
+      if (action === 'status' && observed && !observed.busy && observed.auth !== 'subscription' && autoSelect) void preferSignedIn(target, generation);
     }
+  };
+  const preferSignedIn = async (from: SetupProvider, generation: number) => {
+    autoSelect = false;
+    const other: SetupProvider = from === 'codex' ? 'claude' : 'codex';
+    if (!native || stopped || disposed || provider !== from || generation !== epoch) return;
+    try {
+      const value = readProviderSetupState(await native.status(other), other);
+      if (value.auth === 'subscription' && !value.busy && !stopped && !disposed && provider === from && generation === epoch && !busy) choose(other);
+    } catch { /* The selected provider keeps its own sign-in prompt. */ }
   };
   const requestStatus = () => {
     if (!native || stopped || disposed) return;
@@ -356,9 +372,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     const control = button(id); if (control) listen(control, 'click', event => { if (trusted(event) && !control.disabled) void invoke(action); });
   }
   for (const [id, next] of [['provider-login-codex', 'codex'], ['provider-login-claude', 'claude']] as const) {
-    const control = button(id); if (control) listen(control, 'click', event => { if (trusted(event)) choose(next); });
+    const control = button(id); if (control) listen(control, 'click', event => { if (trusted(event)) { autoSelect = false; choose(next); } });
   }
-  listen(select, 'change', event => { if (event.isTrusted && providers(select.value)) choose(select.value); });
+  listen(select, 'change', event => { if (event.isTrusted && providers(select.value)) { autoSelect = false; choose(select.value); } });
   const login = button('provider-login-start');
   if (login) listen(login, 'click', event => {
     if (!trusted(event) || login.disabled || busy || stopped || disposed || !native || status()?.installed === false) return;

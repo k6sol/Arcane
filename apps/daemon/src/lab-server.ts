@@ -296,6 +296,7 @@ export async function createConnectionLab(options: Options) {
           ['/learning-panel.js', [join(options.cwd, 'dist/apps/desktop/src/learning-panel.js'), 'text/javascript']],
           ['/desktop-verification.js', [join(options.cwd, 'dist/apps/desktop/src/desktop-verification.js'), 'text/javascript']],
           ['/provider-setup.js',[join(options.cwd,'dist/apps/desktop/src/provider-setup.js'),'text/javascript']],
+          ['/claude-chat.js',[join(options.cwd,'dist/apps/desktop/src/claude-chat.js'),'text/javascript']],
           ['/native-handoff.js',[join(options.cwd,'dist/apps/desktop/src/native-handoff.js'),'text/javascript']],
           ['/studio-key-settings.js',[join(options.cwd,'dist/apps/desktop/src/studio-key-settings.js'),'text/javascript']],
           ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
