@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { createAssetService } from '../../apps/daemon/src/asset-service.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -34,7 +35,7 @@ async function fixture(t: test.TestContext) {
   closers.push(() => shared.close());
   shared.bind({ conversation: native, kind: 'asset-job', id: 'owned-original-job' });
   const options = { cwd: resolve('.'), projectPath: shared.projectPath, stateDirectory, workStore: work,
-    conversationWorkStore: shared, probe: noProbe };
+    conversationWorkStore: shared, probe: noProbe, codexConnect: refuseNativeCodex };
   return { root, project, stateDirectory, work, shared, options, own: (close: () => void | Promise<void>) => closers.push(close) };
 }
 

@@ -19,6 +19,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server as NativeFixtureServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { pathToFileURL } from 'node:url';
 import { NATIVE_READ_METHODS, NATIVE_HTTP_RESULT_BYTES, NATIVE_DISPLAY_BYTES, readNativeObservation, readNativeReceipt, prepareNativeRead, nativeResultText, sanitizeNativeText, type NativeObservation, type NativeReadInput, prepareStudioKeyGrant, readStudioKeyRecords, readIssuedStudioKey, type StudioKeyRecord, baselineFromReceipt, prepareWorkRun, prepareWorkReview, prepareAssetInput, BUILDER_METHODS, STUDIO_ROOTS, StudioApi, StudioRequestError, prepareCommand, prepareRestore, readReference, takeControlToken, mutationReceipt, type BuilderInput } from '../../apps/desktop/src/studio.js';
 import { ROOTS, READ_METHODS, WRITE_METHODS, type StudioSession, type StudioCommand, type InstanceRef, type Json } from '../../packages/protocol/src/studio.js';
@@ -620,7 +621,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   const evidencePath = join(directory, 'proof.txt'); await writeFile(evidencePath, 'submitted proof');
   let studioStore = new StudioStore({ directory: join(directory, 'studio') });
   let workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
-  let app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
+  let app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [], codexConnect: refuseNativeCodex });
   t.after(async () => {
     await app.close(); workStore.close(); studioStore.close();
     const child = relative(resolve(tmpdir()), resolve(directory)); assert.ok(child && child !== '..' && !child.startsWith('..' + (process.platform === 'win32' ? '\\' : '/')) && !isAbsolute(child));
@@ -714,7 +715,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   await page.reload(); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
   await app.close(); workStore.close(); studioStore.close();
   studioStore = new StudioStore({ directory: join(directory, 'studio') }); workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
-  app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
+  app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [], codexConnect: refuseNativeCodex });
   await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); await text('#work-tasks', 'complete');
   assert.equal(studioStore.keys().length, 2); assert.ok(studioStore.keys().find(key => key.keyId === issued.keyId)?.revokedAt); assert.ok(studioStore.keys().find(key => key.keyId === rotated.keyId)?.revokedAt); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
   assert.equal(workStore.runs().length, 2); assert.equal(workStore.task(first.id).reviewNote, 'Reviewed the revised proof and acceptance criteria');

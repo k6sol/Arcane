@@ -6,12 +6,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { READ_METHODS, WRITE_METHODS, type PairResult, type StudioCommand } from '../../packages/protocol/src/studio.js';
 
 test('real loopback bridge rejects cross-origin, audience confusion and bearerless control; fixture plugin receives actual queue', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'arcane-studio-http-'));
   const store = new StudioStore({ directory });
-  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: join(directory, 'preferences'), studioStore: store, probe: async () => [] });
+  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: join(directory, 'preferences'), studioStore: store, probe: async () => [], codexConnect: refuseNativeCodex });
   t.after(async () => { await app.close(); store.close(); assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + '\\') || resolve(directory).startsWith(resolve(tmpdir()) + '/')); await rm(directory, { recursive: true, force: true }); });
   const post = (path: string, body: unknown, token?: string, origin?: string) => fetch(app.origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) });
   assert.equal((await fetch(app.origin + '/v1/studio/sessions')).status, 401);

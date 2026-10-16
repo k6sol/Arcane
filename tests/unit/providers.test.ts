@@ -8,6 +8,9 @@ import { boundedCommand, spawnNative } from '../../packages/model-adapters/src/p
 import { normalizeCodexModels, normalizeCodexAuth, normalizeClaudeAuth, claudeModelsFromHelp, emptyConnection, featuresFor, reconcileFeatureStates } from '../../packages/model-adapters/src/catalogue.js';
 import { SelectionStore, validateSelection, atomicPreferenceReplace } from '../../packages/core/src/selection.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex, noProviderProbe, NATIVE_FIXTURE_REFUSAL_MESSAGE } from './native-fixture-refusal.js';
+import { randomUUID } from 'node:crypto';
+import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import type { Connection } from '../../packages/protocol/src/providers.js';
 
 const ROOT = resolve(process.cwd());
@@ -149,7 +152,7 @@ test('process runner times out and does not invoke a shell', async () => {
 });
 async function lab(t:test.TestContext) {
   const dir=await directory(t);
-  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:async()=>[connection()]});t.after(()=>l.close());
+  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:async()=>[connection()],codexConnect:refuseNativeCodex});t.after(()=>l.close());
   const headers={Authorization:'Bearer '+l.token,Origin:l.origin,'Content-Type':'application/json'};
   const post=(route:string,body:unknown)=>fetch(l.origin+route,{method:'POST',headers,body:JSON.stringify(body)});
   return {...l,dir,headers,post};
@@ -188,7 +191,7 @@ test('local API rejects stale pairs, invalid JSON, oversized requests and arbitr
 });
 test('corrupt saved preference remains untouched even when save is requested', async t => {
   const dir=await directory(t); await writeFile(join(dir,'selection.json'),'DO NOT OVERWRITE');
-  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:async()=>[connection()]});t.after(()=>l.close());
+  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:async()=>[connection()],codexConnect:refuseNativeCodex});t.after(()=>l.close());
   const headers={Authorization:'Bearer '+l.token,Origin:l.origin,'Content-Type':'application/json'};
   await fetch(l.origin+'/v1/probe',{method:'POST',headers,body:'{}'});
   assert.equal((await fetch(l.origin+'/v1/selection',{method:'POST',headers,body:JSON.stringify(request)})).status,400);
@@ -198,7 +201,7 @@ test('parallel metadata probes are bounded instead of starting duplicate subproc
   const dir=await directory(t); let finish:(v:Connection[])=>void=()=>{};
   let signalStarted:()=>void=()=>{};
   const started=new Promise<void>(resolve=>{signalStarted=resolve;});
-  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:()=>new Promise(resolve=>{finish=resolve;signalStarted();})});t.after(()=>l.close());
+  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:()=>new Promise(resolve=>{finish=resolve;signalStarted();}),codexConnect:refuseNativeCodex});t.after(()=>l.close());
   const headers={Authorization:'Bearer '+l.token,Origin:l.origin,'Content-Type':'application/json'};
   const first=fetch(l.origin+'/v1/probe',{method:'POST',headers,body:'{}'});
   await started;
@@ -210,7 +213,7 @@ test('completed request body deadline does not interrupt native metadata discove
   const dir=await directory(t);
   let finish:(v:Connection[])=>void=()=>{}, signalStarted:()=>void=()=>{};
   const started=new Promise<void>(resolve=>{signalStarted=resolve;});
-  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:()=>new Promise(resolve=>{finish=resolve;signalStarted();})});t.after(()=>l.close());
+  const l=await createConnectionLab({cwd:ROOT,stateDirectory:dir,probe:()=>new Promise(resolve=>{finish=resolve;signalStarted();}),codexConnect:refuseNativeCodex});t.after(()=>l.close());
   let incoming:IncomingMessage|undefined;
   l.server.on('request', req=>{incoming=req;});
   const pending=fetch(l.origin+'/v1/probe',{method:'POST',headers:{Authorization:'Bearer '+l.token,Origin:l.origin,'Content-Type':'application/json'},body:'{}'});
@@ -238,4 +241,23 @@ test('persistent replacement lock preserves original and later queued writes rec
 
 test('preference replacement never retries unrelated errors or changes non-Windows permission semantics',async()=>{
   for(const [platform,errorCode] of [['win32','ENOENT'],['linux','EPERM']] as const){let attempts=0;await assert.rejects(atomicPreferenceReplace('fixture-source','fixture-target',async()=>{attempts++;throw Object.assign(new Error('Fixture refusal'),{code:errorCode});},platform,async()=>assert.fail('Should not back off')),{code:errorCode});assert.equal(attempts,1);}
+});
+
+test('passive fixture refusals: an explicit connect is refused by the injected factory and the probe is empty', async t => {
+  await assert.rejects(refuseNativeCodex(), { message: NATIVE_FIXTURE_REFUSAL_MESSAGE }); assert.deepEqual(await noProviderProbe(), []);
+  // A Studio store mounts the native chat routes, so the explicit connect reaches the injected factory.
+  let refusals = 0;
+  // Own ordered cleanup: close the lab and SQLite store before removing the owned temp root (Windows EBUSY otherwise).
+  await mkdir(TEMP, { recursive: true }); const dir = await mkdtemp(join(TEMP, 'arcane-provider-test-')), store = new StudioStore({ directory: join(dir, 'studio') });
+  const l = await createConnectionLab({ cwd: ROOT, stateDirectory: join(dir, 'lab'), studioStore: store, probe: noProviderProbe,
+    codexConnect: async (...args: unknown[]) => { refusals++; return refuseNativeCodex(...args); } });
+  t.after(async () => { try { await l.close(); } finally { store.close(); const r = relative(TEMP, dir); assert.ok(r.startsWith('arcane-provider-test-') && !r.includes(sep)); await rm(dir, { recursive: true, force: true }); } });
+  const headers = { Authorization: 'Bearer ' + l.token, Origin: l.origin, 'Content-Type': 'application/json' };
+  const response = await fetch(l.origin + '/v1/codex/action', { method: 'POST', headers, body: JSON.stringify( { requestId: randomUUID(), connectionId: null, action: 'connect' }) });
+  const body = await response.json() as Record<string, any>;
+  assert.equal(response.status, 409); assert.equal(body.record?.state, 'rejected'); assert.equal(body.record?.errorCode, 'NATIVE_ERROR');
+  assert.equal(body.replayed, false);
+  const state = await (await fetch(l.origin + '/v1/codex/state', { headers: { Authorization: 'Bearer ' + l.token } })).json() as { state: { snapshot: { connected?: boolean } | null } };
+  assert.equal(refusals, 1, 'the explicit connect reached exactly the injected refusal (never the default native factory)');
+  assert.ok(!state.state.snapshot?.connected, 'no native connection exists after the refused connect');
 });

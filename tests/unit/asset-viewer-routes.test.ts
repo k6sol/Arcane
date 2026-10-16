@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 import { makeFixtureDirectory } from './windows-fixture-paths.js';
@@ -10,7 +11,7 @@ test('product serves only fixed offline viewer modules with same-origin and owne
   const directory = makeFixtureDirectory('arcane-viewer-routes-');
   const studioStore = new StudioStore({ directory: join(directory, 'studio') });
   const workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
-  const app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [] });
+  const app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [], codexConnect: refuseNativeCodex });
   t.after(async () => { await app.close(); workStore.close(); studioStore.close(); });
   const paths = ['/asset-viewer.js', '/glb-preflight.js', '/asset-viewer-runtime.mjs',
     '/vendor/three/build/three.module.js', '/vendor/three/build/three.core.js',

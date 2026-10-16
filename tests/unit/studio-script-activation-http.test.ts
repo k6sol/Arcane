@@ -6,6 +6,7 @@ import { join, relative, sep, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { READ_METHODS, WRITE_METHODS, type StudioCommand } from '../../packages/protocol/src/studio.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../packages/core/src/script-source-verifier.js';
 
@@ -13,7 +14,7 @@ const proof = (source: string): ScriptSourceVerification => ({sourceSha256:creat
 async function fixture(t: test.TestContext, verifier?: ScriptSourceVerifier) {
   const parent = await realpath(tmpdir()), directory = await mkdtemp(join(parent, 'arcane-script-http-'));
   const store = new StudioStore({ directory });
-  const app = await createConnectionLab({cwd:resolve('.'),stateDirectory:join(directory,'preferences'),studioStore:store,probe:async()=>[],...(verifier ? {scriptSourceVerifier:verifier} : {})});
+  const app = await createConnectionLab({cwd:resolve('.'),stateDirectory:join(directory,'preferences'),studioStore:store,probe:async()=>[],codexConnect:refuseNativeCodex,...(verifier ? {scriptSourceVerifier:verifier} : {})});
   t.after(async()=>{await app.close();store.close();const p=relative(parent,directory);assert.ok(p.startsWith('arcane-script-http-')&&!p.includes(sep));await rm(directory,{recursive:true,force:true});});
   const grant = store.createGrant({allowedRoots:['Workspace'],allowWrites:true});
   const pair = store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'synthetic-http-not-native-Studio',placeId:0,universeId:0,name:'TEST FIXTURE',pluginVersion:'fixture'},capabilities:[...READ_METHODS,...WRITE_METHODS]});

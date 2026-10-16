@@ -10,6 +10,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex, noProviderProbe } from './native-fixture-refusal.js';
 import { createAssetService } from '../../apps/daemon/src/asset-service.js';
 import { studioImportPluginArtifactHash } from '../../apps/daemon/src/studio-import-plugin-artifact.js';
 import type { NativeTestConnection, StudioTestView } from '../../apps/daemon/src/studio-test-service.js';
@@ -217,7 +218,7 @@ test('a Studio metadata lab initializes its owned services without a managed ass
       const part=relative(fixtureTempDirectory(),root); assert.ok(part.startsWith('arcane-chat-studio-')&&!isAbsolute(part)&&!part.includes(sep));
       await rm(root,{recursive:true,force:true}); }
   });
-  lab=await createConnectionLab({cwd:process.cwd(),stateDirectory:join(root,'lab'),studioStore:store});
+  lab=await createConnectionLab({cwd:process.cwd(),stateDirectory:join(root,'lab'),studioStore:store,codexConnect:refuseNativeCodex,probe:noProviderProbe});
   const response=await fetch(lab.origin+'/v1/codex/state',{headers:{Authorization:'Bearer '+lab.token},signal:AbortSignal.timeout(5000)});
   assert.equal(response.status,200);
   const body=await response.json() as {state:{chatTasks?:unknown[]}}; assert.equal(body.state.chatTasks,undefined);

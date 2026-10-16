@@ -4,13 +4,14 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 
 test('product root opens the exact desktop chat surface; diagnostics are explicit and entry creates no native activity', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'arcane-preview-entry-'));
   const store = new StudioStore({ directory: join(directory, 'bridge') });
   let probes = 0;
-  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: join(directory, 'preferences'), studioStore: store, probe: async () => { probes++; return []; } });
+  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: join(directory, 'preferences'), studioStore: store, probe: async () => { probes++; return []; }, codexConnect: refuseNativeCodex });
   t.after(async () => {
     await app.close(); store.close();
     const boundary = relative(resolve(tmpdir()), resolve(directory));
@@ -39,7 +40,7 @@ test('product root opens the exact desktop chat surface; diagnostics are explici
 test('standalone metadata lab remains available without the product Studio bridge', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'arcane-preview-lab-'));
   let probes = 0;
-  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: directory, probe: async () => { probes++; return []; } });
+  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: directory, probe: async () => { probes++; return []; }, codexConnect: refuseNativeCodex });
   t.after(async () => {
     await app.close();
     const boundary = relative(resolve(tmpdir()), resolve(directory));

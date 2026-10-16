@@ -8,6 +8,7 @@ import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
 import { createAssetService, HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetService } from '../../apps/daemon/src/asset-service.js';
 import { createAssetConversationHost } from '../../apps/daemon/src/asset-conversation-host.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 import { normalizeRequest, type AssetInput, type AssetJobEvent, type AssetRequest, type Vec3 } from '../../packages/asset-pipeline/src/index.js';
 import { noLinks, within } from '../../packages/asset-pipeline/src/paths.js';
 import { CUSTOM_REQUEST_BYTES } from '../../packages/asset-pipeline/src/recipe.js';
@@ -587,7 +588,7 @@ test('real lab assembly exposes unavailable/required errors without CLI, Studio 
     let lab: Awaited<ReturnType<typeof createConnectionLab>> | null = null;
     try {
       lab = await createConnectionLab({ cwd: ROOT, projectPath: f.projectPath, stateDirectory: join(f.root, withWork ? 'lab-with-work' : 'lab-no-work'),
-        assetService: f.service, probe: async () => [], ...(work === null ? {} : { workStore: work }) });
+        assetService: f.service, probe: async () => [], codexConnect: refuseNativeCodex, ...(work === null ? {} : { workStore: work }) });
       const code = withWork ? 'ASSET_CONVERSATION_REQUIRED' : 'ASSET_CONVERSATION_UNAVAILABLE';
       status(await call(lab.origin, START, INPUT, {}, lab.token, f.agent), 409, code);
       status(await call(lab.origin, JOBS, undefined, {}, lab.token, f.agent), 409, code);

@@ -7,6 +7,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {StudioStore} from '../../packages/storage/src/studio-store.js';
 import {READ_METHODS,WRITE_METHODS} from '../../packages/protocol/src/studio.js';
 import {createConnectionLab} from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex } from './native-fixture-refusal.js';
 
 const identity={clientSessionId:'status-fixture-client',placeId:0,universeId:0,name:'Synthetic status fixture',pluginVersion:'0.1.7'};
 async function fixture(t:test.TestContext){
@@ -57,7 +58,7 @@ test('pending work and unknown effects block recovery without dispatch or replay
 });
 test('real HTTP status contract authenticates exact keys and refuses cross-origin, GET and secret disclosure',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'arcane-plugin-status-http-')),store=new StudioStore({directory});
-  const app=await createConnectionLab({cwd:resolve('.'),stateDirectory:join(directory,'host'),studioStore:store,probe:async()=>[]});
+  const app=await createConnectionLab({cwd:resolve('.'),stateDirectory:join(directory,'host'),studioStore:store,probe:async()=>[],codexConnect:refuseNativeCodex});
   t.after(async()=>{await app.close();store.close();const rel=relative(tmpdir(),directory);assert.ok(rel&&!isAbsolute(rel)&&!rel.startsWith('..'));await rm(directory,{recursive:true,force:true});});
   const key=store.issueKey({allowedRoots:['Workspace'],allowWrites:true},Number(new URL(app.origin).port));
   const body={protocolVersion:1,apiKey:key.apiKey,identity};

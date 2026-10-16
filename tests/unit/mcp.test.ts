@@ -15,6 +15,7 @@ import { DaemonClient, validateDaemonUrl } from '../../apps/mcp/src/daemon-clien
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { SkillRegistry } from '../../apps/mcp/src/skills.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
+import { refuseNativeCodex, noProviderProbe } from './native-fixture-refusal.js';
 import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
 import { HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord, type AssetJobPage } from '../../apps/daemon/src/asset-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
@@ -397,7 +398,7 @@ test('project config generator: env references, bounded output, no home writes o
 
 test('real daemon HTTP + SQLite + SDK: non-native mock plugin pairing, source update, immutable receipt, restore, readonly grant', async t => {
   const stateDirectory=await directory(t),store=new StudioStore({directory:join(stateDirectory,'sqlite')});
-  const lab=await createConnectionLab({cwd:ROOT,stateDirectory:join(stateDirectory,'lab'),studioStore:store});
+  const lab=await createConnectionLab({cwd:ROOT,stateDirectory:join(stateDirectory,'lab'),studioStore:store,codexConnect:refuseNativeCodex,probe:noProviderProbe});
   after(t,async()=>{try { await lab.close(); } finally { store.close(); }});
   const http=async(path:string,body:unknown,bearer?:string)=>{
     const response=await fetch(lab.origin+path,{method:'POST',headers:{'Content-Type':'application/json',...(bearer?{Authorization:`Bearer ${bearer}`}:{})},body:JSON.stringify(body)});
@@ -465,7 +466,7 @@ test('real daemon HTTP + SQLite + SDK: durable work graph, leases, hashed submis
   await writeFile(join(project, 'worker/evidence.txt'), 'actual local fixture evidence\n');
   const studio = new StudioStore({ directory: join(project, 'studio-db') });
   const work = new WorkStore({ directory: join(project, 'work-db'), projectPath: project });
-  const lab = await createConnectionLab({ cwd: ROOT, stateDirectory: join(project, 'lab'), studioStore: studio, workStore: work, projectPath: project });
+  const lab = await createConnectionLab({ cwd: ROOT, stateDirectory: join(project, 'lab'), studioStore: studio, workStore: work, projectPath: project, codexConnect: refuseNativeCodex, probe: noProviderProbe });
   after(t, async () => { try { await lab.close(); } finally { work.close(); studio.close(); } });
   const client = await linked(t, { url: lab.origin }, ROOT, lab.agentToken);
   const created = await call(client, 'work_create', { title: 'SDK task graph', objective: 'Verify durable evidence gating '.repeat(100), tasks: [
@@ -797,7 +798,7 @@ async function customAssetLabFixture(t: test.TestContext) {
     async artifact() { throw new Error('MCP exposes no asset download endpoint.'); },
     async preview() { throw new Error('No native preview bytes in this fixture.'); }, async close() {},
   };
-  const lab = await createConnectionLab({cwd:ROOT,stateDirectory:join(directoryPath,'lab'),assetService:service});
+  const lab = await createConnectionLab({cwd:ROOT,stateDirectory:join(directoryPath,'lab'),assetService:service,codexConnect:refuseNativeCodex,probe:noProviderProbe});
   lab.server.on('request',(request,response)=>response.once('finish',()=>state.statuses.push({method:request.method ?? '',path:request.url ?? '',status:response.statusCode})));
   after(t,()=>lab.close());
   return {lab,inputs,jobs,state,setManifest(value: AssetManifest) { deliveredManifest = value; }};
