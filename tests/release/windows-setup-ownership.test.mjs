@@ -34,6 +34,12 @@ internal static class Harness {
     if (kind == "badsha") return new OwnedFileDescriptor(root, rootId, SetupOwnership.ShortcutName, 2336, sha.ToUpperInvariant(), id);
     return new OwnedFileDescriptor(root, rootId, SetupOwnership.ShortcutName, 2336, sha, id);
   }
+  private static object RD(RegistrationDescriptor d) { return d == null ? null : (object)new Dictionary<string, object> { { "ownerId", d.OwnerId }, { "valuesSha256", d.ValuesSha256 }, { "lastWriteTime", d.LastWriteTime.ToString("x16") } }; }
+  private static RegistrationDescriptor Registration(string spec) {
+    if (spec == "null") return null;
+    return new RegistrationDescriptor(spec == "bad-owner" ? "../other" : "d6b2b661-c7bf-4e40-94e0-4c26096c5c15",
+      spec == "bad-sha" ? "BAD" : Sha(Encoding.UTF8.GetBytes("typed-registration")), spec == "zero" ? 0UL : 0x0123456789abcdefUL);
+  }
   private static void Out(Dictionary<string, object> v) { Console.WriteLine(Json.Serialize(v)); Console.Out.Flush(); }
   private static string Sha(byte[] b) { using (SHA256 s = SHA256.Create()) { StringBuilder x = new StringBuilder(); foreach (byte c in s.ComputeHash(b)) x.Append(c.ToString("x2")); return x.ToString(); } }
   private static int Main(string[] a) {
@@ -44,7 +50,7 @@ internal static class Harness {
       switch (a[i]) {
         case "read": {
           try { R = InstalledRecord.Read(root); OwnershipRead r = SetupOwnership.Read(R); S = r.Snapshot; v["state"] = r.State.ToString(); v["code"] = r.Code;
-            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); v["shortcut"] = S == null ? null : SD(S.Shortcut); }
+            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); v["shortcut"] = S == null ? null : SD(S.Shortcut); v["registration"] = S == null ? null : RD(S.Registration); }
           catch (InstalledRecordException e) { v["state"] = "RecordError"; v["code"] = e.Code; S = null; }
           break; }
         case "acquire": case "acquire-other": {
@@ -71,6 +77,12 @@ internal static class Harness {
           OwnershipSave r = SetupOwnership.SaveShortcut(S, Shortcut(a[++i]), a[i - 1] == "save-shortcut-null-lease" ? null : A);
           v["state"] = r.State.ToString(); v["code"] = r.Code; v["shortcut"] = r.Snapshot == null ? null : SD(r.Snapshot.Shortcut);
           v["placement"] = r.Placement == null ? null : (object)new Dictionary<string, object> { { "state", r.Placement.State.ToString() }, { "code", r.Placement.Code }, { "backup", r.Placement.RetainedBackup } };
+          if (r.Snapshot != null) S = r.Snapshot; break; }
+        case "save-registration": case "save-registration-null-lease": {
+          string operation = a[i]; RegistrationDescriptor d = Registration(a[++i]);
+          OwnershipSave r = SetupOwnership.SaveRegistration(S, d, operation == "save-registration-null-lease" ? null : A);
+          v["state"] = r.State.ToString(); v["code"] = r.Code; v["registration"] = r.Snapshot == null ? null : RD(r.Snapshot.Registration);
+          v["placement"] = r.Placement == null ? null : (object)new object[] { r.Placement.State.ToString(), r.Placement.Code };
           if (r.Snapshot != null) S = r.Snapshot; break; }
         case "wait": Out(v); Console.In.ReadLine(); continue;
         case "barrier": OwnedFiles.Barrier = delegate(string stage) { Dictionary<string, object> b = new Dictionary<string, object>(); b["op"] = "barrier"; b["stage"] = stage; Out(b); Console.In.ReadLine(); }; continue;
@@ -381,4 +393,61 @@ test('shortcut saves need the matching live lease and keep journal compare-and-s
     [() => { const p = join(target, 'installation.json'); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('"releases"', '"releases" ')); }]);
   assert.deepEqual([pick(lines, 'save-shortcut')[0].state, pick(lines, 'save-shortcut')[0].code], ['Refused', 'RECORD_CHANGED']);
   assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+});
+
+
+// Registration descriptors below are synthetic metadata. No registry operation occurs in this journal fixture.
+test('v3 registration metadata round-trips and survives root-tool and shortcut saves, with exact v1/v2 compatibility', windows, async () => {
+  const s = await setup(), target = await s.installed(), programs = external(s);
+  await s.run(target, ['read', 'save', 'null', 'null']); const v1 = fs.readFileSync(journalOf(target), 'utf8');
+  let rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'valid', 'release', 'read']);
+  assert.deepEqual([pick(rows, 'save-registration')[0].state, pick(rows, 'read').at(-1).state], ['Saved', 'Valid']);
+  let j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); const registration = j.registration;
+  assert.deepEqual([j.schemaVersion, j.shortcut, registration], [3, null, { ownerId: 'd6b2b661-c7bf-4e40-94e0-4c26096c5c15', valuesSha256: hash('typed-registration'), lastWriteTime: '0123456789abcdef' }]);
+  assert.deepEqual(pick(rows, 'read').at(-1).registration, registration);
+  rows = await s.run(target, ['read', 'save', 'keep', 'keep', 'acquire', 'read-with-lease', 'save-shortcut', 'valid:' + programs, 'save-with-lease', 'keep', 'keep', 'save-registration', 'valid', 'release']);
+  assert.equal(pick(rows, 'save')[0].state, 'Unchanged'); assert.equal(pick(rows, 'save-with-lease')[0].state, 'Unchanged');
+  assert.equal(pick(rows, 'save-registration')[0].state, 'Unchanged');
+  j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); assert.equal(j.schemaVersion, 3); assert.deepEqual(j.registration, registration); assert.equal(j.shortcut.root, programs);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'null', 'release']);
+  j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); assert.equal(j.schemaVersion, 2); assert.equal(j.registration, null); assert.equal(j.shortcut.root, programs);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-shortcut', 'null', 'release']);
+  assert.equal(fs.readFileSync(journalOf(target), 'utf8'), v1, 'clearing both optional roles returns exact original v1');
+});
+
+test('registration metadata requires canonical bounded fields and a matching live operation lease', windows, async () => {
+  const s = await setup(), target = await s.installed(), other = await s.installed();
+  await s.run(target, ['read', 'save', 'null', 'null']); const before = fs.readFileSync(journalOf(target));
+  for (const ops of [
+    ['read', 'save-registration-null-lease', 'valid'],
+    ['read', 'acquire-other', other, 'save-registration', 'valid', 'release'],
+    ['read', 'acquire', 'read-with-lease', 'release', 'save-registration', 'valid']]) {
+    const r = pick(await s.run(target, ops), ops.includes('save-registration-null-lease') ? 'save-registration-null-lease' : 'save-registration')[0];
+    assert.deepEqual([r.state, r.code, r.placement], ['Refused', 'RECORD_CHANGED', null]); assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+  }
+  const rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'bad-owner', 'save-registration', 'bad-sha', 'save-registration', 'zero', 'release']);
+  for (const r of pick(rows, 'save-registration')) assert.deepEqual([r.state, r.code, r.placement], ['Refused', 'DESCRIPTOR', null]);
+  assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'valid', 'release']); const valid = fs.readFileSync(journalOf(target), 'utf8');
+  for (const edit of [v => { v.schemaVersion = 2; }, v => { v.registration = null; }, v => { v.registration.extra = 1; }, v => { delete v.registration.ownerId; },
+    v => { v.registration.lastWriteTime = 1; }, v => { v.registration.lastWriteTime = '0000000000000000'; }, v => { v.registration.ownerId = v.registration.ownerId.toUpperCase(); },
+    v => { v.registration.valuesSha256 = v.registration.valuesSha256.toUpperCase(); }, v => { v.registration.keyPath = 'other'; }]) {
+    fs.writeFileSync(journalOf(target), valid); rewrite(target, edit); const malformed = fs.readFileSync(journalOf(target));
+    assert.deepEqual((await s.run(target, ['read'])).map(r => [r.state, r.code]), [['Kept', 'MALFORMED']]); assert.deepEqual(fs.readFileSync(journalOf(target)), malformed);
+  }
+});
+
+test('registration saves retain journal and record compare-and-swap, including changes after publication', windows, async () => {
+  const s = await setup();
+  let target = await s.installed(); await s.run(target, ['read', 'save', 'null', 'null']); const before = fs.readFileSync(journalOf(target));
+  let rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'wait', 'save-registration', 'valid', 'release'], [() => {
+    fs.unlinkSync(journalOf(target)); fs.writeFileSync(journalOf(target), before);
+  }]);
+  assert.deepEqual([pick(rows, 'save-registration')[0].state, pick(rows, 'save-registration')[0].code], ['Kept', 'CHANGED']); assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+  target = await s.installed();
+  rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'barrier', 'save-registration', 'valid', 'release'], [() => {
+    const record = join(target, 'installation.json'); fs.writeFileSync(record, fs.readFileSync(record, 'utf8').replace('"releases"', '"releases" '));
+  }]);
+  const r = pick(rows, 'save-registration')[0]; assert.deepEqual([r.state, r.code, r.placement[0]], ['Unknown', 'RECORD_CHANGED', 'Placed']);
+  assert.equal(JSON.parse(fs.readFileSync(journalOf(target), 'utf8')).schemaVersion, 3, 'published metadata retained without claiming a confirmed save');
 });

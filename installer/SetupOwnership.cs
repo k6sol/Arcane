@@ -14,6 +14,16 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Arcane.Installer
 {
+    /// <summary>Metadata for the fixed current-user, 64-bit Arcane uninstall key. No caller-selected path or values.
+    /// A nonce, typed-value hash and observed write time must still be checked against an opened key before use.</summary>
+    internal sealed class RegistrationDescriptor
+    {
+        public readonly string OwnerId, ValuesSha256;
+        public readonly ulong LastWriteTime;
+        internal RegistrationDescriptor(string ownerId, string valuesSha256, ulong lastWriteTime)
+        { OwnerId = ownerId; ValuesSha256 = valuesSha256; LastWriteTime = lastWriteTime; }
+    }
+
     internal sealed class SetupOwnershipSnapshot
     {
         public readonly string Root, InstallationId;
@@ -23,6 +33,7 @@ namespace Arcane.Installer
         /// <summary>The recorded external shortcut (its Root/RootIdentity are the shortcut directory's), or null. Metadata only:
         /// it grants no known-folder authority and never proves the shortcut is still intact.</summary>
         public readonly OwnedFileDescriptor Shortcut;
+        public readonly RegistrationDescriptor Registration;
         internal readonly FileIdentity RootIdentity;
         internal readonly InstalledRecordSnapshot Record;
         /// <summary>The observed journal file (bytes, hash, identity); null when absent.</summary>
@@ -30,9 +41,11 @@ namespace Arcane.Installer
         internal SetupOwnershipSnapshot(InstalledRecordSnapshot record, bool present, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor journal)
             : this(record, present, launcher, uninstaller, null, journal) { }
         internal SetupOwnershipSnapshot(InstalledRecordSnapshot record, bool present, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor shortcut, OwnedFileDescriptor journal)
+            : this(record, present, launcher, uninstaller, shortcut, null, journal) { }
+        internal SetupOwnershipSnapshot(InstalledRecordSnapshot record, bool present, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor shortcut, RegistrationDescriptor registration, OwnedFileDescriptor journal)
         {
             Record = record; Root = record.Root; RootIdentity = record.RootIdentity; InstallationId = record.InstallationId;
-            Present = present; Launcher = launcher; Uninstaller = uninstaller; Shortcut = shortcut; Journal = journal;
+            Present = present; Launcher = launcher; Uninstaller = uninstaller; Shortcut = shortcut; Registration = registration; Journal = journal;
         }
     }
 
@@ -68,6 +81,8 @@ namespace Arcane.Installer
         internal const int MaxJournalBytes = 8192;
         private static readonly string[] Keys = { "schemaVersion", "kind", "installationId", "root", "rootVolume", "rootIndex", "launcher", "uninstaller", "shortcut", "registration" };
         private static readonly string[] DescriptorKeys = { "name", "bytes", "sha256", "volume", "index" };
+        private static readonly string[] RegistrationKeys = { "ownerId", "valuesSha256", "lastWriteTime" };
+        private static readonly Regex OwnerId = new Regex("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\z");
         private static readonly string[] ShortcutKeys = { "root", "rootVolume", "rootIndex", "name", "bytes", "sha256", "volume", "index" };
         private static readonly Regex DeviceName = new Regex("^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|\\z)", RegexOptions.IgnoreCase), ShortAlias = new Regex("~[0-9]");
         private static readonly Regex Hash = new Regex("^[a-f0-9]{64}\\z"), Volume = new Regex("^[a-f0-9]{8}\\z"), Index = new Regex("^[a-f0-9]{16}\\z");
@@ -131,33 +146,33 @@ namespace Arcane.Installer
                     value = json.DeserializeObject(text) as Dictionary<string, object>;
                 }
                 catch (Exception) { return Kept("MALFORMED"); }
-                // v1: no shortcut. v2: exactly one recorded external shortcut. Registration is never recorded here.
-                if (value == null || !Exact(value, Keys) || !(value["schemaVersion"] is int) || (int)value["schemaVersion"] != (value["shortcut"] == null ? 1 : 2) ||
-                    !"arcane-windows-setup-ownership".Equals(value["kind"]) || value["registration"] != null) return Kept("MALFORMED");
+                // v1: root files. v2: an external shortcut. v3: fixed-key registration, with an optional shortcut.
+                if (value == null || !Exact(value, Keys) || !(value["schemaVersion"] is int) || (int)value["schemaVersion"] != (value["registration"] != null ? 3 : value["shortcut"] == null ? 1 : 2) ||
+                    !"arcane-windows-setup-ownership".Equals(value["kind"])) return Kept("MALFORMED");
                 string installationId = value["installationId"] as string, root = value["root"] as string, rootVolume = value["rootVolume"] as string, rootIndex = value["rootIndex"] as string;
                 if (installationId == null || root == null || rootVolume == null || rootIndex == null || !Volume.IsMatch(rootVolume) || !Index.IsMatch(rootIndex)) return Kept("MALFORMED");
-                OwnedFileDescriptor launcher, uninstaller, shortcut;
+                OwnedFileDescriptor launcher, uninstaller, shortcut; RegistrationDescriptor registration;
                 if (!Descriptor(value["launcher"], LauncherName, record, out launcher) || !Descriptor(value["uninstaller"], UninstallerName, record, out uninstaller) ||
-                    !ShortcutEntry(value["shortcut"], out shortcut)) return Kept("MALFORMED");
+                    !ShortcutEntry(value["shortcut"], out shortcut) || !RegistrationEntry(value["registration"], out registration)) return Kept("MALFORMED");
                 // Exactly the bytes this component writes: no whitespace, reordering, duplicates or trailing data.
-                if (!string.Equals(Serialize(installationId, root, rootVolume, rootIndex, launcher, uninstaller, shortcut), text, StringComparison.Ordinal))
+                if (!string.Equals(Serialize(installationId, root, rootVolume, rootIndex, launcher, uninstaller, shortcut, registration), text, StringComparison.Ordinal))
                     return Kept("MALFORMED");
                 // A journal for another installation or another root is never adopted.
                 if (installationId != record.InstallationId || !string.Equals(root, record.Root, StringComparison.Ordinal) ||
                     rootVolume != Hex8(record.RootIdentity.Volume) || rootIndex != Hex16(record.RootIdentity.Index)) return Kept("FOREIGN");
                 OwnedFileDescriptor journal = new OwnedFileDescriptor(record.Root, record.RootIdentity, JournalName, size, Sha(bytes), identity);
-                return new OwnershipRead(OwnershipReadState.Valid, null, new SetupOwnershipSnapshot(record, true, launcher, uninstaller, shortcut, journal));
+                return new OwnershipRead(OwnershipReadState.Valid, null, new SetupOwnershipSnapshot(record, true, launcher, uninstaller, shortcut, registration, journal));
             }
         }
 
         /// <summary>Records <paramref name="launcher"/> and <paramref name="uninstaller"/> (each null or bound to this root and role).
         /// Never throws, never retries and never reports a save whose delivery is unknown.</summary>
         public static OwnershipSave Save(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller)
-        { return SaveBound(current, launcher, uninstaller, current == null ? null : current.Shortcut, null); }
+        { return SaveBound(current, launcher, uninstaller, current == null ? null : current.Shortcut, current == null ? null : current.Registration, null); }
 
         /// <summary>Saves under the live operation lease for this exact journal and record, preserving the journal compare-and-swap.</summary>
         public static OwnershipSave Save(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OperationLease lease)
-        { return lease == null ? new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null) : SaveBound(current, launcher, uninstaller, current == null ? null : current.Shortcut, lease); }
+        { return lease == null ? new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null) : SaveBound(current, launcher, uninstaller, current == null ? null : current.Shortcut, current == null ? null : current.Registration, lease); }
 
         /// <summary>Records (or, with null, clears) the external shortcut under the live operation lease for this exact journal and
         /// record, preserving the observed launcher and uninstaller. Metadata only: never verifies or touches the shortcut file.</summary>
@@ -165,17 +180,25 @@ namespace Arcane.Installer
         {
             if (lease == null) return new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null);
             if (current == null) return new OwnershipSave(OwnershipSaveState.Refused, "SNAPSHOT", null, null);
-            return SaveBound(current, current.Launcher, current.Uninstaller, shortcut, lease);
+            return SaveBound(current, current.Launcher, current.Uninstaller, shortcut, current.Registration, lease);
         }
 
-        private static OwnershipSave SaveBound(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor shortcut, OperationLease lease)
+        /// <summary>Records fixed-key registration metadata under the exact live lease, preserving all file roles.</summary>
+        public static OwnershipSave SaveRegistration(SetupOwnershipSnapshot current, RegistrationDescriptor registration, OperationLease lease)
+        {
+            if (lease == null) return new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null);
+            if (current == null) return new OwnershipSave(OwnershipSaveState.Refused, "SNAPSHOT", null, null);
+            return SaveBound(current, current.Launcher, current.Uninstaller, current.Shortcut, registration, lease);
+        }
+
+        private static OwnershipSave SaveBound(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor shortcut, RegistrationDescriptor registration, OperationLease lease)
         {
             try
             {
                 if (current == null || current.Record == null || current.Present != (current.Journal != null)) return new OwnershipSave(OwnershipSaveState.Refused, "SNAPSHOT", null, null);
-                if (!Bound(launcher, LauncherName, current) || !Bound(uninstaller, UninstallerName, current) || !ShortcutBound(shortcut)) return new OwnershipSave(OwnershipSaveState.Refused, "DESCRIPTOR", null, null);
+                if (!Bound(launcher, LauncherName, current) || !Bound(uninstaller, UninstallerName, current) || !ShortcutBound(shortcut) || !RegistrationBound(registration)) return new OwnershipSave(OwnershipSaveState.Refused, "DESCRIPTOR", null, null);
                 if (!Current(current.Record, lease)) return new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null);
-                string text = Serialize(current.InstallationId, current.Root, Hex8(current.RootIdentity.Volume), Hex16(current.RootIdentity.Index), launcher, uninstaller, shortcut);
+                string text = Serialize(current.InstallationId, current.Root, Hex8(current.RootIdentity.Volume), Hex16(current.RootIdentity.Index), launcher, uninstaller, shortcut, registration);
                 byte[] bytes = new UTF8Encoding(false, true).GetBytes(text);
                 if (bytes.Length > MaxJournalBytes) return new OwnershipSave(OwnershipSaveState.Refused, "DESCRIPTOR", null, null);
                 string sha = Sha(bytes);
@@ -185,7 +208,7 @@ namespace Arcane.Installer
                 if (placement.State == OwnedFileState.Unchanged)
                 {
                     if (!Current(current.Record, lease)) return new OwnershipSave(OwnershipSaveState.Unknown, "RECORD_CHANGED", null, placement);
-                    return new OwnershipSave(OwnershipSaveState.Unchanged, null, new SetupOwnershipSnapshot(current.Record, true, launcher, uninstaller, shortcut, placement.Descriptor), placement);
+                    return new OwnershipSave(OwnershipSaveState.Unchanged, null, new SetupOwnershipSnapshot(current.Record, true, launcher, uninstaller, shortcut, registration, placement.Descriptor), placement);
                 }
                 if (placement.State != OwnedFileState.Placed && placement.State != OwnedFileState.Replaced)
                 {
@@ -194,7 +217,7 @@ namespace Arcane.Installer
                 }
                 // The journal was published; it is only a confirmed save if the installation is still the same one.
                 if (!Current(current.Record, lease)) return new OwnershipSave(OwnershipSaveState.Unknown, "RECORD_CHANGED", null, placement);
-                SetupOwnershipSnapshot next = new SetupOwnershipSnapshot(current.Record, true, launcher, uninstaller, shortcut, placement.Descriptor);
+                SetupOwnershipSnapshot next = new SetupOwnershipSnapshot(current.Record, true, launcher, uninstaller, shortcut, registration, placement.Descriptor);
                 return new OwnershipSave(OwnershipSaveState.Saved, placement.Code, next, placement);
             }
             catch (Exception) { return new OwnershipSave(OwnershipSaveState.Unknown, "IO", null, null); }
@@ -226,12 +249,12 @@ namespace Arcane.Installer
 
         /// <summary>Canonical journal text: fixed key order, no whitespace, LF. No field refers to the journal's own bytes.
         /// Without a shortcut this is exactly the original v1 text; with one it is v2.</summary>
-        private static string Serialize(string installationId, string root, string rootVolume, string rootIndex, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor shortcut)
+        private static string Serialize(string installationId, string root, string rootVolume, string rootIndex, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OwnedFileDescriptor shortcut, RegistrationDescriptor registration)
         {
             Dictionary<string, object> value = new Dictionary<string, object>();
-            value["schemaVersion"] = shortcut == null ? 1 : 2; value["kind"] = "arcane-windows-setup-ownership"; value["installationId"] = installationId; value["root"] = root;
+            value["schemaVersion"] = registration != null ? 3 : shortcut == null ? 1 : 2; value["kind"] = "arcane-windows-setup-ownership"; value["installationId"] = installationId; value["root"] = root;
             value["rootVolume"] = rootVolume; value["rootIndex"] = rootIndex; value["launcher"] = Entry(launcher); value["uninstaller"] = Entry(uninstaller);
-            value["shortcut"] = ShortcutJson(shortcut); value["registration"] = null;
+            value["shortcut"] = ShortcutJson(shortcut); value["registration"] = RegistrationJson(registration);
             JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = MaxJournalBytes * 4;
             return json.Serialize(value) + "\n";
         }
@@ -297,6 +320,28 @@ namespace Arcane.Installer
                 if (component.Length == 0 || component == "." || component == ".." || component.EndsWith(".", StringComparison.Ordinal) ||
                     component.EndsWith(" ", StringComparison.Ordinal) || DeviceName.IsMatch(component) || ShortAlias.IsMatch(component)) return false;
             try { return string.Equals(Path.GetFullPath(root), root, StringComparison.Ordinal); } catch (Exception) { return false; }
+        }
+
+        private static bool RegistrationBound(RegistrationDescriptor descriptor)
+        { return descriptor == null || descriptor.OwnerId != null && OwnerId.IsMatch(descriptor.OwnerId) && descriptor.ValuesSha256 != null && Hash.IsMatch(descriptor.ValuesSha256) && descriptor.LastWriteTime != 0; }
+
+        private static Dictionary<string, object> RegistrationJson(RegistrationDescriptor descriptor)
+        {
+            if (descriptor == null) return null;
+            return new Dictionary<string, object> { { "ownerId", descriptor.OwnerId }, { "valuesSha256", descriptor.ValuesSha256 }, { "lastWriteTime", Hex16(descriptor.LastWriteTime) } };
+        }
+
+        private static bool RegistrationEntry(object value, out RegistrationDescriptor descriptor)
+        {
+            descriptor = null;
+            if (value == null) return true;
+            Dictionary<string, object> d = value as Dictionary<string, object>;
+            if (d == null || !Exact(d, RegistrationKeys)) return false;
+            string owner = d["ownerId"] as string, sha = d["valuesSha256"] as string, time = d["lastWriteTime"] as string;
+            if (time == null || !Index.IsMatch(time)) return false;
+            RegistrationDescriptor parsed = new RegistrationDescriptor(owner, sha, ulong.Parse(time, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture));
+            if (!RegistrationBound(parsed)) return false;
+            descriptor = parsed; return true;
         }
 
         private static bool Exact(Dictionary<string, object> value, string[] keys)
