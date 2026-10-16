@@ -536,3 +536,51 @@ test('artifact GET bounds concurrent verification and keeps timeout admission un
   const response = await h.call(artifactUrl(f.jobId));
   assert.equal(response.status, 200, 'Admission releases only after the original read settles.');
 });
+
+test('worker status check route: human control only, exact {jobId}, fixed refusal guidance, no native surface', async t => {
+  const dir = await temporary(t), outputRoot = join(dir, 'assets'), request = normalizeRequest({ template: 'hero-prop', name: 'lost' });
+  const closedId = randomUUID(), legacyId = randomUUID();
+  const closedRecord = { schemaVersion: 1, role: 'probe', reservationId: '00000000-0000-4000-8000-000000000001', reservedAt: '2026-10-16T02:00:01.0000000Z',
+    state: 'closed', closure: 'exit-observed', closedAt: '2026-10-16T02:00:02.0000000Z', identity: null };
+  for (const [jobId, workers] of [[closedId, [closedRecord]], [legacyId, undefined]] as const) {
+    const jobDir = join(outputRoot, 'lost-' + jobId); await mkdir(jobDir, { recursive: true });
+    await writeFile(join(jobDir, 'job.json'), JSON.stringify({ schemaVersion: 1, jobId, state: 'interrupted', request, error: null, directory: '/outside', ...(workers ? { workers } : {}) }));
+  }
+  const service = await createAssetService({ cwd: ROOT, outputRoot, ...missing(dir) }), route = assetRoutes(service);
+  let origin = '';
+  const server = createServer(async (req, res) => { if (!await route(req, res, new URL(req.url ?? '/', origin), TOKEN, origin, AGENT_TOKEN)) { res.writeHead(404); res.end(); } });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const address = server.address(); assert.ok(address && typeof address !== 'string'); origin = 'http://127.0.0.1:' + address.port;
+  t.after(async () => { await new Promise<void>(r => server.close(() => r())); await service.close(); });
+  const post = async (body: unknown, headers: Record<string, string> = {}, path = '/v1/assets/resolve-interrupted') => {
+    const response = await fetch(origin + path, { method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body),
+      headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json', Origin: origin, ...headers } });
+    return { status: response.status, json: await response.json().catch(() => null) as Record<string, unknown> | null };
+  };
+  const marker = (jobId: string) => readFile(join(outputRoot, 'lost-' + jobId, 'worker-resolution.json'), 'utf8').then(() => true, () => false);
+  // Authority before any body is read: agent bearer, missing/wrong bearer, cross-origin and cross-site are refused.
+  assert.deepEqual([(await post({ jobId: closedId }, { Authorization: 'Bearer ' + AGENT_TOKEN })).status, (await post({ jobId: closedId }, { Authorization: 'Bearer wrong' })).status,
+    (await post({ jobId: closedId }, { Origin: 'https://evil.invalid' })).status, (await post({ jobId: closedId }, { 'Sec-Fetch-Site': 'cross-site' })).status], [403, 401, 403, 403]);
+  assert.equal((await post({ jobId: closedId }, { Authorization: 'Bearer ' + AGENT_TOKEN })).json?.error, 'HUMAN_ONLY');
+  assert.equal(await marker(closedId), false);
+  assert.equal((await fetch(origin + '/v1/assets/resolve-interrupted', { headers: { Authorization: 'Bearer ' + TOKEN } })).status, 405);
+  for (const body of [{}, { jobId: closedId, extra: 1 }, { jobId: 7 }, { jobId: 'not-a-uuid' }, [closedId]]) assert.equal((await post(body)).status, 400, JSON.stringify(body));
+  assert.equal((await post('{"jobId":')).status, 400);
+  assert.equal((await post({ jobId: randomUUID() })).status, 404);
+  // Legacy: fixed guidance, no paths/PIDs, nothing written, still fenced.
+  const refused = await post({ jobId: legacyId });
+  assert.equal(refused.status, 409); assert.equal(refused.json?.error, 'RECONCILIATION_UNVERIFIED'); assert.equal(refused.json?.reason, 'no-workers-recorded');
+  assert.match(String(refused.json?.message), /cannot confirm the worker stopped/); assert.doesNotMatch(JSON.stringify(refused.json), /[A-Za-z]:\|outside|assets/);
+  assert.equal(await marker(legacyId), false);
+  // Human check of the all-closed job: resolved, still interrupted, no artifacts, and visible in history.
+  const ok = await post({ jobId: closedId });
+  assert.equal(ok.status, 200); const resolution = ok.json?.resolution as Record<string, unknown>;
+  assert.equal(resolution.status, 'resolved'); assert.deepEqual(resolution.evidence, ['closed-exit-observed']); assert.equal(await marker(closedId), true);
+  const jobs = (await (await fetch(origin + '/v1/assets/jobs', { headers: { Authorization: 'Bearer ' + TOKEN } })).json()) as { jobs: { jobId: string; state: string; manifestAvailable: boolean; resolution?: { status: string } }[] };
+  const shown = jobs.jobs.find(j => j.jobId === closedId)!;
+  assert.equal(shown.state, 'interrupted'); assert.equal(shown.manifestAvailable, false); assert.equal(shown.resolution?.status, 'resolved');
+  // The legacy job still holds the coarse fence for everyone.
+  await assert.rejects(service.start(request), (e: unknown) => (e as { code?: string }).code === 'RECONCILIATION');
+  // No native or generic agent action exists for this operation.
+  assert.equal((await post({ jobId: closedId }, { Authorization: 'Bearer ' + AGENT_TOKEN }, '/v1/assets/native/resolve-interrupted')).status, 404);
+});

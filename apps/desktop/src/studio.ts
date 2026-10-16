@@ -254,9 +254,15 @@ function readAssetConversation(value: unknown): AssetConversation {
   return { provider: r.provider as AssetConversation['provider'], threadId: r.threadId, sessionId: r.sessionId };
 }
 function readAssetJob(value: unknown): AssetJobRecord {
-  const r = assetFields(value, ['schemaVersion', 'jobId', 'directory', 'manifestPath', 'request', 'state', 'stage', 'startedAt', 'updatedAt', 'events', 'manifestAvailable', 'error'], ['finishedAt']);
+  const r = assetFields(value, ['schemaVersion', 'jobId', 'directory', 'manifestPath', 'request', 'state', 'stage', 'startedAt', 'updatedAt', 'events', 'manifestAvailable', 'error'], ['finishedAt', 'resolution']);
   const states = ['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
   const time = (v: unknown) => assetText(v, 64) && Number.isFinite(Date.parse(v));
+  if (r.resolution !== undefined) {
+    // Display-only worker-status check for an interrupted job; never success, artifacts or retry.
+    const resolution = r.state === 'interrupted' && record(r.resolution) && r.resolution.status === 'resolved'
+      ? assetFields(r.resolution, ['status', 'resolvedAt']) : assetFields(r.resolution, ['status']);
+    if (r.state !== 'interrupted' || !['resolved', 'invalid', 'uncertain'].includes(String(resolution.status)) || (resolution.status === 'resolved' && !time(resolution.resolvedAt))) throw new Error('Invalid recorded worker status check.');
+  }
   if (r.schemaVersion !== 1 || !assetId(r.jobId) || !assetText(r.directory, 4096) || !(r.manifestPath === null || assetText(r.manifestPath, 4096)) || !states.includes(String(r.state)) || !assetText(r.stage, 256) || !time(r.startedAt) || !time(r.updatedAt) || (r.finishedAt !== undefined && !time(r.finishedAt)) || typeof r.manifestAvailable !== 'boolean' || !Array.isArray(r.events) || r.events.length > 4096) throw new Error('Invalid recorded asset job.');
   if (record(r.request) && r.request.template === 'adopted-glb') {
     const request=assetFields(r.request,['schemaVersion','template','name','path','sourceSha256','sourceBytes']);
@@ -468,20 +474,50 @@ async function boundedNativeJson(response: Response, label = 'Native'): Promise<
 export class StudioRequestError extends Error {
   constructor(message: string, readonly outcome: 'rejected' | 'unknown' | 'unavailable', readonly details?: { code: string; status: number; payload: unknown }) { super(message); }
 }
+export interface AssetWorkerStatus {
+  jobId:string;status:'resolved';resolvedAt:string;evidence:('closed-exit-observed'|'closed-not-started'|'pid-absent'|'pid-reused')[];alreadyResolved:boolean;
+}
+const workerJobId=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value);
+export function readAssetWorkerStatus(value:unknown,jobId:string):AssetWorkerStatus{
+  const envelope=assetFields(value,['resolution']);
+  const result=assetFields(envelope.resolution,['jobId','status','resolvedAt','evidence','alreadyResolved']);
+  if(utf8(JSON.stringify(value))>8192||!workerJobId(jobId)||result.jobId!==jobId||result.status!=='resolved'||
+      !assetText(result.resolvedAt,64)||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(result.resolvedAt)||!Number.isFinite(Date.parse(result.resolvedAt))||
+      new Date(result.resolvedAt).toISOString()!==result.resolvedAt.slice(0,23)+'Z'||typeof result.alreadyResolved!=='boolean'||
+      !Array.isArray(result.evidence)||result.evidence.length<1||result.evidence.length>6||
+      result.evidence.some(value=>!['closed-exit-observed','closed-not-started','pid-absent','pid-reused'].includes(value)))
+    throw new Error('Invalid worker status receipt.');
+  return structuredClone(result) as unknown as AssetWorkerStatus;
+}
+function workerStatusMessage(error:unknown):string{
+  if(error instanceof StudioRequestError&&error.details?.code==='RECONCILIATION_UNVERIFIED'&&record(error.details.payload)){
+    const reason=error.details.payload.reason;
+    if(reason==='same-worker-running')return 'This job’s worker is still running. Wait for it to finish, then check again.';
+    if(['reservation-unresolved','no-workers-recorded','records-invalid'].includes(String(reason)))return 'Arcane has no complete worker record for this job. Asset work remains paused; inspect the retained job details.';
+    return 'The worker’s status could not be confirmed. Asset work remains paused.';
+  }
+  return error instanceof StudioRequestError&&error.outcome==='unknown'
+    ?'The worker check’s outcome is unknown. Refresh the recorded job before checking again.'
+    :'The worker status check could not finish. Refresh the recorded job and try again.';
+}
 export class StudioApi {
   constructor(private readonly token: string, private readonly transport: typeof fetch = fetch, private readonly deadline = 12000) {}
-  async request<T>(path: string, input?: unknown, format: 'json' | 'preview' = 'json', deadline = this.deadline): Promise<T> {
+  async request<T>(path: string, input?: unknown, format: 'json' | 'preview' = 'json', deadline = this.deadline, signal?:AbortSignal): Promise<T> {
     if (!/^[a-f0-9]{64}$/.test(this.token)) throw new StudioRequestError('Open /studio with the launcher’s local control token. This tab has no valid token.', 'rejected');
     const nativeRoute = /^\/v1\/native\/(?:capabilities|read)$/.test(path);
     const conversationRoute = /^\/v1\/assets\/conversation-(?:jobs(?:\?[^#]*)?|start)$/.test(path);
-    if (!(nativeRoute || conversationRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
+    const workerRoute=path==='/v1/assets/resolve-interrupted';
+    if (!(nativeRoute || conversationRoute || workerRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
+    if(workerRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact interrupted asset job.','rejected');
     if (conversationRoute) {
       const route = new URL(path, 'http://127.0.0.1'), query = route.searchParams;
       const listing = route.pathname.endsWith('/conversation-jobs');
       if (format !== 'json' || (listing ? input !== undefined : input === undefined) || [...query.keys()].some(key => !['limit', 'after'].includes(key) || query.getAll(key).length !== 1) || (query.has('limit') && (!/^(?:[1-9]|[1-5][0-9]|6[0-4])$/.test(query.get('limit')!))) || (query.has('after') && !assetText(query.get('after'), 1024))) throw new StudioRequestError('Unsupported local asset conversation request.', 'rejected');
       if (!listing) input = prepareAssetInput(input);
     }
-    const post = input !== undefined, controller = new AbortController();
+    if(signal?.aborted)throw new StudioRequestError('The local request was cancelled before dispatch.','rejected');
+    const post = input !== undefined, controller = new AbortController(),abort=()=>controller.abort();
+    signal?.addEventListener('abort',abort,{once:true});
     const timer = setTimeout(() => controller.abort(), deadline);
     try {
       const transport = this.transport;
@@ -493,7 +529,7 @@ export class StudioApi {
         return blob as T;
       }
       let data: unknown;
-      try { data = nativeRoute || conversationRoute || /^\/v1\/assets\/jobs\?limit=/.test(path) ? await boundedNativeJson(response, nativeRoute ? 'Native' : 'Asset history') : await response.json(); } catch (error) { if (nativeRoute && error instanceof StudioRequestError) throw error; throw new StudioRequestError(error instanceof Error ? error.message : 'The daemon returned an unreadable response (HTTP ' + response.status + ').', post && response.status < 400 || response.status >= 500 && post ? 'unknown' : 'unavailable'); }
+      try { data = nativeRoute || conversationRoute || workerRoute || /^\/v1\/assets\/jobs\?limit=/.test(path) ? await boundedNativeJson(response, nativeRoute ? 'Native' : workerRoute?'Worker status':'Asset history') : await response.json(); } catch (error) { if (nativeRoute && error instanceof StudioRequestError) throw error; throw new StudioRequestError(error instanceof Error ? error.message : 'The daemon returned an unreadable response (HTTP ' + response.status + ').', post && response.status < 400 || response.status >= 500 && post ? 'unknown' : 'unavailable'); }
       if (!response.ok) {
         const detail = record(data) && typeof data.message === 'string' ? data.message : 'Local request failed.';
         const code = record(data) && typeof data.error === 'string' ? data.error + ': ' : '';
@@ -503,7 +539,13 @@ export class StudioApi {
     } catch (error) {
       if (error instanceof StudioRequestError) throw error;
       throw new StudioRequestError(controller.signal.aborted ? 'The local request timed out.' : error instanceof Error ? error.message : 'The local request could not be completed.', post ? 'unknown' : 'unavailable');
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer);signal?.removeEventListener('abort',abort); }
+  }
+  async assetWorkerStatus(jobId:string,signal?:AbortSignal):Promise<AssetWorkerStatus>{
+    if(!workerJobId(jobId))throw new StudioRequestError('Choose one exact interrupted asset job.','rejected');
+    const value=await this.request('/v1/assets/resolve-interrupted',{jobId},'json',30000,signal);
+    try{return readAssetWorkerStatus(value,jobId);}
+    catch{throw new StudioRequestError('The worker status receipt could not be confirmed.','unknown');}
   }
   nativeCapabilities() { return this.request<NativeObservation>('/v1/native/capabilities', undefined, 'json', 45000); }
   nativeRead(input: NativeReadRequest) { return this.request<NativeObservation>('/v1/native/read', input, 'json', 45000); }
@@ -628,6 +670,8 @@ export class StudioWorkbench {
   private assetCardsLimit = 8;
   private assetAvailable = false;
   private assetBusy = false;
+  private assetWorkerCheck:AbortController|null=null;
+  private readonly assetWorkerMessages=new Map<string,string>();
   private assetProbed = false;
   private assetUnknown = '';
   private assetReadAfterUnknown = false;
@@ -800,6 +844,7 @@ export class StudioWorkbench {
     this.el<HTMLButtonElement>('native-copy-token').disabled = true;
   }
   stop() {
+    this.assetWorkerCheck?.abort();this.assetWorkerCheck=null;
     this.productMetadataEpoch++; this.observeProjectPath(null);
     this.removeAssetContext?.(); this.removeAssetContext = null; this.removeAssetProject?.(); this.removeAssetProject = null;
     this.removeSignIn?.(); this.removeSignIn = null;
@@ -1372,6 +1417,7 @@ export class StudioWorkbench {
     if (refresh) queueMicrotask(() => { if (!this.stopped && this.assetContext.ready()) void this.refreshAssets(); });
   }
   private resetAssetContext() {
+    this.assetWorkerCheck?.abort();this.assetWorkerCheck=null;this.assetWorkerMessages.clear();
     this.assetReadEpoch++; this.assetNextCursor = null; this.assetJobs = []; this.assetJobId = '';
     this.automaticAssets.reset(); this.clearChatAssets(); this.assetCardsLimit = 8;
     this.assetAvailable = false; this.assetBusy = false; this.assetProbed = false; this.assetUnknown = ''; this.assetReadAfterUnknown = false;
@@ -1478,7 +1524,7 @@ export class StudioWorkbench {
     const ticket = this.assetContext.capture();
     if (this.stopped || ticket.global || !ticket.conversation || !this.assetSignedIn() || !this.assetAvailable || !this.assetJobs.length) { this.clearChatAssets(); return; }
     const jobs = this.assetJobs.slice(0, this.assetCardsLimit);
-    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, job.request.name])]);
+    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, job.request.name,job.resolution,this.assetWorkerMessages.get(job.jobId)])]);
     if (signature === this.assetCardsSignature) return;
     this.assetCardsSignature = signature; const epoch = ++this.assetCardsEpoch;
     const section = this.make('div', undefined, 'chat-asset-list'); section.setAttribute('role', 'list');
@@ -1489,6 +1535,7 @@ export class StudioWorkbench {
       const name = job.request.name.replaceAll('-', ' '), title = this.make('strong', name.charAt(0).toUpperCase() + name.slice(1));
       const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (job.request.template === 'adopted-glb' ? ' · Adopted GLB · preview only' : ''), 'chat-asset-state');
       const info = this.make('div', undefined, 'chat-asset-info'); info.append(title, state); card.append(info);
+      this.renderWorkerStatus(card,job,current);
       if (job.state === 'succeeded' && job.manifestAvailable) {
         const view = this.make('button', 'View', 'secondary'); view.type = 'button'; view.setAttribute('aria-label', 'View ' + name); view.disabled = this.assetBusy;
         view.addEventListener('click', () => {
@@ -1514,7 +1561,7 @@ export class StudioWorkbench {
     }
   }
   private renderAssetControls() {
-    const ticket = this.assetContext.capture(), running = this.assetJobs.some(j => j.state === 'running'), interrupted = this.assetJobs.some(j => j.state === 'interrupted'), blocked = !this.assetSignedIn() || !this.assetAvailable || this.assetBusy || Boolean(this.assetUnknown) || !this.assetContext.ready();
+    const ticket = this.assetContext.capture(), running = this.assetJobs.some(j => j.state === 'running'), interrupted = this.assetJobs.some(j => j.state === 'interrupted'&&j.request.template!=='adopted-glb'&&j.resolution?.status!=='resolved'), blocked = !this.assetSignedIn() || !this.assetAvailable || this.assetBusy || Boolean(this.assetUnknown) || !this.assetContext.ready();
     let valid = false; try { this.text('asset-request-preview', json(this.assetInput())); valid = true; } catch (error) { this.text('asset-request-preview', error instanceof Error ? error.message : String(error)); }
     this.el<HTMLButtonElement>('asset-start').disabled = blocked || !valid || !this.assetProbed || running || interrupted || !this.assetContext.canStart();
     this.text('asset-start', ticket.global ? 'Start unscoped template job' : 'Start template job in this chat');
@@ -1532,11 +1579,13 @@ export class StudioWorkbench {
     this.el<HTMLSelectElement>('asset-job-picker').disabled = this.assetBusy;
     this.el('asset-unknown').hidden = !this.assetUnknown; this.text('asset-unknown-message', this.assetUnknown);
     this.el<HTMLButtonElement>('asset-acknowledge').disabled = !this.assetAvailable || !this.assetReadAfterUnknown || this.assetBusy;
-    this.text('asset-gate', !this.assetContext.ready() ? 'A native chat in this exact project is required.' : ticket.global && !this.assetContext.canStart() ? 'Global history is for inspection. Choose This chat to start a template job.' : interrupted ? 'Worker supervision was lost. Inspect retained output and resolve it through trusted host configuration.' : running ? 'A job is running. Its stage and final manifest are recorded below.' : !this.assetProbed ? 'Probe the installed Blender runtime before starting a template job.' : ticket.global ? 'This start is unscoped and will not be bound to a chat.' : 'Local runtime observed. Start runs only the selected fixed template in this chat.');
+    this.text('asset-gate', !this.assetContext.ready() ? 'A native chat in this exact project is required.' : ticket.global && !this.assetContext.canStart() ? 'Global history is for inspection. Choose This chat to start a template job.' : interrupted ? 'An interrupted job pauses new asset work. Check its worker status in the asset card or recorded job.' : running ? 'A job is running. Its stage and final manifest are recorded below.' : !this.assetProbed ? 'Probe the installed Blender runtime before starting a template job.' : ticket.global ? 'This start is unscoped and will not be bound to a chat.' : 'Local runtime observed. Start runs only the selected fixed template in this chat.');
     this.renderChatAssets();
   }
   private renderAssetJob() {
     const job = this.currentAssetJob(); this.text('asset-job-record', job ? json(job) : 'No asset job selected.');
+    const workerHost=this.doc.getElementById('asset-worker-status');
+    if(workerHost){workerHost.replaceChildren();if(job)this.renderWorkerStatus(workerHost,job,()=>this.currentAssetJob()?.jobId===job.jobId);}
     const summary = this.el('asset-job-summary'); summary.setAttribute('data-asset-state', job?.state ?? ''); summary.setAttribute('data-asset-name', job?.request.name ?? '');
     if (job?.state === 'running' && this.assetAvailable) {
       const key = this.historyProjectPath() + '\0' + job.jobId;
@@ -1546,6 +1595,42 @@ export class StudioWorkbench {
       }
     }
     this.text('asset-job-summary', job ? job.request.name + (job.request.template === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
+  }
+  private renderWorkerStatus(host:HTMLElement,job:AssetJobRecord,current:()=>boolean):void{
+    if(job.state!=='interrupted'||job.request.template==='adopted-glb')return;
+    const notice=this.make('p',this.assetWorkerMessages.get(job.jobId)??(job.resolution?.status==='resolved'?'Worker confirmed stopped. Partial files are kept; this job remains interrupted.':'Partial files are kept while this job’s worker status is checked.'),'hint');
+    notice.setAttribute('role','status');notice.setAttribute('aria-live','polite');notice.setAttribute('data-worker-status-note',job.jobId);notice.tabIndex=-1;
+    if(job.resolution?.status!=='resolved'){
+      const button=this.make('button',this.assetWorkerCheck&&this.assetBusy?'Checking worker…':'Check worker status','secondary');button.type='button';
+      button.setAttribute('aria-label','Check worker status for '+job.request.name.replaceAll('-',' '));
+      button.disabled=this.assetBusy||!this.assetAvailable||!this.assetSignedIn()||!!this.assetUnknown||!workerJobId(job.jobId);
+      button.addEventListener('click',event=>{if(event.isTrusted&&!event.defaultPrevented&&current())void this.checkAssetWorker(job.jobId,host.id==='asset-worker-status'?'asset-worker-status':'chat-assets');});host.append(button);
+    }
+    host.append(notice);
+  }
+  private async checkAssetWorker(jobId:string,focusHost?:'asset-worker-status'|'chat-assets'):Promise<void>{
+    if(this.assetBusy||!this.assetAvailable||this.assetUnknown||!this.assetSignedIn())return;
+    const job=this.assetJobs.find(item=>item.jobId===jobId);
+    if(!job||job.state!=='interrupted'||job.request.template==='adopted-glb'||job.resolution?.status==='resolved')return;
+    const ticket=this.assetTicket(),controller=new AbortController();
+    if(!this.assetContext.ready())return;
+    this.assetWorkerCheck=controller;this.assetBusy=true;this.assetWorkerMessages.set(jobId,'Checking this job’s worker status…');this.renderAssetControls();this.renderAssetJob();
+    try{
+      const result=await this.api.assetWorkerStatus(jobId,controller.signal);
+      if(!this.assetCurrent(ticket)||this.assetWorkerCheck!==controller)return;
+      job.resolution={status:'resolved',resolvedAt:result.resolvedAt};
+      this.assetWorkerMessages.set(jobId,'Worker confirmed stopped. Partial files are kept; this job remains interrupted.');
+      await this.refreshAssets();
+    }catch(error){
+      if(!this.assetCurrent(ticket)||this.assetWorkerCheck!==controller)return;
+      const message=workerStatusMessage(error);this.assetWorkerMessages.set(jobId,message);this.text('asset-notice',message);
+      if(error instanceof StudioRequestError&&error.outcome==='unknown'){this.assetUnknown=message;this.assetReadAfterUnknown=false;}
+    }finally{
+      if(this.assetCurrent(ticket)&&this.assetWorkerCheck===controller){
+        this.assetWorkerCheck=null;this.assetBusy=false;this.renderAssetControls();this.renderAssetJob();
+        if(focusHost&&(!this.doc.activeElement||this.doc.activeElement===this.doc.body))this.doc.getElementById(focusHost)?.querySelector<HTMLElement>('[data-worker-status-note="'+jobId+'"]')?.focus();
+      }
+    }
   }
   private assetFailure(error: unknown, operation: string) {
     const message = error instanceof Error ? error.message : String(error); this.text('asset-notice', message);

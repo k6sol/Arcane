@@ -671,6 +671,7 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
   let started = 0, current = jobFixture();
   const service: AssetService = {
     outputRoot: 'C:/fixture/assets', projectPath: ROOT,
+    async resolveInterrupted() { assert.fail('MCP must not request human worker recovery.'); },
     async probe() { return ASSET_PROBE; }, jobs() { return started ? [current] : []; },
     jobPage(options = {}) { return historyFixture(started ? [current] : [], options); },
     async start(input) { started++; current = { ...jobFixture(), request: normalizeRequest(input) }; return current; },
@@ -768,6 +769,7 @@ async function customAssetLabFixture(t: test.TestContext) {
   const state = {starts:0,statuses:[] as {method:string;path:string;status:number}[]};
   const service: AssetService = {
     outputRoot:join(directoryPath,'not-generated'),projectPath:ROOT,
+    async resolveInterrupted() { assert.fail('MCP must not request human worker recovery.'); },
     async probe() { return ASSET_PROBE; }, jobs() { return structuredClone(jobs); },
     jobPage(options = {}) { return historyFixture(jobs,options); },
     async start(input) {

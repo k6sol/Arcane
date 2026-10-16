@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createAssetService } from '../../apps/daemon/src/asset-service.js';
 import type { AssetService, AssetStartAdmission } from '../../apps/daemon/src/asset-service.js';
-import { AssetError, AssetPipeline } from '../../packages/asset-pipeline/src/index.js';
+import { AssetError, AssetPipeline, normalizeRequest } from '../../packages/asset-pipeline/src/index.js';
 import { noLinks, within } from '../../packages/asset-pipeline/src/paths.js';
 import { ArcaneError } from '../../packages/protocol/src/providers.js';
 
@@ -250,4 +250,30 @@ test('generic starts and existing input, busy and closed guards do not acquire a
   assert.equal(terminal.state, 'cancelled'); assert.equal(calls, 0); assert.equal(f.starts.mock.callCount(), 1);
   await service.close();
   await assert.rejects(() => service.start(input, admission), code('CLOSED')); assert.equal(calls, 0);
+});
+
+test('a worker status check mid-commit refuses start before admission; a resolved check then admits exactly once', serial, async t => {
+  const f = await fixture(t);
+  const jobId = '43333333-4444-4444-8444-444444444444', jobDir = join(f.outputRoot, 'lost-' + jobId);
+  await realFs.mkdir(jobDir, { recursive: true });
+  await realFs.writeFile(join(jobDir, 'job.json'), JSON.stringify({ schemaVersion: 1, jobId, state: 'interrupted', directory: '/outside', error: null,
+    request: normalizeRequest({ template: 'hero-prop', name: 'lost' }),
+    workers: [{ schemaVersion: 1, role: 'probe', reservationId: '00000000-0000-4000-8000-000000000001', reservedAt: '2026-10-16T02:00:01.0000000Z',
+      state: 'closed', closure: 'exit-observed', closedAt: '2026-10-16T02:00:02.0000000Z', identity: null }] }));
+  const service = await f.open();
+  const gate = f.gate(); let gated = false;
+  mockWrites(t, async (path, _data, write) => { if (dirname(String(path)) === jobDir) { gated = true; await gate.promise; } return write(); });
+  let checks = 0;
+  const admission: AssetStartAdmission = { beforeCreate() { checks++; }, created() {} };
+  await assert.rejects(service.start(input, admission), code('RECONCILIATION'));
+  assert.equal(checks, 0);
+  const resolving = service.resolveInterrupted(jobId);
+  while (!gated) await nextTurn();
+  await assert.rejects(service.start(input, admission), code('BUSY'));
+  assert.equal(checks, 0, 'no admission callback while the check holds the operation');
+  gate.release();
+  assert.equal((await resolving).status, 'resolved');
+  const job = await service.start(input, admission);
+  assert.equal(checks, 1); assert.equal(f.starts.mock.callCount(), 1);
+  await service.cancel(job.jobId);
 });

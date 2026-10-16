@@ -8,7 +8,10 @@ export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest;
 import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
-import { AssetError, createAssetPipeline, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
+import { AssetError, AssetPipeline, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
+import type { ProcessQueryHost } from '../../../packages/asset-pipeline/src/worker-identity.js';
+import { RESOLUTION_RECORD_BYTES, assessJobForResolution, validateResolution,
+  type ResolutionEvidence, type ResolutionReason, type WorkerResolutionRecord } from '../../../packages/asset-pipeline/src/worker-resolution.js';
 import type { AssetInput, AssetJob, AssetJobEvent, AssetJobState, AssetManifest, AssetProbe, AssetRequest, OperationOptions } from '../../../packages/asset-pipeline/src/index.js';
 import { artifactPath, noLinks, prepareOutputRoot, readRegularFile, regularFile } from '../../../packages/asset-pipeline/src/paths.js';
 import { inspectPng, readJson, record, sha256 } from '../../../packages/asset-pipeline/src/validation.js';
@@ -41,7 +44,16 @@ export interface AssetServiceOptions {
   jobDeadlineMs?: number;
   /** Trusted daemon composition only. Never populated from an HTTP/tool payload. */
   studioImport?: StudioImportHostOptions;
+  /** Trusted daemon composition/fixtures only: the fixed exact-PID worker query host. */
+  workerQueryHost?: ProcessQueryHost;
+  /** Trusted fixtures only: replaces the atomic resolution-marker write to exercise commit faults. */
+  resolutionMarkerWriter?: (directory: string, filename: string, text: string) => Promise<void>;
 }
+/** Outcome of a human worker-status check for one interrupted job. Refusals carry fixed reasons only. */
+export type WorkerResolutionOutcome =
+  | { readonly jobId: string; readonly status: 'resolved'; readonly resolvedAt: string; readonly evidence: readonly ResolutionEvidence[]; readonly alreadyResolved: boolean }
+  | { readonly jobId: string; readonly status: 'refused'; readonly reason: ResolutionReason | 'resolution-stale' };
+const RESOLUTION_MARKER = 'worker-resolution.json';
 /** Trusted host-code admission only; never an AssetInput or HTTP JSON field. */
 export interface AssetStartAdmission {
   /** Volatile signal selected from the actual host operation, never input JSON. */
@@ -68,6 +80,8 @@ export interface AssetJobRecord {
   events: AssetJobEvent[];
   manifestAvailable: boolean;
   error: { code: string; message: string } | null;
+  /** Display only for interrupted jobs; admission always re-validates the stored marker from disk. */
+  resolution?: { status: 'resolved'; resolvedAt: string } | { status: 'invalid' | 'uncertain' };
 }
 const ID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const LIMIT = 256;
@@ -112,9 +126,11 @@ export async function createAssetService(options: AssetServiceOptions) {
   const ownerKey = process.platform === 'win32' ? root.toLowerCase() : root;
   if (outputOwners.has(ownerKey)) throw new AssetError('BUSY', 'An asset service already owns this output root in this process.');
   outputOwners.add(ownerKey);
-  const pipeline = createAssetPipeline({ workspaceRoot: options.cwd, outputRoot: root, workerRoot: options.workerRoot ?? join(options.cwd, 'workers', 'blender'),
+  const pipeline = new AssetPipeline({ workspaceRoot: options.cwd, outputRoot: root, workerRoot: options.workerRoot ?? join(options.cwd, 'workers', 'blender'),
     ...(options.blenderExecutable ? { blenderExecutable: options.blenderExecutable } : {}),
-    ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}) });
+    ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}) },
+    options.workerQueryHost ? { queryHost: options.workerQueryHost } : {});
+  const writeMarker = options.resolutionMarkerWriter ?? ((directory: string, filename: string, text: string) => atomicAssetJson(directory, filename, text));
   const entries = new Map<string, { directory: string; job: AssetJobRecord }>();
   const active = new Map<string, { handle: AssetJob; completion: Promise<void> }>();
   let probeActive: AbortController | null = null;
@@ -156,6 +172,55 @@ export async function createAssetService(options: AssetServiceOptions) {
     const e = entries.get(id(jobId));
     if (!e) throw new ArcaneError('NOT_FOUND', 'Unknown asset job.');
     return e;
+  };
+  // Worker-status resolution: one human check at a time, mutually exclusive with admission and Blender work.
+  let resolution: { controller: AbortController; task: Promise<WorkerResolutionOutcome> } | null = null;
+  let admitting = false;
+  // A marker write whose commit could not be confirmed keeps that job fenced for this process lifetime.
+  const uncertainResolutions = new Set<string>();
+  type Witness = { directory: string; jobId: string; markerSha256: string; journalSha256: string };
+  type Stored = { status: 'absent' } | { status: 'invalid' } | { status: 'resolved'; record: WorkerResolutionRecord; witness: Witness };
+  /** Validate the stored marker against the CURRENT journal bytes (never an index or in-memory claim). */
+  const storedResolution = async (directory: string, jobId: string): Promise<Stored> => {
+    let marker: Buffer;
+    try { marker = await readRegularFile(artifactPath(directory, RESOLUTION_MARKER), RESOLUTION_RECORD_BYTES); }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { status: 'absent' } : { status: 'invalid' }; }
+    try {
+      const journal = await readRegularFile(artifactPath(directory, 'job.json'), JOB_JOURNAL_BYTES);
+      const validity = validateResolution({ jobId, journal, record: marker });
+      return validity.valid ? { status: 'resolved', record: validity.record, witness: { directory, jobId, markerSha256: sha256(marker), journalSha256: sha256(journal) } } : { status: 'invalid' };
+    } catch { return { status: 'invalid' }; }
+  };
+  /** Re-read every witnessed marker/journal; any byte change, read fault or uncertainty fails the witness. */
+  const witnessUnchanged = async (witnesses: readonly Witness[]): Promise<boolean> => {
+    for (const w of witnesses) {
+      if (uncertainResolutions.has(w.jobId)) return false;
+      try {
+        const marker = await readRegularFile(artifactPath(w.directory, RESOLUTION_MARKER), RESOLUTION_RECORD_BYTES);
+        const journal = await readRegularFile(artifactPath(w.directory, 'job.json'), JOB_JOURNAL_BYTES);
+        if (sha256(marker) !== w.markerSha256 || sha256(journal) !== w.journalSha256) return false;
+      } catch { return false; }
+    }
+    return true;
+  };
+  const showResolution = (job: AssetJobRecord, stored: Stored) => {
+    if (uncertainResolutions.has(job.jobId)) job.resolution = { status: 'uncertain' };
+    else if (stored.status === 'resolved') job.resolution = { status: 'resolved', resolvedAt: stored.record.assessedAt };
+    else if (stored.status === 'invalid') job.resolution = { status: 'invalid' };
+    else delete job.resolution;
+  };
+  const holdsFence = (job: AssetJobRecord) => job.state === 'interrupted' && !isAdoptedGlbRequest(job.request);
+  /** Blocked while any interrupted job lacks a currently valid, confirmed marker; otherwise the witnessed bytes. */
+  const fenced = async (): Promise<{ blocked: boolean; witnesses: Witness[] }> => {
+    let blocked = false; const witnesses: Witness[] = [];
+    for (const e of entries.values()) {
+      if (!holdsFence(e.job)) continue;
+      const stored = await storedResolution(e.directory, e.job.jobId);
+      showResolution(e.job, stored);
+      if (stored.status !== 'resolved' || uncertainResolutions.has(e.job.jobId)) blocked = true;
+      else witnesses.push(stored.witness);
+    }
+    return { blocked, witnesses };
   };
   try {
     // Ignore index contents as path authority. Scan only direct, fixed-name job directories.
@@ -210,6 +275,8 @@ export async function createAssetService(options: AssetServiceOptions) {
         startedAt: timestamp(journal.startedAt, timestamp(journal.finishedAt, now)), updatedAt: timestamp(journal.finishedAt, now), events: [],
         manifestAvailable: state === 'succeeded', error } });
     }
+    // Interrupted jobs show their stored worker-status check, validated against the exact journal bytes.
+    for (const e of entries.values()) if (holdsFence(e.job)) showResolution(e.job, await storedResolution(e.directory, e.job.jobId));
     // Restore bounded observed events from the advisory index; it never supplies paths or states.
     try {
       const previous = record(await readJson(join(root, 'index.json'), 8 * 1024 * 1024), 'history index');
@@ -320,7 +387,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     projectPath,
     async probe(operation: OperationOptions = {}): Promise<AssetProbe> {
       ensureOpen();
-      if (active.size || probeActive || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+      if (active.size || probeActive || adoption || resolution || admitting) throw new AssetError('BUSY', 'A Blender operation or worker status check is already running.');
       const controller = new AbortController();
       probeActive = controller;
       const abort = () => controller.abort();
@@ -362,7 +429,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (!(associations instanceof ConversationWorkStore) || associations.projectPath !== projectPath
         || original.projectPath !== projectPath || original.projectId !== associations.projectId || original.conversation.provider !== 'codex'
         || typeof admission?.beforeCreate !== 'function' || typeof admission.created !== 'function') throw new ArcaneError('ASSET_ADOPT_SCOPE','Exact native project/store admission is required.');
-      if (adoption || probeActive || active.size) throw new AssetError('BUSY','An asset operation is already running.');
+      if (adoption || probeActive || active.size || resolution || admitting) throw new AssetError('BUSY','An asset operation or worker status check is already running.');
       const end = Date.now() + ADOPTED_GLB_LIMITS.deadlineMs;
       const guard = () => {
         ensureOpen(); assertNativeAssetActor(actor,'mutate');
@@ -430,49 +497,137 @@ export async function createAssetService(options: AssetServiceOptions) {
       return task.finally(()=>{if(adoption===task) adoption=null;});
     },
     async start(input: AssetInput, admission?: AssetStartAdmission): Promise<AssetJobRecord> {
-      ensureOpen(); await flushed(); ensureOpen();
-      if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
-      if ([...entries.values()].some(e => e.job.state === 'interrupted' && !isAdoptedGlbRequest(e.job.request))) throw new ArcaneError('RECONCILIATION', 'Lost worker supervision requires inspection before starting work in this output root. Use a fresh trusted output root after confirming the old worker has stopped.');
-      if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history is full; use a fresh trusted output root.');
-      const request = normalizeRequest(input);
-      const now = new Date().toISOString();
-      const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}),
-        ...(admission?.signal ? { signal: admission.signal } : {}), onEvent: (event: AssetJobEvent) => {
-        const e = entries.get(event.jobId);
-        if (!e || closed) return;
-        e.job.stage = event.stage; e.job.updatedAt = event.at;
-        // The terminal event precedes completion; completion verifies the result before exposing it.
-        if (event.state === 'running') e.job.state = event.state;
-        e.job.events.push(event); e.job.events = e.job.events.slice(-64); persist();
-      } };
-      if (admission) synchronousAdmissionResult(admission.beforeCreate());
-      const handle = pipeline.start(input, operation);
-      const job: AssetJobRecord = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
-      entries.set(handle.id, { directory: handle.directory, job });
-      const completion = handle.completion.then(async result => {
-        let state: AssetJobState = result.state, error = result.error;
-        let manifestPath: string | null = null;
-        if (result.state === 'succeeded' && result.manifestPath) {
-          try {
-            const manifest = await pipeline.validate(result.manifestPath);
-            if (manifest.jobId !== handle.id) throw new AssetError('MANIFEST', 'Result identity does not match its job.');
-            manifestPath = result.manifestPath;
-          } catch { state = 'failed'; error = { code: 'HISTORY_INTEGRITY', message: 'Completed artifacts failed manifest verification.' }; }
+      ensureOpen();
+      if (resolution) throw new AssetError('BUSY', 'A worker status check is already running.');
+      if (admitting) {
+        // Preserve the durability barrier for waiting callers, then recheck closure before reporting busy.
+        await flushed(); ensureOpen();
+        throw new AssetError('BUSY', 'Another asset start is already running.');
+      }
+      admitting = true;
+      try {
+        await flushed(); ensureOpen();
+        if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+        // Coarse project fence: every interrupted job must hold a currently valid, confirmed marker (re-read now).
+        const fence = await fenced();
+        if (fence.blocked) throw new ArcaneError('RECONCILIATION', 'An interrupted asset job still needs a confirmed worker status check before new asset work can start.');
+        ensureOpen();
+        if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+        if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history is full; use a fresh trusted output root.');
+        const request = normalizeRequest(input);
+        const now = new Date().toISOString();
+        const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}),
+          ...(admission?.signal ? { signal: admission.signal } : {}), onEvent: (event: AssetJobEvent) => {
+          const e = entries.get(event.jobId);
+          if (!e || closed) return;
+          e.job.stage = event.stage; e.job.updatedAt = event.at;
+          // The terminal event precedes completion; completion verifies the result before exposing it.
+          if (event.state === 'running') e.job.state = event.state;
+          e.job.events.push(event); e.job.events = e.job.events.slice(-64); persist();
+        } };
+        // Final re-read of every witnessed marker/journal. No await follows until the pipeline starts; a change
+        // after this last read is the remaining non-atomic filesystem boundary (no cross-file transaction).
+        if (fence.witnesses.length && !await witnessUnchanged(fence.witnesses)) {
+          throw new ArcaneError('RECONCILIATION', 'An interrupted job changed while new asset work was being admitted; check its worker status again.');
         }
-        const finishedAt = new Date().toISOString();
-        Object.assign(job, { state, stage: 'complete', updatedAt: finishedAt, finishedAt, error, manifestPath, manifestAvailable: manifestPath !== null });
-      }).catch(() => { job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' }; })
-        .finally(() => { active.delete(handle.id); persist(); });
-      active.set(handle.id, { handle, completion });
-      // Install supervision before host bookkeeping can throw. A created job is
-      // never a safe pre-creation rejection, even if its witness callback fails.
-      let admissionFailure: ArcaneError | undefined;
-      try { if (admission) synchronousAdmissionResult(admission.created(handle.id)); }
-      catch { admissionFailure = new ArcaneError('ADMISSION_CREATED', 'Asset job ' + handle.id + ' was created, but its admission callback failed; inspect retained job history.'); }
-      persist();
-      try { await flushed(); } catch (e) { handle.cancel(); await completion; throw admissionFailure ?? e; }
-      if (admissionFailure) throw admissionFailure;
-      return structuredClone(job);
+        ensureOpen();
+        if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+        if (admission) synchronousAdmissionResult(admission.beforeCreate());
+        const handle = pipeline.start(input, operation);
+        const job: AssetJobRecord = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
+        entries.set(handle.id, { directory: handle.directory, job });
+        const completion = handle.completion.then(async result => {
+          let state: AssetJobState = result.state, error = result.error;
+          let manifestPath: string | null = null;
+          if (result.state === 'succeeded' && result.manifestPath) {
+            try {
+              const manifest = await pipeline.validate(result.manifestPath);
+              if (manifest.jobId !== handle.id) throw new AssetError('MANIFEST', 'Result identity does not match its job.');
+              manifestPath = result.manifestPath;
+            } catch { state = 'failed'; error = { code: 'HISTORY_INTEGRITY', message: 'Completed artifacts failed manifest verification.' }; }
+          }
+          const finishedAt = new Date().toISOString();
+          Object.assign(job, { state, stage: 'complete', updatedAt: finishedAt, finishedAt, error, manifestPath, manifestAvailable: manifestPath !== null });
+        }).catch(() => { job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' }; })
+          .finally(() => { active.delete(handle.id); persist(); });
+        active.set(handle.id, { handle, completion });
+        // Install supervision before host bookkeeping can throw. A created job is
+        // never a safe pre-creation rejection, even if its witness callback fails.
+        let admissionFailure: ArcaneError | undefined;
+        try { if (admission) synchronousAdmissionResult(admission.created(handle.id)); }
+        catch { admissionFailure = new ArcaneError('ADMISSION_CREATED', 'Asset job ' + handle.id + ' was created, but its admission callback failed; inspect retained job history.'); }
+        persist();
+        try { await flushed(); } catch (e) { handle.cancel(); await completion; throw admissionFailure ?? e; }
+        if (admissionFailure) throw admissionFailure;
+        return structuredClone(job);
+      } finally { admitting = false; }
+    },
+    /** Human-owned worker-status check for ONE interrupted job (trusted host/route only, never an agent/model).
+     * Only exact digest-bound evidence that every recorded worker is gone/closed releases this job's share of
+     * the coarse fence. The job stays interrupted with no artifacts, success, import or replay.
+     * Commit boundary: an abort before the marker write starts cancels with nothing changed; once the write
+     * starts it is joined, then re-read from disk, and its actual outcome is reported. */
+    async resolveInterrupted(jobId: unknown, signal?: AbortSignal): Promise<WorkerResolutionOutcome> {
+      ensureOpen();
+      const e = entry(jobId), requested = e.job.jobId;
+      if (resolution || admitting || probeActive || active.size || adoption || artifactReadActive || studioImportActive) {
+        throw new AssetError('BUSY', 'Another asset operation or worker status check is running; try again when it finishes.');
+      }
+      if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('NOT_APPLICABLE', 'Adopted GLB jobs never start a worker and do not pause new asset work.');
+      if (e.job.state !== 'interrupted') throw new ArcaneError('JOB_STATE', 'Only an interrupted asset job needs a worker status check.');
+      const controller = new AbortController(), abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+      const cancelled = () => new ArcaneError('CANCELLED', 'The worker status check was cancelled before anything was saved. Nothing changed.');
+      const uncertain = (message: string) => {
+        uncertainResolutions.add(requested); e.job.resolution = { status: 'uncertain' };
+        return new ArcaneError('RESOLUTION_UNCERTAIN', message);
+      };
+      const run = async (): Promise<WorkerResolutionOutcome> => {
+        await flushed(); // A latched history failure refuses before anything is written.
+        if (controller.signal.aborted || closed) throw cancelled();
+        const stored = await storedResolution(e.directory, requested);
+        // A retired or aborted request must not confirm a previously uncertain marker through the fast path.
+        if (controller.signal.aborted || closed) throw cancelled();
+        if (stored.status === 'resolved') { // Idempotent; also confirms a previously uncertain commit from disk.
+          uncertainResolutions.delete(requested); showResolution(e.job, stored);
+          return { jobId: requested, status: 'resolved', resolvedAt: stored.record.assessedAt, evidence: stored.record.basis.map(b => b.evidence), alreadyResolved: true };
+        }
+        if (controller.signal.aborted) throw cancelled();
+        let journal: Buffer;
+        try { journal = await readRegularFile(artifactPath(e.directory, 'job.json'), JOB_JOURNAL_BYTES); }
+        catch { return { jobId: requested, status: 'refused', reason: 'journal-malformed' }; }
+        const assessment = await assessJobForResolution({ jobId: requested, journal, signal: controller.signal,
+          ...(options.workerQueryHost ? { host: options.workerQueryHost } : {}) });
+        if (assessment.status === 'refused') { if (assessment.reason === 'cancelled') throw cancelled(); return { jobId: requested, status: 'refused', reason: assessment.reason }; }
+        const record = assessment.record;
+        // Freshness: the journal must still be the exact bytes assessed.
+        let current: Buffer | null = null;
+        try { current = await readRegularFile(artifactPath(e.directory, 'job.json'), JOB_JOURNAL_BYTES); } catch { /* stale below */ }
+        if (!current || sha256(current) !== record.journalSha256) return { jobId: requested, status: 'refused', reason: 'resolution-stale' };
+        if (controller.signal.aborted || closed) throw cancelled();
+        // COMMIT BOUNDARY. From here an abort is joined, never reported as a clean cancellation.
+        let writeError: unknown = null;
+        try { await writeMarker(e.directory, RESOLUTION_MARKER, JSON.stringify(record) + '\n'); } catch (error) { writeError = error; }
+        const after = await storedResolution(e.directory, requested);
+        const committed = after.status === 'resolved' && after.record.journalSha256 === record.journalSha256 &&
+          after.record.workersSha256 === record.workersSha256 && after.record.assessedAt === record.assessedAt;
+        if (writeError !== null) {
+          if (writeError instanceof AtomicJsonFailure && writeError.phase !== 'replace' && after.status === 'absent') {
+            throw new ArcaneError('PERSISTENCE', 'The worker status check could not be saved. Nothing changed; new asset work stays paused.');
+          }
+          throw uncertain('Saving the worker status check may not have completed. New asset work stays paused; check the worker status again.');
+        }
+        if (!committed) throw uncertain('The saved worker status check could not be confirmed. New asset work stays paused; check the worker status again.');
+        uncertainResolutions.delete(requested); showResolution(e.job, after);
+        persist();
+        try { await flushed(); }
+        catch { throw uncertain('The worker status check was saved, but asset history could not be saved. New asset work stays paused; inspect retained history.'); }
+        return { jobId: requested, status: 'resolved', resolvedAt: record.assessedAt, evidence: record.basis.map(b => b.evidence), alreadyResolved: false };
+      };
+      const task = run();
+      resolution = { controller, task };
+      try { return await task; }
+      finally { signal?.removeEventListener('abort', abort); if (resolution?.task === task) resolution = null; }
     },
     async cancel(jobId: unknown): Promise<AssetJobRecord> {
       ensureOpen();
@@ -579,10 +734,12 @@ export async function createAssetService(options: AssetServiceOptions) {
     },
     close(): Promise<void> {
       if (closing) return closing;
-      closed = true; probeActive?.abort();
+      closed = true; probeActive?.abort(); resolution?.controller.abort();
       closing = (async () => {
         for (const run of active.values()) run.handle.cancel();
         if (adoption) await adoption.catch(() => {});
+        // Abort the worker-status check and join any marker write it already started.
+        while (resolution) await resolution.task.catch(() => {});
         try {
           await Promise.all([...active.values()].map(run => run.completion));
           while (probeActive) await new Promise<void>(r => setTimeout(r, 10));

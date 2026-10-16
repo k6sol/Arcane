@@ -46,6 +46,7 @@ async function fixture(t: test.TestContext) {
   const readEntered = gate(), readRelease = gate();
   const fakeAssetService: AssetService = {
     projectPath, outputRoot: join(root, 'fake-assets'), jobs: () => structuredClone(jobs),
+    async resolveInterrupted() { assert.fail('Native asset authority must not request human worker recovery.'); },
     jobPage() { return { schemaVersion: 1, jobs: structuredClone(jobs), total: jobs.length, nextCursor: null, byteLimit: 512 * 1024 }; },
     async start(input, admission) {
       starts++; assert.ok(admission); const normalized = normalizeRequest(input); admission.beforeCreate(); allocations++;

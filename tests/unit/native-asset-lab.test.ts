@@ -120,6 +120,7 @@ async function fixture(t: test.TestContext, options:{signal?:AbortSignal;setupSt
   const jobs: AssetJobRecord[] = [];
   const fakeAssetService: AssetService = {
     projectPath, outputRoot: join(root, 'fake-assets'),
+    async resolveInterrupted() { assert.fail('Native LAB authority must not request human worker recovery.'); },
     jobs: () => structuredClone(jobs),
     jobPage() { return { schemaVersion: 1, jobs: structuredClone(jobs), total: jobs.length, nextCursor: null, byteLimit: 512 * 1024 }; },
     async start(input, admission) {

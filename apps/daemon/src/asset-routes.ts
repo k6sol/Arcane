@@ -9,6 +9,14 @@ import type { AssetConversationHost } from './asset-conversation-host.js';
 import { assetConversationJobPage } from './asset-conversation-page.js';
 import { assertLearningHumanRequest, LearningHttpError } from './learning-service.js';
 
+/** Fixed, privacy-safe guidance for a refused worker status check (no PIDs, paths or query output). */
+export function workerCheckGuidance(reason: string): string {
+  if (reason === 'same-worker-running') return 'The original Blender worker for this job is still running. Close Blender or wait for it to finish, then check again.';
+  if (['no-workers-recorded', 'records-invalid', 'reservation-unresolved'].includes(reason)) return 'Arcane has no exact record of this job\'s worker, so it cannot confirm the worker stopped. New asset work stays paused.';
+  if (reason === 'resolution-stale') return 'This job changed while it was being checked. Nothing changed; check the worker status again.';
+  if (['journal-oversized', 'journal-malformed', 'job-mismatch', 'not-interrupted'].includes(reason)) return 'This job\'s saved record cannot be checked. Nothing changed; new asset work stays paused.';
+  return 'Arcane could not confirm the worker stopped right now. Nothing changed; try again shortly.';
+}
 function object(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ArcaneError('INPUT', 'Expected a JSON object.');
   return input as Record<string, unknown>;
@@ -103,8 +111,10 @@ export function assetRoutes(service: AssetService, conversationHost?: AssetConve
       if (!human && !agent) throw new ArcaneError('AUTH', 'Supply the local launcher control or agent bearer.');
       if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new ArcaneError('ORIGIN', 'Cross-origin asset access refused.');
       const route = url.pathname.slice('/v1/assets/'.length);
-      if (route === 'conversation-jobs' || route === 'conversation-start') {
+      if (route === 'conversation-jobs' || route === 'conversation-start' || route === 'resolve-interrupted') {
+        // Human launcher control only, checked before any body is read; agent/native/model bearers are refused.
         assertLearningHumanRequest(request, controlToken, origin, agentToken ?? '');
+        if (route === 'resolve-interrupted' && (!human || agent)) throw new ArcaneError('AUTH', 'Worker status checks require the human launcher control bearer.');
       }
       if (route === 'artifact') {
         if (!human || agent) throw new ArcaneError('AUTH', 'Artifact downloads require the distinct human launcher control bearer.');
@@ -117,7 +127,7 @@ export function assetRoutes(service: AssetService, conversationHost?: AssetConve
           if (referrerUrl.origin !== origin || referrerUrl.username || referrerUrl.password) throw new ArcaneError('ORIGIN', 'Cross-site artifact referrer refused.');
         }
       }
-      const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['conversation-jobs', 'GET'], ['conversation-start', 'POST'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET'], ['artifact', 'GET']]).get(route);
+      const method = new Map([['probe', 'POST'], ['jobs', 'GET'], ['conversation-jobs', 'GET'], ['conversation-start', 'POST'], ['start', 'POST'], ['cancel', 'POST'], ['manifest', 'GET'], ['preview', 'GET'], ['artifact', 'GET'], ['resolve-interrupted', 'POST']]).get(route);
       if (!method) { await send(404, { error: 'NOT_FOUND', message: 'Unknown asset endpoint.' }); return true; }
       if (request.method !== method) { response.setHeader('Allow', method); await send(405, { error: 'METHOD', message: 'Expected ' + method + '.' }); return true; }
       const allowedQuery = route === 'manifest' ? ['jobId'] : route === 'preview' || route === 'artifact' ? ['jobId', 'path'] : route === 'jobs' || route === 'conversation-jobs' ? ['limit', 'after'] : [];
@@ -187,11 +197,23 @@ export function assetRoutes(service: AssetService, conversationHost?: AssetConve
         await send(202, { ...result, job });
       } else if (route === 'probe') { exactKeys(input, []); await send(200, { probe: await service.probe() }); }
       else if (route === 'start') { normalizeRequest(input); await send(202, { job: await service.start(input as unknown as AssetInput) }); }
+      else if (route === 'resolve-interrupted') {
+        if (Object.keys(input).join(',') !== 'jobId' || typeof input.jobId !== 'string') throw new ArcaneError('INPUT', 'Expected exactly {"jobId": "<uuid>"}.');
+        // Only actual response/socket loss cancels; normal request-body completion does not.
+        const controller = new AbortController();
+        const lost = () => { if (!response.writableFinished) controller.abort(); };
+        response.once('close', lost);
+        try {
+          const outcome = await service.resolveInterrupted(input.jobId, controller.signal);
+          if (outcome.status === 'refused') await send(409, { error: 'RECONCILIATION_UNVERIFIED', reason: outcome.reason, message: workerCheckGuidance(outcome.reason) });
+          else await send(200, { resolution: outcome });
+        } finally { response.off('close', lost); }
+      }
       else { exactKeys(input, ['jobId']); await send(200, { job: await service.cancel(input.jobId) }); }
     } catch (error) {
       if (error instanceof LearningHttpError) { await send(error.status, { error: error.code, message: error.message }); return true; }
       const known = error instanceof AssetError || error instanceof ArcaneError, code = known ? error.code : 'INTERNAL';
-      const status = code === 'AUTH' ? 401 : ['HOST', 'ORIGIN'].includes(code) ? 403 : code === 'NOT_FOUND' ? 404 : code === 'BUSY' ? 409 : ['JOB_STATE', 'RECONCILIATION', 'HISTORY_LIMIT', 'CLOSED', 'ASSET_CONVERSATION_UNAVAILABLE', 'ASSET_CONVERSATION_REQUIRED', 'ASSET_CONVERSATION_STALE', 'ASSET_CONVERSATION_UNKNOWN'].includes(code) ? 409 : ['BODY_LIMIT', 'ARTIFACT_LIMIT'].includes(code) ? 413 : ['BODY_TIMEOUT', 'ARTIFACT_TIMEOUT'].includes(code) ? 408 : ['HASH', 'MANIFEST', 'ARTIFACT', 'RECOVERY', 'PERSISTENCE'].includes(code) ? 422 : known ? 400 : 500;
+      const status = code === 'AUTH' ? 401 : ['HOST', 'ORIGIN'].includes(code) ? 403 : code === 'NOT_FOUND' ? 404 : code === 'BUSY' ? 409 : code === 'RESOLUTION_UNCERTAIN' ? 503 : ['JOB_STATE', 'RECONCILIATION', 'NOT_APPLICABLE', 'CANCELLED', 'HISTORY_LIMIT', 'CLOSED', 'ASSET_CONVERSATION_UNAVAILABLE', 'ASSET_CONVERSATION_REQUIRED', 'ASSET_CONVERSATION_STALE', 'ASSET_CONVERSATION_UNKNOWN'].includes(code) ? 409 : ['BODY_LIMIT', 'ARTIFACT_LIMIT'].includes(code) ? 413 : ['BODY_TIMEOUT', 'ARTIFACT_TIMEOUT'].includes(code) ? 408 : ['HASH', 'MANIFEST', 'ARTIFACT', 'RECOVERY', 'PERSISTENCE'].includes(code) ? 422 : known ? 400 : 500;
       if (!response.headersSent && !response.destroyed) { await send(status, { error: code, message: known ? error.message : 'Local asset operation failed; inspect retained job evidence.' }); }
     }
     return true;

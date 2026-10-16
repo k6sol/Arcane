@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
 import {
   ASSET_CONVERSATION_BYTES, AssetConversationController, StudioApi, StudioRequestError, StudioWorkbench,
-  readAssetConversationPage, readAssetConversationStart,
+  readAssetConversationPage, readAssetConversationStart, readAssetWorkerStatus,
   type AssetConversation, type AssetConversationPage, type AssetConversationStart, type StudioWorkbenchOptions,
 } from '../../apps/desktop/src/studio.js';
 import type { AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
@@ -169,6 +169,7 @@ interface WorkbenchFixture {
   assetUnknown: string; assetNextCursor: string | null; assetContext: AssetConversationController;
   refreshAssets(more?: boolean): Promise<void>; startAsset(): Promise<void>; cancelAsset(): Promise<void>; probeAsset(): Promise<void>;
   loadAssetManifest(): Promise<void>; renderAssetControls(): void; renderAssetJob(): void; subscribeAssetContext(): void;
+  checkAssetWorker(jobId:string):Promise<void>;
 }
 function workbench(api: StudioApi, options: StudioWorkbenchOptions) {
   const doc = new DocumentFixture();
@@ -176,6 +177,62 @@ function workbench(api: StudioApi, options: StudioWorkbenchOptions) {
   const view = new StudioWorkbench(doc as unknown as Document, api, 'http://127.0.0.1:45871', TOKEN, options) as unknown as WorkbenchFixture;
   view.subscribeAssetContext(); return { doc, view };
 }
+
+const workerReceipt=(jobId=ID)=>({resolution:{jobId,status:'resolved',resolvedAt:'2026-10-16T00:00:00.0000000Z',evidence:['closed-exit-observed'],alreadyResolved:false}});
+test('worker status transport uses one exact human request and validates its bounded receipt',async()=>{
+  const calls:{path:string;init:RequestInit|undefined}[]=[];
+  const api=new StudioApi(TOKEN,async(path,init)=>{calls.push({path:String(path),init});return Response.json(workerReceipt());});
+  assert.deepEqual(await api.assetWorkerStatus(ID),workerReceipt().resolution);
+  assert.equal(calls.length,1);assert.equal(calls[0]!.path,'/v1/assets/resolve-interrupted');
+  assert.deepEqual(JSON.parse(calls[0]!.init!.body as string),{jobId:ID});
+  assert.equal(new Headers(calls[0]!.init!.headers).get('Authorization'),'Bearer '+TOKEN);
+  assert.equal(calls[0]!.init!.credentials,'omit');assert.equal(calls[0]!.init!.redirect,'error');
+  for(const bad of [{jobId:ID,scope:'model'}, {}, {jobId:'other'}])await assert.rejects(api.request('/v1/assets/resolve-interrupted',bad));
+  await assert.rejects(api.request('/v1/assets/resolve-interrupted?jobId='+ID,{jobId:ID}));
+  const controller=new AbortController();controller.abort();await assert.rejects(api.assetWorkerStatus(ID,controller.signal),{outcome:'rejected'});
+  assert.equal(calls.length,1);
+  for(const bad of [workerReceipt('11111111-1111-4111-8111-111111111111'),{...workerReceipt(),accepted:true},
+    {resolution:{...workerReceipt().resolution,status:'succeeded'}},{resolution:{...workerReceipt().resolution,evidence:['elapsed-time']}},
+    {resolution:{...workerReceipt().resolution,evidence:Array(7).fill('pid-absent')}},{resolution:{...workerReceipt().resolution,extra:'x'}}])assert.throws(()=>readAssetWorkerStatus(bad,ID));
+  let attempts=0;
+  await assert.rejects(new StudioApi(TOKEN,async()=>{attempts++;return Response.json(workerReceipt('11111111-1111-4111-8111-111111111111'));}).assetWorkerStatus(ID),{outcome:'unknown'});
+  assert.equal(attempts,1);
+});
+
+test('human worker check refreshes the same interrupted job without generation or artifact acceptance',async()=>{
+  const interrupted={...job(),state:'interrupted' as const},c=context(),calls:string[]=[];let resolved=false;
+  const api=new StudioApi(TOKEN,async(path)=>{calls.push(String(path));
+    if(path==='/v1/assets/resolve-interrupted'){resolved=true;return Response.json(workerReceipt());}
+    return Response.json(page([{...interrupted,...(resolved?{resolution:{status:'resolved' as const,resolvedAt:workerReceipt().resolution.resolvedAt}}:{})}]));});
+  const {doc,view}=workbench(api,c.options);await view.refreshAssets();view.assetProbed=true;
+  assert.equal(doc.getElementById('asset-start').disabled,true);
+  await view.checkAssetWorker(ID);
+  assert.equal(view.assetJobs[0]!.state,'interrupted');assert.equal(view.assetJobs[0]!.manifestAvailable,false);
+  assert.equal(view.assetJobs[0]!.resolution?.status,'resolved');assert.equal(doc.getElementById('asset-start').disabled,false);
+  assert.deepEqual(calls,['/v1/assets/conversation-jobs?limit=32','/v1/assets/resolve-interrupted','/v1/assets/conversation-jobs?limit=32']);
+  assert.match(doc.getElementById('chat-assets').children[1]!.children[0]!.children.at(-1)!.textContent,/Partial files are kept/);
+});
+
+test('worker check has one flight and a changed chat aborts it without attaching its late receipt',async()=>{
+  const pending=deferred<Response>(),c=context();let checks=0,signal:AbortSignal|undefined;
+  const api=new StudioApi(TOKEN,async(path,init)=>{if(path==='/v1/assets/resolve-interrupted'){checks++;signal=init?.signal??undefined;return pending.promise;}return Response.json(page([{...job(),state:'interrupted'}]));});
+  const {view}=workbench(api,c.options);await view.refreshAssets();
+  const first=view.checkAssetWorker(ID);await view.checkAssetWorker(ID);assert.equal(checks,1);
+  c.change({...NATIVE,threadId:'another'});assert.equal(signal?.aborted,true);
+  pending.resolve(Response.json(workerReceipt()));await first;
+  assert.deepEqual(view.assetJobs,[]);assert.equal(view.assetBusy,false);
+});
+
+test('scripted recovery activation is inert and uncertain status never exposes raw diagnostics',async()=>{
+  const c=context();let checks=0;
+  const api=new StudioApi(TOKEN,async path=>{if(path==='/v1/assets/resolve-interrupted'){checks++;throw Error('C:\\Users\\private\\secret');}return Response.json(page([{...job(),state:'interrupted'}]));});
+  const {view,doc}=workbench(api,c.options);await view.refreshAssets();
+  const card=doc.getElementById('chat-assets').children[1]!.children[0]!;
+  const button=card.children.find(child=>child.tagName==='BUTTON')!;assert.ok(button);
+  button.dispatchEvent(new Event('click'));await setImmediate();assert.equal(checks,0);
+  await view.checkAssetWorker(ID);assert.equal(checks,1);assert.match(view.assetUnknown,/outcome is unknown/);
+  assert.doesNotMatch(doc.getElementById('asset-notice').textContent,/Users|secret|private/);
+});
 
 test('chat changes synchronously clear selected job, history, previews, manifest and downloads', async () => {
   const c = context(), { doc, view } = workbench(new StudioApi(TOKEN, async () => Response.json(page([job()]))), c.options);
