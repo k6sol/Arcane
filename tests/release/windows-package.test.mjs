@@ -443,6 +443,9 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-setup-path.test.mjs', '// Fixture setup path verification source.\n');
   await assert.rejects(packageWindows(options), /Setup path verification requires its matching C# source/);
   await write('installer/SetupPath.cs', '// Fixture native setup path source.\n');
+  await write('tests/release/windows-installation-activity.test.mjs', '// Fixture installation activity source.\n');
+  await assert.rejects(packageWindows(options), /Installation activity verification requires its matching C# source/);
+  await write('installer/InstallationActivity.cs', '// Fixture native installation activity source.\n');
   await write('scripts/build-windows-setup.mjs', '// Fixture setup builder source.\n');
   await rm(join(options.repository, 'installer/SetupForm.cs'));
   await assert.rejects(packageWindows(options), /Setup builder requires its complete native source/);
