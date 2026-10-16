@@ -452,6 +452,12 @@ test('installer verification source belongs to the reproducible source closure',
   await assert.rejects(packageWindows(options), /Registration plan verification requires its matching C# source/);
   await write('installer/RegistrationPlan.cs', '// Fixture native registration plan source.\n');
   await write('tests/release/windows-operation-lease.test.mjs', '// Fixture operation lease verification source.\n');
+  await write('tests/release/windows-release-removal.test.mjs', '// Fixture release removal verification source.\n');
+  await assert.rejects(packageWindows(options), /Release removal verification requires its matching C# source/);
+  await write('installer/ReleaseRemoval.cs', '// Fixture native release removal source.\n');
+  await write('tests/release/windows-uninstall-consent.test.mjs', '// Fixture uninstall consent verification source.\n');
+  await assert.rejects(packageWindows(options), /Uninstall consent verification requires its matching C# source/);
+  await write('installer/UninstallConsent.cs', '// Fixture native uninstall consent source.\n');
   await write('tests/release/windows-setup-form.test.mjs', '// Fixture setup form verification source.\n');
   await rm(join(options.repository, 'installer/SetupForm.cs'));
   await assert.rejects(packageWindows(options), /Setup form verification requires its matching C# source: SetupForm.cs/);
