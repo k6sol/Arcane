@@ -68,14 +68,23 @@ namespace Arcane.Installer
         private static OwnershipRead Kept(string code) { return new OwnershipRead(OwnershipReadState.Kept, code, null); }
 
         /// <summary>Reads the journal of the installation <paramref name="record"/> describes. Never throws and never writes.</summary>
-        public static OwnershipRead Read(InstalledRecordSnapshot record)
+        public static OwnershipRead Read(InstalledRecordSnapshot record) { return ReadBound(record, null); }
+
+        /// <summary>Reads under the live operation lease for this exact record. A missing or unrelated capability is refused.</summary>
+        public static OwnershipRead Read(InstalledRecordSnapshot record, OperationLease lease)
+        { return lease == null ? Kept("RECORD_CHANGED") : ReadBound(record, lease); }
+
+        private static bool Current(InstalledRecordSnapshot record, OperationLease lease)
+        { return lease == null ? InstalledRecord.StillCurrent(record) : InstalledRecord.StillCurrent(record, lease); }
+
+        private static OwnershipRead ReadBound(InstalledRecordSnapshot record, OperationLease lease)
         {
             try
             {
-                if (record == null || !InstalledRecord.StillCurrent(record)) return Kept("RECORD_CHANGED");
+                if (record == null || !Current(record, lease)) return Kept("RECORD_CHANGED");
                 OwnershipRead read = ReadCore(record);
                 // The installation must still be the one the journal was bound to after reading it.
-                return InstalledRecord.StillCurrent(record) ? read : Kept("RECORD_CHANGED");
+                return Current(record, lease) ? read : Kept("RECORD_CHANGED");
             }
             catch (Exception) { return Kept("IO"); }
         }
@@ -134,12 +143,19 @@ namespace Arcane.Installer
         /// <summary>Records <paramref name="launcher"/> and <paramref name="uninstaller"/> (each null or bound to this root and role).
         /// Never throws, never retries and never reports a save whose delivery is unknown.</summary>
         public static OwnershipSave Save(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller)
+        { return SaveBound(current, launcher, uninstaller, null); }
+
+        /// <summary>Saves under the live operation lease for this exact journal and record, preserving the journal compare-and-swap.</summary>
+        public static OwnershipSave Save(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OperationLease lease)
+        { return lease == null ? new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null) : SaveBound(current, launcher, uninstaller, lease); }
+
+        private static OwnershipSave SaveBound(SetupOwnershipSnapshot current, OwnedFileDescriptor launcher, OwnedFileDescriptor uninstaller, OperationLease lease)
         {
             try
             {
                 if (current == null || current.Record == null || current.Present != (current.Journal != null)) return new OwnershipSave(OwnershipSaveState.Refused, "SNAPSHOT", null, null);
                 if (!Bound(launcher, LauncherName, current) || !Bound(uninstaller, UninstallerName, current)) return new OwnershipSave(OwnershipSaveState.Refused, "DESCRIPTOR", null, null);
-                if (!InstalledRecord.StillCurrent(current.Record)) return new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null);
+                if (!Current(current.Record, lease)) return new OwnershipSave(OwnershipSaveState.Refused, "RECORD_CHANGED", null, null);
                 string text = Serialize(current.InstallationId, current.Root, Hex8(current.RootIdentity.Volume), Hex16(current.RootIdentity.Index), launcher, uninstaller);
                 byte[] bytes = new UTF8Encoding(false, true).GetBytes(text);
                 if (bytes.Length > MaxJournalBytes) return new OwnershipSave(OwnershipSaveState.Refused, "DESCRIPTOR", null, null);
@@ -149,7 +165,7 @@ namespace Arcane.Installer
                 OwnedFileResult placement = OwnedFiles.Place(current.Root, JournalName, bytes, sha, current.Journal);
                 if (placement.State == OwnedFileState.Unchanged)
                 {
-                    if (!InstalledRecord.StillCurrent(current.Record)) return new OwnershipSave(OwnershipSaveState.Unknown, "RECORD_CHANGED", null, placement);
+                    if (!Current(current.Record, lease)) return new OwnershipSave(OwnershipSaveState.Unknown, "RECORD_CHANGED", null, placement);
                     return new OwnershipSave(OwnershipSaveState.Unchanged, null, new SetupOwnershipSnapshot(current.Record, true, launcher, uninstaller, placement.Descriptor), placement);
                 }
                 if (placement.State != OwnedFileState.Placed && placement.State != OwnedFileState.Replaced)
@@ -158,7 +174,7 @@ namespace Arcane.Installer
                     return new OwnershipSave(state, placement.Code, null, placement);
                 }
                 // The journal was published; it is only a confirmed save if the installation is still the same one.
-                if (!InstalledRecord.StillCurrent(current.Record)) return new OwnershipSave(OwnershipSaveState.Unknown, "RECORD_CHANGED", null, placement);
+                if (!Current(current.Record, lease)) return new OwnershipSave(OwnershipSaveState.Unknown, "RECORD_CHANGED", null, placement);
                 SetupOwnershipSnapshot next = new SetupOwnershipSnapshot(current.Record, true, launcher, uninstaller, placement.Descriptor);
                 return new OwnershipSave(OwnershipSaveState.Saved, placement.Code, next, placement);
             }

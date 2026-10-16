@@ -24,21 +24,33 @@ internal static class Harness {
   private static string Sha(byte[] b) { using (SHA256 s = SHA256.Create()) { StringBuilder x = new StringBuilder(); foreach (byte c in s.ComputeHash(b)) x.Append(c.ToString("x2")); return x.ToString(); } }
   private static int Main(string[] a) {
     string root = a[0]; SetupOwnershipSnapshot S = null; OwnedFileDescriptor L = null, U = null;
+    InstalledRecordSnapshot R = null; OperationLease A = null;
     for (int i = 1; i < a.Length; i++) {
       Dictionary<string, object> v = new Dictionary<string, object>(); v["op"] = a[i];
       switch (a[i]) {
         case "read": {
-          try { OwnershipRead r = SetupOwnership.Read(InstalledRecord.Read(root)); S = r.Snapshot; v["state"] = r.State.ToString(); v["code"] = r.Code;
+          try { R = InstalledRecord.Read(root); OwnershipRead r = SetupOwnership.Read(R); S = r.Snapshot; v["state"] = r.State.ToString(); v["code"] = r.Code;
             v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); }
           catch (InstalledRecordException e) { v["state"] = "RecordError"; v["code"] = e.Code; S = null; }
           break; }
+        case "acquire": case "acquire-other": {
+          LeaseResult result = OperationLease.Acquire(a[i] == "acquire" ? R : InstalledRecord.Read(a[++i])); A = result.Lease;
+          v["state"] = result.State.ToString(); v["code"] = result.Code; break; }
+        case "release": { LeaseRelease result = A.Release(); v["state"] = result.State.ToString(); v["code"] = result.Code; break; }
+        case "dispose": A.Dispose(); v["retained"] = A.Retained; break;
+        case "journal-read-old": case "read-with-lease": case "read-null-lease": {
+          OwnershipRead result = a[i] == "journal-read-old" ? SetupOwnership.Read(R) : SetupOwnership.Read(R, a[i] == "read-null-lease" ? null : A);
+          v["state"] = result.State.ToString(); v["code"] = result.Code;
+          if (result.Snapshot != null) S = result.Snapshot; break; }
         case "place-launcher": case "place-uninstaller": {
           bool launcher = a[i] == "place-launcher"; byte[] bytes = File.ReadAllBytes(a[++i]);
           OwnedFileResult r = OwnedFiles.Place(root, launcher ? SetupOwnership.LauncherName : SetupOwnership.UninstallerName, bytes, Sha(bytes), launcher ? (L ?? (S == null ? null : S.Launcher)) : (U ?? (S == null ? null : S.Uninstaller)));
           if (launcher) L = r.Descriptor; else U = r.Descriptor; v["state"] = r.State.ToString(); v["code"] = r.Code; break; }
-        case "save": {
+        case "save": case "save-with-lease": case "save-null-lease": {
+          string operation = a[i];
           OwnedFileDescriptor l = Pick(a[++i], L, S == null ? null : S.Launcher, S), u = Pick(a[++i], U, S == null ? null : S.Uninstaller, S);
-          OwnershipSave r = SetupOwnership.Save(S, l, u); v["state"] = r.State.ToString(); v["code"] = r.Code;
+          OwnershipSave r = operation == "save" ? SetupOwnership.Save(S, l, u) : SetupOwnership.Save(S, l, u, operation == "save-null-lease" ? null : A);
+          v["state"] = r.State.ToString(); v["code"] = r.Code;
           v["placement"] = r.Placement == null ? null : (object)new Dictionary<string, object> { { "state", r.Placement.State.ToString() }, { "code", r.Placement.Code }, { "backup", r.Placement.RetainedBackup } };
           if (r.Snapshot != null) S = r.Snapshot; break; }
         case "wait": Out(v); Console.In.ReadLine(); continue;
@@ -98,7 +110,8 @@ async function setup() {
       }
     });
     child.stderr.on('data', d => { err += d; });
-    child.on('close', () => chain.then(() => { if (err) reject(new Error(err)); else { child.stdin.destroy(); resolve(lines.filter(l => l.op !== 'wait' && l.op !== 'barrier')); } }));
+    child.once('error', reject);
+    child.once('close', code => chain.then(() => { if (err || code !== 0) reject(new Error('harness ' + code + ' ' + err)); else { child.stdin.destroy(); resolve(lines.filter(l => l.op !== 'wait' && l.op !== 'barrier')); } }));
   });
   shared = { root, owned, engine, bundle, installed, bytesFile, run };
   return shared;
@@ -202,4 +215,64 @@ test('OwnedFiles kept and unknown placements pass through without claiming a sav
   assert.deepEqual([lines[1].state, lines[1].code, lines[1].placement.state], ['Unknown', 'INTERRUPTED', 'Unknown']);
   assert.equal(fs.readFileSync(journalOf(target), 'utf8'), 'manual during replace'); assert.deepEqual(fs.readFileSync(lines[1].placement.backup), before);
   const after = await s.run(target, ['read']); assert.deepEqual([after[0].state, after[0].code], ['Kept', 'MALFORMED'], 'the manual file is never adopted');
+});
+
+test('only the matching live operation lease can read and save while ordinary journal access remains excluded', windows, async () => {
+  const s = await setup(), target = await s.installed();
+  const rows = await s.run(target, ['read', 'acquire', 'journal-read-old', 'read-with-lease', 'place-launcher', s.bytesFile('lease launcher'),
+    'save', 'placed', 'null', 'save-with-lease', 'placed', 'null', 'save-with-lease', 'keep', 'null', 'release', 'save-with-lease', 'keep', 'null', 'read']);
+  assert.deepEqual(rows.map(row => [row.state, row.code]), [
+    ['Absent', null], ['Acquired', null], ['Kept', 'RECORD_CHANGED'], ['Absent', null], ['Placed', null],
+    ['Refused', 'RECORD_CHANGED'], ['Saved', null], ['Unchanged', null], ['Released', null], ['Refused', 'RECORD_CHANGED'], ['Valid', null],
+  ]);
+  assert.equal(JSON.parse(fs.readFileSync(journalOf(target), 'utf8')).launcher.sha256, hash('lease launcher'));
+  assert.equal(fs.existsSync(join(target, 'installation.lock')), false);
+});
+
+test('null and foreign leases never grant journal access or publication', windows, async () => {
+  const s = await setup(), target = await s.installed(), other = await s.installed();
+  let rows = await s.run(target, ['read', 'read-null-lease', 'save-null-lease', 'null', 'null']);
+  assert.deepEqual(rows.slice(1).map(row => [row.state, row.code]), [['Kept', 'RECORD_CHANGED'], ['Refused', 'RECORD_CHANGED']]);
+  assert.equal(fs.existsSync(journalOf(target)), false);
+  rows = await s.run(target, ['read', 'acquire-other', other, 'read-with-lease', 'save-with-lease', 'null', 'null', 'release']);
+  assert.deepEqual(rows.slice(1).map(row => [row.state, row.code]), [['Acquired', null], ['Kept', 'RECORD_CHANGED'], ['Refused', 'RECORD_CHANGED'], ['Released', null]]);
+  assert.equal(fs.existsSync(journalOf(target)), false); assert.equal(fs.existsSync(journalOf(other)), false);
+});
+
+test('released or disposed leases cannot be reused for journal operations', windows, async () => {
+  const s = await setup();
+  for (const end of ['release', 'dispose']) {
+    const target = await s.installed();
+    const rows = await s.run(target, ['read', 'acquire', end, 'read-with-lease', 'save-with-lease', 'null', 'null']);
+    assert.deepEqual(rows.slice(3).map(row => [row.state, row.code]), [['Kept', 'RECORD_CHANGED'], ['Refused', 'RECORD_CHANGED']]);
+    assert.equal(fs.existsSync(journalOf(target)), false); assert.equal(fs.existsSync(join(target, 'installation.lock')), end === 'dispose');
+    if (end === 'dispose') assert.equal(rows[2].retained, true);
+  }
+});
+
+test('a live lease preserves journal compare-and-swap when manual content appears', windows, async () => {
+  const s = await setup();
+  for (const [timing, code] of [['wait', 'UNRECORDED'], ['barrier', 'TARGET_APPEARED']]) {
+    const target = await s.installed();
+    const rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'place-launcher', s.bytesFile('one'), timing,
+      'save-with-lease', 'placed', 'null', 'release'], [() => fs.writeFileSync(journalOf(target), 'manual while leased')]);
+    assert.deepEqual([rows[4].state, rows[4].code, rows[4].placement.state], ['Kept', code, 'Kept']);
+    assert.equal(fs.readFileSync(journalOf(target), 'utf8'), 'manual while leased');
+  }
+});
+
+test('changed record identity fences a leased save before and after journal publication', windows, async () => {
+  const s = await setup();
+  const replaceRecord = target => {
+    const record = join(target, 'installation.json'), replacement = join(target, 'replacement-record.json');
+    fs.copyFileSync(record, replacement); fs.renameSync(replacement, record);
+  };
+  let target = await s.installed();
+  let rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'wait', 'save-with-lease', 'null', 'null', 'read-with-lease', 'release'], [() => replaceRecord(target)]);
+  assert.deepEqual(rows.slice(3, 5).map(row => [row.state, row.code]), [['Refused', 'RECORD_CHANGED'], ['Kept', 'RECORD_CHANGED']]);
+  assert.equal(fs.existsSync(journalOf(target)), false);
+  target = await s.installed();
+  rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'place-launcher', s.bytesFile('one'), 'barrier', 'save-with-lease', 'placed', 'null', 'release'], [() => replaceRecord(target)]);
+  assert.deepEqual([rows[4].state, rows[4].code, rows[4].placement.state], ['Unknown', 'RECORD_CHANGED', 'Placed']);
+  assert.equal(fs.existsSync(journalOf(target)), true, 'publication is retained without claiming a saved outcome');
 });
