@@ -261,6 +261,7 @@ test('unreadable or unavailable native key storage explains recovery and keeps s
       const f = await fixture(t, true, false, { list }), { page } = f;
       await f.open();
       await page.waitForFunction(expected => document.getElementById('settings-key-storage')?.textContent === expected, UNREADABLE);
+      assert.equal(await page.locator('#settings-key-storage').isVisible(), true, 'Recovery guidance must be visible beside the disabled controls.');
       assert.equal(await page.locator('#settings-key-show').isDisabled(), true, list);
       assert.equal(await page.locator('#settings-key-copy').isDisabled(), true, list);
       assert.equal(await page.locator('#settings-key-generate').isEnabled(), true, list);
