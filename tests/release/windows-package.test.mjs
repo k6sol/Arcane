@@ -436,6 +436,9 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-setup-ownership.test.mjs', '// Fixture setup ownership verification source.\n');
   await assert.rejects(packageWindows(options), /Setup ownership verification requires its matching C# source/);
   await write('installer/SetupOwnership.cs', '// Fixture native setup ownership source.\n');
+  await write('tests/release/windows-shell-link.test.mjs', '// Fixture shortcut verification source.\n');
+  await assert.rejects(packageWindows(options), /Shortcut verification requires its matching C# source/);
+  await write('installer/ShellLink.cs', '// Fixture native shortcut source.\n');
   const result = await packageWindows(options), data = await manifest(result.directory);
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/PayloadArchive.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/KitVerifier.cs'));
@@ -443,5 +446,6 @@ test('installer verification source belongs to the reproducible source closure',
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/Launcher.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/OwnedFiles.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/SetupOwnership.cs'));
+  assert.ok(data.files.some(file => file.path === 'resources/product/installer/ShellLink.cs'));
   await verifyWindowsBundle(result.directory);
 });
