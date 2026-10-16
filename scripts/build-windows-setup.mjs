@@ -11,7 +11,7 @@ const UNINSTALLER_SOURCES = ['UninstallEntry.cs', 'UninstallHandoff.cs', 'Uninst
   'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'StageDirectory.cs', 'OwnedFiles.cs', 'SetupOwnership.cs',
   'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'];
 const NATIVE_SOURCES = [...new Set(['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs',
-  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs',
+  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'ShellLink.cs', 'SetupPath.cs',
   ...UNINSTALLER_SOURCES])].map(name => 'installer/' + name);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 async function digest(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }

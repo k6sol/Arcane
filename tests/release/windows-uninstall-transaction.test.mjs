@@ -56,6 +56,17 @@ internal static class Harness {
           OwnedFileResult uninstaller = OwnedFiles.Place(root, SetupOwnership.UninstallerName, u, Sha(u), null);
           OwnershipSave saved = SetupOwnership.Save(SetupOwnership.Read(r0).Snapshot, launcher.Descriptor, uninstaller.Descriptor);
           v["state"] = saved.State.ToString(); break; }
+        case "shortcut": {
+          string programs = a[++i]; InstalledRecordSnapshot original = InstalledRecord.Read(root); LeaseResult acquired = OperationLease.Acquire(original);
+          using (OperationLease lease = acquired.Lease) {
+            InstalledRecordSnapshot record = InstalledRecord.Read(root, lease); SetupOwnershipSnapshot journal = SetupOwnership.Read(record, lease).Snapshot;
+            ShellLinkResult link = ArcaneShellLink.Create(root + "\\" + SetupOwnership.LauncherName, root);
+            if (!link.Ok) throw new Exception("Link " + link.Code);
+            OwnedFileResult placed = OwnedFiles.Place(programs, SetupOwnership.ShortcutName, link.Bytes, Sha(link.Bytes), null);
+            OwnershipSave saved = SetupOwnership.SaveShortcut(journal, placed.Descriptor, lease);
+            v["state"] = saved.State.ToString(); v["placement"] = F(placed); v["lease"] = lease.Release().State.ToString();
+          }
+          break; }
         case "consent": {
           displayed = InstalledRecord.Read(root); ConsentResult c = UninstallConsent.Ask(null, displayed); authorization = c.Authorization;
           v["state"] = c.State.ToString(); v["authorized"] = authorization != null; break; }
@@ -65,16 +76,16 @@ internal static class Harness {
         case "wait-at": waitAt = a[++i]; continue;
         case "throw-at": { string stage = a[++i]; int nth = int.Parse(a[++i]), count = 0;
           ReleaseRemoval.Barrier = delegate(string s) { if (s == stage && ++count == nth) throw new IOException("Owned fixture interruption."); }; continue; }
-        case "run": case "run-null": case "run-foreign": {
+        case "run": case "run-null": case "run-foreign": case "run-programs": {
           InstalledRecordSnapshot shown = op == "run-foreign" ? InstalledRecord.Read(a[++i]) : displayed;
           seen.Clear();
-          UninstallResult r = UninstallTransaction.Run(shown, op == "run-null" ? null : authorization, cts.Token, progress);
+          UninstallResult r = op == "run-programs" ? UninstallTransaction.RunForPrograms(shown, authorization, cts.Token, progress, a[++i]) : UninstallTransaction.Run(shown, op == "run-null" ? null : authorization, cts.Token, progress);
           v["state"] = r.State.ToString(); v["code"] = r.Code; v["stoppedAt"] = r.StoppedAt.ToString(); v["mutated"] = r.Mutated; v["cancelRequested"] = r.CancelRequested;
           v["acquisition"] = N(r.Acquisition); v["acquisitionCode"] = r.AcquisitionCode; v["retainedLock"] = r.RetainedLock; v["consumed"] = r.Consumed; v["consentCode"] = r.ConsentCode;
           v["activity"] = N(r.Activity); v["activityCode"] = r.ActivityCode; v["activityPaths"] = r.ActivityPaths; v["activityUsers"] = r.ActivityUsers; v["journalPresent"] = r.JournalPresent;
           List<object> releases = new List<object>();
           foreach (ReleaseOutcome o in r.Releases) releases.Add(new object[] { o.State.ToString(), o.Code, o.Executable.ToString(), o.FilesListed, o.FilesDeleted, o.FilesKept, o.ManifestDeleted, o.ReleaseDirectoryDeleted });
-          v["releases"] = releases; v["launcher"] = F(r.Launcher); v["uninstaller"] = F(r.Uninstaller); v["journal"] = F(r.Journal);
+          v["releases"] = releases; v["launcher"] = F(r.Launcher); v["uninstaller"] = F(r.Uninstaller); v["shortcut"] = F(r.Shortcut); v["journal"] = F(r.Journal);
           v["record"] = new object[] { r.Record.ToString(), r.RecordCode }; v["releasesDirectory"] = new object[] { r.ReleasesDirectory.ToString(), r.ReleasesDirectoryCode };
           v["rootDirectory"] = new object[] { r.RootDirectory.ToString(), r.RootDirectoryCode }; v["lease"] = new object[] { N(r.LeaseCleanup), r.LeaseCleanupCode };
           v["progress"] = new List<string>(seen); break; }
@@ -91,7 +102,7 @@ function setup() {
   const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-uninstall-transaction-test-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-uninstall-transaction-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  const sources = ['UninstallTransaction.cs', 'UninstallConsent.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'ReleaseRemoval.cs',
+  const sources = ['UninstallTransaction.cs', 'ShellLink.cs', 'UninstallConsent.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'ReleaseRemoval.cs',
     'InstallationActivity.cs', 'SetupPath.cs', 'PayloadArchive.cs'];
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);
@@ -317,4 +328,40 @@ test('an interruption inside a release keeps its known counters, reports Unknown
   assert.deepEqual(r.releases[1], ['Unknown', 'IO', 'Deleted', 4, 1, 0, false, false], 'the deleted executable stays counted');
   for (const name of ['Arcane.exe', 'Uninstall Arcane.exe', 'setup-ownership.json', 'installation.json']) assert.equal(exists(join(f.target, name)), true, name + ' kept');
   assert.equal(exists(join(f.target, 'installation.lock')), false);
+});
+
+
+test('consented removal binds the owned shortcut to the authorized Programs folder and removes it before releases', windows, async () => {
+  const s = setup(), f = await s.installed({ manual: false }), programs = s.owned('programs');
+  fs.writeFileSync(join(programs, 'Other.lnk'), 'keep sibling shortcut');
+  const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'consent', 'run-programs', programs]);
+  assert.equal(rows.find(r => r.op === 'shortcut').state, 'Saved');
+  const r = result(rows);
+  assert.deepEqual([r.state, r.shortcut, r.lease], ['Removed', ['Deleted', null], ['Released', null]]);
+  assert.ok(r.progress.indexOf('Shortcut:0/1') < r.progress.indexOf('Releases:0/2'));
+  assert.equal(exists(f.target), false); assert.deepEqual(fs.readdirSync(programs), ['Other.lnk']);
+  assert.equal(fs.readFileSync(join(programs, 'Other.lnk'), 'utf8'), 'keep sibling shortcut');
+});
+
+test('a manual edit or different Programs root keeps the shortcut and all application content', windows, async () => {
+  const s = setup();
+  for (const mode of ['edited', 'other-root', 'replaced-root']) {
+    const f = await s.installed({ manual: false }), programs = s.owned('programs'), other = s.owned('other-programs');
+    let before;
+    const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'wait', 'consent', 'run-programs', mode === 'other-root' ? other : programs], [() => {
+      if (mode === 'edited') fs.appendFileSync(join(programs, 'Arcane.lnk'), 'manual edit');
+      if (mode === 'replaced-root') { fs.renameSync(programs, join(other, 'original')); fs.mkdirSync(programs); fs.writeFileSync(join(programs, 'Arcane.lnk'), 'manual replacement'); }
+      before = tree(f.target);
+    }]);
+    const r = result(rows);
+    assert.deepEqual([r.state, r.code, r.mutated, r.releases, r.lease], ['Refused', mode === 'edited' ? 'SHORTCUT' : 'SHORTCUT_ROOT', false, [], ['Released', null]], mode);
+    assert.deepEqual(tree(f.target), before, mode); assert.equal(exists(join(programs, 'Arcane.lnk')), true);
+  }
+});
+
+test('an already absent owned shortcut permits the remaining consented removal', windows, async () => {
+  const s = setup(), f = await s.installed({ manual: false }), programs = s.owned('programs');
+  const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'wait', 'consent', 'run-programs', programs], [() => fs.unlinkSync(join(programs, 'Arcane.lnk'))]);
+  const r = result(rows); assert.deepEqual([r.state, r.shortcut, r.lease], ['Removed', ['Absent', null], ['Released', null]]);
+  assert.equal(exists(f.target), false); assert.deepEqual(fs.readdirSync(programs), []);
 });

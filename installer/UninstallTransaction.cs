@@ -1,6 +1,7 @@
 // Consent-bound removal of a recorded Arcane installation (C# 5, .NET Framework 4.x, no NuGet). Requires the real
 // UninstallAuthorization issued by the confirmation dialog, the exact snapshot that was displayed and a live OperationLease
-// acquired here. Removes only each recorded release (ReleaseRemoval), then the journal-owned root launcher and uninstaller
+// acquired here. First removes the journal-owned shortcut only in the current host-authorized Programs directory, then
+// each recorded release (ReleaseRemoval), then the journal-owned root launcher and uninstaller
 // (OwnedFiles), then the unchanged journal, then installation.json LAST, then the observed releases container and root only
 // when they are empty. Profiles, unlisted, manual and sibling content are never recursively deleted. Synchronous: it never
 // prompts, starts or stops a process, waits, retries, rolls back, schedules a delete or rewrites the record.
@@ -16,7 +17,7 @@ using Microsoft.Win32.SafeHandles;
 namespace Arcane.Installer
 {
     internal enum UninstallState { Removed, Partial, Refused, Cancelled, Unknown }
-    internal enum UninstallPhase { Acquire, Consume, Activity, Releases, RootFiles, Journal, Record, ReleasesDirectory, Lease, RootDirectory, Done }
+    internal enum UninstallPhase { Acquire, Consume, Activity, Shortcut, Releases, RootFiles, Journal, Record, ReleasesDirectory, Lease, RootDirectory, Done }
     internal enum ContainerOutcome { NotReached, Deleted, Absent, Kept }
     internal enum MetadataOutcome { NotReached, Deleted, Kept, Unknown }
 
@@ -54,7 +55,7 @@ namespace Arcane.Installer
     {
         public readonly UninstallState State;
         /// <summary>null, CONSENT, CONSUMED, LEASE, LOCKED, RECORD_CHANGED, JOURNAL_CHANGED, PATH, BUSY, ACTIVITY, RELEASE, ROOT_FILE,
-        /// JOURNAL, RECORD, CONTAINER, CANCELLED or IO.</summary>
+        /// SHORTCUT_ROOT, SHORTCUT, JOURNAL, RECORD, CONTAINER, CANCELLED or IO.</summary>
         public readonly string Code;
         public readonly UninstallPhase StoppedAt;
         /// <summary>True once installation content was (or may have been) deleted. Never implies rollback.</summary>
@@ -69,7 +70,7 @@ namespace Arcane.Installer
         public readonly int ActivityPaths, ActivityUsers;
         public readonly bool JournalPresent;
         public readonly ReadOnlyCollection<ReleaseOutcome> Releases;
-        public readonly OwnedFileResult Launcher, Uninstaller, Journal;
+        public readonly OwnedFileResult Launcher, Uninstaller, Shortcut, Journal;
         public readonly MetadataOutcome Record;
         public readonly string RecordCode;
         public readonly ContainerOutcome ReleasesDirectory, RootDirectory;
@@ -82,7 +83,7 @@ namespace Arcane.Installer
             State = p.State; Code = p.Code; StoppedAt = p.Phase; Mutated = p.Mutated; CancelRequested = p.CancelRequested;
             Acquisition = p.Acquisition; AcquisitionCode = p.AcquisitionCode; RetainedLock = p.RetainedLock; Consumed = p.Consumed; ConsentCode = p.ConsentCode;
             Activity = p.Activity; ActivityCode = p.ActivityCode; ActivityPaths = p.ActivityPaths; ActivityUsers = p.ActivityUsers; JournalPresent = p.JournalPresent;
-            Releases = new List<ReleaseOutcome>(p.Releases).AsReadOnly(); Launcher = p.Launcher; Uninstaller = p.Uninstaller; Journal = p.Journal;
+            Releases = new List<ReleaseOutcome>(p.Releases).AsReadOnly(); Launcher = p.Launcher; Uninstaller = p.Uninstaller; Shortcut = p.Shortcut; Journal = p.Journal;
             Record = p.Record; RecordCode = p.RecordCode; ReleasesDirectory = p.ReleasesDirectory; ReleasesDirectoryCode = p.ReleasesDirectoryCode;
             RootDirectory = p.RootDirectory; RootDirectoryCode = p.RootDirectoryCode; LeaseCleanup = p.LeaseCleanup; LeaseCleanupCode = p.LeaseCleanupCode;
         }
@@ -112,7 +113,7 @@ namespace Arcane.Installer
             internal ActivityState? Activity;
             internal int ActivityPaths, ActivityUsers;
             internal readonly List<ReleaseOutcome> Releases = new List<ReleaseOutcome>();
-            internal OwnedFileResult Launcher, Uninstaller, Journal;
+            internal OwnedFileResult Launcher, Uninstaller, Shortcut, Journal;
             internal MetadataOutcome Record = MetadataOutcome.NotReached;
             internal ContainerOutcome ReleasesDirectory = ContainerOutcome.NotReached, RootDirectory = ContainerOutcome.NotReached;
             internal LeaseReleaseState? LeaseCleanup;
@@ -122,7 +123,7 @@ namespace Arcane.Installer
                 {
                     if (Record == MetadataOutcome.Deleted || Record == MetadataOutcome.Unknown) return true;
                     foreach (ReleaseOutcome r in Releases) if (r.Mutated) return true;
-                    foreach (OwnedFileResult f in new[] { Launcher, Uninstaller, Journal })
+                    foreach (OwnedFileResult f in new[] { Launcher, Uninstaller, Shortcut, Journal })
                         if (f != null && (f.State == OwnedFileState.Deleted || f.State == OwnedFileState.Unknown)) return true;
                     return false;
                 }
@@ -135,13 +136,20 @@ namespace Arcane.Installer
         /// <summary>Removes the displayed, consented installation. Never throws, never prompts, never starts or stops a process,
         /// never waits or retries. <paramref name="progress"/> (may be null) is called synchronously; its exceptions are ignored.</summary>
         public static UninstallResult Run(InstalledRecordSnapshot displayed, UninstallAuthorization authorization, CancellationToken cancel, Action<UninstallProgress> progress)
+        { return RunBound(displayed, authorization, cancel, progress, null); }
+
+        /// <summary>Trusted host port for an explicitly supplied Programs directory. No CLI input selects this destination.</summary>
+        internal static UninstallResult RunForPrograms(InstalledRecordSnapshot displayed, UninstallAuthorization authorization, CancellationToken cancel, Action<UninstallProgress> progress, string programsRoot)
+        { return RunBound(displayed, authorization, cancel, progress, programsRoot); }
+
+        private static UninstallResult RunBound(InstalledRecordSnapshot displayed, UninstallAuthorization authorization, CancellationToken cancel, Action<UninstallProgress> progress, string programsRoot)
         {
             Progress p = new Progress();
             OperationLease lease = null;
             InstalledRecordSnapshot bound = null;
             try
             {
-                Execute(displayed, authorization, cancel, progress, p, ref lease, ref bound);
+                Execute(displayed, authorization, cancel, progress, p, ref lease, ref bound, programsRoot);
             }
             catch (Stop) { }
             catch (Exception)
@@ -158,7 +166,7 @@ namespace Arcane.Installer
         }
 
         private static void Execute(InstalledRecordSnapshot displayed, UninstallAuthorization authorization, CancellationToken cancel, Action<UninstallProgress> progress,
-            Progress p, ref OperationLease lease, ref InstalledRecordSnapshot bound)
+            Progress p, ref OperationLease lease, ref InstalledRecordSnapshot bound, string programsRoot)
         {
             // Arguments and binding to what was displayed: a mismatched or missing consent never acquires a lease. A supplied
             // authorization is burned either way.
@@ -208,6 +216,24 @@ namespace Arcane.Installer
             Report(progress, UninstallPhase.Activity, 0, 1);
             Fence(p, bound, journal, false, lease);
             Preflight(p, bound, journal);
+
+            // Bind external metadata to the current host-authorized Programs folder before using it.
+            // A changed or manual link stops before any application release is removed.
+            if (journal.Shortcut != null)
+            {
+                p.Phase = UninstallPhase.Shortcut;
+                Checkpoint(p, cancel);
+                Report(progress, UninstallPhase.Shortcut, 0, 1);
+                Fence(p, bound, journal, false, lease);
+                string programs;
+                try { programs = InstalledRecord.DirectRoot(programsRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.Programs)); }
+                catch (Exception) { End(p, UninstallState.Refused, "SHORTCUT_ROOT"); return; }
+                if (journal.Shortcut.Root != programs || !InstalledRecord.Directory(programs).SameAs(journal.Shortcut.RootIdentity))
+                    End(p, UninstallState.Refused, "SHORTCUT_ROOT");
+                p.Shortcut = OwnedFiles.Remove(journal.Shortcut);
+                if (p.Shortcut.State == OwnedFileState.Unknown) End(p, UninstallState.Unknown, "SHORTCUT");
+                if (p.Shortcut.State != OwnedFileState.Deleted && p.Shortcut.State != OwnedFileState.Absent) End(p, Stopped(p), "SHORTCUT");
+            }
 
             p.Phase = UninstallPhase.Releases;
             List<InstalledRelease> order = new List<InstalledRelease>();

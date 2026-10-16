@@ -430,7 +430,7 @@ test('directory pin verification belongs to the native source closure', async t 
 test('setup root file verification belongs to the native source closure', async t => {
   const { write, options } = await fixture(t);
   await write('tests/release/windows-setup-root-files.test.mjs', '// Fixture setup root file verification source.\n');
-  for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+  for (const name of ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
     await assert.rejects(packageWindows(options), new RegExp('Setup root file verification requires its matching C# source: ' + name.replace('.', '\\.')));
     await write('installer/' + name, '// Fixture native setup root file source.\n');
   }

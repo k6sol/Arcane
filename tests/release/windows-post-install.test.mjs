@@ -67,7 +67,7 @@ function setup() {
     if (child.startsWith('arcane-post-install-') && !isAbsolute(child) && !child.includes(sep)) fs.rmSync(root, { recursive: true, force: true });
   });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  const sources = ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs'];
+  const sources = ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs'];
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);
   const launcher = Buffer.from('approved launcher fixture'), launcherFile = join(build, 'launcher.bin'); fs.writeFileSync(launcherFile, launcher);

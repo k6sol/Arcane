@@ -20,6 +20,20 @@ internal static class Harness {
   private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
   private static object D(OwnedFileDescriptor d) { if (d == null) return null; Dictionary<string, object> v = new Dictionary<string, object>();
     v["root"] = d.Root; v["name"] = d.Name; v["bytes"] = d.Bytes; v["sha256"] = d.Sha256; v["volume"] = d.Identity.Volume.ToString("x8"); v["index"] = d.Identity.Index.ToString("x16"); return v; }
+  private static object SD(OwnedFileDescriptor d) { if (d == null) return null; Dictionary<string, object> v = new Dictionary<string, object>();
+    v["root"] = d.Root; v["rootVolume"] = d.RootIdentity.Volume.ToString("x8"); v["rootIndex"] = d.RootIdentity.Index.ToString("x16"); v["name"] = d.Name; v["bytes"] = d.Bytes; v["sha256"] = d.Sha256;
+    v["volume"] = d.Identity.Volume.ToString("x8"); v["index"] = d.Identity.Index.ToString("x16"); return v; }
+  private static OwnedFileDescriptor Shortcut(string spec) {
+    if (spec == "null") return null;
+    int colon = spec.IndexOf(':'); string kind = spec.Substring(0, colon), root = spec.Substring(colon + 1);
+    FileIdentity rootId = new FileIdentity(); rootId.Volume = 0x11; rootId.Index = 0x22; FileIdentity id = new FileIdentity(); id.Volume = 0x33; id.Index = 0x44;
+    string sha = Sha(Encoding.UTF8.GetBytes("lnk"));
+    if (kind == "badname") return new OwnedFileDescriptor(root, rootId, "Other.lnk", 2336, sha, id);
+    if (kind == "small") return new OwnedFileDescriptor(root, rootId, SetupOwnership.ShortcutName, 75, sha, id);
+    if (kind == "large") return new OwnedFileDescriptor(root, rootId, SetupOwnership.ShortcutName, 65537, sha, id);
+    if (kind == "badsha") return new OwnedFileDescriptor(root, rootId, SetupOwnership.ShortcutName, 2336, sha.ToUpperInvariant(), id);
+    return new OwnedFileDescriptor(root, rootId, SetupOwnership.ShortcutName, 2336, sha, id);
+  }
   private static void Out(Dictionary<string, object> v) { Console.WriteLine(Json.Serialize(v)); Console.Out.Flush(); }
   private static string Sha(byte[] b) { using (SHA256 s = SHA256.Create()) { StringBuilder x = new StringBuilder(); foreach (byte c in s.ComputeHash(b)) x.Append(c.ToString("x2")); return x.ToString(); } }
   private static int Main(string[] a) {
@@ -30,7 +44,7 @@ internal static class Harness {
       switch (a[i]) {
         case "read": {
           try { R = InstalledRecord.Read(root); OwnershipRead r = SetupOwnership.Read(R); S = r.Snapshot; v["state"] = r.State.ToString(); v["code"] = r.Code;
-            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); }
+            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); v["shortcut"] = S == null ? null : SD(S.Shortcut); }
           catch (InstalledRecordException e) { v["state"] = "RecordError"; v["code"] = e.Code; S = null; }
           break; }
         case "acquire": case "acquire-other": {
@@ -51,6 +65,11 @@ internal static class Harness {
           OwnedFileDescriptor l = Pick(a[++i], L, S == null ? null : S.Launcher, S), u = Pick(a[++i], U, S == null ? null : S.Uninstaller, S);
           OwnershipSave r = operation == "save" ? SetupOwnership.Save(S, l, u) : SetupOwnership.Save(S, l, u, operation == "save-null-lease" ? null : A);
           v["state"] = r.State.ToString(); v["code"] = r.Code;
+          v["placement"] = r.Placement == null ? null : (object)new Dictionary<string, object> { { "state", r.Placement.State.ToString() }, { "code", r.Placement.Code }, { "backup", r.Placement.RetainedBackup } };
+          if (r.Snapshot != null) S = r.Snapshot; break; }
+        case "save-shortcut": case "save-shortcut-null-lease": {
+          OwnershipSave r = SetupOwnership.SaveShortcut(S, Shortcut(a[++i]), a[i - 1] == "save-shortcut-null-lease" ? null : A);
+          v["state"] = r.State.ToString(); v["code"] = r.Code; v["shortcut"] = r.Snapshot == null ? null : SD(r.Snapshot.Shortcut);
           v["placement"] = r.Placement == null ? null : (object)new Dictionary<string, object> { { "state", r.Placement.State.ToString() }, { "code", r.Placement.Code }, { "backup", r.Placement.RetainedBackup } };
           if (r.Snapshot != null) S = r.Snapshot; break; }
         case "wait": Out(v); Console.In.ReadLine(); continue;
@@ -275,4 +294,91 @@ test('changed record identity fences a leased save before and after journal publ
   rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'place-launcher', s.bytesFile('one'), 'barrier', 'save-with-lease', 'placed', 'null', 'release'], [() => replaceRecord(target)]);
   assert.deepEqual([rows[4].state, rows[4].code, rows[4].placement.state], ['Unknown', 'RECORD_CHANGED', 'Placed']);
   assert.equal(fs.existsSync(journalOf(target)), true, 'publication is retained without claiming a saved outcome');
+});
+
+// Bounded external shortcut entry (v2). Shortcut descriptors here are SYNTHETIC metadata: no .lnk is created or opened, and
+// the external directory deliberately does not exist (the journal never requires it).
+const SHORTCUT_KEYS = ['root', 'rootVolume', 'rootIndex', 'name', 'bytes', 'sha256', 'volume', 'index'];
+const external = (s, name = 'Programs') => join(s.root, 'external-missing', name);
+const rewrite = (target, mutate) => { const value = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); mutate(value); fs.writeFileSync(journalOf(target), JSON.stringify(value) + '\n'); };
+
+test('a v2 shortcut entry round-trips under the live lease, legacy saves preserve it and null clears back to exact v1', windows, async () => {
+  const s = await setup(), target = await s.installed(), launcher = s.bytesFile('launcher bytes'), uninstaller = s.bytesFile('uninstaller bytes'), programs = external(s);
+  let lines = await s.run(target, ['read', 'place-launcher', launcher, 'save', 'placed', 'null']);
+  const v1 = fs.readFileSync(journalOf(target), 'utf8'), v1Value = JSON.parse(v1);
+  assert.deepEqual([v1Value.schemaVersion, v1Value.shortcut, v1Value.registration], [1, null, null], 'no shortcut stays canonical v1');
+  lines = await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-shortcut', 'valid:' + programs, 'release', 'read']);
+  const saved = pick(lines, 'save-shortcut')[0];
+  assert.deepEqual([saved.state, saved.code, saved.placement.state], ['Saved', null, 'Replaced']);
+  const text = fs.readFileSync(journalOf(target), 'utf8'), journal = JSON.parse(text);
+  assert.equal(text, JSON.stringify(journal) + '\n', 'canonical bytes');
+  assert.deepEqual([journal.schemaVersion, journal.registration, Object.keys(journal.shortcut)], [2, null, SHORTCUT_KEYS]);
+  assert.deepEqual(journal.shortcut, { root: programs, rootVolume: '00000011', rootIndex: '0000000000000022', name: 'Arcane.lnk', bytes: 2336, sha256: hash('lnk'), volume: '00000033', index: '0000000000000044' });
+  assert.deepEqual(journal.launcher, v1Value.launcher, 'the launcher descriptor is preserved');
+  assert.equal(fs.existsSync(programs), false, 'the external directory was never created or required');
+  const read = pick(lines, 'read').at(-1);
+  assert.deepEqual([read.state, read.shortcut], ['Valid', { root: programs, rootVolume: '00000011', rootIndex: '0000000000000022', name: 'Arcane.lnk', bytes: 2336, sha256: hash('lnk'), volume: '00000033', index: '0000000000000044' }]);
+  // Legacy Save overloads (ordinary and leased) carry the observed shortcut through unchanged.
+  lines = await s.run(target, ['read', 'save', 'keep', 'keep', 'place-uninstaller', uninstaller, 'save', 'keep', 'placed', 'acquire', 'read-with-lease', 'save-with-lease', 'keep', 'keep', 'release', 'read']);
+  assert.deepEqual(pick(lines, 'save').map(l => l.state), ['Unchanged', 'Saved']); assert.equal(pick(lines, 'save-with-lease')[0].state, 'Unchanged');
+  const after = JSON.parse(fs.readFileSync(journalOf(target), 'utf8'));
+  assert.deepEqual([after.schemaVersion, after.shortcut, after.uninstaller.sha256], [2, journal.shortcut, hash('uninstaller bytes')]);
+  // Null under the live lease clears the entry and returns to canonical v1, preserving launcher and uninstaller.
+  lines = await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-shortcut', 'null', 'release']);
+  assert.equal(pick(lines, 'save-shortcut')[0].state, 'Saved');
+  const cleared = fs.readFileSync(journalOf(target), 'utf8'), clearedValue = JSON.parse(cleared);
+  assert.deepEqual([clearedValue.schemaVersion, clearedValue.shortcut, clearedValue.launcher, clearedValue.uninstaller], [1, null, after.launcher, after.uninstaller]);
+  assert.equal(cleared, JSON.stringify({ ...clearedValue }) + '\n');
+});
+
+test('invalid shortcut descriptors and roots are refused before any write; malformed v1/v2 journals are kept byte-identical', windows, async () => {
+  const s = await setup(), target = await s.installed(), launcher = s.bytesFile('launcher bytes'), good = external(s);
+  await s.run(target, ['read', 'place-launcher', launcher, 'save', 'placed', 'null']);
+  const before = fs.readFileSync(journalOf(target));
+  const long = 'C:\\' + 'a'.repeat(250);
+  const roots = ['relative\\Programs', 'C:\\', 'C:\\Programs\\', 'C:\\a\\..\\b', 'C:\\a\\.\\b', 'C:\\a\\b.', 'C:\\a\\b ', 'C:\\a\\b:stream', 'C:\\PROGRA~1\\x', 'C:\\arcane-d4079-absent\\LONGNA~1','C:\\a\\con', 'C:\\a\\c\u0001d',
+    'C:/a/b', 'C:\\a\\\\b', long, '\\\\server\\share\\x'];
+  const specs = [...roots.map(r => 'valid:' + r), 'badname:' + good, 'small:' + good, 'large:' + good, 'badsha:' + good];
+  const ops = ['read', 'acquire', 'read-with-lease']; for (const spec of specs) ops.push('save-shortcut', spec); ops.push('release');
+  const lines = await s.run(target, ops);
+  for (const [i, save] of pick(lines, 'save-shortcut').entries()) assert.deepEqual([save.state, save.code, save.placement], ['Refused', 'DESCRIPTOR', null], specs[i]);
+  assert.deepEqual(fs.readFileSync(journalOf(target)), before, 'nothing written');
+  // A valid v2 journal, then hand edits that are each refused on read and left untouched.
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-shortcut', 'valid:' + good, 'release']);
+  const v2 = fs.readFileSync(journalOf(target), 'utf8');
+  for (const [name, mutate] of [
+    ['v1 carrying a shortcut', v => { v.schemaVersion = 1; }], ['v2 without a shortcut', v => { v.shortcut = null; }], ['registration present', v => { v.registration = {}; }],
+    ['extra shortcut key', v => { v.shortcut.extra = 1; }], ['missing shortcut key', v => { delete v.shortcut.rootIndex; }], ['traversal root', v => { v.shortcut.root = 'C:\\a\\..\\b'; }],
+    ['ADS root', v => { v.shortcut.root = 'C:\\a:b'; }], ['short alias root', v => { v.shortcut.root = 'C:\\PROGRA~1'; }], ['absent short alias root', v => { v.shortcut.root = 'C:\\arcane-d4079-absent\\LONGNA~1'; }],['wrong name', v => { v.shortcut.name = 'Other.lnk'; }],
+    ['too small', v => { v.shortcut.bytes = 75; }], ['uppercase hash', v => { v.shortcut.sha256 = v.shortcut.sha256.toUpperCase(); }], ['schema 3', v => { v.schemaVersion = 3; }]]) {
+    fs.writeFileSync(journalOf(target), v2); rewrite(target, mutate); const edited = fs.readFileSync(journalOf(target));
+    const [r] = await s.run(target, ['read']);
+    assert.deepEqual([r.state, r.code], ['Kept', 'MALFORMED'], name); assert.deepEqual(fs.readFileSync(journalOf(target)), edited, name + ': untouched');
+  }
+  fs.writeFileSync(journalOf(target), v2.replace('"bytes":2336', '"bytes": 2336'));
+  assert.deepEqual((await s.run(target, ['read']))[0].code, 'MALFORMED', 'non-canonical whitespace');
+});
+
+test('shortcut saves need the matching live lease and keep journal compare-and-swap: no adoption or overwrite', windows, async () => {
+  const s = await setup(), target = await s.installed(), other = await s.installed(), launcher = s.bytesFile('launcher bytes'), good = external(s);
+  await s.run(target, ['read', 'place-launcher', launcher, 'save', 'placed', 'null']);
+  const before = fs.readFileSync(journalOf(target));
+  let lines = await s.run(target, ['read', 'save-shortcut-null-lease', 'valid:' + good]);
+  assert.deepEqual([lines[1].state, lines[1].code], ['Refused', 'RECORD_CHANGED'], 'no lease');
+  lines = await s.run(target, ['read', 'acquire-other', other, 'save-shortcut', 'valid:' + good]);
+  assert.deepEqual([pick(lines, 'save-shortcut')[0].state, pick(lines, 'save-shortcut')[0].code], ['Refused', 'RECORD_CHANGED'], 'a foreign lease');
+  fs.rmSync(join(other, 'installation.lock'), { force: true });
+  lines = await s.run(target, ['read', 'acquire', 'read-with-lease', 'release', 'save-shortcut', 'valid:' + good]);
+  assert.deepEqual([pick(lines, 'save-shortcut')[0].state, pick(lines, 'save-shortcut')[0].code], ['Refused', 'RECORD_CHANGED'], 'a released lease');
+  assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+  // The journal replaced (same bytes, new identity) after the leased read: the observed-journal CAS keeps it.
+  lines = await s.run(target, ['read', 'acquire', 'read-with-lease', 'wait', 'save-shortcut', 'valid:' + good, 'release'],
+    [() => { const b = fs.readFileSync(journalOf(target)); fs.unlinkSync(journalOf(target)); fs.writeFileSync(journalOf(target), b); }]);
+  assert.deepEqual([pick(lines, 'save-shortcut')[0].state, pick(lines, 'save-shortcut')[0].code], ['Kept', 'CHANGED']);
+  assert.deepEqual(fs.readFileSync(journalOf(target)), before, 'the replaced journal is never overwritten or adopted');
+  // The record changed after the leased read: fenced before publication.
+  lines = await s.run(target, ['read', 'acquire', 'read-with-lease', 'wait', 'save-shortcut', 'valid:' + good, 'release'],
+    [() => { const p = join(target, 'installation.json'); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('"releases"', '"releases" ')); }]);
+  assert.deepEqual([pick(lines, 'save-shortcut')[0].state, pick(lines, 'save-shortcut')[0].code], ['Refused', 'RECORD_CHANGED']);
+  assert.deepEqual(fs.readFileSync(journalOf(target)), before);
 });

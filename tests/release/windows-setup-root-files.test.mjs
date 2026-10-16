@@ -28,11 +28,17 @@ internal static class Harness {
     string root = a[1]; InstallState state = (InstallState)Enum.Parse(typeof(InstallState), a[8]);
     bool? published = state == InstallState.Installed ? (bool?)true : state == InstallState.AlreadyActive ? (bool?)false : null;
     InstallOutcome result = new InstallOutcome(state, published, null, a[6], a[7], true, false, false, false, 0, 0);
-    if (a.Length > 9) { int hold = int.Parse(a[9]), seen = 0; OwnedFiles.Barrier = delegate(string stage) { if (stage == "before-publish" && ++seen == hold) { Out(new { op = "wait" }); Console.In.ReadLine(); } }; }
+    if (a.Length > 9 && a[9] != "0") { int hold = int.Parse(a[9]), seen = 0; OwnedFiles.Barrier = delegate(string stage) { if (stage == "before-publish" && ++seen == hold) { Out(new { op = "wait" }); Console.In.ReadLine(); } }; }
     byte[] launcher = File.ReadAllBytes(a[2]), uninstaller = File.ReadAllBytes(a[4]);
     long launcherBytes = a[3] == "short" ? launcher.Length - 1 : launcher.Length;
     SetupCompletionOutcome done = PostInstall.CompleteRootFiles(root, result, launcher, launcherBytes, a[3] == "short" ? null : a[3], uninstaller, uninstaller.Length, a[5]);
     OwnedFiles.Barrier = null;
+    if (a.Length > 10) {
+      if (a.Length > 11) { Out(new { op = "wait" }); Console.In.ReadLine(); }
+      ShortcutSetupOutcome sc = PostInstall.CompleteShortcut(done, a[10]);
+      Out(new { op = "shortcut", ready = sc.Ready, code = sc.Code, placement = F(sc.Placement), journal = S(sc.Journal),
+        lease = sc.LeaseCleanup.HasValue ? sc.LeaseCleanup.Value.ToString() : null, retainedLock = sc.RetainedLock });
+    }
     Out(new { op = "done", ready = done.Ready, code = done.Code, installationId = done.InstallationId,
       launcher = done.Launcher == null ? null : F(done.Launcher.Placement), launcherJournal = done.Launcher == null ? null : S(done.Launcher.Journal), launcherReady = done.Launcher != null && done.Launcher.Ready,
       uninstaller = F(done.Uninstaller), journal = S(done.Journal),
@@ -46,7 +52,7 @@ function setup() {
   const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-setup-root-files-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-setup-root-files-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  const sources = ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs'];
+  const sources = ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs'];
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);
   const file = (name, text) => { const p = join(build, name); fs.writeFileSync(p, text); return { path: p, bytes: Buffer.from(text), sha: sha(text) }; };
@@ -66,18 +72,18 @@ function setup() {
   const engine = createWindowsInstallation({ verifyBundle: async d => { const b = fs.readFileSync(join(d, 'windows-manifest.json')), m = JSON.parse(b); return { manifestSha256: sha(b), files: m.fileCount, bytes: m.totalBytes }; } });
   const installed = async () => { const target = join(owned('install'), 'Arcane'); const result = await engine.install({ bundle, installRoot: target }); return { target, result }; };
   /** Runs completion; `action` (if any) runs at the requested publication hold. */
-  const complete = (f, { launcher = L1, uninstaller = U1, state = 'Installed', id = f.result.installationId, active = f.result.activeReleaseId, launcherSha = launcher.sha, uninstallerSha = uninstaller.sha, hold, action } = {}) =>
+  const complete = (f, { launcher = L1, uninstaller = U1, state = 'Installed', id = f.result.installationId, active = f.result.activeReleaseId, launcherSha = launcher.sha, uninstallerSha = uninstaller.sha, hold, action, programs, beforeShortcut = false } = {}) =>
     new Promise((resolve, reject) => {
-      const argv = ['complete', f.target, launcher.path, launcherSha, uninstaller.path, uninstallerSha, id, active, state, ...(hold ? [String(hold)] : [])];
+      const argv = ['complete', f.target, launcher.path, launcherSha, uninstaller.path, uninstallerSha, id, active, state, ...(programs ? [String(hold ?? 0), programs, ...(beforeShortcut ? ["wait-shortcut"] : [])] : hold ? [String(hold)] : [])];
       const child = spawn(harness, argv, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); const rows = []; let out = '', err = '', chain = Promise.resolve(), actionError;
       child.stdout.on('data', d => { out += d; const lines = out.split(/\r?\n/); out = lines.pop(); for (const line of lines) { const row = JSON.parse(line); rows.push(row);
         if (row.op === 'wait') chain = chain.then(() => action && action()).catch(e => { actionError ??= e; }).then(() => child.stdin.write('go\n')); } });
       child.stderr.on('data', d => { err += d; });
       child.once('error', reject);
-      child.once('close', code => chain.then(() => { child.stdin.destroy(); if (actionError) reject(actionError); else if (code !== 0 || err) reject(new Error('harness ' + code + ' ' + err)); else resolve(rows.find(r => r.op === 'done')); }));
+      child.once('close', code => chain.then(() => { child.stdin.destroy(); if (actionError) reject(actionError); else if (code !== 0 || err) reject(new Error('harness ' + code + ' ' + err)); else resolve({ ...rows.find(r => r.op === 'done'), shortcut: rows.find(r => r.op === 'shortcut') }); }));
     });
   const resource = (kind, bytes, pin) => { const r = spawnSync(harness, ['resource', kind, String(bytes), pin], { windowsHide: true, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout.trim()); };
-  shared = { L1, U1, L2, U2, installed, complete, resource, engine, bundle }; return shared;
+  shared = { L1, U1, L2, U2, installed, complete, resource, engine, bundle, owned }; return shared;
 }
 const exists = p => { try { fs.lstatSync(p); return true; } catch { return false; } };
 const journalOf = target => JSON.parse(fs.readFileSync(join(target, 'setup-ownership.json'), 'utf8'));
@@ -175,4 +181,63 @@ test('the embedded launcher and uninstaller are returned only for their exact si
     assert.deepEqual(s.resource(kind, f.bytes.length, '0'.repeat(64)), { ok: false }, kind + ' pin');
   }
   assert.deepEqual(s.resource('uninstaller', s.L1.bytes.length, s.L1.sha), { ok: false }, 'the fixed names are not interchangeable');
+});
+
+
+test('shortcut completion journals an actual link in the authorized owned Programs root and repeats without replacing it', windows, async () => {
+  const s = setup(), f = await s.installed(), programs = s.owned('programs');
+  let r = await s.complete(f, { programs });
+  assert.deepEqual(r.shortcut, { op: 'shortcut', ready: true, code: null, placement: ['Placed', null, false], journal: ['Saved', null], lease: 'Released', retainedLock: null });
+  const before = fs.readFileSync(join(programs, 'Arcane.lnk')), j = journalOf(f.target);
+  assert.equal(j.schemaVersion, 2); assert.equal(j.shortcut.root, programs);
+  assert.equal(j.shortcut.sha256, sha(before)); assert.equal(j.shortcut.name, 'Arcane.lnk');
+  r = await s.complete(f, { programs, state: 'AlreadyActive' });
+  assert.deepEqual(r.shortcut, { op: 'shortcut', ready: true, code: null, placement: ['Unchanged', null, false], journal: ['Unchanged', null], lease: 'Released', retainedLock: null });
+  assert.deepEqual(fs.readFileSync(join(programs, 'Arcane.lnk')), before);
+  assert.deepEqual(journalOf(f.target).shortcut, j.shortcut);
+  assert.equal(exists(join(f.target, 'installation.lock')), false);
+});
+
+test('shortcut completion preserves manual and edited links and refuses a changed authorized destination', windows, async () => {
+  const s = setup();
+  let f = await s.installed(), programs = s.owned('programs');
+  fs.writeFileSync(join(programs, 'Arcane.lnk'), 'manual link');
+  let r = await s.complete(f, { programs });
+  assert.deepEqual([r.shortcut.ready, r.shortcut.code, r.shortcut.placement, r.shortcut.lease], [false, 'PLACEMENT', ['Kept', 'UNRECORDED', false], 'Released']);
+  assert.equal(fs.readFileSync(join(programs, 'Arcane.lnk'), 'utf8'), 'manual link'); assert.equal(journalOf(f.target).shortcut, null);
+  f = await s.installed(); programs = s.owned('programs');
+  await s.complete(f, { programs }); const owned = journalOf(f.target).shortcut;
+  fs.appendFileSync(join(programs, 'Arcane.lnk'), 'edited'); const edited = fs.readFileSync(join(programs, 'Arcane.lnk'));
+  r = await s.complete(f, { programs });
+  assert.equal(r.shortcut.ready, false); assert.deepEqual(fs.readFileSync(join(programs, 'Arcane.lnk')), edited); assert.deepEqual(journalOf(f.target).shortcut, owned);
+  const elsewhere = s.owned('other-programs'); r = await s.complete(f, { programs: elsewhere });
+  assert.deepEqual([r.shortcut.ready, r.shortcut.code, r.shortcut.placement, r.shortcut.lease], [false, 'DESTINATION_CHANGED', null, 'Released']);
+  assert.deepEqual(fs.readdirSync(elsewhere), []); assert.deepEqual(journalOf(f.target).shortcut, owned);
+});
+
+test('shortcut completion verifies root file bytes again and refuses a changed engine selection before placing a link', windows, async () => {
+  const s = setup();
+  for (const changed of ['launcher', 'record']) {
+    const f = await s.installed(), programs = s.owned('programs');
+    const r = await s.complete(f, { programs, beforeShortcut: true, action: () => {
+      if (changed === 'launcher') fs.appendFileSync(join(f.target, 'Arcane.exe'), 'edited');
+      else { const p = join(f.target, 'installation.json'), j = JSON.parse(fs.readFileSync(p, 'utf8')); j.updatedAt = '2026-10-16T00:00:00.000Z'; fs.writeFileSync(p, JSON.stringify(j) + '\n'); }
+    } });
+    assert.equal(r.shortcut.ready, false, changed); assert.equal(r.shortcut.placement, null, changed);
+    assert.deepEqual(fs.readdirSync(programs), []); assert.equal(exists(join(f.target, 'installation.lock')), false);
+  }
+});
+
+
+test('setup recreates an absent owned link and preserves shortcut ownership when the root tools update', windows, async () => {
+  const s = setup(), f = await s.installed(), programs = s.owned('programs');
+  await s.complete(f, { programs }); const initial = journalOf(f.target).shortcut;
+  fs.unlinkSync(join(programs, 'Arcane.lnk'));
+  let r = await s.complete(f, { programs });
+  assert.equal(r.shortcut.ready, true); assert.equal(r.shortcut.placement[0], 'Placed');
+  const repaired = journalOf(f.target).shortcut; assert.notEqual(repaired.index, initial.index);
+  const bytes = fs.readFileSync(join(programs, 'Arcane.lnk'));
+  r = await s.complete(f, { launcher: s.L2, uninstaller: s.U2, programs });
+  assert.equal(r.shortcut.ready, true); assert.equal(r.shortcut.placement[0], 'Unchanged');
+  assert.deepEqual(journalOf(f.target).shortcut, repaired); assert.deepEqual(fs.readFileSync(join(programs, 'Arcane.lnk')), bytes);
 });

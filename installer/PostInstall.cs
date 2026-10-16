@@ -1,4 +1,4 @@
-// Setup completion binds launcher placement to the confirmed engine result and installation journal.
+// Setup completion binds root tools and the Start Menu shortcut to the confirmed engine result and installation journal.
 // It neither retries partial publication nor adopts unrecorded files. Launch is a separate human UI action.
 using System;
 using System.IO;
@@ -41,6 +41,17 @@ namespace Arcane.Installer
             Ready = ready; Code = code; Root = root; InstallationId = installationId; Launcher = launcher; Uninstaller = uninstaller; Journal = journal;
             LeaseCleanup = leaseCleanup; LeaseCleanupCode = leaseCleanupCode; RetainedLock = retainedLock;
         }
+    }
+
+    internal sealed class ShortcutSetupOutcome
+    {
+        public readonly bool Ready;
+        public readonly string Code, RetainedLock;
+        public readonly OwnedFileResult Placement;
+        public readonly OwnershipSave Journal;
+        public readonly LeaseReleaseState? LeaseCleanup;
+        internal ShortcutSetupOutcome(bool ready, string code, OwnedFileResult placement, OwnershipSave journal, LeaseReleaseState? cleanup, string retainedLock)
+        { Ready = ready; Code = code; Placement = placement; Journal = journal; LeaseCleanup = cleanup; RetainedLock = retainedLock; }
     }
 
     internal static class PostInstall
@@ -95,7 +106,7 @@ namespace Arcane.Installer
             if (expected == null || !InstalledRecord.StillCurrent(record, lease)) return false;
             OwnershipRead fresh = SetupOwnership.Read(record, lease);
             return fresh.State == OwnershipReadState.Valid && fresh.Snapshot != null && fresh.Snapshot.Present && expected.Present &&
-                Same(fresh.Snapshot.Journal, expected.Journal) && Same(fresh.Snapshot.Launcher, expected.Launcher) && Same(fresh.Snapshot.Uninstaller, expected.Uninstaller);
+                Same(fresh.Snapshot.Journal, expected.Journal) && Same(fresh.Snapshot.Launcher, expected.Launcher) && Same(fresh.Snapshot.Uninstaller, expected.Uninstaller) && Same(fresh.Snapshot.Shortcut, expected.Shortcut);
         }
 
         private static bool Accepted(OwnedFileResult placement)
@@ -109,6 +120,86 @@ namespace Arcane.Installer
 
         private static bool Retained(OwnedFileResult placement, OwnershipSave save)
         { return placement != null && placement.RetainedBackup != null || save != null && save.Placement != null && save.Placement.RetainedBackup != null; }
+
+        private static byte[] VerifiedBytes(OwnedFileDescriptor descriptor)
+        {
+            if (descriptor == null || !InstalledRecord.Directory(InstalledRecord.DirectRoot(descriptor.Root)).SameAs(descriptor.RootIdentity)) return null;
+            FileIdentity identity;
+            byte[] bytes = InstalledRecord.ReadDirect(descriptor.Root + "\\" + descriptor.Name, OwnedFiles.MaxBytes, "FILE", out identity);
+            return identity.SameAs(descriptor.Identity) && bytes.LongLength == descriptor.Bytes && Sha(bytes) == descriptor.Sha256 ? bytes : null;
+        }
+
+        /// <summary>The trusted host supplies the current user's Programs directory, never an argument from setup's CLI or
+        /// the ownership journal. Creates no directory and never adopts an existing link. Root files remain a separate outcome.</summary>
+        public static ShortcutSetupOutcome CompleteShortcut(SetupCompletionOutcome completion, string programsRoot)
+        {
+            bool ready = false; string code = null, retainedLock = null;
+            OwnedFileResult placement = null; OwnershipSave saved = null;
+            OperationLease lease = null; LeaseRelease released = null;
+            try
+            {
+                if (completion == null || !completion.Ready || completion.Launcher == null || completion.Launcher.Placement == null || completion.Uninstaller == null || completion.Journal == null || completion.Journal.Snapshot == null)
+                    code = "INSTALLATION";
+                else
+                {
+                    string programs = InstalledRecord.DirectRoot(programsRoot);
+                    InstalledRecordSnapshot record = InstalledRecord.Read(completion.Root);
+                    if (record.InstallationId != completion.InstallationId || record.RecordSha256 != completion.Journal.Snapshot.Record.RecordSha256) code = "RECORD_CHANGED";
+                    else
+                    {
+                        LeaseResult acquired = OperationLease.Acquire(record); retainedLock = acquired.RetainedLock;
+                        if (acquired.State != LeaseState.Acquired || acquired.Lease == null) code = acquired.Code ?? "LEASE";
+                        else
+                        {
+                            lease = acquired.Lease;
+                            OwnershipRead read = SetupOwnership.Read(record, lease);
+                            SetupOwnershipSnapshot current = read.Snapshot;
+                            if (read.State != OwnershipReadState.Valid || current == null) code = "JOURNAL";
+                            else if (!Same(current.Launcher, completion.Launcher.Placement.Descriptor) || !Same(current.Uninstaller, completion.Uninstaller.Descriptor) ||
+                                VerifiedBytes(current.Launcher) == null || VerifiedBytes(current.Uninstaller) == null) code = "ROOT_FILES";
+                            else if (current.Shortcut != null && (current.Shortcut.Root != programs || !InstalledRecord.Directory(programs).SameAs(current.Shortcut.RootIdentity))) code = "DESTINATION_CHANGED";
+                            else
+                            {
+                                string launcherPath = record.Root + "\\" + SetupOwnership.LauncherName;
+                                // Reuse a verified link's exact bytes: COM tracking metadata is not a reason to replace it.
+                                byte[] bytes = current.Shortcut == null || !InstalledRecord.Exists(current.Shortcut.Root + "\\" + current.Shortcut.Name) ? null : VerifiedBytes(current.Shortcut);
+                                ShellLinkResult link = bytes == null ? ArcaneShellLink.Create(launcherPath, record.Root) : ArcaneShellLink.Inspect(bytes);
+                                if (!link.Ok || !ArcaneShellLink.Describes(link.Fields, launcherPath, record.Root)) code = "LINK";
+                                else if (!Fenced(record, lease, current)) code = "JOURNAL_CHANGED";
+                                else
+                                {
+                                    bytes = bytes ?? link.Bytes;
+                                    placement = OwnedFiles.Place(programs, SetupOwnership.ShortcutName, bytes, Sha(bytes), current.Shortcut);
+                                    if (!Accepted(placement)) code = "PLACEMENT";
+                                    else if (!Fenced(record, lease, current)) code = "JOURNAL_CHANGED";
+                                    else
+                                    {
+                                        saved = SetupOwnership.SaveShortcut(current, placement.Descriptor, lease);
+                                        if (!Saved(saved)) code = "SHORTCUT_JOURNAL";
+                                        else if (!Fenced(record, lease, saved.Snapshot) || VerifiedBytes(placement.Descriptor) == null ||
+                                            VerifiedBytes(current.Launcher) == null || VerifiedBytes(current.Uninstaller) == null) code = "CHANGED";
+                                        else { ready = true; if (Retained(placement, saved)) code = "BACKUP_RETAINED"; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (InstalledRecordException error) { code = error.Code; }
+            catch (Exception) { code = "IO"; }
+            finally
+            {
+                if (lease != null)
+                {
+                    try { released = lease.Release(); } catch (Exception) { released = new LeaseRelease(LeaseReleaseState.Unknown, "IO"); }
+                    try { lease.Dispose(); } catch (Exception) { }
+                    if (released.State != LeaseReleaseState.Released)
+                    { retainedLock = lease.Root + "\\" + InstalledRecord.LockName; if (ready) { ready = false; code = "LEASE"; } }
+                }
+            }
+            return new ShortcutSetupOutcome(ready, code, placement, saved, released == null ? (LeaseReleaseState?)null : released.State, retainedLock);
+        }
 
         /// <summary>After a confirmed installation, places and records the approved launcher, then the approved uninstaller, under ONE
         /// operation lease for the current record. The launcher is recorded before the uninstaller is placed, so a later failure keeps

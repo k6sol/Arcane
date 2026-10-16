@@ -201,12 +201,12 @@ function validateInstallerSources(files) {
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-post-install.test.mjs')) {
-    for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+    for (const name of ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Postinstall verification requires its matching C# source: ' + name);
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-setup-root-files.test.mjs')) {
-    for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+    for (const name of ['PostInstall.cs', 'ShellLink.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup root file verification requires its matching C# source: ' + name);
     }
   }
@@ -231,7 +231,7 @@ function validateInstallerSources(files) {
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-setup-form.test.mjs')) {
-    for (const name of ['SetupForm.cs', 'PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs']) {
+    for (const name of ['SetupForm.cs', 'PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'ShellLink.cs', 'SetupPath.cs', 'UninstallEntry.cs', 'UninstallHandoff.cs', 'UninstallStage.cs', 'UninstallForm.cs', 'UninstallTransaction.cs', 'UninstallConsent.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup form verification requires its matching C# source: ' + name);
     }
   }
@@ -246,7 +246,7 @@ function validateInstallerSources(files) {
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-uninstall-transaction.test.mjs')) {
-    for (const name of ['UninstallTransaction.cs', 'UninstallConsent.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'PayloadArchive.cs']) {
+    for (const name of ['UninstallTransaction.cs', 'ShellLink.cs', 'UninstallConsent.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'ReleaseRemoval.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Uninstall transaction verification requires its matching C# source: ' + name);
     }
   }
