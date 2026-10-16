@@ -300,6 +300,37 @@ test('real service journal preserves multiple public histories across reload; ex
   const foreign=await reopened.action({requestId:randomUUID(),connectionId,action:'thread-resume',threadId:'not-owned'});assert.equal(foreign.record.state,'rejected');assert.equal(foreign.record.errorCode,'HISTORY_SCOPE');
 });
 
+test('starting a fresh conversation does not read stored history before the user writes a message',async t=>{
+  const f=await serviceFixture(t);
+  const connected=await f.service.action({requestId:randomUUID(),connectionId:null,action:'connect'});
+  const connectionId=connected.state.snapshot!.connectionId;
+  await f.service.action({requestId:randomUUID(),connectionId,action:'select',model:'fixture-sol',effort:'low'});
+  const historyReads:string[]=[];
+  f.setHistoryHook(async id=>{historyReads.push(id);throw new CodexClientError('REMOTE_REJECTED','Synthetic new conversation has no stored history.',true);});
+  const doc=new DocumentFixture(),api=new CodexChatApi(TOKEN,async(path,init)=>{
+    if(path==='/v1/codex/state')return Response.json({state:f.service.state()});
+    const input=JSON.parse(String(init?.body));f.calls.push(input.action);
+    const outcome=await f.service.action(input);
+    return Response.json(outcome,{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});
+  });
+  const chat=new CodexChat(doc.asDocument(),api);t.after(()=>chat.stop());
+  await chat.enableChatTabs({storage:memoryStorage()});await chat.start();
+  doc.getElementById('codex-model').value='fixture-sol';doc.getElementById('codex-effort').value='low';
+  doc.getElementById('codex-select').dispatchEvent(new Event('click'));await tick();
+  assert.equal(await chat.startCurrentChat(),true);
+  assert.equal(chat.currentStateView().nativeBoundToActiveChat,true);
+  assert.deepEqual(historyReads,[]);
+  assert.equal(f.service.state().nativeHistory!.recorded,null,'No history recording is invented for a new chat.');
+  const before=f.calls.length;
+  doc.getElementById('codex-composer').value='My first message';
+  doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  assert.equal(doc.getElementById('codex-composer').disabled,false);
+  assert.equal(doc.getElementById('codex-submit').disabled,false);
+  assert.equal(f.calls.length,before,'Typing preserves the draft without a native request.');
+  assert.doesNotMatch(doc.getElementById('codex-notice').textContent,/history-load|rejected/);
+  assert.equal(f.calls.includes('turn-start'),false);
+});
+
 test('explicit start binds only its local draft to a real acknowledged native thread; draft creation and selection never send it',async t=>{
   const f=await serviceFixture(t),old=await f.seed();f.calls.length=0;
   const doc=new DocumentFixture(),api=new CodexChatApi(TOKEN,async(path,init)=>{if(path==='/v1/codex/state')return Response.json({state:f.service.state()});const input=JSON.parse(String(init?.body));f.calls.push(input.action);const outcome=await f.service.action(input);return Response.json(outcome,{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});});

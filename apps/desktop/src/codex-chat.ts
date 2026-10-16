@@ -750,8 +750,9 @@ export class CodexChat {
         if(!this.tabs?.bindDraft(this.state!))return false;
         if(draft){const context=this.tabDraftContexts.get(draft.key);if(context)this.tabDraftContexts.set(this.tabs.active()!.key,context);this.tabDraftContexts.delete(draft.key);}
       }
-      // Public history loading is part of the explicit open gesture; it never sends a turn.
-      const targetHistoryReady=!IDLE.includes(live.turnStatus)||await perform('history-load',{threadId:live.threadId});
+      // A newly created conversation has no prior history to load. Saved chats
+      // still load their public history as part of the explicit open gesture.
+      const targetHistoryReady=action==='thread-start'||!IDLE.includes(live.turnStatus)||await perform('history-load',{threadId:live.threadId});
       if(historyLimited&&targetHistoryReady&&exact())this.text('codex-notice',historyHadRecording
         ?'Opened this conversation. The previous conversation\u2019s history exceeded the display limit; its earlier recording and unsent draft were retained.'
         :'Opened this conversation. The previous conversation\u2019s history exceeded the display limit; no earlier recording was available. Your unsent draft was retained.');
