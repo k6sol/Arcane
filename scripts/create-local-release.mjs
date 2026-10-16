@@ -169,8 +169,11 @@ function validateWorkspaceLock(files) {
   }
 }
 function validateInstallerSources(files) {
-  if (files.some(file => file.path === 'tests/release/windows-installer-payload.test.mjs') && !files.some(file => file.path === 'installer/PayloadArchive.cs')) {
+  if (files.some(file => ['tests/release/windows-installer-payload.test.mjs', 'tests/release/windows-setup-payload.test.mjs'].includes(file.path)) && !files.some(file => file.path === 'installer/PayloadArchive.cs')) {
     throw new Error('Installer payload verification requires its matching C# source.');
+  }
+  if (files.some(file => file.path === 'tests/release/windows-installer-kit.test.mjs') && !files.some(file => file.path === 'installer/KitVerifier.cs')) {
+    throw new Error('Installer kit verification requires its matching C# source.');
   }
 }
 export async function createLocalRelease({ repository = REPOSITORY } = {}) {
