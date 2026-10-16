@@ -418,7 +418,7 @@ namespace Arcane.Installer
         {
             string root = bound.Root, path = root + "\\" + InstalledRecord.RecordName;
             code = null;
-            using (SafeFileHandle pin = CreateFileW(root, NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero))
+            using (SafeFileHandle pin = CreateFileW(root, NativeFile.ListDirectory | NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero))
             {
                 FileIdentity rootIdentity; FileAttributes rootAttributes; uint rootLinks; long rootSize;
                 if (pin.IsInvalid || !NativeFile.Describe(pin, out rootIdentity, out rootAttributes, out rootLinks, out rootSize) ||

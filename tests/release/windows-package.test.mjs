@@ -416,6 +416,17 @@ test('production runtime, cache and generated code are not private Arcane runtim
   await verifyWindowsBundle(result.directory);
 });
 
+test('directory pin verification belongs to the native source closure', async t => {
+  const { write, options } = await fixture(t);
+  await write('tests/release/windows-directory-pins.test.mjs', '// Fixture directory pin verification source.\n');
+  for (const name of ['OwnedFiles.cs', 'StageDirectory.cs', 'ReleaseRemoval.cs', 'InstalledRecord.cs', 'PayloadArchive.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'OperationLease.cs']) {
+    await assert.rejects(packageWindows(options), new RegExp('Directory pin verification requires its matching C# source: ' + name.replace('.', '\\.')));
+    await write('installer/' + name, '// Fixture native directory pin source.\n');
+  }
+  const result = await packageWindows(options), data = await manifest(result.directory);
+  assert.ok(data.files.some(file => file.path === 'resources/product/installer/OwnedFiles.cs'));
+});
+
 test('installer verification source belongs to the reproducible source closure', async t => {
   const { write, options } = await fixture(t);
   await write('tests/release/windows-installer-payload.test.mjs', '// Fixture payload verification source.\n');

@@ -76,8 +76,8 @@ namespace Arcane.Installer
                     return new LeaseResult(LeaseState.Refused, InstalledRecord.Exists(lockPath) ? "LOCKED" : "RECORD_CHANGED", null, null);
             }
             catch (Exception) { return new LeaseResult(LeaseState.Refused, "PATH", null, null); }
-            // The root cannot be renamed or replaced while this handle (no FILE_SHARE_DELETE) is held.
-            SafeFileHandle pin = CreateFileW(authorized.Root, NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
+            // The root cannot be renamed or replaced while this handle (ListDirectory access, no FILE_SHARE_DELETE) is held.
+            SafeFileHandle pin = CreateFileW(authorized.Root, NativeFile.ListDirectory | NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
             FileIdentity pinIdentity; FileAttributes attributes; uint links; long size;
             if (pin.IsInvalid || !NativeFile.Describe(pin, out pinIdentity, out attributes, out links, out size) || !pinIdentity.SameAs(authorized.RootIdentity) ||
                 (attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)

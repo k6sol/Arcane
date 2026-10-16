@@ -86,7 +86,7 @@ namespace Arcane.Installer
         private static SafeFileHandle PinRoot(string root, out FileIdentity identity)
         {
             identity = new FileIdentity();
-            SafeFileHandle handle = CreateFileW(root, NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExistingDisposition, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
+            SafeFileHandle handle = CreateFileW(root, NativeFile.ListDirectory | NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExistingDisposition, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
             if (handle.IsInvalid) { handle.Dispose(); return null; }
             FileAttributes attributes; uint links; long size;
             if (!NativeFile.Describe(handle, out identity, out attributes, out links, out size) || (attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)

@@ -1,5 +1,7 @@
 # Windows installation engine
 
+Directory pins in ownership, operation leases, release removal, stage cleanup and record removal include list-directory access. Attribute-only handles do not enforce delete-sharing restrictions. Three native regressions isolate the actual private pin helpers on empty directories: rename and removal are denied while held and allowed after release. Existing operation and cleanup cases also pass. These pins require list-folder permission and refuse when it is unavailable; identity-only readers keep their existing access.
+
 The installation engine stages verified Windows directory packages and publishes an active release record. A runnable unsigned setup executable composes payload extraction, kit verification, progress and cancellation. Stable launch, shortcuts, uninstall registration and clean-machine acceptance remain delivery gates.
 
 `createWindowsInstallation()` from `scripts/windows-installation.mjs` exposes two host-only operations:

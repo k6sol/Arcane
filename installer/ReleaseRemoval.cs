@@ -182,7 +182,7 @@ namespace Arcane.Installer
             if (derived == null) { Stop(result, RemovalState.Refused, "MANIFEST"); return; }
 
             // Pin the root (no delete right) and, with ReadAttributes|DELETE, the release directory and every existing derived
-            // directory. No FILE_SHARE_DELETE: none can be renamed or replaced; each is later deleted through this same pin.
+            // directory. ListDirectory access with no FILE_SHARE_DELETE: none can be renamed or replaced; each is later deleted through this same pin.
             // The releases parent may change between the chain check and pinning: a fixed refusal, never an exception path.
             FileIdentity releasesIdentity;
             if (!DirectoryIdentity(releases, out releasesIdentity)) { Stop(result, RemovalState.Retained, "CHANGED"); return; }
@@ -306,7 +306,7 @@ namespace Arcane.Installer
 
         private static bool Pin(Dictionary<string, SafeFileHandle> pins, string path, FileIdentity expected, bool deletable)
         {
-            SafeFileHandle handle = CreateFileW(Extended(path), NativeFile.ReadAttributes | (deletable ? NativeFile.Delete : 0), NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
+            SafeFileHandle handle = CreateFileW(Extended(path), NativeFile.ListDirectory | NativeFile.ReadAttributes | (deletable ? NativeFile.Delete : 0), NativeFile.ShareRead | NativeFile.ShareWrite, IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
             FileIdentity identity; FileAttributes attributes; uint links; long size;
             if (handle.IsInvalid || !NativeFile.Describe(handle, out identity, out attributes, out links, out size) || !identity.SameAs(expected) ||
                 (attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0) { handle.Dispose(); return false; }

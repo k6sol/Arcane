@@ -66,7 +66,8 @@ namespace Arcane.Installer
     /// <summary>Handle-based file identity helpers (no link following) shared by extraction and cleanup.</summary>
     internal static class NativeFile
     {
-        internal const uint ReadAttributes = 0x80, GenericRead = 0x80000000, Delete = 0x10000;
+        // ListDirectory makes a directory handle take part in sharing checks; ReadAttributes alone does not deny rename or delete.
+        internal const uint ReadAttributes = 0x80, GenericRead = 0x80000000, Delete = 0x10000, ListDirectory = 0x1;
         internal const uint ShareRead = 1, ShareWrite = 2, ShareDelete = 4;
         private const uint OpenExisting = 3, OpenReparsePoint = 0x00200000, BackupSemantics = 0x02000000;
         [StructLayout(LayoutKind.Sequential)]

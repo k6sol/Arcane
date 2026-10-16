@@ -169,6 +169,11 @@ function validateWorkspaceLock(files) {
   }
 }
 function validateInstallerSources(files) {
+  if (files.some(file => file.path === 'tests/release/windows-directory-pins.test.mjs')) {
+    for (const name of ['OwnedFiles.cs', 'StageDirectory.cs', 'ReleaseRemoval.cs', 'InstalledRecord.cs', 'PayloadArchive.cs', 'InstallationActivity.cs', 'SetupPath.cs', 'OperationLease.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Directory pin verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => ['tests/release/windows-installer-payload.test.mjs', 'tests/release/windows-setup-payload.test.mjs'].includes(file.path)) && !files.some(file => file.path === 'installer/PayloadArchive.cs')) {
     throw new Error('Installer payload verification requires its matching C# source.');
   }

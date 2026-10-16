@@ -178,10 +178,10 @@ namespace Arcane.Installer
                 try { AssertDirectChain(parent); return true; } catch (StageException) { return false; }
             }
 
-            /// <summary>Opens the directory entry itself with a deny-delete share mode and checks it is the recorded real directory.</summary>
+            /// <summary>Opens the directory entry itself with ListDirectory access and a deny-delete share mode and checks it is the recorded real directory.</summary>
             private static SafeFileHandle Pin(string path, FileIdentity expected)
             {
-                SafeFileHandle handle = NativeFile.Open(path, NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, true);
+                SafeFileHandle handle = NativeFile.Open(path, NativeFile.ListDirectory | NativeFile.ReadAttributes, NativeFile.ShareRead | NativeFile.ShareWrite, true);
                 FileIdentity identity; FileAttributes attributes; uint links; long size;
                 if (handle != null && NativeFile.Describe(handle, out identity, out attributes, out links, out size) && identity.SameAs(expected) &&
                     (attributes & FileAttributes.Directory) != 0 && (attributes & FileAttributes.ReparsePoint) == 0) return handle;
