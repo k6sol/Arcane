@@ -163,5 +163,5 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
       if (captures.get(jobId)?.scopeKey === scopeKey(scope)) captures.delete(jobId);
     },
   };
-  return Object.freeze({ hooks: Object.freeze(hooks), close() { closed = true; captures.clear(); } });
+  return Object.freeze({ hooks: Object.freeze(hooks),hasCapturedJob(jobId:string){if(closed)fail('STUDIO_IMPORT_SCOPE');return captures.has(jobId);}, close() { closed = true; captures.clear(); } });
 }

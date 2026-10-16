@@ -361,21 +361,19 @@ test('a late start response keeps captured chat A when the live chat changes to 
   assert.equal(f.starts, 1);
 });
 
-test('listing returns its captured scope for one page and refuses a chat change between binding reads', async t => {
+test('listing refuses a chat change across asynchronous retained-job hydration without exposing the captured page', async t => {
   const f = await fixture(t, { seeds: seeds(2) }), later = { ...NATIVE, threadId: 'Later:Thread' };
   for (const id of [uuid(1), uuid(2)]) f.store.bind({ conversation: NATIVE, kind: 'asset-job', id });
   const list = f.store.list.bind(f.store); let reads = 0;
   f.store.list = (...args) => { reads++; const result = list(...args); f.context(later); return result; };
-  const one = page(await f.call<JobsReply>(JOBS + '?limit=1'), f.store.projectId, f.projectPath);
-  assert.deepEqual(one.jobs.map(job => job.jobId), [uuid(1)]); assert.equal(reads, 1);
-  assert.ok(!JSON.stringify(one).includes(later.threadId));
+  const one=await f.call<JobsReply>(JOBS+'?limit=1');status(one,409);assert.equal(reads,2);
+  assert.equal((one.value as unknown as {error:string}).error,'ASSET_CONVERSATION_STALE');
+  assert.ok(!JSON.stringify(one.value).includes(later.threadId));assert.ok(!JSON.stringify(one.value).includes(uuid(1)));
   f.context({ ...NATIVE }); reads = 0;
   f.store.bind = () => assert.fail('A changing conversation cannot trigger attribution.');
-  // A complete page is one captured observation, not one live lookup per item.
-  // A later chat change cannot rewrite that page's original attribution.
-  const captured = page(await f.call<JobsReply>(JOBS + '?limit=2'), f.store.projectId, f.projectPath);
-  assert.equal(reads, 1); assert.deepEqual(captured.jobs.map(job => job.jobId), [uuid(1), uuid(2)]);
-  assert.ok(!JSON.stringify(captured).includes(later.threadId)); assert.equal(f.starts, 0);
+  const captured=await f.call<JobsReply>(JOBS+'?limit=2');status(captured,409);assert.equal(reads,2);
+  assert.equal((captured.value as unknown as {error:string}).error,'ASSET_CONVERSATION_STALE');
+  assert.ok(!JSON.stringify(captured.value).includes(later.threadId));assert.ok(!JSON.stringify(captured.value).includes(uuid(2)));assert.equal(f.starts,0);
 });
 
 test('exact provider/thread/session/case and namespace isolate actual jobs; legacy work stays global', async t => {

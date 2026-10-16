@@ -1,4 +1,4 @@
-import { JOB_JOURNAL_BYTES, CUSTOM_REQUEST_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
+import { JOB_JOURNAL_BYTES, CUSTOM_REQUEST_BYTES,jsonSnapshot } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { Stats } from 'node:fs';
 import { lstat, opendir, mkdir, writeFile, rename } from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
@@ -21,6 +21,8 @@ import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor } 
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
 import { createStudioImportTransfer, type StudioImportTransfer } from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
+import {AssetArchiveStore,type AssetArchiveScan,type AssetJobDirectory} from './asset-archive-store.js';
+import type {ArchiveHostFacts} from '../../../packages/asset-pipeline/src/archive-ledger.js';
 
 
 export interface PreparedStudioImportPayload {
@@ -48,6 +50,12 @@ export interface AssetServiceOptions {
   workerQueryHost?: ProcessQueryHost;
   /** Trusted fixtures only: replaces the atomic resolution-marker write to exercise commit faults. */
   resolutionMarkerWriter?: (directory: string, filename: string, text: string) => Promise<void>;
+  /** Host-owned retained-work facts. Never accepted from HTTP or model inputs. */
+  retentionPins?:{
+    preparationRecord(jobId:string):Promise<boolean>;
+    pendingStage(jobId:string):boolean;
+    importCaptured(jobId:string):boolean;
+  };
 }
 /** Outcome of a human worker-status check for one interrupted job. Refusals carry fixed reasons only. */
 export type WorkerResolutionOutcome =
@@ -82,10 +90,17 @@ export interface AssetJobRecord {
   error: { code: string; message: string } | null;
   /** Display only for interrupted jobs; admission always re-validates the stored marker from disk. */
   resolution?: { status: 'resolved'; resolvedAt: string } | { status: 'invalid' | 'uncertain' };
+  retention?:{status:'archived';archivedAt:string};
+}
+export interface AssetHistoryUnavailable {jobId:string;name?:string;status:'missing'|'changed'|'conflict'|'unclassified'}
+class UnavailableAssetHistory extends ArcaneError {
+  constructor(readonly item:AssetHistoryUnavailable){super('HISTORY_INTEGRITY','This retained job needs inspection before its content can be used. Its files have been kept.');}
 }
 const ID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const LIMIT = 256;
 export const HISTORY_PAGE_BYTES = 512 * 1024;
+/** Archived identities plus a bounded degraded root inventory; not an admission capacity. */
+export const HISTORY_RECORD_LIMIT=8768;
 export const ARTIFACT_DOWNLOAD_BYTES = 64 * 1024 * 1024;
 export const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 30000;
 const DOWNLOADS = new Map([
@@ -102,7 +117,7 @@ async function unchangedFile(path: string, before: Stats): Promise<void> {
     throw new AssetError('ARTIFACT', 'Artifact or manifest changed during download verification.');
   }
 }
-export interface AssetJobPage { schemaVersion: 1; jobs: AssetJobRecord[]; total: number; nextCursor: string | null; byteLimit: number }
+export interface AssetJobPage { schemaVersion: 1; jobs: AssetJobRecord[]; total: number; nextCursor: string | null; byteLimit: number;unavailable?:AssetHistoryUnavailable[] }
 const outputOwners = new Set<string>();
 function id(value: unknown): string {
   if (typeof value !== 'string' || !ID.test(value)) throw new ArcaneError('INPUT', 'Expected a job UUID.');
@@ -132,7 +147,12 @@ export async function createAssetService(options: AssetServiceOptions) {
     options.workerQueryHost ? { queryHost: options.workerQueryHost } : {});
   const writeMarker = options.resolutionMarkerWriter ?? ((directory: string, filename: string, text: string) => atomicAssetJson(directory, filename, text));
   const entries = new Map<string, { directory: string; job: AssetJobRecord }>();
+  let archives:AssetArchiveStore;
+  let archiveScan:AssetArchiveScan;
+  const unavailableHistory=new Map<string,AssetHistoryUnavailable>();
+  const unclassifiedHistory=new Map<string,AssetJobDirectory>();
   const active = new Map<string, { handle: AssetJob; completion: Promise<void> }>();
+  const historyReads=new Set<Promise<unknown>>();
   let probeActive: AbortController | null = null;
   let adoption: Promise<AssetJobRecord> | null = null;
   let artifactReadActive = false;
@@ -168,13 +188,10 @@ export async function createAssetService(options: AssetServiceOptions) {
       (persistenceIssue ? ' (' + persistenceIssue.phase + '/' + persistenceIssue.code + ')' : '') + '; inspect retained job journals.');
   };
   const ensureOpen = () => { if (closed) throw new ArcaneError('CLOSED', 'Asset service is closed.'); };
-  const entry = (jobId: unknown) => {
-    const e = entries.get(id(jobId));
-    if (!e) throw new ArcaneError('NOT_FOUND', 'Unknown asset job.');
-    return e;
-  };
   // Worker-status resolution: one human check at a time, mutually exclusive with admission and Blender work.
   let resolution: { controller: AbortController; task: Promise<WorkerResolutionOutcome> } | null = null;
+  let retentionOperation:{controller:AbortController;task:Promise<unknown>}|null=null;
+  const lifetime=new AbortController();
   let admitting = false;
   // A marker write whose commit could not be confirmed keeps that job fenced for this process lifetime.
   const uncertainResolutions = new Set<string>();
@@ -222,20 +239,15 @@ export async function createAssetService(options: AssetServiceOptions) {
     }
     return { blocked, witnesses };
   };
-  try {
-    // Ignore index contents as path authority. Scan only direct, fixed-name job directories.
-    const directories = await opendir(root);
-    let inspected = 0;
-    for await (const d of directories) {
-      if (++inspected > 1024) throw new ArcaneError('HISTORY_LIMIT', 'Asset output root has too many entries to scan safely.');
-      const match = /^([a-z][a-z0-9-]{0,47})-([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/.exec(d.name);
-      if (!match) continue;
-      if (!d.isDirectory() || d.isSymbolicLink()) throw new AssetError('OUTPUT_PATH', 'Job directories must be regular directories without links.');
-      if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history exceeds 256 jobs; use a fresh trusted output root.');
-      const directory = join(root, d.name);
-      await noLinks(directory);
+  async function recoverEntry(ref:AssetJobDirectory,readOnly=false):Promise<{directory:string;job:AssetJobRecord}>{
+    const directory=ref.directory,match=[ref.name+'-'+ref.jobId,ref.name,ref.jobId];
       const journal = record(await readJson(join(directory, 'job.json'), JOB_JOURNAL_BYTES), 'job journal');
+      if(journal.schemaVersion!==1||!['running','succeeded','failed','cancelled','timed_out','interrupted'].includes(String(journal.state)))
+        throw new AssetError('RECOVERY','The saved job state cannot be verified.');
       if (id(journal.jobId) !== match[2]) throw new AssetError('RECOVERY', 'Job directory and journal identities disagree.');
+      // Reclassification is read-only. A newly discovered running journal retains
+      // its admission fence instead of being rewritten as part of rebuilding an index.
+      if(readOnly&&journal.state==='running')throw new AssetError('RECOVERY','The saved job still needs supervision recovery.');
       if (isAdoptedGlbRequest(journal.request)) {
         const request = parseAdoptedGlbRequest(journal.request);
         if (request.name !== match[1]) throw new AssetError('RECOVERY','Adopted job identity disagrees.');
@@ -248,10 +260,9 @@ export async function createAssetService(options: AssetServiceOptions) {
             if(manifest.jobId !== match[2] || !isDeepStrictEqual(manifest.request,request) || !importHost || manifest.provenance.projectId !== importHost.workAssociations.projectId) throw new Error('scope');
           } catch {state='failed';error={code:'HISTORY_INTEGRITY',message:'Managed adopted GLB evidence failed verification.'};}
         }
-        entries.set(match[2]!,{directory,job:{schemaVersion:1,jobId:match[2]!,directory,request,state,stage:'complete',startedAt,
+        return {directory,job:{schemaVersion:1,jobId:match[2]!,directory,request,state,stage:'complete',startedAt,
           updatedAt:timestamp(journal.updatedAt,startedAt),...(typeof journal.finishedAt==='string'?{finishedAt:journal.finishedAt}:{}),
-          manifestPath:state==='succeeded'?join(directory,'manifest.json'):null,manifestAvailable:state==='succeeded',events:[],error}});
-        continue;
+          manifestPath:state==='succeeded'?join(directory,'manifest.json'):null,manifestAvailable:state==='succeeded',events:[],error}};
       }
       let request: AssetRequest;
       try { request = normalizeRequest(journal.request ?? await readJson(join(directory, 'request.json'), CUSTOM_REQUEST_BYTES)); }
@@ -271,9 +282,20 @@ export async function createAssetService(options: AssetServiceOptions) {
         state = 'failed'; error = { code: 'HISTORY_INTEGRITY', message: 'Retained job evidence failed verification; inspect local artifacts.' };
       }
       const now = new Date().toISOString();
-      entries.set(match[2]!, { directory, job: { schemaVersion: 1, jobId: match[2]!, directory, manifestPath: state === 'succeeded' ? join(directory, 'manifest.json') : null, ...(typeof journal.finishedAt === 'string' ? { finishedAt: journal.finishedAt } : {}), request, state, stage: state === 'interrupted' ? 'supervision-lost' : 'complete',
+      return { directory, job: { schemaVersion: 1, jobId: match[2]!, directory, manifestPath: state === 'succeeded' ? join(directory, 'manifest.json') : null, ...(typeof journal.finishedAt === 'string' ? { finishedAt: journal.finishedAt } : {}), request, state, stage: state === 'interrupted' ? 'supervision-lost' : 'complete',
         startedAt: timestamp(journal.startedAt, timestamp(journal.finishedAt, now)), updatedAt: timestamp(journal.finishedAt, now), events: [],
-        manifestAvailable: state === 'succeeded', error } });
+        manifestAvailable: state === 'succeeded', error } };
+  }
+  try {
+    archives=await AssetArchiveStore.open({root});archiveScan=await archives.scan();
+    for(const ref of archiveScan.unclassified)unclassifiedHistory.set(ref.jobId,ref);
+    for(const ref of archiveScan.active){
+      try{const entry=await recoverEntry(ref);entries.set(ref.jobId,entry);
+        if(entry.job.error?.code==='HISTORY_INTEGRITY')unavailableHistory.set(ref.jobId,{jobId:ref.jobId,name:ref.name,status:'conflict'});}
+      catch(error){
+        if(error instanceof AssetError&&error.code==='BUSY')throw error;
+        unavailableHistory.set(ref.jobId,{jobId:ref.jobId,name:ref.name,status:'conflict'});
+      }
     }
     // Interrupted jobs show their stored worker-status check, validated against the exact journal bytes.
     for (const e of entries.values()) if (holdsFence(e.job)) showResolution(e.job, await storedResolution(e.directory, e.job.jobId));
@@ -294,8 +316,160 @@ export async function createAssetService(options: AssetServiceOptions) {
         }
       }
     } catch { /* Index is rebuildable; verified journals remain the authority. */ }
-    persist(); await flushed();
+    // Preserve the advisory index too when the locator cannot classify every retained record.
+    if(!archiveScan.degraded&&!unavailableHistory.size){persist();await flushed();}
   } catch (e) { outputOwners.delete(ownerKey); throw e; }
+
+  function retainedRead<T>(jobIds:readonly string[],read:()=>Promise<T>):Promise<T>{
+    ensureOpen();const release=archives.pin(jobIds);
+    const task=Promise.resolve().then(read).finally(()=>{release();historyReads.delete(task);});
+    historyReads.add(task);return task;
+  }
+  async function verifiedSavedManifest(directory:string,jobId:string,request:AssetRequest|AdoptedGlbRequest,bindFullRequest=true):Promise<AssetPreviewManifest>{
+    const manifest=isAdoptedGlbRequest(request)
+      ?await validateAdoptedGlbManifest(directory,await readJson(join(directory,'manifest.json')))
+      :await pipeline.validate(join(directory,'manifest.json'));
+    if(manifest.jobId!==jobId||manifest.request.name!==request.name||bindFullRequest&&!isDeepStrictEqual(manifest.request,request))throw new AssetError('MANIFEST','Manifest identity differs from its saved job request.');
+    if(isAdoptedGlbManifest(manifest)){
+      const binding=importHost?.workAssociations.binding('asset-job',jobId);
+      if(!isDeepStrictEqual(manifest.request,request)||!binding||binding.projectId!==manifest.provenance.projectId||!isDeepStrictEqual(binding.conversation,manifest.provenance.conversation))
+        throw new AssetError('MANIFEST','Adopted snapshot differs from its durable conversation binding.');
+    }
+    return manifest;
+  }
+
+  async function loadEntry(jobId:unknown):Promise<{directory:string;job:AssetJobRecord}>{
+    return retainedRead([id(jobId)],async()=>{
+    ensureOpen();const requested=id(jobId),current=entries.get(requested);
+    const unavailable=unavailableHistory.get(requested);if(unavailable)throw new UnavailableAssetHistory(unavailable);
+    if(current)return current;
+    if(unclassifiedHistory.has(requested))throw new UnavailableAssetHistory({jobId:requested,name:unclassifiedHistory.get(requested)!.name,status:'unclassified'});
+    if(!archives.isArchived(requested))throw new ArcaneError('NOT_FOUND','Unknown asset job.');
+    const retained=await archives.read(requested);ensureOpen();
+    if(retained.status!=='archived'||!retained.journal)throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:retained.status==='archived'?'conflict':retained.status});
+    // Read-only hydration: never call recover() for archived bytes (it can rewrite a running journal).
+    const journal=record(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(retained.journal)),'archived job');
+    let request:AssetRequest|AdoptedGlbRequest;
+    try{request=isAdoptedGlbRequest(journal.request)?parseAdoptedGlbRequest(journal.request):normalizeRequest(journal.request);}
+    catch{throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});}
+    if(request.name!==retained.entry.name||journal.jobId!==requested)throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});
+    const startedAt=timestamp(journal.startedAt,retained.entry.archivedAt),finishedAt=timestamp(journal.finishedAt,startedAt);
+    let originalError:AssetJobRecord['error']=null;
+    if(journal.error!==undefined&&journal.error!==null){
+      const error=record(journal.error,'archived job error');
+      if(typeof error.code!=='string'||error.code.length>64||typeof error.message!=='string'||error.message.length>1024)
+        throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});
+      originalError={code:error.code,message:error.message};
+    }
+    const job:AssetJobRecord={schemaVersion:1,jobId:requested,directory:retained.directory,request,state:retained.entry.state,
+      stage:retained.entry.state==='interrupted'?'supervision-lost':'complete',startedAt,updatedAt:finishedAt,
+      ...(typeof journal.finishedAt==='string'?{finishedAt:journal.finishedAt}:{}),
+      manifestPath:retained.entry.manifestAvailable?join(retained.directory,'manifest.json'):null,manifestAvailable:retained.entry.manifestAvailable,
+      events:[],error:originalError??(retained.entry.state==='interrupted'?{code:'SUPERVISION_LOST',message:'The interrupted job was retained; no replay.'}:null),
+      retention:{status:'archived',archivedAt:retained.entry.archivedAt}};
+    if(job.state==='succeeded'&&!job.manifestAvailable){
+      // A rebuilt ledger cannot infer exports from a terminal state. A scoped
+      // history read may establish availability from the actual saved files.
+      try{await verifiedSavedManifest(retained.directory,requested,request);job.manifestAvailable=true;job.manifestPath=join(retained.directory,'manifest.json');}
+      catch{ensureOpen();job.error={code:'HISTORY_INTEGRITY',message:'Saved exports need inspection before they can be used.'};}
+      const current=await archives.read(requested);ensureOpen();
+      if(current.status!=='archived'||!current.journal?.equals(retained.journal))throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'changed'});
+    }
+    if(retained.entry.state==='interrupted')showResolution(job,await storedResolution(retained.directory,requested));
+    // Archived progress is advisory and never supplies file paths, state or worker authority.
+    try{const saved=record(await readJson(join(retained.directory,'observed-events.json'),16384),'archived observations');
+      if(saved.schemaVersion===1&&saved.jobId===requested&&Array.isArray(saved.events)&&saved.events.length<=64&&saved.events.every(raw=>{
+        const event=record(raw,'archived event');return event.jobId===requested&&typeof event.at==='string'&&Number.isFinite(Date.parse(event.at))&&
+          typeof event.stage==='string'&&/^[a-z-]{1,48}$/.test(event.stage)&&['running','succeeded','failed','cancelled','timed_out','interrupted'].includes(String(event.state));
+      }))job.events=saved.events as AssetJobEvent[];
+    }catch{/* Missing advisory observations do not replace journal authority. */}
+    ensureOpen();return{directory:retained.directory,job};
+    });
+  }
+  async function lookupJobs(jobIds:readonly string[]):Promise<{jobs:AssetJobRecord[];unavailable:AssetHistoryUnavailable[]}>{
+    ensureOpen();if(!Array.isArray(jobIds)||jobIds.length>64||new Set(jobIds).size!==jobIds.length||jobIds.some(value=>typeof value!=='string'||value.length!==36||!ID.test(value)))throw new ArcaneError('INPUT','Choose at most 64 exact unique job UUIDs.');
+    const ids=[...jobIds],release=archives.pin(ids),jobs:AssetJobRecord[]=[],unavailable:AssetHistoryUnavailable[]=[];
+    try{for(const requested of ids){
+      try{jobs.push(structuredClone((await loadEntry(requested)).job));}
+      catch(error){ensureOpen();if(error instanceof UnavailableAssetHistory)unavailable.push(structuredClone(error.item));
+        else if(error instanceof ArcaneError&&error.code==='NOT_FOUND')unavailable.push({jobId:requested,status:'missing'});
+        else throw error;}
+    }return{jobs,unavailable};}finally{release();}
+  }
+  async function retentionFacts(jobId:string):Promise<ArchiveHostFacts>{
+    ensureOpen();if(importHost&&!options.retentionPins)throw new ArcaneError('HISTORY_INTEGRITY','Retained import state needs host inspection before archival.');
+    const preparationRecord=options.retentionPins?await options.retentionPins.preparationRecord(jobId):false;ensureOpen();
+    const pendingStage=options.retentionPins?.pendingStage(jobId)??false,importCaptured=options.retentionPins?.importCaptured(jobId)??false;
+    if(typeof preparationRecord!=='boolean'||typeof pendingStage!=='boolean'||typeof importCaptured!=='boolean')throw new ArcaneError('HISTORY_INTEGRITY','Retained-work facts are unavailable.');
+    return{active:active.has(jobId),readPinned:false,importCaptured,preparationRecord,pendingStage,uncertainLatch:uncertainResolutions.has(jobId),manifestVerified:entries.get(jobId)?.job.manifestAvailable===true};
+  }
+  /** Reconcile a committed classification from current bytes without restarting work.
+   * Unreadable, malformed or still-running records remain visible and keep admission fenced. */
+  async function reconcileHistory():Promise<{active:number;archived:number;unavailable:number;degraded:boolean}>{
+    const previous=new Map(entries);archiveScan=await archives.scan();
+    entries.clear();unavailableHistory.clear();unclassifiedHistory.clear();
+    for(const ref of archiveScan.unclassified)unclassifiedHistory.set(ref.jobId,ref);
+    for(const ref of archiveScan.active){
+      try{
+        const entry=await recoverEntry(ref,true);
+        entry.job.events=previous.get(ref.jobId)?.job.events??[];
+        if(holdsFence(entry.job))showResolution(entry.job,await storedResolution(entry.directory,ref.jobId));
+        entries.set(ref.jobId,entry);
+        if(entry.job.error?.code==='HISTORY_INTEGRITY')unavailableHistory.set(ref.jobId,{jobId:ref.jobId,name:ref.name,status:'conflict'});
+      }catch{unavailableHistory.set(ref.jobId,{jobId:ref.jobId,name:ref.name,status:'conflict'});}
+    }
+    const degraded=archiveScan.degraded||unavailableHistory.size>0||unclassifiedHistory.size>0;
+    if(!degraded){persist();await flushed();}
+    return{active:archiveScan.active.length,archived:archiveScan.archived.length,unavailable:unavailableHistory.size,degraded};
+  }
+  async function maintainHistory(kind:'rebuild'|'confirm',signal?:AbortSignal):Promise<{active:number;archived:number;unavailable:number;degraded:boolean;backup:string|null}>{
+    ensureOpen();
+    if(retentionOperation||admitting||resolution||active.size||probeActive||adoption||artifactReadActive||studioImportActive||historyReads.size)
+      throw new AssetError('BUSY','Wait for the current asset operation before inspecting retained history.');
+    const controller=new AbortController(),abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const guard=()=>{ensureOpen();if(controller.signal.aborted)throw new ArcaneError('CANCELLED','History inspection was cancelled before its ledger write.');};
+    const run=async()=>{
+      await flushed();guard();let backup:string|null=null,committed=false;
+      try{
+        if(kind==='rebuild')backup=(await archives.rebuild({facts:retentionFacts,guard})).backup;
+        else await archives.confirm(guard);
+        committed=true;
+        // Once the store reports a committed/confirmed outcome, finish the view
+        // even after caller retirement. Closing joins this owned operation.
+        return{...await reconcileHistory(),backup};
+      }catch(error){
+        if(committed)throw new ArcaneError('ASSET_ARCHIVE_UNCERTAIN','The history change was saved, but its refreshed view could not be confirmed. Inspect recorded history before another change.');
+        if(error instanceof ArcaneError&&error.code==='ASSET_ARCHIVE_BACKUP'){
+          const scan=await archives.scan();if(scan.reasons.includes('commit-uncertain'))throw new ArcaneError('ASSET_ARCHIVE_UNCERTAIN','The history change needs inspection before its outcome can be confirmed.');
+        }
+        throw error;
+      }
+    };
+    const task=run();retentionOperation={controller,task};
+    try{return await task;}finally{signal?.removeEventListener('abort',abort);if(retentionOperation?.task===task)retentionOperation=null;}
+  }
+  async function ensureHistoryRoom(guard:()=>void):Promise<void>{
+    archiveScan=await archives.scan();ensureOpen();synchronousAdmissionResult(guard());
+    if(archiveScan.degraded||unavailableHistory.size||unclassifiedHistory.size)throw new ArcaneError('HISTORY_INTEGRITY','Retained history needs inspection before new asset work. Existing files are kept.');
+    if(entries.size<LIMIT)return;
+    if(artifactReadActive||studioImportActive)throw new AssetError('BUSY','Wait for retained asset reads or import preparation before archiving history.');
+    const selected:string[]=[];
+    for(const job of ordered().toReversed()){
+      if(selected.length>=32)break;
+      if(job.state==='running'||uncertainResolutions.has(job.jobId))continue;
+      const facts=await retentionFacts(job.jobId);synchronousAdmissionResult(guard());
+      if(await archives.eligible(job.jobId,facts))selected.push(job.jobId);ensureOpen();synchronousAdmissionResult(guard());
+    }
+    if(!selected.length)throw new ArcaneError('HISTORY_LIMIT','Retained work pins the active history limit. Inspect interrupted jobs and pending imports before starting another job.');
+    for(const jobId of selected){const e=entries.get(jobId)!;
+      await atomicAssetJson(e.directory,'observed-events.json',JSON.stringify({schemaVersion:1,jobId,events:e.job.events})+'\n');
+      ensureOpen();synchronousAdmissionResult(guard());
+    }
+    const archived=await archives.archive({jobIds:selected,activeCount:entries.size,facts:retentionFacts,guard:()=>{ensureOpen();synchronousAdmissionResult(guard());}});
+    // Ledger authority committed; the active index is advisory. Retained UUIDs load through the archive store.
+    for(const jobId of archived)entries.delete(jobId);persist();await flushed();ensureOpen();synchronousAdmissionResult(guard());
+    archiveScan=await archives.scan();ensureOpen();synchronousAdmissionResult(guard());
+  }
 
   function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: false): Promise<PreparedStudioImport>;
   function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: true, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImportPayload>;
@@ -318,20 +492,26 @@ export async function createAssetService(options: AssetServiceOptions) {
     };
     const check = () => { guard(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
     const originalScope = check();
-    const e = entry(requested);
+    const e = await loadEntry(requested);check();
     if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB origin requires safe conversion and observed source mapping; engine import is unavailable.');
     if (e.job.state !== 'succeeded' || !e.job.manifestAvailable || active.has(requested)) throw new ArcaneError('JOB_STATE', 'Import preparation requires a verified completed job.');
     if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
     studioImportActive = true;
     // Bounds waits as well as reads; late host callbacks cannot expose a result.
-    const wait = async <T>(promise: T | Promise<T>): Promise<T> => {
+    const wait = async <T>(promise: T | Promise<T>,joinOnClose=false): Promise<T> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let onClose:(()=>void)|undefined;
       try {
-        const result = await Promise.race([Promise.resolve(promise), new Promise<never>((_resolve, reject) => {
+        const waits:Promise<T>[]=[Promise.resolve(promise), new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new ArcaneError('STUDIO_IMPORT_TIMEOUT', 'Studio import preparation exceeded its 30 second deadline.')), Math.max(1, end - Date.now()));
-        })]);
+        })];
+        if(!joinOnClose)waits.push(new Promise<never>((_resolve,reject)=>{
+          onClose=()=>reject(new ArcaneError('CLOSED','Asset service is closed.'));
+          if(lifetime.signal.aborted)onClose();else lifetime.signal.addEventListener('abort',onClose,{once:true});
+        }));
+        const result = await Promise.race(waits);
         check(); return result;
-      } finally { if (timer) clearTimeout(timer); }
+      } finally { if (timer) clearTimeout(timer);if(onClose)lifetime.signal.removeEventListener('abort',onClose); }
     };
     const payloadFiles = new Map<string, Uint8Array>();
     const authority = createStudioImportManifestAuthority({ loadGeneratedFiles: async value => {
@@ -367,7 +547,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       const transfer = payload ? createStudioImportTransfer(prepared, payload) : null;
       check();
       if (attempt && !importHost.recordPrepared) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Preparation attempt persistence is required.');
-      if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard, attempt));
+      if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard, attempt),true);
       check();
       if (includePayload) {
         if (!payload || !transfer) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
@@ -387,7 +567,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     projectPath,
     async probe(operation: OperationOptions = {}): Promise<AssetProbe> {
       ensureOpen();
-      if (active.size || probeActive || adoption || resolution || admitting) throw new AssetError('BUSY', 'A Blender operation or worker status check is already running.');
+      if (active.size || probeActive || adoption || resolution || admitting || retentionOperation) throw new AssetError('BUSY', 'An asset operation or retained-history change is already running.');
       const controller = new AbortController();
       probeActive = controller;
       const abort = () => controller.abort();
@@ -397,6 +577,78 @@ export async function createAssetService(options: AssetServiceOptions) {
       finally { operation.signal?.removeEventListener('abort', abort); probeActive = null; }
     },
     jobs(): AssetJobRecord[] { return snapshot(); },
+    lookupJobs,
+    rebuildHistory:(signal?:AbortSignal)=>maintainHistory('rebuild',signal),
+    confirmHistory:(signal?:AbortSignal)=>maintainHistory('confirm',signal),
+    async historyStatus(){
+      return retainedRead([],async()=>{
+      ensureOpen();const scan=await archives.scan();ensureOpen();
+      return{degraded:scan.degraded||unavailableHistory.size>0,reasons:[...scan.reasons],active:scan.active.length,
+        archived:scan.archived.length,unclassified:scan.unclassified.length,unavailable:unavailableHistory.size};
+
+      });
+    },
+    /** Human host operation only. Restoring history never starts a worker or imports an artifact. */
+    async restoreHistory(jobId:unknown,signal?:AbortSignal):Promise<{jobId:string;swappedOut:string|null;activeAfter:number}>{
+      ensureOpen();const requested=id(jobId);
+      if(retentionOperation||admitting||resolution||active.size||probeActive||adoption||artifactReadActive||studioImportActive)throw new AssetError('BUSY','Wait for the current asset operation before restoring history.');
+      const controller=new AbortController(),abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+      const guard=()=>{ensureOpen();if(controller.signal.aborted)throw new ArcaneError('CANCELLED','History restoration was cancelled before its ledger write.');};
+      const run=async()=>{
+        await flushed();guard();archiveScan=await archives.scan();guard();
+        if(archiveScan.degraded||unavailableHistory.size||unclassifiedHistory.size)throw new ArcaneError('HISTORY_INTEGRITY','Retained history needs inspection before restoration.');
+        if(!archives.isArchived(requested))throw new ArcaneError('JOB_STATE','Choose an archived job to restore.');
+        const restored=await loadEntry(requested);guard();let swapJobId:string|undefined;
+        if(entries.size>=LIMIT){
+          for(const job of ordered().toReversed()){
+            const facts=await retentionFacts(job.jobId);guard();
+            if(await archives.eligible(job.jobId,facts)){swapJobId=job.jobId;break;}guard();
+          }
+          if(!swapJobId)throw new ArcaneError('HISTORY_LIMIT','No retained job can be swapped while active work or pending imports pin history.');
+          const job=entries.get(swapJobId)!.job;
+          await atomicAssetJson(job.directory,'observed-events.json',JSON.stringify({schemaVersion:1,jobId:swapJobId,events:job.events})+'\n');guard();
+        }
+        const result=await archives.restore({jobId:requested,activeCount:entries.size,...(swapJobId?{swapJobId}:{}),facts:retentionFacts,guard});
+        // The ledger committed. Synchronize the advisory view even after cancellation or host close.
+        if(result.swappedOut)entries.delete(result.swappedOut);
+        delete restored.job.retention;entries.set(requested,restored);persist();
+        try{await flushed();}catch{throw new ArcaneError('ASSET_ARCHIVE_UNCERTAIN','The restoration was saved, but its refreshed view could not be confirmed. Inspect recorded history before another change.');}return result;
+      };
+      const task=run();retentionOperation={controller,task};
+      try{return await task;}finally{signal?.removeEventListener('abort',abort);if(retentionOperation?.task===task)retentionOperation=null;}
+    },
+    async historyPage(options:{limit?:number;after?:string}={}):Promise<AssetJobPage>{
+      return retainedRead([],async()=>{
+      ensureOpen();if(Object.keys(options).some(key=>key!=='limit'&&key!=='after'))throw new ArcaneError('INPUT','Unexpected history option.');
+      const limit=options.limit??32;if(!Number.isSafeInteger(limit)||limit<1||limit>64)throw new ArcaneError('INPUT','History limit must be 1..64.');
+      archiveScan=await archives.scan();ensureOpen();
+      unclassifiedHistory.clear();
+      const catalog=new Map<string,{jobId:string;at:string}>();
+      for(const e of entries.values())catalog.set(e.job.jobId,{jobId:e.job.jobId,at:e.job.startedAt});
+      for(const e of archiveScan.archived)catalog.set(e.jobId,{jobId:e.jobId,at:e.entry.startedAt??e.entry.archivedAt});
+      for(const e of unavailableHistory.values())catalog.set(e.jobId,{jobId:e.jobId,at:''});
+      for(const e of archiveScan.unclassified){unclassifiedHistory.set(e.jobId,e);catalog.set(e.jobId,{jobId:e.jobId,at:''});}
+      for(const e of archiveScan.active)if(!catalog.has(e.jobId)){unclassifiedHistory.set(e.jobId,e);catalog.set(e.jobId,{jobId:e.jobId,at:''});}
+      const all=[...catalog.values()].sort((a,b)=>b.at.localeCompare(a.at)||b.jobId.localeCompare(a.jobId));
+      const after=options.after===undefined?-1:all.findIndex(e=>e.jobId===id(options.after));
+      if(options.after!==undefined&&after<0)throw new ArcaneError('NOT_FOUND','Unknown history cursor.');
+      const page:AssetJobPage={schemaVersion:1,jobs:[],total:all.length,nextCursor:null,byteLimit:HISTORY_PAGE_BYTES};
+      let consumed=0;
+      for(const item of all.slice(after+1,after+1+limit)){
+        const loaded=await lookupJobs([item.jobId]);ensureOpen();
+        const candidate:AssetJobPage={...page,jobs:[...page.jobs,...loaded.jobs],
+          ...((page.unavailable?.length??0)+loaded.unavailable.length?{unavailable:[...(page.unavailable??[]),...loaded.unavailable]}:{}),
+          nextCursor:item.jobId};
+        if(Buffer.byteLength(JSON.stringify(candidate))>HISTORY_PAGE_BYTES){
+          if(!consumed)throw new ArcaneError('HISTORY_LIMIT','One retained history record exceeds the response bound.');break;
+        }
+        page.jobs=candidate.jobs;if(candidate.unavailable)page.unavailable=candidate.unavailable;consumed++;
+      }
+      if(after+1+consumed<all.length)page.nextCursor=all[after+consumed]!.jobId;
+      return page;
+
+      });
+    },
     jobPage(options: { limit?: number; after?: string } = {}): AssetJobPage {
       ensureOpen();
       if (Object.keys(options).some(k => k !== 'limit' && k !== 'after')) throw new ArcaneError('INPUT', 'Unexpected history option.');
@@ -429,7 +681,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (!(associations instanceof ConversationWorkStore) || associations.projectPath !== projectPath
         || original.projectPath !== projectPath || original.projectId !== associations.projectId || original.conversation.provider !== 'codex'
         || typeof admission?.beforeCreate !== 'function' || typeof admission.created !== 'function') throw new ArcaneError('ASSET_ADOPT_SCOPE','Exact native project/store admission is required.');
-      if (adoption || probeActive || active.size || resolution || admitting) throw new AssetError('BUSY','An asset operation or worker status check is already running.');
+      if (adoption || probeActive || active.size || resolution || admitting || retentionOperation) throw new AssetError('BUSY','An asset operation or retained-history change is already running.');
       const end = Date.now() + ADOPTED_GLB_LIMITS.deadlineMs;
       const guard = () => {
         ensureOpen(); assertNativeAssetActor(actor,'mutate');
@@ -442,7 +694,7 @@ export async function createAssetService(options: AssetServiceOptions) {
         let job:AssetJobRecord|null=null;
         try {
           await wait(flushed());
-          if(entries.size>=LIMIT) throw new ArcaneError('HISTORY_LIMIT','Asset history is full.');
+          await ensureHistoryRoom(guard);
           guard();
           // Actual bytes + all preview geometry/image budgets are checked BEFORE
           // creating/copying anything into managed storage. No source execution.
@@ -498,12 +750,14 @@ export async function createAssetService(options: AssetServiceOptions) {
     },
     async start(input: AssetInput, admission?: AssetStartAdmission): Promise<AssetJobRecord> {
       ensureOpen();
-      if (resolution) throw new AssetError('BUSY', 'A worker status check is already running.');
+      if (resolution || retentionOperation) throw new AssetError('BUSY', 'A worker status check or retained-history change is already running.');
       if (admitting) {
         // Preserve the durability barrier for waiting callers, then recheck closure before reporting busy.
         await flushed(); ensureOpen();
         throw new AssetError('BUSY', 'Another asset start is already running.');
       }
+      // Validate and detach the original request before any await or retention write.
+      const originalInput=jsonSnapshot(input) as unknown as AssetInput,request=normalizeRequest(originalInput);
       admitting = true;
       try {
         await flushed(); ensureOpen();
@@ -513,8 +767,14 @@ export async function createAssetService(options: AssetServiceOptions) {
         if (fence.blocked) throw new ArcaneError('RECONCILIATION', 'An interrupted asset job still needs a confirmed worker status check before new asset work can start.');
         ensureOpen();
         if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
-        if (entries.size >= LIMIT) throw new ArcaneError('HISTORY_LIMIT', 'Asset history is full; use a fresh trusted output root.');
-        const request = normalizeRequest(input);
+        await ensureHistoryRoom(()=>{
+          ensureOpen();if(admission?.signal?.aborted){
+            // Preserve the original host's definitive authority refusal before
+            // allocation rather than turning it into an unwitnessed unknown start.
+            synchronousAdmissionResult(admission.beforeCreate());
+            throw new ArcaneError('CANCELLED','Asset admission was cancelled.');
+          }
+        });
         const now = new Date().toISOString();
         const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}),
           ...(admission?.signal ? { signal: admission.signal } : {}), onEvent: (event: AssetJobEvent) => {
@@ -533,7 +793,7 @@ export async function createAssetService(options: AssetServiceOptions) {
         ensureOpen();
         if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
         if (admission) synchronousAdmissionResult(admission.beforeCreate());
-        const handle = pipeline.start(input, operation);
+        const handle = pipeline.start(originalInput, operation);
         const job: AssetJobRecord = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
         entries.set(handle.id, { directory: handle.directory, job });
         const completion = handle.completion.then(async result => {
@@ -569,8 +829,8 @@ export async function createAssetService(options: AssetServiceOptions) {
      * starts it is joined, then re-read from disk, and its actual outcome is reported. */
     async resolveInterrupted(jobId: unknown, signal?: AbortSignal): Promise<WorkerResolutionOutcome> {
       ensureOpen();
-      const e = entry(jobId), requested = e.job.jobId;
-      if (resolution || admitting || probeActive || active.size || adoption || artifactReadActive || studioImportActive) {
+      const e = await loadEntry(jobId), requested = e.job.jobId;
+      if (resolution || admitting || probeActive || active.size || adoption || artifactReadActive || studioImportActive || retentionOperation) {
         throw new AssetError('BUSY', 'Another asset operation or worker status check is running; try again when it finishes.');
       }
       if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('NOT_APPLICABLE', 'Adopted GLB jobs never start a worker and do not pause new asset work.');
@@ -631,44 +891,41 @@ export async function createAssetService(options: AssetServiceOptions) {
     },
     async cancel(jobId: unknown): Promise<AssetJobRecord> {
       ensureOpen();
-      const e = entry(jobId), running = active.get(e.job.jobId);
+      const e = await loadEntry(jobId), running = active.get(e.job.jobId);
       if (running) { running.handle.cancel(); await running.completion; }
       // A completed worker may already have left active while its history write is pending.
       await flushed();
       return structuredClone(e.job);
     },
     async manifest(jobId: unknown): Promise<AssetPreviewManifest> {
+      return retainedRead([id(jobId)],async()=>{
       ensureOpen();
-      const e = entry(jobId);
+      const e = await loadEntry(jobId);
       if (!e.job.manifestAvailable || e.job.state !== 'succeeded') throw new ArcaneError('JOB_STATE', 'A verified completed manifest is unavailable for this job.');
-      const manifest = isAdoptedGlbRequest(e.job.request)
-        ? await validateAdoptedGlbManifest(e.directory, await readJson(join(e.directory,'manifest.json')))
-        : await pipeline.validate(join(e.directory, 'manifest.json'));
-      if (manifest.jobId !== e.job.jobId || manifest.request.name !== e.job.request.name) throw new AssetError('MANIFEST', 'Manifest identity does not match the indexed job.');
-      if(isAdoptedGlbManifest(manifest)){
-        const binding=importHost?.workAssociations.binding('asset-job',e.job.jobId);
-        if(!isDeepStrictEqual(manifest.request,e.job.request)||!binding||binding.projectId!==manifest.provenance.projectId
-          ||!isDeepStrictEqual(binding.conversation,manifest.provenance.conversation)) throw new AssetError('MANIFEST','Adopted snapshot differs from its original request or durable conversation binding.');
-      }
-      return manifest;
+      // Inspection may expose a changed generated manifest; artifact and import
+      // admission still compare its full request before authorizing any use.
+      return verifiedSavedManifest(e.directory,e.job.jobId,e.job.request,false);
+
+      });
     },
     /** Production host preparation. Only a completed owned job UUID and the SAME
      * native actor enter here; files, target and baseline come from host evidence.
      * Host context reads and pending metadata persistence do not upload, import,
      * verify an engine result or authorize a Studio write. */
-    prepareStudioImport(jobId: unknown, actor: NativeAssetActor): Promise<PreparedStudioImport> {
-      return prepareImport(jobId, actor, this, false);
+    async prepareStudioImport(jobId: unknown, actor: NativeAssetActor): Promise<PreparedStudioImport> {
+      return retainedRead([id(jobId)],()=>prepareImport(jobId, actor, this, false));
     },
     /** Trusted host-only staging from the SAME completed-job admission and owned
      * bytes. The returned data does not authorize uploads or editor writes and
      * is never exposed by the native HTTP/MCP preparation endpoint. */
-    prepareStudioImportPayload(jobId: unknown, actor: NativeAssetActor, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImportPayload> {
-      return prepareImport(jobId, actor, this, true, attempt);
+    async prepareStudioImportPayload(jobId: unknown, actor: NativeAssetActor, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImportPayload> {
+      return retainedRead([id(jobId)],()=>prepareImport(jobId, actor, this, true, attempt));
     },
     async preview(jobId: unknown, path: unknown): Promise<Buffer> {
+      return retainedRead([id(jobId)],async()=>{
       ensureOpen();
-      const e = entry(jobId);
       if (path !== 'preview-hero.png' && path !== 'preview-side.png') throw new ArcaneError('INPUT', 'Only the two fixed manifest previews may be read.');
+      const e = await loadEntry(jobId);
       const manifest = await this.manifest(e.job.jobId);
       const artifact = manifest.artifacts.find(a => a.path === path && a.role === 'preview');
       if (!artifact) throw new ArcaneError('NOT_FOUND', 'Preview is not approved by the manifest.');
@@ -677,11 +934,15 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (isAdoptedGlbManifest(manifest)) throw new ArcaneError('NOT_FOUND','Adopted GLB uses the existing interactive viewer; no rendered PNG was produced.');
       inspectPng(bytes, manifest.request.renderResolution);
       return bytes;
+
+      });
     },
     async artifact(jobId: unknown, path: unknown): Promise<{ bytes: Buffer; filename: string; contentType: string }> {
+      return retainedRead([id(jobId)],async()=>{
       ensureOpen();
-      const e = entry(jobId), download = typeof path === 'string' ? DOWNLOADS.get(path) : undefined;
+      const download = typeof path === 'string' ? DOWNLOADS.get(path) : undefined;
       if (!download) throw new ArcaneError('INPUT', 'Only the fixed GLB, FBX and completed Blender scene artifacts may be downloaded.');
+      const e = await loadEntry(jobId);
       if (!e.job.manifestAvailable || e.job.state !== 'succeeded') throw new ArcaneError('JOB_STATE', 'Artifact downloads require a verified completed job.');
       if (artifactReadActive) throw new AssetError('BUSY', 'An artifact download is already being verified.');
       artifactReadActive = true;
@@ -731,20 +992,25 @@ export async function createAssetService(options: AssetServiceOptions) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new AssetError('ARTIFACT', 'Completed artifact or manifest disappeared during download verification.');
         throw error;
       } finally { artifactReadActive = false; }
+
+      });
     },
     close(): Promise<void> {
       if (closing) return closing;
-      closed = true; probeActive?.abort(); resolution?.controller.abort();
+      closed = true;lifetime.abort(); probeActive?.abort(); resolution?.controller.abort();retentionOperation?.controller.abort();
       closing = (async () => {
         for (const run of active.values()) run.handle.cancel();
         if (adoption) await adoption.catch(() => {});
         // Abort the worker-status check and join any marker write it already started.
         while (resolution) await resolution.task.catch(() => {});
+        while(retentionOperation)await retentionOperation.task.catch(()=>{});
         try {
           await Promise.all([...active.values()].map(run => run.completion));
           while (probeActive) await new Promise<void>(r => setTimeout(r, 10));
+          while(admitting)await new Promise<void>(r=>setTimeout(r,10));
+          while(historyReads.size)await Promise.allSettled([...historyReads]);
           await flushed();
-        } finally { outputOwners.delete(ownerKey); }
+        } finally { archives.close();outputOwners.delete(ownerKey); }
       })();
       return closing;
     }

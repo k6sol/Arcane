@@ -227,7 +227,9 @@ export interface AssetConversation { provider: 'codex' | 'claude-code'; threadId
 export interface AssetConversationPage {
   projectId: string; projectPath: string; conversation: AssetConversation;
   jobs: AssetJobRecord[]; nextCursor: string | null; byteLimit: 524288;
+  unavailable?:AssetHistoryUnavailable[];
 }
+export interface AssetHistoryUnavailable {jobId:string;name?:string;status:'missing'|'changed'|'conflict'|'unclassified'}
 export interface AssetConversationStart {
   projectId: string; projectPath: string; conversation: AssetConversation;
   jobId: string; association: 'bound' | 'unknown'; retry: false; job: AssetJobRecord;
@@ -254,9 +256,11 @@ function readAssetConversation(value: unknown): AssetConversation {
   return { provider: r.provider as AssetConversation['provider'], threadId: r.threadId, sessionId: r.sessionId };
 }
 function readAssetJob(value: unknown): AssetJobRecord {
-  const r = assetFields(value, ['schemaVersion', 'jobId', 'directory', 'manifestPath', 'request', 'state', 'stage', 'startedAt', 'updatedAt', 'events', 'manifestAvailable', 'error'], ['finishedAt', 'resolution']);
+  const r = assetFields(value, ['schemaVersion', 'jobId', 'directory', 'manifestPath', 'request', 'state', 'stage', 'startedAt', 'updatedAt', 'events', 'manifestAvailable', 'error'], ['finishedAt', 'resolution','retention']);
   const states = ['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
   const time = (v: unknown) => assetText(v, 64) && Number.isFinite(Date.parse(v));
+  if(r.retention!==undefined){const retention=assetFields(r.retention,['status','archivedAt']);
+    if(retention.status!=='archived'||!time(retention.archivedAt)||r.state==='running')throw new Error('Invalid retained asset classification.');}
   if (r.resolution !== undefined) {
     // Display-only worker-status check for an interrupted job; never success, artifacts or retry.
     const resolution = r.state === 'interrupted' && record(r.resolution) && r.resolution.status === 'resolved'
@@ -285,17 +289,28 @@ function readAssetJob(value: unknown): AssetJobRecord {
   if (r.error !== null) { const e = assetFields(r.error, ['code', 'message']); if (!assetText(e.code, 256) || !assetText(e.message, 16000)) throw new Error('Invalid recorded asset error.'); }
   return r as unknown as AssetJobRecord;
 }
-function assetEnvelope(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  const r = assetFields(value, keys);
+function assetEnvelope(value: unknown, keys: readonly string[],optional:readonly string[]=[]): Record<string, unknown> {
+  const r = assetFields(value, keys,optional);
   if (utf8(JSON.stringify(r)) > ASSET_CONVERSATION_BYTES || typeof r.projectId !== 'string' || !/^[a-f0-9]{64}$/.test(r.projectId) || !assetText(r.projectPath, 4096)) throw new Error('Invalid bounded asset project envelope.');
   return r;
 }
 export function readAssetConversationPage(value: unknown, limit = 32): AssetConversationPage {
-  const r = assetEnvelope(value, ['projectId', 'projectPath', 'conversation', 'jobs', 'nextCursor', 'byteLimit']);
+  const r = assetEnvelope(value, ['projectId', 'projectPath', 'conversation', 'jobs', 'nextCursor', 'byteLimit'],['unavailable']);
   if (!Number.isInteger(limit) || limit < 1 || limit > 64 || !Array.isArray(r.jobs) || r.jobs.length > limit || r.byteLimit !== ASSET_CONVERSATION_BYTES || !(r.nextCursor === null || assetText(r.nextCursor, 1024))) throw new Error('Invalid bounded asset history page.');
   const jobs = r.jobs.map(readAssetJob);
-  if (new Set(jobs.map(job => job.jobId)).size !== jobs.length) throw new Error('Duplicate asset jobs in history page.');
-  return { ...r, conversation: readAssetConversation(r.conversation), jobs } as AssetConversationPage;
+  const unavailable=readUnavailableHistory(r.unavailable,jobs,limit);
+  return { ...r, conversation: readAssetConversation(r.conversation), jobs,...(unavailable.length?{unavailable}:{}) } as AssetConversationPage;
+}
+function readUnavailableHistory(value:unknown,jobs:AssetJobRecord[],limit:number):AssetHistoryUnavailable[]{
+  const rows:AssetHistoryUnavailable[]=[],ids=new Set(jobs.map(job=>job.jobId));
+  if(ids.size!==jobs.length)throw new Error('Duplicate asset jobs in history page.');
+  if(value===undefined)return rows;
+  if(!Array.isArray(value)||jobs.length+value.length>limit)throw new Error('Retained history exceeds its page bound.');
+  for(const raw of value){const item=assetFields(raw,['jobId','status'],['name']);
+    if(!workerJobId(item.jobId)||ids.has(item.jobId)||!['missing','changed','conflict','unclassified'].includes(String(item.status))||
+      item.name!==undefined&&(typeof item.name!=='string'||!/^[a-z][a-z0-9-]{0,47}(?![\s\S])/.test(item.name)))throw new Error('Invalid unavailable asset history.');
+    ids.add(item.jobId);rows.push({...item} as unknown as AssetHistoryUnavailable);
+  }return rows;
 }
 export function readAssetConversationStart(value: unknown): AssetConversationStart {
   const r = assetEnvelope(value, ['projectId', 'projectPath', 'conversation', 'jobId', 'association', 'retry', 'job']);
@@ -489,6 +504,42 @@ export function readAssetWorkerStatus(value:unknown,jobId:string):AssetWorkerSta
     throw new Error('Invalid worker status receipt.');
   return structuredClone(result) as unknown as AssetWorkerStatus;
 }
+export const ASSET_HISTORY_REASONS=Object.freeze(['ledger-invalid','ledger-changed','scan-limit','directory-invalid','duplicate-job','active-limit','archived-evidence','commit-uncertain'] as const);
+export type AssetHistoryReason=typeof ASSET_HISTORY_REASONS[number];
+export interface AssetHistoryHealth {degraded:boolean;reasons:AssetHistoryReason[];active:number;archived:number;unclassified:number;unavailable:number}
+export interface AssetHistoryChange {active:number;archived:number;unavailable:number;degraded:boolean;backup:string|null}
+const boundedCount=(value:unknown,max:number)=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=max;
+/** Exact bounded history health. Degraded is consistent with its reasons; nothing is inferred as healthy. */
+export function readAssetHistoryHealth(value:unknown):AssetHistoryHealth{
+  const envelope=assetFields(value,['history']),r=assetFields(envelope.history,['degraded','reasons','active','archived','unclassified','unavailable']);
+  if(utf8(JSON.stringify(value))>4096||typeof r.degraded!=='boolean'||!Array.isArray(r.reasons)||r.reasons.length>ASSET_HISTORY_REASONS.length||
+    r.reasons.some(reason=>!ASSET_HISTORY_REASONS.includes(reason as AssetHistoryReason))||new Set(r.reasons).size!==r.reasons.length||r.degraded!==(r.reasons.length>0||Number(r.unavailable)>0||Number(r.unclassified)>0)||
+    !boundedCount(r.active,4416)||!boundedCount(r.archived,4096)||!boundedCount(r.unclassified,4416)||!boundedCount(r.unavailable,256))
+    throw new Error('Invalid retained history health.');
+  return structuredClone(r) as unknown as AssetHistoryHealth;
+}
+/** Exact rebuild/confirm receipt. A backup is only an owned basename, never a path. */
+export function readAssetHistoryChange(value:unknown,key:'rebuilt'|'confirmed'):AssetHistoryChange{
+  const envelope=assetFields(value,[key]),r=assetFields(envelope[key],['active','archived','unavailable','degraded','backup']);
+  if(utf8(JSON.stringify(value))>4096||!boundedCount(r.active,256)||!boundedCount(r.archived,4096)||!boundedCount(r.unavailable,256)||typeof r.degraded!=='boolean'||
+    !(r.backup===null||typeof r.backup==='string'&&/^archive-ledger\.backup-[0-9a-f]{16}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bin(?![\s\S])/.test(r.backup)))
+    throw new Error('Invalid retained history change receipt.');
+  return structuredClone(r) as unknown as AssetHistoryChange;
+}
+const HISTORY_REASON_TEXT:Record<AssetHistoryReason,string>={
+  'ledger-invalid':'The saved history index could not be read.','ledger-changed':'The saved history index changed outside Arcane.',
+  'scan-limit':'There are more entries than can be checked at once.','directory-invalid':'Some job folders have unexpected names or links.',
+  'duplicate-job':'A job appears in more than one folder.','active-limit':'More than 256 jobs are active.',
+  'archived-evidence':'Some archived jobs changed or are missing.','commit-uncertain':'The last history change was not confirmed.'};
+export interface AssetHistoryRestore {jobId:string;swappedOut:string|null;activeAfter:number}
+export function readAssetHistoryRestore(value:unknown,jobId:string):AssetHistoryRestore{
+  const envelope=assetFields(value,['restored']),r=assetFields(envelope.restored,['jobId','swappedOut','activeAfter']);
+  if(utf8(JSON.stringify(value))>4096||!workerJobId(jobId)||r.jobId!==jobId||
+    !(r.swappedOut===null||workerJobId(r.swappedOut)&&r.swappedOut!==jobId)||
+    typeof r.activeAfter!=='number'||!Number.isSafeInteger(r.activeAfter)||r.activeAfter<1||r.activeAfter>256)
+    throw new Error('Invalid history restoration receipt.');
+  return structuredClone(r) as unknown as AssetHistoryRestore;
+}
 function workerStatusMessage(error:unknown):string{
   if(error instanceof StudioRequestError&&error.details?.code==='RECONCILIATION_UNVERIFIED'&&record(error.details.payload)){
     const reason=error.details.payload.reason;
@@ -507,8 +558,13 @@ export class StudioApi {
     const nativeRoute = /^\/v1\/native\/(?:capabilities|read)$/.test(path);
     const conversationRoute = /^\/v1\/assets\/conversation-(?:jobs(?:\?[^#]*)?|start)$/.test(path);
     const workerRoute=path==='/v1/assets/resolve-interrupted';
-    if (!(nativeRoute || conversationRoute || workerRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
+    const historyRestoreRoute=path==='/v1/assets/restore-history';
+    const historyStatusRoute=path==='/v1/assets/history-status',historyChangeRoute=path==='/v1/assets/rebuild-history'||path==='/v1/assets/confirm-history';
+    if (!(nativeRoute || conversationRoute || workerRoute || historyRestoreRoute || historyStatusRoute || historyChangeRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
     if(workerRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact interrupted asset job.','rejected');
+    if(historyRestoreRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact archived asset job.','rejected');
+    if(historyStatusRoute&&(input!==undefined||format!=='json'))throw new StudioRequestError('History health is a read-only request.','rejected');
+    if(historyChangeRoute&&(!record(input)||Reflect.ownKeys(input).length!==0||format!=='json'))throw new StudioRequestError('History changes take an exact empty request.','rejected');
     if (conversationRoute) {
       const route = new URL(path, 'http://127.0.0.1'), query = route.searchParams;
       const listing = route.pathname.endsWith('/conversation-jobs');
@@ -529,7 +585,7 @@ export class StudioApi {
         return blob as T;
       }
       let data: unknown;
-      try { data = nativeRoute || conversationRoute || workerRoute || /^\/v1\/assets\/jobs\?limit=/.test(path) ? await boundedNativeJson(response, nativeRoute ? 'Native' : workerRoute?'Worker status':'Asset history') : await response.json(); } catch (error) { if (nativeRoute && error instanceof StudioRequestError) throw error; throw new StudioRequestError(error instanceof Error ? error.message : 'The daemon returned an unreadable response (HTTP ' + response.status + ').', post && response.status < 400 || response.status >= 500 && post ? 'unknown' : 'unavailable'); }
+      try { data = nativeRoute || conversationRoute || workerRoute || historyRestoreRoute || historyStatusRoute || historyChangeRoute || /^\/v1\/assets\/jobs\?limit=/.test(path) ? await boundedNativeJson(response, nativeRoute ? 'Native' : workerRoute?'Worker status':'Asset history') : await response.json(); } catch (error) { if (nativeRoute && error instanceof StudioRequestError) throw error; throw new StudioRequestError(error instanceof Error ? error.message : 'The daemon returned an unreadable response (HTTP ' + response.status + ').', post && response.status < 400 || response.status >= 500 && post ? 'unknown' : 'unavailable'); }
       if (!response.ok) {
         const detail = record(data) && typeof data.message === 'string' ? data.message : 'Local request failed.';
         const code = record(data) && typeof data.error === 'string' ? data.error + ': ' : '';
@@ -547,6 +603,20 @@ export class StudioApi {
     try{return readAssetWorkerStatus(value,jobId);}
     catch{throw new StudioRequestError('The worker status receipt could not be confirmed.','unknown');}
   }
+  async assetHistoryHealth(signal?:AbortSignal):Promise<AssetHistoryHealth>{
+    const value=await this.request('/v1/assets/history-status',undefined,'json',15000,signal);
+    try{return readAssetHistoryHealth(value);}catch{throw new StudioRequestError('History health could not be read.','unavailable');}
+  }
+  /** One explicit change. A lost, malformed or oversized receipt is unknown and never replayed here. */
+  async assetChangeHistory(kind:'rebuild'|'confirm',signal?:AbortSignal):Promise<AssetHistoryChange>{
+    const value=await this.request(kind==='rebuild'?'/v1/assets/rebuild-history':'/v1/assets/confirm-history',{},'json',60000,signal);
+    try{return readAssetHistoryChange(value,kind==='rebuild'?'rebuilt':'confirmed');}catch{throw new StudioRequestError('The history change receipt could not be confirmed.','unknown');}
+  }
+  async assetRestoreHistory(jobId:string,signal?:AbortSignal):Promise<AssetHistoryRestore>{
+    if(!workerJobId(jobId))throw new StudioRequestError('Choose one exact archived asset job.','rejected');
+    const value=await this.request('/v1/assets/restore-history',{jobId},'json',30000,signal);
+    try{return readAssetHistoryRestore(value,jobId);}catch{throw new StudioRequestError('The history restoration receipt could not be confirmed.','unknown');}
+  }
   nativeCapabilities() { return this.request<NativeObservation>('/v1/native/capabilities', undefined, 'json', 45000); }
   nativeRead(input: NativeReadRequest) { return this.request<NativeObservation>('/v1/native/read', input, 'json', 45000); }
   keys() { return this.request<{ keys: StudioKeyRecord[] }>('/v1/studio/keys'); }
@@ -555,14 +625,15 @@ export class StudioApi {
   revokeKey(keyId: string) { return this.request<{ revoked: true }>('/v1/studio/keys/revoke', { keyId }); }
   agentToken() { return this.request<{ token: string; scopes: unknown; canReview: false; expires: string }>('/v1/product/mcp-token', {}); }
   assetJobs() { return this.request<{ jobs: AssetJobRecord[] }>('/v1/assets/jobs'); }
-  async assetGlobalJobs(limit = 32, after?: string): Promise<{ jobs: AssetJobRecord[]; nextCursor: string | null }> {
+  async assetGlobalJobs(limit = 32, after?: string): Promise<{ jobs: AssetJobRecord[]; nextCursor: string | null;unavailable?:AssetHistoryUnavailable[] }> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 64 || (after !== undefined && !assetText(after, 1024))) throw new StudioRequestError('Invalid global asset page request.', 'rejected');
     const value = await this.request<unknown>('/v1/assets/jobs?limit=' + limit + (after === undefined ? '' : '&after=' + encodeURIComponent(after)));
-    const r = assetFields(value, ['schemaVersion', 'jobs', 'total', 'nextCursor', 'byteLimit']);
+    const r = assetFields(value, ['schemaVersion', 'jobs', 'total', 'nextCursor', 'byteLimit'],['unavailable']);
     if (utf8(JSON.stringify(r)) > ASSET_CONVERSATION_BYTES || r.schemaVersion !== 1 || r.byteLimit !== ASSET_CONVERSATION_BYTES || !Array.isArray(r.jobs) || r.jobs.length > limit || typeof r.total !== 'number' || !Number.isSafeInteger(r.total) || r.total < r.jobs.length || !(r.nextCursor === null || assetText(r.nextCursor, 1024))) throw new Error('Invalid bounded global asset page.');
     const jobs = r.jobs.map(readAssetJob);
-    if (new Set(jobs.map(job => job.jobId)).size !== jobs.length) throw new Error('Duplicate global asset jobs.');
-    return { jobs, nextCursor: r.nextCursor };
+    const unavailable=readUnavailableHistory(r.unavailable,jobs,limit);
+    if((r.total as number)<jobs.length+unavailable.length||(r.total as number)>8768)throw new Error('Invalid retained history count.');
+    return { jobs, nextCursor: r.nextCursor,...(unavailable.length?{unavailable}:{}) };
   }
   async assetConversationJobs(limit = 32, after?: string): Promise<AssetConversationPage> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 64 || (after !== undefined && !assetText(after, 1024))) throw new StudioRequestError('Choose an asset page limit from 1 to 64 and a bounded opaque cursor.', 'rejected');
@@ -671,6 +742,13 @@ export class StudioWorkbench {
   private assetAvailable = false;
   private assetBusy = false;
   private assetWorkerCheck:AbortController|null=null;
+  private assetHistoryChange:AbortController|null=null;
+  private assetAcknowledgementBound=false;
+  private assetHealthRead:AbortController|null=null;
+  private assetHealth:AssetHistoryHealth|null=null;
+  private assetHealthResult='';
+  private assetHealthBound=false;
+  private readonly assetHistoryMessages=new Map<string,string>();
   private readonly assetWorkerMessages=new Map<string,string>();
   private assetProbed = false;
   private assetUnknown = '';
@@ -678,6 +756,7 @@ export class StudioWorkbench {
   private assetPreviewEpoch = 0;
   private assetReadEpoch = 0;
   private assetNextCursor: string | null = null;
+  private assetUnavailable:AssetHistoryUnavailable[]=[];
   private readonly assetContext: AssetConversationController;
   private removeAssetContext: (() => void) | null = null;
   private removeAssetProject: (() => void) | null = null;
@@ -779,7 +858,7 @@ export class StudioWorkbench {
     this.on('asset-history-more', 'click', () => { if (this.assetNextCursor) void this.refreshAssets(true); });
     this.subscribeAssetContext();
     this.on('asset-refresh', 'click', () => { void this.refresh(); });
-    this.on('asset-acknowledge', 'click', () => { if (!this.assetAvailable || !this.assetReadAfterUnknown || this.assetBusy) return; this.assetUnknown = ''; this.assetReadAfterUnknown = false; this.renderAssetControls(); });
+    this.bindAssetAcknowledgement();
     this.renderAssetControls();
     this.on('work-create-form', 'submit', event => { event.preventDefault(); void this.createWork(); });
     this.on('work-add-task', 'click', () => this.addWorkTask());
@@ -844,6 +923,7 @@ export class StudioWorkbench {
     this.el<HTMLButtonElement>('native-copy-token').disabled = true;
   }
   stop() {
+    this.assetHistoryChange?.abort();this.assetHistoryChange=null;this.assetHealthRead?.abort();this.assetHealthRead=null;
     this.assetWorkerCheck?.abort();this.assetWorkerCheck=null;
     this.productMetadataEpoch++; this.observeProjectPath(null);
     this.removeAssetContext?.(); this.removeAssetContext = null; this.removeAssetProject?.(); this.removeAssetProject = null;
@@ -1417,8 +1497,10 @@ export class StudioWorkbench {
     if (refresh) queueMicrotask(() => { if (!this.stopped && this.assetContext.ready()) void this.refreshAssets(); });
   }
   private resetAssetContext() {
+    this.assetHistoryChange?.abort();this.assetHistoryChange=null;this.assetHistoryMessages.clear();
+    this.assetHealthRead?.abort();this.assetHealthRead=null;this.assetHealth=null;this.assetHealthResult='';this.renderAssetHealth();
     this.assetWorkerCheck?.abort();this.assetWorkerCheck=null;this.assetWorkerMessages.clear();
-    this.assetReadEpoch++; this.assetNextCursor = null; this.assetJobs = []; this.assetJobId = '';
+    this.assetReadEpoch++; this.assetNextCursor = null; this.assetJobs = []; this.assetUnavailable=[];this.assetJobId = '';
     this.automaticAssets.reset(); this.clearChatAssets(); this.assetCardsLimit = 8;
     this.assetAvailable = false; this.assetBusy = false; this.assetProbed = false; this.assetUnknown = ''; this.assetReadAfterUnknown = false;
     this.clearAssetPreview(); this.renderAssetPicker(); this.renderAssetJob();
@@ -1447,39 +1529,51 @@ export class StudioWorkbench {
     }
     if (!this.assetContext.ready() || (more && !after)) { this.renderAssetControls(); return; }
     try {
-      let jobs: AssetJobRecord[], cursor: string | null = null;
+      let jobs: AssetJobRecord[], cursor: string | null = null,unavailable:AssetHistoryUnavailable[]=[];
       if (ticket.global) {
         if (this.assetOptions.assetMode === 'standalone') {
           const data = await this.api.assetJobs(); if (!Array.isArray(data.jobs) || data.jobs.length > 256) throw new Error('Invalid global asset history.');
-          jobs = data.jobs.map(readAssetJob);
+          jobs = data.jobs.map(readAssetJob);unavailable=readUnavailableHistory((data as {unavailable?:unknown}).unavailable,jobs,64);
         } else {
-          const data = await this.api.assetGlobalJobs(32, after ?? undefined); jobs = data.jobs; cursor = data.nextCursor;
+          const data = await this.api.assetGlobalJobs(32, after ?? undefined); jobs = data.jobs; cursor = data.nextCursor;unavailable=data.unavailable??[];
         }
       } else {
         const data = await this.api.assetConversationJobs(32, after ?? undefined);
         if (!this.assetCurrent(ticket) || requestEpoch !== this.assetReadEpoch) return;
         if (!this.assetContext.matches(ticket, data)) throw new Error('Asset history does not match this exact project and native chat.');
-        jobs = data.jobs; cursor = data.nextCursor;
+        jobs = data.jobs; cursor = data.nextCursor;unavailable=data.unavailable??[];
       }
       if (!this.assetCurrent(ticket) || requestEpoch !== this.assetReadEpoch) return;
       if (after && cursor === after) throw new Error('Asset history returned a nonadvancing cursor.');
       const combined = more ? [...this.assetJobs, ...jobs] : jobs;
       if (ticket.global) for (const item of this.assetContext.unknownDetails()) if (item.job && !combined.some(job => job.jobId === item.jobId)) combined.push(item.job);
       const unique = [...new Map(combined.map(job => [job.jobId, job])).values()];
-      if (unique.length > 256 || utf8(JSON.stringify(unique)) > ASSET_CONVERSATION_BYTES) throw new Error('Asset history view reached its 256 job / 512 KiB bound. Refresh or inspect global history.');
+      const unavailableRows=[...new Map([...(more?this.assetUnavailable:[]),...unavailable].filter(item=>!unique.some(job=>job.jobId===item.jobId)).map(item=>[item.jobId,item])).values()];
+      let windowed=false;
+      const withinView=()=>unique.length+unavailableRows.length<=256&&utf8(JSON.stringify([unique,unavailableRows]))<=ASSET_CONVERSATION_BYTES;
+      while(more&&!withinView()){
+        const old=unique.findIndex(job=>!jobs.some(incoming=>incoming.jobId===job.jobId));
+        if(old>=0){unique.splice(old,1);windowed=true;continue;}
+        const oldUnavailable=unavailableRows.findIndex(item=>!unavailable.some(incoming=>incoming.jobId===item.jobId));
+        if(oldUnavailable>=0){unavailableRows.splice(oldUnavailable,1);windowed=true;continue;}break;
+      }
+      if(!withinView())throw new Error('This history page exceeds its bounded view. Inspect a smaller recorded page.');
       // Only a current, matched native-chat receipt may drive presentation.
       // Global and paginated history never turns an old asset into new work.
       if (!ticket.global) this.automaticAssets.observe(jobs, more);
-      this.assetJobs = unique; this.assetNextCursor = cursor; this.assetAvailable = true;
+      this.assetJobs = unique;this.assetUnavailable=unavailableRows; this.assetNextCursor = cursor; this.assetAvailable = true;
+      if(windowed)this.text('asset-notice','Showing a bounded window of loaded history. Earlier items remain in recorded history.');
+      else if(unavailableRows.length)this.text('asset-notice',unavailableRows.length+' retained '+(unavailableRows.length===1?'job needs':'jobs need')+' inspection. Files are kept.');
       if (this.assetUnknown) this.assetReadAfterUnknown = true;
       this.renderAssetPicker(); this.text('asset-status', ticket.global ? 'Global asset history' : 'Assets for this chat'); this.renderAssetJob();
+      if(!more)void this.readAssetHealth(ticket);
       this.renderChatAssets();
       if (!ticket.global) this.presentAutomaticAsset(ticket);
     } catch (error) {
       if (!this.assetCurrent(ticket) || requestEpoch !== this.assetReadEpoch) return;
       this.assetAvailable = false; this.assetProbed = false; this.assetReadAfterUnknown = false;
       // Refused or mismatched history must not leave selectable cached jobs.
-      this.assetJobs = []; this.assetJobId = ''; this.assetNextCursor = null; this.clearAssetPreview(); this.renderAssetPicker(); this.renderAssetJob();
+      this.assetJobs = [];this.assetUnavailable=[]; this.assetJobId = ''; this.assetNextCursor = null; this.clearAssetPreview(); this.renderAssetPicker(); this.renderAssetJob();
       this.clearChatAssets();
       this.text('asset-status', 'Asset history unavailable');
       this.text('asset-notice', error instanceof Error ? error.message : String(error));
@@ -1522,12 +1616,16 @@ export class StudioWorkbench {
   private renderChatAssets(): void {
     const host = this.doc.getElementById('chat-assets'); if (!host) return;
     const ticket = this.assetContext.capture();
-    if (this.stopped || ticket.global || !ticket.conversation || !this.assetSignedIn() || !this.assetAvailable || !this.assetJobs.length) { this.clearChatAssets(); return; }
+    if (this.stopped || ticket.global || !ticket.conversation || !this.assetSignedIn() || !this.assetAvailable || !(this.assetJobs.length||this.assetUnavailable.length)) { this.clearChatAssets(); return; }
     const jobs = this.assetJobs.slice(0, this.assetCardsLimit);
-    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, job.request.name,job.resolution,this.assetWorkerMessages.get(job.jobId)])]);
+    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit,this.assetUnavailable, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, job.request.name,job.resolution,job.retention,this.assetWorkerMessages.get(job.jobId),this.assetHistoryMessages.get(job.jobId)])]);
     if (signature === this.assetCardsSignature) return;
     this.assetCardsSignature = signature; const epoch = ++this.assetCardsEpoch;
     const section = this.make('div', undefined, 'chat-asset-list'); section.setAttribute('role', 'list');
+    for(const item of this.assetUnavailable.slice(0,this.assetCardsLimit)){
+      const card=this.make('article',undefined,'chat-asset-card');card.setAttribute('role','listitem');card.setAttribute('data-asset-unavailable',item.jobId);
+      card.append(this.make('strong',item.name?item.name.replaceAll('-',' '):'Retained asset'),this.make('p','Saved history needs inspection. Files are kept.','hint'));section.append(card);
+    }
     const labels: Record<string, string> = { running: 'Building', succeeded: 'Ready', failed: 'Failed', cancelled: 'Cancelled', timed_out: 'Timed out', interrupted: 'Interrupted' };
     const current = () => epoch === this.assetCardsEpoch && this.assetCurrent(ticket) && this.assetSignedIn() && this.assetAvailable && !this.assetUnknown;
     for (const job of jobs) {
@@ -1536,6 +1634,7 @@ export class StudioWorkbench {
       const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (job.request.template === 'adopted-glb' ? ' · Adopted GLB · preview only' : ''), 'chat-asset-state');
       const info = this.make('div', undefined, 'chat-asset-info'); info.append(title, state); card.append(info);
       this.renderWorkerStatus(card,job,current);
+      this.renderRetentionStatus(card,job,current);
       if (job.state === 'succeeded' && job.manifestAvailable) {
         const view = this.make('button', 'View', 'secondary'); view.type = 'button'; view.setAttribute('aria-label', 'View ' + name); view.disabled = this.assetBusy;
         view.addEventListener('click', () => {
@@ -1578,6 +1677,7 @@ export class StudioWorkbench {
     this.el<HTMLButtonElement>('asset-load-manifest').disabled = blocked || !this.currentAssetJob()?.manifestAvailable || this.currentAssetJob()?.state !== 'succeeded';
     this.el<HTMLSelectElement>('asset-job-picker').disabled = this.assetBusy;
     this.el('asset-unknown').hidden = !this.assetUnknown; this.text('asset-unknown-message', this.assetUnknown);
+    this.renderAssetHealth();
     this.el<HTMLButtonElement>('asset-acknowledge').disabled = !this.assetAvailable || !this.assetReadAfterUnknown || this.assetBusy;
     this.text('asset-gate', !this.assetContext.ready() ? 'A native chat in this exact project is required.' : ticket.global && !this.assetContext.canStart() ? 'Global history is for inspection. Choose This chat to start a template job.' : interrupted ? 'An interrupted job pauses new asset work. Check its worker status in the asset card or recorded job.' : running ? 'A job is running. Its stage and final manifest are recorded below.' : !this.assetProbed ? 'Probe the installed Blender runtime before starting a template job.' : ticket.global ? 'This start is unscoped and will not be bound to a chat.' : 'Local runtime observed. Start runs only the selected fixed template in this chat.');
     this.renderChatAssets();
@@ -1585,7 +1685,7 @@ export class StudioWorkbench {
   private renderAssetJob() {
     const job = this.currentAssetJob(); this.text('asset-job-record', job ? json(job) : 'No asset job selected.');
     const workerHost=this.doc.getElementById('asset-worker-status');
-    if(workerHost){workerHost.replaceChildren();if(job)this.renderWorkerStatus(workerHost,job,()=>this.currentAssetJob()?.jobId===job.jobId);}
+    if(workerHost){workerHost.replaceChildren();if(job){const current=()=>this.currentAssetJob()?.jobId===job.jobId;this.renderWorkerStatus(workerHost,job,current);this.renderRetentionStatus(workerHost,job,current);}}
     const summary = this.el('asset-job-summary'); summary.setAttribute('data-asset-state', job?.state ?? ''); summary.setAttribute('data-asset-name', job?.request.name ?? '');
     if (job?.state === 'running' && this.assetAvailable) {
       const key = this.historyProjectPath() + '\0' + job.jobId;
@@ -1595,6 +1695,115 @@ export class StudioWorkbench {
       }
     }
     this.text('asset-job-summary', job ? job.request.name + (job.request.template === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
+  }
+  private bindAssetAcknowledgement():void{
+    const button=this.doc.getElementById('asset-acknowledge');if(!button||this.assetAcknowledgementBound)return;
+    this.assetAcknowledgementBound=true;button.addEventListener('click',event=>{
+      const click=event as MouseEvent;
+      if(!event.isTrusted||event.defaultPrevented||click.button!==0||click.altKey||click.ctrlKey||click.metaKey||click.shiftKey||!this.assetAvailable||!this.assetReadAfterUnknown||this.assetBusy)return;
+      this.assetUnknown='';this.assetReadAfterUnknown=false;this.renderAssetControls();
+    });
+  }
+  private renderRetentionStatus(host:HTMLElement,job:AssetJobRecord,current:()=>boolean):void{
+    const message=this.assetHistoryMessages.get(job.jobId);
+    if(!job.retention&&!message)return;
+    const note=this.make('p',message??'Archived in recorded history. Files are kept.','hint');
+    note.setAttribute('role','status');note.setAttribute('aria-live','polite');note.setAttribute('data-asset-retained-note',job.jobId);note.tabIndex=-1;
+    if(job.retention){
+      const button=this.make('button',this.assetHistoryChange&&this.assetBusy?'Restoring history…':'Restore to active history','secondary');button.type='button';
+      button.setAttribute('aria-label','Restore '+job.request.name.replaceAll('-',' ')+' to active history');
+      button.disabled=this.assetBusy||!this.assetAvailable||!this.assetSignedIn()||!!this.assetUnknown||!this.assetContext.ready();
+      button.addEventListener('click',event=>{if(event.isTrusted&&!event.defaultPrevented&&event.button===0&&!event.altKey&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&current())
+        void this.restoreAssetHistory(job.jobId,host.id==='asset-worker-status'?'asset-worker-status':'chat-assets');});host.append(button);
+    }host.append(note);
+  }
+  /** Trusted, unmodified primary activation only; keyboard activation of a button dispatches a trusted click. */
+  private onTrusted(id:string,action:()=>void):void{
+    const element=this.doc.getElementById(id);if(!element)return;
+    element.addEventListener('click',event=>{const input=event as MouseEvent;
+      if(event.isTrusted===true&&!event.defaultPrevented&&input.button===0&&!input.altKey&&!input.ctrlKey&&!input.metaKey&&!input.shiftKey&&!(element as HTMLButtonElement).disabled)action();});
+  }
+  private async readAssetHealth(ticket:AssetContextTicket):Promise<void>{
+    this.assetHealthRead?.abort();const controller=new AbortController();this.assetHealthRead=controller;
+    try{
+      const health=await this.api.assetHistoryHealth(controller.signal);
+      if(!this.assetCurrent(ticket)||this.assetHealthRead!==controller)return;
+      this.assetHealth=health;
+    }catch{
+      if(!this.assetCurrent(ticket)||this.assetHealthRead!==controller)return;
+      this.assetHealth=null; // Unknown health is never shown as healthy.
+    }finally{if(this.assetHealthRead===controller){this.assetHealthRead=null;this.renderAssetHealth();}}
+  }
+  private renderAssetHealth():void{
+    const host=this.doc.getElementById('asset-history-health');if(!host)return;
+    if(!this.assetHealthBound){this.assetHealthBound=true; // Bound once on first render, independent of the boot path.
+      this.onTrusted('asset-history-rebuild',()=>{void this.changeAssetHistory('rebuild');});
+      this.onTrusted('asset-history-confirm',()=>{void this.changeAssetHistory('confirm');});}
+    const health=this.assetHealth,visible=!!health&&this.assetAvailable&&this.assetSignedIn()&&!this.stopped;
+    host.hidden=!visible;if(!visible||!health){this.text('asset-history-health-status','');this.text('asset-history-health-result',this.assetHealthResult);return;}
+    host.className=health.degraded?'notice warning':'notice';
+    const counts=health.active+' active · '+health.archived+' archived'+(health.unavailable?' · '+health.unavailable+' need inspection':'')+(health.unclassified?' · '+health.unclassified+' not yet classified':'');
+    this.text('asset-history-health-status',health.degraded
+      ?'Saved history needs attention. '+health.reasons.map(reason=>HISTORY_REASON_TEXT[reason]).join(' ')+' '+counts+'. Files are kept. Archiving and restoring stay paused until this is resolved.'
+      :'Saved history is healthy. '+counts+'.');
+    const blocked=this.assetBusy||!!this.assetUnknown||!this.assetContext.ready()||!this.assetSignedIn();
+    const rebuild=this.el<HTMLButtonElement>('asset-history-rebuild'),confirm=this.el<HTMLButtonElement>('asset-history-confirm');
+    rebuild.hidden=!health.degraded;rebuild.disabled=blocked||!health.degraded;
+    confirm.hidden=!health.reasons.includes('commit-uncertain');confirm.disabled=blocked||confirm.hidden;
+    const pending=this.assetHistoryChange&&this.assetBusy;
+    this.text('asset-history-rebuild',pending?'Working…':'Rebuild history index');this.text('asset-history-confirm',pending?'Working…':'Confirm last change');
+    this.text('asset-history-health-help',health.degraded?'Rebuild re-checks every job folder and saves a new index; the previous index is kept as a backup. Confirm re-checks only the last unconfirmed change. Neither moves, deletes or restarts any job.':'');
+    this.text('asset-history-health-result',this.assetHealthResult);
+  }
+  private async changeAssetHistory(kind:'rebuild'|'confirm'):Promise<void>{
+    if(this.assetBusy||this.assetHistoryChange||!this.assetAvailable||this.assetUnknown||!this.assetSignedIn()||!this.assetContext.ready()||!this.assetHealth?.degraded)return;
+    if(kind==='confirm'&&!this.assetHealth.reasons.includes('commit-uncertain'))return;
+    const ticket=this.assetTicket(),controller=new AbortController();this.assetHistoryChange=controller;this.assetBusy=true;
+    this.assetHealthResult=kind==='rebuild'?'Rebuilding the history index…':'Checking the last change…';this.renderAssetControls();
+    try{
+      const change=await this.api.assetChangeHistory(kind,controller.signal);
+      if(!this.assetCurrent(ticket)||this.assetHistoryChange!==controller)return;
+      this.assetHealthResult=(kind==='rebuild'?'History index rebuilt: ':'Last change confirmed: ')+change.active+' active, '+change.archived+' archived'+
+        (change.unavailable?', '+change.unavailable+' still need inspection':'')+'.'+(change.backup?' The previous index was kept as a backup.':'')+
+        ' No job was moved, deleted or restarted.'+(change.degraded?' History still needs attention.':'');
+      this.assetHistoryChange=null;this.assetBusy=false;
+      await this.refreshAssets();
+    }catch(error){
+      if(!this.assetCurrent(ticket)||this.assetHistoryChange!==controller)return;
+      const unknown=error instanceof StudioRequestError&&error.outcome==='unknown';
+      this.assetHealthResult=unknown?'The outcome of this change is unknown. It was not repeated. Refresh recorded history before another change.'
+        :(kind==='rebuild'?'History could not be rebuilt. Saved job files are kept; inspect the reasons above.':'The last change could not be confirmed. It stays unconfirmed; rebuild or inspect the reasons above.');
+      if(unknown){this.assetUnknown=this.assetHealthResult;this.assetReadAfterUnknown=false;}
+    }finally{
+      if(this.assetCurrent(ticket)&&(this.assetHistoryChange===controller||this.assetHistoryChange===null)){
+        if(this.assetHistoryChange===controller){this.assetHistoryChange=null;this.assetBusy=false;}
+        this.renderAssetControls();
+        if(!this.doc.activeElement||this.doc.activeElement===this.doc.body||(this.doc.activeElement as HTMLButtonElement).disabled)this.doc.getElementById('asset-history-health-result')?.focus();
+      }
+    }
+  }
+  private async restoreAssetHistory(jobId:string,focusHost:'asset-worker-status'|'chat-assets'):Promise<void>{
+    if(this.assetBusy||!this.assetAvailable||this.assetUnknown||!this.assetSignedIn()||!this.assetContext.ready())return;
+    const job=this.assetJobs.find(item=>item.jobId===jobId);if(!job?.retention)return;
+    const ticket=this.assetTicket(),controller=new AbortController();this.assetHistoryChange=controller;this.assetBusy=true;
+    this.assetHistoryMessages.set(jobId,'Restoring this job to active history…');this.renderAssetControls();this.renderAssetJob();
+    try{
+      await this.api.assetRestoreHistory(jobId,controller.signal);
+      if(!this.assetCurrent(ticket)||this.assetHistoryChange!==controller)return;
+      delete job.retention;this.assetHistoryMessages.set(jobId,'Restored to active history. Generation was not restarted.');
+      await this.refreshAssets();
+    }catch(error){
+      if(!this.assetCurrent(ticket)||this.assetHistoryChange!==controller)return;
+      const unknown=error instanceof StudioRequestError&&error.outcome==='unknown';
+      const message=unknown?'The restoration outcome is unknown. Refresh recorded history before another change.':'History could not be restored. Refresh the retained job and check again.';
+      this.assetHistoryMessages.set(jobId,message);this.text('asset-notice',message);
+      if(unknown){this.assetUnknown=message;this.assetReadAfterUnknown=false;}
+    }finally{
+      if(this.assetCurrent(ticket)&&this.assetHistoryChange===controller){
+        this.assetHistoryChange=null;this.assetBusy=false;this.renderAssetControls();this.renderAssetJob();
+        if(!this.doc.activeElement||this.doc.activeElement===this.doc.body)this.doc.getElementById(focusHost)?.querySelector<HTMLElement>('[data-asset-retained-note="'+jobId+'"]')?.focus();
+      }
+    }
   }
   private renderWorkerStatus(host:HTMLElement,job:AssetJobRecord,current:()=>boolean):void{
     if(job.state!=='interrupted'||job.request.template==='adopted-glb')return;

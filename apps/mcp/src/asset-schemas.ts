@@ -8,7 +8,7 @@ import { normalizeRequest, validateAudit } from '../../../packages/asset-pipelin
 import { jsonSnapshot, JOB_JOURNAL_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { AssetInput, AssetRequest, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
 import { id, boundedText } from './schemas.js';
-import { HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetJobPage } from '../../daemon/src/asset-service.js';
+import { HISTORY_PAGE_BYTES,HISTORY_RECORD_LIMIT, type AssetJobRecord, type AssetJobPage } from '../../daemon/src/asset-service.js';
 import { assetSlug, assemblyRecipe, assemblyEvidence, geometryBounds, socketEvidence, materialEvidence, boundedVector } from './assembly-schemas.js';
 
 const count = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -64,14 +64,23 @@ export const assetJob: z.ZodType<AssetJobRecord> = z.object({
   manifestPath: path.nullable(), error: z.object({ code: id.max(64), message: text }).nullable(), request: z.union([assetRequest,adoptedGlbRequest]),
   stage: id.max(48), startedAt: id, updatedAt: id, manifestAvailable: z.boolean(),
   events: z.array(z.object({ jobId: assetJobId, at: id, stage: id.max(48), state: jobState })).max(64), finishedAt: id.optional(),
-}).transform(({ finishedAt, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }) }))
-  .refine(job => job.events.every(event => event.jobId === job.jobId), 'Events must belong to this exact asset job.');
+  retention:z.strictObject({status:z.literal('archived'),archivedAt:z.iso.datetime()}).optional(),
+  resolution:z.union([z.strictObject({status:z.literal('resolved'),resolvedAt:z.iso.datetime({precision:7})}),z.strictObject({status:z.enum(['invalid','uncertain'])})]).optional(),
+}).refine(job => job.events.every(event => event.jobId === job.jobId)&&(!job.resolution||job.state==='interrupted')&&
+    (!job.retention||job.state!=='running'&&(job.state!=='interrupted'||job.resolution?.status==='resolved')), 'Asset history evidence must match this exact job and terminal state.')
+  // The marker is checked before transformation, but human recovery controls
+  // are never exposed to an agent as a reusable approval or effect capability.
+  .transform(({ finishedAt,retention,resolution:_resolution, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(retention===undefined?{}:{retention}) }));
 
 export const assetHistoryInput = z.strictObject({ limit: z.number().int().min(1).max(64).optional(), after: assetJobId.optional() });
+const unavailableAsset=z.strictObject({jobId:assetJobId.length(36),name:z.string().min(1).max(48).regex(/^[a-z][a-z0-9-]*(?![\s\S])/).optional(),status:z.enum(['missing','changed','conflict','unclassified'])})
+  .transform(({name,...item})=>({...item,...(name===undefined?{}:{name})}));
 export const assetJobPage: z.ZodType<AssetJobPage> = z.object({ schemaVersion: z.literal(1), jobs: z.array(assetJob).max(64),
-  total: z.number().int().min(0).max(256), nextCursor: assetJobId.nullable(), byteLimit: z.literal(HISTORY_PAGE_BYTES),
-}).refine(page => page.total >= page.jobs.length && new Set(page.jobs.map(job => job.jobId)).size === page.jobs.length
-  && (page.nextCursor === null || page.nextCursor === page.jobs.at(-1)?.jobId)
+  total: z.number().int().min(0).max(HISTORY_RECORD_LIMIT), nextCursor: assetJobId.nullable(), byteLimit: z.literal(HISTORY_PAGE_BYTES),unavailable:z.array(unavailableAsset).max(64).optional(),
+}).transform(({unavailable,...page})=>({...page,...(unavailable===undefined?{}:{unavailable})})).refine(page => page.total >= page.jobs.length+(page.unavailable?.length??0) && page.jobs.length+(page.unavailable?.length??0)<=64&&
+  new Set([...page.jobs.map(job => job.jobId),...(page.unavailable??[]).map(item=>item.jobId)]).size === page.jobs.length+(page.unavailable?.length??0)
+  && (page.nextCursor === null || page.nextCursor === page.jobs.at(-1)?.jobId || page.nextCursor===page.unavailable?.at(-1)?.jobId)
   && Buffer.byteLength(JSON.stringify(page)) <= HISTORY_PAGE_BYTES, 'Invalid bounded asset history page.');
 
 // Native envelopes are response evidence, never caller-supplied authority.
@@ -99,8 +108,8 @@ export function nativeAssetCursorMatchesScope(cursor: string, scope: z.output<z.
   return cursor.slice(0, 64) === digest;
 }
 export const nativeAssetJobPage = boundedNativeRecord(HISTORY_PAGE_BYTES).pipe(z.strictObject({
-  ...nativeScope, jobs: z.array(nativeJob).max(64), nextCursor: nativeAssetCursor.nullable(), byteLimit: z.literal(HISTORY_PAGE_BYTES),
-})).refine(page => new Set(page.jobs.map(job => job.jobId)).size === page.jobs.length
+  ...nativeScope, jobs: z.array(nativeJob).max(64), nextCursor: nativeAssetCursor.nullable(), byteLimit: z.literal(HISTORY_PAGE_BYTES),unavailable:z.array(unavailableAsset).max(64).optional(),
+})).refine(page => page.jobs.length+(page.unavailable?.length??0)<=64&&new Set([...page.jobs.map(job => job.jobId),...(page.unavailable??[]).map(item=>item.jobId)]).size === page.jobs.length+(page.unavailable?.length??0)
   && (page.nextCursor === null || nativeAssetCursorMatchesScope(page.nextCursor, page)), 'Invalid scoped native asset history page.');
 export const nativeAssetStart = boundedNativeRecord(JOB_JOURNAL_BYTES).pipe(z.strictObject({
   ...nativeScope, jobId: nativeAssetJobId.nullable(), association: z.enum(['bound', 'unknown']),

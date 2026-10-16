@@ -121,6 +121,12 @@ async function fixture(t: test.TestContext, options:{signal?:AbortSignal;setupSt
   const fakeAssetService: AssetService = {
     projectPath, outputRoot: join(root, 'fake-assets'),
     async resolveInterrupted() { assert.fail('Native LAB authority must not request human worker recovery.'); },
+    async lookupJobs(ids){const all=this.jobs();return{jobs:ids.flatMap(id=>all.filter(job=>job.jobId===id)),unavailable:ids.filter(id=>!all.some(job=>job.jobId===id)).map(jobId=>({jobId,status:'missing' as const}))};},
+    async historyPage(options={}){return this.jobPage(options);},
+    async historyStatus(){return{degraded:false,reasons:[],active:this.jobs().length,archived:0,unclassified:0,unavailable:0};},
+    async restoreHistory(){assert.fail('Only the human history control can restore retained jobs.');},
+    async rebuildHistory(){assert.fail('Only the human history control can rebuild retained history.');},
+    async confirmHistory(){assert.fail('Only the human history control can confirm retained history.');},
     jobs: () => structuredClone(jobs),
     jobPage() { return { schemaVersion: 1, jobs: structuredClone(jobs), total: jobs.length, nextCursor: null, byteLimit: 512 * 1024 }; },
     async start(input, admission) {

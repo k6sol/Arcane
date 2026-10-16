@@ -200,8 +200,9 @@ test('worker status transport uses one exact human request and validates its bou
 });
 
 test('human worker check refreshes the same interrupted job without generation or artifact acceptance',async()=>{
-  const interrupted={...job(),state:'interrupted' as const},c=context(),calls:string[]=[];let resolved=false;
-  const api=new StudioApi(TOKEN,async(path)=>{calls.push(String(path));
+  const interrupted={...job(),state:'interrupted' as const},c=context(),calls:string[]=[],health:{method:unknown;body:unknown}[]=[];let resolved=false;
+  const api=new StudioApi(TOKEN,async(path,init)=>{calls.push(String(path));
+    if(path==='/v1/assets/history-status')health.push({method:init?.method,body:init?.body});
     if(path==='/v1/assets/resolve-interrupted'){resolved=true;return Response.json(workerReceipt());}
     return Response.json(page([{...interrupted,...(resolved?{resolution:{status:'resolved' as const,resolvedAt:workerReceipt().resolution.resolvedAt}}:{})}]));});
   const {doc,view}=workbench(api,c.options);await view.refreshAssets();view.assetProbed=true;
@@ -209,7 +210,9 @@ test('human worker check refreshes the same interrupted job without generation o
   await view.checkAssetWorker(ID);
   assert.equal(view.assetJobs[0]!.state,'interrupted');assert.equal(view.assetJobs[0]!.manifestAvailable,false);
   assert.equal(view.assetJobs[0]!.resolution?.status,'resolved');assert.equal(doc.getElementById('asset-start').disabled,false);
-  assert.deepEqual(calls,['/v1/assets/conversation-jobs?limit=32','/v1/assets/resolve-interrupted','/v1/assets/conversation-jobs?limit=32']);
+  await new Promise(done=>setTimeout(done,0)); // Let the read-only health observations settle.
+  assert.deepEqual(calls.filter(path=>path!=='/v1/assets/history-status'),['/v1/assets/conversation-jobs?limit=32','/v1/assets/resolve-interrupted','/v1/assets/conversation-jobs?limit=32']);
+  assert.deepEqual(health,[{method:'GET',body:undefined},{method:'GET',body:undefined}],'exactly one GET health read per first-page read');
   assert.match(doc.getElementById('chat-assets').children[1]!.children[0]!.children.at(-1)!.textContent,/Partial files are kept/);
 });
 
@@ -267,10 +270,15 @@ test('foreign host project/chat and inconsistent project ID are refused without 
 });
 
 test('history advances only on an explicit bounded page read and resets its opaque cursor on chat change', async () => {
-  const c = context(), calls: string[] = [];
-  const { doc, view } = workbench(new StudioApi(TOKEN, async path => { calls.push(String(path)); return Response.json(calls.length === 1 ? page([job()], NATIVE, 'opaque:next') : page([job('second')])); }), c.options);
-  await view.refreshAssets(); assert.equal(calls.length, 1); assert.equal(doc.getElementById('asset-history-more').hidden, false);
-  await view.refreshAssets(true); assert.deepEqual(view.assetJobs.map(item => item.jobId), [ID, 'second']); assert.equal(calls[1], '/v1/assets/conversation-jobs?limit=32&after=opaque%3Anext');
+  const c = context(), calls: string[] = [], health: { method: unknown; body: unknown }[] = [];
+  const pages = () => calls.filter(path => path !== '/v1/assets/history-status');
+  const { doc, view } = workbench(new StudioApi(TOKEN, async (path, init) => { calls.push(String(path));
+    if (path === '/v1/assets/history-status') { health.push({ method: init?.method, body: init?.body }); return Response.json({ history: { degraded: false, reasons: [], active: 1, archived: 0, unclassified: 0, unavailable: 0 } }); }
+    return Response.json(pages().length === 1 ? page([job()], NATIVE, 'opaque:next') : page([job('second')])); }), c.options);
+  await view.refreshAssets(); assert.equal(pages().length, 1); assert.equal(doc.getElementById('asset-history-more').hidden, false);
+  await view.refreshAssets(true); assert.deepEqual(view.assetJobs.map(item => item.jobId), [ID, 'second']); assert.equal(pages()[1], '/v1/assets/conversation-jobs?limit=32&after=opaque%3Anext');
+  await new Promise(done => setTimeout(done, 0));
+  assert.deepEqual(health, [{ method: 'GET', body: undefined }], 'one GET health read for the first page; a cursor page reads none');
   c.change(null); assert.equal(view.assetNextCursor, null); assert.equal(doc.getElementById('asset-history-more').hidden, true);
 });
 

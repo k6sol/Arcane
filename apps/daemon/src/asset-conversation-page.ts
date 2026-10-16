@@ -2,7 +2,7 @@ import { types } from 'node:util';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import type { NativeConversation } from '../../../packages/storage/src/conversation-work-store.js';
 import type { AssetConversationHost, AssetConversationListing, NativeAssetConversationHost } from './asset-conversation-host.js';
-import { HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetService } from './asset-service.js';
+import { HISTORY_PAGE_BYTES, type AssetJobRecord, type AssetService,type AssetHistoryUnavailable } from './asset-service.js';
 import type { NativeAssetActor } from './native-asset-authority.js';
 
 export interface AssetConversationJobPage {
@@ -12,6 +12,7 @@ export interface AssetConversationJobPage {
   jobs: AssetJobRecord[];
   nextCursor: string | null;
   byteLimit: number;
+  unavailable?:AssetHistoryUnavailable[];
 }
 
 // Existing storage cursor: 64 hex scope characters, colon, 1..16 sequence digits.
@@ -161,4 +162,73 @@ function capturedJobPage(
   result.nextCursor = prefix.nextCursor;
   if (Buffer.byteLength(JSON.stringify(result)) > HISTORY_PAGE_BYTES) historyLimit();
   return result;
+}
+
+/** Hydrates exact captured UUIDs, including archived and unavailable history. The second
+ * host observation verifies the original scope and exact consumed prefix after filesystem awaits. */
+async function hydratedJobPage(
+  service:Pick<AssetService,'lookupJobs'|'projectPath'>,
+  list:(pagination:{limit:number;after?:string})=>AssetConversationListing,
+  options:{limit:number;after:string|null},
+):Promise<AssetConversationJobPage>{
+  let first:AssetConversationListing|undefined;
+  const blank=capturedJobPage({jobs:()=>[]},pagination=>{
+    const captured=snapshot(list(pagination),pagination.limit);
+    if(captured.projectPath!==service.projectPath)stale();first=captured;return captured;
+  },options);
+  if(!first)stale();
+  const original:AssetConversationListing=first;
+  // Historical non-UUID bindings remain consumed orphans; archived UUIDs always hydrate explicitly.
+  const validIds=original.items.map(binding=>binding.id).filter(id=>/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(id));
+  const loaded=await service.lookupJobs(validIds);
+  const jobs=new Map<string,AssetJobRecord>(),unavailable=new Map<string,AssetHistoryUnavailable>();
+  const ids=new Set(validIds);
+  for(const job of loaded.jobs){if(!ids.has(job.jobId)||jobs.has(job.jobId))stale();jobs.set(job.jobId,job);}
+  for(const item of loaded.unavailable){if(!ids.has(item.jobId)||jobs.has(item.jobId)||unavailable.has(item.jobId))stale();unavailable.set(item.jobId,item);}
+  if(jobs.size+unavailable.size!==validIds.length)stale();
+  const result:AssetConversationJobPage={...blank,jobs:[],unavailable:[]};
+  // Match the actual wire shape before calculating the cap: an empty optional
+  // array must not reject an otherwise exactly fitting retained record.
+  const pageBytes=(value:AssetConversationJobPage)=>{
+    const {unavailable,...required}=value;
+    return Buffer.byteLength(JSON.stringify(unavailable?.length?value:required));
+  };
+  const rows=original.items.map(binding=>({job:jobs.get(binding.id),unavailable:unavailable.get(binding.id)}));
+  const full={...result,jobs:rows.flatMap(row=>row.job?[row.job]:[]),unavailable:rows.flatMap(row=>row.unavailable?[row.unavailable]:[])};
+  let consumed=rows.length,cut=false;
+  if(pageBytes(full)<=HISTORY_PAGE_BYTES){result.jobs=full.jobs;result.unavailable=full.unavailable;}
+  else{
+    cut=true;consumed=0;
+    const cursorBytes=original.nextCursor===null?MAX_CURSOR_JSON_BYTES:Buffer.byteLength(JSON.stringify(original.nextCursor));
+    for(const row of rows){
+      const candidate={...result,jobs:row.job?[...result.jobs,row.job]:result.jobs,
+        unavailable:row.unavailable?[...(result.unavailable??[]),row.unavailable]:(result.unavailable??[]),nextCursor:null};
+      const bytes=pageBytes(candidate);
+      if(bytes+cursorBytes-4>HISTORY_PAGE_BYTES){
+        if(!consumed){if(bytes+MIN_CURSOR_JSON_BYTES-4>HISTORY_PAGE_BYTES)historyLimit();result.jobs=candidate.jobs;result.unavailable=candidate.unavailable;consumed=1;}
+        break;
+      }
+      result.jobs=candidate.jobs;result.unavailable=candidate.unavailable;consumed++;
+    }
+    if(consumed<1||consumed>=rows.length)historyLimit();
+  }
+  let verified:AssetConversationListing;
+  try{verified=snapshot(list({limit:cut?consumed:options.limit,...(options.after===null?{}:{after:options.after})}),cut?consumed:options.limit);}
+  catch{stale();}
+  if(verified.projectId!==original.projectId||verified.projectPath!==original.projectPath||!sameNative(verified.conversation,original.conversation)||
+    verified.items.length!==consumed||verified.items.some((binding,index)=>binding.id!==original.items[index]!.id||binding.projectId!==original.projectId||
+      !sameNative(binding.conversation,original.conversation))||
+    (cut?(verified.nextCursor===null||verified.nextCursor===options.after):verified.nextCursor!==original.nextCursor))stale();
+  result.nextCursor=verified.nextCursor;
+  if(!result.unavailable?.length)delete result.unavailable;
+  if(Buffer.byteLength(JSON.stringify(result))>HISTORY_PAGE_BYTES)historyLimit();
+  return result;
+}
+
+export function assetConversationJobPageAsync(service:Pick<AssetService,'lookupJobs'|'projectPath'>,host:AssetConversationHost,options:{limit:number;after:string|null}):Promise<AssetConversationJobPage>{
+  return hydratedJobPage(service,pagination=>host.listHuman(pagination),options);
+}
+export function nativeAssetConversationJobPageAsync(service:Pick<AssetService,'lookupJobs'|'projectPath'>,host:Pick<NativeAssetConversationHost,'listNative'>,
+  actor:NativeAssetActor,options:{limit:number;after:string|null}):Promise<AssetConversationJobPage>{
+  return hydratedJobPage(service,pagination=>host.listNative(actor,pagination),options);
 }

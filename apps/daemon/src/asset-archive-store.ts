@@ -1,6 +1,6 @@
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import type {BigIntStats} from 'node:fs';
-import {lstat,opendir,realpath} from 'node:fs/promises';
+import {lstat,open,opendir,realpath} from 'node:fs/promises';
 import {isAbsolute,join,resolve} from 'node:path';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
 import {atomicAssetJson,AtomicJsonFailure} from '../../../packages/asset-pipeline/src/atomic-json.js';
@@ -32,6 +32,14 @@ export interface AssetArchiveScan {
   readonly archived:readonly ArchivedJobSummary[];
   readonly degraded:boolean;
   readonly reasons:readonly ('ledger-invalid'|'ledger-changed'|'scan-limit'|'directory-invalid'|'duplicate-job'|'active-limit'|'archived-evidence'|'commit-uncertain')[];
+}
+/** Explicit host/human rebuild result: bounded internal identities plus the preserved original ledger. */
+export interface AssetArchiveRebuild {readonly active:readonly string[];readonly archived:readonly string[];readonly backup:string|null}
+const BACKUP_PREFIX='archive-ledger.backup-',BACKUP_LIMIT=16,REBUILD_SCAN_LIMIT=ACTIVE_LIMIT+LEDGER_MAX_ENTRIES+64;
+const JOB_DIRECTORY=/^([a-z][a-z0-9-]{0,47})-([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})(?![\s\S])/;
+interface RebuildWitness {
+  readonly ref:AssetJobDirectory;readonly eligible:Omit<LedgerEntry,'journal'|'archivedAt'>|null;
+  readonly stat:BigIntStats|null;readonly journalSha256:string|null;readonly markerSha256:string|null;
 }
 interface JobBytes {readonly journal:Buffer;readonly marker:Buffer|null;readonly stat:BigIntStats}
 interface Candidate {readonly entry:LedgerEntry;readonly files:JobBytes;readonly directory:AssetJobDirectory}
@@ -168,6 +176,14 @@ export class AssetArchiveStore {
       degraded:reasons.size>0,reasons:Object.freeze([...reasons])});
   }
   isArchived(jobId:string):boolean{this.#ensureOpen();return this.#ledger.entries.some(entry=>entry.jobId===jobId);}
+  /** Read-only candidate filtering. archive() independently repeats every fact before writing. */
+  async eligible(jobId:string,facts:ArchiveHostFacts):Promise<boolean>{
+    this.#ensureOpen();if(!UUID.test(jobId))fail('INPUT');
+    const ref=this.#directories.get(jobId);if(!ref||this.isArchived(jobId)||this.#pins.has(jobId))return false;
+    try{const files=await this.#files(ref);this.#ensureOpen();
+      return !this.#pins.has(jobId)&&assessEligibility({jobId,name:ref.name,journal:files.journal,marker:files.marker,facts}).eligible;
+    }catch{this.#ensureOpen();return false;}
+  }
   /** Read lease survives asynchronous service consumers. Releasing twice is harmless. */
   pin(jobIds:readonly string[]):()=>void{
     this.#ensureOpen();if(!Array.isArray(jobIds)||jobIds.length>64||jobIds.some(id=>!UUID.test(id)))fail('INPUT');
@@ -257,6 +273,140 @@ export class AssetArchiveStore {
       if(this.#pins.has(jobId)||swap&&this.#pins.has(swap.entry.jobId))fail('LEASED');
       await this.#commit(plan.ledger);
       return{jobId,swappedOut:plan.swappedOut,activeAfter:plan.activeAfter};
+    }finally{this.#busy=false;}
+  }
+  /** Closure-independent root identity check used to inspect a commit that already began. */
+  async #rootIdentity():Promise<void>{
+    await noLinks(this.root);const current=await lstat(this.root,{bigint:true});
+    if(!current.isDirectory()||current.isSymbolicLink()||current.dev!==this.rootIdentity.dev||current.ino!==this.rootIdentity.ino||
+      !equalPath(await realpath(this.root),this.root))fail('PATH');
+  }
+  /** Complete inventory to the fixed bound, independent of any existing/corrupt/short ledger.
+   * An incomplete prefix, linked/ambiguous entry or duplicated UUID refuses the rebuild. */
+  async #inventory():Promise<{refs:Map<string,AssetJobDirectory>;names:string;backups:number}>{
+    await this.#rootUnchanged();
+    const refs=new Map<string,AssetJobDirectory>(),names:string[]=[];let backups=0;
+    for await(const dirent of await opendir(this.root)){
+      names.push(dirent.name);if(names.length>REBUILD_SCAN_LIMIT)fail('SCAN_LIMIT');
+      if(dirent.name.startsWith(BACKUP_PREFIX))backups++;
+      const match=JOB_DIRECTORY.exec(dirent.name);if(!match)continue;
+      const name=match[1]!,jobId=match[2]!;
+      try{assetName(name);}catch{fail('DIRECTORY');}
+      if(!dirent.isDirectory()||dirent.isSymbolicLink())fail('DIRECTORY');
+      if(refs.has(jobId))fail('DUPLICATE');
+      refs.set(jobId,Object.freeze({jobId,name,directory:join(this.root,dirent.name)}));
+    }
+    for(const ref of refs.values())await this.#directory(ref);
+    await this.#rootUnchanged();
+    return{refs,names:JSON.stringify(names.sort()),backups};
+  }
+  /** Exact original ledger bytes (possibly invalid UTF-8/JSON) plus file identity; unsafe sources refuse intact. */
+  async #source():Promise<{bytes:Buffer;stat:BigIntStats}|null>{
+    await this.#rootUnchanged();const path=join(this.root,LEDGER_FILE);
+    let before:BigIntStats;
+    try{before=await lstat(path,{bigint:true});}catch(error){if(errno(error)==='ENOENT')return null;fail('LEDGER_SOURCE');}
+    if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||before.size<1n||before.size>BigInt(LEDGER_MAX_BYTES))fail('LEDGER_SOURCE');
+    let bytes:Buffer;try{bytes=await readRegularFile(path,LEDGER_MAX_BYTES);}catch{fail('LEDGER_SOURCE');}
+    const after=await lstat(path,{bigint:true});if(!sameFile(before,after))fail('LEDGER_SOURCE');
+    return{bytes,stat:after};
+  }
+  async #witness(ref:AssetJobDirectory,readFacts:(jobId:string)=>Promise<ArchiveHostFacts>,guard:()=>void):Promise<RebuildWitness>{
+    const facts=await readFacts(ref.jobId);syncGuard(guard);
+    let files:JobBytes;
+    try{files=await this.#files(ref);}
+    catch(error){
+      if(errno(error)!=='ENOENT')throw error;
+      // The directory exists but its journal does not: visible and active, never archived.
+      try{await this.#directory(ref);}catch{fail('CHANGED');}
+      syncGuard(guard);return{ref,eligible:null,stat:null,journalSha256:null,markerSha256:null};
+    }
+    syncGuard(guard);
+    const eligibility=assessEligibility({jobId:ref.jobId,name:ref.name,journal:files.journal,marker:files.marker,facts});
+    return{ref,eligible:eligibility.eligible?eligibility.entry:null,stat:files.stat,journalSha256:digest(files.journal),markerSha256:files.marker===null?null:digest(files.marker)};
+  }
+  /** Never overwrites: a unique, direct, single-link file in this exact root, flushed and read back exactly. */
+  async #backup(bytes:Buffer):Promise<string>{
+    await this.#rootUnchanged();
+    const name=BACKUP_PREFIX+digest(bytes).slice(0,16)+'-'+randomUUID()+'.bin',path=join(this.root,name);
+    const handle=await open(path,'wx',0o600);
+    try{await handle.writeFile(bytes);await handle.sync();}finally{await handle.close();}
+    await this.#backupIntact(name,bytes);
+    return name;
+  }
+  async #backupIntact(name:string,bytes:Buffer):Promise<void>{
+    await this.#rootIdentity();let read:Buffer;
+    try{read=await readRegularFile(join(this.root,name),LEDGER_MAX_BYTES);}catch{fail('BACKUP');}
+    if(!read.equals(bytes))fail('BACKUP');
+  }
+  /** Explicit host/human rebuild for corrupt or legacy over-cap retained history. Job directories,
+   * journals and artifacts are never moved, deleted or replayed; unresolved evidence stays visible or refuses. */
+  async rebuild(input:{facts:(jobId:string)=>Promise<ArchiveHostFacts>;guard:()=>void}):Promise<AssetArchiveRebuild>{
+    this.#ensureOpen();if(this.#busy)fail('BUSY');
+    const readFacts=input?.facts,guard=input?.guard;
+    if(typeof readFacts!=='function'||typeof guard!=='function')fail('INPUT');
+    this.#busy=true;
+    try{
+      syncGuard(guard);if(this.#pins.size)fail('LEASED');
+      const inventory=await this.#inventory();syncGuard(guard);
+      if(inventory.backups>=BACKUP_LIMIT)fail('BACKUP_LIMIT');
+      const source=await this.#source();syncGuard(guard);
+      const parsed=source?parseLedger(source.bytes):null,prior=new Map((parsed?.ok?parsed.ledger.entries:[]).map(entry=>[entry.jobId,entry]));
+      // A retained valid classification cannot be released by a rebuild: every prior entry needs its exact directory.
+      for(const entry of prior.values()){const ref=inventory.refs.get(entry.jobId);if(!ref)fail('MISSING');if(ref.name!==entry.name)fail('DIRECTORY');}
+      const witnesses:RebuildWitness[]=[];
+      for(const ref of inventory.refs.values())witnesses.push(await this.#witness(ref,readFacts,guard));
+      const visible=witnesses.filter(w=>!w.eligible);
+      if(visible.some(w=>prior.has(w.ref.jobId)))fail('CHANGED'); // Keep the fence; fresh eligibility is required.
+      const retained=witnesses.filter(w=>w.eligible&&prior.has(w.ref.jobId));
+      const fresh=witnesses.filter(w=>w.eligible&&!prior.has(w.ref.jobId)).sort((a,b)=>{
+        const at=(w:RebuildWitness)=>w.eligible!.finishedAt??w.eligible!.startedAt??'';
+        return at(a)<at(b)?1:at(a)>at(b)?-1:a.ref.jobId<b.ref.jobId?-1:1;
+      });
+      const slots=ACTIVE_LIMIT-visible.length;if(slots<0)fail('CAPACITY');
+      const activeFresh=fresh.slice(0,slots),archivedFresh=fresh.slice(slots);
+      if(retained.length+archivedFresh.length>LEDGER_MAX_ENTRIES)fail('CAPACITY');
+      const now=new Date().toISOString();
+      const entries:LedgerEntry[]=[
+        ...[...prior.values()].map(old=>{const w=retained.find(r=>r.ref.jobId===old.jobId)!;return{...w.eligible!,journal:fingerprintOf(w.stat!),archivedAt:old.archivedAt};}),
+        ...archivedFresh.map(w=>({...w.eligible!,journal:fingerprintOf(w.stat!),archivedAt:now})),
+      ];
+      const next=copyLedger({schemaVersion:1,kind:'arcane-asset-archive',entries}),text=serializeLedger(next);
+      const result=Object.freeze({active:Object.freeze([...visible,...activeFresh].map(w=>w.ref.jobId).sort()),archived:Object.freeze(entries.map(e=>e.jobId))});
+      if(source&&digest(source.bytes)===digest(text)){
+        this.#ledger=next;this.#ledgerDigest=digest(text);this.#invalid=false;this.#directories=inventory.refs;
+        return Object.freeze({...result,backup:null});
+      }
+      const backup=source?await this.#backup(source.bytes):null;syncGuard(guard);
+      // Revalidate every classification witness, host fact, the inventory, the source and its backup.
+      if(this.#pins.size)fail('LEASED');
+      const again=await this.#inventory();syncGuard(guard);if(again.names!==inventory.names&&
+        JSON.stringify(JSON.parse(again.names).filter((n:string)=>n!==backup))!==inventory.names)fail('CHANGED');
+      for(const w of witnesses){
+        const now=await this.#witness(w.ref,readFacts,guard);
+        if(!!now.eligible!==!!w.eligible||now.journalSha256!==w.journalSha256||now.markerSha256!==w.markerSha256||
+          (now.stat===null)!==(w.stat===null)||now.stat&&w.stat&&!sameFile(now.stat,w.stat))fail('CHANGED');
+      }
+      const current=await this.#source();syncGuard(guard);
+      if((current===null)!==(source===null)||current&&source&&(!current.bytes.equals(source.bytes)||!sameFile(current.stat,source.stat)))fail('LEDGER');
+      if(source&&backup)await this.#backupIntact(backup,source.bytes);
+      syncGuard(guard);if(this.#pins.size)fail('LEASED');
+      // Commit has begun: join it and inspect the actual disk outcome even if the caller retires.
+      let writeError:unknown=null;
+      try{await this.write(this.root,LEDGER_FILE,text);}catch(error){writeError=error;}
+      let observed:Buffer|null=null,inspected=true;
+      try{await this.#rootIdentity();observed=await readRegularFile(join(this.root,LEDGER_FILE),LEDGER_MAX_BYTES);}
+      catch(error){if(errno(error)!=='ENOENT')inspected=false;}
+      const observedDigest=observed===null?null:digest(observed),landed=inspected&&observedDigest===digest(text);
+      if(landed){this.#ledger=next;this.#ledgerDigest=observedDigest;this.#invalid=false;this.#directories=inventory.refs;}
+      if(writeError!==null){
+        if(!landed&&inspected&&observedDigest===(source?digest(source.bytes):null)&&writeError instanceof AtomicJsonFailure&&writeError.phase!=='replace')fail('PERSISTENCE');
+        this.#uncertain=true;fail('UNCERTAIN');
+      }
+      if(!landed){this.#uncertain=true;fail('UNCERTAIN');}
+      if(source&&backup){try{await this.#backupIntact(backup,source.bytes);}catch{this.#uncertain=true;fail('BACKUP');}}
+      // Every retained entry was freshly validated against current host facts; this commit is the inspection.
+      this.#uncertain=false;
+      return Object.freeze({...result,backup});
     }finally{this.#busy=false;}
   }
   /** Explicit host/human inspection can confirm an uncertain commit from the exact current bytes.

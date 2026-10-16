@@ -672,6 +672,12 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
   const service: AssetService = {
     outputRoot: 'C:/fixture/assets', projectPath: ROOT,
     async resolveInterrupted() { assert.fail('MCP must not request human worker recovery.'); },
+    async lookupJobs(ids){const all=this.jobs();return{jobs:ids.flatMap(id=>all.filter(job=>job.jobId===id)),unavailable:ids.filter(id=>!all.some(job=>job.jobId===id)).map(jobId=>({jobId,status:'missing' as const}))};},
+    async historyPage(options={}){return this.jobPage(options);},
+    async historyStatus(){return{degraded:false,reasons:[],active:this.jobs().length,archived:0,unclassified:0,unavailable:0};},
+    async restoreHistory(){assert.fail('Only the human history control can restore retained jobs.');},
+    async rebuildHistory(){assert.fail('Only the human history control can rebuild retained history.');},
+    async confirmHistory(){assert.fail('Only the human history control can confirm retained history.');},
     async probe() { return ASSET_PROBE; }, jobs() { return started ? [current] : []; },
     jobPage(options = {}) { return historyFixture(started ? [current] : [], options); },
     async start(input) { started++; current = { ...jobFixture(), request: normalizeRequest(input) }; return current; },
@@ -770,6 +776,12 @@ async function customAssetLabFixture(t: test.TestContext) {
   const service: AssetService = {
     outputRoot:join(directoryPath,'not-generated'),projectPath:ROOT,
     async resolveInterrupted() { assert.fail('MCP must not request human worker recovery.'); },
+    async lookupJobs(ids){const all=this.jobs();return{jobs:ids.flatMap(id=>all.filter(job=>job.jobId===id)),unavailable:ids.filter(id=>!all.some(job=>job.jobId===id)).map(jobId=>({jobId,status:'missing' as const}))};},
+    async historyPage(options={}){return this.jobPage(options);},
+    async historyStatus(){return{degraded:false,reasons:[],active:this.jobs().length,archived:0,unclassified:0,unavailable:0};},
+    async restoreHistory(){assert.fail('Only the human history control can restore retained jobs.');},
+    async rebuildHistory(){assert.fail('Only the human history control can rebuild retained history.');},
+    async confirmHistory(){assert.fail('Only the human history control can confirm retained history.');},
     async probe() { return ASSET_PROBE; }, jobs() { return structuredClone(jobs); },
     jobPage(options = {}) { return historyFixture(jobs,options); },
     async start(input) {

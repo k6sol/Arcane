@@ -126,6 +126,15 @@ test('a pending selection is single-flight and service close fences the awaited 
   await assert.rejects(f.service.prepareStudioImport(NEXT, f.actor), code('BUSY'));
   await f.service.close(); gate.release(); await assert.rejects(result, code('CLOSED'));
 });
+
+test('service close joins an already-started preparation record and fences its result',async t=>{
+  const f=await harness(t),started=deferred(),gate=deferred();
+  f.persist(async()=>{started.release();await gate.promise;});
+  const pending=f.service.prepareStudioImport(JOB,f.actor),refused=assert.rejects(pending,code('CLOSED'));await started.promise;
+  let closed=false;const closing=f.service.close().then(()=>{closed=true;});
+  await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(closed,false,'a started metadata write is joined');
+  gate.release();await refused;await closing;assert.equal(closed,true);
+});
 test('oversized fixed exports fail before full loading and changed artifact bytes fail verification', async t => {
   const f = await harness(t);
   await truncate(join(f.jobDirectory, 'asset.glb'), STUDIO_IMPORT_LIMITS.fileBytes+1);

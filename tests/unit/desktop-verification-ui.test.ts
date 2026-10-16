@@ -329,6 +329,9 @@ test('browser fixture: native keyboard activation, responsive settings, referenc
     assert.deepEqual(await calls(), []);
     assert.equal(await page.locator('#code-verification-settings').getAttribute('open'), null);
     const draft = 'Keep this draft and its whitespace.  ';
+    // This controller-only fixture has no provider gate controller. Choose its
+    // presentation state explicitly, as the other isolated workspace fixtures do.
+    await page.evaluate(()=>document.getElementById('workspace-stage')!.classList.remove('provider-required'));
     await page.locator('#codex-composer').fill(draft);
     const drawer = page.locator('#settings-drawer');
     assert.equal(await drawer.evaluate((dialog: HTMLDialogElement) => dialog.tagName), 'DIALOG');

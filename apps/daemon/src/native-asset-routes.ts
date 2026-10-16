@@ -7,7 +7,7 @@ import {normalizeRequest,AssetError} from '../../../packages/asset-pipeline/src/
 import type {AssetService} from './asset-service.js';
 import type {createStudioImportStagingController} from './studio-import-staging-controller.js';
 import type {NativeAssetConversationHost} from './asset-conversation-host.js';
-import {nativeAssetConversationJobPage} from './asset-conversation-page.js';
+import {nativeAssetConversationJobPageAsync} from './asset-conversation-page.js';
 import {assertNativeAssetActor,nativeAssetActorScope,type NativeAssetRegistry} from './native-asset-authority.js';
 import {parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import {parseNativeStudioStagingResponse} from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
@@ -57,7 +57,7 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const seen=new Set<string>();for(const[key]of url.searchParams){if(!allowed.includes(key)||seen.has(key))fail('INPUT');seen.add(key);}
    if(route==='jobs'){
     const text=url.searchParams.get('limit');if(text!==null&&!/^[1-9][0-9]?$/.test(text))fail('INPUT');const limit=text===null?32:Number(text);
-    const page=nativeAssetConversationJobPage(service,host,actor,{limit,after:url.searchParams.get('after')});assertNativeAssetActor(actor,'read');await send(200,page);return true;
+    const page=await nativeAssetConversationJobPageAsync(service,host,actor,{limit,after:url.searchParams.get('after')});assertNativeAssetActor(actor,'read');await send(200,page);return true;
    }
    if(route==='manifest'){
     const id=jobId(url.searchParams.get('jobId'));if(!host.bindingNative(actor,id))fail('NOT_FOUND');
