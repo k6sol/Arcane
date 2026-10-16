@@ -68,19 +68,19 @@ function schema(file: string) { const db = new DatabaseSync(sqliteTransportPath(
   return { version: Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version),
     sql: (db.prepare("SELECT sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all() as { sql: string }[]).map(row => row.sql).sort() }; } finally { db.close(); } }
 
-test('v1 and v2 journals migrate to v3 with tasks and proposals preserved', async t => {
-  for (const version of [1, 2]) await t.test('v' + version, async st => {
+test('v1, v2 and v3 journals migrate to v4 with tasks and proposals preserved', async t => {
+  for (const version of [1, 2, 3]) await t.test('v' + version, async st => {
     const f = await fixture(st), kept = fullTask(f.project, 'verified');
-    v1Journal(f.file, f.project, [kept], version === 2 ? [PROPOSALS] : [], version);
+    v1Journal(f.file, f.project, [kept], version === 3 ? [PROPOSALS, PLANS, STEPS] : version === 2 ? [PROPOSALS] : [], version);
     const store = f.open();
     assert.deepEqual(store.get(kept.id), kept); assert.equal(store.plan(kept.id), null); store.close();
-    const after = schema(f.file); assert.equal(after.version, 3); assert.deepEqual(after.sql, [...V1, PROPOSALS, PLANS, STEPS].sort());
+    const after = schema(f.file); assert.equal(after.version, 4); assert.deepEqual(after.sql, [...V1, PROPOSALS, PLANS, STEPS].sort());
   });
 });
 
 test('newer, foreign, corrupt and inconsistent plan state is refused byte-intact', async t => {
   const cases: [string, (f: Awaited<ReturnType<typeof fixture>>) => void, RegExp][] = [
-    ['v4 newer', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=4;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
+    ['v5 newer', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=5;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
     ['v3 with a foreign table', f => { v1Journal(f.file, f.project, [], [PROPOSALS, PLANS, STEPS, 'CREATE TABLE extra(id INTEGER PRIMARY KEY)'], 3); }, /schema or project/],
     ['v3 missing the step table', f => { v1Journal(f.file, f.project, [], [PROPOSALS, PLANS], 3); }, /schema or project/],
     ['plan row for an unknown task', f => { v1Journal(f.file, f.project, [], [PROPOSALS, PLANS, STEPS], 3); const db = new DatabaseSync(sqliteTransportPath(f.file)); const id = randomUUID(), taskId = randomUUID();
@@ -292,6 +292,48 @@ test('persisted foreign proposal and changed fan-in references refuse live use a
     assert.throws(() => new ChatTaskStore({ directory: f.directory, projectPath: f.project }), code('CORRUPT'));
     assert.deepEqual(await inventory(f), before);
   });
+});
+
+test('review binding precedes only the final parent and becomes awaiting review after its successful terminal', async t => {
+  const f = await fixture(t), store = f.open(), h = harness(store), first = h.worker(1, 0);
+  h.incorporate(1, [first.proposal.id]); const second = h.worker(2, 0);
+  const evidence = store.reservePlanStep({ planId: h.plan.id, kind: 'evidence', round: 2, index: 0, live: h.live });
+  assert.throws(() => store.reservePlanStep({ planId: h.plan.id, kind: 'incorporation', round: 2, index: 0, live: h.live, proposalIds: [second.proposal.id] }), code('ORDER'), 'review commit must be acknowledged before its native handoff');
+  store.acknowledgePlanStep({ stepId: evidence.id, evidence: { runId: randomUUID() } });
+  assert.equal(store.plan(h.task.id)!.state, 'active', 'a review binding cannot accept unfinished native work');
+  const spare = store.reserveProposal({ id: randomUUID(), taskId: h.task.id, requestId: randomUUID(), promptSha256: sha('p'), promptBytes: 1 });
+  assert.throws(() => store.reservePlanStep({ planId: h.plan.id, kind: 'worker', round: 2, index: 1, live: h.live, proposalId: spare.id }), code('ORDER'));
+  h.incorporate(2, [second.proposal.id]); assert.equal(store.plan(h.task.id)!.state, 'awaiting_review');
+  store.close(); const reopened = f.open();
+  assert.equal(reopened.plan(h.task.id)!.state, 'awaiting_review');
+  assert.deepEqual(reopened.planSteps(h.plan.id).slice(-2).map(step => [step.kind, step.state]), [['evidence', 'acknowledged'], ['incorporation', 'completed']]);
+});
+
+test('restart preserves an early review reference without dispatching its unstarted final parent', async t => {
+  const f = await fixture(t), store = f.open(), h = harness(store), first = h.worker(1, 0);
+  h.incorporate(1, [first.proposal.id]); h.worker(2, 0);
+  const evidence = store.reservePlanStep({ planId: h.plan.id, kind: 'evidence', round: 2, index: 0, live: h.live }), runId = randomUUID();
+  store.acknowledgePlanStep({ stepId: evidence.id, evidence: { runId } }); store.close();
+  const reopened = f.open(); assert.equal(reopened.plan(h.task.id)!.state, 'stopped');
+  assert.equal(reopened.planSteps(h.plan.id).at(-1)!.evidence!.runId, runId);
+  assert.equal(reopened.planSteps(h.plan.id).filter(step => step.kind === 'incorporation').length, 1);
+  assert.throws(() => reopened.reservePlanStep({ planId: h.plan.id, kind: 'incorporation', round: 2, index: 0, live: h.live, proposalIds: [] }), code('INPUT'));
+});
+
+test('v3 completed late-review plans migrate with their original payload bytes and no invented prompt digest', async t => {
+  const f = await fixture(t), store = f.open(), h = harness(store), worker = h.worker(1, 0);
+  h.incorporate(1, [worker.proposal.id]); const evidence = store.reservePlanStep({ planId: h.plan.id, kind: 'evidence', round: 1, index: 0, live: h.live });
+  store.acknowledgePlanStep({ stepId: evidence.id, evidence: { runId: randomUUID() } }); store.close();
+  const db = new DatabaseSync(sqliteTransportPath(f.file));
+  for (const row of db.prepare('SELECT id,payload FROM chat_task_plan_steps').all() as { id: string; payload: string }[]) {
+    const legacy = JSON.parse(row.payload) as Record<string, unknown>; delete legacy.inputSha256;
+    db.prepare('UPDATE chat_task_plan_steps SET payload=? WHERE id=?').run(JSON.stringify(legacy), row.id);
+  }
+  db.exec('PRAGMA user_version=3'); const before = db.prepare('SELECT id,payload FROM chat_task_plan_steps ORDER BY seq').all(); db.close();
+  const reopened = f.open(); assert.equal(reopened.plan(h.task.id)!.state, 'awaiting_review');
+  assert.ok(reopened.planSteps(h.plan.id).every(step => step.inputSha256 === null)); reopened.close();
+  const check = new DatabaseSync(sqliteTransportPath(f.file)); try { assert.deepEqual(check.prepare('SELECT id,payload FROM chat_task_plan_steps ORDER BY seq').all(), before); }
+  finally { check.close(); }
 });
 
 test('no unhandled rejections', async () => { await new Promise(done => setTimeout(done, 20)); assert.deepEqual(unhandled, []); });

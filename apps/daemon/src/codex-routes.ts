@@ -68,7 +68,18 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
       const supplied=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
       if(!matches(supplied,controlToken))throw new RouteError(matches(supplied,agentToken)?'HUMAN_ONLY':'AUTH',matches(supplied,agentToken)?403:401);
       if(request.headers.origin&&request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
-      if(url.search)throw new RouteError('QUERY',400);
+      if(url.search&&url.pathname!=='/v1/codex/task-plan')throw new RouteError('QUERY',400);
+      if(url.pathname==='/v1/codex/task-plan'){
+        if(request.method!=='GET')throw new RouteError('METHOD',405);
+        if(!service.taskPlan)throw new RouteError('TASK_PLAN_UNAVAILABLE',404);
+        if(url.search.length>2048||[...url.searchParams.keys()].length!==3||
+          !['connectionId','threadId','taskId'].every(key=>url.searchParams.getAll(key).length===1))throw new RouteError('QUERY',400);
+        const input=Object.fromEntries(url.searchParams);
+        if(!proposalScope(input))throw new RouteError('TASK_SCOPE',400);
+        const view=await service.taskPlan(input);
+        if(byteLength(JSON.stringify(view))>65536)throw new RouteError('TASK_PLAN_LIMIT',500);
+        send(200,view);return true;
+      }
       if(url.pathname==='/v1/codex/state'){
         if(request.method!=='GET')throw new RouteError('METHOD',405);
         send(200,{state:project(service.state())});return true;

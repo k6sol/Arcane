@@ -1,15 +1,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { object, textField } from '../../../packages/protocol/src/studio.js';
 import type { StudioStore } from '../../../packages/storage/src/studio-store.js';
-import type { WorkStore } from '../../../packages/storage/src/work-store.js';
+import type { WorkStore, WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import type { ScriptSourceVerifier } from '../../../packages/core/src/script-source-verifier.js';
 
-export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken: string | ((request: IncomingMessage) => string) = '', sourceVerifier: ScriptSourceVerifier | null = null) {
+export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken: string | ((request: IncomingMessage) => string) = '', sourceVerifier: ScriptSourceVerifier | null = null,
+  authorizeBoundWork?: (actorId:string,binding:WorkTaskBinding)=>void) {
   // Canonical host identity, never supplied by a browser/model or inferred from UI text.
   const project = workflowProjectIdentity(projectPath);
   let attempts: number[] = [];
@@ -24,10 +25,30 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       const expectedAgent = () => typeof agentToken === 'function' ? agentToken(request) : agentToken;
       const human = matches(controlToken); const agent = matches(expectedAgent());
       if (!plugin && !human && !agent) throw new ArcaneError('AUTH', 'Open the local launcher session, or supply its scoped local MCP bearer.');
+      const actorId='agent-'+createHash('sha256').update(bearer).digest('hex');
+      const authorizeBinding=(binding:WorkTaskBinding):void=>{
+        if(human)return;if(!authorizeBoundWork)throw new ArcaneError('SCOPE','Original task work authority is unavailable.');
+        try{const result:unknown=authorizeBoundWork(actorId,binding);if(result instanceof Promise)void result.catch(()=>{});
+          if(result!==undefined)throw new Error('asynchronous authority');
+        }catch{throw new ArcaneError('SCOPE','This evidence run belongs to another original native task or is no longer active.');}
+      };
+      const boundAllowed=(runId:string):boolean=>{
+        const binding=work!.bindingForRun(runId);if(!binding||human)return true;
+        try{authorizeBinding(binding);return true;}catch{return false;}
+      };
+      const requireBound=(runId:string):void=>{if(!boundAllowed(runId))throw new ArcaneError('SCOPE','This evidence run belongs to another original native task or is no longer active.');};
       if (agent && ['/v1/studio/pairing', '/v1/studio/revoke', '/v1/studio/keys', '/v1/studio/keys/rotate', '/v1/studio/keys/revoke', '/v1/work/review', '/v1/product/mcp-token'].includes(url.pathname)) throw new ArcaneError('SCOPE', 'Agent bearer cannot grant Studio access, revoke human sessions or approve work. Use the human panel.');
       if (request.method === 'GET' && !plugin) {
-        if (work && url.pathname === '/v1/work/runs') { send(200, { runs: work.runs() }); return true; }
-        if (work && url.pathname === '/v1/work/ready') { send(200, { tasks: work.ready(url.searchParams.get('runId') ?? undefined) }); return true; }
+        if (work && url.pathname === '/v1/work/runs') { send(200, { runs: human?work.runs():work.runsReadOnly().filter(run=>boundAllowed(run.id)) }); return true; }
+        if (work && url.pathname.startsWith('/v1/work/runs/')) {
+          const runId=url.pathname.slice('/v1/work/runs/'.length);
+          if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(runId)||url.search)throw new ArcaneError('INPUT','Choose one recorded work run.');
+          requireBound(runId);send(200,{run:work.runById(runId)});return true;
+        }
+        if (work && url.pathname === '/v1/work/ready') {
+          const runId=url.searchParams.get('runId')??undefined;if(runId)requireBound(runId);
+          send(200, { tasks: human?work.ready(runId):work.readyReadOnly(runId).filter(task=>boundAllowed(task.runId)) }); return true;
+        }
         if (url.pathname === '/v1/studio/keys') { send(200, {keys:store.keys()}); return true; }
         if (url.pathname === '/v1/studio/sessions') { send(200, { sessions: store.sessions() }); return true; }
         if (url.pathname === '/v1/studio/commands') { send(200, { commands: store.commands(url.searchParams.get('sessionId') ?? undefined) }); return true; }
@@ -79,10 +100,11 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         return true;
       }
       if (work && url.pathname.startsWith('/v1/work/')) {
+        if(agent&&['/v1/work/claim','/v1/work/progress','/v1/work/submit'].includes(url.pathname))requireBound(work.task(textField(a.taskId,'task ID')).runId);
         if (url.pathname === '/v1/work/create') send(200, { run: work.create(a) });
-        else if (url.pathname === '/v1/work/claim') send(200, work.claim(a));
-        else if (url.pathname === '/v1/work/progress') send(200, { task: work.progress(a) });
-        else if (url.pathname === '/v1/work/submit') send(200, { task: work.submit(a) });
+        else if (url.pathname === '/v1/work/claim') send(200, work.claim(a,agent?authorizeBinding:undefined));
+        else if (url.pathname === '/v1/work/progress') send(200, { task: work.progress(a,agent?authorizeBinding:undefined) });
+        else if (url.pathname === '/v1/work/submit') send(200, { task: work.submit(a,agent?authorizeBinding:undefined) });
         else if (url.pathname === '/v1/work/review') send(200, { task: work.review(a) });
         else send(404, { error: 'NOT_FOUND', message: 'Unknown work endpoint.' });
         return true;

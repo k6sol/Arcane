@@ -191,6 +191,16 @@ export class WorkStore {
   }
   private iso(): string { return new Date(this.now()).toISOString(); }
   private transaction<T>(work: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const out = work(); this.db.exec('COMMIT'); return out; } catch (error) { this.db.exec('ROLLBACK'); throw error; } }
+  /** Host callback, never JSON input. Runs under the mutation transaction before
+   * lease expiry or any write, so a bound-run check cannot race its mutation. */
+  private authorizeTask(taskId:string,authorize?: (binding:WorkTaskBinding)=>void):void {
+    if(!authorize)return;const binding=this.bindingForRun(this.task(taskId).runId);if(!binding)return;
+    const result:unknown=authorize(binding);if(result instanceof Promise)void result.catch(()=>{});
+    if(result!==undefined)throw new ArcaneError('SCOPE','Bound work authority must be checked synchronously.');
+  }
+  private expireForTask(taskId:string,authorize?: (binding:WorkTaskBinding)=>void):void {
+    this.transaction(()=>{this.authorizeTask(taskId,authorize);this.expire(this.task(taskId).runId);});
+  }
   private save(task: WorkTask, leaseHash?: string | null): void {
     task.updatedAt = this.iso();
     if (leaseHash !== undefined) this.db.prepare('UPDATE tasks SET payload=?,lease_hash=? WHERE id=?').run(JSON.stringify(task), leaseHash, task.id);
@@ -260,6 +270,13 @@ export class WorkStore {
     if (binding.taskId !== taskId || binding.planId !== planId) throw new ArcaneError('CORRUPT', 'Task binding mapping is inconsistent.');
     return { binding, run: this.boundRun(binding) };
   }
+  /** Host authorization lookup. Never expires leases or creates a binding. */
+  bindingForRun(runId: string): WorkTaskBinding | null {
+    if (typeof runId !== 'string' || !UUID.test(runId)) throw new ArcaneError('INPUT', 'Invalid work run.');
+    const row = this.db.prepare('SELECT id,run_id,binding_key,payload FROM task_bindings WHERE run_id=?').get(runId) as Row | undefined;
+    if (!row) return null;
+    const binding = this.bindingRow(row); this.boundRun(binding); return binding;
+  }
   /** Exact bounded run read by ID. */
   runById(runId: string): WorkRun {
     if (typeof runId !== 'string' || !UUID.test(runId)) throw new ArcaneError('INPUT', 'Invalid run ID.');
@@ -304,17 +321,27 @@ export class WorkStore {
   task(id: string): WorkTask { const r = this.db.prepare('SELECT id,run_id,payload FROM tasks WHERE id=?').get(id) as Row | undefined; if (!r) throw new ArcaneError('TASK', 'Unknown task.'); return this.taskRow(r); }
   private allTasks(): WorkTask[] { return (this.db.prepare('SELECT id,run_id,payload FROM tasks ORDER BY rowid').all() as Row[]).map(r => this.taskRow(r)); }
   runs(): WorkRun[] {
-    this.expire(); const tasks = this.allTasks();
+    this.expire(); return this.runsReadOnly();
+  }
+  runsReadOnly(): WorkRun[] {
+    const tasks = this.allTasks();
     return (this.db.prepare('SELECT id,payload FROM runs ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => { const run = this.runRow(r); return { ...run, tasks: tasks.filter(t => t.runId === run.id) }; });
   }
-  private expire(): void { for (const t of this.allTasks()) if (t.state === 'in_progress' && Date.parse(t.leaseUntil ?? '') <= this.now()) { t.state = 'interrupted'; t.leaseUntil = null; t.progress = 'Worker lease expired. Inspect changes before reclaiming; no automatic execution retry.'; this.save(t, null); } }
+  private expire(runId?: string): void { for (const t of this.allTasks()) if ((!runId || t.runId === runId) && t.state === 'in_progress' && Date.parse(t.leaseUntil ?? '') <= this.now()) { t.state = 'interrupted'; t.leaseUntil = null; t.progress = 'Worker lease expired. Inspect changes before reclaiming; no automatic execution retry.'; this.save(t, null); } }
   ready(runId?: string): WorkTask[] {
-    this.expire(); const all = this.allTasks(); return all.filter(t => (!runId || t.runId === runId) && ['pending', 'interrupted'].includes(t.state) && t.dependencies.every(d => all.some(x => x.runId === t.runId && x.key === d && x.state === 'complete')));
+    this.expire(runId); return this.readyReadOnly(runId);
   }
-  claim(input: unknown): { task: WorkTask; leaseToken: string } {
+  readyReadOnly(runId?: string): WorkTask[] {
+    const all = this.allTasks(); return all.filter(t => (!runId || t.runId === runId) &&
+      (['pending', 'interrupted'].includes(t.state) || t.state === 'in_progress' && Date.parse(t.leaseUntil ?? '') <= this.now()) &&
+      t.dependencies.every(d => all.some(x => x.runId === t.runId && x.key === d && x.state === 'complete')))
+      .map(t => t.state === 'in_progress' ? { ...t, state: 'interrupted' as const, leaseUntil: null, progress: 'Worker lease expired; claim explicitly before further work.' } : t);
+  }
+  claim(input: unknown,authorize?: (binding:WorkTaskBinding)=>void): { task: WorkTask; leaseToken: string } {
     const a = object(input); const taskId = textField(a.taskId, 'task ID'); const worker = textField(a.worker, 'worker label', 200);
     return this.transaction(() => {
-      this.expire(); const t = this.task(taskId);
+      this.authorizeTask(taskId,authorize);
+      this.expire(this.task(taskId).runId); const t = this.task(taskId);
       if (!this.ready(t.runId).some(r => r.id === taskId)) throw new ArcaneError('TASK_STATE', 'Task is not ready, or dependencies have not passed review.');
       for (const path of t.scope) this.scoped(path);
       const overlap = (p: string, q: string) => { const a = process.platform === 'win32' ? p.toLowerCase() : p; const b = process.platform === 'win32' ? q.toLowerCase() : q; return a === b || a.startsWith(b + '/') || b.startsWith(a + '/'); };
@@ -323,16 +350,19 @@ export class WorkStore {
     });
   }
   private owned(taskId: string, token: unknown): WorkTask {
-    this.expire(); const t = this.task(taskId); const r = this.db.prepare('SELECT lease_hash FROM tasks WHERE id=?').get(taskId) as Row;
+    this.expire(this.task(taskId).runId); const t = this.task(taskId); const r = this.db.prepare('SELECT lease_hash FROM tasks WHERE id=?').get(taskId) as Row;
     const expected = r.lease_hash as string | null; const actual = hash(textField(token, 'lease token', 128));
     if (t.state !== 'in_progress' || !expected || expected.length !== actual.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(actual))) throw new ArcaneError('WRITE_LEASE', 'Worker lease is invalid or expired.');
     return t;
   }
-  progress(input: unknown): WorkTask {
-    const a = object(input); const t = this.owned(textField(a.taskId, 'task ID'), a.leaseToken); t.progress = textField(a.progress, 'progress', 4000); t.leaseUntil = new Date(this.now() + 300000).toISOString(); this.save(t); return t;
+  progress(input: unknown,authorize?: (binding:WorkTaskBinding)=>void): WorkTask {
+    const a = object(input),taskId=textField(a.taskId,'task ID');this.expireForTask(taskId,authorize);return this.transaction(()=>{
+      this.authorizeTask(taskId,authorize);const t = this.owned(taskId, a.leaseToken); t.progress = textField(a.progress, 'progress', 4000); t.leaseUntil = new Date(this.now() + 300000).toISOString(); this.save(t); return t;
+    });
   }
-  submit(input: unknown): WorkTask {
-    const a = object(input); const t = this.owned(textField(a.taskId, 'task ID'), a.leaseToken);
+  submit(input: unknown,authorize?: (binding:WorkTaskBinding)=>void): WorkTask {
+    const a = object(input),taskId=textField(a.taskId,'task ID');this.expireForTask(taskId,authorize);return this.transaction(()=>{
+    this.authorizeTask(taskId,authorize);const t = this.owned(taskId, a.leaseToken);
     if (!Array.isArray(a.evidence) || a.evidence.length < 1 || a.evidence.length > 20) throw new ArcaneError('EVIDENCE', 'Submission requires 1..20 local evidence artifacts.');
     t.evidence = a.evidence.map(value => {
       const e = object(value);
@@ -342,6 +372,7 @@ export class WorkStore {
       return { path: verified.path, sha256: verified.sha256, bytes: verified.bytes, note: textField(e.note, 'evidence note', 2000), addedAt: this.iso() };
     });
     t.state = 'needs_review'; t.leaseUntil = null; t.progress = 'Evidence submitted; completion requires a reviewer decision.'; this.save(t, null); return t;
+    });
   }
   review(input: unknown): WorkTask {
     const a = object(input); const t = this.task(textField(a.taskId, 'task ID'));

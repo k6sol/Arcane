@@ -908,4 +908,22 @@ body.arcane-app {
 .playtest-panel{display:grid;gap:10px;max-width:720px;margin:14px auto;padding:0 18px}.playtest-panel[hidden]{display:none}.playtest-row{padding:15px 17px;border:1px solid rgba(255,72,84,.2);border-radius:12px;background:linear-gradient(135deg,rgba(72,25,31,.26),rgba(22,22,25,.9));min-width:0}.playtest-panel h3{margin:0 0 5px;font-size:14px;font-weight:600}.playtest-panel p{font-size:12px;color:var(--muted);margin:5px 0;overflow-wrap:anywhere}.playtest-panel button{font-size:12px;padding:7px 12px;border-radius:7px;margin:8px 8px 0 0}.playtest-panel button[data-playtest-action=approve]{background:#d73341;color:#fff;border-color:#e34250}.playtest-panel details{margin-top:10px;color:var(--muted);font-size:11px}.playtest-panel summary{cursor:pointer}.playtest-panel dl{display:grid;grid-template-columns:130px minmax(0,1fr);gap:5px;margin:10px 0}.playtest-panel dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}.playtest-panel [role=status]{font-size:12px}.playtest-feedback{padding:10px 0}.playtest-panel button:focus-visible,.playtest-panel summary:focus-visible{outline:2px solid #ff5360;outline-offset:3px}@media(max-width:560px){.playtest-panel{padding:0 10px}.playtest-panel dl{grid-template-columns:1fr}}
 /* Keep this universal preference reset last, after every responsive override. */
 .codex-quota-bucket{white-space:pre-line;overflow-wrap:anywhere;min-width:0}
+/* Display-only automatic plan and review card. */
+.task-plan[hidden]{display:none!important}
+.task-plan{width:min(780px,100%);margin:18px auto;padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);min-width:0}
+.task-plan-header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:6px 12px}
+.task-plan-title{margin:0;font-size:14px;font-weight:650}
+.task-plan-status{margin:0;font-size:12px;color:var(--muted)}
+.task-plan-note{margin:8px 0 0;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.task-plan-phase{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.task-plan-phase-title{margin:0 0 6px;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.task-plan-steps{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+.task-plan-step{margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--raised);font-size:13px;overflow-wrap:anywhere;min-width:0}
+.task-plan-step[data-state=failed],.task-plan-step[data-state=unknown]{border-color:#7a3a3e}
+.task-plan-review-state{margin:6px 0 0;font-size:13px;font-weight:600}
+.task-plan-review-state[data-state=accepted]{color:#7fd19b}
+.task-plan-review-state[data-state=changes_requested],.task-plan-review-state[data-state=unavailable]{color:var(--accent)}
+.task-plan-review-tasks{margin:4px 0 0;font-size:12px;color:var(--muted)}
+.task-plan-review-button{margin-top:10px;min-height:40px}
+@media(max-width:480px){.task-plan{margin:12px 0;padding:12px;border-radius:8px}.task-plan-review-button{width:100%}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

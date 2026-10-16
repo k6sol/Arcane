@@ -318,6 +318,10 @@ export class WorkspaceShell {
 
   /** Close settings and dismiss displayed secrets before the chat controller navigates. */
   showConversation(): void { this.openComposer(); }
+  showRecordedWork(): void {
+    const target=this.doc.getElementById('work-heading');
+    if(target)this.focus(target);
+  }
   private openComposer(draft?: string): void {
     const composer = this.composer();
     if (!composer) return;

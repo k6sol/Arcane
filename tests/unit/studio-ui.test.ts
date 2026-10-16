@@ -206,8 +206,8 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const browserSource = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), 'utf8');
   assert.match(browserSource, /from ['"]\.\/codex-chat\.js['"]/);
   const dynamicImports=[...browserSource.matchAll(/\bimport\s*\(([^)]+)\)/g)].map(match=>match[1]!.trim());
-  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./chat-tabs.js'", "'./chat-attachments.js'"],'Only fixed reviewed workflow, chat and attachment modules may load dynamically.');
-  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|chat-tabs|chat-attachments)\.js\1\s*\)/g,'');
+  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./task-plan-boot.js'", "'./chat-tabs.js'", "'./chat-attachments.js'"],'Only fixed reviewed workflow, task status, chat and attachment modules may load dynamically.');
+  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|task-plan-boot|chat-tabs|chat-attachments)\.js\1\s*\)/g,'');
   assert.doesNotMatch(withoutApprovedWorkflow, /\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
   // Parse the emitted module without linking/evaluating it; prose/string payloads
   // containing `from '...'` are not runtime dependencies.
@@ -215,6 +215,12 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   assert.ifError(parsed.error);assert.equal(parsed.status,0,parsed.stderr);
   const staticModules=JSON.parse(parsed.stdout) as string[];
   assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./playtest-panel.js','./provider-setup.js','./studio-key-settings.js','./task-usage-ui.js','./workspace-shell.js']);
+  for(const [name,dependencies] of [['task-plan-boot',['./codex-task-plan.js']],['codex-task-plan',[]]] as const){
+    const source=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/'+name+'.js'),'utf8');
+    assert.doesNotMatch(source,/\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m,name+' stays browser-only');
+    const module=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:source,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
+    assert.ifError(module.error);assert.equal(module.status,0,module.stderr);assert.deepEqual(JSON.parse(module.stdout),dependencies,name+' imports only its fixed presentation dependency');
+  }
 });
 
 test('edit baselines must match the actual succeeded read request and exact client session', () => {

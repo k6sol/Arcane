@@ -2,6 +2,7 @@ import type { NativeWorkflowModelProof } from '../../../packages/protocol/src/wo
 import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from '../../../packages/storage/src/sqlite-path.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { mkdirSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -14,6 +15,11 @@ import type { ChatTaskProposalRecord } from '../../../packages/storage/src/chat-
 import type { NativeTaskContinuation } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
 import {snapshotReferenceImages,referenceImageMetadata,type ReferenceImageMetadata} from '../../../packages/codex-client/src/reference-images.js';
+import { WorkStore, type WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
+import { CHAT_TASK_PLAN_INPUT_BYTES } from './chat-task-plan-runner.js';
+import { createChatTaskNativePlan, type NativePlanClient } from './chat-task-native-plan.js';
+import { createTaskAcceptancePort } from './chat-task-acceptance.js';
+import { TASK_PLAN_REVIEW_TASK_STATES, type TaskPlanView, type TaskPlanReviewView, type TaskPlanReviewTaskState } from '../../../packages/protocol/src/chat-task-plan.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
@@ -105,7 +111,7 @@ export interface CodexProductState {
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
-export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'>>;
+export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'>>;
 export interface CodexServiceOptions {
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
@@ -117,6 +123,8 @@ export interface CodexServiceOptions {
   arcaneMcp?: () => ArcaneMcpLaunchProfile;
   /** Trusted composition/fixture proposal worker factory. Injected legacy clients without it gain no proposal authority. */
   proposalWorker?: ChatTaskProposalFactory;
+  /** Borrowed original-project evidence store; never accepted from an action envelope. */
+  workStore?: WorkStore;
 }
 function safeDirectory(path: string): string {
   if (!isAbsolute(path)) throw new CodexClientError('PATH', 'Trusted runtime paths must be absolute.');
@@ -138,7 +146,11 @@ function repairPrompt(report: StudioTestTaskSettled): string {
 }
 /** Durable human action receipts; native conversations remain owned by the actual CLI. */
 export function createCodexService(options: CodexServiceOptions) {
-  const directory = safeDirectory(options.directory), projectPath = realpathSync(options.projectPath);
+  const projectPath = realpathSync(options.projectPath);
+  if (options.workStore && (!(options.workStore instanceof WorkStore) ||
+      (process.platform==='win32'?options.workStore.projectPath.toLowerCase()!==projectPath.toLowerCase():options.workStore.projectPath!==projectPath)))
+    throw new CodexClientError('TASK_SCOPE','Task evidence must use the original project WorkStore.');
+  const directory = safeDirectory(options.directory);
   const filename = join(directory, 'codex-actions.sqlite');
   try { const stat = lstatSync(filename); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new CodexClientError('PATH', 'Unsafe native action journal.'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -174,6 +186,7 @@ export function createCodexService(options: CodexServiceOptions) {
   let client: CodexHostClient | null = null, lastSnapshot: Snapshot | null = null;
   let connecting = false, closing = false, busy = false, closed = false, generation = 0;
   let pendingTaskBinding=false;
+  const planInputs = new Map<string,{objective:string;inputSha256:string}>();
   let pendingConnect: Promise<CodexHostClient> | null = null;
   let tasks:ChatTaskCoordinator|null;
   try{tasks=options.assetRegistry?new ChatTaskCoordinator({directory:join(directory,'chat-tasks'),projectPath}):null;}
@@ -510,6 +523,20 @@ export function createCodexService(options: CodexServiceOptions) {
                 // identity was captured before any fresh-process rotation; the getter reads the exact owned client live.
                 const origin=tasks!.begin({id:taskId,actorId:ownedContext.actorId!,snapshot:owned.snapshot(),allowWorkspaceWrites:allowWrites,allowAssets,accountIdentity:taskAccount!,
                   owner:{snapshot:()=>owned.snapshot(),accountIdentity:()=>owned.taskAccountIdentity?.()??null,revoke:()=>{ownedContext.nextIntent=null;owned.revokeTaskContinuation!();},
+                    plan:scope=>{
+                      if(!continuation||!owned.openIncorporationChain||!owned.issueIncorporationPermit||!owned.continueIncorporation)throw new CodexClientError('TASK_SCOPE','Original native parent planning is unavailable.');
+                      const task=tasks!.list().find(value=>value.id===taskId)!;
+                      if(!task.operationId||!task.turnId||!task.acknowledged)throw new CodexClientError('TASK_SCOPE','The original task acknowledgement is unavailable.');
+                      const native=createChatTaskNativePlan({client:owned as NativePlanClient,continuation,owner:scope,original:{connectionId:task.connectionId,
+                        threadId:task.threadId,sessionId:task.sessionId,accountIdentity:taskAccount!,model:task.model,effort:task.effort,
+                        allowWorkspaceWrites:task.allowWorkspaceWrites,operationId:task.operationId,turnId:task.turnId}});
+                      return Object.freeze({waitForInitial:()=>native.waitForInitial(),incorporate:async(text:string,acknowledge:(value:{operationId:string;turnId:string})=>void)=>{
+                        scope.assertActive();const snapshot=owned.snapshot(),thread=snapshot.thread!;
+                        if(!task.allowAssets&&ownedContext.manualAssets)throw new CodexClientError('TASK_SCOPE','Task asset scope cannot expand after the original Send.');
+                        if(task.allowAssets)ownedContext.nextIntent={connectionId:snapshot.connectionId,threadId:thread.threadId,sessionId:thread.sessionId,operationId:null};
+                        try{return await native.incorporate(text,acknowledge);}finally{ownedContext.nextIntent=null;}
+                      }});
+                    },
                     repair:async(report:StudioTestTaskSettled)=>{
                       if(!continuation)throw new CodexClientError('TASK_SCOPE','Original task continuation is unavailable.');
                       const snapshot=owned.snapshot(),thread=snapshot.thread!;
@@ -524,6 +551,9 @@ export function createCodexService(options: CodexServiceOptions) {
                     }
                   }});
                 ownedContext.taskId=origin.taskId;taskContexts.set(origin.taskId,ownedContext);taskAfterCommit=taskId;
+                if(options.workStore&&proposalFactory&&owned.openIncorporationChain&&owned.issueIncorporationPermit&&owned.continueIncorporation&&Buffer.byteLength(value.text)<=CHAT_TASK_PLAN_INPUT_BYTES)
+                  planInputs.set(taskId,{objective:value.text,inputSha256:createHash('sha256').update(JSON.stringify({text:value.text,
+                    references:value.references?referenceImageMetadata(value.references):[],allowWorkspaceWrites:allowWrites,allowAssets})).digest('hex')});
                 try {const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites,...(value.references?{references:value.references}:{})});continuation=started.continuation;accepted=true;}
                 catch(error){const uncertain=error instanceof CodexClientError&&error.dispatched&&error.code!=='REMOTE_REJECTED'||owned.snapshot().operations.some(op=>op.method==='turn/start'&&op.state==='unknown');
                   tasks!.uncertain(taskId,'initial_turn_not_replayed',uncertain);throw error;}
@@ -638,8 +668,23 @@ export function createCodexService(options: CodexServiceOptions) {
           catch {/* uncertain still starts owned cleanup when its journal write fails. */}
           await tasks!.drain();throw error;
         }
+        const planned=planInputs.get(taskAfterCommit);planInputs.delete(taskAfterCommit);
+        if(planned&&options.workStore&&proposalFactory){
+          try{tasks!.startPlan({taskId:taskAfterCommit,...planned,factory:proposalFactory,evidence:async(plan,owner)=>{
+            const port=createTaskAcceptancePort({work:options.workStore!,owner});
+            const base='arcane-evidence/'+plan.taskId;
+            const created=await port.request({taskId:plan.taskId,planId:plan.id,objectiveSha256:plan.objectiveSha256,original:plan.binding,
+              run:{title:'Review task result',objective:'Review actual implementation and verification evidence for the original chat task '+plan.taskId+'.',
+                tasks:[{key:'implementation',title:'Review implementation',instructions:'Inspect the original chat task and its actual changed project files. Submit current file evidence; native prose is not proof of success.',
+                  acceptance:'A human reviewed actual implementation evidence for this original task.',scope:[base+'/implementation'],dependencies:[]},
+                  {key:'verification',title:'Review verification',instructions:'Submit actual current test reports, measured results or other relevant local artifacts. State unsupported or missing checks explicitly.',
+                    acceptance:'A human reviewed actual verification evidence. Syntax or generated summaries alone do not establish gameplay correctness.',scope:[base+'/verification'],dependencies:[]}]}});
+            return{runId:created.runId};
+          }});}catch{try{tasks!.uncertain(taskAfterCommit,'task_plan_admission_not_replayed');}catch{/* The original native acknowledgement remains real; no replay. */}}
+        }
       }
     }
+    if(taskAfterCommit)planInputs.delete(taskAfterCommit);
     return {record,replayed:false,state:state()};
   }
   function action(input: unknown): Promise<CodexActionOutcome> {
@@ -660,6 +705,57 @@ export function createCodexService(options: CodexServiceOptions) {
       state: entry.state, reason: entry.reason, text: entry.result?.text ?? null, textSha256: entry.result?.textSha256 ?? null, textBytes: entry.result?.textBytes ?? null,
       createdAt: entry.createdAt, updatedAt: entry.updatedAt })) };
   }
+  const taskPlanReads = new Set<Promise<TaskPlanView>>();
+  /** Bounded display-only read. A browser can observe a plan and a human review,
+   * never create a binding, restart a step or obtain any native capability. */
+  async function readTaskPlan(input: unknown): Promise<TaskPlanView> {
+    if(closed||journalFault)throw new CodexClientError('CLOSED','Native task observation is unavailable.');
+    const parsed=z.strictObject({connectionId:uuid,threadId:identifier,taskId:uuid}).safeParse(input);
+    if(!parsed.success)throw new CodexClientError('ARGUMENTS','Choose one exact native task.');
+    const scope=parsed.data,selected=exactClient(scope.connectionId),epoch=generation;
+    const assertScope=()=>{
+      if(closed||generation!==epoch||exactClient(scope.connectionId)!==selected)throw new CodexClientError('STALE_CONNECTION','Task view belongs to an earlier connection.');
+      const thread=selected.snapshot().thread,task=tasks?.list().find(value=>value.id===scope.taskId);
+      if(!thread?.configured||thread.threadId!==scope.threadId||!task||task.threadId!==thread.threadId||task.sessionId!==thread.sessionId)
+        throw new CodexClientError('TASK_SCOPE','Read only a task in this exact conversation.');
+      const plan=tasks!.plan(task.id);
+      if(plan&&selected.taskAccountIdentity?.()!==plan.binding.accountIdentity)throw new CodexClientError('TASK_SCOPE','The original task account changed.');
+      return{task,plan};
+    };
+    const initial=assertScope();if(!initial.plan)return{taskId:scope.taskId,plan:null};
+    let steps=tasks!.planSteps(initial.plan.id),reference=steps.find(step=>step.kind==='evidence'),review:TaskPlanReviewView|null=null;
+    if(reference&&options.workStore){
+      let runId=reference.evidence?.runId??null;
+      try{
+        const mapped=options.workStore.bindingFor(scope.taskId,initial.plan.id);
+        if(mapped&&isDeepStrictEqual(mapped.binding.original,initial.plan.binding)&&mapped.binding.objectiveSha256===initial.plan.objectiveSha256){
+          if(runId&&runId!==mapped.run.id)throw new Error('Review mapping changed.');
+          runId=mapped.run.id;
+        }else if(runId)throw new Error('Review binding is unavailable.');
+        if(runId){
+          if(reference.state!=='acknowledged')review={runId,state:'unavailable',reason:'request_uncertain',tasks:[]};
+          else{
+            const owner=tasks!.planObservationOwner(scope.taskId),port=createTaskAcceptancePort({work:options.workStore,owner});
+            const status=await port.status({taskId:scope.taskId,planId:initial.plan.id,runId});
+            if(!status.tasks.every(task=>TASK_PLAN_REVIEW_TASK_STATES.some(state=>state===task.state)))throw new Error('Invalid task review state.');
+            review={runId,state:status.state,reason:status.reason,tasks:status.tasks.map(task=>({key:task.key,state:task.state as TaskPlanReviewTaskState}))};
+          }
+        }
+      }catch{if(runId)review={runId,state:'unavailable',reason:'owner_or_evidence_unavailable',tasks:[]};}
+    }else if(reference?.evidence)review={runId:reference.evidence.runId,state:'unavailable',reason:'store_unavailable',tasks:[]};
+    const fresh=assertScope();
+    if(fresh.plan?.id!==initial.plan.id)throw new CodexClientError('TASK_SCOPE','The task plan changed during observation.');
+    steps=tasks!.planSteps(fresh.plan.id);reference=steps.find(step=>step.kind==='evidence');
+    if(review&&reference?.state==='acknowledged'&&reference.evidence?.runId!==review.runId)throw new CodexClientError('TASK_SCOPE','The evidence reference changed during observation.');
+    const lastParent=steps.filter(step=>step.kind==='incorporation').at(-1);
+    if(review?.state==='accepted'&&(fresh.plan.state!=='awaiting_review'||reference?.state!=='acknowledged'||lastParent?.state!=='completed'||lastParent.terminal!=='completed'))
+      review={...review,state:'unavailable',reason:'native_work_pending'};
+    return{taskId:scope.taskId,plan:{planId:fresh.plan.id,state:fresh.plan.state,reason:fresh.plan.reason,review,
+      steps:steps.map(step=>({seq:step.seq,kind:step.kind,round:step.round as 1|2,index:step.index as 0|1|2,state:step.state,terminal:step.terminal,reason:step.reason}))}};
+  }
+  function taskPlan(input:unknown):Promise<TaskPlanView>{
+    const pending=readTaskPlan(input);taskPlanReads.add(pending);void pending.finally(()=>taskPlanReads.delete(pending)).catch(()=>{});return pending;
+  }
   const usageReads = new Set<Promise<CodexProductState>>();
   async function readUsage(input: unknown): Promise<CodexProductState> {
     if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
@@ -677,7 +773,9 @@ export function createCodexService(options: CodexServiceOptions) {
     const promise = readUsage(input); usageReads.add(promise);
     void promise.finally(() => usageReads.delete(promise)).catch(() => {}); return promise;
   }
-  return { state, action, refreshUsage, proposals, playtestTasks:tasks?.playtests??null,
+  return { state, action, refreshUsage, proposals, taskPlan,
+    authorizeBoundWork(actorId:string,binding:WorkTaskBinding){if(!tasks)throw new Error('Native work authority is unavailable.');tasks.authorizeBoundWork(actorId,binding);},
+    playtestTasks:tasks?.playtests??null,
     attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, async close() {
     if (closed) return; generation++; closed = true;tasks?.fence();
     try{retireAssets();}catch{/* Native task closure must still run after registry retirement. */}
@@ -685,10 +783,10 @@ export function createCodexService(options: CodexServiceOptions) {
       if (pendingConnect) { try { await (await pendingConnect).close(); } catch { /* Init failure already closed its native child. */ } }
       try{await tasks?.close();}finally{if(client)await client.close();}
       if (journalFault) await journalFault;
-    } finally { client = null; await Promise.allSettled([...inFlight,...usageReads]); db.close(); }
+    } finally { client = null; planInputs.clear();await Promise.allSettled([...inFlight,...usageReads,...taskPlanReads]); db.close(); }
   },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
 export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &
-  Partial<Pick<ReturnType<typeof createCodexService>, 'refreshUsage'|'proposals'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
+  Partial<Pick<ReturnType<typeof createCodexService>, 'refreshUsage'|'proposals'|'taskPlan'|'authorizeBoundWork'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
 
 

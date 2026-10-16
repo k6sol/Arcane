@@ -560,7 +560,9 @@ export class StudioApi {
     const workerRoute=path==='/v1/assets/resolve-interrupted';
     const historyRestoreRoute=path==='/v1/assets/restore-history';
     const historyStatusRoute=path==='/v1/assets/history-status',historyChangeRoute=path==='/v1/assets/rebuild-history'||path==='/v1/assets/confirm-history';
-    if (!(nativeRoute || conversationRoute || workerRoute || historyRestoreRoute || historyStatusRoute || historyChangeRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
+    const exactWorkRun=/^\/v1\/work\/runs\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(path);
+    if(exactWorkRun&&(input!==undefined||format!=='json'))throw new StudioRequestError('Recorded work lookup is read-only.','rejected');
+    if (!(exactWorkRun || nativeRoute || conversationRoute || workerRoute || historyRestoreRoute || historyStatusRoute || historyChangeRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
     if(workerRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact interrupted asset job.','rejected');
     if(historyRestoreRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact archived asset job.','rejected');
     if(historyStatusRoute&&(input!==undefined||format!=='json'))throw new StudioRequestError('History health is a read-only request.','rejected');
@@ -653,6 +655,10 @@ export class StudioApi {
     return this.request<Blob>('/v1/assets/preview?jobId=' + encodeURIComponent(jobId) + '&path=' + encodeURIComponent(path), undefined, 'preview');
   }
   runs() { return this.request<{ runs: WorkRun[] }>('/v1/work/runs'); }
+  run(runId:string) {
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(runId))throw new StudioRequestError('Choose one recorded work run.','rejected');
+    return this.request<{run:WorkRun}>('/v1/work/runs/'+encodeURIComponent(runId));
+  }
   ready() { return this.request<{ tasks: WorkTask[] }>('/v1/work/ready'); }
   createRun(input: WorkRunInput) { return this.request<{ run: WorkRun }>('/v1/work/create', input); }
   reviewTask(input: { taskId: string; approved: boolean; note: string }) { return this.request<{ task: WorkTask }>('/v1/work/review', input); }
@@ -762,6 +768,7 @@ export class StudioWorkbench {
   private removeAssetProject: (() => void) | null = null;
   private removeSignIn: (() => void) | null = null;
   private workRuns: WorkRun[] = [];
+  private workNavigation=0;
   private readyIds = new Set<string>();
   private workTaskId = '';
   private workAvailable = false;
@@ -863,7 +870,7 @@ export class StudioWorkbench {
     this.on('work-create-form', 'submit', event => { event.preventDefault(); void this.createWork(); });
     this.on('work-add-task', 'click', () => this.addWorkTask());
     this.on('work-create-form', 'input', () => this.renderWorkControls());
-    this.on('work-run-picker', 'change', () => this.renderWorkBoard());
+    this.on('work-run-picker', 'change', () => {this.workNavigation++;this.renderWorkBoard();});
     this.on('work-filter', 'change', () => this.renderWorkBoard());
     this.on('work-review-note', 'input', () => this.renderWorkControls());
     this.on('work-approve', 'click', () => this.reviewWork(true));
@@ -1347,13 +1354,37 @@ export class StudioWorkbench {
       finally { this.busy = false; this.renderControls(); }
     });
   }
+  async openWorkRun(runId:string,isCurrent:()=>boolean):Promise<boolean> {
+    if(this.stopped||this.workBusy||!isCurrent())return false;
+    const navigation=++this.workNavigation;
+    // Fetch the exact run: older evidence remains reachable beyond the recent list.
+    const {run}=await this.api.run(runId);
+    if(this.stopped||this.workBusy||navigation!==this.workNavigation||!isCurrent())return false;
+    if(run.id!==runId||!Array.isArray(run.tasks)||run.tasks.length>64)throw new Error('Invalid recorded work run.');
+    this.workRuns=[run,...this.workRuns.filter(row=>row.id!==runId)].slice(0,101);
+    const picker=this.el<HTMLSelectElement>('work-run-picker');picker.replaceChildren();this.option(picker,'','All recorded runs');
+    for(const row of this.workRuns)this.option(picker,row.id,row.title+' · '+row.id);
+    picker.value=runId;this.el<HTMLSelectElement>('work-filter').value='all';
+    this.workTaskId=(run.tasks.find(task=>task.state==='needs_review')??run.tasks[0])?.id??'';
+    this.el<HTMLTextAreaElement>('work-review-note').value='';
+    // Navigation never grants review authority; normal fresh-work checks still apply.
+    this.renderWorkBoard();this.renderWorkTask();this.renderWorkControls();return true;
+  }
   private async refreshWork() {
+    const navigation=this.workNavigation,selected=this.value('work-run-picker');
     const reads = await Promise.allSettled([this.api.runs(), this.api.ready()]);
     try {
       const runs = reads[0]!, ready = reads[1]!;
       if (runs.status === 'rejected') throw runs.reason;
       if (ready.status === 'rejected') throw ready.reason;
       if (!Array.isArray(runs.value.runs) || !Array.isArray(ready.value.tasks)) throw new Error('Invalid work endpoint response.');
+      if(this.stopped||navigation!==this.workNavigation)return;
+      if(selected&&!runs.value.runs.some(run=>run.id===selected)){
+        const {run}=await this.api.run(selected);
+        if(this.stopped||navigation!==this.workNavigation)return;
+        if(run.id!==selected||!Array.isArray(run.tasks)||run.tasks.length>64)throw new Error('Invalid recorded work run.');
+        runs.value.runs=[run,...runs.value.runs].slice(0,101);
+      }
       this.workRuns = runs.value.runs; this.readyIds = new Set(ready.value.tasks.map(t => t.id));
       this.workAvailable = true; if (this.workUnknown) this.workReadAfterUnknown = true;
       const picker = this.el<HTMLSelectElement>('work-run-picker'), previous = picker.value;
@@ -2081,7 +2112,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   let storage: Pick<Storage, 'getItem' | 'setItem'>;
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
   const token = takeControlToken(window.location, window.history, storage);
-  const codexChat = new CodexChat(document, new CodexChatApi(token));
+  const codexApi=new CodexChatApi(token);
+  const codexChat = new CodexChat(document, codexApi);
   const providerSetup = startProviderSetup(document, {chat:codexChat});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
@@ -2114,8 +2146,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }).catch(() => { const mount = document.getElementById('workflow-panel'); if (mount) mount.textContent = 'Restart Arcane to load the workflow tools.'; });
   const dismissConnectionSecrets = () => workbench.dismissConnectionSecrets();
   let workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets);
-  window.addEventListener('pagehide', () => { workflowsStopped = true; playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; providerSetup.resume();playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  let taskPlanCard:ReturnType<typeof import('./task-plan-boot.js').startTaskPlanCard>|null=null;
+  void import('./task-plan-boot.js').then(module=>{
+    taskPlanCard=module.startTaskPlanCard(document,{chat:codexChat,api:codexApi,
+      openReview:async(runId,isCurrent)=>{if(await workbench.openWorkRun(runId,isCurrent)&&isCurrent())workspaceShell.showRecordedWork();}});
+    if(workflowsStopped)taskPlanCard.stop();
+  }).catch(()=>{const mount=document.getElementById('codex-task-plan');if(mount)mount.textContent='Restart Arcane to load task progress.';});
+  window.addEventListener('pagehide', () => { workflowsStopped = true; taskPlanCard?.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; taskPlanCard?.resume(); providerSetup.resume();playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,

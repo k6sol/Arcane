@@ -85,6 +85,8 @@ interface Options {
   codexService?: CodexService;
   /** Trusted/test-only client factory for the owned service; never supplied by HTTP. */
   codexConnect?: CodexServiceOptions['connect'];
+  /** Trusted owned worker injection for product composition/fixtures; never HTTP input. */
+  codexProposalWorker?: CodexServiceOptions['proposalWorker'];
   /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
   workflowCodeVerification?: WorkflowCodeHostConfiguration;
   /** Trusted/test-only borrowed verifier. Never accepted from HTTP or agent data. */
@@ -130,7 +132,9 @@ export async function createConnectionLab(options: Options) {
   const codex = options.codexService ?? (options.studioStore ? createCodexService({
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
     ...(options.codexConnect ? {connect:options.codexConnect} : {}),
+    ...(options.codexProposalWorker ? {proposalWorker:options.codexProposalWorker} : {}),
     ...(nativeAssetRegistry ? {assetRegistry:nativeAssetRegistry} : {}),
+    ...(options.workStore ? {workStore:options.workStore} : {}),
     arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
@@ -151,7 +155,8 @@ export async function createConnectionLab(options: Options) {
       try { ownedSourceVerifier = await createScriptSourceVerifier({ compiler:options.workflowCodeVerification.compiler, directory:await realpath(directory) }); }
       catch { /* Failed trusted preflight leaves activation unavailable, never a fallback. */ }
     }
-    bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, coreAgentToken, options.scriptSourceVerifier ?? ownedSourceVerifier) : null;
+    bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, coreAgentToken, options.scriptSourceVerifier ?? ownedSourceVerifier,
+      (actorId,binding)=>{if(!codex?.authorizeBoundWork)throw new ArcaneError('SCOPE','Original native task work authority is unavailable.');codex.authorizeBoundWork(actorId,binding);}) : null;
     if(options.studioStore){
       const resolveTestActor: StudioTestActorResolver = request => {
         const bearer=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
@@ -267,6 +272,8 @@ export async function createConnectionLab(options: Options) {
           ['/studio.css', [join(options.cwd, 'apps/desktop/public/studio.css'), 'text/css']],
           ['/studio.js', [join(options.cwd, 'dist/apps/desktop/src/studio.js'), 'text/javascript']],
           ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
+          ['/codex-task-plan.js', [join(options.cwd, 'dist/apps/desktop/src/codex-task-plan.js'), 'text/javascript']],
+          ['/task-plan-boot.js', [join(options.cwd, 'dist/apps/desktop/src/task-plan-boot.js'), 'text/javascript']],
           ['/chat-tabs.js', [join(options.cwd, 'dist/apps/desktop/src/chat-tabs.js'), 'text/javascript']],
           ['/chat-attachments.js', [join(options.cwd, 'dist/apps/desktop/src/chat-attachments.js'), 'text/javascript']],
           ['/task-usage.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage.js'), 'text/javascript']],

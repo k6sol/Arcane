@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import type { WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { z } from 'zod';
-import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, type ChatTaskProposalReason, type ChatTaskProposalRecord, type ChatTaskProposalResult, type ChatTaskRecord } from '../../../packages/storage/src/chat-task-store.js';
+import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, type ChatTaskPlanRecord, type ChatTaskPlanReason, type ChatTaskProposalReason, type ChatTaskProposalRecord, type ChatTaskProposalResult, type ChatTaskRecord } from '../../../packages/storage/src/chat-task-store.js';
+import { startChatTaskPlan } from './chat-task-plan-runner.js';
 import type { Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskOrigin, StudioTestTaskPort, StudioTestTaskPrepared,
   StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
@@ -21,6 +24,12 @@ export interface ChatTaskOwner {
   cancel(): Promise<void>;
   /** Live native account identity of this exact owned client. Owners without it gain no proposal authority. */
   accountIdentity?(): string | null;
+  /** Original native client and opaque parent continuation, captured by host composition. */
+  plan?(owner: ChatTaskProposalWorkerInput['owner']): ChatTaskNativePlan;
+}
+export interface ChatTaskNativePlan {
+  waitForInitial(): Promise<void>;
+  incorporate(text: string, acknowledge: (value: { operationId: string; turnId: string }) => void): Promise<'completed' | 'failed'>;
 }
 /** Display-only proposal worker: one turn, no approvals, write grants, MCP or parent continuation. */
 export interface ChatTaskProposalWorker {
@@ -58,7 +67,7 @@ interface OwnedTask { origin: StudioTestTaskOrigin; admission: StudioTestTaskOri
   controller: AbortController;
   /** Exact original account captured at begin; never recaptured later. */
   accountIdentity: string | null;
-  proposal: Promise<void> | null }
+  proposal: Promise<void> | null; planController: AbortController | null; planDispatch: string | null; planCompletion: Promise<ChatTaskPlanRecord> | null }
 const PROPOSAL_ACCOUNT = /^[a-f0-9]{64}$/;
 const errorCode = (error: unknown) => error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : null;
 const wellFormedText = (value: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
@@ -83,7 +92,7 @@ export class ChatTaskCoordinator {
   readonly #owners = new Map<string, OwnedTask>();
   readonly #actors = new Map<string, OwnedTask>();
   readonly #origins = new WeakMap<object, OwnedTask>();
-  readonly #pending = new Set<Promise<void>>();
+  readonly #pending = new Set<Promise<unknown>>();
   readonly #stopping = new Map<string, Promise<void>>();
   #cancellation: StudioTestTaskCancellation | null = null;
   #closed = false;
@@ -135,7 +144,7 @@ export class ChatTaskCoordinator {
     const origin = Object.freeze({ kind: 'studio-test-task-origin' as const, taskId: task.id, projectId: task.projectId, provider: 'codex' as const,
       threadId: task.threadId, sessionId: task.sessionId, incarnationId });
     const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false,
-      controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null };
+      controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planController: null, planDispatch: null, planCompletion: null };
     this.#owners.set(task.id, entry); this.#actors.set(input.actorId, entry); this.#origins.set(origin, entry);
     return origin;
   }
@@ -154,9 +163,9 @@ export class ChatTaskCoordinator {
     if(entry.admission!==origin || this.#store.get(origin.taskId).operationId!==entry.admissionOperation)throw new Error('Task operation admission is unavailable.');
     return entry;
   }
-  #assertTask(entry:OwnedTask): void {
+  #assertTask(entry:OwnedTask,allowVerified=false): void {
     const task = this.#store.get(entry.origin.taskId), snapshot = entry.owner.snapshot(), thread = snapshot.thread;
-    if (this.#closed || this.#fenced || entry.revoked || !ACTIVE.has(task.state) || !snapshot.connected || !snapshot.ready || snapshot.mcpIsolation !== 'arcane-only-verified' ||
+    if (this.#closed || this.#fenced || entry.revoked || !ACTIVE.has(task.state)&&!(allowVerified&&task.state==='verified') || !snapshot.connected || !snapshot.ready || snapshot.mcpIsolation !== 'arcane-only-verified' ||
         snapshot.account?.auth !== 'subscription' || snapshot.connectionId !== task.connectionId || !thread?.configured ||
         thread.threadId !== task.threadId || thread.sessionId !== task.sessionId || thread.selection.model !== task.model || thread.selection.effort !== task.effort) {
       throw new Error('The original task incarnation is unavailable.');
@@ -164,8 +173,11 @@ export class ChatTaskCoordinator {
   }
   dispatched(id: string, operationId: string): void {
     const entry = this.#owners.get(id); if (!entry) throw new Error('Unknown owned task.'); this.#assertTask(entry);
+    const plan = this.#store.plan(id), plannedStep = entry.planDispatch ? this.#store.planSteps(plan!.id).find(step => step.id === entry.planDispatch) : null;
+    if (entry.planDispatch && (plan?.state !== 'active' || plannedStep?.kind !== 'incorporation' || plannedStep.state !== 'reserved' || entry.planController?.signal.aborted))
+      throw new Error('Task incorporation dispatch no longer owns its reservation.');
     this.#store.update(id, task => {
-      if (task.operationId && task.round === 0 || task.round === 1 && task.repairDispatch !== 'reserved') throw new Error('Task dispatch was already recorded.');
+      if (task.operationId && task.round === 0 && !plannedStep || task.round === 1 && task.repairDispatch !== 'reserved') throw new Error('Task dispatch was already recorded.');
       task.operationId = operationId; task.turnId = null; task.acknowledged = false; task.nativeSettled = false;
     });
     const origin=Object.freeze({...entry.origin});entry.admission=origin;entry.admissionOperation=operationId;this.#origins.set(origin,entry);
@@ -264,6 +276,7 @@ export class ChatTaskCoordinator {
       });
     }
     if (task.state !== 'repair_queued' || task.repairDispatch !== 'not_requested') return;
+    this.#stopPlan(entry, 'repair_reserved');
     const report = task.evidence.at(-1)!;
     entry.admission=null; // Fence every held original-turn preparation before repair reservation.
     this.#store.update(id, value => { value.round = 1; value.state = 'repairing'; value.repairDispatch = 'reserved';
@@ -310,6 +323,99 @@ export class ChatTaskCoordinator {
     if (!entry.accountIdentity || live !== entry.accountIdentity) throw new ChatTaskProposalError('ACCOUNT_IDENTITY', 'The original task account is unavailable or changed.');
   }
   proposals(taskId: string): ChatTaskProposalRecord[] { return this.#store.proposals(taskId); }
+  plan(taskId: string): ChatTaskPlanRecord | null { return this.#store.plan(taskId); }
+  planSteps(planId: string) { return this.#store.planSteps(planId); }
+  /** Exact native actor may submit only its own bound evidence while the final
+   * parent operation is active. Persisted identity data is never a capability. */
+  authorizeBoundWork(actorId:string,binding:WorkTaskBinding):void {
+    const entry=this.#actors.get(actorId);
+    if(!entry||entry.origin.taskId!==binding.taskId||!entry.planDispatch||entry.planController?.signal.aborted)throw new Error('No original task work authority.');
+    this.#assertProposalParent(entry);
+    const task=this.#store.get(binding.taskId),plan=this.#store.plan(binding.taskId),snapshot=entry.owner.snapshot();
+    if(!plan||plan.id!==binding.planId||plan.state!=='active'||plan.objectiveSha256!==binding.objectiveSha256||!isDeepStrictEqual(plan.binding,binding.original)||
+      task.repairDispatch!=='not_requested'||task.nativeSettled||!task.operationId||entry.admissionOperation!==task.operationId||
+      !snapshot.thread||!['starting','inProgress'].includes(snapshot.thread.turnStatus))throw new Error('Bound task work no longer owns its native operation.');
+    const steps=this.#store.planSteps(plan.id),parent=steps.find(step=>step.id===entry.planDispatch),review=steps.find(step=>step.kind==='evidence');
+    const operation=snapshot.operations.find(operation=>operation.operationId===task.operationId);
+    if(parent?.kind!=='incorporation'||parent.round!==2||!['reserved','acknowledged'].includes(parent.state)||review?.state!=='acknowledged'||
+      review.evidence?.runId!==binding.runId||!operation||operation.method!=='turn/start'||!['pending','acknowledged'].includes(operation.state))
+      throw new Error('Only the original final parent can submit this bound work.');
+    if(entry.revoked||entry.planController?.signal.aborted)throw new Error('Bound task work owner retired.');
+  }
+  /** Read-only evidence observation may outlive a measured successful task, but
+   * never its original account/client, cancellation or permission incarnation. */
+  planObservationOwner(taskId: string): ChatTaskProposalWorkerInput['owner'] {
+    const entry = this.#owners.get(taskId); if (!entry || !entry.planController) throw new Error('Task plan owner is unavailable.');
+    const signal = entry.planController.signal;
+    return Object.freeze({ signal, assertActive: (): void => {
+      if (signal.aborted) throw new Error('Task plan owner retired.'); this.#assertTask(entry,true);
+      if (!entry.accountIdentity || entry.owner.accountIdentity?.() !== entry.accountIdentity) throw new Error('Task plan account changed.');
+    } });
+  }
+  /** Host-only orchestration. Native and evidence ports come from the original owned task;
+   * no route or model can supply a factory, account identity, grant or continuation. */
+  startPlan(input: { taskId: string; objective: string; inputSha256: string; factory: ChatTaskProposalFactory;
+    evidence: (plan: ChatTaskPlanRecord, owner: ChatTaskProposalWorkerInput['owner']) => Promise<{ runId: string }> }): ChatTaskPlanRecord {
+    const entry = this.#owners.get(input.taskId);
+    if (!entry || typeof entry.owner.plan !== 'function' || typeof input.factory !== 'function' || typeof input.evidence !== 'function') throw new Error('Task plan ports are unavailable.');
+    this.#assertProposalParent(entry);
+    const prior = this.#store.plan(input.taskId);
+    if (prior) {
+      if (prior.objectiveSha256 !== createHash('sha256').update(input.objective).digest('hex') || prior.inputSha256 !== input.inputSha256) throw new Error('Task plan input changed.');
+      return prior;
+    }
+    if (entry.proposal) throw new Error('An existing task proposal is still running.');
+    const controller = new AbortController(); entry.planController = controller;
+    const retire = () => controller.abort(); entry.controller.signal.addEventListener('abort', retire, { once: true });
+    controller.signal.addEventListener('abort', () => entry.controller.signal.removeEventListener('abort', retire), { once: true });
+    const owner = Object.freeze({ signal: controller.signal, assertActive: (): void => {
+      if (controller.signal.aborted) throw new Error('Task plan retired.');
+      this.#assertProposalParent(entry);
+      if (this.#store.get(input.taskId).repairDispatch !== 'not_requested') throw new Error('Task repair reserved.');
+    } });
+    try {
+      const native = entry.owner.plan(owner);
+      const started = startChatTaskPlan({ store: this.#store, taskId: input.taskId, objective: input.objective, inputSha256: input.inputSha256,
+        accountIdentity: entry.accountIdentity!, ports: Object.freeze({ signal: owner.signal, assertActive: owner.assertActive,
+          waitForInitial: async () => { owner.assertActive(); await native.waitForInitial(); owner.assertActive(); },
+          propose: async (record: ChatTaskProposalRecord, text: string) => {
+            owner.assertActive();
+            if (entry.proposal || !this.#budget.available()) { this.#store.settleProposal(record.id, { state: 'failed', reason: 'worker_failed_before_dispatch' }); return; }
+            this.#budget.acquire();
+            const task = this.#store.get(input.taskId), workerInput = Object.freeze({ accountIdentity: entry.accountIdentity!,
+              selection: Object.freeze({ model: task.model, effort: task.effort }), owner });
+            const tracked = this.#runProposal(entry, record, text, input.factory, workerInput).finally(() => {
+              if (entry.proposal === tracked) entry.proposal = null; this.#pending.delete(tracked);
+            });
+            entry.proposal = tracked; this.#pending.add(tracked); void tracked.catch(() => {}); await tracked;
+          },
+          incorporate: async (text: string, acknowledge: (value: { operationId: string; turnId: string }) => void) => {
+            owner.assertActive();
+            const plan = this.#store.plan(input.taskId)!, step = this.#store.planSteps(plan.id).at(-1)!;
+            if (step.kind !== 'incorporation' || step.state !== 'reserved' || entry.planDispatch) throw new Error('No exact parent reservation.');
+            entry.planDispatch = step.id;
+            try { return await native.incorporate(text, value => {
+              this.acknowledged(input.taskId);
+              const task = this.#store.get(input.taskId);
+              if (!task.acknowledged || task.operationId !== value.operationId || task.turnId !== value.turnId) throw new Error('Parent acknowledgement changed its owned operation.');
+              acknowledge(value);
+            }); } finally { if (entry.planDispatch === step.id) entry.planDispatch = null; }
+          },
+          requestEvidence: async (plan: ChatTaskPlanRecord) => { owner.assertActive(); const reference = await input.evidence(plan, owner); owner.assertActive(); return reference; },
+        }) });
+      const tracked = started.completion.then(value => {
+        if (value.state === 'unknown') this.uncertain(input.taskId, 'task_plan_unknown_no_replay');
+        return value;
+      }).finally(() => { this.#pending.delete(tracked); });
+      entry.planCompletion = tracked; this.#pending.add(tracked); void tracked.catch(() => { try { this.uncertain(input.taskId, 'task_plan_journal_failed_no_replay'); } catch { /* The owner is still fenced. */ } });
+      return started.plan;
+    } catch (error) { controller.abort(); throw error; }
+  }
+  #stopPlan(entry: OwnedTask, reason: ChatTaskPlanReason): void {
+    entry.planController?.abort(); entry.planDispatch = null;
+    const plan = this.#store.plan(entry.origin.taskId);
+    if (plan) this.#store.stopPlan({ planId: plan.id, reason });
+  }
   proposalByRequest(requestId: string): ChatTaskProposalRecord | null { return this.#store.proposalByRequest(requestId); }
   /** Human-triggered, display-only proposal for one exact owned parent task. The
    * attempt is durable BEFORE the factory can spawn and is never replayed. */
@@ -327,7 +433,7 @@ export class ChatTaskCoordinator {
     if (!entry || !entry.accountIdentity || typeof entry.owner.accountIdentity !== 'function') throw new ChatTaskProposalError('TASK_SCOPE', 'This task has no live proposal authority.');
     try { this.#assertProposalParent(entry); }
     catch (error) { throw error instanceof ChatTaskProposalError ? error : new ChatTaskProposalError('TASK_SCOPE', 'The original task incarnation is unavailable.'); }
-    if (entry.proposal || !this.#budget.available())
+    if (entry.proposal || this.#store.plan(input.taskId)?.state === 'active' || !this.#budget.available())
       throw new ChatTaskProposalError('BUSY', 'Wait for the current proposal to finish.');
     if (this.#store.proposals(input.taskId).length >= CHAT_TASK_PROPOSAL_LIMITS.perTask) throw new ChatTaskProposalError('BUSY', 'This task has no proposal capacity left.');
     const task = this.#store.get(input.taskId);
@@ -390,7 +496,7 @@ export class ChatTaskCoordinator {
   /** Abort owned proposal work BEFORE the revoke callback can run or throw. */
   #retire(entry: OwnedTask): void {
     entry.revoked = true; entry.admission = null;
-    try { entry.controller.abort(); } finally { entry.owner.revoke(); }
+    try { entry.controller.abort(); this.#stopPlan(entry, 'parent_retired'); } finally { entry.owner.revoke(); }
   }
   async stopAll(reason: string): Promise<void> {
     this.fence();const cleanups:Promise<void>[]=[],failures:unknown[]=[];

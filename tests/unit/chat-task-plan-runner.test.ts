@@ -31,6 +31,11 @@ async function fixture(t: test.TestContext) {
     },
     async incorporate(text, acknowledge) {
       assert.ok(Buffer.byteLength(text) < 131072); assert.equal(store.planSteps(store.plan(task.id)!.id).at(-1)!.state, 'reserved');
+      assert.equal(store.planSteps(store.plan(task.id)!.id).at(-1)!.inputSha256, hash(text), 'the exact rendered native input is committed before dispatch');
+      if (events.filter(e => e === 'parent').length === 1) {
+        const reference = store.planSteps(store.plan(task.id)!.id).find(step => step.kind === 'evidence')!;
+        assert.equal(reference.state, 'acknowledged'); assert.ok(text.includes(reference.evidence!.runId), 'the last native turn receives its bound review run');
+      }
       events.push('parent'); acknowledge({ operationId: randomUUID(), turnId: randomUUID() }); return 'completed';
     },
     async requestEvidence(plan: ChatTaskPlanRecord) { assert.equal(store.planSteps(plan.id).at(-1)!.kind, 'evidence');
@@ -45,11 +50,11 @@ async function fixture(t: test.TestContext) {
 test('a journal-backed plan reserves before effects, runs five workers and two exact parents, then requests review once', async t => {
   const f = await fixture(t), started = f.start(), done = await started.completion;
   assert.equal(done.state, 'awaiting_review');
-  assert.deepEqual(f.events, ['initial', 'worker', 'worker', 'worker', 'parent', 'worker', 'worker', 'parent', 'evidence']);
+  assert.deepEqual(f.events, ['initial', 'worker', 'worker', 'worker', 'parent', 'worker', 'worker', 'evidence', 'parent']);
   assert.equal(f.store.get(f.task.id).state, 'working', 'a plan and review reference never accept a chat task');
   assert.deepEqual(f.store.planSteps(done.id).map(s => [s.kind, s.state]), [
     ['worker', 'completed'], ['worker', 'completed'], ['worker', 'completed'], ['incorporation', 'completed'],
-    ['worker', 'completed'], ['worker', 'completed'], ['incorporation', 'completed'], ['evidence', 'acknowledged'],
+    ['worker', 'completed'], ['worker', 'completed'], ['evidence', 'acknowledged'], ['incorporation', 'completed'],
   ]);
   assert.equal(f.store.plan(f.task.id)!.objectiveSha256, hash(objective));
 });
@@ -89,8 +94,26 @@ test('parent acknowledgement and terminal are separate; uncertain or failed pare
     assert.equal(done.state, mode === 'failed terminal' ? 'stopped' : 'unknown'); assert.equal(parents, 1);
     const steps = f.store.planSteps(done.id); assert.equal(steps.length, 4); assert.equal(steps.at(-1)!.terminal, mode === 'failed terminal' ? 'failed' : null);
     assert.ok(!f.events.includes('evidence'));
+    // Pre-ACK uncertainty stays dispatch_uncertain; a journaled exact ACK whose terminal was lost is terminal_unobserved.
+    assert.deepEqual([steps.at(-1)!.state, steps.at(-1)!.reason, !!steps.at(-1)!.native], {
+      'lost ack': ['unknown', 'dispatch_uncertain', false], 'missing ack': ['unknown', 'dispatch_uncertain', false],
+      'lost terminal': ['unknown', 'terminal_unobserved', true], 'failed terminal': ['completed', null, true] }[mode]);
     await f.start({ async incorporate() { parents++; return 'completed'; } }).completion; assert.equal(parents, 1);
   });
+});
+
+test('an acknowledged final parent whose terminal is unobserved keeps its early evidence and records terminal_unobserved', async t => {
+  const f = await fixture(t); let parents = 0;
+  const done = await f.start({ async incorporate(_text, acknowledge) { parents++; f.events.push('parent');
+    acknowledge({ operationId: 'owned-op-' + parents, turnId: 'owned-turn-' + parents });
+    if (parents === 2) throw Error('final terminal unobserved'); return 'completed'; } }).completion;
+  assert.deepEqual([done.state, done.reason], ['unknown', 'step_unknown']); assert.equal(parents, 2);
+  const steps = f.store.planSteps(done.id), evidence = steps.find(step => step.kind === 'evidence')!, final = steps.at(-1)!;
+  assert.ok(evidence.seq < final.seq, 'the review run was bound before the final parent');
+  assert.deepEqual([evidence.state, evidence.reason, !!evidence.evidence?.runId], ['acknowledged', null, true]);
+  assert.deepEqual([final.kind, final.round, final.state, final.reason, final.native?.turnId], ['incorporation', 2, 'unknown', 'terminal_unobserved', 'owned-turn-2']);
+  assert.ok(steps.filter(step => step.kind === 'worker').every(step => step.state === 'completed' && step.reason === null), 'worker steps keep their own reasons');
+  await f.start({ async incorporate() { parents++; return 'completed'; } }).completion; assert.equal(parents, 2, 'never replayed');
 });
 
 test('a lost evidence response retains an unknown spent request and cannot allocate another review run', async t => {
@@ -110,7 +133,7 @@ test('retirement during each asynchronous phase prevents every later effect', as
     const done = await f.start(overrides).completion;
     assert.ok(['stopped', 'unknown'].includes(done.state)); assert.notEqual(done.state, 'awaiting_review');
     assert.equal(f.events.filter(x => x === 'worker').length, phase === 'initial' ? 0 : phase === 'worker' ? 1 : phase === 'parent' ? 3 : 5);
-    assert.equal(f.events.filter(x => x === 'parent').length, phase === 'initial' || phase === 'worker' ? 0 : phase === 'parent' ? 1 : 2);
+    assert.equal(f.events.filter(x => x === 'parent').length, phase === 'initial' || phase === 'worker' ? 0 : 1);
   });
 });
 

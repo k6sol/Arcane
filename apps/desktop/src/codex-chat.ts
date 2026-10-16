@@ -306,6 +306,29 @@ export class CodexChatApi {
     const value=await this.request('/v1/codex/proposals',{connectionId:scope.connectionId,threadId:scope.threadId,taskId:scope.taskId},signal);
     try{return readTaskProposals(value,scope.taskId);}catch{throw new CodexHttpError('Proposal response was not recognized.',false);}
   }
+  /** Raw bounded display response. The plan card parses it independently; this
+   * GET cannot create work, replay a turn or approve evidence. */
+  async taskPlan(scope:TaskProposalRead,signal?:AbortSignal):Promise<string>{
+    if(!uuid(scope.connectionId)||!uuid(scope.taskId)||!text(scope.threadId)||!/^[a-f0-9]{64}$/.test(this.#token))throw new CodexHttpError('Choose the exact current task.',false);
+    const controller=new AbortController(),abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timer=setTimeout(abort,this.deadline);
+    try{
+      if(controller.signal.aborted)throw new Error('Task plan read was cancelled.');
+      const query=new URLSearchParams({connectionId:scope.connectionId,threadId:scope.threadId,taskId:scope.taskId}),transport=this.transport;
+      const response=await transport('/v1/codex/task-plan?'+query.toString(),{method:'GET',headers:{Authorization:'Bearer '+this.#token},
+        signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'});
+      if(controller.signal.aborted||response.status!==200||!/^application\/json(?:;|$)/i.test(response.headers.get('content-type')??''))throw new Error('Task plan read was unavailable.');
+      const reader=response.body?.getReader();if(!reader)throw new Error('Task plan response has no body.');
+      const chunks:Uint8Array[]=[];let length=0;
+      try{for(;;){const part=await reader.read();if(controller.signal.aborted)throw new Error('Task plan read was cancelled.');if(part.done)break;
+        length+=part.value.byteLength;if(length>65536){await reader.cancel();throw new Error('Task plan response exceeded its bound.');}chunks.push(part.value);
+      }}finally{reader.releaseLock();}
+      if(controller.signal.aborted)throw new Error('Task plan read was cancelled.');
+      const bytes=new Uint8Array(length);let at=0;for(const chunk of chunks){bytes.set(chunk,at);at+=chunk.byteLength;}
+      return new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+    }catch(error){throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Task plan unavailable.'),false);}
+    finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
+  }
   /** One human-activated request. Its request ID is never regenerated or resent here. */
   async proposalStart(input:TaskProposalStart,signal?:AbortSignal):Promise<TaskProposalReceipt> {
     const value=await this.request('/v1/codex/action',input as unknown as ChatAction,signal);
