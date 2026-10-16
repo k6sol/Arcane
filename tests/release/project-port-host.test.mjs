@@ -55,10 +55,20 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
   const calls = [], timers = new Map(); let timerId = 0;
   const context = {
     child: null, origin: '', token: '', projectSession: null, projectPath: '', closing: false, switching: false,
+    smoke: false, window: null, nativeHandoff: null,
     ...f, nodeExecutable: process.execPath, process: { platform: process.platform, env: { ARCANE_PORT: '9', ARCANE_DAEMON_URL: 'https://invalid.example', NODE_OPTIONS: 'untrusted' } },
     fs: filesystem, Buffer, URL, join: path.join, resolve: path.resolve, createHash, policy,
     performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, CODE_VERIFICATION_WARNING: 'Fixture warning.', console,
     providerSetup: { cancelPending() {} },
+    // Port and state ownership are the boundary under test. The separate handoff suite
+    // executes its actual broker; here the newly mounted host capability has no actions.
+    require(name) {
+      assert.equal(name, './native-handoff-host.cjs');
+      return { createNativeHandoffHost(ports) {
+        assert.equal(ports.getSession(), null, 'A port fixture has no desktop window.');
+        return Object.freeze({ dispose: async () => ({ revoked: 0, unknown: 0, retained: 0 }), cancelPending() {} });
+      } };
+    },
     codeVerification: { daemonConfiguration: () => ({ environment: {}, settingsHash: null, failure: null }) },
     fixtureManagedConfiguration({codeVerification, project, productRoot}) {
       assert.equal(productRoot, f.productRoot);

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { win32 } from 'node:path';
+import { win32, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 
@@ -13,8 +14,8 @@ import vm from 'node:vm';
 const require = createRequire(import.meta.url);
 const electronDir = new URL('../../apps/desktop/electron/', import.meta.url);
 const mainSource = readFileSync(new URL('main.cjs', electronDir), 'utf8').replaceAll('\r\n', '\n');
-const hostModule = require(new URL('native-handoff-host.cjs', electronDir).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
-const ipcModule = require(new URL('native-handoff-ipc.cjs', electronDir).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const hostModule = require(fileURLToPath(new URL('native-handoff-host.cjs', electronDir)));
+const ipcModule = require(fileURLToPath(new URL('native-handoff-ipc.cjs', electronDir)));
 function block(begin, end) {
   const start = mainSource.indexOf(begin), stop = mainSource.indexOf(end, start + begin.length);
   assert.ok(start >= 0 && stop > start, 'expected the named production block: ' + begin.trim().slice(0, 50));
@@ -186,7 +187,7 @@ test('actual broker dispose fans revocations out concurrently (bounded by its re
   };
   let cleaned = 0;
   const host = hostModule.createNativeHandoffHost({
-    getSession: () => ({ projectPath: 'C:\\p', runtimeDirectory: 'C:\\r', nodePath: 'C:\\n.exe', mcpEntry: 'C:\\m.js', origin, controlToken: token, epoch: sessionEpoch }),
+    getSession: () => ({ projectPath: resolve('/p'), runtimeDirectory: resolve('/r'), nodePath: resolve('/n.exe'), mcpEntry: resolve('/m.js'), origin, controlToken: token, epoch: sessionEpoch }),
     getChoices: () => ({ cliVersion: '2.1.177', aliases: ['opus'], efforts: ['high'] }), confirm: async () => true, launchTerminal: async () => 'opened', fetch: fetchPort,
     preparer: { prepare: async () => Object.freeze({ argv: Object.freeze(['--mcp-config', 'C:\\r\\x\\arcane.mcp.json']), env: Object.freeze({}) }), cleanup: async () => { cleaned++; return { state: 'removed' }; } } });
   for (let i = 0; i < 3; i++) assert.equal((await host.launch({ model: 'opus', effort: 'high' })).state, 'opened');
