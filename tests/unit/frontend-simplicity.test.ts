@@ -17,13 +17,13 @@ test('General keeps one key action and initial guards without permission or hist
   assert.match(details.slice(0, details.indexOf('>')), /\bhidden\b/);
   assert.doesNotMatch(details.slice(0, details.indexOf('>')), /\bopen\b/);
   assert.match(details, /<summary>Key details<\/summary>/);
-  for (const id of ['settings-key-select', 'settings-key-metadata', 'settings-key-storage']) {
+  for (const id of ['settings-key-select', 'settings-key-metadata']) {
     assert.equal(details.split('id="' + id + '"').length - 1, 1, id);
   }
   assert.match(general, /id="settings-key-heading">Arcane API key<\/h3>/);
   assert.match(general, /id="settings-key-generate"[^>]*disabled>Generate API key/);
   assert.doesNotMatch(html, /id="key-writes"|id="key-roots"|name="key-root"/);
-  for (const id of ['settings-key-secret', 'settings-key-show', 'settings-key-copy', 'settings-key-notice']) {
+  for (const id of ['settings-key-secret', 'settings-key-show', 'settings-key-copy', 'settings-key-storage', 'settings-key-notice']) {
     assert.equal(general.split('id="' + id + '"').length - 1, 1, id);
     assert.doesNotMatch(details, new RegExp('id="' + id + '"'));
   }

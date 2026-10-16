@@ -167,7 +167,7 @@ test('valid signed-in local draft enables Send; the form binds via real receipts
   await f.chat.refresh(); assert.equal(f.posts.length, 0, 'startup, staging and refresh never start a chat or turn');
   f.doc.getElementById('codex-compose').human('submit');
   await until(() => f.receipts.some(record => record.action === 'turn-start'));
-  assert.deepEqual(f.posts.map(post => post.action), ['select', 'thread-start', 'history-load', 'turn-start']);
+  assert.deepEqual(f.posts.map(post => post.action), ['select', 'thread-start', 'turn-start']);
   assert.deepEqual(f.current().thread!.selection, PAIR); assert.equal(f.chat.currentStateView().nativeBoundToActiveChat, true);
   const turn = f.posts.find(post => post.action === 'turn-start')!;
   assert.equal(turn.text, '  Send this public draft 🧩\nunchanged.  '); assert.equal(turn.threadId, f.current().thread!.threadId);
@@ -204,7 +204,7 @@ test('textarea Enter uses setup-before-send; Shift+Enter and IME Enter never sen
   composer.human('keydown', { key: 'Enter' }); f.doc.getElementById('codex-compose').human('submit');
   assert.equal(f.posts.filter(post => post.action === 'thread-start').length, 1);
   f.controls.gate.release(); await until(() => f.receipts.some(record => record.action === 'turn-start'));
-  assert.deepEqual(f.posts.map(post => post.action), ['select', 'thread-start', 'history-load', 'turn-start']);
+  assert.deepEqual(f.posts.map(post => post.action), ['select', 'thread-start', 'turn-start']);
   assert.equal(f.posts.find(post => post.action === 'turn-start')!.text, 'Keyboard draft 🧩');
 });
 
