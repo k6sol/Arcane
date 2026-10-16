@@ -19,9 +19,15 @@ The host must abort the captured signal when the parent stops or its account, mo
 
 The native lifecycle transport joins the child's `close` event. After one second it escalates termination and waits one further second for confirmation. If closure remains unobserved, `close()` rejects with `PROCESS_EXIT_UNCONFIRMED`, which the session passes to its host. Concurrent and repeated close calls share the same join and outcome. This confirms the owned lifecycle process and its streams only; Windows descendant containment and the separate history-reader process need their own acceptance evidence.
 
+## Proposal results
+
+`propose()` waits for the sole acknowledged turn's completion and returns a frozen `{status:'proposed', threadId, sessionId, turnId, text}` result. It requires an observed completion event, nonempty assistant text, consecutive event sequences without retention loss, and the same acknowledged operation, thread, session and model selection throughout collection. Errors, disconnection, account changes, empty output and uncertain completion return no partial proposal.
+
+Collection permits at most 64 KiB of UTF-8 output, including message separators, from at most 32 assistant items. The execution bound is 60 seconds from the start attempt, followed by the bounded child join. Ownership remains checked while collecting and after joining the child. Parent retirement during cleanup cannot release a proposal. A second call is refused even after successful completion or an unsent first attempt. Discovery and initialization retain their separate request bounds.
+
 ## Integration boundary
 
-This component does not yet connect the chat task coordinator or WorkStore graph to automatic workers. The host integration must capture parent authority privately, reserve dispatch durably, bound concurrency and execution time, join cancellation, and return bounded proposals to the originating task. A serialized task ID or account hash alone is not permission to launch a worker. No browser or MCP launch route is exposed by this change.
+This component does not yet connect the chat task coordinator or WorkStore graph to automatic workers. The host integration must capture parent authority privately, reserve dispatch durably, bound concurrency, and route these proposals to the originating task. The collector's execution bound also needs to fit that host operation's deadline. A serialized task ID or account hash alone is not permission to launch a worker. No browser or MCP launch route is exposed by this change.
 
 Worker text is a proposal. The original task retains edits, measured verification, evidence submission and review. A completed native turn does not establish that code was applied or that acceptance criteria passed.
 

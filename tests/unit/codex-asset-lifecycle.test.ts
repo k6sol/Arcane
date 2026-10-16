@@ -17,7 +17,7 @@ import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES } from '../../packages/prot
 const ROOT = resolve(process.cwd()), GENERIC = 'a4'.repeat(32), FINAL = 'c6'.repeat(32);
 const EMITTED = fileURLToPath(new URL('../../packages/', import.meta.url));
 const MODULES = [
-  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history', 'reference-images', 'rate-limits'].map(name => 'codex-client/src/' + name + '.js'),
+  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history', 'reference-images', 'rate-limits','proposal-result'].map(name => 'codex-client/src/' + name + '.js'),
   ...['scenario-image', 'scenario-limits'].map(name => 'studio-test-controller/src/' + name + '.js'),
   'protocol/src/arcane-tools.js', // Imported by the unmodified production isolation module.
 ];

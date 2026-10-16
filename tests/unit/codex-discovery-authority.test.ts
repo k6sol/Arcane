@@ -16,7 +16,7 @@ import {connectCodexProposalWorker} from '../../packages/codex-client/src/index.
 const TOKEN = 'a4'.repeat(32), AMBIENT = 'b5'.repeat(32);
 const DAEMON = 'http://127.0.0.1:47831';
 const MODULES = [
-  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history', 'reference-images', 'rate-limits'].map(name => 'codex-client/src/' + name + '.js'),
+  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history', 'reference-images', 'rate-limits','proposal-result'].map(name => 'codex-client/src/' + name + '.js'),
   ...['scenario-image', 'scenario-limits'].map(name => 'studio-test-controller/src/' + name + '.js'),
   'protocol/src/arcane-tools.js', // Imported by the unmodified production isolation module.
 ];
@@ -24,10 +24,11 @@ const EMITTED = fileURLToPath(new URL('../../packages/', import.meta.url));
 type Mode = 'normal' | 'discovery-init-failure' | 'inventory-failure' | 'unsafe-key' |
   'arcane-active' | 'arcane-missing' | 'arcane-null' | 'arcane-plugin' | 'arcane-metadata' | 'final-init-failure' | 'final-inherited' | 'final-null' |
   'proposal-discovery-account' | 'proposal-final-account' | 'proposal-reviewer' | 'proposal-sandbox' | 'proposal-approval' | 'proposal-model' |
-  'proposal-tools' | 'proposal-active' | 'proposal-account-change' | 'proposal-late-inherited' | 'proposal-lost-turn';
+  'proposal-tools' | 'proposal-active' | 'proposal-account-change' | 'proposal-late-inherited' | 'proposal-lost-turn' |
+  'proposal-empty'|'proposal-overflow'|'proposal-failed'|'proposal-disconnect'|'proposal-gap'|'proposal-terminal-before-ack'|'proposal-deadline';
 type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'invalid-id' | 'extra-field' | 'disconnected' | 'close-pending' | 'busy-pending';
 type HistoryResponse = 'wrong-thread' | 'wrong-session' | 'wrong-project';
-type ParentRetirement='before-launch'|'discovery-init'|'discovery-inventory'|'final-init'|'thread-inventory'|'turn-inventory'|'before-write'|'reentrant-abort'|'active'|'after-connect'|'mutated-owner';
+type ParentRetirement='before-launch'|'discovery-init'|'discovery-inventory'|'final-init'|'thread-inventory'|'turn-inventory'|'before-write'|'reentrant-abort'|'active'|'after-connect'|'mutated-owner'|'joined-close';
 interface FixtureOptions {
   profile?: boolean; mode?: Mode; thread?: boolean; history?: boolean; invalidProfile?: boolean;
   historyAction?: HistoryAction; historyResponse?: HistoryResponse; repeatHistory?: boolean;
@@ -39,6 +40,7 @@ interface Receipt {
   daemonUrl?: string | null; method?: string; params?: Record<string, unknown>; cwd?: string; envHasEntry?: boolean;
   code?: string; snapshot?: { ready: boolean; mcpIsolation: string; thread: { threadId: string; configured: boolean } | null };
   keys?: string[]; resultValue?: {decision?:string};
+  proposalResult?:{threadId:string;sessionId:string|null;turnId:string;text:string;status:string};
   history?: { completeness: string; entries: { text: string; ids: { threadId: string; sessionId: string | null; turnId: string; itemId: string } }[]; gaps: { reason: string }[] };
 }
 
@@ -102,12 +104,17 @@ createInterface({ input: process.stdin }).on('line', line => {
     approvalsReviewer: mode==='proposal-reviewer'?'auto_review':'user', sandbox: { type: mode==='proposal-sandbox'?'workspaceWrite':'readOnly', networkAccess: false } });
   if(method==='turn/start'&&scenario.proposal) {
     if(mode==='proposal-lost-turn')return;
-    result(id,{turn:{id:'proposal-turn',status:'inProgress'}});
+    if(mode==='proposal-terminal-before-ack')send({method:'turn/started',params:{threadId:'fixture-thread',turn:{id:'proposal-turn',status:'inProgress'}}});
+    else result(id,{turn:{id:'proposal-turn',status:'inProgress'}});
     send({method:'item/commandExecution/requestApproval',id:'proposal-approval',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-command',command:'synthetic command',cwd:process.cwd()}});
     if(mode==='proposal-account-change')send({method:'account/updated',params:{authMode:'chatgpt'}});
     else {
-      send({method:'item/agentMessage/delta',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-result',delta:'Synthetic code proposal'}});
-      send({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'proposal-turn',status:'completed'}}});
+      if(mode==='proposal-disconnect')return process.exit(0);
+      if(mode==='proposal-deadline')return;
+      if(mode!=='proposal-empty')send({method:'item/agentMessage/delta',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-result',delta:mode==='proposal-overflow'?'x'.repeat(65537):'Synthetic code proposal'}});
+      if(mode==='proposal-gap')for(let i=0;i<300;i++)send({method:'item/agentMessage/delta',params:{threadId:'fixture-thread',turnId:'proposal-turn',itemId:'proposal-result',delta:'x'}});
+      send({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'proposal-turn',status:mode==='proposal-failed'?'failed':'completed'}}});
+      if(mode==='proposal-terminal-before-ack')result(id,{turn:{id:'proposal-turn',status:'completed'}});
     }
     return;
   }
@@ -187,7 +194,8 @@ try {
     }
     if(scenario.dispatch) {
       proposing=true;
-      await client.propose('Synthetic task context; return a review proposal.');
+      const proposalResult=await client.propose('Synthetic task context; return a review proposal.');
+      record({event:'proposal-result',proposalResult});
       const deadline=Date.now()+3000;
       while(client.snapshot().connected&&client.snapshot().thread?.turnStatus==='inProgress') {
         if(Date.now()>=deadline)throw new Error('Synthetic proposal did not settle.');await delay(5);
@@ -277,9 +285,10 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
     '  let frame="", inventoryReads=0;const requests=new Map();const write=child.stdin.write.bind(child.stdin);',
     '  child.stdin.write=(data,...rest)=>{const message=JSON.parse(String(data));if(message.method==="mcpServerStatus/list")inventoryReads++;if(message.id)requests.set(message.id,{method:message.method,inventoryReads});return write(data,...rest);};',
     '  child.stdout.on("data",chunk=>{frame+=chunk.toString();let end;while((end=frame.indexOf("\\n"))>=0){const line=frame.slice(0,end);frame=frame.slice(end+1);if(!line.trim())continue;const message=JSON.parse(line),request=requests.get(message.id),stage=scenario.parentRetirement;',
+    '    if(scenario.mode==="proposal-deadline"&&id===2&&request?.method==="turn/start"){const now=Date.now();Date.now=()=>now+120000;}',
     '    if(request&&(stage==="discovery-init"&&id===1&&request.method==="initialize"||stage==="discovery-inventory"&&id===1&&request.method==="mcpServerStatus/list"||stage==="final-init"&&id===2&&request.method==="initialize"||stage==="thread-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===1||stage==="turn-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===2||stage==="active"&&id===2&&request.method==="turn/start"))globalThis.arcaneFixtureRetire();',
     '  }});',
-    '  child.once("close", () => record({ event: "close", launch: id })); return child;',
+    '  child.once("close", () => {record({ event: "close", launch: id });if(id===2&&scenario.parentRetirement==="joined-close")globalThis.arcaneFixtureRetire();}); return child;',
     '}',
   ].join('\n');
   await writeFile(join(dir, 'boundary.mjs'), boundary);
@@ -529,6 +538,7 @@ test('proposal worker launches two secret-free children and dispatches exactly o
   assert.equal(calls(records,'mcpServerStatus/list').length,3);
   assert.equal(events(records,'rpc').find(row=>row.resultValue)?.resultValue?.decision,'cancel');
   assert.equal(events(records,'repeat-error')[0]?.code,'PROPOSAL_READ_ONLY');
+  assert.deepEqual(events(records,'proposal-result')[0]?.proposalResult,{threadId:'fixture-thread',sessionId:'fixture-session',turnId:'proposal-turn',text:'Synthetic code proposal',status:'proposed'});
 });
 
 for(const [mode,expected,launches] of [
@@ -548,8 +558,26 @@ for(const [mode,expected,launches] of [
 test('proposal account notification fences the active worker even when auth mode remains subscription',async t=>{
   const {records}=await fixture(t,{proposal:true,dispatch:true,mode:'proposal-account-change'});
   assert.equal(calls(records,'turn/start').length,1);
-  assert.equal(events(records,'proposal')[0]?.snapshot?.ready,false);
-  assert.equal(events(records,'proposal')[0]?.snapshot?.mcpIsolation,'proposal-pending');
+  assert.equal(events(records,'proposal-result').length,0);
+  assert.equal(events(records,'error')[0]?.code,'PROPOSAL_INCOMPLETE');
+  assert.equal(events(records,'close').length,2);
+});
+
+for(const [mode,code] of [
+  ['proposal-empty','PROPOSAL_INCOMPLETE'],['proposal-overflow','PROPOSAL_OUTPUT'],['proposal-failed','PROPOSAL_FAILED'],
+  ['proposal-disconnect','PROPOSAL_INCOMPLETE'],['proposal-gap','PROPOSAL_INCOMPLETE'],['proposal-deadline','PROPOSAL_TIMEOUT'],
+] as const)test('proposal result refuses '+mode+' without partial text or replay',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,mode});
+  assert.equal(events(records,'error')[0]?.code,code);
+  assert.equal(events(records,'proposal-result').length,0);
+  assert.equal(calls(records,'turn/start').length,1);
+  assert.equal(events(records,'close').length,2);
+});
+
+test('proposal result requires the exact acknowledgement even when completion arrives first',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,mode:'proposal-terminal-before-ack'});
+  assert.equal(events(records,'error').length,0);
+  assert.equal(events(records,'proposal-result')[0]?.proposalResult?.text,'Synthetic code proposal');
   assert.equal(events(records,'close').length,2);
 });
 
@@ -581,6 +609,7 @@ for(const [parentRetirement,launches,turns] of [
   ['before-launch',0,0],['discovery-init',1,0],['discovery-inventory',1,0],['final-init',2,0],
   ['thread-inventory',2,0],['turn-inventory',2,0],['before-write',2,0],['reentrant-abort',2,0],
   ['active',2,1],['after-connect',2,0],['mutated-owner',2,0],
+  ['joined-close',2,1],
 ] as const)test('proposal original-task retirement at '+parentRetirement+' joins owned children',async t=>{
   const {records}=await fixture(t,{proposal:true,dispatch:true,parentRetirement});
   assert.equal(events(records,'spawn').length,launches);
@@ -589,6 +618,6 @@ for(const [parentRetirement,launches,turns] of [
   assert.ok(events(records,'error').length===1);
   assert.ok(!JSON.stringify(records).includes('SYNTHETIC_PRIVATE_PARENT_DETAIL'));
   if(parentRetirement==='reentrant-abort')assert.equal(events(records,'error')[0]?.code,'DISCONNECTED');
-  if(['before-launch','before-write','after-connect','mutated-owner'].includes(parentRetirement))
+  if(['before-launch','before-write','after-connect','mutated-owner','joined-close'].includes(parentRetirement))
     assert.equal(events(records,'error')[0]?.code,'PARENT_SCOPE');
 });

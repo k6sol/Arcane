@@ -7,8 +7,10 @@ import { arcaneIsolationOverrides } from './mcp-isolation.js';
 import { exact, fail, limits, str } from './validation.js';
 import { validateNativeAssetHooks, type ConnectOptions, type Limits, type NativeAssetHooks } from './types.js';
 import type { InternalProcess } from './transport.js';
-import type { LocalUse, LimitOptions, Selection, Snapshot, ThreadState } from './types.js';
+import type { LocalUse, LimitOptions, Selection, Snapshot } from './types.js';
 import { nativeEnvironment } from './transport.js';
+import { collectProposalResult, PROPOSAL_DURATION_MS, type ProposalResult } from './proposal-result.js';
+export type {ProposalResult} from './proposal-result.js';
 export { CODEX_LIMITS, CodexClientError } from './types.js';
 export type { Account, ArcaneMcpLaunchProfile, Approval, ConnectOptions, FileChangePreview, HumanAction, LimitOptions, LocalUse, Model, NativeAssetHooks, NativeAssetIntent, Operation, Selection, SessionEvent, SessionEventValue, Snapshot, ThreadState } from './types.js';
 export type CodexClient = CodexSession;
@@ -18,7 +20,7 @@ export type { NativeTaskContinuation, ManagedTaskStart } from './types.js';
 export interface ProposalWorker {
   snapshot(): Snapshot;
   /** One task-scoped dispatch. The worker has no write grant or approval API. */
-  propose(text: string): Promise<ThreadState>;
+  propose(text: string): Promise<ProposalResult>;
   close(): Promise<void>;
 }
 /** Trusted host input only. Capture identity and selection from the original task,
@@ -104,11 +106,19 @@ export async function connectCodexProposalWorker(options: ProposalWorkerOptions)
     session.selectModel({initiatedBy:'human',...selection});
     const thread=await session.startThread({initiatedBy:'human'});
     checkOwner();
+    let proposed=false;
     return Object.freeze({snapshot:()=>session.snapshot(),propose:async(text:string)=>{
+      if(proposed)fail('PROPOSAL_READ_ONLY','Proposal workers permit one turn and no replay.');
+      proposed=true;
       try{
         checkOwner();
         if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The worker account changed before dispatch.');
-        return await session.startTurn({initiatedBy:'human',threadId:thread.threadId,text});
+        const baseline=session.snapshot(),deadline=Date.now()+PROPOSAL_DURATION_MS;
+        const ack=await session.startTurn({initiatedBy:'human',threadId:thread.threadId,text});
+        const result=await collectProposalResult({snapshot:()=>session.snapshot(),ack,baseline,assertOwner:checkOwner,signal,deadline});
+        await close();
+        checkOwner();
+        return result;
       }catch(error){await close();throw error;}
     },close});
   }catch(error){await close();throw error;}
