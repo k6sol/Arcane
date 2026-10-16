@@ -75,7 +75,7 @@ const ENTRIES = [{ name: 'bundle/' }, { name: 'bundle/Arcane.exe', data: Buffer.
 let shared;
 function setup() {
   if (shared) return shared;
-  const boundary = fs.realpathSync(tmpdir()), root = fs.realpathSync(fs.mkdtempSync(join(boundary, 'arcane-installer-stage-test-')));
+  const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-installer-stage-test-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-installer-stage-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
   for (const name of ['PayloadArchive.cs', 'StageDirectory.cs']) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));

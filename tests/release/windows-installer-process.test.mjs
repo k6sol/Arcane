@@ -107,7 +107,7 @@ const installed = result({ state: 'installed', published: true, code: null, inst
 let shared;
 function setup(t) {
   if (shared) return shared;
-  const boundary = fs.realpathSync(tmpdir()), root = fs.realpathSync(fs.mkdtempSync(join(boundary, 'arcane-installer-process-test-')));
+  const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-installer-process-test-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-installer-process-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
   for (const name of ['KitVerifier.cs', 'InstallProcess.cs']) fs.copyFileSync(new URL('installer/' + name, repository), join(build, name));
@@ -164,6 +164,14 @@ test('actual CLI frames agree with the controller: installed, already-active and
   assert.deepEqual([r.outcome.state, r.outcome.published, r.outcome.code, r.outcome.installationId], ['Failed', null, 'PUBLISH_UNCONFIRMED', null]);
   r = s.run('plain', s.real({ progress: [], error: { code: 'MANIFEST', published: false } }));
   assert.deepEqual([r.outcome.state, r.outcome.published, r.outcome.code, r.outcome.exitCode], ['Failed', false, 'MANIFEST', 1]);
+});
+
+test('Windows drive-letter casing preserves admitted owned process paths', windows, t => {
+  const s = setup(t), lowerDrive = path => path[0].toLowerCase() + path.slice(1);
+  const { outcome } = s.run('plain', { lines: [installed], exit: 0 }, {
+    node: lowerDrive(process.execPath), entryPoint: lowerDrive(s.entry), installRoot: lowerDrive(join(s.root, 'Drive Case (1)')),
+  });
+  assert.equal(outcome.state, 'Installed'); assert.equal(outcome.code, null);
 });
 
 test('cancellation sends exactly one cancel frame and waits for the actual exit; late cancel never becomes rollback', windows, t => {
