@@ -276,12 +276,12 @@ export class CodexChatApi {
   safe(value: string): string {
     return value.replaceAll(this.#token || '\0', '[REDACTED]').replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g,'[REDACTED]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [REDACTED]').replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}/g,'[REDACTED]').replace(/("?(?:accessToken|access_token|apiKey|api_key|password|secret)"?\s*[:=]\s*["']?)[^"',;\s]+/gi,'$1[REDACTED]').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g,'');
   }
-  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/usage', input?: ChatAction|{connectionId:string}, signal?: AbortSignal): Promise<unknown> {
+  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/usage' | '/v1/codex/proposals', input?: ChatAction|{connectionId:string}|TaskProposalRead, signal?: AbortSignal): Promise<unknown> {
     if (!/^[a-f0-9]{64}$/.test(this.#token)) throw new CodexHttpError('Open the launcher’s human control link.',false);
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort',abort,{once:true}); if(signal?.aborted) controller.abort();
     const timer = setTimeout(abort,this.deadline);
-    const mutable=!!input&&path!=='/v1/codex/usage';
+    const mutable=!!input&&path!=='/v1/codex/usage'&&path!=='/v1/codex/proposals';
     try {
       const transport = this.transport;
       const response = await transport(path,{method:input?'POST':'GET',headers:{Authorization:'Bearer '+this.#token,...(input?{'Content-Type':'application/json'}:{})},...(input?{body:JSON.stringify(input)}:{}),signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'});
@@ -300,6 +300,17 @@ export class CodexChatApi {
     finally {clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
+  /** Display-only read of one exact owned task; it never starts or retries work. */
+  async proposals(scope:TaskProposalRead,signal?:AbortSignal):Promise<TaskProposalView[]> {
+    if(!uuid(scope.connectionId)||!uuid(scope.taskId)||!text(scope.threadId))throw new CodexHttpError('Choose the exact current task.',false);
+    const value=await this.request('/v1/codex/proposals',{connectionId:scope.connectionId,threadId:scope.threadId,taskId:scope.taskId},signal);
+    try{return readTaskProposals(value,scope.taskId);}catch{throw new CodexHttpError('Proposal response was not recognized.',false);}
+  }
+  /** One human-activated request. Its request ID is never regenerated or resent here. */
+  async proposalStart(input:TaskProposalStart,signal?:AbortSignal):Promise<TaskProposalReceipt> {
+    const value=await this.request('/v1/codex/action',input as unknown as ChatAction,signal);
+    try{return readTaskProposalReceipt(value,input);}catch{throw new CodexHttpError('Proposal acknowledgement was unreadable; it was not resent.',true);}
+  }
   async refreshUsage(connectionId:string,signal?:AbortSignal):Promise<void> {
     if(!uuid(connectionId))throw new CodexHttpError('Choose the exact current native connection.',false);
     const value=await this.request('/v1/codex/usage',{connectionId},signal);
@@ -451,6 +462,7 @@ export class CodexChat {
   private preferenceController: ChatTabsController | null = null;
   private attachments: ChatAttachmentsController | null = null;
   private imageRequest:AbortController|null=null;
+  private proposals:TaskProposalPanel|null=null;
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
   /** Presentation-only attachment mount; it creates no native thread or task. */
   enableTextAttachments(controller:ChatAttachmentsController):void {
@@ -465,6 +477,23 @@ export class CodexChat {
       this.state?.connecting||this.state?.closing||this.tabs&&(!active||active.kind==='native'&&!this.tabs.bound(this.state)))return null;
     return JSON.stringify([this.state?.projectPath,active?.key??null,s.connectionId,
       active?.kind==='draft'?null:s.thread?.threadId??null,active?.kind==='draft'?null:s.thread?.sessionId??null]);
+  }
+  /** Display-only proposal scope: the latest owned task of the exact bound conversation. */
+  taskProposalScope():TaskProposalScope|null {
+    const s=this.snapshot(),t=s?.thread,active=this.tabs?.active();
+    if(this.stopped||!this.fresh||!this.providerAllowsCodex()||this.tabTransition||this.state?.displayLimited||!s?.connected||!s.ready||
+      s.account?.auth!=='subscription'||!s.account.requiresOpenaiAuth||!t?.configured||this.state?.connecting||this.state?.closing||
+      this.tabs&&(!active||active.kind!=='native'||!this.tabs.bound(this.state)))return null;
+    const task=this.state?.chatTasks?.findLast(row=>row.threadId===t.threadId&&row.sessionId===t.sessionId);
+    if(!task||task.connectionId!==s.connectionId)return null;
+    return Object.freeze({projectPath:this.state!.projectPath,chatKey:active?.key??null,connectionId:s.connectionId,threadId:t.threadId,sessionId:t.sessionId,taskId:task.taskId,
+      active:['working','awaiting_verification','repair_queued','repairing'].includes(task.state),account:JSON.stringify([s.account.auth,s.account.plan]),
+      model:t.selection.model,effort:t.selection.effort});
+  }
+  /** Mount the presentation-only proposal panel beside the conversation text once. */
+  enableTaskProposals(options:{pollMs?:number}={}):void {
+    if(this.proposals)return;
+    this.proposals=TaskProposalPanel.mount(this.doc,this.api,()=>this.taskProposalScope(),listener=>this.subscribeStateChange(listener),options);
   }
   referenceImageInputAvailable():boolean{
     if(this.textAttachmentScope()===null)return false;
@@ -493,7 +522,7 @@ export class CodexChat {
     await tabs.initializePreferences(project);
     if(this.state.projectPath!==project||!this.fresh)throw new Error('The project changed while reading chat preferences.');
     if(this.tabs)return;
-    this.tabs=tabs;this.syncTabs();tabs.mount();this.loadTabDraft();this.render();this.publishState();
+    this.tabs=tabs;this.syncTabs();tabs.mount();this.loadTabDraft();this.render();this.enableTaskProposals();this.publishState();
     this.preferenceController=module.connectChatTabPreferences(this.doc,this);
     if(tabs.persistenceStatus()==='native-error')this.text('codex-notice','Native chat preferences could not be verified. Local drafts are available; EXE persistence is unavailable.');
   }
@@ -1561,5 +1590,201 @@ export class CodexChat {
     await this.refresh();if(this.confirmation!==c||!this.confirmationValid()){this.text('codex-confirm-warning','The native scope or preview changed. Close this confirmation and review current state.');return;}
     if(c.action==='review-draft'){this.reviewedDraftTarget={context:this.draftContextFingerprint(),text:this.value('codex-composer')};this.closeConfirmation();this.text('codex-notice','Draft re-reviewed for this conversation. No turn was submitted and no permission changed.');this.renderControls();return;}
     this.closeConfirmation();await this.dispatch(c.action,c.fields);
+  }
+}
+
+// ------------------------------------------------------------- task proposals
+// Display-only proposals for the exact owned task in the bound conversation.
+// Proposal text is rendered as plain text and never becomes an instruction,
+// approval, grant, workflow result or continuation.
+export const TASK_PROPOSAL_LIMITS = Object.freeze({ promptBytes: 16384, textBytes: 65536, entries: 8, polls: 90 });
+const PROPOSAL_STATES = ['reserved','proposed','failed','unknown'] as const;
+const PROPOSAL_REASONS: Record<string,string> = {
+  worker_unavailable:'Codex was unavailable.', worker_failed_before_dispatch:'Codex could not start.', dispatch_uncertain:'The request may not have finished.',
+  parent_retired:'The task stopped first.', output_rejected:'The reply could not be shown.', worker_close_unconfirmed:'Codex did not close cleanly.',
+  daemon_restarted_no_replay:'Arcane restarted first.', journal_failure:'It could not be saved.',
+};
+export interface TaskProposalRead { connectionId: string; threadId: string; taskId: string }
+export interface TaskProposalStart extends TaskProposalRead { requestId: string; action: 'proposal-start'; text: string }
+export interface TaskProposalView {
+  proposalId: string; requestId: string; state: typeof PROPOSAL_STATES[number]; reason: string | null;
+  text: string | null; textSha256: string | null; textBytes: number | null; createdAt: string; updatedAt: string;
+}
+export interface TaskProposalReceipt { state: 'acknowledged'|'rejected'|'unknown'|'pending'; errorCode: string | null; proposalId: string | null; replayed: boolean }
+export interface TaskProposalScope {
+  readonly projectPath: string; readonly chatKey: string | null; readonly connectionId: string; readonly threadId: string; readonly sessionId: string | null;
+  readonly taskId: string; readonly active: boolean; readonly account: string; readonly model: string; readonly effort: string;
+}
+const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+const wellFormed = (value: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
+const isoTime = (value: unknown) => typeof value === 'string' && value.length <= 64 && Number.isFinite(Date.parse(value));
+/** Strict bounded projection of one scoped proposal list. */
+export function readTaskProposals(value: unknown, taskId: string): TaskProposalView[] {
+  if (!dataObject(value, ['proposals']) || !dataObject(value.proposals, ['taskId','display','proposals'])) throw new Error('Invalid proposal envelope.');
+  const list = value.proposals;
+  if (list.taskId !== taskId || list.display !== 'proposal_not_applied' || !Array.isArray(list.proposals) || list.proposals.length > TASK_PROPOSAL_LIMITS.entries) throw new Error('Invalid proposal scope.');
+  const ids = new Set<string>();
+  return list.proposals.map(row => {
+    if (!dataObject(row, ['proposalId','requestId','state','reason','text','textSha256','textBytes','createdAt','updatedAt']) || !uuid(row.proposalId) || !uuid(row.requestId) ||
+        ids.has(row.proposalId) || !PROPOSAL_STATES.includes(row.state as never) || !(row.reason === null || typeof row.reason === 'string' && Object.hasOwn(PROPOSAL_REASONS, row.reason)) ||
+        !isoTime(row.createdAt) || !isoTime(row.updatedAt)) throw new Error('Invalid proposal.');
+    ids.add(row.proposalId);
+    if (row.state === 'proposed') {
+      if (row.reason !== null || typeof row.text !== 'string' || !row.text.length || !wellFormed(row.text) || typeof row.textSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.textSha256) ||
+          typeof row.textBytes !== 'number' || utf8Bytes(row.text) !== row.textBytes || row.textBytes > TASK_PROPOSAL_LIMITS.textBytes) throw new Error('Invalid proposal text.');
+    } else if (row.text !== null || row.textSha256 !== null || row.textBytes !== null || (row.state === 'reserved') !== (row.reason === null)) throw new Error('Invalid proposal outcome.');
+    return { proposalId: row.proposalId, requestId: row.requestId, state: row.state as TaskProposalView['state'], reason: row.reason as string | null, text: row.text as string | null,
+      textSha256: row.textSha256 as string | null, textBytes: row.textBytes as number | null, createdAt: row.createdAt as string, updatedAt: row.updatedAt as string };
+  });
+}
+/** Exact receipt for the exact request; anything else is uncertain, never resent. */
+export function readTaskProposalReceipt(value: unknown, input: TaskProposalStart): TaskProposalReceipt {
+  if (!dataObject(value, ['record','replayed','state']) || typeof value.replayed !== 'boolean') throw new Error('Invalid proposal receipt.');
+  const r = value.record, keys = ['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt'];
+  if (!dataObject(r, object(r) && Object.hasOwn(r, 'proposalId') ? [...keys,'proposalId'] : keys) || r.requestId !== input.requestId || r.action !== 'proposal-start' ||
+      r.connectionId !== input.connectionId || !['acknowledged','rejected','unknown','pending'].includes(String(r.state)) || !(r.errorCode === null || text(r.errorCode,64)) ||
+      r.threadId!==input.threadId||!(r.turnId===null||text(r.turnId))||!(r.model===null||text(r.model))||!(r.effort===null||text(r.effort,64))||
+      !isoTime(r.createdAt)||!(r.finishedAt===null||isoTime(r.finishedAt))||
+      (r.state === 'acknowledged') !== uuid(r.proposalId) || Object.hasOwn(r,'proposalId') && !uuid(r.proposalId)) throw new Error('Invalid proposal receipt.');
+  readCodexState(value.state);
+  return { state: r.state as TaskProposalReceipt['state'], errorCode: r.errorCode as string | null, proposalId: uuid(r.proposalId) ? r.proposalId : null, replayed: value.replayed };
+}
+async function proposalDigestsMatch(entries: readonly TaskProposalView[]): Promise<boolean> {
+  for (const entry of entries) if (entry.text !== null) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(entry.text));
+    if (Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2,'0')).join('') !== entry.textSha256) return false;
+  }
+  return true;
+}
+const proposalKey = (scope: TaskProposalScope | null) => scope ? JSON.stringify([scope.projectPath, scope.chatKey, scope.connectionId, scope.threadId, scope.sessionId, scope.taskId, scope.account, scope.model, scope.effort]) : '';
+interface ProposalAttempt { requestId: string; state: 'sending'|'acknowledged'|'rejected'|'uncertain'; code: string | null }
+/** Presentation controller mounted beside the conversation text. */
+export class TaskProposalPanel {
+  #scope: TaskProposalScope | null = null; #key = ''; #generation = 0; #stopped = false;
+  #request: AbortController | null = null; #read: AbortController | null = null; #timer: ReturnType<typeof setTimeout> | undefined; #polls = 0;
+  #attempt: ProposalAttempt | null = null; #entries: TaskProposalView[] = []; #notice = ''; #reading = false;
+  readonly #unsubscribe: () => void;
+  readonly root: HTMLElement; readonly #input: HTMLTextAreaElement; readonly #button: HTMLButtonElement; readonly #check: HTMLButtonElement;
+  readonly #status: HTMLElement; readonly #list: HTMLElement;
+  static mount(doc: Document, api: CodexChatApi, scope: () => TaskProposalScope | null, subscribe: (listener: () => void) => () => void, options: { pollMs?: number } = {}): TaskProposalPanel | null {
+    const anchor = doc.getElementById('codex-messages');
+    if (!anchor || doc.getElementById('codex-proposals')) return null;
+    return new TaskProposalPanel(doc, anchor, api, scope, subscribe, options.pollMs ?? 1000);
+  }
+  private constructor(private readonly doc: Document, anchor: HTMLElement, private readonly api: CodexChatApi, private readonly scope: () => TaskProposalScope | null,
+      subscribe: (listener: () => void) => () => void, private readonly pollMs: number) {
+    const make = <K extends keyof HTMLElementTagNameMap>(tag: K, id?: string, className?: string, value?: string) => {
+      const element = doc.createElement(tag); if (id) element.id = id; if (className) element.className = className; if (value !== undefined) element.textContent = value; return element; };
+    this.root = make('section', 'codex-proposals', 'codex-proposals'); this.root.setAttribute('aria-label', 'Task proposals'); this.root.hidden = true;
+    const label = make('label', undefined, 'visually-hidden', 'What should the proposal cover?'); label.setAttribute('for', 'codex-proposal-text');
+    this.#input = make('textarea', 'codex-proposal-text'); this.#input.rows = 2; this.#input.placeholder = 'What should Codex propose for this task?';
+    this.#button = make('button', 'codex-proposal-request', 'secondary', 'Request proposal'); this.#button.type = 'button';
+    this.#check = make('button', 'codex-proposal-check', 'secondary', 'Check again'); this.#check.type = 'button'; this.#check.hidden = true;
+    const row = make('div', undefined, 'button-row'); row.append(this.#button, this.#check);
+    this.#status = make('p', 'codex-proposal-status', 'hint'); this.#status.setAttribute('role', 'status'); this.#status.setAttribute('aria-live', 'polite');
+    this.#list = make('ol', 'codex-proposal-list', 'codex-proposal-list');
+    this.root.append(make('h3', undefined, undefined, 'Ask for a proposal'), make('p', undefined, 'hint', 'Codex suggests a change for this task. Nothing is applied.'), label, this.#input, row, this.#status, this.#list);
+    anchor.after(this.root);
+    this.#button.addEventListener('click', event => { void this.#start(event); });
+    this.#check.addEventListener('click', event => { if (this.#trusted(event)) void this.#refresh(); });
+    this.#input.addEventListener('input', () => this.#render());
+    this.#unsubscribe = subscribe(() => this.sync());
+    this.sync();
+  }
+  #trusted(event: Event): boolean {
+    const input = event as MouseEvent;
+    return event.isTrusted === true && !event.defaultPrevented && input.button === 0 && !input.altKey && !input.ctrlKey && !input.metaKey && !input.shiftKey;
+  }
+  /** Any scope change stops display work, clears scoped content and ignores late replies. */
+  sync(): void {
+    if (this.#stopped) return;
+    const next = this.scope(), key = proposalKey(next);
+    if (key !== this.#key) {
+      this.#generation++; this.#request?.abort(); this.#read?.abort(); this.#request = this.#read = null;
+      if (this.#timer) clearTimeout(this.#timer); this.#timer = undefined;
+      this.#key = key; this.#attempt = null; this.#entries = []; this.#notice = ''; this.#polls = 0; this.#reading = false; this.#input.value = '';
+      this.#list.replaceChildren();
+      this.#scope = next;
+      if (next) void this.#refresh();
+    } else this.#scope = next;
+    this.#render();
+  }
+  stop(): void { this.#stopped = true; this.#generation++; this.#request?.abort(); this.#read?.abort(); if (this.#timer) clearTimeout(this.#timer); this.#unsubscribe(); this.root.remove(); }
+  #blocked(): boolean {
+    return !this.#scope?.active || this.#reading && !this.#entries.length && !this.#attempt || this.#attempt !== null && this.#attempt.state !== 'rejected' ||
+      this.#entries.some(entry => entry.state === 'reserved') || this.#entries.length >= TASK_PROPOSAL_LIMITS.entries;
+  }
+  async #start(event: Event): Promise<void> {
+    const scope = this.#scope, prompt = this.#input.value;
+    if (!this.#trusted(event) || !scope || this.#button.disabled || this.#blocked() || !prompt.trim() || utf8Bytes(prompt) > TASK_PROPOSAL_LIMITS.promptBytes || !wellFormed(prompt)) return;
+    const generation = this.#generation, requestId = crypto.randomUUID(), controller = new AbortController();
+    const attempt: ProposalAttempt = { requestId, state: 'sending', code: null };
+    this.#attempt = attempt; this.#request = controller; this.#notice = ''; this.#render();
+    try {
+      const receipt = await this.api.proposalStart({ requestId, connectionId: scope.connectionId, action: 'proposal-start', threadId: scope.threadId, taskId: scope.taskId, text: prompt }, controller.signal);
+      if (generation !== this.#generation) return;
+      attempt.state = receipt.state === 'acknowledged' ? 'acknowledged' : receipt.state === 'rejected' ? 'rejected' : 'uncertain'; attempt.code = receipt.errorCode;
+      if (attempt.state === 'acknowledged') this.#input.value = '';
+    } catch (error) {
+      if (generation !== this.#generation) return;
+      attempt.state = error instanceof CodexHttpError && !error.unknown ? 'rejected' : 'uncertain';
+    } finally {
+      if (generation === this.#generation) { this.#request = null; this.#polls = 0; void this.#refresh(); }
+    }
+  }
+  async #refresh(): Promise<void> {
+    const scope = this.#scope, generation = this.#generation;
+    if (!scope || this.#stopped) return;
+    if (this.#timer) clearTimeout(this.#timer); this.#timer = undefined;
+    this.#read?.abort(); const controller = new AbortController(); this.#read = controller; this.#reading = true; this.#render();
+    try {
+      const entries = await this.api.proposals({ connectionId: scope.connectionId, threadId: scope.threadId, taskId: scope.taskId }, controller.signal);
+      if (generation !== this.#generation) return;
+      if (!await proposalDigestsMatch(entries)) throw new Error('digest');
+      if (generation !== this.#generation) return;
+      this.#entries = entries; this.#notice = '';
+      // The original attempt is read back by its scoped request ID; it is never resent.
+      if (this.#attempt && entries.some(entry => entry.requestId === this.#attempt!.requestId)) this.#attempt = null;
+    } catch {
+      if (generation !== this.#generation) return;
+      this.#notice = 'Proposals could not be read. Use Check again.';
+    } finally {
+      if (generation === this.#generation) {
+        this.#reading = false; this.#read = null;
+        const waiting = this.#entries.some(entry => entry.state === 'reserved') || this.#attempt?.state === 'acknowledged' || this.#attempt?.state === 'uncertain';
+        if (waiting && !this.#notice && this.#polls < TASK_PROPOSAL_LIMITS.polls) { this.#polls++; this.#timer = setTimeout(() => { void this.#refresh(); }, this.pollMs); }
+        this.#render();
+      }
+    }
+  }
+  #render(): void {
+    const scope = this.#scope, attempt = this.#attempt;
+    this.root.hidden = !scope;
+    const prompt = this.#input.value, oversized = utf8Bytes(prompt) > TASK_PROPOSAL_LIMITS.promptBytes;
+    this.#button.disabled = !scope || this.#blocked() || !prompt.trim() || oversized;
+    this.#input.disabled = !scope?.active;
+    const waiting = this.#entries.some(entry => entry.state === 'reserved') || attempt?.state === 'acknowledged';
+    this.#check.hidden = !(attempt?.state === 'uncertain' || this.#notice || waiting && this.#polls >= TASK_PROPOSAL_LIMITS.polls);
+    this.#status.textContent = this.api.safe(
+      !scope ? '' : this.#notice ? this.#notice :
+      attempt?.state === 'sending' ? 'Requesting a proposal…' :
+      attempt?.state === 'uncertain' ? 'The request outcome is unknown. It was not resent; use Check again.' :
+      attempt?.state === 'rejected' ? 'The proposal request was refused.' :
+      attempt?.state === 'acknowledged' || waiting ? (this.#polls >= TASK_PROPOSAL_LIMITS.polls ? 'Still working. Use Check again.' : 'Working on the proposal…') :
+      oversized ? 'Shorten the request to 16 KiB.' :
+      !scope.active ? 'Proposals can be requested while this task is running.' :
+      this.#entries.length >= TASK_PROPOSAL_LIMITS.entries ? 'This task has reached its proposal limit.' : '');
+    const signature = JSON.stringify(this.#entries);
+    if (this.#list.dataset.signature === signature) return;
+    this.#list.dataset.signature = signature;
+    this.#list.replaceChildren(...this.#entries.map(entry => {
+      const item = this.doc.createElement('li'), label = this.doc.createElement('p');
+      label.className = 'hint';
+      label.textContent = entry.state === 'proposed' ? 'Proposal — not applied' : entry.state === 'reserved' ? 'Working on the proposal…' :
+        (entry.state === 'failed' ? 'No proposal. ' : 'Outcome unknown; it was not retried. ') + (entry.reason ? PROPOSAL_REASONS[entry.reason] ?? '' : '');
+      item.append(label);
+      if (entry.text !== null) { const body = this.doc.createElement('pre'); body.className = 'codex-proposal-text'; body.textContent = this.api.safe(entry.text); item.append(body); }
+      return item;
+    }));
   }
 }

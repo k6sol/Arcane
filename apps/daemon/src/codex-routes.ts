@@ -8,6 +8,15 @@ const MAX_BODY = 160 * 1024, MAX_RESPONSE = 4 * 1024 * 1024;
 const byteLength = (text: string) => Buffer.byteLength(text,'utf8');
 function matches(supplied: string, expected: string): boolean { return expected.length > 0 && byteLength(supplied)===byteLength(expected) && timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)); }
 class RouteError extends Error { constructor(public code: string, public status: number) { super(code); } }
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Exact {connectionId,threadId,taskId}; validated before any service or native access. */
+function proposalScope(value: unknown): value is { connectionId: string; threadId: string; taskId: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const keys = Object.keys(value).sort(), row = value as Record<string, unknown>;
+  return keys.join(',') === 'connectionId,taskId,threadId' && typeof row.connectionId === 'string' && UUID.test(row.connectionId) &&
+    typeof row.taskId === 'string' && UUID.test(row.taskId) && typeof row.threadId === 'string' && row.threadId.length > 0 &&
+    row.threadId.length <= 256 && !/[\x00-\x1f\x7f]/.test(row.threadId);
+}
 async function body(request: IncomingMessage,maximum=MAX_BODY): Promise<unknown> {
   if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/json' || request.headers['content-encoding']) throw new RouteError('CONTENT_TYPE',415);
   const length = request.headers['content-length'];
@@ -74,6 +83,15 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
         if(!service.refreshUsage)throw new RouteError('RATE_LIMITS_UNAVAILABLE',400);
         const input=await body(request,1024);
         send(200,{state:project(await service.refreshUsage(input))});return true;
+      }
+      if(url.pathname==='/v1/codex/proposals'){
+        // Display-only read for one exact owned task; never journaled and never starts work.
+        if(request.method!=='POST')throw new RouteError('METHOD',405);
+        if(request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
+        if(!service.proposals)throw new RouteError('PROPOSALS_UNAVAILABLE',404);
+        const input=await body(request,1024);
+        if(!proposalScope(input))throw new RouteError('PROPOSAL_SCOPE',400);
+        send(200,{proposals:service.proposals(input)});return true;
       }
       const referenceTurn=url.pathname==='/v1/codex/reference-turn';
       if(url.pathname!=='/v1/codex/action'&&!referenceTurn)throw new RouteError('NOT_FOUND',404);

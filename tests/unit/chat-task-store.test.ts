@@ -14,7 +14,7 @@ function task(){return{id:randomUUID(),provider:'codex' as const,threadId:'threa
  state:'working' as const,round:0 as const,operationId:null,turnId:null,nativeSettled:false,acknowledged:false,repairDispatch:'not_requested' as const,prepared:null,evidence:[],reason:null};}
 
 test('opening a newer task journal leaves database bytes and sidecar inventory unchanged',async t=>{
- const f=await fixture(t),db=new DatabaseSync(sqliteTransportPath(f.file));db.exec('PRAGMA user_version=2;CREATE TABLE future_state(id INTEGER PRIMARY KEY,value TEXT);INSERT INTO future_state VALUES(1,\'retained\')');db.close();
+ const f=await fixture(t),db=new DatabaseSync(sqliteTransportPath(f.file));db.exec('PRAGMA user_version=3;CREATE TABLE future_state(id INTEGER PRIMARY KEY,value TEXT);INSERT INTO future_state VALUES(1,\'retained\')');db.close();
  const before=await readFile(f.file),names=await readdir(f.directory);assert.throws(()=>new ChatTaskStore({directory:f.directory,projectPath:f.project}),/newer/);
  assert.deepEqual(await readFile(f.file),before);assert.deepEqual(await readdir(f.directory),names);
 });

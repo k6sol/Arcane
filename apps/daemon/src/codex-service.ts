@@ -5,11 +5,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
-import { connectCodexClient, CodexClientError, type CodexClient, type Snapshot, type ArcaneMcpLaunchProfile, type NativeAssetHooks } from '../../../packages/codex-client/src/index.js';
+import { connectCodexClient, connectCodexProposalWorker, CodexClientError, type CodexClient, type Snapshot, type ArcaneMcpLaunchProfile, type NativeAssetHooks } from '../../../packages/codex-client/src/index.js';
 import type { NativeAssetRegistry, NativeAssetIncarnation } from './native-asset-authority.js';
 import { locateNativeCli } from '../../../packages/model-adapters/src/process.js';
 import { HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, redactNativeHistoryText, type NativeHistoryResult } from '../../../packages/codex-client/src/history.js';
-import { ChatTaskCoordinator } from './chat-task-coordinator.js';
+import { ChatTaskCoordinator, ChatTaskProposalError, type ChatTaskProposalFactory } from './chat-task-coordinator.js';
+import type { ChatTaskProposalRecord } from '../../../packages/storage/src/chat-task-store.js';
 import type { NativeTaskContinuation } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
 import {snapshotReferenceImages,referenceImageMetadata,type ReferenceImageMetadata} from '../../../packages/codex-client/src/reference-images.js';
@@ -33,6 +34,8 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
   z.strictObject({ ...common, action: z.literal('task-stop'), threadId: identifier, taskId: uuid }),
   z.strictObject({ ...common, action: z.literal('task-focus'), threadId: identifier, taskId: uuid }),
+  // Display-only proposal for the exact owned parent task. Never applied, approved or continued.
+  z.strictObject({ ...common, action: z.literal('proposal-start'), threadId: identifier, taskId: uuid, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 16384) }),
   z.strictObject({ ...common, action: z.literal('approval'), threadId: identifier, turnId: identifier, handle: identifier, decision: z.enum(['accept','decline','cancel']) }),
 ]);
 export type CodexAction = z.infer<typeof codexActionInput>;
@@ -43,7 +46,15 @@ export interface CodexActionRecord {
   createdAt: string; finishedAt: string | null;
   nextConnectionId?: string;
   references?:readonly ReferenceImageMetadata[];
+  /** proposal-start only; such receipts are never listed in the desktop action history. */
+  proposalId?: string;
 }
+/** Display data only: never an acceptance receipt, approval, grant or parent continuation. */
+export interface CodexProposalView {
+  proposalId: string; requestId: string; state: ChatTaskProposalRecord['state']; reason: ChatTaskProposalRecord['reason'];
+  text: string | null; textSha256: string | null; textBytes: number | null; createdAt: string; updatedAt: string;
+}
+export interface CodexProposalList { taskId: string; display: 'proposal_not_applied'; proposals: CodexProposalView[] }
 export interface CodexRecordedHistory {
   requestId: string; connectionId: string; provenance: Snapshot['provenance']; loadedAt: string;
   result: NativeHistoryResult;
@@ -104,6 +115,8 @@ export interface CodexServiceOptions {
   nativeToolsConfigured?: boolean;
   /** Trusted application callback; never use browser supplied paths/tokens. */
   arcaneMcp?: () => ArcaneMcpLaunchProfile;
+  /** Trusted composition/fixture proposal worker factory. Injected legacy clients without it gain no proposal authority. */
+  proposalWorker?: ChatTaskProposalFactory;
 }
 function safeDirectory(path: string): string {
   if (!isAbsolute(path)) throw new CodexClientError('PATH', 'Trusted runtime paths must be absolute.');
@@ -173,6 +186,12 @@ export function createCodexService(options: CodexServiceOptions) {
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
     return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}) });
   };
+  const proposalFactory: ChatTaskProposalFactory | null = options.proposalWorker ?? (options.connect ? null : async input => {
+    const command = await locateNativeCli('codex');
+    if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
+    return connectCodexProposalWorker({ command, cwd: projectPath, use: 'personal-local', accountIdentity: input.accountIdentity,
+      selection: { model: input.selection.model, effort: input.selection.effort }, owner: input.owner });
+  });
   interface HumanAssetIntent { connectionId:string; threadId:string; sessionId:string|null; operationId:string|null }
   interface AssetContext { handle: NativeAssetIncarnation | null; retired: boolean; hooks: NativeAssetHooks; nextIntent:HumanAssetIntent|null;
     actorId: string | null; taskId: string | null; ownerClient: CodexHostClient | null;manualAssets:boolean;manualWrites:boolean }
@@ -215,7 +234,7 @@ export function createCodexService(options: CodexServiceOptions) {
     const live = !!status && !status.retired && !context?.retired && snapshot?.connected === true && snapshot.ready === true && snapshot.thread?.configured === true && snapshot.account?.auth === 'subscription' && snapshot.mcpIsolation === 'arcane-only-verified';
     return {available:options.assetRegistry!==undefined,sealed:live&&status!.sealed,granted:live&&status!.granted,admissionOpen:live&&status!.granted&&status!.admissionOpen};
   }
-  const history = (): CodexActionRecord[] => (db.prepare('SELECT payload FROM actions ORDER BY rowid DESC LIMIT 100').all() as {payload:string}[]).map(row => JSON.parse(row.payload) as CodexActionRecord);
+  const history = (): CodexActionRecord[] => (db.prepare("SELECT payload FROM actions WHERE json_extract(payload,'$.action') IS NOT 'proposal-start' ORDER BY rowid DESC LIMIT 100").all() as {payload:string}[]).map(row => JSON.parse(row.payload) as CodexActionRecord);
   function nativeHistory(threadId?: string): CodexHistoryState | null {
     const row = (threadId === undefined
       ? db.prepare('SELECT thread_id,session_id,payload FROM native_history WHERE id=1 AND project_path=?').get(projectPath)
@@ -433,6 +452,7 @@ export function createCodexService(options: CodexServiceOptions) {
               const managed = tasks?.available() === true&&!injectedLegacy;
               let allowWrites = value.allowWorkspaceWrites === true;
               let allowAssets=value.allowAssets===true;
+              let taskAccount:string|null=null;
               if(managed) {
                 const original=selected.snapshot(),thread=original.thread,context=currentAssets;
                 if(!thread?.configured || thread.threadId!==value.threadId || !original.connected || !original.ready || original.approvals.length ||
@@ -443,6 +463,7 @@ export function createCodexService(options: CodexServiceOptions) {
                 const rotate=!!context.taskId || original.operations.some(op=>op.method==='turn/start');
                 const identity=selected.taskAccountIdentity?.()??null;
                 if(!identity)throw new CodexClientError('ACCOUNT_IDENTITY','Native account identity is unavailable for an exact managed task.');
+                taskAccount=identity;
                 pendingTaskBinding=true;ownsTaskBinding=true;
                 await tasks!.cancelFor(thread.threadId,thread.sessionId,'human_followup_superseded');
                 if(closed||generation!==epoch)throw new CodexClientError('STALE_CONNECTION','Human task was cancelled before dispatch.');
@@ -486,8 +507,9 @@ export function createCodexService(options: CodexServiceOptions) {
               }
               try {if(managed) {
                 const owned=selected,ownedContext=context!,taskId=randomUUID();let continuation:NativeTaskContinuation|null=null;
-                const origin=tasks!.begin({id:taskId,actorId:ownedContext.actorId!,snapshot:owned.snapshot(),allowWorkspaceWrites:allowWrites,allowAssets,
-                  owner:{snapshot:()=>owned.snapshot(),revoke:()=>{ownedContext.nextIntent=null;owned.revokeTaskContinuation!();},
+                // identity was captured before any fresh-process rotation; the getter reads the exact owned client live.
+                const origin=tasks!.begin({id:taskId,actorId:ownedContext.actorId!,snapshot:owned.snapshot(),allowWorkspaceWrites:allowWrites,allowAssets,accountIdentity:taskAccount!,
+                  owner:{snapshot:()=>owned.snapshot(),accountIdentity:()=>owned.taskAccountIdentity?.()??null,revoke:()=>{ownedContext.nextIntent=null;owned.revokeTaskContinuation!();},
                     repair:async(report:StudioTestTaskSettled)=>{
                       if(!continuation)throw new CodexClientError('TASK_SCOPE','Original task continuation is unavailable.');
                       const snapshot=owned.snapshot(),thread=snapshot.thread!;
@@ -530,6 +552,14 @@ export function createCodexService(options: CodexServiceOptions) {
               if(!thread || thread.threadId!==value.threadId || !tasks?.belongs(value.taskId,thread.threadId,thread.sessionId))
                 throw new CodexClientError('TASK_SCOPE','Stop only the owned task in this exact native conversation.');
               await tasks.cancel(value.taskId,'human_stopped_task');break;
+            }
+            case 'proposal-start': {
+              const thread=selected.snapshot().thread;
+              if(!proposalFactory || !thread?.configured || thread.threadId!==value.threadId || !tasks?.belongs(value.taskId,thread.threadId,thread.sessionId))
+                throw new CodexClientError('TASK_SCOPE','Propose only for the owned task in this exact native conversation.');
+              try {record.proposalId=tasks.startProposal({taskId:value.taskId,requestId:value.requestId,text:value.text,factory:proposalFactory}).id;}
+              catch(error){if(error instanceof ChatTaskProposalError)throw new CodexClientError(error.code,error.message);throw error;}
+              break;
             }
             case 'approval': selected.respondApproval({initiatedBy:'human',connectionId:value.connectionId,threadId:value.threadId,turnId:value.turnId,handle:value.handle,decision:value.decision}); break;
           }
@@ -616,6 +646,20 @@ export function createCodexService(options: CodexServiceOptions) {
     const promise = runAction(input); inFlight.add(promise);
     void promise.finally(() => inFlight.delete(promise)).catch(() => {}); return promise;
   }
+  /** Read-only proposal display for the exact selected conversation; never journals, dispatches or applies. */
+  function proposals(input: unknown): CodexProposalList {
+    if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
+    if (journalFault) throw new CodexClientError('JOURNAL_FAILURE','Review the retained native journal before reading proposals.');
+    const parsed = z.strictObject({connectionId:uuid,threadId:identifier,taskId:uuid}).safeParse(input);
+    if (!parsed.success) throw new CodexClientError('ARGUMENTS','Proposal listing requires the exact connection, conversation and task.');
+    const thread = exactClient(parsed.data.connectionId).snapshot().thread;
+    const task = tasks?.list().find(entry => entry.id === parsed.data.taskId);
+    if (!tasks || !thread?.configured || thread.threadId !== parsed.data.threadId || !task || task.threadId !== thread.threadId || task.sessionId !== thread.sessionId)
+      throw new CodexClientError('TASK_SCOPE','List proposals only for a task in this exact native conversation.');
+    return { taskId: task.id, display: 'proposal_not_applied', proposals: tasks.proposals(task.id).map(entry => ({ proposalId: entry.id, requestId: entry.requestId,
+      state: entry.state, reason: entry.reason, text: entry.result?.text ?? null, textSha256: entry.result?.textSha256 ?? null, textBytes: entry.result?.textBytes ?? null,
+      createdAt: entry.createdAt, updatedAt: entry.updatedAt })) };
+  }
   const usageReads = new Set<Promise<CodexProductState>>();
   async function readUsage(input: unknown): Promise<CodexProductState> {
     if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
@@ -633,7 +677,7 @@ export function createCodexService(options: CodexServiceOptions) {
     const promise = readUsage(input); usageReads.add(promise);
     void promise.finally(() => usageReads.delete(promise)).catch(() => {}); return promise;
   }
-  return { state, action, refreshUsage, playtestTasks:tasks?.playtests??null,
+  return { state, action, refreshUsage, proposals, playtestTasks:tasks?.playtests??null,
     attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, async close() {
     if (closed) return; generation++; closed = true;tasks?.fence();
     try{retireAssets();}catch{/* Native task closure must still run after registry retirement. */}
@@ -645,6 +689,6 @@ export function createCodexService(options: CodexServiceOptions) {
   },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
 export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &
-  Partial<Pick<ReturnType<typeof createCodexService>, 'refreshUsage'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
+  Partial<Pick<ReturnType<typeof createCodexService>, 'refreshUsage'|'proposals'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
 
 
