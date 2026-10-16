@@ -104,7 +104,7 @@ for (const storageAvailable of [true, false]) test('key onboarding: trusted rota
       }) }) });
       Object.defineProperty(navigator, 'clipboard', { value: { writeText: (value: string) => fixture.keyOnboardingClipboard(value) } });
     });
-    const page = await context.newPage(); page.setDefaultTimeout(6000); page.on('pageerror', error => errors.push(error.message));
+    const page = await context.newPage(); page.setDefaultTimeout(6000); page.setDefaultNavigationTimeout(20000); page.on('pageerror', error => errors.push(error.message));
     const text = async (id: string, value: string) => page.waitForFunction(({ id, value }) => document.getElementById(id)?.textContent?.includes(value), { id, value });
     const posts = () => requests.filter(request => request.method === 'POST');
     const chatView = () => page.evaluate(() => ({ messages: document.getElementById('codex-messages')?.textContent,

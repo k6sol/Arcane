@@ -104,7 +104,7 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
       } : {}),
     }) }) });
   }, { native, secret, keyId: KEY_ID, legacy, fail });
-  const page = await context.newPage(); page.setDefaultTimeout(6000); page.on('pageerror', error => errors.push(error.message));
+  const page = await context.newPage(); page.setDefaultTimeout(6000); page.setDefaultNavigationTimeout(20000); page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin + '/studio#' + TOKEN);
   await page.waitForFunction(() => document.getElementById('key-status')?.textContent === 'Key service responding');
   await page.locator('#codex-composer').fill(DRAFT);

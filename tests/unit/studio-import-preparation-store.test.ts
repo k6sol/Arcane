@@ -210,18 +210,23 @@ test('receipt witness refuses an actual Play heartbeat', async t => {
 });
 
 for (const operation of ['save', 'get'] as const) for (const transition of ['regrant', 'new-intent', 'retire', 'registry-close', 'cws-close'] as const)
-  test('preparation ' + operation + ' fences the same actor and binding across awaited filesystem ' + transition, { timeout: 8000 }, async t => {
-    const started = performance.now(), phases = [{phase:'fixture',elapsedMs:0}]; let completed = false;
+  test('preparation ' + operation + ' fences the same actor and binding across awaited filesystem ' + transition, { timeout: 30000 }, async t => {
+    const started = performance.now(), phases = [{phase:'fixture',elapsedMs:0}]; let completed = false, operationSignal:AbortSignal|undefined;
     const phase = (name:string) => phases.push({phase:name,elapsedMs:Math.round(performance.now()-started)});
-    t.after(()=>{if(!completed)t.diagnostic('Preparation fence phases: '+JSON.stringify({operation,transition,timeoutMs:8000,aborted:t.signal.aborted,phases}));});
+    t.after(()=>{if(!completed)t.diagnostic('Preparation fence phases: '+JSON.stringify({operation,transition,setupTimeoutMs:30000,timeoutMs:8000,aborted:operationSignal?.aborted??t.signal.aborted,phases}));});
     const f = await fixture(t); phase('open-store'); const store = await f.create(); phase('store-ready');
     if (operation === 'get') { await store.save(f.actor, JOB, f.prepared, f.witness, guard); phase('initial-save-ready'); }
-    const hold = f.holdRead(), pending = operation === 'save' ? store.save(f.actor, JOB, f.prepared, f.witness, guard) : store.get(f.actor, JOB, guard);
-    phase('await-held-filesystem');
-    const denied = assert.rejects(pending, transition === 'cws-close' ? refused('CONVERSATION_WORK_CLOSED') : refused('NATIVE_ASSET_AUTHORITY'));
-    await hold.entered; phase('filesystem-held'); f.transition(transition); hold.release(); phase('authority-changed'); await denied; phase('refusal-observed');
-    assert.equal((await readdir(f.options.directory)).includes(JOB + '.json'), operation === 'get');
-    completed = true;
+    // Native fixture setup has a separate budget; the awaited authority fence
+    // keeps its original eight-second deadline and every refusal assertion.
+    await t.test('refuses the changed authority', {timeout:8000}, async fence => {
+      operationSignal=fence.signal;
+      const hold = f.holdRead(), pending = operation === 'save' ? store.save(f.actor, JOB, f.prepared, f.witness, guard) : store.get(f.actor, JOB, guard);
+      phase('await-held-filesystem');
+      const denied = assert.rejects(pending, transition === 'cws-close' ? refused('CONVERSATION_WORK_CLOSED') : refused('NATIVE_ASSET_AUTHORITY'));
+      await hold.entered; phase('filesystem-held'); f.transition(transition); hold.release(); phase('authority-changed'); await denied; phase('refusal-observed');
+      assert.equal((await readdir(f.options.directory)).includes(JOB + '.json'), operation === 'get');
+      completed = true;
+    });
   });
 
 test('trusted target/service/deadline guard fences awaits and asynchronous or boolean guards never authorize storage', async t => {
