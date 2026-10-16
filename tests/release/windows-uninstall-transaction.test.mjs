@@ -331,31 +331,30 @@ test('an interruption inside a release keeps its known counters, reports Unknown
 });
 
 
-test('consented removal binds the owned shortcut to the authorized Programs folder and removes it before releases', windows, async () => {
+test('consented removal binds the owned shortcut to the authorized Programs folder and removes it after releases', windows, async () => {
   const s = setup(), f = await s.installed({ manual: false }), programs = s.owned('programs');
   fs.writeFileSync(join(programs, 'Other.lnk'), 'keep sibling shortcut');
   const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'consent', 'run-programs', programs]);
   assert.equal(rows.find(r => r.op === 'shortcut').state, 'Saved');
   const r = result(rows);
   assert.deepEqual([r.state, r.shortcut, r.lease], ['Removed', ['Deleted', null], ['Released', null]]);
-  assert.ok(r.progress.indexOf('Shortcut:0/1') < r.progress.indexOf('Releases:0/2'));
+  assert.ok(r.progress.indexOf('Shortcut:0/1') > r.progress.indexOf('Releases:1/2'));
+  assert.ok(r.progress.indexOf('Shortcut:0/1') < r.progress.indexOf('RootFiles:0/2'));
   assert.equal(exists(f.target), false); assert.deepEqual(fs.readdirSync(programs), ['Other.lnk']);
   assert.equal(fs.readFileSync(join(programs, 'Other.lnk'), 'utf8'), 'keep sibling shortcut');
 });
 
-test('a manual edit or different Programs root keeps the shortcut and all application content', windows, async () => {
+test('a manual edit or different Programs root keeps the shortcut while the recorded app is removed', windows, async () => {
   const s = setup();
   for (const mode of ['edited', 'other-root', 'replaced-root']) {
     const f = await s.installed({ manual: false }), programs = s.owned('programs'), other = s.owned('other-programs');
-    let before;
     const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'wait', 'consent', 'run-programs', mode === 'other-root' ? other : programs], [() => {
       if (mode === 'edited') fs.appendFileSync(join(programs, 'Arcane.lnk'), 'manual edit');
       if (mode === 'replaced-root') { fs.renameSync(programs, join(other, 'original')); fs.mkdirSync(programs); fs.writeFileSync(join(programs, 'Arcane.lnk'), 'manual replacement'); }
-      before = tree(f.target);
     }]);
     const r = result(rows);
-    assert.deepEqual([r.state, r.code, r.mutated, r.releases, r.lease], ['Refused', mode === 'edited' ? 'SHORTCUT' : 'SHORTCUT_ROOT', false, [], ['Released', null]], mode);
-    assert.deepEqual(tree(f.target), before, mode); assert.equal(exists(join(programs, 'Arcane.lnk')), true);
+    assert.deepEqual([r.state, r.code, r.mutated, r.shortcut, r.lease], ['Removed', null, true, ['Kept', mode === 'edited' ? 'CHANGED' : 'ROOT'], ['Released', null]], mode);
+    assert.equal(exists(f.target), false, mode); assert.equal(exists(join(programs, 'Arcane.lnk')), true);
   }
 });
 
@@ -364,4 +363,15 @@ test('an already absent owned shortcut permits the remaining consented removal',
   const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'wait', 'consent', 'run-programs', programs], [() => fs.unlinkSync(join(programs, 'Arcane.lnk'))]);
   const r = result(rows); assert.deepEqual([r.state, r.shortcut, r.lease], ['Removed', ['Absent', null], ['Released', null]]);
   assert.equal(exists(f.target), false); assert.deepEqual(fs.readdirSync(programs), []);
+});
+
+
+test('cancellation before release removal keeps the owned shortcut and application available', windows, async () => {
+  const s = setup(), f = await s.installed({ manual: false }), programs = s.owned('programs');
+  let appBefore, linkBefore;
+  const rows = await s.run(f.target, [...s.journal, 'shortcut', programs, 'wait', 'consent', 'cancel-at', 'Activity:0', 'run-programs', programs], [() => {
+    appBefore = tree(f.target); linkBefore = fs.readFileSync(join(programs, 'Arcane.lnk'));
+  }]);
+  const r = result(rows); assert.deepEqual([r.state, r.mutated, r.shortcut, r.releases, r.lease], ['Cancelled', false, null, [], ['Released', null]]);
+  assert.deepEqual(tree(f.target), appBefore); assert.deepEqual(fs.readFileSync(join(programs, 'Arcane.lnk')), linkBefore);
 });

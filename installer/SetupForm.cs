@@ -25,7 +25,7 @@ namespace Arcane.Installer
 
         public SetupForm()
         {
-            Text = "Arcane Setup"; ClientSize = new Size(600, 380);
+            Text = "Arcane Setup"; ClientSize = new Size(600, 396);
             FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen; BackColor = Color.FromArgb(17, 17, 21);
             ForeColor = Color.FromArgb(239, 239, 243); Font = new Font("Segoe UI", 10);
@@ -36,11 +36,11 @@ namespace Arcane.Installer
             Label title = new Label { Text = "Install Arcane", Location = new Point(34, 84), Size = new Size(530, 48), Font = new Font("Segoe UI", 26, FontStyle.Bold) }; Controls.Add(title);
             Label intro = new Label { Text = "Your local development workspace, ready when you are.", Location = new Point(37, 141), Size = new Size(525, 28), ForeColor = Color.FromArgb(169, 169, 182) }; Controls.Add(intro);
             status = new Label { Text = "Install for your Windows account.", Location = new Point(37, 196), Size = new Size(525, 30) }; Controls.Add(status);
-            detail = new Label { Text = "Projects and app profiles stay separate from installation files.", Location = new Point(37, 232), Size = new Size(525, 60), ForeColor = Color.FromArgb(169, 169, 182), Font = new Font("Segoe UI", 9) }; Controls.Add(detail);
-            progress = new ProgressBar { Location = new Point(37, 300), Size = new Size(525, 6), Style = ProgressBarStyle.Continuous, Minimum = 0, Maximum = 1000, Visible = false }; Controls.Add(progress);
-            primary = new Button { Text = "Install", Location = new Point(430, 316), Size = new Size(132, 36), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(255, 63, 91), ForeColor = Color.White, TabIndex = 0 };
+            detail = new Label { Text = "Projects and app profiles stay separate from installation files.", Location = new Point(37, 232), Size = new Size(525, 76), ForeColor = Color.FromArgb(169, 169, 182), Font = new Font("Segoe UI", 9) }; Controls.Add(detail);
+            progress = new ProgressBar { Location = new Point(37, 316), Size = new Size(525, 6), Style = ProgressBarStyle.Continuous, Minimum = 0, Maximum = 1000, Visible = false }; Controls.Add(progress);
+            primary = new Button { Text = "Install", Location = new Point(430, 332), Size = new Size(132, 36), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(255, 63, 91), ForeColor = Color.White, TabIndex = 0 };
             primary.FlatAppearance.BorderSize = 0; primary.Click += BeginInstall; Controls.Add(primary);
-            cancel = new Button { Text = "Cancel", Location = new Point(284, 316), Size = new Size(132, 36), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(32, 32, 39), ForeColor = ForeColor, TabIndex = 1 };
+            cancel = new Button { Text = "Cancel", Location = new Point(284, 332), Size = new Size(132, 36), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(32, 32, 39), ForeColor = ForeColor, TabIndex = 1 };
             cancel.FlatAppearance.BorderColor = Color.FromArgb(67, 67, 79); cancel.Click += delegate { if (busy) RequestCancel(); else Close(); }; Controls.Add(cancel);
             AcceptButton = primary; CancelButton = cancel;
             FormClosing += delegate(object sender, FormClosingEventArgs args) { if (busy) { args.Cancel = true; RequestCancel(); } };

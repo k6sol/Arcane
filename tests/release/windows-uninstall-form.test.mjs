@@ -17,6 +17,7 @@ internal static class Harness {
   static void Hide(Form f) { f.Opacity=0; f.Location=new Point(-32000,-32000); long ex=GetWindowLongPtr(f.Handle,-20).ToInt64(); SetWindowLongPtr(f.Handle,-20,new IntPtr((ex & ~0x00040000L)|0x00000080L)); }
   [STAThread] static int Main(string[] args) {
     Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException); int errors=0; Application.ThreadException+=delegate { errors++; };
+    if(args[0]=="present") return Present();
     InstalledRecordSnapshot record=InstalledRecord.Read(args[0]); string mode=args[1];
     UninstallConsent.Observe=delegate(Form f,string stage) { if(stage=="load") { Hide(f); return; } f.BeginInvoke(new Action(delegate { ((Button)f.Controls.Find("uninstall",false)[0]).PerformClick(); })); };
     ConsentResult decision=UninstallConsent.Ask(null,record); UninstallConsent.Observe=null;
@@ -45,6 +46,27 @@ internal static class Harness {
       }
     }
     return 0;
+  }
+  // Presentation of ACTUALLY constructed results (internal UninstallResult construction path) on a never-shown window. No record,
+  // no authorization and no transaction: the window's own consent-dependent removal never starts because Shown never fires.
+  static int Present() {
+    System.Collections.Generic.List<object> rows=new System.Collections.Generic.List<object>();
+    foreach(string spec in new[]{"null","Deleted:","Absent:","Kept:ROOT","Kept:CHANGED","Kept:LINKED","Kept:REDIRECT","Kept:IN_USE","Kept:ROOT:extra","Kept:ROOT:lock","Partial:Kept:ROOT"}) {
+      UninstallTransaction.Progress p=new UninstallTransaction.Progress(); string[] part=spec.Split(':');
+      int at=0; if(part[0]=="Partial") { p.State=UninstallState.Partial; p.Code="RELEASE"; at=1; } else p.State=UninstallState.Removed;
+      if(part[at]!="null") p.Shortcut=new OwnedFileResult((OwnedFileState)Enum.Parse(typeof(OwnedFileState),part[at]), part.Length>at+1&&part[at+1]!=""?part[at+1]:null, null, null);
+      if(part.Length>at+2&&part[at+2]=="extra") p.RootDirectory=ContainerOutcome.Kept; else if(p.State==UninstallState.Removed) p.RootDirectory=ContainerOutcome.Deleted;
+      if(part.Length>at+2&&part[at+2]=="lock") p.RetainedLock="fixture-lock";
+      UninstallResult r=new UninstallResult(p);
+      using(UninstallForm form=new UninstallForm(null,null)) {
+        Hide(form);
+        typeof(UninstallForm).GetMethod("Present",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(form,new object[]{r,false});
+        Label status=(Label)form.Controls.Find("status",false)[0], detail=(Label)form.Controls.Find("detail",false)[0];
+        Size need=TextRenderer.MeasureText(detail.Text,detail.Font,new Size(detail.Width,int.MaxValue),TextFormatFlags.WordBreak|TextFormatFlags.TextBoxControl);
+        rows.Add(new System.Collections.Generic.Dictionary<string,object>{{"spec",spec},{"title",status.Text},{"detail",detail.Text},{"needHeight",need.Height},{"labelHeight",detail.Height},{"labelWidth",detail.Width},{"result",form.Result==null}});
+      }
+    }
+    Console.WriteLine(new JavaScriptSerializer().Serialize(rows)); return 0;
   }
 }`;
 
@@ -88,4 +110,20 @@ for (const mode of ['complete', 'missing', 'cancel']) test('native uninstall win
   else if (mode === 'missing') { assert.deepEqual([r.state, r.code, r.title], ['Refused', 'CONSENT', 'Installation files kept']); assert.deepEqual(fs.readFileSync(join(target, 'installation.json')), before); }
   else { assert.deepEqual([r.cancelled, r.heldOpen, r.state, r.code, r.lease, r.title], [true, true, 'Partial', 'CANCELLED', 'Released', 'Some installation files remain']); assert.deepEqual(fs.readFileSync(join(target, 'installation.json')), before); }
   assert.equal(fs.existsSync(join(target, 'installation.lock')), false);
+});
+
+test('native uninstall window explains a kept Start Menu shortcut after a successful removal, and the text fits', windows, async () => {
+  const s = setup(), rows = await s.run('present', '-');
+  const by = Object.fromEntries(rows.map(r => [r.spec, r]));
+  const removed = 'Your projects and app profiles have been kept.';
+  for (const spec of ['null', 'Deleted:', 'Absent:']) assert.deepEqual([by[spec].title, by[spec].detail], ['Arcane is uninstalled', removed], spec + ': unchanged success text (old installations have no shortcut)');
+  assert.equal(by['Kept:ROOT'].detail, removed + '\nThe Start Menu location could not be confirmed, so its shortcut was kept.');
+  for (const code of ['CHANGED', 'LINKED', 'REDIRECT']) assert.equal(by['Kept:' + code].detail, removed + '\nThe Start Menu shortcut was kept because it was changed after setup.', code);
+  assert.equal(by['Kept:IN_USE'].detail, removed + '\nThe Start Menu shortcut could not be removed and was kept.');
+  assert.equal(by['Kept:ROOT:extra'].detail, 'Projects, profiles and additional files have been kept.\nThe Start Menu location could not be confirmed, so its shortcut was kept.');
+  for (const r of rows.filter(r => r.spec.startsWith('Kept'))) assert.equal(r.title, 'Arcane is uninstalled', r.spec + ': removal stays successful');
+  assert.equal(by['Kept:ROOT:lock'].detail, 'An installation operation needs review. Keep the remaining installation files and operation record.', 'retained-lock override is preserved');
+  assert.deepEqual([by['Partial:Kept:ROOT'].title, by['Partial:Kept:ROOT'].detail.includes('Start Menu')], ['Some installation files remain', false], 'only a completed removal explains the kept link');
+  for (const r of rows) { assert.ok(!/delete|remove it/i.test(r.detail.split('\n')[1] ?? ''), r.spec + ': never suggests deleting the unverified link'); assert.ok(r.needHeight <= r.labelHeight, r.spec + ': ' + r.needHeight + ' <= ' + r.labelHeight); }
+  assert.ok(rows.every(r => r.result), 'presentation never created or consumed a transaction');
 });

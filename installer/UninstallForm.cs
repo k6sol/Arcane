@@ -78,32 +78,43 @@ namespace Arcane.Installer
             catch (Exception) { Failed = true; }
             finally { busy = false; operation = null; running.Dispose(); }
             progress.Visible = false; close.Text = "Close"; close.Enabled = true;
-            if (Failed || Result == null)
+            Present(Result, Failed);
+        }
+
+        /// <summary>Shows the terminal message for an actual transaction result. Presentation only: it never acts on files.</summary>
+        private void Present(UninstallResult result, bool failed)
+        {
+            if (failed || result == null)
             {
                 status.Text = "Review installation files";
                 detail.Text = "The uninstall result could not be confirmed. Keep the remaining files for review.";
             }
-            else if (Result.State == UninstallState.Removed)
+            else if (result.State == UninstallState.Removed)
             {
                 status.Text = "Arcane is uninstalled";
-                detail.Text = Result.RootDirectory == ContainerOutcome.Kept ? "Projects, profiles and additional files have been kept." : "Your projects and app profiles have been kept.";
+                detail.Text = result.RootDirectory == ContainerOutcome.Kept ? "Projects, profiles and additional files have been kept." : "Your projects and app profiles have been kept.";
+                // The app removal stands; a shortcut that could not be proven ours is kept and explained, never deleted here.
+                if (result.Shortcut != null && result.Shortcut.State == OwnedFileState.Kept)
+                    detail.Text += result.Shortcut.Code == "ROOT" ? "\nThe Start Menu location could not be confirmed, so its shortcut was kept."
+                        : result.Shortcut.Code == "CHANGED" || result.Shortcut.Code == "LINKED" || result.Shortcut.Code == "REDIRECT" ? "\nThe Start Menu shortcut was kept because it was changed after setup."
+                        : "\nThe Start Menu shortcut could not be removed and was kept.";
             }
-            else if (Result.State == UninstallState.Cancelled)
+            else if (result.State == UninstallState.Cancelled)
             {
                 status.Text = "Uninstall cancelled";
                 detail.Text = "Installation files were kept. You can start uninstall again when you are ready.";
             }
-            else if (Result.Code == "BUSY")
+            else if (result.Code == "BUSY")
             {
                 status.Text = "Close Arcane to continue";
                 detail.Text = "A running app is using installation files. Close it, then start uninstall again.";
             }
             else
             {
-                status.Text = Result.State == UninstallState.Partial ? "Some installation files remain" : "Installation files kept";
+                status.Text = result.State == UninstallState.Partial ? "Some installation files remain" : "Installation files kept";
                 detail.Text = "Remaining files were kept for review. Projects and app profiles stay on this computer.";
             }
-            if (Result != null && Result.RetainedLock != null)
+            if (result != null && result.RetainedLock != null)
                 detail.Text = "An installation operation needs review. Keep the remaining installation files and operation record.";
         }
     }

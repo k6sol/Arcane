@@ -1,7 +1,7 @@
 // Consent-bound removal of a recorded Arcane installation (C# 5, .NET Framework 4.x, no NuGet). Requires the real
 // UninstallAuthorization issued by the confirmation dialog, the exact snapshot that was displayed and a live OperationLease
-// acquired here. First removes the journal-owned shortcut only in the current host-authorized Programs directory, then
-// each recorded release (ReleaseRemoval), then the journal-owned root launcher and uninstaller
+// acquired here. Removes each recorded release (ReleaseRemoval), then the journal-owned shortcut only in the current
+// host-authorized Programs directory, then the journal-owned root launcher and uninstaller
 // (OwnedFiles), then the unchanged journal, then installation.json LAST, then the observed releases container and root only
 // when they are empty. Profiles, unlisted, manual and sibling content are never recursively deleted. Synchronous: it never
 // prompts, starts or stops a process, waits, retries, rolls back, schedules a delete or rewrites the record.
@@ -17,7 +17,7 @@ using Microsoft.Win32.SafeHandles;
 namespace Arcane.Installer
 {
     internal enum UninstallState { Removed, Partial, Refused, Cancelled, Unknown }
-    internal enum UninstallPhase { Acquire, Consume, Activity, Shortcut, Releases, RootFiles, Journal, Record, ReleasesDirectory, Lease, RootDirectory, Done }
+    internal enum UninstallPhase { Acquire, Consume, Activity, Releases, Shortcut, RootFiles, Journal, Record, ReleasesDirectory, Lease, RootDirectory, Done }
     internal enum ContainerOutcome { NotReached, Deleted, Absent, Kept }
     internal enum MetadataOutcome { NotReached, Deleted, Kept, Unknown }
 
@@ -217,24 +217,6 @@ namespace Arcane.Installer
             Fence(p, bound, journal, false, lease);
             Preflight(p, bound, journal);
 
-            // Bind external metadata to the current host-authorized Programs folder before using it.
-            // A changed or manual link stops before any application release is removed.
-            if (journal.Shortcut != null)
-            {
-                p.Phase = UninstallPhase.Shortcut;
-                Checkpoint(p, cancel);
-                Report(progress, UninstallPhase.Shortcut, 0, 1);
-                Fence(p, bound, journal, false, lease);
-                string programs;
-                try { programs = InstalledRecord.DirectRoot(programsRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.Programs)); }
-                catch (Exception) { End(p, UninstallState.Refused, "SHORTCUT_ROOT"); return; }
-                if (journal.Shortcut.Root != programs || !InstalledRecord.Directory(programs).SameAs(journal.Shortcut.RootIdentity))
-                    End(p, UninstallState.Refused, "SHORTCUT_ROOT");
-                p.Shortcut = OwnedFiles.Remove(journal.Shortcut);
-                if (p.Shortcut.State == OwnedFileState.Unknown) End(p, UninstallState.Unknown, "SHORTCUT");
-                if (p.Shortcut.State != OwnedFileState.Deleted && p.Shortcut.State != OwnedFileState.Absent) End(p, Stopped(p), "SHORTCUT");
-            }
-
             p.Phase = UninstallPhase.Releases;
             List<InstalledRelease> order = new List<InstalledRelease>();
             foreach (InstalledRelease release in bound.Releases) if (release.Id != bound.ActiveReleaseId) order.Add(release);
@@ -248,6 +230,27 @@ namespace Arcane.Installer
                 p.Releases.Add(outcome);
                 if (outcome.State == RemovalState.Removed || outcome.State == RemovalState.Absent) continue;
                 End(p, outcome.State == RemovalState.Unknown ? UninstallState.Unknown : p.Mutated ? UninstallState.Partial : UninstallState.Refused, "RELEASE");
+            }
+
+            // The recorded application and external shortcut have separate ownership. A changed external
+            // folder or link is kept and reported; it cannot revoke authority over the recorded application.
+            // Wait until releases are removed so an earlier stop retains the existing launch entry.
+            if (journal.Shortcut != null)
+            {
+                p.Phase = UninstallPhase.Shortcut;
+                Checkpoint(p, cancel);
+                Report(progress, UninstallPhase.Shortcut, 0, 1);
+                Checkpoint(p, cancel);
+                Fence(p, bound, journal, false, lease);
+                bool authorizedRoot = false;
+                try
+                {
+                    string programs = InstalledRecord.DirectRoot(programsRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.Programs));
+                    authorizedRoot = journal.Shortcut.Root == programs && InstalledRecord.Directory(programs).SameAs(journal.Shortcut.RootIdentity);
+                }
+                catch (Exception) { }
+                p.Shortcut = authorizedRoot ? OwnedFiles.Remove(journal.Shortcut) : new OwnedFileResult(OwnedFileState.Kept, "ROOT", null, null);
+                if (p.Shortcut.State == OwnedFileState.Unknown) End(p, UninstallState.Unknown, "SHORTCUT");
             }
 
             // Only after every recorded release is Removed or Absent: the journal-owned root launcher, then uninstaller.
