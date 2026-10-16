@@ -38,6 +38,75 @@ namespace Arcane.Installer
         public int Files;
         public int Directories;
         public long Bytes;
+        /// <summary>Cleanup authority, set only by a successful fresh extraction (see StageDirectory.Cleanup).</summary>
+        internal StageOwnership Ownership;
+    }
+
+    /// <summary>Volume serial number plus file index: the identity of an opened file or directory.</summary>
+    internal struct FileIdentity
+    {
+        public uint Volume; public ulong Index;
+        public bool SameAs(FileIdentity other) { return Volume == other.Volume && Index == other.Index; }
+    }
+
+    /// <summary>Exactly what one successful extraction created: the stage root, each created directory and each written
+    /// file (relative path, byte count, SHA-256 of the bytes written, identity). Never derived from scanning a directory.</summary>
+    internal sealed class StageOwnership
+    {
+        internal sealed class OwnedDirectory { public string Relative; public FileIdentity Identity; }
+        internal sealed class OwnedFile { public string Relative; public long Bytes; public byte[] Sha256; public FileIdentity Identity; }
+        internal readonly string Root;
+        internal readonly FileIdentity RootIdentity;
+        internal readonly List<OwnedDirectory> Directories = new List<OwnedDirectory>(); // creation order: parents first
+        internal readonly List<OwnedFile> Files = new List<OwnedFile>();
+        internal bool Consumed;
+        internal StageOwnership(string root, FileIdentity identity) { Root = root; RootIdentity = identity; }
+    }
+
+    /// <summary>Handle-based file identity helpers (no link following) shared by extraction and cleanup.</summary>
+    internal static class NativeFile
+    {
+        internal const uint ReadAttributes = 0x80, GenericRead = 0x80000000, Delete = 0x10000;
+        internal const uint ShareRead = 1, ShareWrite = 2, ShareDelete = 4;
+        private const uint OpenExisting = 3, OpenReparsePoint = 0x00200000, BackupSemantics = 0x02000000;
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Created, Accessed, Written;
+            public uint VolumeSerial, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out ByHandleFileInformation information);
+
+        /// <summary>Opens the final component itself (a reparse point is opened, never followed). Null when it cannot be opened.</summary>
+        internal static Microsoft.Win32.SafeHandles.SafeFileHandle Open(string path, uint access, uint share, bool directory)
+        {
+            Microsoft.Win32.SafeHandles.SafeFileHandle handle = CreateFileW(path, access, share, IntPtr.Zero, OpenExisting, OpenReparsePoint | (directory ? BackupSemantics : 0), IntPtr.Zero);
+            if (handle.IsInvalid) { handle.Dispose(); return null; }
+            return handle;
+        }
+        internal static bool Describe(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out FileIdentity identity, out FileAttributes attributes, out uint links, out long size)
+        {
+            ByHandleFileInformation info;
+            identity = new FileIdentity(); attributes = 0; links = 0; size = -1;
+            if (handle == null || !GetFileInformationByHandle(handle, out info)) return false;
+            identity.Volume = info.VolumeSerial; identity.Index = ((ulong)info.IndexHigh << 32) | info.IndexLow;
+            attributes = (FileAttributes)info.Attributes; links = info.Links; size = ((long)info.SizeHigh << 32) | info.SizeLow;
+            return true;
+        }
+        /// <summary>Identity of an existing real directory (not a reparse point), read through a handle to the entry itself.</summary>
+        internal static FileIdentity DirectoryIdentity(string path)
+        {
+            using (Microsoft.Win32.SafeHandles.SafeFileHandle handle = Open(path, ReadAttributes, ShareRead | ShareWrite | ShareDelete, true))
+            {
+                FileIdentity identity; FileAttributes attributes; uint links; long size;
+                if (!Describe(handle, out identity, out attributes, out links, out size) || (attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new PayloadException("REPARSE", null);
+                return identity;
+            }
+        }
     }
 
     internal static class PayloadArchive
@@ -104,7 +173,7 @@ namespace Arcane.Installer
                     List<Planned> plan = Plan(zip, stage);
                     // 4. Fresh, direct stage, then exclusive extraction; a failure retains the stage.
                     CreateStage(stage);
-                    try { return Extract(plan, stage, ToHex(expected)); }
+                    try { return Extract(plan, stage, ToHex(expected), new StageOwnership(stage, NativeFile.DirectoryIdentity(stage))); }
                     catch (PayloadException error) { throw new PayloadException(error.Code, stage); }
                     catch (Exception) { throw new PayloadException("IO", stage); }
                 }
@@ -212,7 +281,7 @@ namespace Arcane.Installer
             }
         }
 
-        private static PayloadReceipt Extract(List<Planned> plan, string stage, string payloadHex)
+        private static PayloadReceipt Extract(List<Planned> plan, string stage, string payloadHex, StageOwnership ownership)
         {
             HashSet<string> created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             created.Add(stage);
@@ -221,12 +290,14 @@ namespace Arcane.Installer
             foreach (Planned item in plan)
             {
                 string directory = item.Directory ? item.Target : Path.GetDirectoryName(item.Target);
-                EnsureDirectories(stage, directory, created, receipt);
+                EnsureDirectories(stage, directory, created, receipt, ownership);
                 if (item.Directory) continue;
                 AssertDirectChain(directory);
                 long written = 0;
+                StageOwnership.OwnedFile owned = new StageOwnership.OwnedFile();
                 using (Stream input = item.Entry.Open())
                 using (FileStream output = new FileStream(item.Target, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (SHA256 sha = SHA256.Create())
                 {
                     if ((File.GetAttributes(item.Target) & FileAttributes.ReparsePoint) != 0) throw Fail("REPARSE");
                     while (true)
@@ -236,18 +307,24 @@ namespace Arcane.Installer
                         written += read;
                         // The declared size is a bound, not a hint: more bytes than declared is refused (no zip bomb).
                         if (written > item.DeclaredBytes || written > MaxFileBytes) throw Fail("ENTRY_SIZE");
-                        output.Write(buffer, 0, read);
+                        output.Write(buffer, 0, read); sha.TransformBlock(buffer, 0, read, null, 0);
                     }
-                    output.Flush(true);
+                    output.Flush(true); sha.TransformFinalBlock(new byte[0], 0, 0);
+                    // Ownership is recorded from the exclusive handle that wrote these bytes.
+                    FileAttributes attributes; uint links; long size;
+                    if (!NativeFile.Describe(output.SafeFileHandle, out owned.Identity, out attributes, out links, out size) || links != 1 || size != written) throw Fail("IO");
+                    owned.Sha256 = sha.Hash;
                 }
                 if (written != item.DeclaredBytes) throw Fail("ENTRY_SIZE");
+                owned.Relative = item.Target.Substring(stage.Length + 1); owned.Bytes = written; ownership.Files.Add(owned);
                 receipt.Files++; receipt.Bytes += written;
                 if (receipt.Bytes > MaxTotalBytes) throw Fail("LIMIT");
             }
+            receipt.Ownership = ownership;
             return receipt;
         }
 
-        private static void EnsureDirectories(string stage, string directory, HashSet<string> created, PayloadReceipt receipt)
+        private static void EnsureDirectories(string stage, string directory, HashSet<string> created, PayloadReceipt receipt, StageOwnership ownership)
         {
             if (created.Contains(directory)) return;
             string relative = directory.Substring(stage.Length).TrimStart('\\');
@@ -258,6 +335,9 @@ namespace Arcane.Installer
                 if (created.Contains(current)) continue;
                 if (!CreateDirectoryW(current, IntPtr.Zero)) throw Fail(Marshal.GetLastWin32Error() == 183 ? "ENTRY_DUPLICATE" : "IO");
                 if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw Fail("REPARSE");
+                StageOwnership.OwnedDirectory owned = new StageOwnership.OwnedDirectory();
+                owned.Relative = current.Substring(stage.Length + 1); owned.Identity = NativeFile.DirectoryIdentity(current);
+                ownership.Directories.Add(owned);
                 created.Add(current); receipt.Directories++;
             }
         }
