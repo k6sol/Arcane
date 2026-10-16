@@ -230,7 +230,7 @@ function installMenu() {
       void codeVerification.configure().catch(() => { if (window && !closing && !switching) void dialog.showMessageBox(window,
         { type: 'error', title: 'Luau verification', message: 'Luau verification configuration is unavailable. Saved settings were retained.' }); });
     } }] },
-    { label: 'Help', submenu: [{ label: 'About Arcane', click: () => { if (window) void dialog.showMessageBox(window, { type: 'info', title: 'Arcane', message: 'Arcane 0.1.0 - Local development preview', detail: 'Your tools. Your workspace.\nThis build is unsigned. It does not automatically connect providers, edit Studio, publish, or train model weights.' }); } }] }
+    { label: 'Help', submenu: [{ label: 'About Arcane', click: () => { if (window) void dialog.showMessageBox(window, { type: 'info', title: 'Arcane', message: 'Arcane 0.1.0 - Local development preview', detail: 'Your tools. Your workspace.\nThis unsigned preview reads native sign-in status at startup and can reconnect a saved Codex login. Tasks use your selected account and model.' }); } }] }
   ]));
 }
 async function failStartup(message) {
