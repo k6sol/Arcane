@@ -399,7 +399,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   const end = labSource.indexOf('\n    }', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the connection lab lifecycle boundary.');
   const member = labSource.slice(begin, end + '\n    }'.length);
-  let release, nativeAssetsFenced = false, taskAdmissionFenced = false;
+  let release, nativeAssetsFenced = false, taskAdmissionFenced = false, handoffsFenced = false;
   const childCleanup = new Promise(resolve => { release = resolve; });
   const server = {
     accepting: true,
@@ -410,10 +410,11 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
     server, workflow: null, associations: null, ownsAssociations: false, ArcaneError: Error,
     fenceTasks() { taskAdmissionFenced = true; return []; },
-    ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); } } },
-    ownedSourceVerifier: { dispose() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before compiler disposal'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before compiler disposal'); } },
+    handoffs: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before handoff retirement'); handoffsFenced = true; } },
+    ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before test cleanup'); } } },
+    ownedSourceVerifier: { dispose() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before compiler disposal'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before compiler disposal'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before compiler disposal'); } },
     nativeAssetRegistry: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before registry retirement'); nativeAssetsFenced = true; } },
-    codex: { close: () => { assert.equal(taskAdmissionFenced, true, 'Task admission must be fenced before child cleanup'); assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); return childCleanup; } },
+    codex: { close: () => { assert.equal(taskAdmissionFenced, true, 'Task admission must be fenced before child cleanup'); assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); assert.equal(handoffsFenced,true,'Handoff authority must be fenced before child cleanup'); return childCleanup; } },
   });
   const closing = cleanup();
   try {
@@ -421,6 +422,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     assert.equal(server.accepting, false, 'A holder of the old agent bearer can currently open a fresh socket while shutdown waits.');
     assert.equal(taskAdmissionFenced, true, 'Shutdown fences tasks while child cleanup is still held');
     assert.equal(nativeAssetsFenced, true, 'Shutdown retires native authority while child cleanup is still held');
+    assert.equal(handoffsFenced,true,'Shutdown retires handoff authority while child cleanup is still held');
   } finally {
     release();
     await closing;
