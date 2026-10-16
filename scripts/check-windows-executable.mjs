@@ -12,20 +12,26 @@ export async function runBoundedChild(command, args, options = {}) {
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 180000 ||
       !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 262144) throw new Error('Invalid child-process bounds.');
   return new Promise((resolve, reject) => {
-    let bytes = 0, output = '', failure = null, done = false, child, timer, terminalTimer, drainTimer;
+    let bytes = 0, output = '', failure = null, done = false, child, timer, terminalTimer, drainTimer, exited = null;
     const finish = (error, result) => {
       if (done) return; done = true; clearTimeout(timer); clearTimeout(terminalTimer); clearTimeout(drainTimer);
       if (error) reject(error); else resolve(result);
     };
     const stop = reason => {
-      if (failure || done) return; failure = reason; child.kill();
+      if (failure || done) return; failure = reason;
+      if (exited) { terminal(exited.code, exited.signal); return; }
       terminalTimer = setTimeout(() => finish(new Error(reason + ' Terminal acknowledgement missing; do not restart without inspection.')), 10000);
+      try { child.kill(); } catch { /* Keep waiting for this owned process's terminal acknowledgement. */ }
     };
     try { child = spawn(command, args, { cwd, env, shell: false, windowsHide: true,
       stdio: ipc ? ['ignore','pipe','pipe','ipc'] : ['ignore','pipe','pipe'] }); }
     catch { finish(new Error('Owned process could not be created.')); return; }
     timer = setTimeout(() => stop('Owned process deadline exceeded.'), deadlineMs);
     const collect = chunk => { bytes += chunk.length; if (bytes > maxOutputBytes) stop('Owned process diagnostics exceeded their bound.'); else output += chunk.toString('utf8'); };
+    // Windows can report a pipe connection failure on the stream instead of the
+    // child. Observe both pipes and retain the actual terminal outcome.
+    child.stdout.on('error', () => stop('Owned process output pipe failed.'));
+    child.stderr.on('error', () => stop('Owned process output pipe failed.'));
     child.stdout.on('data', collect); child.stderr.on('data', collect);
     if (onMessage) child.on('message', message => { try { onMessage(message, child); } catch { stop('Invalid private child message.'); } });
     child.once('error', () => finish(new Error('Owned process could not be launched. No security settings were changed.')));
@@ -38,6 +44,7 @@ export async function runBoundedChild(command, args, options = {}) {
     // Windows IPC may leave inherited stream handles open after a proven process exit.
     // Bound the drain, then close only our read handles; exit status is authoritative.
     child.once('exit', (code, signal) => {
+      exited = { code, signal };
       clearTimeout(timer);
       drainTimer = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); if (child.connected) child.disconnect(); terminal(code,signal); }, 250);
     });

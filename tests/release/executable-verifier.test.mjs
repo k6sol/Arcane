@@ -44,3 +44,30 @@ test('a proved timely exit cancels deadline before delayed IPC drain',async()=>{
   for(const t of timers)if(!cleared.has(t))t.fn();
   assert.equal((await pending).code,0);assert.equal(kills,0);
 });
+
+for (const stream of ['stdout', 'stderr']) test('a '+stream+' pipe failure retains the owned terminal outcome',async()=>{
+  const {EventEmitter}=await import('node:events'),{runInNewContext}=await import('node:vm');
+  const child=new EventEmitter(); let kills=0;
+  child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+  child.stdout.destroy=()=>{};child.stderr.destroy=()=>{};child.connected=false;child.pid=456;
+  child.kill=()=>{kills++;queueMicrotask(()=>{child.emit('exit',9,null);child.emit('close',9,null);});};
+  const run=runInNewContext('('+runBoundedChild.toString()+')',{spawn:()=>child,process:{env:{}},setTimeout,clearTimeout});
+  const pending=run('fixture',[],{env:{}});
+  child[stream].emit('error',Object.assign(new Error('fixture pipe'),{code:'ENOTCONN'}));
+  await assert.rejects(pending,error=>/output pipe failed.*exit acknowledged/.test(error.message)&&error.outcome.code===9&&error.outcome.pid===456);
+  assert.equal(kills,1);
+  child[stream].emit('error',new Error('late fixture error'));
+});
+
+test('a pipe failure after proved exit fails verification without killing or replaying',async()=>{
+  const {EventEmitter}=await import('node:events'),{runInNewContext}=await import('node:vm');
+  const child=new EventEmitter(); let kills=0;
+  child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+  child.stdout.destroy=()=>{};child.stderr.destroy=()=>{};child.connected=false;child.pid=789;child.kill=()=>kills++;
+  const run=runInNewContext('('+runBoundedChild.toString()+')',{spawn:()=>child,process:{env:{}},setTimeout,clearTimeout});
+  const pending=run('fixture',[],{env:{}});
+  child.emit('exit',0,null);
+  child.stderr.emit('error',new Error('fixture drain failure'));
+  await assert.rejects(pending,error=>/output pipe failed.*exit acknowledged/.test(error.message)&&error.outcome.code===0);
+  assert.equal(kills,0);
+});
