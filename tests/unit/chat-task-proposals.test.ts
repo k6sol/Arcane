@@ -23,6 +23,8 @@ const V1 = [
   'CREATE TABLE chat_task_meta(id INTEGER PRIMARY KEY CHECK(id=1),project_id TEXT NOT NULL,project_path TEXT NOT NULL) STRICT',
   'CREATE TABLE chat_task_owner(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,token TEXT NOT NULL) STRICT',
 ];
+const PLAN_TABLES = ['CREATE TABLE chat_task_plans(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192)) STRICT',
+  'CREATE TABLE chat_task_plan_steps(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,step_key TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192),UNIQUE(plan_id,step_key),UNIQUE(plan_id,seq)) STRICT'];
 const V2 = [...V1, 'CREATE TABLE chat_task_proposals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,request_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=98304)) STRICT'];
 
 async function fixture(t: test.TestContext) {
@@ -68,7 +70,7 @@ test('v1 journal migrates to v2 only after exact validation and retains task pay
     assert.equal(store.get(active.id).state, 'unknown'); assert.equal(store.get(active.id).reason, 'daemon_restarted_no_replay');
     assert.deepEqual(store.proposals(kept.id), []);
   } finally { store.close(); }
-  const after = schema(f.file); assert.equal(after.version, 2); assert.deepEqual(after.sql, [...V2].sort());
+  const after = schema(f.file); assert.equal(after.version, 3); assert.deepEqual(after.sql, [...V2, PLAN_TABLES[0], PLAN_TABLES[1]].sort());
   const db = new DatabaseSync(sqliteTransportPath(f.file));
   try { assert.equal((db.prepare('SELECT payload FROM chat_tasks WHERE id=?').get(kept.id) as { payload: string }).payload, JSON.stringify(kept)); } finally { db.close(); }
 });
@@ -81,7 +83,7 @@ test('corrupt, foreign, wrong-project and live-owned journals are refused byte-i
     ['v1 for another project', f => { v1Journal(f.file, f.project, [], { projectId: 'e'.repeat(64), projectPath: f.root }); }, /schema or project/],
     ['v1 with an extra table', f => { v1Journal(f.file, f.project, []); const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('CREATE TABLE extra(id INTEGER PRIMARY KEY)'); db.close(); }, /schema or project/],
     ['v1 with a live owner', f => { v1Journal(f.file, f.project, []); const db = new DatabaseSync(sqliteTransportPath(f.file)); db.prepare('INSERT INTO chat_task_owner VALUES(1,?,?)').run(process.pid, 'foreign'); db.close(); }, /live owner/],
-    ['v3 journal', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=3;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
+    ['v4 journal', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=4;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
   ];
   for (const [name, prepare, expected] of cases) await t.test(name, async st => {
     const f = await fixture(st); prepare(f); const before = await inventory(f);

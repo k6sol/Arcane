@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { lstatSync, mkdirSync, realpathSync, openSync, closeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import {isDeepStrictEqual,types} from 'node:util';
 import { dirname, isAbsolute, join, resolve, parse } from 'node:path';
 import { z } from 'zod';
 import { sqliteTransportPath } from './sqlite-path.js';
@@ -43,8 +44,78 @@ const TABLES_V1=[
   'CREATE TABLE chat_task_owner(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,token TEXT NOT NULL) STRICT',
 ];
 const PROPOSALS_DDL='CREATE TABLE chat_task_proposals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,request_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=98304)) STRICT';
-const TABLES=[...TABLES_V1,PROPOSALS_DDL];
-const VERSION=2;
+const PLANS_DDL='CREATE TABLE chat_task_plans(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192)) STRICT';
+const STEPS_DDL='CREATE TABLE chat_task_plan_steps(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,step_key TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192),UNIQUE(plan_id,step_key),UNIQUE(plan_id,seq)) STRICT';
+const TABLES_V2=[...TABLES_V1,PROPOSALS_DDL];
+const TABLES=[...TABLES_V2,PLANS_DDL,STEPS_DDL];
+const VERSION=3;
+
+/** Durable host-authored plan journal. Rows record bounded identities and digests only; they carry no
+ * capability, prompt text or acceptance. A plan or parent completion is never task acceptance. */
+export const CHAT_TASK_PLAN_POLICY=Object.freeze({rounds:2,workersPerRound:3,workerAttempts:5,parentSteps:2,fanInBytes:98304} as const);
+export const CHAT_TASK_PLAN_LIMITS=Object.freeze({plans:256,stepsPerPlan:16,steps:4096,payloadBytes:8192});
+export const CHAT_TASK_PLAN_REASONS=Object.freeze(['task_cancelled','task_uncertain','fenced','parent_retired','repair_reserved','binding_changed',
+  'budget_exhausted','no_usable_proposals','daemon_restarted','step_unknown'] as const);
+export const CHAT_TASK_STEP_REASONS=Object.freeze(['not_dispatched','dispatch_uncertain','terminal_unobserved','daemon_restarted_no_replay',
+  'not_requested','request_uncertain','worker_failed','worker_unknown'] as const);
+export type ChatTaskPlanReason=typeof CHAT_TASK_PLAN_REASONS[number];
+export type ChatTaskStepReason=typeof CHAT_TASK_STEP_REASONS[number];
+export type ChatTaskStepKind='worker'|'incorporation'|'evidence';
+export interface ChatTaskPlanBinding {
+  readonly accountIdentity:string;readonly connectionId:string;readonly incarnationId:string;readonly threadId:string;readonly sessionId:string|null;
+  readonly model:string;readonly effort:string;readonly allowWorkspaceWrites:boolean;readonly allowAssets:boolean;
+}
+export interface ChatTaskPlanRecord {
+  readonly id:string;readonly taskId:string;readonly binding:ChatTaskPlanBinding;readonly objectiveSha256:string;readonly inputSha256:string;
+  readonly policy:typeof CHAT_TASK_PLAN_POLICY;readonly state:'active'|'stopped'|'awaiting_review'|'unknown';readonly reason:ChatTaskPlanReason|null;
+  readonly createdAt:string;readonly updatedAt:string;
+}
+export interface ChatTaskPlanStep {
+  readonly id:string;readonly planId:string;readonly taskId:string;readonly key:string;readonly seq:number;readonly kind:ChatTaskStepKind;
+  readonly round:number;readonly index:number;readonly state:'reserved'|'acknowledged'|'completed'|'failed'|'unknown';readonly reason:ChatTaskStepReason|null;
+  readonly proposalId:string|null;readonly fanIn:{readonly proposalIds:readonly string[];readonly bytes:number;readonly sha256:string}|null;
+  readonly native:{readonly operationId:string;readonly turnId:string}|null;readonly terminal:'completed'|'failed'|null;readonly evidence:{readonly runId:string}|null;
+  readonly createdAt:string;readonly updatedAt:string;
+}
+export class ChatTaskPlanError extends Error {
+  constructor(readonly code:'INPUT'|'TASK_SCOPE'|'PLAN_INACTIVE'|'BINDING'|'ORDER'|'DUPLICATE'|'BUDGET'|'STATE'|'FULL'|'CORRUPT',message:string){super(message);this.name='ChatTaskPlanError';}
+}
+const planFail=(code:ChatTaskPlanError['code'],message:string):never=>{throw new ChatTaskPlanError(code,message);};
+const planBinding=z.strictObject({accountIdentity:hash,connectionId:z.string().uuid(),incarnationId:z.string().uuid(),threadId:id,sessionId:id.nullable(),
+  model:id,effort:id,allowWorkspaceWrites:z.boolean(),allowAssets:z.boolean()});
+const planPolicy=z.strictObject({rounds:z.literal(2),workersPerRound:z.literal(3),workerAttempts:z.literal(5),parentSteps:z.literal(2),fanInBytes:z.literal(98304)});
+const planRecord=z.strictObject({id:z.string().uuid(),taskId:z.string().uuid(),binding:planBinding,objectiveSha256:hash,inputSha256:hash,policy:planPolicy,
+  state:z.enum(['active','stopped','awaiting_review','unknown']),reason:z.enum(CHAT_TASK_PLAN_REASONS).nullable(),createdAt:z.string().datetime(),updatedAt:z.string().datetime()})
+  .refine(r=>(r.state==='active'||r.state==='awaiting_review')===(r.reason===null));
+const stepRecord=z.strictObject({id:z.string().uuid(),planId:z.string().uuid(),taskId:z.string().uuid(),key:z.string().max(32),seq:z.number().int().min(1).max(16),
+  kind:z.enum(['worker','incorporation','evidence']),round:z.number().int().min(1).max(2),index:z.number().int().min(0).max(2),
+  state:z.enum(['reserved','acknowledged','completed','failed','unknown']),reason:z.enum(CHAT_TASK_STEP_REASONS).nullable(),
+  proposalId:z.string().uuid().nullable(),
+  fanIn:z.strictObject({proposalIds:z.array(z.string().uuid()).min(1).max(3),bytes:z.number().int().min(1).max(98304),sha256:hash}).nullable(),
+  native:z.strictObject({operationId:id,turnId:id}).nullable(),terminal:z.enum(['completed','failed']).nullable(),
+  evidence:z.strictObject({runId:id}).nullable(),createdAt:z.string().datetime(),updatedAt:z.string().datetime()})
+  .refine(s=>s.key===s.kind+':'+s.round+':'+s.index&&((s.state==='failed'||s.state==='unknown')===(s.reason!==null))&&
+    (s.kind==='worker'?s.proposalId!==null&&s.fanIn===null&&s.native===null&&s.terminal===null&&s.evidence===null&&s.state!=='acknowledged':
+     s.kind==='incorporation'?s.index===0&&s.proposalId===null&&s.fanIn!==null&&s.evidence===null&&new Set(s.fanIn.proposalIds).size===s.fanIn.proposalIds.length&&
+       (s.state==='completed')===(s.terminal!==null)&&(s.state==='acknowledged'||s.state==='completed'?s.native!==null:s.state==='reserved'||s.state==='failed'?s.native===null:true):
+     s.index===0&&s.proposalId===null&&s.fanIn===null&&s.native===null&&s.terminal===null&&(s.state==='acknowledged')===(s.evidence!==null)&&s.state!=='completed'));
+/** Detached exact own data: accessors, symbol keys and unexpected fields are refused before any use. */
+function ownData(value:unknown,required:readonly string[],optional:readonly string[]=[]):Record<string,unknown>{
+  if(value===null||typeof value!=='object'||types.isProxy(value)||Array.isArray(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value)))planFail('INPUT','Expected an exact host envelope.');
+  const keys=Reflect.ownKeys(value as object);
+  if(keys.some(key=>typeof key!=='string'||!required.includes(key)&&!optional.includes(key))||required.some(key=>!keys.includes(key)))planFail('INPUT','Unexpected or missing field.');
+  const out:Record<string,unknown>={};
+  for(const key of keys as string[]){const field=Object.getOwnPropertyDescriptor(value,key);if(!field||!Object.hasOwn(field,'value'))planFail('INPUT','Fields must be plain data.');out[key]=field!.value;}
+  return out;
+}
+function ownArray(value:unknown,max:number):unknown[]{
+  if(value===null||typeof value!=='object'||types.isProxy(value)||!Array.isArray(value)||Object.getPrototypeOf(value)!==Array.prototype||value.length<1||value.length>max)planFail('INPUT','Expected a bounded array.');
+  const items=value as unknown[],keys=Reflect.ownKeys(items);
+  if(keys.length!==items.length+1)planFail('INPUT','Arrays must be plain data.');
+  return Array.from({length:items.length},(_,index)=>{const field=Object.getOwnPropertyDescriptor(items,index); // descriptors only; getters are never invoked
+    if(!field||!Object.hasOwn(field,'value'))planFail('INPUT','Array items must be plain data.');return field!.value;});
+}
+type PlanRow={id:string;task_id:string;payload:string};type StepRow={id:string;plan_id:string;step_key:string;seq:number;payload:string};
 
 /** Display-only proposal attempts (never acceptance, effects or a parent continuation). */
 export const CHAT_TASK_PROPOSAL_LIMITS=Object.freeze({perTask:8,total:1024,promptBytes:16384,textBytes:64*1024,payloadBytes:98304});
@@ -98,7 +169,7 @@ export class ChatTaskStore {
     try {
       const version = Number(this.#db.prepare('PRAGMA user_version').get()!.user_version);
       if (version > VERSION) throw new Error('Task journal is newer than this build.');
-      if(version!==0&&version!==1&&version!==VERSION)throw new Error('Invalid task journal version.');
+      if(version!==0&&version!==1&&version!==2&&version!==VERSION)throw new Error('Invalid task journal version.');
       if(this.#db.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')throw new Error('Task journal integrity failed.');
       if(version===0){
         if(this.#db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get()||this.#db.prepare('PRAGMA application_id').get()?.application_id!==0)throw new Error('Unversioned task journal is not empty.');
@@ -112,14 +183,14 @@ export class ChatTaskStore {
         if(meta?.project_id!==this.projectId||meta.project_path!==this.projectPath)throw new Error('Task journal schema or project changed.');
       };
       const current=Number(this.#db.prepare('PRAGMA user_version').get()!.user_version);
-      schemaFor(current===1?TABLES_V1:TABLES);
+      schemaFor(current===1?TABLES_V1:current===2?TABLES_V2:TABLES);
       // Every refusal below is read-only and precedes the first write (including the WAL header switch).
       const taskRows=()=>{
         const rows=this.#db.prepare('SELECT id,payload FROM chat_tasks ORDER BY rowid LIMIT 257').all() as {id:string;payload:string}[];
         if(rows.length>256)throw new Error('Task journal retention exceeded.');
-        for(const row of rows){let value:unknown;try{value=JSON.parse(row.payload);}catch{throw new Error('Task journal is corrupt.');}if(this.#parse(value).id!==row.id)throw new Error('Task journal is corrupt.');}
+        for(const row of rows)this.#taskRow(row);
       };
-      taskRows();if(current===VERSION)this.#allProposals();
+      taskRows();if(current>=2)this.#allProposals();if(current===VERSION)this.#allPlanRows();
       const prior=this.#db.prepare('SELECT pid FROM chat_task_owner WHERE id=1').get();
       if(prior&&live(Number(prior.pid)))throw new Error('Task journal already has a live owner.');
       this.#db.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;PRAGMA journal_size_limit=8388608;');
@@ -127,12 +198,13 @@ export class ChatTaskStore {
         const owner=this.#db.prepare('SELECT pid FROM chat_task_owner WHERE id=1').get();
         if(owner&&live(Number(owner.pid)))throw new Error('Task journal already has a live owner.');
         this.#db.prepare('INSERT OR REPLACE INTO chat_task_owner VALUES(1,?,?)').run(process.pid,this.#owner);
-        // v1 -> v2 only after exact validation and ownership, in the SAME transaction as the claim.
-        if(current===1){
-          if(Number(this.#db.prepare('PRAGMA user_version').get()!.user_version)!==1)throw new Error('Task journal version changed during migration.');
-          schemaFor(TABLES_V1);taskRows(); // Recheck under the write lock before any DDL.
-          this.#db.exec(PROPOSALS_DDL);this.#db.exec(`PRAGMA user_version=${VERSION};`);
-        }
+        // v1/v2 -> v3 only after exact validation and ownership, in the SAME transaction as the claim.
+        if(current<VERSION){
+          if(Number(this.#db.prepare('PRAGMA user_version').get()!.user_version)!==current)throw new Error('Task journal version changed during migration.');
+          schemaFor(current===1?TABLES_V1:TABLES_V2);taskRows();if(current===2)this.#allProposals(); // Recheck under the write lock before any DDL.
+          if(current===1)this.#db.exec(PROPOSALS_DDL);
+          this.#db.exec(PLANS_DDL);this.#db.exec(STEPS_DDL);this.#db.exec(`PRAGMA user_version=${VERSION};`);
+        }else this.#recoverPlans(); // Restart recovery is atomic with the ownership claim.
         this.#db.exec('COMMIT');claimed=true;
       }catch(error){this.#db.exec('ROLLBACK');throw error;}
       schemaFor(TABLES);
@@ -233,14 +305,22 @@ export class ChatTaskStore {
   summaries(): ChatTaskSummary[] { this.#open(); return [...this.#summaries.values()].map(value => ({ ...value })); }
   list(): ChatTaskRecord[] {
     this.#open();
-    const rows = this.#db.prepare('SELECT payload FROM chat_tasks ORDER BY rowid LIMIT 257').all() as { payload: string }[];
+    const rows = this.#db.prepare('SELECT id,payload FROM chat_tasks ORDER BY rowid LIMIT 257').all() as { id: unknown; payload: unknown }[];
     if (rows.length > 256) throw new Error('Task journal retention exceeded.');
-    return rows.map(row => this.#parse(JSON.parse(row.payload)));
+    return rows.map(row => this.#taskRow(row));
   }
   get(id: string): ChatTaskRecord {
     this.#open();
-    const row = this.#db.prepare('SELECT payload FROM chat_tasks WHERE id=?').get(id) as { payload: string } | undefined;
-    if (!row) throw new Error('Unknown task.'); return this.#parse(JSON.parse(row.payload));
+    const row = this.#db.prepare('SELECT id,payload FROM chat_tasks WHERE id=?').get(id) as { id: unknown; payload: unknown } | undefined;
+    if (!row) throw new Error('Unknown task.'); return this.#taskRow(row);
+  }
+  /** One exact task row reader: raw types and the UTF-8 byte bound are checked BEFORE JSON.parse,
+   * then the existing record schema, project and row identity. Externally altered rows refuse; nothing is repaired. */
+  #taskRow(row: { id: unknown; payload: unknown }): ChatTaskRecord {
+    if (!row || typeof row.id !== 'string' || typeof row.payload !== 'string' || Buffer.byteLength(row.payload) > 512 * 1024) throw new Error('Task journal record exceeds its bound or is corrupt.');
+    let value: unknown; try { value = JSON.parse(row.payload); } catch { throw new Error('Task journal is corrupt.'); }
+    const parsed = this.#parse(value); if (parsed.id !== row.id) throw new Error('Task journal is corrupt.');
+    return parsed;
   }
   create(input: Omit<ChatTaskRecord, 'projectId' | 'projectPath' | 'revision' | 'createdAt' | 'updatedAt'>): ChatTaskRecord {
     this.#open();
@@ -261,6 +341,256 @@ export class ChatTaskStore {
       this.#cache(parsed);
       return structuredClone(parsed);
     } catch (error) { this.#db.exec('ROLLBACK'); throw error; }
+  }
+  // ---------------------------------------------------------------- plan journal (v3)
+  #parsePlan(row:PlanRow):ChatTaskPlanRecord{
+    if(!row||typeof row.id!=='string'||typeof row.task_id!=='string'||typeof row.payload!=='string'||Buffer.byteLength(row.payload)>CHAT_TASK_PLAN_LIMITS.payloadBytes)planFail('CORRUPT','Task plan journal is corrupt.');
+    let value:unknown;try{value=JSON.parse(row.payload);}catch{planFail('CORRUPT','Task plan journal is corrupt.');}
+    const parsed=planRecord.safeParse(value);
+    if(!parsed.success||parsed.data.id!==row.id||parsed.data.taskId!==row.task_id)planFail('CORRUPT','Task plan journal is corrupt.');
+    const r=parsed.data!;return Object.freeze({...r,binding:Object.freeze({...r.binding}),policy:CHAT_TASK_PLAN_POLICY}) as ChatTaskPlanRecord;
+  }
+  #parseStep(row:StepRow):ChatTaskPlanStep{
+    if(!row||typeof row.id!=='string'||typeof row.plan_id!=='string'||typeof row.step_key!=='string'||typeof row.seq!=='number'||typeof row.payload!=='string'||
+      Buffer.byteLength(row.payload)>CHAT_TASK_PLAN_LIMITS.payloadBytes)planFail('CORRUPT','Task plan step journal is corrupt.');
+    let value:unknown;try{value=JSON.parse(row.payload);}catch{planFail('CORRUPT','Task plan step journal is corrupt.');}
+    const parsed=stepRecord.safeParse(value);
+    if(!parsed.success||parsed.data.id!==row.id||parsed.data.planId!==row.plan_id||parsed.data.key!==row.step_key||parsed.data.seq!==row.seq)planFail('CORRUPT','Task plan step journal is corrupt.');
+    const s=parsed.data!;
+    return Object.freeze({...s,fanIn:s.fanIn?Object.freeze({...s.fanIn,proposalIds:Object.freeze([...s.fanIn.proposalIds])}):null,
+      native:s.native?Object.freeze({...s.native}):null,evidence:s.evidence?Object.freeze({...s.evidence}):null}) as ChatTaskPlanStep;
+  }
+  /** Read-only validation of every plan/step row, bounded BEFORE parse, with cross-row consistency. */
+  #allPlanRows():{plans:{record:ChatTaskPlanRecord;payload:string}[];steps:{record:ChatTaskPlanStep;payload:string}[]}{
+    const planRows=this.#db.prepare('SELECT id,task_id,payload FROM chat_task_plans ORDER BY rowid LIMIT ?').all(CHAT_TASK_PLAN_LIMITS.plans+1) as PlanRow[];
+    if(planRows.length>CHAT_TASK_PLAN_LIMITS.plans)planFail('CORRUPT','Task plan retention exceeded.');
+    const stepRows=this.#db.prepare('SELECT id,plan_id,step_key,seq,payload FROM chat_task_plan_steps ORDER BY plan_id,seq LIMIT ?').all(CHAT_TASK_PLAN_LIMITS.steps+1) as StepRow[];
+    if(stepRows.length>CHAT_TASK_PLAN_LIMITS.steps)planFail('CORRUPT','Task plan step retention exceeded.');
+    const plans=planRows.map(row=>({record:this.#parsePlan(row),payload:row.payload})),steps=stepRows.map(row=>({record:this.#parseStep(row),payload:row.payload}));
+    const byId=new Map(plans.map(p=>[p.record.id,p.record]));
+    for(const plan of plans){const task=this.#db.prepare('SELECT 1 FROM chat_tasks WHERE id=?').get(plan.record.taskId);if(!task)planFail('CORRUPT','Task plan names an unknown task.');}
+    const counts=new Map<string,number>();
+    for(const{record:step}of steps){
+      const plan=byId.get(step.planId);if(!plan||plan.taskId!==step.taskId)planFail('CORRUPT','Task plan step names an unknown plan.');
+      const n=(counts.get(step.planId)??0)+1;counts.set(step.planId,n);
+      if(step.seq!==n||n>CHAT_TASK_PLAN_LIMITS.stepsPerPlan)planFail('CORRUPT','Task plan step order is corrupt.');
+    }
+    for(const plan of plans)this.#validatePlanLinks(plan.record,steps.filter(step=>step.record.planId===plan.record.id).map(step=>step.record));
+    return{plans,steps};
+  }
+  /** Reconcile persisted references before recovery or live use, not just each
+   * row's JSON shape. A valid-looking foreign proposal cannot supply evidence. */
+  #validatePlanLinks(plan:ChatTaskPlanRecord,steps:ChatTaskPlanStep[]):void{
+    const seen=new Set<string>();let workers=0,parents=0,evidence=0;
+    for(let index=0;index<steps.length;index++){
+      const step=steps[index]!,prior=steps.slice(0,index);
+      if(step.taskId!==plan.taskId)planFail('CORRUPT','Task plan step changed its parent.');
+      if(prior.some(s=>s.kind==='evidence'))planFail('CORRUPT','Task plan continued after its review request.');
+      if(step.round===2&&!prior.some(s=>s.kind==='incorporation'&&s.round===1&&s.state==='completed'&&s.terminal==='completed'))
+        planFail('CORRUPT','Task plan round lacks its completed parent.');
+      if(step.kind==='worker'){
+        const proposal=this.#proposalById(step.proposalId!);
+        if(!proposal||proposal.taskId!==plan.taskId||seen.has(proposal.id)||prior.some(s=>s.kind!=='worker'&&s.round===step.round)||
+          step.state==='completed'&&proposal.state!=='proposed'||step.state==='failed'&&proposal.state!=='failed')
+          planFail('CORRUPT','Task plan worker lost its exact proposal.');
+        seen.add(proposal!.id);workers++;
+      }else if(step.kind==='incorporation'){
+        const currentWorkers=prior.filter(s=>s.kind==='worker'&&s.round===step.round);
+        if(!currentWorkers.length||currentWorkers.some(s=>s.state==='reserved'||s.state==='acknowledged'))planFail('CORRUPT','Task plan parent lacks settled workers.');
+        let fanIn:ChatTaskPlanStep['fanIn'];
+        try{fanIn=this.#fanIn(plan,step.round,prior,step.fanIn!.proposalIds);}catch{planFail('CORRUPT','Task plan fan-in cannot be verified.');}
+        if(!isDeepStrictEqual(fanIn!,step.fanIn))planFail('CORRUPT','Task plan fan-in commitment changed.');
+        parents++;
+      }else{
+        const parent=prior.filter(s=>s.kind==='incorporation').at(-1);
+        if(!parent||parent.round!==step.round||parent.state!=='completed'||parent.terminal!=='completed')planFail('CORRUPT','Task plan review lacks its completed parent.');
+        evidence++;
+      }
+    }
+    if(workers>CHAT_TASK_PLAN_POLICY.workerAttempts||parents>CHAT_TASK_PLAN_POLICY.parentSteps||evidence>1||
+      plan.state==='awaiting_review'&&!steps.some(s=>s.kind==='evidence'&&s.state==='acknowledged'))planFail('CORRUPT','Task plan graph exceeds its policy.');
+  }
+  #planRow(planId:string):{record:ChatTaskPlanRecord;payload:string}{
+    const row=this.#db.prepare('SELECT id,task_id,payload FROM chat_task_plans WHERE id=?').get(planId) as PlanRow|undefined;
+    if(!row)planFail('TASK_SCOPE','Unknown task plan.');return{record:this.#parsePlan(row!),payload:row!.payload};
+  }
+  #stepRows(planId:string):{record:ChatTaskPlanStep;payload:string}[]{
+    const rows=this.#db.prepare('SELECT id,plan_id,step_key,seq,payload FROM chat_task_plan_steps WHERE plan_id=? ORDER BY seq LIMIT ?').all(planId,CHAT_TASK_PLAN_LIMITS.stepsPerPlan+1) as StepRow[];
+    if(rows.length>CHAT_TASK_PLAN_LIMITS.stepsPerPlan)planFail('CORRUPT','Task plan step retention exceeded.');
+    const parsed=rows.map((row,i)=>{const record=this.#parseStep(row);if(record.seq!==i+1)planFail('CORRUPT','Task plan step order is corrupt.');return{record,payload:row.payload};});
+    this.#validatePlanLinks(this.#planRow(planId).record,parsed.map(row=>row.record));return parsed;
+  }
+  #writePlan(next:ChatTaskPlanRecord,priorPayload:string|null):void{
+    const parsed=planRecord.safeParse(next);if(!parsed.success)planFail('STATE','Invalid task plan record.');
+    const payload=JSON.stringify(parsed.data);if(Buffer.byteLength(payload)>CHAT_TASK_PLAN_LIMITS.payloadBytes)planFail('BUDGET','Task plan record exceeds its bound.');
+    if(priorPayload===null)this.#db.prepare('INSERT INTO chat_task_plans(id,task_id,payload) VALUES(?,?,?)').run(next.id,next.taskId,payload);
+    else if(Number(this.#db.prepare('UPDATE chat_task_plans SET payload=? WHERE id=? AND payload=?').run(payload,next.id,priorPayload).changes)!==1)planFail('STATE','Task plan changed concurrently.');
+  }
+  #writeStep(next:ChatTaskPlanStep,priorPayload:string|null):void{
+    const parsed=stepRecord.safeParse(next);if(!parsed.success)planFail('STATE','Invalid task plan step.');
+    const payload=JSON.stringify(parsed.data);if(Buffer.byteLength(payload)>CHAT_TASK_PLAN_LIMITS.payloadBytes)planFail('BUDGET','Task plan step exceeds its bound.');
+    if(priorPayload===null)this.#db.prepare('INSERT INTO chat_task_plan_steps(id,plan_id,step_key,seq,payload) VALUES(?,?,?,?,?)').run(next.id,next.planId,next.key,next.seq,payload);
+    else if(Number(this.#db.prepare('UPDATE chat_task_plan_steps SET payload=? WHERE id=? AND payload=?').run(payload,next.id,priorPayload).changes)!==1)planFail('STATE','Task plan step changed concurrently.');
+  }
+  #planTx<T>(work:()=>T):T{this.#open();this.#db.exec('BEGIN IMMEDIATE');try{const out=work();this.#db.exec('COMMIT');return out;}catch(error){this.#db.exec('ROLLBACK');throw error;}}
+  /** Restart recovery inside the ownership transaction: no surviving owner keeps automatic dispatch rights. */
+  #recoverPlans():void{
+    const now=new Date().toISOString(),{plans,steps}=this.#allPlanRows();
+    for(const{record,payload}of steps)if(record.state==='reserved'||record.state==='acknowledged'&&record.kind==='incorporation')
+      this.#writeStep({...record,state:'unknown',reason:'daemon_restarted_no_replay',updatedAt:now},payload);
+    for(const{record,payload}of plans)if(record.state==='active')this.#writePlan({...record,state:'stopped',reason:'daemon_restarted',updatedAt:now},payload);
+  }
+  #bindingCurrent(plan:ChatTaskPlanRecord,task:ChatTaskRecord,accountIdentity:unknown):void{
+    const b=plan.binding;
+    if(!ACTIVE.has(task.state)||task.repairDispatch!=='not_requested')planFail('PLAN_INACTIVE','The parent task is not running or has a repair reserved.');
+    if(accountIdentity!==b.accountIdentity||task.connectionId!==b.connectionId||task.incarnationId!==b.incarnationId||task.threadId!==b.threadId||
+      task.sessionId!==b.sessionId||task.model!==b.model||task.effort!==b.effort||task.allowWorkspaceWrites!==b.allowWorkspaceWrites||task.allowAssets!==b.allowAssets)
+      planFail('BINDING','The original task binding changed.');
+  }
+  /** One host-authored plan per exact running task, bound to its original identity and grants. */
+  createPlan(input:{taskId:string;accountIdentity:string;objectiveSha256:string;inputSha256:string}):ChatTaskPlanRecord{
+    const i=ownData(input,['taskId','accountIdentity','objectiveSha256','inputSha256']);
+    if(!z.string().uuid().safeParse(i.taskId).success||![i.accountIdentity,i.objectiveSha256,i.inputSha256].every(v=>hash.safeParse(v).success))planFail('INPUT','Invalid plan identity.');
+    return this.#planTx(()=>{
+      const task=this.get(i.taskId as string);
+      if(!ACTIVE.has(task.state)||task.repairDispatch!=='not_requested')planFail('PLAN_INACTIVE','The parent task is not running or has a repair reserved.');
+      if(this.#db.prepare('SELECT 1 FROM chat_task_plans WHERE task_id=?').get(task.id))planFail('DUPLICATE','This task already has a plan.');
+      if(Number((this.#db.prepare('SELECT count(*) AS n FROM chat_task_plans').get() as {n:number}).n)>=CHAT_TASK_PLAN_LIMITS.plans)planFail('FULL','Task plan journal is full.');
+      const now=new Date().toISOString(),record:ChatTaskPlanRecord={id:randomUUID(),taskId:task.id,binding:{accountIdentity:i.accountIdentity as string,connectionId:task.connectionId,
+        incarnationId:task.incarnationId,threadId:task.threadId,sessionId:task.sessionId,model:task.model,effort:task.effort,allowWorkspaceWrites:task.allowWorkspaceWrites,allowAssets:task.allowAssets},
+        objectiveSha256:i.objectiveSha256 as string,inputSha256:i.inputSha256 as string,policy:CHAT_TASK_PLAN_POLICY,state:'active',reason:null,createdAt:now,updatedAt:now};
+      this.#writePlan(record,null);return this.#planRow(record.id).record;
+    });
+  }
+  plan(taskId:string):ChatTaskPlanRecord|null{
+    this.#open();const row=this.#db.prepare('SELECT id,task_id,payload FROM chat_task_plans WHERE task_id=?').get(taskId) as PlanRow|undefined;
+    return row?this.#parsePlan(row):null;
+  }
+  planSteps(planId:string):ChatTaskPlanStep[]{this.#open();return this.#stepRows(planId).map(row=>row.record);}
+  /** Canonical fan-in: derived from exact proposed rows in worker index order, never asserted by a caller. */
+  #fanIn(plan:ChatTaskPlanRecord,round:number,steps:ChatTaskPlanStep[],ids:readonly string[]):{proposalIds:string[];bytes:number;sha256:string}{
+    const workers=steps.filter(s=>s.kind==='worker'&&s.round===round),selected:ChatTaskPlanStep[]=[];
+    for(const id of ids){const step=workers.find(s=>s.proposalId===id);if(!step||step.state!=='completed'||selected.includes(step))planFail('ORDER','Fan-in needs unique completed workers of this round.');selected.push(step!);}
+    selected.sort((a,b)=>a.index-b.index);
+    const rows=selected.map(step=>{const proposal=this.#proposalById(step.proposalId!);
+      if(!proposal||proposal.taskId!==plan.taskId||proposal.state!=='proposed'||!proposal.result)planFail('ORDER','Fan-in proposals must be proposed rows of this task.');
+      return{proposalId:proposal!.id,textSha256:proposal!.result!.textSha256,textBytes:proposal!.result!.textBytes};});
+    const bytes=rows.reduce((total,row)=>total+row.textBytes,0);
+    if(bytes>CHAT_TASK_PLAN_POLICY.fanInBytes)planFail('BUDGET','Fan-in exceeds its byte budget.');
+    return{proposalIds:rows.map(row=>row.proposalId),bytes,sha256:createHash('sha256').update(JSON.stringify(rows)).digest('hex')};
+  }
+  proposalById(id:string):ChatTaskProposalRecord|null{this.#open();return this.#proposalById(id);}
+  #proposalById(id:string):ChatTaskProposalRecord|null{
+    const row=this.#db.prepare('SELECT id,task_id,request_id,payload FROM chat_task_proposals WHERE id=?').get(id) as {id:string;task_id:string;request_id:string;payload:string}|undefined;
+    return row?this.#parseProposal(row):null;
+  }
+  /** Reserve BEFORE any native or worker effect. Keys are never reused, even after failed/unknown. */
+  reservePlanStep(input:{planId:string;kind:ChatTaskStepKind;round:number;index:number;live:{accountIdentity:string};proposalId?:string;proposalIds?:readonly string[]}):ChatTaskPlanStep{
+    const i=ownData(input,['planId','kind','round','index','live'],['proposalId','proposalIds']),live=ownData(i.live,['accountIdentity']);
+    const kind=i.kind,round=i.round,index=i.index;
+    if(typeof i.planId!=='string'||!['worker','incorporation','evidence'].includes(kind as string)||!Number.isSafeInteger(round)||(round as number)<1||(round as number)>CHAT_TASK_PLAN_POLICY.rounds||
+      !Number.isSafeInteger(index)||(index as number)<0||(index as number)>=(kind==='worker'?CHAT_TASK_PLAN_POLICY.workersPerRound:1)||
+      (kind==='worker')!==(i.proposalId!==undefined)||(kind==='incorporation')!==(i.proposalIds!==undefined))planFail('INPUT','Invalid plan step reservation.');
+    const proposalIds=kind==='incorporation'?ownArray(i.proposalIds,CHAT_TASK_PLAN_POLICY.workersPerRound).map(v=>{if(typeof v!=='string')planFail('INPUT','Invalid fan-in.');return v as string;}):null;
+    return this.#planTx(()=>{
+      const{record:plan}=this.#planRow(i.planId as string);
+      if(plan.state!=='active')planFail('PLAN_INACTIVE','The plan no longer accepts reservations.');
+      this.#bindingCurrent(plan,this.get(plan.taskId),live.accountIdentity);
+      const steps=this.#stepRows(plan.id).map(row=>row.record),key=kind+':'+round+':'+index;
+      if(steps.some(s=>s.key===key))planFail('DUPLICATE','This plan step was already reserved; it is never replayed.');
+      if(steps.length>=CHAT_TASK_PLAN_LIMITS.stepsPerPlan||Number((this.#db.prepare('SELECT count(*) AS n FROM chat_task_plan_steps').get() as {n:number}).n)>=CHAT_TASK_PLAN_LIMITS.steps)planFail('FULL','Task plan step journal is full.');
+      const inFlight=steps.filter(s=>s.state==='reserved'||s.state==='acknowledged');
+      const incorporation=(r:number)=>steps.find(s=>s.kind==='incorporation'&&s.round===r);
+      const priorOpen=(r:number)=>{const prior=incorporation(r-1);return r===1||prior?.state==='completed'&&prior.terminal==='completed';};
+      let extra:Partial<ChatTaskPlanStep>={};
+      if(kind==='worker'){
+        if(inFlight.some(s=>s.kind!=='worker'||s.round!==round)||incorporation(round as number)||!priorOpen(round as number))planFail('ORDER','Workers run only in the current open round.');
+        if(steps.filter(s=>s.kind==='worker').length>=CHAT_TASK_PLAN_POLICY.workerAttempts)planFail('BUDGET','Worker attempt budget exhausted.');
+        const proposal=typeof i.proposalId==='string'?this.#proposalById(i.proposalId):null;
+        if(!proposal||proposal.taskId!==plan.taskId||proposal.state!=='reserved'||steps.some(s=>s.proposalId===proposal.id)||
+          this.#db.prepare("SELECT 1 FROM chat_task_plan_steps WHERE json_extract(payload,'$.proposalId')=?").get(proposal.id))
+          planFail('ORDER','A worker step links one exact reserved proposal attempt of this task.');
+        extra={proposalId:proposal!.id};
+      }else if(kind==='incorporation'){
+        const workers=steps.filter(s=>s.kind==='worker'&&s.round===round);
+        if(inFlight.length||!priorOpen(round as number)||!workers.length||steps.filter(s=>s.kind==='incorporation').length>=CHAT_TASK_PLAN_POLICY.parentSteps)planFail('ORDER','Incorporation needs every worker of its round settled.');
+        extra={fanIn:this.#fanIn(plan,round as number,steps,proposalIds!)};
+      }else{
+        const last=steps.filter(s=>s.kind==='incorporation').at(-1);
+        if(inFlight.length||!last||last.round!==round||last.state!=='completed'||last.terminal!=='completed'||steps.some(s=>s.kind==='evidence'))planFail('ORDER','Evidence follows the final completed incorporation once.');
+      }
+      const now=new Date().toISOString(),record:ChatTaskPlanStep={id:randomUUID(),planId:plan.id,taskId:plan.taskId,key,seq:steps.length+1,kind:kind as ChatTaskStepKind,
+        round:round as number,index:index as number,state:'reserved',reason:null,proposalId:null,fanIn:null,native:null,terminal:null,evidence:null,...extra,createdAt:now,updatedAt:now};
+      this.#writeStep(record,null);
+      return this.#stepRows(plan.id).find(row=>row.record.id===record.id)!.record;
+    });
+  }
+  #stepById(stepId:unknown):{record:ChatTaskPlanStep;payload:string}{
+    if(typeof stepId!=='string')planFail('INPUT','Invalid step.');
+    const row=this.#db.prepare('SELECT id,plan_id,step_key,seq,payload FROM chat_task_plan_steps WHERE id=?').get(stepId as string) as StepRow|undefined;
+    if(!row)planFail('TASK_SCOPE','Unknown task plan step.');
+    const record=this.#parseStep(row!);this.#stepRows(record.planId);
+    return{record,payload:row!.payload};
+  }
+  /** Exact owned native operation/turn (incorporation) or evidence-review reference (evidence). */
+  acknowledgePlanStep(input:{stepId:string;native?:{operationId:string;turnId:string};evidence?:{runId:string}}):ChatTaskPlanStep{
+    const i=ownData(input,['stepId'],['native','evidence']);
+    const native=i.native===undefined?null:ownData(i.native,['operationId','turnId']),evidence=i.evidence===undefined?null:ownData(i.evidence,['runId']);
+    return this.#planTx(()=>{
+      const{record,payload}=this.#stepById(i.stepId);
+      if(record.state!=='reserved'||(record.kind==='incorporation')!==(native!==null)||(record.kind==='evidence')!==(evidence!==null)||record.kind==='worker')planFail('STATE','Only a reserved parent or evidence step can be acknowledged.');
+      const next:ChatTaskPlanStep={...record,state:'acknowledged',native:native as ChatTaskPlanStep['native'],evidence:evidence as ChatTaskPlanStep['evidence'],updatedAt:new Date().toISOString()};
+      this.#writeStep(next,payload);
+      if(record.kind==='evidence'){const plan=this.#planRow(record.planId);if(plan.record.state==='active')this.#writePlan({...plan.record,state:'awaiting_review',updatedAt:next.updatedAt},plan.payload);}
+      return this.#stepById(record.id).record;
+    });
+  }
+  /** Settle only from observed outcomes. Terminal results are immutable; unknown never becomes known. */
+  settlePlanStep(input:{stepId:string;outcome:{state:'completed';terminal:'completed'|'failed'}|{state:'failed'|'unknown';reason:ChatTaskStepReason}}):ChatTaskPlanStep{
+    const i=ownData(input,['stepId','outcome']),outcome=ownData(i.outcome,['state'],['terminal','reason']);
+    return this.#planTx(()=>{
+      const{record,payload}=this.#stepById(i.stepId);
+      if(record.kind==='worker')planFail('STATE','Worker steps settle from their proposal row.');
+      const now=new Date().toISOString();let next:ChatTaskPlanStep;
+      if(outcome.state==='completed'&&record.kind==='incorporation'&&record.state==='acknowledged'&&(outcome.terminal==='completed'||outcome.terminal==='failed')&&outcome.reason===undefined)
+        next={...record,state:'completed',terminal:outcome.terminal,updatedAt:now};
+      else if(outcome.state==='failed'&&record.state==='reserved'&&outcome.terminal===undefined&&(record.kind==='incorporation'?outcome.reason==='not_dispatched':outcome.reason==='not_requested'))
+        next={...record,state:'failed',reason:outcome.reason as ChatTaskStepReason,updatedAt:now};
+      else if(outcome.state==='unknown'&&(record.state==='reserved'||record.state==='acknowledged'&&record.kind==='incorporation')&&outcome.terminal===undefined&&
+        (record.kind==='incorporation'?['dispatch_uncertain','terminal_unobserved'].includes(outcome.reason as string):outcome.reason==='request_uncertain'))
+        next={...record,state:'unknown',reason:outcome.reason as ChatTaskStepReason,updatedAt:now};
+      else planFail('STATE','This plan step outcome is not allowed from its current state.');
+      this.#writeStep(next!,payload);
+      if(next!.state==='unknown'){const plan=this.#planRow(record.planId);if(plan.record.state==='active')this.#writePlan({...plan.record,state:'unknown',reason:'step_unknown',updatedAt:now},plan.payload);}
+      return this.#stepById(record.id).record;
+    });
+  }
+  /** Mirror the linked proposal's terminal row; an orphan or still-reserved proposal stays unsettled. */
+  syncWorkerStep(input:{stepId:string}):ChatTaskPlanStep{
+    const i=ownData(input,['stepId']);
+    return this.#planTx(()=>{
+      const{record,payload}=this.#stepById(i.stepId);
+      if(record.kind!=='worker'||record.state!=='reserved')planFail('STATE','Only a reserved worker step can be synchronized.');
+      const proposal=this.#proposalById(record.proposalId!);
+      if(!proposal||proposal.taskId!==record.taskId)planFail('CORRUPT','Worker step lost its proposal row.');
+      if(proposal!.state==='reserved')return record;
+      const next:ChatTaskPlanStep=proposal!.state==='proposed'?{...record,state:'completed',updatedAt:new Date().toISOString()}
+        :{...record,state:proposal!.state==='failed'?'failed':'unknown',reason:proposal!.state==='failed'?'worker_failed':'worker_unknown',updatedAt:new Date().toISOString()};
+      this.#writeStep(next,payload);
+      if(next.state==='unknown'){const plan=this.#planRow(record.planId);if(plan.record.state==='active')this.#writePlan({...plan.record,state:'unknown',reason:'step_unknown',updatedAt:next.updatedAt},plan.payload);}
+      return this.#stepById(record.id).record;
+    });
+  }
+  /** Retirement, repair reservation, binding change or budget end: no further reservations. Idempotent. */
+  stopPlan(input:{planId:string;reason:ChatTaskPlanReason}):ChatTaskPlanRecord{
+    const i=ownData(input,['planId','reason']);
+    if(!CHAT_TASK_PLAN_REASONS.includes(i.reason as ChatTaskPlanReason)||i.reason==='daemon_restarted'||i.reason==='step_unknown')planFail('INPUT','Invalid stop reason.');
+    return this.#planTx(()=>{
+      const{record,payload}=this.#planRow(i.planId as string);
+      if(record.state!=='active')return record;
+      this.#writePlan({...record,state:'stopped',reason:i.reason as ChatTaskPlanReason,updatedAt:new Date().toISOString()},payload);
+      return this.#planRow(record.id).record;
+    });
   }
   close(): void { if (!this.#closed) { this.#closed = true;try{this.#db.prepare('DELETE FROM chat_task_owner WHERE token=?').run(this.#owner);}finally{this.#db.close();} } }
 }
