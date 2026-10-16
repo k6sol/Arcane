@@ -27,10 +27,12 @@ type Mode = 'normal' | 'discovery-init-failure' | 'inventory-failure' | 'unsafe-
   'proposal-tools' | 'proposal-active' | 'proposal-account-change' | 'proposal-late-inherited' | 'proposal-lost-turn';
 type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'invalid-id' | 'extra-field' | 'disconnected' | 'close-pending' | 'busy-pending';
 type HistoryResponse = 'wrong-thread' | 'wrong-session' | 'wrong-project';
+type ParentRetirement='before-launch'|'discovery-init'|'discovery-inventory'|'final-init'|'thread-inventory'|'turn-inventory'|'before-write'|'reentrant-abort'|'active'|'after-connect'|'mutated-owner';
 interface FixtureOptions {
   profile?: boolean; mode?: Mode; thread?: boolean; history?: boolean; invalidProfile?: boolean;
   historyAction?: HistoryAction; historyResponse?: HistoryResponse; repeatHistory?: boolean;
   proposal?: boolean; dispatch?: boolean; repeatProposal?: boolean;
+  parentRetirement?:ParentRetirement;
 }
 interface Receipt {
   event: string; launch?: number; args?: string[]; envKeys?: string[]; tokenHash?: string | null;
@@ -152,6 +154,17 @@ process.env.CODEX_HOME = 'SYNTHETIC_PROVIDER_OVERRIDE';
 process.env.OPENAI_API_KEY = 'SYNTHETIC_PROVIDER_KEY';
 process.env.NODE_OPTIONS = '--require=SYNTHETIC_WRAPPER';
 const { connectCodexClient, connectCodexProposalWorker } = await import(library + 'index.js');
+const controller=new AbortController();let parentActive=true,proposing=false,proposalChecks=0;
+globalThis.arcaneFixtureRetire=()=>{parentActive=false;controller.abort();record({event:'parent-retired'});};
+if(scenario.parentRetirement==='before-launch')globalThis.arcaneFixtureRetire();
+const owner={signal:controller.signal,assertActive:()=>{
+  record({event:'owner-check',phase:proposing?'proposing':'connecting'});
+  if(proposing&&++proposalChecks===2) {
+    if(scenario.parentRetirement==='before-write')parentActive=false;
+    if(scenario.parentRetirement==='reentrant-abort')globalThis.arcaneFixtureRetire();
+  }
+  if(!parentActive)throw new Error('SYNTHETIC_PRIVATE_PARENT_DETAIL');
+}};
 let client;
 try {
   const profile = { nodeExecutable: process.execPath, serverEntry: join(root, 'apps', 'mcp', 'src', 'main.js'),
@@ -163,11 +176,17 @@ try {
   };
   client = scenario.proposal ? await connectCodexProposalWorker({...options,
     accountIdentity:(await import('node:crypto')).createHash('sha256').update('codex-reported-account\0synthetic@example.test').digest('hex'),
-    selection:{model:'fixture-model',effort:'low'}}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {})});
+    selection:{model:'fixture-model',effort:'low'},owner}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {})});
   record({ event: 'connected', snapshot: client.snapshot(), node: await realpath(process.execPath) });
   if(scenario.proposal) {
     record({event:'surface',keys:Object.keys(client)});
+    if(scenario.parentRetirement==='after-connect')parentActive=false;
+    if(scenario.parentRetirement==='mutated-owner') {
+      owner.assertActive=()=>{};owner.signal=new AbortController().signal;
+      globalThis.arcaneFixtureRetire();
+    }
     if(scenario.dispatch) {
+      proposing=true;
       await client.propose('Synthetic task context; return a review proposal.');
       const deadline=Date.now()+3000;
       while(client.snapshot().connected&&client.snapshot().thread?.turnStatus==='inProgress') {
@@ -255,6 +274,11 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
     '  const id = ++launch; record({ event: "spawn", launch: id, args });',
     '  const child = realSpawn(process.execPath, ["-e", peer, JSON.stringify({ ...scenario, launch: id }), audit, ...args], options);',
     '  if (scenario.repeatHistory && id >= 3) { args.push("SYNTHETIC_BOUNDARY_MUTATION"); options.env.ARCANE_LOCAL_TOKEN = "b5".repeat(32); options.env.ARCANE_DAEMON_URL = "http://127.0.0.1:49999"; }',
+    '  let frame="", inventoryReads=0;const requests=new Map();const write=child.stdin.write.bind(child.stdin);',
+    '  child.stdin.write=(data,...rest)=>{const message=JSON.parse(String(data));if(message.method==="mcpServerStatus/list")inventoryReads++;if(message.id)requests.set(message.id,{method:message.method,inventoryReads});return write(data,...rest);};',
+    '  child.stdout.on("data",chunk=>{frame+=chunk.toString();let end;while((end=frame.indexOf("\\n"))>=0){const line=frame.slice(0,end);frame=frame.slice(end+1);if(!line.trim())continue;const message=JSON.parse(line),request=requests.get(message.id),stage=scenario.parentRetirement;',
+    '    if(request&&(stage==="discovery-init"&&id===1&&request.method==="initialize"||stage==="discovery-inventory"&&id===1&&request.method==="mcpServerStatus/list"||stage==="final-init"&&id===2&&request.method==="initialize"||stage==="thread-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===1||stage==="turn-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===2||stage==="active"&&id===2&&request.method==="turn/start"))globalThis.arcaneFixtureRetire();',
+    '  }});',
     '  child.once("close", () => record({ event: "close", launch: id })); return child;',
     '}',
   ].join('\n');
@@ -539,7 +563,7 @@ test('proposal isolation accepts only explicit disabled empty inventories',()=>{
 
 test('proposal factory rejects account, model, launch and authority overrides before spawning',async()=>{
   const base={command:process.execPath,cwd:process.cwd(),use:'personal-local' as const,
-    accountIdentity:'a4'.repeat(32),selection:{model:'fixture-model',effort:'low'}};
+    accountIdentity:'a4'.repeat(32),selection:{model:'fixture-model',effort:'low'},owner:{signal:new AbortController().signal,assertActive:()=>{}}};
   await assert.rejects(()=>connectCodexProposalWorker({...base,accountIdentity:'untrusted-identity'}),{code:'ACCOUNT_IDENTITY'});
   for(const value of [
     {...base,selection:{...base.selection,provider:'other'}},
@@ -547,4 +571,24 @@ test('proposal factory rejects account, model, launch and authority overrides be
   ])await assert.rejects(()=>connectCodexProposalWorker(value as never),{code:'ARGUMENTS'});
   await assert.rejects(()=>connectCodexProposalWorker({...base,use:'commercial-hosted'} as never),{code:'LOCAL_USE_ONLY'});
   await assert.rejects(()=>connectCodexProposalWorker({...base,command:'codex'}),{code:'PROCESS_PATH'});
+  for(const owner of [{},{signal:{},assertActive:()=>{}},{signal:base.owner.signal,assertActive:'claim'},
+    Object.create(base.owner),{signal:base.owner.signal,get assertActive(){throw new Error('Do not invoke accessor');}},
+    {signal:base.owner.signal,assertActive:()=>true},{signal:base.owner.signal,assertActive:async()=>{throw new Error('Private async detail');}}])
+    await assert.rejects(()=>connectCodexProposalWorker({...base,owner} as never),{code:'PARENT_SCOPE'});
+});
+
+for(const [parentRetirement,launches,turns] of [
+  ['before-launch',0,0],['discovery-init',1,0],['discovery-inventory',1,0],['final-init',2,0],
+  ['thread-inventory',2,0],['turn-inventory',2,0],['before-write',2,0],['reentrant-abort',2,0],
+  ['active',2,1],['after-connect',2,0],['mutated-owner',2,0],
+] as const)test('proposal original-task retirement at '+parentRetirement+' joins owned children',async t=>{
+  const {records}=await fixture(t,{proposal:true,dispatch:true,parentRetirement});
+  assert.equal(events(records,'spawn').length,launches);
+  assert.equal(events(records,'close').length,launches);
+  assert.equal(calls(records,'turn/start').length,turns);
+  assert.ok(events(records,'error').length===1);
+  assert.ok(!JSON.stringify(records).includes('SYNTHETIC_PRIVATE_PARENT_DETAIL'));
+  if(parentRetirement==='reentrant-abort')assert.equal(events(records,'error')[0]?.code,'DISCONNECTED');
+  if(['before-launch','before-write','after-connect','mutated-owner'].includes(parentRetirement))
+    assert.equal(events(records,'error')[0]?.code,'PARENT_SCOPE');
 });

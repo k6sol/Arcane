@@ -184,7 +184,8 @@ export class CodexSession {
   #nativeAssetHooks: NativeAssetHooks | undefined;
   #assetIntent: { operation: Operation; scope: NativeAssetIntent } | null = null;
   #assetsRetired = false;
-  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only'|'proposal' = 'native-config', hooks?: NativeAssetHooks) {
+  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only'|'proposal' = 'native-config', hooks?: NativeAssetHooks, private readonly proposalOwner?:()=>void) {
+    if(mcpPolicy==='proposal'&&typeof proposalOwner!=='function')fail('PARENT_SCOPE','Proposal workers require an original-task owner.');
     if (hooks !== undefined) {
       this.#nativeAssetHooks = validateNativeAssetHooks(hooks);
       if (mcpPolicy !== 'arcane-only') fail('MCP_PROFILE', 'Native asset hooks require Arcane isolation.');
@@ -796,7 +797,10 @@ export class CodexSession {
     this.#operations.push(operation); return operation;
   }
   #requestOperation(operation: Operation, params: unknown): Promise<unknown> {
-    return this.#transport.request(operation.method, params, id => { operation.requestId = id; },
+    return this.#transport.request(operation.method, params, id => {
+      if(this.mcpPolicy==='proposal'&&operation.method==='turn/start')this.proposalOwner!();
+      operation.requestId = id;
+    },
       this.#nativeAssetHooks && operation.method === 'turn/start' ? () => this.#dispatchNativeAssetIntent(operation) : undefined);
   }
   #dispatchNativeAssetIntent(operation: Operation): void {

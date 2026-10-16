@@ -26,6 +26,8 @@ export interface ProposalWorker {
 export interface ProposalWorkerOptions {
   command: string; cwd: string; use: LocalUse; limits?: LimitOptions;
   accountIdentity: string; selection: Selection;
+  /** Private host capability captured from the original task, never tool JSON. */
+  owner: { signal: AbortSignal; assertActive(): void };
 }
 const PROPOSAL_FLAGS = [
   '-c','agents.enabled=false','-c','features.shell_tool=false','-c','features.apps=false',
@@ -48,33 +50,68 @@ async function installedPaths(commandInput: unknown, cwdInput: unknown, use: unk
 /** Owned, fresh subscription worker. Discovery never receives a bearer or sends
  * a model turn; the final child disables every discovered MCP server. */
 export async function connectCodexProposalWorker(options: ProposalWorkerOptions): Promise<ProposalWorker> {
-  exact(options,['command','cwd','use','limits','accountIdentity','selection']);
+  exact(options,['command','cwd','use','limits','accountIdentity','selection','owner']);
   const identity = str(options.accountIdentity,64);
   if(!/^[a-f0-9]{64}$/.test(identity))fail('ACCOUNT_IDENTITY','The original task account identity is required.');
   exact(options.selection,['model','effort']);
   const selection={model:str(options.selection.model),effort:str(options.selection.effort,64)};
+  exact(options.owner,['signal','assertActive']);
+  const signalField=Object.getOwnPropertyDescriptor(options.owner,'signal');
+  const assertionField=Object.getOwnPropertyDescriptor(options.owner,'assertActive');
+  if(!signalField||!Object.hasOwn(signalField,'value')||!(signalField.value instanceof AbortSignal)||
+      !assertionField||!Object.hasOwn(assertionField,'value')||typeof assertionField.value!=='function')
+    fail('PARENT_SCOPE','A live original-task owner is required.');
+  const signal:AbortSignal=signalField.value,assertActive:()=>unknown=assertionField.value;
+  const checkOwner=()=>{
+    if(signal.aborted)fail('PARENT_SCOPE','The original task is no longer active.');
+    try{
+      const result=assertActive();
+      if(result!==undefined){
+        if(result instanceof Promise)void result.catch(()=>{});
+        throw new Error(); // Ownership must be checked synchronously at the write boundary.
+      }
+    }
+    catch{fail('PARENT_SCOPE','The original task is no longer active.');}
+    // Trusted assertions can retire the parent synchronously; check again before write.
+    if(signal.aborted)fail('PARENT_SCOPE','The original task is no longer active.');
+  };
+  checkOwner();
   const bounds=limits(options.limits),{executable,workspace}=await installedPaths(options.command,options.cwd,options.use);
+  checkOwner();
   const discovery=prepareCodexDiscoveryProcess(executable,workspace);
   discovery.args.push(...PROPOSAL_FLAGS);
-  let session=new CodexSession(discovery,bounds,'installed-cli','proposal');
+  let session=new CodexSession(discovery,bounds,'installed-cli','proposal',undefined,checkOwner);
+  let closing:Promise<void>|undefined;
+  const close=()=>{signal.removeEventListener('abort',retired);return closing??=session.close();};
+  const retired=()=>{void close().catch(()=>{/* The retained join is awaited by close()/factory failure. */});};
+  signal.addEventListener('abort',retired,{once:true});
   try {
+    checkOwner();
     await session.initialize();
+    checkOwner();
     if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The worker account differs from the original task.');
     const rows=await session.inspectMcpServers({initiatedBy:'human'});
+    checkOwner();
     const overrides=arcaneIsolationOverrides(rows,process.execPath,'');
     await session.close();
+    checkOwner();
     // Discovery already resets Arcane to disabled. No Arcane credential, endpoint
     // or tool allowlist is ever added to the worker environment or arguments.
-    session=new CodexSession({command:executable,cwd:workspace,env:nativeEnvironment(),args:[...discovery.args,...overrides]},bounds,'installed-cli','proposal');
+    session=new CodexSession({command:executable,cwd:workspace,env:nativeEnvironment(),args:[...discovery.args,...overrides]},bounds,'installed-cli','proposal',undefined,checkOwner);
     await session.initialize();
+    checkOwner();
     if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The final worker account differs from the original task.');
     session.selectModel({initiatedBy:'human',...selection});
     const thread=await session.startThread({initiatedBy:'human'});
+    checkOwner();
     return Object.freeze({snapshot:()=>session.snapshot(),propose:async(text:string)=>{
-      if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The worker account changed before dispatch.');
-      return session.startTurn({initiatedBy:'human',threadId:thread.threadId,text});
-    },close:()=>session.close()});
-  }catch(error){await session.close();throw error;}
+      try{
+        checkOwner();
+        if(session.taskAccountIdentity()!==identity)fail('ACCOUNT_IDENTITY','The worker account changed before dispatch.');
+        return await session.startTurn({initiatedBy:'human',threadId:thread.threadId,text});
+      }catch(error){await close();throw error;}
+    },close});
+  }catch(error){await close();throw error;}
 }
 
 /** Embedded history uses only the separate, secret-free isolated launch template. */
