@@ -464,11 +464,23 @@ test('regression: normal packaged asset state is accepted outside resources and 
   assert.ok(writes.every(path => policy.within(userData, path)), 'Asset initialization may write only beneath owned userData.');
   // Generation repeats the containment check: fixing service initialization alone
   // must not leave the actual pipeline rooted in the immutable installation.
-  const pipelineCall = /const pipeline\s*=\s*createAssetPipeline\((\{[\s\S]*?\})\);/.exec(serviceSource);
+  const pipelineCall = /const pipeline\s*=\s*new AssetPipeline\(([\s\S]*?)\);\s*const writeMarker/.exec(serviceSource);
   assert.ok(pipelineCall, 'Expected asset pipeline configuration.');
-  const pipeline = vm.runInNewContext('(' + pipelineCall[1] + ')', { options, root: result, ...win32 });
+  const captured = vm.runInNewContext('capture(' + pipelineCall[1] + ')', {
+    options, root: result, ...win32, capture: (configuration, dependencies) => ({configuration, dependencies}),
+  });
+  const pipeline = captured.configuration;
+  assert.deepEqual(Object.keys(captured.dependencies), [], 'Production defaults must retain the fixed process query host.');
   assert.equal(policy.within(pipeline.workspaceRoot, pipeline.outputRoot), true, 'Generated asset output must fit the writable pipeline workspace.');
   assert.equal(pipeline.workerRoot, win32.join(resources, 'workers', 'blender'), 'Bundled worker lookup must retain the immutable resource root.');
+  const queryHost = Object.freeze({platform: 'fixture-only'});
+  const injected = vm.runInNewContext('capture(' + pipelineCall[1] + ')', {
+    options: {...options, workerQueryHost: queryHost}, root: result, ...win32,
+    capture: (configuration, dependencies) => ({configuration, dependencies}),
+  });
+  assert.equal(injected.dependencies.queryHost, queryHost, 'Only trusted host composition supplies a process query fixture.');
+  assert.equal(injected.configuration.outputRoot, pipeline.outputRoot);
+  assert.equal(injected.configuration.workerRoot, pipeline.workerRoot);
 });
 
 
