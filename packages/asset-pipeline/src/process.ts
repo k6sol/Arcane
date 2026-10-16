@@ -4,7 +4,14 @@ import { StringDecoder } from 'node:string_decoder';
 import { AssetError } from './types.js';
 
 export interface CommandSpec { executable: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }
-export interface CommandOptions { signal?: AbortSignal; deadlineMs?: number; maxOutputBytes?: number; onLine?: (line: string) => void }
+/** Optional launch supervision. `spawned` runs right after the process is created; a `'stop'` decision (or a
+ * throwing hook) stops the owned child. `closed` runs only on the child's own close event, and the command
+ * settles only after both close and the supervision decision. */
+export interface CommandSupervision {
+  spawned(info: { pid: number | undefined; exited(): boolean }): Promise<'continue' | 'stop'>;
+  closed(): void;
+}
+export interface CommandOptions { signal?: AbortSignal; deadlineMs?: number; maxOutputBytes?: number; onLine?: (line: string) => void; supervise?: CommandSupervision }
 export interface CommandResult { stdout: string; stderr: string; exitCode: number | null; signal: NodeJS.Signals | null }
 
 /** Intentionally excludes provider credentials, user Python paths and Blender overrides. */
@@ -35,10 +42,12 @@ export function runBounded(spec: CommandSpec, options: CommandOptions = {}): Pro
     const decoder = new StringDecoder('utf8'); let pending = '';
     const out: Buffer[] = [], err: Buffer[] = [];
     let force: ReturnType<typeof setTimeout> | undefined;
+    // A failed kill request never escapes a handler or counts as cleanup: settlement still waits for close.
+    const signalChild = (signal: NodeJS.Signals) => { try { child.kill(signal); } catch { /* Close remains the only proof of exit. */ } };
     const stop = (error: AssetError) => {
       if (stopped) return;
-      stopped = error; child.kill('SIGTERM');
-      force = setTimeout(() => child.kill('SIGKILL'), 500);
+      stopped = error; signalChild('SIGTERM');
+      force = setTimeout(() => signalChild('SIGKILL'), 500);
     };
     const abort = () => stop(new AssetError('CANCELLED', 'Operation cancelled.'));
     const timer = setTimeout(() => stop(new AssetError('DEADLINE', 'Worker exceeded its deadline.')), deadlineMs);
@@ -60,11 +69,21 @@ export function runBounded(spec: CommandSpec, options: CommandOptions = {}): Pro
     });
     child.stderr.on('data', (chunk: Buffer) => collect(err, chunk));
     child.once('error', () => { stopped ??= new AssetError('PROCESS_START', 'Native worker could not start.'); });
+    let exited = false; child.once('exit', () => { exited = true; });
+    const supervision = options.supervise;
+    const decided: Promise<void> = !supervision ? Promise.resolve() : Promise.resolve()
+      .then(() => supervision.spawned({ pid: child.pid, exited: () => exited }))
+      .catch(() => 'stop' as const)
+      .then(decision => { if (decision !== 'continue') stop(new AssetError('SUPERVISION_UNRECORDED', 'Worker identity could not be recorded; the worker was stopped.')); });
     // Do not release the supervisor slot until close: timeout/cancellation waits for process exit.
     child.once('close', (exitCode, signal) => {
-      clearTimeout(timer); if (force) clearTimeout(force); options.signal?.removeEventListener('abort', abort);
-      if (stopped) reject(stopped);
-      else resolve({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), exitCode, signal });
+      clearTimeout(timer); options.signal?.removeEventListener('abort', abort);
+      try { supervision?.closed(); } catch { /* Closure observation is recorded by the caller. */ }
+      void decided.then(() => {
+        if (force) clearTimeout(force);
+        if (stopped) reject(stopped);
+        else resolve({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), exitCode, signal });
+      });
     });
   });
 }
