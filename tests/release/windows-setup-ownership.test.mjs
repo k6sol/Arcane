@@ -50,7 +50,7 @@ internal static class Harness {
       switch (a[i]) {
         case "read": {
           try { R = InstalledRecord.Read(root); OwnershipRead r = SetupOwnership.Read(R); S = r.Snapshot; v["state"] = r.State.ToString(); v["code"] = r.Code;
-            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); v["shortcut"] = S == null ? null : SD(S.Shortcut); v["registration"] = S == null ? null : RD(S.Registration); }
+            v["present"] = S == null ? (object)null : S.Present; v["launcher"] = S == null ? null : D(S.Launcher); v["uninstaller"] = S == null ? null : D(S.Uninstaller); v["shortcut"] = S == null ? null : SD(S.Shortcut); v["registration"] = S == null ? null : RD(S.Registration); v["pending"] = S == null || S.PendingRegistration == null ? null : (object)new object[] { S.PendingRegistration.OwnerId, S.PendingRegistration.ValuesSha256 }; }
           catch (InstalledRecordException e) { v["state"] = "RecordError"; v["code"] = e.Code; S = null; }
           break; }
         case "acquire": case "acquire-other": {
@@ -83,6 +83,12 @@ internal static class Harness {
           OwnershipSave r = SetupOwnership.SaveRegistration(S, d, operation == "save-registration-null-lease" ? null : A);
           v["state"] = r.State.ToString(); v["code"] = r.Code; v["registration"] = r.Snapshot == null ? null : RD(r.Snapshot.Registration);
           v["placement"] = r.Placement == null ? null : (object)new object[] { r.Placement.State.ToString(), r.Placement.Code };
+          if (r.Snapshot != null) S = r.Snapshot; break; }
+        case "save-intent": case "save-intent-null-lease": {
+          string operation = a[i], spec = a[++i]; RegistrationDescriptor d = Registration(spec);
+          RegistrationIntent pending = d == null ? null : new RegistrationIntent(spec == "empty-owner" ? "00000000-0000-0000-0000-000000000000" : d.OwnerId, d.ValuesSha256);
+          OwnershipSave r = SetupOwnership.SaveRegistrationIntent(S, pending, operation == "save-intent-null-lease" ? null : A);
+          v["state"] = r.State.ToString(); v["code"] = r.Code; v["placement"] = r.Placement == null ? null : r.Placement.State.ToString();
           if (r.Snapshot != null) S = r.Snapshot; break; }
         case "wait": Out(v); Console.In.ReadLine(); continue;
         case "barrier": OwnedFiles.Barrier = delegate(string stage) { Dictionary<string, object> b = new Dictionary<string, object>(); b["op"] = "barrier"; b["stage"] = stage; Out(b); Console.In.ReadLine(); }; continue;
@@ -450,4 +456,50 @@ test('registration saves retain journal and record compare-and-swap, including c
   }]);
   const r = pick(rows, 'save-registration')[0]; assert.deepEqual([r.state, r.code, r.placement[0]], ['Unknown', 'RECORD_CHANGED', 'Placed']);
   assert.equal(JSON.parse(fs.readFileSync(journalOf(target), 'utf8')).schemaVersion, 3, 'published metadata retained without claiming a confirmed save');
+});
+
+
+test('v4 registration intent is durable before native work and every legacy save preserves it until explicit acknowledgement', windows, async () => {
+  const s = await setup(), target = await s.installed(), programs = external(s);
+  await s.run(target, ['read', 'save', 'null', 'null']); const v1 = fs.readFileSync(journalOf(target), 'utf8');
+  let rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-intent', 'valid', 'release', 'read']);
+  assert.equal(pick(rows, 'save-intent')[0].state, 'Saved');
+  let j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); const intent = j.registrationPending;
+  assert.deepEqual([j.schemaVersion, j.registration, intent], [4, null, { ownerId: 'd6b2b661-c7bf-4e40-94e0-4c26096c5c15', valuesSha256: hash('typed-registration') }]);
+  assert.deepEqual(pick(rows, 'read').at(-1).pending, [intent.ownerId, intent.valuesSha256]);
+  rows = await s.run(target, ['read', 'save', 'keep', 'keep', 'acquire', 'read-with-lease', 'save-shortcut', 'valid:' + programs, 'save-with-lease', 'keep', 'keep', 'release']);
+  assert.equal(pick(rows, 'save')[0].state, 'Unchanged');
+  j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); assert.equal(j.schemaVersion, 4); assert.deepEqual(j.registrationPending, intent); assert.equal(j.shortcut.root, programs);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'valid', 'release']);
+  j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); assert.equal(j.schemaVersion, 3); assert.equal(Object.hasOwn(j, 'registrationPending'), false); assert.equal(j.registration.ownerId, intent.ownerId);
+  const v3 = fs.readFileSync(journalOf(target), 'utf8');
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-intent', 'valid', 'release']);
+  j = JSON.parse(fs.readFileSync(journalOf(target), 'utf8')); assert.equal(j.schemaVersion, 4); assert.ok(j.registration); assert.deepEqual(j.registrationPending, intent);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'valid', 'release']); assert.equal(fs.readFileSync(journalOf(target), 'utf8'), v3);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-registration', 'null', 'save-shortcut', 'null', 'release']); assert.equal(fs.readFileSync(journalOf(target), 'utf8'), v1);
+});
+
+test('pending registration metadata refuses invalid intents, wrong leases and noncanonical or incomplete v4 documents', windows, async () => {
+  const s = await setup(), target = await s.installed(), other = await s.installed();
+  await s.run(target, ['read', 'save', 'null', 'null']); const before = fs.readFileSync(journalOf(target));
+  for (const ops of [['read', 'save-intent-null-lease', 'valid'], ['read', 'acquire-other', other, 'save-intent', 'valid', 'release'], ['read', 'acquire', 'release', 'save-intent', 'valid']]) {
+    const op = ops.includes('save-intent-null-lease') ? 'save-intent-null-lease' : 'save-intent'; const r = pick(await s.run(target, ops), op)[0];
+    assert.deepEqual([r.state, r.code, r.placement], ['Refused', 'RECORD_CHANGED', null]); assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+  }
+  const bad = await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-intent', 'null', 'save-intent', 'bad-owner', 'save-intent', 'bad-sha', 'save-intent', 'empty-owner', 'release']);
+  for (const r of pick(bad, 'save-intent')) assert.deepEqual([r.state, r.code], ['Refused', 'DESCRIPTOR']);
+  await s.run(target, ['read', 'acquire', 'read-with-lease', 'save-intent', 'valid', 'release']); const valid = fs.readFileSync(journalOf(target), 'utf8');
+  for (const edit of [j => { j.schemaVersion = 3; }, j => { delete j.registrationPending; }, j => { j.registrationPending = null; }, j => { j.registrationPending.extra = 1; },
+    j => { j.registrationPending.ownerId = '00000000-0000-0000-0000-000000000000'; }, j => { j.registrationPending.valuesSha256 = 1; }, j => { j.registrationPending.valuesSha256 = j.registrationPending.valuesSha256.toUpperCase(); }]) {
+    fs.writeFileSync(journalOf(target), valid); rewrite(target, edit); const edited = fs.readFileSync(journalOf(target));
+    assert.deepEqual((await s.run(target, ['read'])).map(r => [r.state, r.code]), [['Kept', 'MALFORMED']]); assert.deepEqual(fs.readFileSync(journalOf(target)), edited);
+  }
+});
+
+test('pending intent save preserves journal CAS and reports publication separately when the engine record changes', windows, async () => {
+  const s = await setup(); let target = await s.installed(); await s.run(target, ['read', 'save', 'null', 'null']); const before = fs.readFileSync(journalOf(target));
+  let rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'wait', 'save-intent', 'valid', 'release'], [() => { fs.unlinkSync(journalOf(target)); fs.writeFileSync(journalOf(target), before); }]);
+  assert.deepEqual([pick(rows, 'save-intent')[0].state, pick(rows, 'save-intent')[0].code], ['Kept', 'CHANGED']); assert.deepEqual(fs.readFileSync(journalOf(target)), before);
+  target = await s.installed(); rows = await s.run(target, ['read', 'acquire', 'read-with-lease', 'barrier', 'save-intent', 'valid', 'release'], [() => { const p = join(target, 'installation.json'); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('"releases"', '"releases" ')); }]);
+  const r = pick(rows, 'save-intent')[0]; assert.deepEqual([r.state, r.code, r.placement], ['Unknown', 'RECORD_CHANGED', 'Placed']); assert.equal(JSON.parse(fs.readFileSync(journalOf(target), 'utf8')).schemaVersion, 4);
 });
