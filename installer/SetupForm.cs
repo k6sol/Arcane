@@ -59,9 +59,11 @@ namespace Arcane.Installer
         }
         private void Report(InstallProgress value)
         {
+            CancellationTokenSource reportingOperation = operation;
+            if (reportingOperation == null) return;
             Post(delegate
             {
-                if (operation.IsCancellationRequested) return;
+                if (!object.ReferenceEquals(operation, reportingOperation) || reportingOperation.IsCancellationRequested) return;
                 switch (value.Phase)
                 {
                     case "verifying-source": status.Text = "Checking installation files..."; break;

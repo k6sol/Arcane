@@ -51,8 +51,8 @@ function setup() {
   const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-launcher-test-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-launcher-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  for (const name of ['InstalledRecord.cs', 'Launcher.cs', 'PayloadArchive.cs']) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
-  const sources = ['InstalledRecord.cs', 'Launcher.cs', 'PayloadArchive.cs'].map(name => join(build, name));
+  for (const name of ['InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'PayloadArchive.cs']) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
+  const sources = ['InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'PayloadArchive.cs'].map(name => join(build, name));
   const refs = ['/reference:System.Web.Extensions.dll', '/reference:System.Windows.Forms.dll', '/reference:System.IO.Compression.dll'];
   const compile = (out, files, extra) => {
     const r = spawnSync(csc, ['/nologo', '/platform:x64', '/optimize+', '/out:' + out, ...extra, ...files], { windowsHide: true, encoding: 'utf8', timeout: 120000 });

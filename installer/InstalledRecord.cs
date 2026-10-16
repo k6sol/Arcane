@@ -189,13 +189,26 @@ namespace Arcane.Installer
             return number;
         }
 
-        /// <summary>Reads and strictly validates the engine record of <paramref name="installationRoot"/>.</summary>
-        public static InstalledRecordSnapshot Read(string installationRoot)
+        /// <summary>Reads and strictly validates the engine record of <paramref name="installationRoot"/>. Refuses every installation.lock.</summary>
+        public static InstalledRecordSnapshot Read(string installationRoot) { return ReadCore(installationRoot, null); }
+
+        /// <summary>Lease-aware read: accepts installation.lock ONLY when it is the live lock issued to <paramref name="lease"/> for this
+        /// root, and only while the record still equals the record the lease was authorized for. Every other lock is refused.</summary>
+        public static InstalledRecordSnapshot Read(string installationRoot, OperationLease lease)
+        {
+            if (lease == null) throw Fail("LEASE");
+            InstalledRecordSnapshot snapshot = ReadCore(installationRoot, lease);
+            if (snapshot.InstallationId != lease.InstallationId || snapshot.RecordSha256 != lease.RecordSha256 || !snapshot.RecordIdentity.SameAs(lease.RecordIdentity)) throw Fail("LEASE");
+            return snapshot;
+        }
+
+        private static InstalledRecordSnapshot ReadCore(string installationRoot, OperationLease lease)
         {
             string root = DirectRoot(installationRoot);
             FileIdentity rootIdentity = Directory(root);
-            // An installation operation in progress owns the root: never read across it.
-            if (Exists(Path.Combine(root, LockName))) throw Fail("LOCKED");
+            // An installation operation in progress owns the root: never read across it, except through the lease that owns it.
+            bool locked = Exists(Path.Combine(root, LockName));
+            if (lease == null ? locked : !locked || !lease.Proves(root, rootIdentity)) throw Fail(lease == null ? "LOCKED" : "LEASE");
             FileIdentity recordIdentity;
             byte[] bytes = ReadDirect(Path.Combine(root, RecordName), RecordMaxBytes, "RECORD", out recordIdentity);
             Dictionary<string, object> value = Json(bytes, RecordMaxBytes, "RECORD");
@@ -231,13 +244,26 @@ namespace Arcane.Installer
         }
 
         /// <summary>True when the root is the same directory, no installation is running and the record bytes and identity are unchanged.</summary>
-        public static bool StillCurrent(InstalledRecordSnapshot snapshot)
+        public static bool StillCurrent(InstalledRecordSnapshot snapshot) { return StillCurrentCore(snapshot, null); }
+
+        /// <summary>Lease-aware fence: true only while <paramref name="lease"/> is live, bound to this snapshot's root, installation and
+        /// record, its own lock is still present and unchanged, and the record bytes and identity are unchanged.</summary>
+        public static bool StillCurrent(InstalledRecordSnapshot snapshot, OperationLease lease)
+        {
+            if (snapshot == null || lease == null || snapshot.InstallationId != lease.InstallationId || snapshot.RecordSha256 != lease.RecordSha256 ||
+                !snapshot.RecordIdentity.SameAs(lease.RecordIdentity) || !string.Equals(snapshot.Root, lease.Root, StringComparison.Ordinal) ||
+                !snapshot.RootIdentity.SameAs(lease.RootIdentity)) return false;
+            return StillCurrentCore(snapshot, lease);
+        }
+
+        private static bool StillCurrentCore(InstalledRecordSnapshot snapshot, OperationLease lease)
         {
             try
             {
                 if (!Directory(snapshot.Root).SameAs(snapshot.RootIdentity)) return false;
                 DirectChain(snapshot.Root);
-                if (Exists(Path.Combine(snapshot.Root, LockName))) return false;
+                bool locked = Exists(Path.Combine(snapshot.Root, LockName));
+                if (lease == null ? locked : !locked || !lease.Proves(snapshot.Root, snapshot.RootIdentity)) return false;
                 FileIdentity identity;
                 byte[] bytes = ReadDirect(Path.Combine(snapshot.Root, RecordName), RecordMaxBytes, "RECORD", out identity);
                 return identity.SameAs(snapshot.RecordIdentity) && bytes.Length == snapshot.RecordBytes && Sha256Hex(bytes) == snapshot.RecordSha256;

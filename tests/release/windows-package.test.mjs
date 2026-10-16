@@ -428,6 +428,8 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-installed-launcher.test.mjs', '// Fixture installed launcher verification source.\n');
   await assert.rejects(packageWindows(options), /Installed launcher verification requires its matching C# source/);
   for (const name of ['InstalledRecord.cs', 'Launcher.cs']) await write('installer/' + name, '// Fixture native launcher source.\n');
+  await assert.rejects(packageWindows(options), /Installed launcher verification requires its matching C# source: OperationLease.cs/);
+  await write('installer/OperationLease.cs', '// Fixture native operation lease source.\n');
   await write('tests/release/windows-setup-owned-files.test.mjs', '// Fixture owned setup file verification source.\n');
   await assert.rejects(packageWindows(options), /Setup file verification requires its matching C# source/);
   await write('installer/OwnedFiles.cs', '// Fixture native setup file source.\n');
@@ -449,10 +451,15 @@ test('installer verification source belongs to the reproducible source closure',
   await write('tests/release/windows-registration-plan.test.mjs', '// Fixture registration plan source.\n');
   await assert.rejects(packageWindows(options), /Registration plan verification requires its matching C# source/);
   await write('installer/RegistrationPlan.cs', '// Fixture native registration plan source.\n');
-  await write('scripts/build-windows-setup.mjs', '// Fixture setup builder source.\n');
+  await write('tests/release/windows-operation-lease.test.mjs', '// Fixture operation lease verification source.\n');
+  await write('tests/release/windows-setup-form.test.mjs', '// Fixture setup form verification source.\n');
   await rm(join(options.repository, 'installer/SetupForm.cs'));
-  await assert.rejects(packageWindows(options), /Setup builder requires its complete native source/);
+  await assert.rejects(packageWindows(options), /Setup form verification requires its matching C# source: SetupForm.cs/);
   await write('installer/SetupForm.cs', '// Fixture native setup source.\n');
+  await write('scripts/build-windows-setup.mjs', '// Fixture setup builder source.\n');
+  await rm(join(options.repository, 'installer/setup.manifest'));
+  await assert.rejects(packageWindows(options), /Setup builder requires its complete native source/);
+  await write('installer/setup.manifest', '<!-- Fixture setup manifest. -->\n');
   await assert.rejects(packageWindows(options), /Setup builder requires its complete native source: launcher.manifest/);
   await write('installer/launcher.manifest', '<!-- Fixture launcher manifest. -->\n');
   const result = await packageWindows(options), data = await manifest(result.directory);
@@ -464,5 +471,6 @@ test('installer verification source belongs to the reproducible source closure',
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/SetupOwnership.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/ShellLink.cs'));
   assert.ok(data.files.some(file => file.path === 'resources/product/installer/PostInstall.cs'));
+  assert.ok(data.files.some(file => file.path === 'resources/product/installer/OperationLease.cs'));
   await verifyWindowsBundle(result.directory);
 });

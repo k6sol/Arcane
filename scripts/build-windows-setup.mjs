@@ -8,7 +8,7 @@ import { runBoundedChild } from './check-windows-executable.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NATIVE_SOURCES = ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs',
-  'InstalledRecord.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs'].map(name => 'installer/' + name);
+  'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs'].map(name => 'installer/' + name);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 async function digest(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }
 async function direct(path, directory = false, allowHardlinks = false) {
@@ -53,7 +53,7 @@ export async function buildWindowsSetup({ bundle, outputParent, repository = REP
       '/main:Arcane.Installer.LauncherEntry', '/out:' + launcher, '/win32icon:' + icon,
       '/win32manifest:' + join(repository, 'installer/launcher.manifest'), '/reference:System.Windows.Forms.dll',
       '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll',
-      ...['Launcher.cs', 'InstalledRecord.cs', 'PayloadArchive.cs'].map(name => join(repository, 'installer', name))],
+      ...['Launcher.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'].map(name => join(repository, 'installer', name))],
     { cwd: owned, env: environment, deadlineMs: 120000 });
     await fs.writeFile(join(owned, 'launcher-compile.log'), launcherBuild.output, { flag: 'wx' });
     if (launcherBuild.code !== 0) throw new Error('Launcher compilation failed; inspect retained launcher-compile.log.');

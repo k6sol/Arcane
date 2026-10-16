@@ -51,11 +51,11 @@ function setup() {
   const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-owned-files-test-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-owned-files-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  for (const name of ['OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs']) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
+  for (const name of ['OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs']) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS); fs.writeFileSync(join(build, 'Peer.cs'), PEER);
   const compile = (out, files, extra = []) => { const r = spawnSync(csc, ['/nologo', '/target:exe', '/platform:x64', '/out:' + out, ...extra, ...files], { windowsHide: true, encoding: 'utf8', timeout: 120000 });
     assert.equal(r.status, 0, 'csc failed: ' + r.stdout + r.stderr); return out; };
-  const harness = compile(join(build, 'harness.exe'), ['OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs', 'Harness.cs'].map(f => join(build, f)),
+  const harness = compile(join(build, 'harness.exe'), ['OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs', 'Harness.cs'].map(f => join(build, f)),
     ['/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll']);
   const peer = fs.readFileSync(compile(join(build, 'peer.exe'), [join(build, 'Peer.cs')]));
   let count = 0;

@@ -176,27 +176,27 @@ function validateInstallerSources(files) {
     throw new Error('Installer kit verification requires its matching C# source.');
   }
   if (files.some(file => file.path === 'tests/release/windows-installed-launcher.test.mjs')) {
-    for (const name of ['InstalledRecord.cs', 'Launcher.cs', 'PayloadArchive.cs']) {
+    for (const name of ['InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Installed launcher verification requires its matching C# source: ' + name);
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-setup-owned-files.test.mjs')) {
-    for (const name of ['OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs']) {
+    for (const name of ['OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup file verification requires its matching C# source: ' + name);
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-setup-ownership.test.mjs')) {
-    for (const name of ['SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs']) {
+    for (const name of ['SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup ownership verification requires its matching C# source: ' + name);
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-shell-link.test.mjs')) {
-    for (const name of ['ShellLink.cs', 'InstalledRecord.cs', 'PayloadArchive.cs']) {
+    for (const name of ['ShellLink.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Shortcut verification requires its matching C# source: ' + name);
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-post-install.test.mjs')) {
-    for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
+    for (const name of ['PostInstall.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'InstallProcess.cs', 'KitVerifier.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Postinstall verification requires its matching C# source: ' + name);
     }
   }
@@ -211,12 +211,22 @@ function validateInstallerSources(files) {
     }
   }
   if (files.some(file => file.path === 'tests/release/windows-registration-plan.test.mjs')) {
-    for (const name of ['RegistrationPlan.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs']) {
+    for (const name of ['RegistrationPlan.cs', 'SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Registration plan verification requires its matching C# source: ' + name);
     }
   }
+  if (files.some(file => file.path === 'tests/release/windows-operation-lease.test.mjs')) {
+    for (const name of ['OperationLease.cs', 'InstalledRecord.cs', 'Launcher.cs', 'PayloadArchive.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Operation lease verification requires its matching C# source: ' + name);
+    }
+  }
+  if (files.some(file => file.path === 'tests/release/windows-setup-form.test.mjs')) {
+    for (const name of ['SetupForm.cs', 'PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs']) {
+      if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup form verification requires its matching C# source: ' + name);
+    }
+  }
   if (files.some(file => file.path === 'scripts/build-windows-setup.mjs')) {
-    for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'setup.manifest', 'launcher.manifest']) {
+    for (const name of ['PayloadArchive.cs', 'KitVerifier.cs', 'InstallProcess.cs', 'StageDirectory.cs', 'SetupForm.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'Launcher.cs', 'OwnedFiles.cs', 'SetupOwnership.cs', 'PostInstall.cs', 'SetupPath.cs', 'setup.manifest', 'launcher.manifest']) {
       if (!files.some(file => file.path === 'installer/' + name)) throw new Error('Setup builder requires its complete native source: ' + name);
     }
   }

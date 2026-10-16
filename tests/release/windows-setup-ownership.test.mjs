@@ -63,7 +63,7 @@ async function setup() {
   const boundary = fs.realpathSync.native(tmpdir()), root = fs.realpathSync.native(fs.mkdtempSync(join(boundary, 'arcane-ownership-test-')));
   process.on('exit', () => { const p = relative(boundary, root); if (p.startsWith('arcane-ownership-test-') && !isAbsolute(p) && !p.includes(sep)) fs.rmSync(root, { recursive: true, force: true }); });
   const build = join(root, 'build'); fs.mkdirSync(build);
-  const sources = ['SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'PayloadArchive.cs'];
+  const sources = ['SetupOwnership.cs', 'OwnedFiles.cs', 'InstalledRecord.cs', 'OperationLease.cs', 'PayloadArchive.cs'];
   for (const name of sources) fs.copyFileSync(new URL('../../installer/' + name, import.meta.url), join(build, name));
   fs.writeFileSync(join(build, 'Harness.cs'), HARNESS);
   const harness = join(build, 'harness.exe');
