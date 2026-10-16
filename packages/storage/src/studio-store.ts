@@ -34,6 +34,11 @@ export interface AssetUploadContextPin {
   readonly sessionId:string;readonly clientLifetimeId:string;readonly pluginArtifactHash:string;
   readonly playEpoch:number;readonly placeId:number;readonly universeId:number;
 }
+/** A paired plugin polls every 2 s. Its longest healthy silence is one 10 s HTTP timeout plus the
+ * 30 s maximum network backoff (plugin/src/Transport.luau); unloading sends no disconnect, so a
+ * session unseen for longer than this is a dead Studio lifetime, not a substitute target. */
+export const STUDIO_SESSION_LIVE_MS = 60_000;
+export type ListedStudioSession = StudioSession & { live: boolean };
 export const STUDIO_STAGE_RUN_LIMITS = Object.freeze({packets:512,envelopeBytes:8*1024*1024,argumentBytes:256*1024,runs:64});
 export interface StageRunHandle {readonly kind:'studio-stage-run-handle'}
 export interface StageRunIntent {
@@ -267,7 +272,24 @@ export class StudioStore {
   }
   private saveSession(s: StudioSession): void { this.db.prepare('UPDATE sessions SET payload=? WHERE id=?').run(JSON.stringify(s), s.id); }
   private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); }
-  sessions(): StudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => JSON.parse(r.payload as string) as StudioSession); }
+  sessions(): ListedStudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => { const s = JSON.parse(r.payload as string) as StudioSession; return { ...s, live: this.live(s) }; }); }
+  /** Unrevoked and heard from recently. The single plugin worker does not poll while it executes a
+   * delivered command, so an unexpired dispatched lease also counts as a heartbeat. */
+  private live(s: StudioSession): boolean {
+    if (s.revokedAt) return false;
+    if (this.now() - Date.parse(s.lastSeenAt) <= STUDIO_SESSION_LIVE_MS) return true;
+    return (this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state='dispatched'").all(s.id) as Row[])
+      .some(r => Date.parse((JSON.parse(r.payload as string) as StudioCommand).expiresAt) > this.now());
+  }
+  /** Leases expire by time even when the owning plugin never polls again; mirrors poll() expiry
+   * exactly. Joins an enclosing transaction, otherwise opens its own. */
+  private expired(c: StudioCommand): StudioCommand {
+    if ((c.state !== 'queued' && c.state !== 'dispatched') || Date.parse(c.expiresAt) > this.now()) return c;
+    if (!this.db.isTransaction) return this.transaction(() => this.expired(this.command(c.id)));
+    if (c.state === 'dispatched') { c.state = 'needs_reconciliation'; c.error = 'Delivery expired with unknown engine outcome. No automatic replay.'; c.finishedAt = this.iso(); this.saveCommand(c); this.event('command_unknown', c.id, {}); }
+    else { c.state = 'cancelled'; c.error = 'Undelivered command expired.'; c.finishedAt = this.iso(); this.saveCommand(c); }
+    return c;
+  }
   /** Host selection must inspect every live pairing, never a display-limited page. */
   activeSessions(): StudioSession[] {
     return (this.db.prepare("SELECT payload FROM sessions WHERE json_extract(payload,'$.revokedAt') IS NULL ORDER BY rowid DESC").all() as Row[])
@@ -435,6 +457,7 @@ export class StudioStore {
         return JSON.parse(old.payload as string) as StudioCommand;
       }
       const s = this.session(sessionId);
+      if (!this.live(s)) throw new ArcaneError('SESSION_OFFLINE', 'Studio session is not live: its plugin has not polled within ' + STUDIO_SESSION_LIVE_MS / 1000 + ' s. No command was queued. List sessions and choose a live one; do not retry against this session.');
       const args = validateCommandArgs(method, a.args, s, internalRestore);
       const activating = this.activationSource(method, args);
       const verification = admission ? this.#activationAdmissions.get(admission) : undefined;
@@ -512,7 +535,7 @@ export class StudioStore {
   }
   command(id: string): StudioCommand {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
-    if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return JSON.parse(row.payload as string) as StudioCommand;
+    if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return this.expired(JSON.parse(row.payload as string) as StudioCommand);
   }
   /** Durable intent before an irreversible engine call. Admission/rights are
    * checked by the trusted native controller, never inferred from these fields.
@@ -1057,7 +1080,7 @@ export class StudioStore {
   }
   commands(sessionId?: string): StudioCommand[] {
     const q = sessionId ? this.db.prepare('SELECT payload FROM commands WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 100').all(sessionId) : this.db.prepare('SELECT payload FROM commands ORDER BY created DESC,rowid DESC LIMIT 100').all();
-    return (q as Row[]).map(r => JSON.parse(r.payload as string) as StudioCommand);
+    return (q as Row[]).map(r => this.expired(JSON.parse(r.payload as string) as StudioCommand));
   }
   poll(sessionId: string, observation?: unknown, executingCommand?:unknown): StudioCommand[] {
     return this.transaction(() => {

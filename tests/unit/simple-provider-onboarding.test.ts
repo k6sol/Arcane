@@ -31,7 +31,7 @@ test('production onboarding keeps empty mounts, a minimal sign-in gate and conci
   assert.match(pickerSetup, /id="codex-picker-claude"[^>]*type="button"[^>]*data-workspace-target="provider-setup-panel">Claude CLI<\/button>/);
   assert.doesNotMatch(pickerSetup, /native terminal/);
   assert.match(html, /Claude Code opens in its native terminal\./);
-  assert.match(css, /--accent:#ff3340/);
+  assert.match(css, /--accent:#d97757/); assert.match(css, /var\(--accent\)/);
   assert.match(css, /font-family:"Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(css, /\[hidden\]\{display:none!important\}/);
@@ -210,10 +210,13 @@ test('Edge native-contract fixture: metadata status reads, explicit login/connec
     await page.locator('#provider-login-start').click();
     await page.waitForFunction(() => document.getElementById('provider-login-start')?.textContent === 'Open Claude Code');
     const beforeLaunch = (await f.calls()).length;
-    assert.equal(await page.locator('#provider-login-gate').isVisible(), true);
-    await page.locator('#provider-login-start').click(); await page.waitForFunction(n => (window as any).providerUI.calls.length === n + 1, beforeLaunch);
+    // A fresh signed-in Claude status unlocks the embedded Claude chat in place of the Codex panel.
+    assert.equal(await page.locator('#provider-login-gate').isVisible(), false);
+    assert.equal(await page.locator('#claude-chat').isVisible(), true);
+    assert.equal(await page.locator('#codex-compose').isVisible(), false, 'Codex composer is hidden, not destroyed');
+    await page.locator('#claude-chat-terminal').click(); await page.waitForFunction(n => (window as any).providerUI.calls.length === n + 1, beforeLaunch);
     assert.deepEqual((await f.calls()).at(-1), { action: 'launch', provider: 'claude' });
-    assert.equal(await page.locator('#provider-login-gate').isVisible(), true, 'Claude handoff is not an embedded chat');
+    assert.equal(await page.locator('#claude-chat').isVisible(), true, 'Terminal handoff stays a secondary action beside the embedded chat');
     assert.equal(await page.locator('#codex-submit').isDisabled(), true);
     assert.equal(await page.locator('#codex-composer').inputValue(), 'Keep my unsent draft.');
     assert.equal((await f.calls()).some((call: any) => call.action === 'install'), false);

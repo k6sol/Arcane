@@ -63,6 +63,8 @@ export class ChatTaskProposalError extends Error {
 interface OwnedTask { origin: StudioTestTaskOrigin; admission: StudioTestTaskOrigin | null; admissionOperation: string | null;
   jobOrigins: Map<string,StudioTestTaskOrigin>; currentJob:StudioTestTaskPrepared|null; settledJobs:Set<string>;
   actorId: string; owner: ChatTaskOwner; revoked: boolean; advancing: boolean;
+  /** One re-request after an unapproved job expired/cancelled before start; in-memory like every task capability. */
+  unstartedRetried: boolean;
   /** Aborted on EVERY retirement path, always before owner.revoke(). */
   controller: AbortController;
   /** Exact original account captured at begin; never recaptured later. */
@@ -143,7 +145,7 @@ export class ChatTaskCoordinator {
       repairDispatch: 'not_requested', prepared: null, evidence: [], reason: null });
     const origin = Object.freeze({ kind: 'studio-test-task-origin' as const, taskId: task.id, projectId: task.projectId, provider: 'codex' as const,
       threadId: task.threadId, sessionId: task.sessionId, incarnationId });
-    const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false,
+    const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false, unstartedRetried: false,
       controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planController: null, planDispatch: null, planCompletion: null };
     this.#owners.set(task.id, entry); this.#actors.set(input.actorId, entry); this.#origins.set(origin, entry);
     return origin;
@@ -224,12 +226,25 @@ export class ChatTaskCoordinator {
     if (Buffer.byteLength(JSON.stringify(input)) > 128 * 1024) throw new Error('Verification evidence exceeds its bound.');
     terminalSchema.parse(input); const value = structuredClone(input);
     if(entry.jobOrigins.get(value.jobId)!==origin)throw new Error('Foreign verification job capability.');
+    // A job whose consent expired or was cancelled before start() never claimed a
+    // run: no Studio effect, nothing to review and no evidence slot is consumed.
+    const review = value.review as typeof value.review & { runId?: unknown };
+    const notStarted = review.runId === null && review.phase === 'idle' && review.outcome === null && review.cleanup === 'not_started';
+    let retried = false;
     this.#store.update(origin.taskId, task => {
       const existing = task.evidence.find(report => report.jobId === value.jobId);
       if (existing) { if (existing.reportDigest !== value.reportDigest) throw new Error('Verification terminal changed.'); return; }
       const expected = task.prepared;
       if (!expected || expected.jobId !== value.jobId || expected.displayDigest !== value.displayDigest ||
           expected.scenarioDigest !== value.scenarioDigest || expected.subjectDigest !== value.subjectDigest) throw new Error('Verification scope changed.');
+      if (notStarted) {
+        if (entry.revoked || task.state !== 'awaiting_verification') return;
+        if (entry.unstartedRetried) { task.state = 'cancelled'; task.reason = 'verification_consent_expired'; return; }
+        // Allow exactly one fresh request for this same round.
+        retried = true; task.prepared = null;
+        task.state = task.round === 1 ? 'repairing' : 'working'; task.reason = 'verification_not_started_rerequest_allowed';
+        return;
+      }
       task.evidence.push(value);
       if (entry.revoked || !ACTIVE.has(task.state)) return;
       const scenario = value.scenario;
@@ -240,6 +255,7 @@ export class ChatTaskCoordinator {
       if (!settled || value.scenarioDigest === null || value.subjectDigest === null) { task.state = 'paused'; task.reason = 'verification_requires_review'; return; }
       task.state = 'awaiting_verification'; task.reason = 'settled_evidence_waiting_for_native_terminal';
     });
+    if (retried) entry.unstartedRetried = true;
     entry.settledJobs.add(value.jobId);
     this.#schedule(entry);
   }

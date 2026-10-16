@@ -204,6 +204,7 @@ test('fixture SDK: every scene/selection/script read uses exact shared endpoints
   const f = await fixture(t), client = await linked(t,f);
   const sessions=await call(client,'sessions'); assert.notEqual(sessions.result.isError,true,JSON.stringify(sessions.data));
   assert.equal(sessions.data.sessions[0].id,SESSION_ID);
+  assert.equal(sessions.data.sessions[0].live,true,'sessions output exposes liveness');
   for (const [name, args] of [
     ['scene_children',{root:'Workspace',ref:REFERENCE,limit:7}], ['scene_inspect',{ref:REFERENCE}],
     ['scene_search',{root:'Workspace',query:'Same',limit:5}], ['selection_read',{}], ['script_read',{ref:{...REFERENCE,className:'ModuleScript'}}],
@@ -407,7 +408,7 @@ test('real daemon HTTP + SQLite + SDK: non-native mock plugin pairing, source up
   const grant=await http('/v1/studio/pairing',{allowedRoots:['Workspace'],allowWrites:true},lab.token);
   const paired=await http('/v1/plugin/pair',{code:grant.code,protocolVersion:1,identity:{clientSessionId:randomUUID(),placeId:0,universeId:0,name:'Non-native MCP fixture',pluginVersion:'fixture'},capabilities:[...READ_METHODS,...WRITE_METHODS]});
   const client=await linked(t,{url:lab.origin},ROOT,lab.agentToken),scriptRef={...REFERENCE,sessionId:paired.sessionId,className:'ModuleScript'};
-  assert.equal((await call(client,'sessions')).data.sessions[0].id,paired.sessionId);
+  const listedSessions=(await call(client,'sessions')).data.sessions; assert.equal(listedSessions[0].id,paired.sessionId); assert.equal(listedSessions[0].live,true);
   async function completePluginWork(pending: Promise<Awaited<ReturnType<typeof call>>>, expectedMethod:string, result:(command:StudioCommand)=>Json) {
     let delivered: StudioCommand | undefined;
     const until=Date.now()+2000;

@@ -19,10 +19,15 @@ export interface ChatTabsOptions {
   captureLegacyNewChat?: boolean;
   /** Presentation-only navigation hook; never starts or grants native work. */
   beforeNewChat?: () => void;
+  /** Presentation-only notice hook: a native preference save failed or recovered. */
+  onPersistenceChange?: () => void;
+  /** Presentation-only routing: while another chat surface is active, New chat starts there instead of a Codex draft. */
+  alternateNewChat?: { active(): boolean; start(): void };
 }
 export interface ChatTabPreferences {
   version: 1; projectPath: string; provider: 'codex'|'claude'; activeTabId: string | null;
-  tabs: {localId:string;title:string;provider:'codex';threadId:string|null;sessionId:string|null;draft:string;modelId:string|null;effort:string|null;tool:'all'|'blender'|'roblox';previewOpen:boolean}[];
+  /** workflowDraft is optional on read: legacy rows omit it and are plain drafts. It is always written. */
+  tabs: {localId:string;title:string;provider:'codex';threadId:string|null;sessionId:string|null;draft:string;modelId:string|null;effort:string|null;tool:'all'|'blender'|'roblox';previewOpen:boolean;workflowDraft?:boolean}[];
 }
 export interface ChatTabsCallbacks {
   select(key: string): Promise<boolean>; close(key: string): Promise<boolean>;
@@ -41,6 +46,7 @@ const tool = (v:unknown):v is ChatTabView['tool'] => v==='all'||v==='blender'||v
 const pair = (v: unknown): v is ChatSelection => exact(v,['model','effort']) && typeof v.model === 'string' && v.model.length > 0 && v.model.length <= 256 && typeof v.effort === 'string' && v.effort.length > 0 && v.effort.length <= 64 && !/[\x00-\x1f]/.test(v.model+v.effort);
 const sameSelection = (a: ChatSelection | null, b: ChatSelection | null) => a?.model===b?.model&&a?.effort===b?.effort;
 const DRAFT_SAVE_DELAY_MS = 150;
+const NATIVE_ROW = ['localId','title','provider','threadId','sessionId','draft','modelId','effort','tool','previewOpen'];
 export const nativeChatKey = (binding: Pick<CodexSavedThread,'projectPath'|'threadId'|'sessionId'>) => JSON.stringify([binding.projectPath,'codex',binding.threadId,binding.sessionId]);
 
 /** Public host evidence only. Browser preferences and names never create ownership. */
@@ -77,6 +83,8 @@ export class ChatTabs {
   private savedMenu: HTMLDetailsElement | null = null;
   private nativeReady = false;
   private nativeError = false;
+  /** A save failed; its snapshot stays queued and is retried at the next persist boundary. */
+  private nativeSaveFailed = false;
   private nativeQueued: {value:ChatTabPreferences;serialized:string;generation:number} | null = null;
   private nativeGeneration = 0;
   private nativeSaving = false;
@@ -91,7 +99,7 @@ export class ChatTabs {
     if (!this.storage && !options.preferences) { try { this.storage = doc.defaultView?.localStorage; } catch {} }
   }
   persistenceStatus(): 'native'|'native-loading'|'native-error'|'browser-origin'|'memory' {
-    return this.options.preferences ? this.nativeError?'native-error':this.nativeReady?'native':'native-loading' : this.storage?'browser-origin':'memory';
+    return this.options.preferences ? this.nativeError||this.nativeSaveFailed?'native-error':this.nativeReady?'native':'native-loading' : this.storage?'browser-origin':'memory';
   }
   providerPreference(): 'codex'|'claude' {return this.preferredProvider;}
   preferencesSaved():boolean {return !this.preferencesDirty&&!this.persistenceDirty&&!this.nativeSaving&&this.nativeQueued===null&&!this.nativeError&&this.persistenceStatus()!=='native-loading'&&this.persistenceStatus()!=='memory';}
@@ -102,7 +110,7 @@ export class ChatTabs {
   async initializePreferences(projectPath: string): Promise<void> {
     if (!this.options.preferences) return;
     const generation=++this.nativeGeneration;
-    this.nativeQueued=null;
+    this.nativeQueued=null;this.nativeSaveFailed=false;
     this.nativeReady=false;this.nativeError=false;
     try {
       const value=await this.options.preferences.read();
@@ -112,11 +120,13 @@ export class ChatTabs {
         this.preferredProvider=value.provider as 'codex'|'claude';
         const ids=new Set<string>(), rows:Tab[]=[];
         for(const row of value.tabs) {
-          if(!exact(row,['localId','title','provider','threadId','sessionId','draft','modelId','effort','tool','previewOpen'])||!uuid(row.localId)||ids.has(row.localId)||row.provider!=='codex'||typeof row.title!=='string'||row.title.length>160||!tool(row.tool)||typeof row.previewOpen!=='boolean'||typeof row.draft!=='string'||bytes(row.draft)>CHAT_TAB_LIMITS.draftBytes||!(row.threadId===null||id(row.threadId))||!(row.sessionId===null||id(row.sessionId))||row.threadId===null&&row.sessionId!==null||!(row.modelId===null&&row.effort===null||pair({model:row.modelId,effort:row.effort})))throw new Error('Invalid native chat preference row.');
+          const flagged=plain(row)&&Object.hasOwn(row,'workflowDraft');
+          if(!exact(row,[...NATIVE_ROW,...(flagged?['workflowDraft']:[])])||flagged&&typeof row.workflowDraft!=='boolean'||!uuid(row.localId)||ids.has(row.localId)||row.provider!=='codex'||typeof row.title!=='string'||row.title.length>160||!tool(row.tool)||typeof row.previewOpen!=='boolean'||typeof row.draft!=='string'||bytes(row.draft)>CHAT_TAB_LIMITS.draftBytes||!(row.threadId===null||id(row.threadId))||!(row.sessionId===null||id(row.sessionId))||row.threadId===null&&row.sessionId!==null||!(row.modelId===null&&row.effort===null||pair({model:row.modelId,effort:row.effort})))throw new Error('Invalid native chat preference row.');
           ids.add(row.localId);
           const selection=row.modelId===null?null:{model:row.modelId as string,effort:row.effort as string};
           const binding={projectPath,threadId:row.threadId as string,sessionId:row.sessionId as string|null};
-          rows.push({key:row.threadId===null?'draft:'+row.localId:nativeChatKey(binding),localId:row.localId,title:row.title,tool:row.tool,previewOpen:row.previewOpen,kind:row.threadId===null?'draft':'native',provider:'codex',projectPath,threadId:row.threadId as string|null,sessionId:row.sessionId as string|null,selection,draft:row.draft,workflowDraft:!!row.draft});
+          // Only a row stored as a workflow draft keeps its review gate; legacy rows without the flag are plain typed text.
+          rows.push({key:row.threadId===null?'draft:'+row.localId:nativeChatKey(binding),localId:row.localId,title:row.title,tool:row.tool,previewOpen:row.previewOpen,kind:row.threadId===null?'draft':'native',provider:'codex',projectPath,threadId:row.threadId as string|null,sessionId:row.sessionId as string|null,selection,draft:row.draft,workflowDraft:row.workflowDraft===true});
         }
         const keys=new Set(rows.map(row=>row.key));if(keys.size!==rows.length)throw new Error('Duplicate native chat preferences.');
         const activeKey=rows.find(row=>row.localId===value.activeTabId)?.key??rows[0]?.key??null;
@@ -148,7 +158,7 @@ export class ChatTabs {
       this.persist(); this.projectPath = state.projectPath; this.rows = []; this.activeKey = null; this.recordings.clear();
       this.preferredSelections.clear();this.observedSelections.clear();
       this.presentationRevision++;this.persistenceDirty=true;
-      if(this.options.preferences&&this.nativeProject!==state.projectPath){this.nativeReady=false;this.nativeQueued=null;this.nativeGeneration++;}
+      if(this.options.preferences&&this.nativeProject!==state.projectPath){this.nativeReady=false;this.nativeQueued=null;this.nativeSaveFailed=false;this.nativeGeneration++;}
       this.restore(state.projectPath);
     }
     const binding = state.nativeHistory ? validateHistoryBinding(state.nativeHistory,state.projectPath) : null;
@@ -162,7 +172,7 @@ export class ChatTabs {
     for(const [index,row] of this.rows.entries()) {
       if(row.kind==='draft'||this.owns(row))continue;
       // An advisory ID that cannot be confirmed never authorizes resume, but its unsent text is retained.
-      const recovered:Tab={...row,key:'draft:'+row.localId,kind:'draft',threadId:null,sessionId:null,title:'Recovered draft',workflowDraft:!!row.draft};
+      const recovered:Tab={...row,key:'draft:'+row.localId,kind:'draft',threadId:null,sessionId:null,title:'Recovered draft',workflowDraft:row.workflowDraft===true};
       this.presentationRevision++;this.persistenceDirty=true;
       if(this.activeKey===row.key)this.activeKey=recovered.key;this.rows[index]=recovered;
     }
@@ -270,7 +280,7 @@ export class ChatTabs {
   }
   private persist() {
     if(this.draftTimer!==null){clearTimeout(this.draftTimer);this.draftTimer=null;}
-    if(!this.persistenceDirty)return;
+    if(!this.persistenceDirty){if(this.nativeSaveFailed&&this.nativeQueued)void this.saveNative();return;}
     this.persistenceDirty=false;
     this.preferencesDirty=true;
     if (!this.projectPath || this.clean(this.projectPath)!==this.projectPath) return;
@@ -283,10 +293,10 @@ export class ChatTabs {
     try { if(this.storage){this.storage.setItem(this.storageKey(this.projectPath),value);if(!this.options.preferences)this.preferencesDirty=false;} } catch {this.persistenceDirty=true;}
     if(this.options.preferences&&this.nativeReady&&!this.nativeError&&this.nativeProject===this.projectPath) {
       const native:ChatTabPreferences={version:1,projectPath:this.projectPath,provider:this.preferredProvider,activeTabId:this.rows.find(row=>row.key===this.activeKey)?.localId??null,
-        tabs:tabs.map(row=>({localId:row.localId,title:row.title,provider:'codex',threadId:row.threadId,sessionId:row.sessionId,draft:row.draft,modelId:row.selection?.model??null,effort:row.selection?.effort??null,tool:row.tool,previewOpen:row.previewOpen}))};
+        tabs:tabs.map(row=>({localId:row.localId,title:row.title,provider:'codex',threadId:row.threadId,sessionId:row.sessionId,draft:row.draft,modelId:row.selection?.model??null,effort:row.selection?.effort??null,tool:row.tool,previewOpen:row.previewOpen,workflowDraft:row.workflowDraft===true}))};
       const serialized=JSON.stringify(native);
       this.preferencesDirty=serialized!==this.nativeSaved;
-      if(serialized!==this.nativeLast){this.nativeLast=serialized;this.nativeQueued={value:native,serialized,generation:this.nativeGeneration};void this.saveNative();}
+      if(serialized!==this.nativeLast||this.nativeSaveFailed){this.nativeLast=serialized;this.nativeQueued={value:native,serialized,generation:this.nativeGeneration};void this.saveNative();}
     }
   }
   private async saveNative(): Promise<void> {
@@ -296,10 +306,18 @@ export class ChatTabs {
       if(queued.generation!==this.nativeGeneration||!this.nativeReady||queued.value.projectPath!==this.nativeProject||queued.value.projectPath!==this.projectPath)continue;
       try {
         await this.options.preferences!.save(queued.value);
-        if(queued.generation===this.nativeGeneration&&this.nativeReady&&queued.value.projectPath===this.nativeProject&&queued.value.projectPath===this.projectPath){this.nativeSaved=queued.serialized;this.preferencesDirty=this.persistenceDirty||this.nativeSaved!==this.nativeLast;}
-      } catch {if(queued.generation===this.nativeGeneration&&this.nativeReady&&queued.value.projectPath===this.nativeProject&&queued.value.projectPath===this.projectPath){this.nativeError=true;this.nativeQueued=null;}}
+        if(queued.generation===this.nativeGeneration&&this.nativeReady&&queued.value.projectPath===this.nativeProject&&queued.value.projectPath===this.projectPath){this.nativeSaved=queued.serialized;this.preferencesDirty=this.persistenceDirty||this.nativeSaved!==this.nativeLast;
+          if(this.nativeSaveFailed&&this.nativeQueued===null){this.nativeSaveFailed=false;this.notifyPersistence();}}
+      } catch {if(queued.generation===this.nativeGeneration&&this.nativeReady&&queued.value.projectPath===this.nativeProject&&queued.value.projectPath===this.projectPath){
+        // Keep the unsaved snapshot (or a newer one) queued; the next persist boundary retries it. Never retry in a loop.
+        const first=!this.nativeSaveFailed;this.nativeSaveFailed=true;this.preferencesDirty=true;
+        if(first)this.notifyPersistence();
+        if(this.nativeQueued===null){this.nativeQueued=queued;break;}
+      }}
     }}
     finally {this.nativeSaving=false;}
+  }
+  private notifyPersistence():void {try{this.options.onPersistenceChange?.();}catch{}
   }
   private restore(projectPath: string) {
     try {
@@ -353,7 +371,8 @@ export class ChatTabs {
   render(blocked: boolean): void {
     if (!this.mounted) return;
     this.newChatAllowed = !blocked && this.rows.length < CHAT_TAB_LIMITS.open;
-    const signature = JSON.stringify([this.presentationRevision,this.activeKey,blocked]);
+    const alternate = this.alternateNewChat();
+    const signature = JSON.stringify([this.presentationRevision,this.activeKey,blocked,alternate]);
     if (signature!==this.signature) {
       this.signature=signature;
       const mount = this.doc.getElementById('workspace-chat-tabs')!;
@@ -371,7 +390,7 @@ export class ChatTabs {
       if (focusKey) Array.from(mount.querySelectorAll<HTMLElement>('[role=tab]')).find(button=>button.dataset.chatKey===focusKey)?.focus({preventScroll:true});
       for (const id of ['workspace-new-chat', ...(this.options.captureLegacyNewChat ? ['new-chat'] : [])]) {
         const create=this.doc.getElementById(id) as HTMLButtonElement|null;
-        if(create)create.disabled=!this.newChatAllowed;
+        if(create)create.disabled=!this.newChatAllowed&&!alternate;
       }
     }
     const savedSignature=JSON.stringify([this.catalogueRevision,blocked]);
@@ -385,9 +404,14 @@ export class ChatTabs {
       if(!this.catalogue.length){const empty=this.doc.createElement('p');empty.textContent='No saved native chats.';this.savedMenu.append(empty);}
     }
   }
+  private alternateNewChat(): boolean { try { return this.options.alternateNewChat?.active()===true; } catch { return false; } }
   private requestNewChat(): void {
-    if (!this.mounted || !this.newChatAllowed) return;
+    if (!this.mounted) return;
+    // The Claude surface owns New chat while it is shown; Codex busy/limit gates only apply to Codex drafts.
+    const alternate = this.alternateNewChat();
+    if (!alternate && !this.newChatAllowed) return;
     this.options.beforeNewChat?.();
+    if (alternate) { try { this.options.alternateNewChat!.start(); } catch {} return; }
     void this.callbacks.newChat();
   }
   stop(): void {this.newChatAllowed=false;this.persist();for(const fn of this.cleanup.splice(0))fn();this.savedMenu?.remove();this.savedMenu=null;this.mounted=false;this.signature='';this.savedSignature='';}
@@ -466,6 +490,7 @@ export async function startChatTabs(doc:Document,options:StartChatTabsOptions):P
   const preferences=options.preferences??workspacePreferencesAdapter(doc,options),chat=options.chat;
   await chat.enableChatTabs({...(preferences?{preferences}:{}),...(options.storage?{storage:options.storage}:{}),
     ...(options.captureLegacyNewChat!==undefined?{captureLegacyNewChat:options.captureLegacyNewChat}:{}),
-    ...(options.beforeNewChat?{beforeNewChat:options.beforeNewChat}:{})});
+    ...(options.beforeNewChat?{beforeNewChat:options.beforeNewChat}:{}),
+    ...(options.alternateNewChat?{alternateNewChat:options.alternateNewChat}:{})});
   return connectChatTabPreferences(doc,chat);
 }

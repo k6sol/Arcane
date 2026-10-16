@@ -5,6 +5,7 @@ import { LearningPanel } from './learning-panel.js';
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
+import { ClaudeChat } from './claude-chat.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
@@ -2118,6 +2119,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const codexApi=new CodexChatApi(token);
   const codexChat = new CodexChat(document, codexApi);
   const providerSetup = startProviderSetup(document, {chat:codexChat});
+  // Claude chat replaces the Codex panel only while provider setup reports the Claude surface.
+  // Codex state is never destroyed; its nodes are only hidden.
+  const claudeRoot = document.getElementById('claude-chat');
+  const claudeChat = claudeRoot ? new ClaudeChat(claudeRoot) : null;
+  let claudeChatStopped = false;
+  const showClaudeChat = () => { if (!claudeChatStopped && providerSetup.chatSurface() === 'claude') void claudeChat?.refresh(); };
+  providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat();
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
@@ -2156,12 +2164,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       openReview:async(runId,isCurrent)=>{if(await workbench.openWorkRun(runId,isCurrent)&&isCurrent())workspaceShell.showRecordedWork();}});
     if(workflowsStopped)taskPlanCard.stop();
   }).catch(()=>{const mount=document.getElementById('codex-task-plan');if(mount)mount.textContent='Restart Arcane to load task progress.';});
-  window.addEventListener('pagehide', () => { workflowsStopped = true; taskPlanCard?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; taskPlanCard?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; claudeChat?.stop(); taskPlanCard?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,
-      beforeNewChat: () => workspaceShell.showConversation() });
+      beforeNewChat: () => workspaceShell.showConversation(),
+      // While the Claude surface is shown, sidebar New chat and Ctrl/Cmd+N start a new Claude conversation instead.
+      alternateNewChat: { active: () => !claudeChatStopped && !!claudeChat && providerSetup.chatSurface() === 'claude', start: () => claudeChat?.newChat() } });
     const attachments=await import('./chat-attachments.js');
     codexChat.enableTextAttachments(attachments.startChatAttachments(document,{
       getScope:()=>codexChat.textAttachmentScope(),onChange:()=>codexChat.attachmentPresentationChanged(),

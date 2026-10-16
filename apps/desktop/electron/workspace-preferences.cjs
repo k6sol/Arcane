@@ -8,6 +8,7 @@ const policy = require('./policy.cjs');
 const FILE = 'workspace-preferences.v1.json';
 const MAX_TABS = 16, MAX_FILE_BYTES = 1024 * 1024, MAX_PLAIN_BYTES = 512 * 1024;
 const ERROR = 'Arcane workspace preferences are unavailable.';
+const ROW_FIELDS = Object.freeze(['localId', 'title', 'provider', 'threadId', 'sessionId', 'draft', 'modelId', 'effort', 'tool', 'previewOpen']);
 const fail = () => { throw new Error(ERROR); };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
@@ -40,14 +41,18 @@ function preferences(value, scope) {
   for (let i = 0; i < value.tabs.length; i++) {
     const d = Object.getOwnPropertyDescriptor(value.tabs, String(i));
     if (!d || !d.enumerable || !Object.hasOwn(d, 'value')) fail();
-    const row = fields(d.value, ['localId', 'title', 'provider', 'threadId', 'sessionId', 'draft', 'modelId', 'effort', 'tool', 'previewOpen']);
+    // Optional boolean workflowDraft keeps a workflow draft's review gate across restarts. Legacy rows omit it and mean a
+    // plain draft (false); presence is preserved exactly so canonical legacy records still decrypt and read back unchanged.
+    const flagged = !!d.value && !types.isProxy(d.value) && Object.getPrototypeOf(d.value) === Object.prototype && Object.hasOwn(d.value, 'workflowDraft');
+    const row = fields(d.value, flagged ? [...ROW_FIELDS, 'workflowDraft'] : ROW_FIELDS);
+    if (flagged && typeof row.workflowDraft !== 'boolean') fail();
     const localId = text(row.localId, 128, true), title = text(row.title, 512);
     if (ids.has(localId) || /[\x00-\x1f\x7f]/.test(title) || !['codex', 'claude'].includes(row.provider) ||
         !['all', 'blender', 'roblox'].includes(row.tool) || typeof row.previewOpen !== 'boolean') fail();
     ids.add(localId);
     tabs.push({ localId, title, provider: row.provider, threadId: nullableId(row.threadId, 256), sessionId: nullableId(row.sessionId, 256),
       draft: text(row.draft, 128 * 1024), modelId: nullableId(row.modelId, 256), effort: nullableId(row.effort, 64),
-      tool: row.tool, previewOpen: row.previewOpen });
+      tool: row.tool, previewOpen: row.previewOpen, ...(flagged ? { workflowDraft: row.workflowDraft } : {}) });
   }
   const activeTabId = nullableId(value.activeTabId, 128);
   if (activeTabId !== null && !ids.has(activeTabId)) fail();

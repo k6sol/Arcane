@@ -25,10 +25,26 @@ let codeVerification, projectSession, providerSetup;
 let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
+let claudeChat;
 const CODE_VERIFICATION_WARNING = 'Arcane opened without Luau verification. The saved compiler is unavailable. Saved configuration was retained; choose an approved compiler in Tool > Configure Luau verification, then restart Arcane.';
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
+/** Stop every in-app Claude chat turn of the current project and revoke its scoped credentials (quit/switch/failure). */
+function stopClaudeChat() { const chat = claudeChat; claudeChat = null; return chat ? chat.dispose().catch(() => null) : Promise.resolve(null); }
+// In-app Claude chat: headless installed Claude Code per turn, Arcane-only MCP config and a scoped credential from this
+// project's handoff broker. Bound to this project epoch; the transcript lives in an owned per-project directory.
+// Started after startDaemon, so the port/state host fixtures exercise only the daemon boundary.
+async function startClaudeChat() {
+  if (smoke || !projectSession || !nativeHandoff) return;
+  const chatDirectory = await ownedDirectory(join(projectSession.stateRoot, 'claude-chat')), chatBroker = nativeHandoff, chatEpoch = projectSession;
+  void stopClaudeChat();
+  claudeChat = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog,
+    getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
+    handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
+      release: handoffId => chatBroker.releaseChat(handoffId) },
+    instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
+}
 async function stopDaemon() {
   providerSetup?.cancelPending();
   const handoff = nativeHandoff; nativeHandoff = null;
@@ -217,8 +233,9 @@ async function chooseProject() {
   try {
     // Discard the previous renderer and credential before selecting a new project.
     const old = window; window = null; if (old && !old.isDestroyed()) old.destroy();
+    void stopClaudeChat(); // children stop now; revocation runs beside the daemon shutdown
     if (!await stopDaemon()) throw new Error('Previous runtime did not close cleanly.');
-    await startDaemon(path); makeWindow(); await loadWorkspace();
+    await startDaemon(path); await startClaudeChat(); makeWindow(); await loadWorkspace();
     const pref = join(userRoot, 'last-project.json'); await policy.directPath(pref, 'file', true);
     await writeFile(pref, JSON.stringify({ version: 1, projectPath: path }) + '\n', { mode: 0o600 });
   } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP'].includes(error.code) ? error.message : 'Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
@@ -236,7 +253,7 @@ function installMenu() {
   ]));
 }
 async function failStartup(message) {
-  providerSetup?.dispose();
+  providerSetup?.dispose(); void stopClaudeChat();
   if (closing) return; closing = true;
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
@@ -367,7 +384,7 @@ if (profilePreparationFailed) app.whenReady().then(() => failStartup('Arcane app
 else if (!locked) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
-  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); void stopDaemon().then(clean => app.exit(clean ? 0 : 1)); } });
+  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); void Promise.all([stopClaudeChat(), stopDaemon()]).then(([, clean]) => app.exit(clean ? 0 : 1)); } });
   app.on('window-all-closed', () => { if (!switching && !closing) app.quit(); });
   app.whenReady().then(async () => {
     try {
@@ -387,6 +404,10 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       workspacePreferences.installIpc(ipcMain);
+      require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
+        getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
+        getHost: () => claudeChat ?? null,
+      });
       require('./native-handoff-ipc.cjs').installNativeHandoffIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !nativeHandoff ? null :
           { window, origin, epoch: projectSession },
@@ -417,7 +438,7 @@ else {
         if (bytes.length > 8192) throw new Error('Project preference too large.'); const saved = JSON.parse(bytes.toString('utf8'));
         if (Object.keys(saved).sort().join(',') !== 'projectPath,version' || saved.version !== 1) throw new Error('Invalid project preference.'); selected = await policy.directPath(saved.projectPath);
       } catch (error) { if (error.code !== 'ENOENT' && !smoke) await dialog.showMessageBox({ type: 'warning', title: 'Saved project unavailable', message: 'Starting an empty local project. The saved preference was preserved; use File > Open project to choose a folder.' }); }
-      await startDaemon(selected); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
+      await startDaemon(selected); await startClaudeChat(); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
     } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP'].includes(error.code) ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
   });
 }

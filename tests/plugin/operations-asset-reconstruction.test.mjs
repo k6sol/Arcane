@@ -121,3 +121,19 @@ assert(destroyed==7 and ops.assetCleanupFailed==true)
 local ok2,e2=pcall(function() ops:cancelAssetTransfers() end);assert(not ok2 and e2.code=='CLEANUP' and destroyed==7)
 rejects(function() ops:reconstructAsset(input,guard) end,'CLEANUP');assert(creates==8)
 `,true));
+test('successful reconstruction releases its staging slot while retaining mesh ownership and continuity retirement',options,t=>run(t,setup+`
+stage();local input=args();ops:reconstructAsset(input,guard)
+assert(ops.assetTransfers[expected.digest]==nil,'reconstructed transfer no longer holds a staging slot')
+rejects(function() ops:reconstructAsset(input,guard) end,'STATE');assert(creates==8 and destroyed==0)
+rejects(function() ops:stageAssetPacket({expected=expected,packet=packets[1],target=target,continuity=continuity},guard) end,'STATE');assert(next(ops.assetTransfers)==nil)
+-- One other unrelated staging transfer plus a new one must still fit the two-transfer bound.
+local other={receiver={cancel=function() end,status=function() return {state='receiving'} end}}
+ops.assetTransfers[string.rep('d',64)]=other
+local ok,e=pcall(function() return ops:receiveAssetPacket({digest=string.rep('c',64),payloadDigest=expected.payloadDigest,manifestDigest=expected.manifestDigest},packets[1],guard) end)
+assert(ok or (type(e)=='table' and e.code~='BUSY'),'released slot admits a new transfer: '..tostring(type(e)=='table' and e.code or e))
+rejects(function() ops:receiveAssetPacket({digest=string.rep('e',64),payloadDigest=expected.payloadDigest,manifestDigest=expected.manifestDigest},packets[1],guard) end,'BUSY')
+ops.assetTransfers[string.rep('d',64)]=nil;ops.assetTransfers[string.rep('c',64)].receiver:cancel();ops.assetTransfers[string.rep('c',64)]=nil
+-- Edit continuity retirement still reaches the detached reconstructed meshes.
+ops:retireAssetContinuity({sessionId=target.sessionId,mode='Play',playEpoch=1})
+assert(destroyed==8)
+`,true));

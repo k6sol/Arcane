@@ -237,6 +237,13 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 		end
 	end
 	if response.StatusCode == 409 then V.fail("RECONCILE", "Daemon refused the session or receipt; inspect the command and connect again.") end
+	-- Any other definitive client error on a receipt (for example RECEIPT) rejects
+	-- these exact bytes; resending them is not a loopback retry. Only timeout and
+	-- busy statuses remain transient.
+	if route == ROUTES.result and response.StatusCode >= 400 and response.StatusCode < 500
+		and response.StatusCode ~= 408 and response.StatusCode ~= 429 then
+		V.fail("RECONCILE", "Daemon rejected the command receipt (HTTP " .. tostring(response.StatusCode) .. "); inspect the command and connect again.")
+	end
 	if not response.Success then V.fail("NETWORK", "Daemon request failed (HTTP " .. tostring(response.StatusCode) .. ").") end
 	if type(response.Body) ~= "string" or #response.Body > V.RESULT_BYTES + V.ARGUMENT_BYTES + 8192 then V.fail("BODY_LIMIT", "Daemon response exceeds the transport bound.") end
 	local decoded, data = pcall(function() return V.decode(response.Body, self.http) end)
@@ -569,7 +576,8 @@ function Transport:tick(): number
 		self.pending = nil
 		self:status(if self.blocked then "reconciliation" else "connected",
 			if self.blocked then "Partial change: inspect the command and place before pairing again." else "Receipt acknowledged.", receipt.body.commandId)
-		return Transport.POLL_SECONDS
+		-- Poll for the next queued command at once; only idle polls wait.
+		return if self.blocked then Transport.POLL_SECONDS else 0
 	end
 	if self.blocked then return Transport.POLL_SECONDS end
 	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = observation}, pair.token)
@@ -578,8 +586,11 @@ function Transport:tick(): number
 	self:checkIdentity(pair)
 	V.fields(response, {"commands"}, "poll response")
 	local commands = V.list(response.commands, 1, "command queue")
-	if #commands == 1 then self:dispatch(commands[1])
-	else self:status("connected", if self:isEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.") end
+	if #commands == 1 then
+		self:dispatch(commands[1])
+		return 0 -- Post the receipt on the next tick without an idle sleep.
+	end
+	self:status("connected", if self:isEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.")
 	return Transport.POLL_SECONDS
 end
 

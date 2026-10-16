@@ -443,3 +443,59 @@ client.assetProgressAt=nil
 rejects(function() client:assetProgress() end,'RECONCILE');assert(client.assetRenewal==original and client.pending==nil and client.cacheCount==0)
 client:stop()
 `));
+
+const cadenceSetup = `
+local client = connected()
+local queued = nil
+local resultStatus, resultError = 200, nil
+local function readCommand(id: string, epoch: number): any
+  return {protocolVersion = V.PROTOCOL, id = id, requestId = id .. "-request", state = "dispatched",
+    sessionId = client.pair.sessionId, clientSessionId = client.clientSessionId, method = "scene.children",
+    allowedRoots = V.array({"Workspace"}), allowWrites = client.pair.allowWrites,
+    leaseEpoch = epoch, expiresAt = "2099-01-01T00:00:00.000Z", args = {root = "Missing"}}
+end
+fixture.httpHook = function(request: any): any
+  table.insert(requests, request)
+  if string.find(request.Url, "/poll", 1, true) then
+    local commands = if queued then V.array({queued}) else V.array({})
+    queued = nil
+    return reply({commands = commands})
+  elseif string.find(request.Url, "/result", 1, true) then
+    if resultError then return reply({error = resultError, message = "untrusted detail"}, resultStatus) end
+    return reply({accepted = true})
+  end
+  error("unexpected route " .. request.Url)
+end
+local function route(index: number): string return string.match(requests[index].Url, "/v1/plugin/(%a+)$") end
+`;
+
+test('dispatched work posts its receipt and polls again without idle sleeps; idle polls keep the poll interval', options, t => run(t, cadenceSetup + `
+local before = #requests
+queued = readCommand("cadence-1", 1)
+assert(client:cycle() == 0, "dispatch must not sleep before posting its receipt")
+assert(route(before + 1) == "poll" and client.pending and client.pending.body.commandId == "cadence-1")
+queued = readCommand("cadence-2", 2)
+assert(client:cycle() == 0, "an acknowledged receipt must not sleep before the next poll")
+assert(route(before + 2) == "result" and client.pending == nil)
+assert(client:cycle() == 0 and route(before + 3) == "poll" and client.pending.body.commandId == "cadence-2")
+assert(client:cycle() == 0 and route(before + 4) == "result")
+assert(client:cycle() == Transport.POLL_SECONDS and route(before + 5) == "poll" and client.pending == nil, "idle poll keeps its interval")
+assert(#requests == before + 5)
+client:stop()
+`));
+
+test('a definitive non-session 400 on the receipt route blocks for reconciliation instead of retrying as loopback loss', options, t => run(t, cadenceSetup + `
+queued = readCommand("cadence-receipt", 1)
+client:cycle(); assert(client.pending and not client.blocked)
+resultStatus, resultError = 400, "RECEIPT"
+local delay = client:cycle()
+local status = statuses[#statuses]
+assert(status.state == "reconciliation" and client.blocked and client.failures == 0, "RECEIPT rejection is not NETWORK: " .. status.state .. " " .. status.detail)
+assert(not string.find(status.detail, "Loopback unavailable", 1, true) and not string.find(status.detail, "untrusted detail", 1, true))
+assert(delay == Transport.MAX_BACKOFF_SECONDS and client.pending and client.pending.body.commandId == "cadence-receipt", "receipt stays for reconciliation")
+-- Transient server faults still use the ordinary loopback retry.
+client.blocked = false
+resultStatus, resultError = 500, "INTERNAL"
+assert(client:cycle() == 4 and client.failures == 1 and statuses[#statuses].state == "retrying")
+client:stop()
+`));

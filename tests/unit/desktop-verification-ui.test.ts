@@ -365,7 +365,7 @@ test('browser fixture: native keyboard activation, responsive settings, referenc
       const style = getComputedStyle(document.documentElement);
       return ['--bg', '--text', '--accent'].map(name => style.getPropertyValue(name).trim());
     });
-    assert.deepEqual(palette, ['#080808', '#f5f5f5', '#ff3340']);
+    assert.deepEqual(palette, ['#faf9f5', '#141413', '#d97757']);
     for (const width of [945, 390]) {
       await page.setViewportSize({ width, height: 850 });
       await setup.scrollIntoViewIfNeeded();

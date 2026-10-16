@@ -8,6 +8,9 @@ import {
   studioTestRoutes, STUDIO_TEST_HTTP_LIMITS,
   type StudioTestRouteService, type StudioTestActor,
 } from '../../apps/daemon/src/studio-test-routes.js';
+import { z } from 'zod';
+import { StudioTestError } from '../../packages/studio-test-controller/src/contracts.js';
+import { ArcaneError } from '../../packages/protocol/src/providers.js';
 
 // Synthetic caller credentials only. This harness never imports a provider,
 // Studio adapter, the parent server, or the actual playtest service.
@@ -357,7 +360,7 @@ test('responses have byte bounds, fixed security headers and no caller bearer in
 test('known and unknown service failures use fixed messages without error, provider or credential disclosure', async t => {
   const f = await httpFixture(t);
   for (const [code, status] of [['BUSY', 409], ['NOT_FOUND', 404], ['HUMAN_AUTH_REQUIRED', 403], ['PLACE_DENIED', 403],
-    ['FENCED', 409], ['CONSENT_EXPIRED', 409], ['TIMEOUT', 504], ['SHUTDOWN', 503], ['JOURNAL_FAILED', 503], ['invented-secret-code', 503]] as const) {
+    ['FENCED', 409], ['CONSENT_EXPIRED', 409], ['TIMEOUT', 504], ['SHUTDOWN', 503], ['JOURNAL_FAILED', 503], ['invented-secret-code', 424]] as const) {
     f.hooks.prepare = async () => { throw problem(code, 'provider stdout ' + AGENT_A + ' ' + HUMAN); };
     const result = await f.post('prepare', PREPARE);
     assert.equal(result.status, status, code); assert.equal(result.text.includes(AGENT_A), false);
@@ -460,4 +463,34 @@ test('aborted uploads never dispatch service operations and clean up listeners',
   f.request.aborted = true; f.request.emit('aborted'); await handling;
   assert.equal(f.response.status, 400); assert.deepEqual(f.calls, []);
   for (const name of ['data', 'end', 'error', 'aborted']) assert.equal(f.request.listenerCount(name), 0, name);
+});
+
+test('settled prepare refusals are definite 4xx codes; only possible effects stay 5xx', async t => {
+  const f = await httpFixture(t);
+  const zod = z.strictObject({ sessionId: z.string() }).safeParse({});
+  assert.equal(zod.success, false);
+  for (const [thrown, status, code] of [
+    [new StudioTestError('UNSUPPORTED_TOOL'), 422, 'TEST_TOOL_UNSUPPORTED'],
+    [new StudioTestError('BAD_NATIVE_RESPONSE'), 424, 'NATIVE_RESPONSE_INVALID'],
+    [new StudioTestError('RUNTIME_ERROR'), 424, 'PREPARE_FAILED'],
+    [new ArcaneError('SESSION', 'Unknown Studio session.'), 404, 'SESSION_NOT_FOUND'],
+    [new ArcaneError('REVOKED', 'revoked'), 409, 'SESSION_REVOKED'],
+    [new ArcaneError('PROPERTY', 'Property is not writable by the safe bridge.'), 422, 'SCENARIO_DENIED'],
+    [new ArcaneError('INPUT', 'Too many properties.'), 422, 'SCENARIO_DENIED'],
+    // A scenario policy SCOPE refusal is not the route's own caller-changed fence.
+    [new ArcaneError('SCOPE', 'Instance reference is outside this exact paired Studio scope.'), 422, 'SCENARIO_DENIED'],
+    [zod.error, 400, 'INVALID_REQUEST'],
+    [new Error('native spawn failed ' + AGENT_A), 424, 'PREPARE_FAILED'],
+    [new StudioTestError('BINDING_CHANGED'), 409, 'BINDING_CHANGED'],
+    [new StudioTestError('EFFECT_UNKNOWN'), 503, 'UNAVAILABLE'],
+  ] as const) {
+    f.hooks.prepare = async () => { throw thrown; };
+    const result = await f.post('prepare', PREPARE);
+    assert.equal(result.status, status, code); assert.equal((result.json as { error: string }).error, code);
+    assert.equal(result.text.includes(AGENT_A), false); assert.equal(result.text.includes('safe bridge'), false);
+  }
+  // Outside prepare a native failure may follow an effect and remains ambiguous.
+  f.hooks.cancel = async () => { throw new StudioTestError('BAD_NATIVE_RESPONSE'); };
+  const cancelled = await f.post('cancel', { id: 'job-1' });
+  assert.equal(cancelled.status, 503); assert.equal((cancelled.json as { error: string }).error, 'UNAVAILABLE');
 });

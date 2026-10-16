@@ -60,7 +60,7 @@ function createNativeHandoffHost(ports) {
   else { const q = plain(p.preparer, ['prepare', 'cleanup']); if (!fn(q.prepare) || !fn(q.cleanup)) fail('INPUT'); preparer = Object.freeze({ prepare: q.prepare, cleanup: q.cleanup }); }
   const { getSession, getChoices, confirm, launchTerminal } = p;
 
-  let generation = 0, controller = new AbortController(), inflight = false, disposed = false;
+  let generation = 0, controller = new AbortController(), inflight = false, chatInflight = false, disposed = false;
   // Bounded private bookkeeping for handoffs this host minted: original captured session, owned receipt, revoked flag.
   const records = new Map();
 
@@ -248,6 +248,56 @@ function createNativeHandoffHost(ports) {
     if (record) record.revoked = true;
     return result('revoked', null, { handoffId, cleanup: record ? await cleanupOwned(record) : 'not_owned' });
   }
+  /** Trusted main-process port for the in-app Claude chat host (no terminal, no dialog here: the chat host asks the
+   * human itself before calling). Mints ONE scoped credential through the same begin -> prepare -> seal path and
+   * returns the owned config path plus the credential ONLY as a non-enumerable env overlay. The caller owns the
+   * headless child; dispose/releaseChat revoke it. Any doubt is null, never a retry. */
+  async function prepareChat(input) {
+    if (disposed || chatInflight || records.size >= LIMITS.records) return null;
+    let selection;
+    try { const s = plain(input, ['model', 'effort']); if (typeof s.model !== 'string' || !CHOICE.test(s.model) || typeof s.effort !== 'string' || !CHOICE.test(s.effort)) return null; selection = Object.freeze({ model: s.model, effort: s.effort }); }
+    catch { return null; }
+    chatInflight = true;
+    try {
+      const session = readSession(); if (!session) return null;
+      const scope = { session, generation }, signal = controller.signal;
+      const project = await projectOf(session, signal);
+      if (!current(scope) || !project) return null;
+      const begun = await request(session, 'POST', '/v1/native-handoffs/begin', { requestId: randomUUID(), projectId: project.projectId }, signal);
+      let handoff = null, credential = null;
+      if (begun.kind === 'reply' && begun.status === 200) {
+        try { const v = plain(begun.value, ['handoff', 'credential']); const s = status(v.handoff, project.projectId);
+          if (s && s.state === 'pending' && typeof v.credential === 'string' && CREDENTIAL.test(v.credential)) { handoff = s; credential = v.credential; } } catch { /* null below */ }
+      }
+      if (!handoff) return null;
+      const record = { handoffId: handoff.handoffId, projectId: project.projectId, session, receipt: null, revoked: false };
+      records.set(record.handoffId, record);
+      if (!current(scope)) { await abandon(record, 'refused', 'context_changed'); return null; }
+      let receipt;
+      try {
+        receipt = await preparer.prepare({ projectPath: session.projectPath, runtimeDirectory: session.runtimeDirectory, nodePath: session.nodePath, mcpEntry: session.mcpEntry,
+          daemonUrl: session.origin, credential, model: selection.model, effort: selection.effort, assertCurrent: () => { if (!current(scope)) throw new Error('stale'); } });
+      } catch { await abandon(record, 'refused', 'prepare_refused'); return null; }
+      record.receipt = receipt;
+      const sealed = await request(session, 'POST', '/v1/native-handoffs/seal', { handoffId: record.handoffId, projectId: project.projectId }, signal);
+      let sealedStatus = null;
+      if (sealed.kind === 'reply' && sealed.status === 200) {
+        try { const s = status(plain(sealed.value, ['handoff']).handoff, project.projectId); if (s && s.handoffId === record.handoffId && s.state === 'sealed') sealedStatus = s; } catch { /* null below */ }
+      }
+      if (!sealedStatus || !current(scope)) { await abandon(record, 'refused', 'seal_unconfirmed'); return null; }
+      const out = { handoffId: record.handoffId, expiresAt: sealedStatus.expiresAt, configPath: receipt.configPath };
+      Object.defineProperty(out, 'env', { value: Object.freeze({ ARCANE_DAEMON_URL: session.origin, ARCANE_LOCAL_TOKEN: credential }), enumerable: false });
+      credential = null;
+      return Object.freeze(out);
+    } catch { return null; } finally { chatInflight = false; }
+  }
+  /** Revoke one chat credential this host minted (original session only) and clean its owned config. */
+  async function releaseChat(handoffId) {
+    const record = typeof handoffId === 'string' && UUID.test(handoffId) ? records.get(handoffId) : undefined;
+    if (!record) return false;
+    const revoked = await revokeOriginal(record); await cleanupOwned(record);
+    return revoked === 'revoked';
+  }
   /** Synchronous fence: later awaits in flight see a new generation and their reads are aborted. */
   function cancelPending() { generation++; controller.abort(); controller = new AbortController(); }
   /** Fence, then revoke known original handoffs once and clean only owned material. Never touches native processes. */
@@ -263,7 +313,10 @@ function createNativeHandoffHost(ports) {
     }));
     return Object.freeze({ revoked, unknown, retained });
   }
-  return Object.freeze({ launch, list, revoke, cancelPending, dispose });
+  // The chat ports are trusted main-process hooks, deliberately outside the enumerable human API.
+  const host = { launch, list, revoke, cancelPending, dispose };
+  Object.defineProperties(host, { prepareChat: { value: prepareChat }, releaseChat: { value: releaseChat } });
+  return Object.freeze(host);
 }
 
 module.exports = { createNativeHandoffHost, NativeHandoffHostError, NATIVE_HANDOFF_HOST_LIMITS: LIMITS };

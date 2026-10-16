@@ -541,3 +541,30 @@ test('unprepared state parents fail closed without creating directories', async 
   assert.equal(f.disk.writes.length, 0); assert.equal(f.safeStorage.calls.includes('encrypt'), false);
 });
 
+
+test('optional workflowDraft flag round-trips through preload and host; legacy rows stay plain; malformed values are refused', async () => {
+  const f = fixture();
+  const flagged = snapshot({ tabs: [tab(1, { draft: 'Workflow generated text', workflowDraft: true }), tab(2, { draft: 'Typed text', workflowDraft: false })] });
+  assert.deepEqual(json(await f.call('save', flagged)), { saved: true });
+  assert.deepEqual(json(await f.call('read')), { available: true, preferences: flagged });
+  assert.deepEqual(json(await f.raw('read')), { available: true, preferences: flagged });
+  // Rows without the flag (written before it existed) are accepted and read back without inventing one.
+  const legacy = snapshot({ tabs: [tab(1, { draft: 'Legacy typed text' })] });
+  assert.deepEqual(json(await f.call('save', legacy)), { saved: true });
+  const legacyRead = json(await f.call('read'));
+  assert.deepEqual(legacyRead, { available: true, preferences: legacy }); assert.equal(Object.hasOwn(legacyRead.preferences.tabs[0], 'workflowDraft'), false);
+  // A canonical encrypted record from an older build still decrypts and validates unchanged.
+  const g = fixture(), payload = { version: 1, projectId: g.projectId, preferences: legacy };
+  g.disk.put(g.full, { kind: 'file', bytes: Buffer.from(JSON.stringify({ version: 1, ciphertext: g.safeStorage.encryptString(JSON.stringify(payload)).toString('base64') }) + '\n') });
+  assert.deepEqual(json(await g.call('read')), { available: true, preferences: legacy });
+  const prior = Buffer.from(f.disk.node(f.full).bytes), writes = f.disk.writes.length;
+  for (const workflowDraft of ['yes', 'true', 1, 0, null, {}, []]) {
+    const bad = snapshot({ tabs: [tab(1, { workflowDraft })] });
+    await assert.rejects(f.raw('save', bad), ERROR); await assert.rejects(f.call('save', bad), ERROR);
+    f.setReply({ available: true, preferences: bad }); await assert.rejects(f.call('read'), ERROR); f.setReply(undefined);
+  }
+  assert.ok(f.disk.node(f.full).bytes.equals(prior)); assert.equal(f.disk.writes.length, writes);
+  const stored = fixture(), badPayload = { version: 1, projectId: stored.projectId, preferences: snapshot({ tabs: [tab(1, { workflowDraft: 'yes' })] }) };
+  stored.disk.put(stored.full, { kind: 'file', bytes: Buffer.from(JSON.stringify({ version: 1, ciphertext: stored.safeStorage.encryptString(JSON.stringify(badPayload)).toString('base64') }) + '\n') });
+  await assert.rejects(stored.raw('read'), ERROR); await assert.rejects(stored.call('read'), ERROR);
+});

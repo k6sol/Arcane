@@ -382,8 +382,11 @@ export class DaemonClient {
       // Staging may have completed before the route's final actor/binding check
       // returns 403/404. A post-send HTTP rejection cannot prove no work happened.
       if (error instanceof BridgeError && error.rejected && !nativeStaging) throw error;
+      // Keep the daemon's (already redacted) refusal code so a definite preflight
+      // refusal is diagnosable; state/retry semantics stay unknown/no-replay.
+      const detail = !deadline.signal.aborted && error instanceof BridgeError ? { error: { code: error.code, message: error.message } } : {};
       return { ...identity, operationId, state: 'unknown', terminal: false, ambiguous: true,
-        wait: deadline.signal.aborted ? options.signal?.aborted ? 'aborted' : 'timeout' : 'interrupted', nextStep };
+        wait: deadline.signal.aborted ? options.signal?.aborted ? 'aborted' : 'timeout' : 'interrupted', nextStep, ...detail };
     } finally { deadline.dispose(); }
   }
 

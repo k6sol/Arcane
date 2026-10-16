@@ -2,6 +2,9 @@
 import type { ProviderConnectionStatus } from './codex-chat.js';
 
 export type SetupProvider = 'codex' | 'claude';
+export type ChatSurface = 'codex' | 'claude';
+/** Codex conversation nodes hidden (never removed) while the embedded Claude chat is shown. */
+export const CODEX_SURFACE_SELECTORS = ['#codex-panel .conversation-scroll', '#codex-compose', '#codex-notice', '#codex-status', '#workspace-chat-tabs', '#workspace-new-chat'] as const;
 export interface ClaudeSetupChoices {
   cliVersion: string; aliases: readonly string[]; efforts: readonly string[];
 }
@@ -36,6 +39,9 @@ export interface ProviderSetupController {
   /** Current Claude CLI choices; null when status, sign-in or provider selection is stale. */
   handoffChoices(): ClaudeSetupChoices | null;
   subscribeHandoffChoices(listener: () => void): () => void;
+  /** Which in-app chat the workspace shows: Codex, or the embedded Claude chat after a signed-in Claude status. */
+  chatSurface(): ChatSurface;
+  subscribeChatSurface(listener: () => void): () => void;
   stop(): void;
   resume(): void;
   cleanup(): void;
@@ -126,6 +132,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   if (!panel || !gate || !select) return {
     isSignedIn: () => false, subscribeSignInChange: (_listener: () => void) => () => {},
     handoffChoices: () => null, subscribeHandoffChoices: (_listener: () => void) => () => {},
+    chatSurface: () => 'codex', subscribeChatSurface: (_listener: () => void) => () => {},
     stop() {}, resume() {}, cleanup() {},
   };
   const native = bridge(doc, options), storage = presentationStorage(doc);
@@ -143,6 +150,25 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const signInListeners = new Set<() => void>();
   const choiceListeners = new Set<() => void>();
   let lastChoices = '';
+  // Claude chat evidence: a non-busy subscription status ACK for the selected Claude provider.
+  // Unlike isSignedIn() it does not expire on the 60s presentation clock (an open chat must not
+  // re-lock mid-conversation); any non-subscription status, failure, provider change or stop clears it.
+  let claudeChatEvidence = false, surface: ChatSurface = 'codex';
+  const surfaceListeners = new Set<() => void>();
+  const claudeChatActive = () => provider === 'claude' && claudeChatEvidence && !!native && !stopped && !disposed;
+  const applySurface = () => {
+    const next: ChatSurface = claudeChatActive() ? 'claude' : 'codex';
+    if (next === surface) return;
+    surface = next;
+    const claude = next === 'claude';
+    const root = doc.getElementById('claude-chat'); if (root) root.hidden = !claude;
+    for (const selector of CODEX_SURFACE_SELECTORS) {
+      let node: HTMLElement | null = null;
+      try { node = selector.startsWith('#') && !selector.includes(' ') ? doc.getElementById(selector.slice(1)) : doc.querySelector?.(selector) ?? null; } catch { node = null; }
+      if (node) node.hidden = claude;
+    }
+    for (const listener of [...surfaceListeners]) { try { listener(); } catch { /* Observers cannot interrupt setup. */ } }
+  };
   const clearSignInTimer = () => { if (signInTimer !== null) clearTimeout(signInTimer); signInTimer = null; };
   const clearLoginWatch = () => { if (loginTimer !== null) clearTimeout(loginTimer); loginTimer = null; loginWatch = null; };
   provider = providers(select.value) ? select.value : 'codex';
@@ -196,7 +222,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     select.value = provider;
     panel.setAttribute('aria-busy', String(busy || connectingSavedLogin)); gate.setAttribute('aria-busy', String(busy || connectingSavedLogin));
     for (const [id, value] of [['provider-login-codex', 'codex'], ['provider-login-claude', 'claude']] as const) button(id)?.setAttribute('aria-pressed', String(provider === value));
-    gate.hidden = !!connected(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
+    gate.hidden = !!connected() || claudeChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
     const checking = busy && activeAction === 'status' || pendingStatus;
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
       state?.auth === 'signed-out' || provider === 'codex' && connection?.fresh && connection.auth === 'signed-out' ? 'Sign in with ' + name + '.' :
@@ -225,6 +251,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     }
     // Keep the integration hook; the card offers status through its one primary action.
     const refresh = button('provider-login-refresh'); if (refresh) { refresh.hidden = true; refresh.disabled = stopped || disposed || busy || !native; }
+    // Terminal handoff stays available as a secondary action beside the embedded Claude chat.
+    const terminal = button('claude-chat-terminal'); if (terminal) { terminal.hidden = !claudeChatActive(); terminal.disabled = stopped || disposed || busy || !native; }
+    applySurface();
     clearSignInTimer();
     const entry = states.get(provider);
     if (entry && !stopped && !disposed && status()) {
@@ -240,7 +269,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (next !== provider) clearLoginWatch();
     if (stopped || disposed) return;
     const changed = next !== provider;
-    if (changed) { provider = next; epoch++; actionError = null; states.delete(next); if (next === 'claude') claudeSignInObserved = null; }
+    if (changed) { provider = next; epoch++; actionError = null; states.delete(next); claudeChatEvidence = false; if (next === 'claude') claudeSignInObserved = null; }
     try { storage?.setItem(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider })); } catch { /* Only presentation is lost. */ }
     render();
     const Event = doc.defaultView?.CustomEvent;
@@ -264,6 +293,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       if (!stopped && !disposed && generation === epoch) {
         states.set(target, { state: value, observed: Date.now() });
         if (target === 'claude') {
+          if (value.auth !== 'subscription') claudeChatEvidence = false;
+          else if (action === 'status' && !value.busy) claudeChatEvidence = true;
           if (value.auth !== 'subscription') claudeSignInObserved = null;
           else if (action === 'status' && !value.busy) claudeSignInObserved = Date.now();
           // Install/launch snapshots and busy replies may contain cached auth.
@@ -278,7 +309,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         if (watching && !value.busy) clearLoginWatch();
       }
     } catch {
-      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') claudeSignInObserved = null; awaitingStatus.delete(target); actionError = 'Setup unavailable. Try again in Settings.'; }
+      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; claudeChatEvidence = false; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Try again in Settings.'; }
     } finally {
       busy = false; activeAction = null; cancelStatus = null; if (!disposed) render();
       if (!stopped && !disposed && generation === epoch && target === provider) {
@@ -321,7 +352,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     pendingStatus = false;
     void invoke('status');
   };
-  for (const [id, action] of [['provider-setup-refresh', 'status'], ['provider-setup-login', 'login'], ['provider-setup-install', 'install'], ['provider-setup-launch', 'launch'], ['provider-login-refresh', 'status']] as const) {
+  for (const [id, action] of [['provider-setup-refresh', 'status'], ['provider-setup-login', 'login'], ['provider-setup-install', 'install'], ['provider-setup-launch', 'launch'], ['claude-chat-terminal', 'launch'], ['provider-login-refresh', 'status']] as const) {
     const control = button(id); if (control) listen(control, 'click', event => { if (trusted(event) && !control.disabled) void invoke(action); });
   }
   for (const [id, next] of [['provider-login-codex', 'codex'], ['provider-login-claude', 'claude']] as const) {
@@ -362,13 +393,19 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       choiceListeners.add(listener);
       return () => { choiceListeners.delete(listener); };
     },
+    chatSurface: () => surface,
+    subscribeChatSurface(listener: () => void) {
+      if (disposed) return () => {};
+      surfaceListeners.add(listener);
+      return () => { surfaceListeners.delete(listener); };
+    },
     subscribeSignInChange(listener: () => void) {
       if (disposed) return () => {};
       signInListeners.add(listener);
       return () => { signInListeners.delete(listener); };
     },
-    stop() { stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; awaitingStatus.clear(); render(); },
+    stop() { stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); render(); },
     resume() { if (disposed || !stopped) return; stopped = false; epoch++; render(); requestStatus(); },
-    cleanup() { if (disposed) return; disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); signInListeners.clear(); choiceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
+    cleanup() { if (disposed) return; disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
   };
 }

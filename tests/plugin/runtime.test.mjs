@@ -139,7 +139,7 @@ end
 assert(#fixture.workers == 1 and #fixture.transports == 1, "exactly one transport worker")
 local client = fixture.transports[1]
 local worker = coroutine.create(fixture.workers[1])
-task.wait = function(seconds: number): () assert(seconds >= 2 and seconds <= 30, "original backoff bounds"); coroutine.yield() end
+task.wait = function(seconds: number): () assert(seconds == 0 or (seconds >= 2 and seconds <= 30), "original backoff bounds or an immediate post-dispatch continuation"); coroutine.yield() end
 local function cycle(): () local ok, err = coroutine.resume(worker); assert(ok, tostring(err)) end
 local function enter(value: any): () keyInput.Text = value; keyInput:GetPropertyChangedSignal("Text"):Fire() end
 local function storageBoundaries(): ()

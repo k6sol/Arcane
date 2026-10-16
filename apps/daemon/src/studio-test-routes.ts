@@ -64,11 +64,38 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   SHUTDOWN: [503, 'The playtest service is closing.'],
   JOURNAL_FAILED: [503, 'The playtest journal is unavailable.'],
   UNAVAILABLE: [503, 'The playtest operation is unavailable.'],
+  // Settled preparation refusals only (see prepareRefusal): no job exists, so these are definite.
+  TEST_TOOL_UNSUPPORTED: [422, 'Native Studio does not support this playtest; no playtest job was created.'],
+  NATIVE_RESPONSE_INVALID: [424, 'Native Studio returned unusable test evidence; no playtest job was created.'],
+  SESSION_NOT_FOUND: [404, 'The paired Studio session was not found; no playtest job was created.'],
+  SESSION_REVOKED: [409, 'The paired Studio session was revoked; no playtest job was created.'],
+  SCENARIO_DENIED: [422, 'The scenario is outside the paired Studio safe scope; no playtest job was created.'],
+  PREPARE_FAILED: [424, 'Playtest preparation failed; no playtest job was created.'],
 };
+/** Fences only this route raises; a service error reusing one of these names is not that fence. */
+const ROUTE_ONLY = new Set(['AUTH', 'HOST', 'ORIGIN', 'SCOPE', 'METHOD', 'QUERY', 'CONTENT_TYPE', 'BODY_LIMIT', 'BODY', 'BODY_TIMEOUT', 'RESPONSE_LIMIT']);
+const SCENARIO_POLICY = new Set(['INPUT', 'PROPERTY', 'SCOPE', 'READ_ONLY', 'CAPABILITY', 'TEST_BUDGET', 'TEST_SETUP']);
 class RouteError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 function fail(code: string): never { throw new RouteError(code); }
+/** The service's prepare() rejects only after it has settled: a job is never
+ * returned and any partially built job is closed before rethrowing. Its refusals
+ * are therefore definite (4xx), except an explicit unknown effect. The route's
+ * own deadline (TIMEOUT) and disconnect fences are raised elsewhere and stay 5xx. */
+function prepareRefusal(error: unknown): unknown {
+  if (error instanceof RouteError) return error;
+  if (error instanceof Error && error.name === 'ZodError') return new RouteError('INVALID_REQUEST');
+  const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+  if (code === 'EFFECT_UNKNOWN') return error;
+  if (code === 'UNSUPPORTED_TOOL') return new RouteError('TEST_TOOL_UNSUPPORTED');
+  if (code === 'BAD_NATIVE_RESPONSE') return new RouteError('NATIVE_RESPONSE_INVALID');
+  if (code === 'SESSION') return new RouteError('SESSION_NOT_FOUND');
+  if (code === 'REVOKED') return new RouteError('SESSION_REVOKED');
+  if (code !== undefined && SCENARIO_POLICY.has(code)) return new RouteError('SCENARIO_DENIED');
+  if (code !== undefined && Object.hasOwn(ERRORS, code) && !ROUTE_ONLY.has(code)) return error;
+  return new RouteError('PREPARE_FAILED');
+}
 function identifier(value: unknown): string {
   if (typeof value !== 'string' || !ID.test(value)) fail('INVALID_REQUEST');
   return value;
@@ -273,7 +300,10 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
         const value = await readJson(request, controller.signal);
         readingBody = false; guard();
         let job: unknown;
-        if (url.pathname === PREFIX + '/prepare') job = await service.requests.prepare(prepareInput(value), initial.id);
+        if (url.pathname === PREFIX + '/prepare') {
+          const input = prepareInput(value);
+          try { job = await service.requests.prepare(input, initial.id); } catch (error) { throw prepareRefusal(error); }
+        }
         else if (approving) job = await service.humanControl.approve(approvalInput(value), guard);
         else job = await service.requests.cancel(identifier(record(value, ['id']).id), initial.id);
         guard();

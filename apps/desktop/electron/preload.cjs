@@ -147,6 +147,7 @@ const workspacePreferenceText = (value, max, identifier = false) => {
   return value;
 };
 const workspacePreferenceId = (value, max) => value === null ? null : workspacePreferenceText(value, max, true);
+const WORKSPACE_PREFERENCE_ROW = Object.freeze(['localId', 'title', 'provider', 'threadId', 'sessionId', 'draft', 'modelId', 'effort', 'tool', 'previewOpen']);
 const workspacePreferenceSnapshot = value => {
   workspacePreferenceFields(value, ['version', 'projectPath', 'provider', 'tabs', 'activeTabId']);
   const projectPath = workspacePreferenceText(value.projectPath, 4096);
@@ -157,14 +158,17 @@ const workspacePreferenceSnapshot = value => {
   for (let i = 0; i < value.tabs.length; i++) {
     const d = Object.getOwnPropertyDescriptor(value.tabs, String(i));
     if (!d || !d.enumerable || !Object.hasOwn(d, 'value')) workspacePreferenceError();
-    const row = workspacePreferenceFields(d.value, ['localId', 'title', 'provider', 'threadId', 'sessionId', 'draft', 'modelId', 'effort', 'tool', 'previewOpen']);
+    // Optional boolean workflowDraft: legacy rows omit it (a plain draft). Presence is preserved exactly, never invented.
+    const flagged = !!d.value && Object.getPrototypeOf(d.value) === Object.prototype && Object.hasOwn(d.value, 'workflowDraft');
+    const row = workspacePreferenceFields(d.value, flagged ? [...WORKSPACE_PREFERENCE_ROW, 'workflowDraft'] : WORKSPACE_PREFERENCE_ROW);
+    if (flagged && typeof row.workflowDraft !== 'boolean') workspacePreferenceError();
     const localId = workspacePreferenceText(row.localId, 128, true), title = workspacePreferenceText(row.title, 512);
     if (ids.has(localId) || /[\x00-\x1f\x7f]/.test(title) || !['codex', 'claude'].includes(row.provider) ||
         !['all', 'blender', 'roblox'].includes(row.tool) || typeof row.previewOpen !== 'boolean') workspacePreferenceError();
     ids.add(localId);
     tabs.push({ localId, title, provider: row.provider, threadId: workspacePreferenceId(row.threadId, 256), sessionId: workspacePreferenceId(row.sessionId, 256),
       draft: workspacePreferenceText(row.draft, 128 * 1024), modelId: workspacePreferenceId(row.modelId, 256), effort: workspacePreferenceId(row.effort, 64),
-      tool: row.tool, previewOpen: row.previewOpen });
+      tool: row.tool, previewOpen: row.previewOpen, ...(flagged ? { workflowDraft: row.workflowDraft } : {}) });
   }
   const activeTabId = workspacePreferenceId(value.activeTabId, 128);
   if (activeTabId !== null && !ids.has(activeTabId)) workspacePreferenceError();
@@ -190,4 +194,90 @@ const workspacePreferenceInvoke = async (action, args) => {
 const workspacePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args), save: (...args) => workspacePreferenceInvoke('save', args),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences }));
+// In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
+const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
+  'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.'];
+const claudeChatUnavailable = () => { throw new Error(CLAUDE_CHAT_ERRORS[0]); };
+const claudeChatId = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+const claudeChatChoice = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
+const claudeChatTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value);
+const claudeChatText = (value, max) => typeof value === 'string' && value.length <= max;
+const claudeChatList = (value, max) => Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype && value.length <= max;
+const claudeChatMessage = value => {
+  if (!value || typeof value !== 'object' || !claudeChatId(value.id) || !['user', 'assistant', 'tool', 'error'].includes(value.role) ||
+      !claudeChatText(value.text, 65536) || !claudeChatTime(value.at)) claudeChatUnavailable();
+  const out = { id: value.id, role: value.role, text: value.text, at: value.at };
+  if (value.tool !== undefined) {
+    if (!value.tool || typeof value.tool !== 'object' || !claudeChatText(value.tool.name, 128) || !value.tool.name ||
+        !['started', 'finished', 'failed'].includes(value.tool.status)) claudeChatUnavailable();
+    out.tool = { name: value.tool.name, status: value.tool.status };
+  }
+  return out;
+};
+const claudeChatReply = (action, value) => {
+  if (!value || typeof value !== 'object') claudeChatUnavailable();
+  if (action === 'status') {
+    if (typeof value.installed !== 'boolean' || typeof value.signedIn !== 'boolean' || !(value.cliVersion === null || claudeChatText(value.cliVersion, 64)) ||
+        !claudeChatList(value.models, 32) || !value.models.every(claudeChatChoice) || !claudeChatList(value.efforts, 16) || !value.efforts.every(claudeChatChoice) ||
+        !(value.defaultModel === null || value.models.includes(value.defaultModel)) || !(value.message === null || claudeChatText(value.message, 512))) claudeChatUnavailable();
+    return { installed: value.installed, signedIn: value.signedIn, cliVersion: value.cliVersion, models: [...value.models], efforts: [...value.efforts], defaultModel: value.defaultModel, message: value.message };
+  }
+  if (action === 'list') {
+    if (!claudeChatList(value.conversations, 200)) claudeChatUnavailable();
+    return { conversations: value.conversations.map(c => {
+      if (!c || !claudeChatId(c.conversationId) || !claudeChatText(c.title, 200) || !claudeChatTime(c.updatedAt) || !claudeChatChoice(c.model) || !claudeChatChoice(c.effort)) claudeChatUnavailable();
+      return { conversationId: c.conversationId, title: c.title, updatedAt: c.updatedAt, model: c.model, effort: c.effort };
+    }) };
+  }
+  if (action === 'history') {
+    if (!claudeChatId(value.conversationId) || !claudeChatList(value.messages, 2000)) claudeChatUnavailable();
+    return { conversationId: value.conversationId, messages: value.messages.map(claudeChatMessage) };
+  }
+  if (!claudeChatId(value.turnId) || !claudeChatId(value.conversationId)) claudeChatUnavailable();
+  return { turnId: value.turnId, conversationId: value.conversationId };
+};
+const claudeChatInvoke = async (action, args) => {
+  let input;
+  if (action === 'status' || action === 'list') { if (args.length) claudeChatUnavailable(); }
+  else if (action === 'send') {
+    const value = args[0];
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 4) claudeChatUnavailable();
+    for (const key of ['conversationId', 'text', 'model', 'effort']) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) claudeChatUnavailable(); }
+    if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !claudeChatChoice(value.model) || !claudeChatChoice(value.effort)) claudeChatUnavailable();
+    if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(CLAUDE_CHAT_ERRORS[4]);
+    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort };
+  } else { if (args.length !== 1 || !claudeChatId(args[0])) claudeChatUnavailable(); input = args[0]; }
+  let value;
+  try { value = await ipcRenderer.invoke('arcane:claude-chat-' + action, ...(input === undefined ? [] : [input])); }
+  catch (error) { const text = String(error?.message ?? ''); throw new Error(CLAUDE_CHAT_ERRORS.find(known => text.endsWith(known)) ?? CLAUDE_CHAT_ERRORS[0]); }
+  if (action === 'stop' || action === 'remove') { if (typeof value !== 'boolean') claudeChatUnavailable(); return value; }
+  return claudeChatReply(action, value);
+};
+const claudeChatEvent = value => {
+  if (!value || typeof value !== 'object' || !claudeChatId(value.turnId) || !claudeChatId(value.conversationId)) return null;
+  const base = { turnId: value.turnId, conversationId: value.conversationId };
+  try {
+    if (value.type === 'delta') return claudeChatText(value.text, 65536) ? { ...base, type: 'delta', text: value.text } : null;
+    if (value.type === 'message' || value.type === 'tool') return { ...base, type: value.type, message: claudeChatMessage(value.message) };
+    if (value.type === 'done') {
+      const u = value.usage, number = n => Number.isSafeInteger(n) && n >= 0;
+      if (typeof value.ok !== 'boolean' || !(value.error === null || claudeChatText(value.error, 512)) ||
+          !(u === null || u && typeof u === 'object' && number(u.inputTokens) && number(u.outputTokens) && (u.costUsd === null || typeof u.costUsd === 'number' && Number.isFinite(u.costUsd) && u.costUsd >= 0))) return null;
+      return { ...base, type: 'done', ok: value.ok, error: value.error, usage: u === null ? null : { inputTokens: u.inputTokens, outputTokens: u.outputTokens, costUsd: u.costUsd } };
+    }
+  } catch { return null; }
+  return null;
+};
+const claudeChat = Object.freeze({ version: 1,
+  status: (...args) => claudeChatInvoke('status', args), list: (...args) => claudeChatInvoke('list', args),
+  history: (...args) => claudeChatInvoke('history', args), send: (...args) => claudeChatInvoke('send', args),
+  stop: (...args) => claudeChatInvoke('stop', args), remove: (...args) => claudeChatInvoke('remove', args),
+  onEvent: listener => {
+    if (typeof listener !== 'function') claudeChatUnavailable();
+    const wrapped = (_event, payload) => { const event = claudeChatEvent(payload); if (event) { try { listener(event); } catch { /* renderer listener errors stay in the renderer */ } } };
+    ipcRenderer.on('arcane:claude-chat-event', wrapped);
+    let active = true;
+    return () => { if (active) { active = false; ipcRenderer.removeListener('arcane:claude-chat-event', wrapped); } };
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat }));

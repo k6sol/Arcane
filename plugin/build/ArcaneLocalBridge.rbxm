@@ -1033,13 +1033,17 @@ end
 
 function Operations:retireAssetContinuity(proof: any): ()
 	local retired = false
-	for _, owned in pairs(self.assetTransfers) do
+	local function check(owned: any): ()
 		local c = owned.continuity
 		if c and (type(proof) ~= "table" or proof.sessionId ~= owned.target.sessionId or proof.mode ~= "Edit"
 			or proof.placeId ~= owned.target.placeId or proof.universeId ~= owned.target.universeId
 			or proof.connected ~= true or proof.continuitySupported ~= true or proof.clientLifetimeId ~= c.clientLifetimeId
 			or proof.pluginArtifactHash ~= c.pluginArtifactHash or proof.playEpoch ~= c.playEpoch) then retired = true end
 	end
+	for _, owned in pairs(self.assetTransfers) do check(owned) end
+	-- Reconstructed meshes no longer hold a staging slot but keep their epoch.
+	local owners = assetOwners[self]
+	if owners then for _, owner in pairs(owners.resources) do if not owner.retired then check(owner) end end end
 	if retired then self:cancelAssetTransfers() end
 end
 
@@ -1071,6 +1075,8 @@ function Operations:stageAssetPacket(args: any, guard: () -> ()): any
 	if owned then
 		if not owned.target or not V.equal(owned.target, target) or not V.equal(owned.continuity, args.continuity) then V.fail("SCOPE", "Staging target or lifetime changed.") end
 	else
+		local prior = assetOwners[self]
+		if prior and prior.resources[identity.digest] then V.fail("STATE", "Transfer was already reconstructed; inspect its original receipt.") end
 		local first = V.object(self.http:JSONDecode(packet), "first asset packet")
 		if first.kind ~= "begin" or first.ordinal ~= 0 or not V.equal(first.target, target) then V.fail("SCOPE", "Initial packet does not name the observed target.") end
 	end
@@ -1090,6 +1096,8 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	local owned = self.assetTransfers[identity.digest]
 	local current = self:assetTargetGuard(args.target, guard)
 	current()
+	local prior = assetOwners[self]
+	if not owned and prior and prior.resources[identity.digest] then V.fail("STATE", "Reconstruction was already consumed; inspect its original receipt.") end
 	if not owned or not V.equal(owned.expected, identity) or not V.equal(owned.target, args.target)
 		or not V.equal(owned.continuity, args.continuity) then V.fail("SCOPE", "Original staged buffers are absent or changed.") end
 	local owners = assetOwners[self]
@@ -1107,7 +1115,7 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	end
 	current()
 	owners.consumed[runId] = true; owners.count += 1 -- BEFORE resolving/allocating an engine service.
-	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false}
+	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, target = owned.target, continuity = owned.continuity}
 	owners.resources[identity.digest] = owner
 	owned.guard = function(): ()
 		current()
@@ -1141,6 +1149,9 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		self:cancelAssetTransfers()
 		error(output, 0)
 	end
+	-- The emptied receiver no longer owns buffers; release its staging slot so
+	-- only in-progress transfers count toward the two-transfer bound.
+	if self.assetTransfers[identity.digest] == owned then self.assetTransfers[identity.digest] = nil end
 	return output
 end
 
@@ -1373,11 +1384,27 @@ function Operations:updateProperties(command: any, args: any, guard: () -> ()): 
 		self.registry:resolve(ref)
 		if not P.compare(instance, args.expected, names) then V.fail("CONFLICT", "Properties changed before the write.") end
 		progress.ref = ref
+		local original, observable = {}, P.snapshot(instance)
+		for _, name in ipairs(names) do original[name] = instance[name] end
 		for _, name in ipairs(names) do
 			progress.touched = true
 			instance[name] = decoded[name]
 		end
-		for _, name in ipairs(names) do if not P.assignedMatches(instance, name, decoded[name]) then V.fail("VERIFY", "Property write did not match the requested value.") end end
+		for _, name in ipairs(names) do
+			if not P.assignedMatches(instance, name, decoded[name]) then
+				-- The engine coerced a value. Synchronously restore the exact engine
+				-- baseline; only a fully verified revert is a clean, untouched failure.
+				local reverted = pcall(function()
+					for _, restoring in ipairs(names) do instance[restoring] = original[restoring] end
+				end)
+				if reverted then
+					local matches = true
+					for _, restoring in ipairs(names) do if instance[restoring] ~= original[restoring] then matches = false end end
+					if matches and V.equal(P.snapshot(instance), observable) then progress.touched = false end
+				end
+				V.fail("VERIFY", "Property write did not match the requested value.")
+			end
+		end
 		return {ref = self.registry:ref(instance), mutation = {kind = "scene.update", ref = ref,
 			before = {properties = before}, after = {properties = P.snapshot(instance, names)}}}
 	end)
@@ -1826,6 +1853,13 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 		end
 	end
 	if response.StatusCode == 409 then V.fail("RECONCILE", "Daemon refused the session or receipt; inspect the command and connect again.") end
+	-- Any other definitive client error on a receipt (for example RECEIPT) rejects
+	-- these exact bytes; resending them is not a loopback retry. Only timeout and
+	-- busy statuses remain transient.
+	if route == ROUTES.result and response.StatusCode >= 400 and response.StatusCode < 500
+		and response.StatusCode ~= 408 and response.StatusCode ~= 429 then
+		V.fail("RECONCILE", "Daemon rejected the command receipt (HTTP " .. tostring(response.StatusCode) .. "); inspect the command and connect again.")
+	end
 	if not response.Success then V.fail("NETWORK", "Daemon request failed (HTTP " .. tostring(response.StatusCode) .. ").") end
 	if type(response.Body) ~= "string" or #response.Body > V.RESULT_BYTES + V.ARGUMENT_BYTES + 8192 then V.fail("BODY_LIMIT", "Daemon response exceeds the transport bound.") end
 	local decoded, data = pcall(function() return V.decode(response.Body, self.http) end)
@@ -2158,7 +2192,8 @@ function Transport:tick(): number
 		self.pending = nil
 		self:status(if self.blocked then "reconciliation" else "connected",
 			if self.blocked then "Partial change: inspect the command and place before pairing again." else "Receipt acknowledged.", receipt.body.commandId)
-		return Transport.POLL_SECONDS
+		-- Poll for the next queued command at once; only idle polls wait.
+		return if self.blocked then Transport.POLL_SECONDS else 0
 	end
 	if self.blocked then return Transport.POLL_SECONDS end
 	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = observation}, pair.token)
@@ -2167,8 +2202,11 @@ function Transport:tick(): number
 	self:checkIdentity(pair)
 	V.fields(response, {"commands"}, "poll response")
 	local commands = V.list(response.commands, 1, "command queue")
-	if #commands == 1 then self:dispatch(commands[1])
-	else self:status("connected", if self:isEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.") end
+	if #commands == 1 then
+		self:dispatch(commands[1])
+		return 0 -- Post the receipt on the next tick without an idle sleep.
+	end
+	self:status("connected", if self:isEdit() then "Connected; waiting for commands." else "Connected; commands are fenced during playtesting.")
 	return Transport.POLL_SECONDS
 end
 

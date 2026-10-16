@@ -451,3 +451,31 @@ test('actual oversized history rejection preserves the original task owner acros
   assert.equal(f.clients[1]!.snapshot().thread!.turnStatus,'idle');assert.deepEqual(f.cancelled,[]);
   const receipt=f.service.state().actions.find(row=>row.requestId===rejected.data.record.requestId)!;assert.equal(receipt.state,'rejected');assert.equal(receipt.errorCode,'FRAME_LIMIT');
 });
+
+/** Exact terminal the playtest service sends when an unapproved job expires or is cancelled before start(). */
+function notStarted(jobId=randomUUID()):StudioTestTaskSettled {
+  const report=packet(jobId);
+  return {...report,reportDigest:createHash('sha256').update(jobId+'not-started').digest('hex'),
+    review:{...report.review,runId:null,scopeDigest:null,phase:'idle',outcome:null,code:'OK',cleanup:'not_started',startedAt:null,deadline:null,cleanupDeadline:null,
+      observations:0,requiresHumanReview:false,canStartAnotherOperation:false},
+    scenario:{outcome:'incomplete',requiredEvidence:'missing',inputRelease:'complete',restoration:'not_required',subjects:'unobserved'}};
+}
+test('an unapproved verification that expired before start allows one exact re-request, then cancels without human review',async t=>{
+ const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),expired=notStarted();
+ f.prepare(origin,expired);assert.equal(f.task().state,'awaiting_verification');
+ await f.service.playtestTasks!.terminal(origin,expired);
+ assert.equal(f.task().state,'working');assert.equal(f.task().reason,'verification_not_started_rerequest_allowed');assert.equal(f.task().reportDigest,null);
+ const retry=notStarted();f.prepare(origin,retry);assert.equal(f.task().state,'awaiting_verification');
+ await assert.rejects(async()=>f.service.playtestTasks!.terminal(origin,expired),/scope changed/);
+ assert.equal(f.task().state,'awaiting_verification');
+ await f.service.playtestTasks!.terminal(origin,retry);
+ assert.equal(f.task().state,'cancelled');assert.equal(f.task().reason,'verification_consent_expired');
+ assert.throws(()=>f.prepare(origin,packet()),/unavailable/);
+ assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.deepEqual(f.validated,[]);
+});
+test('a started run with an unknown outcome still requires human review',async t=>{
+ const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),base=notStarted();
+ const started:StudioTestTaskSettled={...base,review:{...base.review,runId:randomUUID(),phase:'done',cleanup:'unknown',requiresHumanReview:true}};
+ f.prepare(origin,started);await f.service.playtestTasks!.terminal(origin,started);
+ assert.equal(f.task().state,'paused');assert.equal(f.task().reason,'verification_requires_review');
+});

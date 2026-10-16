@@ -1,0 +1,609 @@
+'use strict';
+
+// Main-process host for the in-app Claude chat. Each turn runs the INSTALLED Claude Code headless (`-p`, stream-json)
+// with no built-in tools, only Arcane's own MCP server (strict owned config) and a scoped, revocable daemon credential
+// minted through the native handoff path. The user's text goes on stdin; stdout NDJSON is parsed with fixed bounds;
+// stderr is never read into any reply. Authentication, billing and model entitlement stay with Claude Code.
+// Import and construction have no native side effects.
+const nativeFs = require('node:fs/promises');
+const nativePath = require('node:path');
+const nativeSpawn = require('node:child_process').spawn;
+const { randomUUID: nativeUUID } = require('node:crypto');
+const { types } = require('node:util');
+const os = require('node:os');
+
+const LIMITS = Object.freeze({
+  textChars: 100000, messageBytes: 65536, messages: 2000, conversations: 200, transcriptBytes: 8 * 1048576, indexBytes: 1048576,
+  lineBytes: 4 * 1048576, stdoutBytes: 64 * 1048576, deltaChars: 65536, turns: 4, helperBytes: 65536, helperTimeoutMs: 8000,
+  turnTimeoutMs: 30 * 60000, statusMaxAgeMs: 60000, credentialMarginMs: 10 * 60000, instructionsChars: 16000, titleChars: 60, toolName: 128,
+});
+const EVENT_CHANNEL = 'arcane:claude-chat-event';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CHOICE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/u;
+const EFFORT_ORDER = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const ROLES = Object.freeze(['user', 'assistant', 'tool', 'error']);
+const TOOL_STATES = Object.freeze(['started', 'finished', 'failed']);
+const MCP_SERVER = 'arcane';
+// Fixed renderer-safe messages. Nothing from stderr or raw native output is ever forwarded.
+const MESSAGES = Object.freeze({
+  unavailable: 'Claude chat is unavailable.',
+  busy: 'Another Claude chat reply is still running in this conversation.',
+  full: 'Too many Claude chat replies are running. Wait for one to finish.',
+  missing: 'This conversation no longer exists.',
+  text: 'Message is empty or too long.',
+  notInstalled: 'Claude Code was not found. Install it, then check again.',
+  version: 'The installed Claude Code version could not be verified.',
+  signedOut: 'Claude Code is not signed in. Sign in with your Claude account, then check again.',
+  notSubscription: 'Claude Code is not signed in with a Claude subscription. Arcane chat uses your Claude account sign-in.',
+  authUnknown: 'Claude Code sign-in status is unavailable or unrecognized.',
+  choices: 'Claude Code model choices could not be read.',
+  selection: 'Choose a model and effort offered by the installed Claude Code.',
+  declined: 'Claude chat was not allowed to use Arcane project tools for this project.',
+  credential: 'Arcane project tools could not be prepared for Claude chat. Check that the workspace is running, then try again.',
+  start: 'Claude Code could not be started.',
+  stopped: 'Stopped.',
+  timeout: 'The Claude reply took too long and was stopped.',
+  noReply: 'Claude Code ended without a reply.',
+  exited: 'Claude Code stopped before finishing the reply.',
+  failed: 'Claude Code could not finish this reply.',
+  output: 'Claude Code produced more output than Arcane accepts. The reply was stopped.',
+  closed: 'The workspace closed, so the reply was stopped.',
+});
+const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text]);
+const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
+  '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown.';
+const FALLBACK_INSTRUCTIONS = 'You are the Arcane Roblox development assistant. Use Arcane\'s advertised MCP tools. Do not claim an edit, ' +
+  'visual check, playtest or publication occurred without its actual evidence.';
+
+class ClaudeChatError extends Error {
+  constructor(key) { super(MESSAGES[key] ?? MESSAGES.unavailable); this.name = 'ClaudeChatError'; this.safe = true; }
+}
+const fail = key => { throw new ClaudeChatError(key); };
+/** Exact plain own data fields; proxies refused before any trap and accessors never invoked. */
+function plain(value, keys) {
+  if (!value || typeof value !== 'object' || types.isProxy(value)) fail('unavailable');
+  const prototype = Object.getPrototypeOf(value), own = Reflect.ownKeys(value);
+  if (prototype !== Object.prototype && prototype !== null || own.length !== keys.length || own.some(key => typeof key !== 'string' || !keys.includes(key))) fail('unavailable');
+  const out = Object.create(null);
+  for (const key of keys) { const field = Object.getOwnPropertyDescriptor(value, key); if (!field || !field.enumerable || !Object.hasOwn(field, 'value')) fail('unavailable'); out[key] = field.value; }
+  return out;
+}
+const isId = value => typeof value === 'string' && UUID.test(value);
+const isoNow = now => new Date(now()).toISOString();
+/** UTF-8 byte bound without splitting a code point. */
+function bounded(text, maxBytes) {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let out = Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8');
+  while (out.endsWith('�')) out = out.slice(0, -1);
+  return out;
+}
+/** Exact `send` envelope (shared by the IPC boundary and the host). */
+function sendInput(value) {
+  const v = plain(value, ['conversationId', 'text', 'model', 'effort']);
+  if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !CHOICE.test(v.model) ||
+      typeof v.effort !== 'string' || !CHOICE.test(v.effort)) fail('unavailable');
+  if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
+  return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort });
+}
+/** CLI aliases/efforts from the fixed `--help` paragraphs (provider-setup's parseClaudeChoices logic). */
+function parseChoices(stdout) {
+  const help = stdout.replace(/\r\n/g, '\n');
+  const modelParagraph = /--model\s+<model>([\s\S]*?)(?:\n\s{2}--|\n\s{2}-[a-z])/m.exec(help)?.[1] ?? '';
+  const aliases = [...new Set([...modelParagraph.matchAll(/'([a-z][a-z0-9-]+)'/g)].map(m => m[1]).filter(v => !v.startsWith('claude-')))];
+  const effortParagraph = /--effort\s+<level>([\s\S]*?)(?:\n\s{2}--|\n\s{2}-[a-z])/m.exec(help)?.[1] ?? '';
+  const efforts = EFFORT_ORDER.filter(e => new RegExp('\\b' + e + '\\b').test(effortParagraph));
+  if (!aliases.length || aliases.length > 32 || aliases.some(alias => !CHOICE.test(alias)) || !efforts.length) return null;
+  return { aliases, efforts };
+}
+/** A CLI result error is forwarded only when it is a short plain sentence: no URL, address, path, or token-like run. */
+function safeResultText(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || text.length > 300 || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/u.test(text) || /https?:|www\.|@|[A-Za-z]:[\\/]|[\\/](?:Users|home)[\\/]/i.test(text) ||
+      /[A-Za-z0-9_+/=-]{32,}/.test(text)) return null;
+  return text.replace(/\s+/g, ' ');
+}
+const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+
+/** Per-project transcript store: owned directory, atomic writes, fixed bounds, one serial write queue. */
+function createStore({ fs, p, directory, now, limits }) {
+  const indexPath = p.join(directory, 'index.json'), conversationsDirectory = p.join(directory, 'conversations');
+  let entries = null, queue = Promise.resolve();
+  const transcripts = new Map();
+  const serial = fn => { const run = queue.then(fn); queue = run.catch(() => {}); return run; };
+  const transcriptPath = id => { if (!isId(id)) fail('unavailable'); return p.join(conversationsDirectory, id + '.json'); };
+  async function readJson(path, maxBytes) {
+    let stat; try { stat = await fs.lstat(path); } catch (error) { if (error?.code === 'ENOENT') return undefined; throw error; }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) return null;
+    try { return JSON.parse(await fs.readFile(path, 'utf8')); } catch { return null; }
+  }
+  async function atomicWrite(path, value) {
+    const data = JSON.stringify(value) + '\n', temporary = path + '.' + nativeUUID() + '.tmp';
+    try { await fs.writeFile(temporary, data, { flag: 'wx', mode: 0o600 }); await fs.rename(temporary, path); }
+    catch (error) { try { await fs.unlink(temporary); } catch { /* absent */ } throw error; }
+  }
+  function validEntry(e) {
+    try {
+      const v = plain(e, ['conversationId', 'title', 'createdAt', 'updatedAt', 'model', 'effort', 'sessionId']);
+      if (!isId(v.conversationId) || typeof v.title !== 'string' || v.title.length > 200 || CONTROL.test(v.title) || !ISO.test(v.createdAt) || !ISO.test(v.updatedAt) ||
+          typeof v.model !== 'string' || !CHOICE.test(v.model) || typeof v.effort !== 'string' || !CHOICE.test(v.effort) || !(v.sessionId === null || isId(v.sessionId))) return null;
+      return { ...v };
+    } catch { return null; }
+  }
+  function validMessage(m) {
+    try {
+      const keys = m && typeof m === 'object' && Object.hasOwn(m, 'tool') ? ['id', 'role', 'text', 'at', 'tool'] : ['id', 'role', 'text', 'at'];
+      const v = plain(m, keys);
+      if (!isId(v.id) || !ROLES.includes(v.role) || typeof v.text !== 'string' || Buffer.byteLength(v.text) > limits.messageBytes || !ISO.test(v.at)) return null;
+      const out = { id: v.id, role: v.role, text: v.text, at: v.at };
+      if (keys.length === 5) {
+        const t = plain(v.tool, ['name', 'status']);
+        if (v.role !== 'tool' || typeof t.name !== 'string' || !t.name || t.name.length > limits.toolName || CONTROL.test(t.name) || !TOOL_STATES.includes(t.status)) return null;
+        out.tool = { name: t.name, status: t.status };
+      }
+      return out;
+    } catch { return null; }
+  }
+  async function load() {
+    if (entries) return entries;
+    await fs.mkdir(conversationsDirectory, { recursive: true, mode: 0o700 });
+    const saved = await readJson(indexPath, limits.indexBytes);
+    const list = saved && saved.version === 1 && Array.isArray(saved.conversations) ? saved.conversations.slice(0, limits.conversations).map(validEntry).filter(Boolean) : [];
+    if (saved === null) { try { await fs.rename(indexPath, indexPath + '.unreadable-' + now()); } catch { /* retained */ } }
+    const seen = new Set(); entries = list.filter(e => !seen.has(e.conversationId) && seen.add(e.conversationId));
+    return entries;
+  }
+  const persistIndex = () => atomicWrite(indexPath, { version: 1, conversations: entries });
+  async function messagesOf(id) {
+    if (transcripts.has(id)) return transcripts.get(id);
+    const saved = await readJson(transcriptPath(id), limits.transcriptBytes + limits.messageBytes * 2);
+    const messages = saved && saved.version === 1 && saved.conversationId === id && Array.isArray(saved.messages) ?
+      saved.messages.slice(-limits.messages).map(validMessage).filter(Boolean) : [];
+    transcripts.set(id, messages);
+    if (transcripts.size > 8) for (const key of transcripts.keys()) { if (transcripts.size <= 8) break; if (key !== id) transcripts.delete(key); }
+    return messages;
+  }
+  async function persistMessages(id, messages) {
+    while (messages.length > limits.messages) messages.shift();
+    let bytes = messages.reduce((total, m) => total + Buffer.byteLength(JSON.stringify(m)) + 1, 0);
+    while (bytes > limits.transcriptBytes && messages.length > 1) bytes -= Buffer.byteLength(JSON.stringify(messages.shift())) + 1;
+    await atomicWrite(transcriptPath(id), { version: 1, conversationId: id, messages });
+  }
+  return Object.freeze({
+    list: () => serial(async () => (await load()).map(e => ({ ...e }))),
+    get: id => serial(async () => { const e = (await load()).find(item => item.conversationId === id); return e ? { ...e } : null; }),
+    create: (entry, protectedIds) => serial(async () => {
+      const list = await load();
+      while (list.length >= limits.conversations) {
+        const victims = list.filter(e => !protectedIds.has(e.conversationId)).sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+        if (!victims.length) fail('full');
+        list.splice(list.indexOf(victims[0]), 1); transcripts.delete(victims[0].conversationId);
+        try { await fs.unlink(transcriptPath(victims[0].conversationId)); } catch { /* absent */ }
+      }
+      list.push({ ...entry }); transcripts.set(entry.conversationId, []);
+      await persistIndex();
+    }),
+    update: (id, patch) => serial(async () => {
+      const e = (await load()).find(item => item.conversationId === id); if (!e) return false;
+      Object.assign(e, patch); await persistIndex(); return true;
+    }),
+    remove: id => serial(async () => {
+      const list = await load(), at = list.findIndex(item => item.conversationId === id); if (at < 0) return false;
+      list.splice(at, 1); transcripts.delete(id); await persistIndex();
+      try { await fs.unlink(transcriptPath(id)); } catch { /* absent */ }
+      return true;
+    }),
+    messages: id => serial(async () => { if (!(await load()).some(e => e.conversationId === id)) return null; return (await messagesOf(id)).map(m => ({ ...m, ...(m.tool ? { tool: { ...m.tool } } : {}) })); }),
+    /** Append, or replace by id; skipped when the conversation was removed meanwhile. */
+    put: (id, message) => serial(async () => {
+      if (!(await load()).some(e => e.conversationId === id)) return false;
+      const messages = await messagesOf(id), at = messages.findIndex(m => m.id === message.id);
+      if (at >= 0) messages[at] = message; else messages.push(message);
+      await persistMessages(id, messages); return true;
+    }),
+  });
+}
+
+function createClaudeChat(options) {
+  if (!options || typeof options !== 'object' || typeof options.getWindow !== 'function' || typeof options.projectPath !== 'string' ||
+      typeof options.stateDirectory !== 'string' || !options.handoff || typeof options.handoff.prepare !== 'function' || typeof options.handoff.release !== 'function') fail('unavailable');
+  // Trusted main-process seams for tests only; never IPC payloads.
+  const fs = options.fs ?? nativeFs, spawn = options.spawn ?? nativeSpawn, platform = options.platform ?? process.platform;
+  const p = platform === 'win32' ? nativePath.win32 : nativePath.posix;
+  const env = { ...(options.env ?? process.env) }, home = options.homedir ?? (() => os.homedir()), now = options.now ?? (() => Date.now());
+  const randomUUID = options.randomUUID ?? nativeUUID, handoff = options.handoff;
+  const limits = Object.freeze({ ...LIMITS, ...(options.limits ?? {}) });
+  const projectPath = options.projectPath;
+  const store = createStore({ fs, p, directory: options.stateDirectory, now, limits });
+  const turns = new Map(), byConversation = new Map();
+  let disposed = false, statusCache = null, approval = null, approved = false, credential = null, minting = null, instructions = null;
+  const credentials = new Set();
+
+  function emit(event) {
+    try {
+      const window = options.getWindow();
+      if (!window || window.isDestroyed?.() || !window.webContents || window.webContents.isDestroyed?.()) return;
+      window.webContents.send(EVENT_CHANNEL, event);
+    } catch { /* A closed renderer misses the event; the transcript keeps it. */ }
+  }
+  function nativeEnvironment() {
+    const output = {};
+    const names = ['SystemRoot', 'WINDIR', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'TMPDIR',
+      'LANG', 'LC_ALL', 'TERM', 'DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'CLAUDE_CONFIG_DIR'];
+    for (const name of names) {
+      const key = Object.keys(env).find(key => key.toLowerCase() === name.toLowerCase());
+      const value = key === undefined ? undefined : env[key];
+      if (typeof value === 'string' && !CONTROL.test(value) && Buffer.byteLength(value) <= 4096) output[name] = value;
+    }
+    output.PATH = pathDirectories().join(p.delimiter);
+    return output;
+  }
+  function absolute(value) {
+    if (typeof value !== 'string' || !value || value !== value.trim() || CONTROL.test(value) || Buffer.byteLength(value) > 2048 || !p.isAbsolute(value)) return null;
+    if (platform === 'win32' && (!/^[a-z]:[\\/]/i.test(value) || /[<>"|?*]/.test(value) || value.slice(2).includes(':'))) return null;
+    return p.normalize(value);
+  }
+  function pathDirectories() {
+    const raw = env.PATH ?? env.Path ?? '';
+    if (typeof raw !== 'string' || raw.length > 32768) return [];
+    const entries = raw.split(p.delimiter); if (entries.length > 64) return [];
+    const out = [];
+    for (let entry of entries) {
+      if (entry.startsWith('"') && entry.endsWith('"')) entry = entry.slice(1, -1);
+      const full = absolute(entry); if (full && !out.some(item => item.toLowerCase() === full.toLowerCase())) out.push(full);
+    }
+    return out;
+  }
+  const inside = (directory, value) => { const r = p.relative(directory, value); return !r || (!p.isAbsolute(r) && r !== '..' && !r.startsWith('..' + p.sep)); };
+  /** The native claude executable: PATH, then the official user installer location; never a wrapper or a project file. */
+  async function locate() {
+    if (options.locate) return options.locate();
+    const filename = 'claude' + (platform === 'win32' ? '.exe' : '');
+    const candidate = async value => {
+      try {
+        const full = absolute(await fs.realpath(value)), stat = full && await fs.stat(full);
+        if (!full || !stat.isFile() || inside(projectPath, full) || (platform === 'win32' && p.basename(full).toLowerCase() !== filename)) return null;
+        if (platform !== 'win32' && !(stat.mode & 0o111)) return null;
+        return full;
+      } catch { return null; }
+    };
+    for (const directory of pathDirectories()) { const full = await candidate(p.join(directory, filename)); if (full) return full; }
+    const userHome = absolute(home());
+    return userHome ? candidate(p.join(userHome, '.local', 'bin', filename)) : null;
+  }
+  /** Bounded one-shot helper; output stays in this closure. */
+  function run(command, args) {
+    return new Promise(resolve => {
+      let child, done = false, bytes = 0; const chunks = [];
+      const finish = (ok, code = null) => {
+        if (done) return; done = true; clearTimeout(timer);
+        if (!ok) { try { child?.kill(); } catch { /* closed */ } }
+        resolve({ ok, code, stdout: ok ? Buffer.concat(chunks).toString('utf8') : '' });
+      };
+      const timer = setTimeout(() => finish(false), limits.helperTimeoutMs);
+      try {
+        child = spawn(command, args, { cwd: absolute(home()) ?? projectPath, env: nativeEnvironment(), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        child.once('error', () => finish(false));
+        child.once('close', code => finish(Number.isInteger(code), code));
+        child.stdout.on('data', data => { const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data); bytes += chunk.length; if (bytes > limits.helperBytes) return finish(false); chunks.push(chunk); });
+        child.stderr.on('data', data => { bytes += data.length; if (bytes > limits.helperBytes) finish(false); });
+        child.stdout.once('error', () => finish(false)); child.stderr.once('error', () => finish(false));
+      } catch { finish(false); }
+    });
+  }
+  const snapshot = (values, command = null) => {
+    const value = Object.freeze({ installed: false, signedIn: false, cliVersion: null, models: Object.freeze([]), efforts: Object.freeze([]), defaultModel: null, message: null, ...values });
+    statusCache = { at: now(), value, command }; return value;
+  };
+  async function readStatus() {
+    if (disposed) return snapshot({ message: MESSAGES.unavailable });
+    const command = await locate();
+    if (!command) return snapshot({ message: MESSAGES.notInstalled });
+    const version = await run(command, ['--version']);
+    const match = version.ok && version.code === 0 ? /^([0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}(?:-[A-Za-z0-9.-]{1,32})?) \(Claude Code\)\s*$/.exec(version.stdout) : null;
+    if (!match) return snapshot({ installed: true, message: MESSAGES.version });
+    const cliVersion = match[1];
+    const auth = await run(command, ['auth', 'status', '--json']);
+    let signedIn = false, message = MESSAGES.authUnknown;
+    try {
+      const value = JSON.parse(auth.stdout);
+      if (auth.ok && value && typeof value === 'object' && !Array.isArray(value)) {
+        if (value.loggedIn === false) message = MESSAGES.signedOut;
+        else if (value.loggedIn === true && value.authMethod === 'claude.ai') { signedIn = true; message = null; }
+        else if (value.loggedIn === true) message = MESSAGES.notSubscription;
+      }
+    } catch { /* unknown */ }
+    const help = await run(command, ['--help']);
+    const choices = help.ok && help.code === 0 ? parseChoices(help.stdout) : null;
+    if (!choices) return snapshot({ installed: true, signedIn, cliVersion, message: message ?? MESSAGES.choices }, command);
+    return snapshot({ installed: true, signedIn, cliVersion, models: Object.freeze([...choices.aliases]), efforts: Object.freeze([...choices.efforts]),
+      defaultModel: choices.aliases.includes('sonnet') ? 'sonnet' : choices.aliases[0], message }, command);
+  }
+  let statusRun = null;
+  function status() { statusRun ??= readStatus().catch(() => snapshot({ message: MESSAGES.unavailable })).finally(() => { statusRun = null; }); return statusRun; }
+  async function freshStatus() {
+    if (statusCache && statusCache.command && now() - statusCache.at >= 0 && now() - statusCache.at < limits.statusMaxAgeMs) return statusCache;
+    await status(); return statusCache;
+  }
+  /** One native question per project session (this host instance); concurrent first turns share it. A decline asks again next time. */
+  function ensureApproval(cliVersion) {
+    if (approved) return Promise.resolve(true);
+    approval ??= (async () => {
+      const window = options.getWindow();
+      if (!window || window.isDestroyed?.()) return false;
+      const dialog = options.dialog ?? require('electron').dialog;
+      const result = await dialog.showMessageBox(window, {
+        type: 'question', title: 'Arcane Claude chat', message: 'Use Claude chat with Arcane project tools?',
+        detail: 'Claude chat runs the installed Claude Code ' + cliVersion + ' in the background for this project, using your Claude sign-in and subscription usage. ' +
+          'Arcane gives it only its own project tools and a temporary project credential (work coordination and Studio commands you already allowed; it expires in 30 minutes and can be revoked). ' +
+          'Built-in shell, file and web tools are turned off. Arcane asks once each time this project is opened.\n\nProject: ' + projectPath,
+        buttons: ['Cancel', 'Allow'], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      if (disposed || options.getWindow() !== window) return false;
+      approved = result?.response === 1; return approved;
+    })().catch(() => false).finally(() => { approval = null; });
+    return approval;
+  }
+  /** Reuse the scoped credential while comfortably unexpired; otherwise mint once (shared by concurrent turns). */
+  async function acquireCredential(model, effort) {
+    const usable = c => c && !c.retired && Date.parse(c.expiresAt) - now() > limits.credentialMarginMs;
+    if (usable(credential)) { credential.users++; return credential; }
+    minting ??= (async () => {
+      const previous = credential; credential = null;
+      if (previous) { previous.retired = true; if (!previous.users) void retire(previous); }
+      let receipt; try { receipt = await handoff.prepare(Object.freeze({ model, effort })); } catch { receipt = null; }
+      const overlay = receipt?.env;
+      if (!receipt || typeof receipt.configPath !== 'string' || !isId(receipt.handoffId) || typeof receipt.expiresAt !== 'string' || !Number.isFinite(Date.parse(receipt.expiresAt)) ||
+          !overlay || typeof overlay.ARCANE_DAEMON_URL !== 'string' || typeof overlay.ARCANE_LOCAL_TOKEN !== 'string') return null;
+      const minted = { handoffId: receipt.handoffId, expiresAt: receipt.expiresAt, configPath: receipt.configPath, users: 0, retired: false,
+        env: Object.freeze({ ARCANE_DAEMON_URL: overlay.ARCANE_DAEMON_URL, ARCANE_LOCAL_TOKEN: overlay.ARCANE_LOCAL_TOKEN }) };
+      credentials.add(minted);
+      if (disposed) { minted.retired = true; void retire(minted); return null; }
+      credential = minted; return minted;
+    })().finally(() => { minting = null; });
+    const minted = await minting;
+    if (!minted || minted.retired) return null;
+    minted.users++; return minted;
+  }
+  async function retire(c) { credentials.delete(c); try { await handoff.release(c.handoffId); } catch { /* the broker's dispose still revokes */ } }
+  function releaseCredential(c) { if (!c) return; c.users = Math.max(0, c.users - 1); if (c.retired && !c.users && credentials.has(c)) void retire(c); }
+  async function loadInstructions() {
+    if (instructions !== null) return instructions;
+    let text = FALLBACK_INSTRUCTIONS;
+    try { const value = await options.instructions?.(); if (typeof value === 'string' && value.trim()) text = value; } catch { /* fallback */ }
+    instructions = (PREAMBLE + '\n\n' + text).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').slice(0, limits.instructionsChars);
+    return instructions;
+  }
+  function killTree(child) {
+    if (!child || child.exitCode !== null && child.exitCode !== undefined || child.signalCode) return;
+    if (platform === 'win32' && Number.isSafeInteger(child.pid) && child.pid > 0) {
+      const root = absolute(env.SystemRoot ?? env.SYSTEMROOT ?? env.WINDIR ?? '');
+      if (root) {
+        try {
+          const killer = spawn(p.join(root, 'System32', 'taskkill.exe'), ['/T', '/F', '/PID', String(child.pid)], { shell: false, windowsHide: true, stdio: 'ignore' });
+          killer.once?.('error', () => {});
+        } catch { /* child.kill below */ }
+      }
+    }
+    try { child.kill(); } catch { /* closed */ }
+  }
+  const message = (role, text, tool) => ({ id: randomUUID(), role, text: bounded(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
+  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.tool ? { tool: { name: m.tool.name, status: m.tool.status } } : {}) });
+  const toolName = name => { const short = name.startsWith('mcp__' + MCP_SERVER + '__') ? name.slice(MCP_SERVER.length + 7) : name; return (short.replace(/[^A-Za-z0-9._:-]/g, '_') || 'tool').slice(0, limits.toolName); };
+
+  async function send(input) {
+    if (disposed) fail('unavailable');
+    const v = sendInput(input);
+    if (turns.size >= limits.turns) fail('full');
+    let entry = null;
+    if (v.conversationId !== null) { entry = await store.get(v.conversationId); if (!entry) fail('missing'); }
+    const conversationId = entry ? entry.conversationId : randomUUID();
+    if (disposed) fail('unavailable');
+    if (byConversation.has(conversationId)) fail('busy');
+    if (turns.size >= limits.turns) fail('full');
+    const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
+      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false };
+    turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
+    try {
+      const at = isoNow(now);
+      if (!entry) {
+        const title = v.text.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
+        await store.create({ conversationId, title, createdAt: at, updatedAt: at, model: v.model, effort: v.effort, sessionId: null }, new Set(byConversation.keys()));
+      } else await store.update(conversationId, { updatedAt: at, model: v.model, effort: v.effort });
+      if (!await store.put(conversationId, message('user', v.text))) fail('missing');
+    } catch (error) {
+      turns.delete(turn.turnId); byConversation.delete(conversationId);
+      throw error instanceof ClaudeChatError ? error : new ClaudeChatError('unavailable');
+    }
+    void runTurn(turn, v.text);
+    return Object.freeze({ turnId: turn.turnId, conversationId });
+  }
+
+  async function finish(turn, ok, error, usage = null) {
+    if (turn.finished) return; turn.finished = true;
+    clearTimeout(turn.timer); releaseCredential(turn.credential); turn.credential = null;
+    if (!ok) statusCache = null; // the next turn re-reads native sign-in status
+    try {
+      if (error) await store.put(turn.conversationId, message('error', error));
+      await store.update(turn.conversationId, { updatedAt: isoNow(now), ...(turn.sessionId ? { sessionId: turn.sessionId } : {}) });
+    } catch { /* the done event still reports the outcome */ }
+    turns.delete(turn.turnId); if (byConversation.get(turn.conversationId) === turn) byConversation.delete(turn.conversationId);
+    emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage });
+  }
+
+  async function runTurn(turn, text) {
+    try {
+      const s = (await freshStatus()).value, command = statusCache?.command;
+      if (turn.stopped) return finish(turn, false, MESSAGES.stopped);
+      if (!s.installed || !command) return finish(turn, false, s.message ?? MESSAGES.notInstalled);
+      if (!s.signedIn) return finish(turn, false, s.message ?? MESSAGES.signedOut);
+      if (!s.models.includes(turn.model) || !s.efforts.includes(turn.effort)) return finish(turn, false, MESSAGES.selection);
+      if (!await ensureApproval(s.cliVersion)) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.declined);
+      if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
+      turn.credential = await acquireCredential(turn.model, turn.effort);
+      if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
+      if (!turn.credential) return finish(turn, false, MESSAGES.credential);
+      const prompt = await loadInstructions();
+      if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
+      const args = ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+        '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--model', turn.model, '--effort', turn.effort,
+        '--permission-mode', 'default', '--tools', '', '--allowedTools', 'mcp__' + MCP_SERVER, '--append-system-prompt', prompt,
+        ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
+      if (args.some(value => value.includes(turn.credential.env.ARCANE_LOCAL_TOKEN))) return finish(turn, false, MESSAGES.start);
+      let child;
+      try {
+        child = spawn(command, args, { cwd: projectPath, env: { ...nativeEnvironment(), ...turn.credential.env }, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      } catch { return finish(turn, false, MESSAGES.start); }
+      turn.child = child;
+      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; killTree(child); } }, limits.turnTimeoutMs);
+      let pending = [], pendingBytes = 0, skipping = false, total = 0;
+      const line = buffer => {
+        if (!buffer.length) return;
+        let value; try { value = JSON.parse(buffer.toString('utf8')); } catch { return; }
+        if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.type !== 'string') return;
+        try { handle(turn, value); } catch { /* unknown shapes are ignored */ }
+      };
+      child.stdout.on('data', data => {
+        if (turn.finished) return;
+        let chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        total += chunk.length;
+        if (total > limits.stdoutBytes) { turn.overflow = true; killTree(child); return; }
+        for (let at = chunk.indexOf(10); at >= 0; at = chunk.indexOf(10)) {
+          const head = chunk.subarray(0, at); chunk = chunk.subarray(at + 1);
+          if (!skipping && pendingBytes + head.length <= limits.lineBytes) line(Buffer.concat([...pending, head]));
+          pending = []; pendingBytes = 0; skipping = false;
+        }
+        if (skipping || !chunk.length) return;
+        pendingBytes += chunk.length;
+        if (pendingBytes > limits.lineBytes) { pending = []; pendingBytes = 0; skipping = true; } else pending.push(chunk);
+      });
+      // stderr may contain account details or secrets: it is drained and discarded, never stored or forwarded.
+      child.stderr.on('data', () => {});
+      for (const stream of [child.stdout, child.stderr, child.stdin]) stream?.on?.('error', () => {});
+      child.once('error', () => { void finish(turn, false, turn.stopped ? MESSAGES.stopped : MESSAGES.start); });
+      child.once('close', code => {
+        if (!skipping && pending.length) line(Buffer.concat(pending));
+        pending = [];
+        const r = turn.result;
+        if (turn.stopped) return void finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped, r?.usage ?? null);
+        if (turn.timedOut) return void finish(turn, false, MESSAGES.timeout, r?.usage ?? null);
+        if (turn.overflow) return void finish(turn, false, MESSAGES.output, r?.usage ?? null);
+        if (r && !r.isError) return void finish(turn, true, null, r.usage);
+        if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
+        void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
+      });
+      child.stdin.end(text, 'utf8');
+    } catch { await finish(turn, false, MESSAGES.failed); }
+  }
+
+  /** Stream-json events observed from Claude Code 2.1.301; anything else is ignored. */
+  function handle(turn, event) {
+    const base = { turnId: turn.turnId, conversationId: turn.conversationId };
+    if (isId(event.session_id) && (event.type === 'system' && event.subtype === 'init' || event.type === 'result') && turn.sessionId !== event.session_id) {
+      turn.sessionId = event.session_id;
+      void store.update(turn.conversationId, { sessionId: turn.sessionId }).catch(() => {});
+    }
+    if (event.parent_tool_use_id !== null && event.parent_tool_use_id !== undefined) return; // subagent traffic
+    if (event.type === 'stream_event') {
+      const e = event.event;
+      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text)
+        emit({ ...base, type: 'delta', text: e.delta.text.slice(0, limits.deltaChars) });
+    } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content.slice(0, 256)) {
+        if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+          const m = message('assistant', block.text);
+          void store.put(turn.conversationId, m).catch(() => {});
+          emit({ ...base, type: 'message', message: publicMessage(m) });
+        } else if (block?.type === 'tool_use' && typeof block.name === 'string' && typeof block.id === 'string' && block.id.length <= 256 && !turn.tools.has(block.id) && turn.tools.size < 4096) {
+          const name = toolName(block.name), m = message('tool', name, { name, status: 'started' });
+          turn.tools.set(block.id, m);
+          void store.put(turn.conversationId, m).catch(() => {});
+          emit({ ...base, type: 'tool', message: publicMessage(m) });
+        }
+      }
+    } else if (event.type === 'user' && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content.slice(0, 256)) {
+        const m = block?.type === 'tool_result' ? turn.tools.get(block.tool_use_id) : undefined;
+        if (!m || m.tool.status !== 'started') continue;
+        m.tool = { name: m.tool.name, status: block.is_error === true ? 'failed' : 'finished' };
+        void store.put(turn.conversationId, { ...m, tool: { ...m.tool } }).catch(() => {});
+        emit({ ...base, type: 'tool', message: publicMessage(m) });
+      }
+    } else if (event.type === 'result') {
+      const u = event.usage && typeof event.usage === 'object' ? event.usage : null;
+      const cost = typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0 ? event.total_cost_usd : null;
+      turn.result = { isError: event.is_error === true || event.subtype !== 'success', text: event.result,
+        usage: u ? { inputTokens: count(u.input_tokens) + count(u.cache_creation_input_tokens) + count(u.cache_read_input_tokens), outputTokens: count(u.output_tokens), costUsd: cost } : null };
+    }
+  }
+
+  async function list() {
+    if (disposed) fail('unavailable');
+    const entries = await store.list();
+    entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return Object.freeze({ conversations: entries.map(e => ({ conversationId: e.conversationId, title: e.title, updatedAt: e.updatedAt, model: e.model, effort: e.effort })) });
+  }
+  async function history(conversationId) {
+    if (disposed) fail('unavailable');
+    if (!isId(conversationId)) fail('unavailable');
+    const messages = await store.messages(conversationId);
+    if (!messages) fail('missing');
+    return Object.freeze({ conversationId, messages: messages.map(publicMessage) });
+  }
+  function stop(turnId) {
+    if (!isId(turnId)) fail('unavailable');
+    const turn = turns.get(turnId);
+    if (!turn || turn.finished) return Promise.resolve(false);
+    turn.stopped = true; killTree(turn.child);
+    return Promise.resolve(true);
+  }
+  async function remove(conversationId) {
+    if (disposed) fail('unavailable');
+    if (!isId(conversationId)) fail('unavailable');
+    const turn = byConversation.get(conversationId);
+    if (turn) { turn.stopped = true; killTree(turn.child); }
+    return store.remove(conversationId);
+  }
+  /** App quit / project switch: stop every turn this host spawned and revoke the credentials it minted. */
+  async function dispose() {
+    if (disposed) return; disposed = true;
+    for (const turn of turns.values()) { turn.stopped = true; killTree(turn.child); }
+    const owned = [...credentials]; credential = null;
+    for (const c of owned) c.retired = true;
+    await Promise.all(owned.map(retire));
+  }
+  const host = { version: 1, status: () => status(), list, history, send, stop, remove };
+  Object.defineProperties(host, { dispose: { value: dispose }, activeTurns: { value: () => turns.size } });
+  return Object.freeze(host);
+}
+
+/** Human IPC: only the trusted main window's main frame on the daemon origin; every argument shape is exact. */
+function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
+  const policy = require('./policy.cjs');
+  function scope(event) {
+    const session = getSession(), window = session?.window, contents = window?.webContents, frame = event?.senderFrame;
+    if (!session || !window || window.isDestroyed() || !contents || contents.isDestroyed() || event.sender !== contents || !frame || frame !== contents.mainFrame ||
+        !policy.validOrigin(session.origin) || !policy.navigationAllowed(session.origin, frame.url) || new URL(frame.url).href !== frame.url) fail('unavailable');
+    return session;
+  }
+  for (const action of ['status', 'list', 'history', 'send', 'stop', 'remove']) ipcMain.handle('arcane:claude-chat-' + action, async (event, ...args) => {
+    try {
+      const before = scope(event), host = getHost();
+      if (!host) fail('unavailable');
+      let input;
+      if (action === 'status' || action === 'list') { if (args.length) fail('unavailable'); }
+      else if (action === 'send') { if (args.length !== 1) fail('unavailable'); input = sendInput(args[0]); }
+      else { if (args.length !== 1 || !isId(args[0])) fail('unavailable'); input = args[0]; }
+      const response = input === undefined ? await host[action]() : await host[action](input);
+      const after = getSession();
+      if (!after || after.window !== before.window || after.epoch !== before.epoch || getHost() !== host) fail('unavailable');
+      return response;
+    } catch (error) {
+      throw new Error(error instanceof ClaudeChatError && SAFE_ERRORS.includes(error.message) ? error.message : MESSAGES.unavailable);
+    }
+  });
+}
+
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, safeResultText, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

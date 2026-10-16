@@ -567,3 +567,31 @@ test('a held acknowledged resume is still fenced by '+change,async t=>{
   assert.deepEqual(f.posts.map(row=>row.action),['history-load','disconnect','connect','select','thread-resume']);
   assert.notEqual(f.chat.currentStateView().nativeBoundToActiveChat,true);
 });
+
+test('F2: while the Claude surface is active, sidebar New chat and Ctrl/Cmd+N start a Claude chat instead of a Codex draft',()=>{
+  const doc=new DocumentFixture();let surface:'codex'|'claude'='claude',created=0,claude=0,navigations=0;
+  const options={storage:memoryStorage(),captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;},
+    alternateNewChat:{active:()=>surface==='claude',start:()=>{claude++;}}};
+  const tabs=new ChatTabs(doc.asDocument(),value=>value,{...callbacks,newChat:async()=>{created++;return true;}},options);
+  tabs.sync(state());tabs.mount();tabs.render(false);
+  const click=new Event('click',{cancelable:true});doc.getElementById('new-chat').dispatchEvent(click);
+  assert.equal(click.defaultPrevented,true);assert.equal(claude,1);assert.equal(created,0);assert.equal(navigations,1);
+  assert.equal(newChatShortcut(doc).defaultPrevented,true);assert.equal(newChatShortcut(doc,{metaKey:true},'N').defaultPrevented,true);
+  assert.equal(claude,3);assert.equal(created,0);assert.equal(tabs.views().length,1,'no Codex draft tab is created');
+  // A busy Codex chat or a full tab strip never blocks the Claude surface's New chat.
+  tabs.render(true);assert.equal(doc.getElementById('new-chat').disabled,false);
+  doc.getElementById('new-chat').dispatchEvent(new Event('click',{cancelable:true}));assert.equal(claude,4);
+  surface='codex';tabs.render(true);assert.equal(doc.getElementById('new-chat').disabled,true);
+  newChatShortcut(doc);assert.equal(claude,4);assert.equal(created,0,'busy Codex still blocks its own New chat');
+  tabs.render(false);
+  doc.getElementById('new-chat').dispatchEvent(new Event('click',{cancelable:true}));newChatShortcut(doc);
+  assert.equal(created,2);assert.equal(claude,4,'Codex surface behaviour is unchanged');assert.equal(navigations,6);
+  tabs.stop();surface='claude';newChatShortcut(doc);assert.equal(claude,4,'never routes after stop');
+});
+
+test('F2: a throwing surface probe falls back to the Codex New chat',()=>{
+  const doc=new DocumentFixture();let created=0;
+  const options={storage:memoryStorage(),captureLegacyNewChat:true,alternateNewChat:{active:():boolean=>{throw new Error('probe');},start:()=>{assert.fail('not routed');}}};
+  const tabs=new ChatTabs(doc.asDocument(),value=>value,{...callbacks,newChat:async()=>{created++;return true;}},options);
+  tabs.sync(state());tabs.mount();tabs.render(false);newChatShortcut(doc);assert.equal(created,1);tabs.stop();
+});

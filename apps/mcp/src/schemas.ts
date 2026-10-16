@@ -45,5 +45,5 @@ export const session = z.object({
   id, protocolVersion: z.literal(1), clientSessionId: id, placeId: z.number().int().nonnegative(),
   universeId: z.number().int().nonnegative(), name: id, pluginVersion: id,
   allowedRoots: z.array(root).max(ROOTS.length), allowWrites: z.boolean(), capabilities: z.array(id).max(100),
-  connectedAt: id, lastSeenAt: id, revokedAt: id.nullable(),
+  connectedAt: id, lastSeenAt: id, revokedAt: id.nullable(), live: z.boolean().optional(),
 });

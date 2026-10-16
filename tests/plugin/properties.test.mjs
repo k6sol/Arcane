@@ -275,7 +275,9 @@ for channel = 1, 3 do
   check(string.find(err.message, "VERIFY:", 1, true) ~= nil and err.unsafe == true, "bad update setter retains the VERIFY cause")
   check(err.recovery.partial and err.recovery.needsReconciliation and err.recovery.rollbackVerified == false, "bad update requires reconciliation and claims no rollback")
   check(err.recovery.ref.instanceId == created.ref.instanceId and ops.mutations[err.recovery.commandId] == nil, "partial update retains identity without a successful receipt")
-  local corrupted = table.clone(regressionStored)
+  -- The synchronous revert attempt is corrupted by the same bad setter, so the
+  -- unverified baseline write remains for reconciliation (still PARTIAL).
+  local corrupted = table.clone(created.mutation.after.properties.Color.value)
   corrupted[channel] = colorFloat32((math.round(corrupted[channel] * 255) + 1) / 255)
   exactColor(P.snapshot(instance, {"Color"}).Color, corrupted, "partial actual corruption")
   check(not P.assignedMatches(instance, "Color", P.decode("Color", taggedColor(regressionInput), true, true)), "post-write comparison rejects the one-byte corruption")
@@ -404,4 +406,39 @@ for _, method in ipairs({"create", "update"}) do
 end
 print("Arcane Orientation post-write checks passed: " .. checks)
 `, /Arcane Orientation post-write checks passed: \d+/);
+});
+
+test('engine-coerced update value reverts synchronously to a clean VERIFY instead of an unsafe PARTIAL', { skip: !runtime }, async () => {
+  await runPropertyFixture(regressionFixture + `
+-- Test double for native Ball coercion: a Ball part keeps a uniform Size.
+local ballOriginalSetter = instanceMetatable.__newindex
+instanceMetatable.__newindex = function(self: any, key: string, value: any): ()
+  if key == "Size" and self:IsA("Part") and self.Shape == Enum.PartType.Ball and not fixture.ballRevertFails then
+    local side = math.min(value.X, value.Y, value.Z); value = Vector3.new(side, side, side)
+  elseif key == "Size" and fixture.ballRevertFails then value = Vector3.new(9, 9, 9) end
+  ballOriginalSetter(self, key, value)
+end
+local ops = fresh()
+local created = create(ops, {Shape = "Ball", Size = vector(3, 3, 3)})
+local instance = ops.registry:resolve(created.ref)
+local before = P.snapshot(instance)
+local committed, cancelled = fixture.committed, fixture.cancelled
+local err = refuses("VERIFY", function()
+  return run(ops, "scene.update", {ref = created.ref, expected = {Size = vector(3, 3, 3)}, properties = {Size = vector(4, 2, 6)}})
+end)
+check(err.unsafe ~= true and err.recovery == nil, "verified revert is not an unsafe partial change")
+check(V.equal(P.snapshot(instance), before) and instance.Size == Vector3.new(3, 3, 3), "coerced write is reverted exactly")
+check(fixture.committed == committed and fixture.cancelled == cancelled + 1 and ops.mutations["assignment-" .. serial] == nil, "reverted update cancels its recording and issues no receipt")
+-- Following work is not refused: the same part accepts a later valid uniform update.
+local updated = run(ops, "scene.update", {ref = created.ref, expected = {Size = vector(3, 3, 3)}, properties = {Size = vector(5, 5, 5)}})
+check(instance.Size == Vector3.new(5, 5, 5) and updated.mutation.after.properties.Size.value[1] == 5, "later update succeeds")
+-- A revert the engine does not honour stays PARTIAL for reconciliation.
+fixture.ballRevertFails = true
+err = refuses("PARTIAL", function()
+  return run(ops, "scene.update", {ref = created.ref, expected = {Size = vector(5, 5, 5)}, properties = {Size = vector(4, 2, 6)}})
+end)
+fixture.ballRevertFails = nil
+check(err.unsafe == true and err.recovery.partial and err.recovery.rollbackVerified == false and string.find(err.message, "VERIFY:", 1, true) ~= nil, "failed revert keeps PARTIAL")
+print("Arcane coerced revert checks passed: " .. checks)
+`, /Arcane coerced revert checks passed: \d+/);
 });

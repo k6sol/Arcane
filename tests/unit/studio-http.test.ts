@@ -49,3 +49,18 @@ test('real loopback bridge rejects cross-origin, audience confusion and bearerle
   assert.equal((await post('/v1/studio/revoke', { sessionId: pair.sessionId }, app.token, app.origin)).status, 200);
   assert.equal((await post('/v1/plugin/poll', { sessionId: pair.sessionId }, pair.token)).status, 409);
 });
+test('a dead Studio lifetime is listed live=false and a command to it is a definitive 409 SESSION_OFFLINE, never a queued receipt', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'arcane-studio-http-offline-')); let now = Date.now();
+  const store = new StudioStore({ directory, now: () => now });
+  const app = await createConnectionLab({ cwd: resolve('.'), stateDirectory: join(directory, 'preferences'), studioStore: store, probe: async () => [], codexConnect: refuseNativeCodex });
+  t.after(async () => { await app.close(); store.close(); assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + '\\') || resolve(directory).startsWith(resolve(tmpdir()) + '/')); await rm(directory, { recursive: true, force: true }); });
+  const post = (path: string, body: unknown, token?: string) => fetch(app.origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(body) });
+  const grant = await (await post('/v1/studio/pairing', { allowedRoots: ['Workspace'], allowWrites: false }, app.token)).json() as { code: string };
+  const pair = await (await post('/v1/plugin/pair', { code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'unloaded-window', placeId: 0, universeId: 0, name: 'TEST FIXTURE (not Studio)', pluginVersion: 'fixture' }, capabilities: [...READ_METHODS] })).json() as PairResult;
+  now += 61_000; // The plugin was unloaded without a disconnect and never polls again.
+  const listed = await (await fetch(app.origin + '/v1/studio/sessions', { headers: { Authorization: 'Bearer ' + app.agentToken } })).json() as { sessions: { id: string; live: boolean; revokedAt: string | null }[] };
+  assert.deepEqual(listed.sessions.map(s => [s.id, s.revokedAt, s.live]), [[pair.sessionId, null, false]]);
+  const refused = await post('/v1/studio/commands', { sessionId: pair.sessionId, requestId: 'offline-request-01', method: 'selection.read', args: {} }, app.agentToken);
+  assert.equal(refused.status, 409); assert.equal((await refused.json() as { error: string }).error, 'SESSION_OFFLINE');
+  assert.equal(store.commands().length, 0);
+});

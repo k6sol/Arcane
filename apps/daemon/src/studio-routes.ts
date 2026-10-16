@@ -119,7 +119,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       else send(404, { error: 'NOT_FOUND', message: 'Unknown bridge endpoint.' });
     } catch (error) {
       const known = error instanceof ArcaneError; const code = known ? error.code : 'INTERNAL';
-      const status = ['AUTH','KEY_REJECTED'].includes(code) ? 401 : ['ORIGIN', 'SCOPE', 'READ_ONLY'].includes(code) ? 403 : code === 'BUSY' ? 429 : ['RECEIPT_CONFLICT', 'IDEMPOTENCY', 'RECONCILIATION', 'REVOKED', 'COMMAND_STATE'].includes(code) ? 409 : known ? 400 : 500;
+      const status = ['AUTH','KEY_REJECTED'].includes(code) ? 401 : ['ORIGIN', 'SCOPE', 'READ_ONLY'].includes(code) ? 403 : code === 'BUSY' ? 429 : ['RECEIPT_CONFLICT', 'IDEMPOTENCY', 'RECONCILIATION', 'REVOKED', 'COMMAND_STATE', 'SESSION_OFFLINE'].includes(code) ? 409 : known ? 400 : 500;
       if (!response.destroyed && !response.headersSent) send(status, { error: code, message: known ? error.message : 'Local bridge operation failed; inspect local receipts. Provider credentials are not involved.' });
     }
     return true;

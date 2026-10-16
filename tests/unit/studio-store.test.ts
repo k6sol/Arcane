@@ -116,3 +116,34 @@ test('workspace lock prevents second daemon and restart never replays unknown co
   assert.ok(reopened.events().some(e => e && typeof e === 'object' && !Array.isArray(e) && e.kind === 'daemon_started'));
   reopened.close();
 });
+test('a Studio reload leaves the old pairing listed as not live; commands to it are refused, never silently queued', t => {
+  const f = fixture(t, true);
+  // Reopening Studio is a new plugin lifetime: a new clientSessionId pairs while the old row stays unrevoked (stop() sends no disconnect).
+  const grant = f.store.createGrant({ allowedRoots: ['Workspace'], allowWrites: true });
+  const reopened = f.store.pair({ ...f.input, code: grant.code, identity: { ...f.input.identity, clientSessionId: 'native-window-A-reloaded' } });
+  f.advance(61_000); f.store.poll(reopened.sessionId);
+  const listed = f.store.sessions() as (ReturnType<StudioStore['sessions']>[number] & { live?: unknown })[];
+  assert.equal(listed.find(s => s.id === f.pair.sessionId)?.revokedAt, null, 'the dead lifetime is still unrevoked');
+  assert.equal(listed.find(s => s.id === f.pair.sessionId)?.live, false);
+  assert.equal(listed.find(s => s.id === reopened.sessionId)?.live, true);
+  assert.throws(() => f.store.enqueue({ sessionId: f.pair.sessionId, requestId: 'dead-000001', method: 'selection.read', args: {} }),
+    (error: Error & { code?: string }) => error.code === 'SESSION_OFFLINE');
+  assert.equal(f.store.commands().length, 0, 'no queued command is left behind for a dead session');
+  assert.equal(f.store.enqueue({ sessionId: reopened.sessionId, requestId: 'live-000001', method: 'selection.read', args: {} }).state, 'queued');
+});
+test('a session executing a dispatched command stays live while it is not polling', t => {
+  const f = fixture(t);
+  f.store.enqueue({ sessionId: f.pair.sessionId, requestId: 'busy-000001', method: 'selection.read', args: {} }); f.store.poll(f.pair.sessionId);
+  f.advance(90_000);
+  assert.equal((f.store.sessions()[0] as { live?: unknown }).live, true);
+  assert.equal(f.store.enqueue({ sessionId: f.pair.sessionId, requestId: 'busy-000002', method: 'selection.read', args: {} }).state, 'queued');
+});
+test('queued and dispatched commands of a session that stopped polling expire when read, not only on its next poll', t => {
+  const f = fixture(t);
+  const dispatched = f.store.enqueue({ sessionId: f.pair.sessionId, requestId: 'stop-000001', method: 'selection.read', args: {} }); f.store.poll(f.pair.sessionId);
+  const queued = f.store.enqueue({ sessionId: f.pair.sessionId, requestId: 'stop-000002', method: 'selection.read', args: {} });
+  f.advance(180_001); // The plugin was unloaded; poll() is never called again for this session.
+  assert.equal(f.store.command(queued.id).state, 'cancelled');
+  assert.equal(f.store.command(dispatched.id).state, 'needs_reconciliation');
+  assert.deepEqual(f.store.commands(f.pair.sessionId).map(c => c.state).sort(), ['cancelled', 'needs_reconciliation']);
+});

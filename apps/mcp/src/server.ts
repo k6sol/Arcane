@@ -43,8 +43,16 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     });
   }
 
-  register('sessions', 'Read: list genuinely paired Studio sessions, IDs, root grants and write permission. Choose an exact session; disconnected or revoked sessions are not substitutes.',
-    z.strictObject({ timeoutMs }), READ, (input, signal) => client.sessions({ ...input, signal }));
+  // Mirrors STUDIO_SESSION_LIVE_MS in packages/storage/src/studio-store.ts; the daemon's own `live` wins when it is supplied.
+  const SESSION_LIVE_MS = 60_000;
+  register('sessions', 'Read: list paired Studio sessions, IDs, root grants, write permission and live (plugin heard from within the last 60 s). Reopening Studio leaves the old pairing listed with live=false; commands to it are refused with SESSION_OFFLINE. Choose an exact live session; non-live or revoked sessions are not substitutes.',
+    z.strictObject({ timeoutMs }), READ, async (input, signal) => {
+      const listed = await client.sessions({ ...input, signal });
+      return { sessions: listed.sessions.map(s => {
+        const reported = (s as { live?: unknown }).live;
+        return { ...s, live: typeof reported === 'boolean' ? reported : !s.revokedAt && Date.now() - Date.parse(s.lastSeenAt) <= SESSION_LIVE_MS };
+      }) };
+    });
   register('scene_children', 'Read: return parentRef for the exact requested granted root/parent (including an empty Workspace), plus at most 200 child nodes. Reuse the actual parentRef for authorized scene_create; never fabricate root references. No changes.',
     z.strictObject({ ...target, root, ref: ref.optional(), limit: z.number().int().min(1).max(200).default(100) }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'scene.children', args as Record<string, Json>, { timeoutMs, signal }));

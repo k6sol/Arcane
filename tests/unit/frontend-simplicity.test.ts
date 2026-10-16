@@ -257,3 +257,10 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
     assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
     t.diagnostic('Fresh private Edge ' + context.browser()!.version() + '; actual HTML/CSS; three viewports; no catalogue, API or native activity; screenshots=' + root);
   });
+
+test('F2: the sidebar New chat routes to the Claude chat only while the Claude surface is active', async () => {
+  const boot = await source('apps/desktop/src/studio.ts');
+  assert.match(boot, /alternateNewChat:\s*\{\s*active:\s*\(\)\s*=>\s*!claudeChatStopped\s*&&\s*!!claudeChat\s*&&\s*providerSetup\.chatSurface\(\)\s*===\s*'claude',\s*start:\s*\(\)\s*=>\s*claudeChat\?\.newChat\(\)\s*\}/);
+  const tabs = await source('apps/desktop/src/chat-tabs.ts');
+  assert.match(tabs, /\.\.\.\(options\.alternateNewChat\?\{alternateNewChat:options\.alternateNewChat\}:\{\}\)/, 'startChatTabs forwards the routing hook');
+});

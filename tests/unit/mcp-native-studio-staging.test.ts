@@ -303,3 +303,29 @@ test('stage-only ambiguity policy preserves existing definitive rejection handli
   unknown(await f.daemon.assetsStageStudioImport(JOB));
   assert.deepEqual(f.requests.map(request => new URL(request.url).pathname), ['/v1/assets/native/cancel', PATH]);
 });
+
+test('definite daemon preflight refusals stay unknown/no-retry but keep their redacted daemon code', async t => {
+  const f = fixture(t), client = await linked(t, f.daemon);
+  for (const [path, run, tool] of [
+    [PATH, () => f.daemon.assetsStageStudioImport(JOB), TOOL],
+    ['/v1/assets/native/reconstruct-studio-import', () => f.daemon.assetsReconstructStudioImport(JOB), 'assets_reconstruct_studio_import'],
+  ] as const) {
+    for (const code of ['STUDIO_IMPORT_TARGET', 'STUDIO_IMPORT_AMBIGUOUS', 'STUDIO_IMPORT_CONTINUITY', 'STUDIO_STAGE_CAPABILITY', 'STUDIO_RECONSTRUCT_STATE']) {
+      f.setResponder(request => {
+        assert.ok(request.url.endsWith(path));
+        return json({error: code, message: 'Native chat asset request refused or unavailable. ' + TOKEN}, 503);
+      });
+      const direct = await run() as Record<string, unknown>;
+      assert.equal(direct.jobId, JOB); assert.equal(direct.state, 'unknown'); assert.equal(direct.retry, false); assert.equal(direct.ambiguous, true);
+      assert.deepEqual(direct.error, {code, message: 'Native chat asset request refused or unavailable. [redacted]'});
+      const result = CallToolResultSchema.parse(await client.callTool({name: tool, arguments: {jobId: JOB}}));
+      const content = result.structuredContent as Record<string, unknown>;
+      assert.equal(content.state, 'unknown'); assert.equal((content.error as {code: string}).code, code);
+      assert.equal(JSON.stringify(result).includes(TOKEN), false);
+    }
+  }
+  // A lost acknowledgement reports only the local connection failure and stays unknown.
+  f.setResponder(() => { throw new TypeError('socket reset'); });
+  const lost = unknown(await f.daemon.assetsStageStudioImport(JOB));
+  assert.equal((lost.error as {code: string}).code, 'DAEMON_UNREACHABLE');
+});

@@ -538,7 +538,7 @@ export class CodexChat {
     const preferences=options.preferences??module.workspacePreferencesAdapter(this.doc);
     const tabs=new module.ChatTabs(this.doc,value=>this.api.safe(value),{
       select:key=>this.selectChat(key),close:key=>this.closeChat(key),newChat:()=>this.newChat(),openSaved:id=>this.openSavedChat(id),
-    },{...options,...(preferences?{preferences}:{})});
+    },{...options,...(preferences?{preferences}:{}),onPersistenceChange:()=>{options.onPersistenceChange?.();this.persistenceChanged(tabs);}});
     if(!this.state||!this.fresh)await this.refresh();
     if(!this.state||!this.fresh)throw new Error('Read the canonical project before restoring chat tabs.');
     const project=this.state.projectPath;
@@ -548,6 +548,14 @@ export class CodexChat {
     this.tabs=tabs;this.syncTabs();tabs.mount();this.loadTabDraft();this.render();this.enableTaskProposals();this.publishState();
     this.preferenceController=module.connectChatTabPreferences(this.doc,this);
     if(tabs.persistenceStatus()==='native-error')this.text('codex-notice','Native chat preferences could not be verified. Local drafts are available; EXE persistence is unavailable.');
+  }
+  /** A native preference save failed or recovered: show it and republish the unsaved state. */
+  private persistenceChanged(tabs:ChatTabs):void {
+    if(this.stopped||this.tabs!==tabs)return;
+    const failed='Chat preferences could not be saved. Your unsent text stays in this window; saving retries on your next change.';
+    if(tabs.persistenceStatus()==='native-error')this.text('codex-notice',failed);
+    else if(this.el('codex-notice').textContent===failed)this.text('codex-notice','Chat preferences saved.');
+    this.publishState();
   }
   private draftView(tab:ChatTabView|null):ChatTabView|null {
     return tab&&this.draftDirty&&tab.key===this.tabs?.active()?.key?{...tab,draft:this.value('codex-composer'),workflowDraft:!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft}:tab;
@@ -1417,6 +1425,14 @@ export class CodexChat {
     const imageRequest=input.action==='turn-start'&&input.references?new AbortController():null;
     if(imageRequest)this.imageRequest=imageRequest;
     this.pending.set(input.requestId,input);this.text('codex-notice','Waiting for confirmation…');
+    // Only a definitive rejection may hand the cleared text back; pending/unknown sends never do (no duplicate sends).
+    const sentDraft=input.action==='turn-start'?{text:this.value('codex-composer'),origins:structuredClone(this.workflowDraftOrigins),reviewed:this.reviewedDraftTarget,restored:this.restoredWorkflowDraft,tab:this.tabs?.active()?.key??null}:null;
+    const restoreRejectedDraft=()=>{
+      if(!sentDraft||!sentDraft.text||this.stopped||this.value('codex-composer')!==''||(this.tabs?.active()?.key??null)!==sentDraft.tab)return;
+      this.el<HTMLTextAreaElement>('codex-composer').value=sentDraft.text;
+      this.workflowDraftOrigins=sentDraft.origins;this.reviewedDraftTarget=sentDraft.reviewed;this.restoredWorkflowDraft=sentDraft.restored;this.stashTabDraft();
+      this.text('codex-notice',(this.el('codex-notice').textContent??'')+' Your message text was restored to the composer.');
+    };
     if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.el<HTMLTextAreaElement>('codex-composer').value='';this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
     this.render();this.publishState();
     try {
@@ -1431,11 +1447,13 @@ export class CodexChat {
         const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
         this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
+      else if(outcome.record.state==='rejected')restoreRejectedDraft();
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;
       return fenced?undefined:outcome.record;
     } catch(error) {
       if(!(error instanceof CodexHttpError)||error.unknown)this.uncertain.set(input.requestId,{input,read:false});
       if(!this.stopped&&epoch===this.generation)this.text('codex-notice',(error instanceof Error?error.message:'Unknown native HTTP acknowledgement.')+' Request ID retained: '+input.requestId+'. No automatic retry.');
+      if(error instanceof CodexHttpError&&!error.unknown)restoreRejectedDraft();
     } finally {
         if(this.imageRequest===imageRequest)this.imageRequest=null;
       this.pending.delete(input.requestId);
