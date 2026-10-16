@@ -42,6 +42,7 @@ const history = mode => {
   const paginatedItems=[question,item('progress','Public assistant progress.'),mcp,reasoning,answer];
   let turns=mode==='missing-turns'||mode==='paginated-missing-turns'?undefined:
     mode==='turn-limit'?Array.from({length:65},(_,n)=>turn([item('i-'+n)],'t-'+n)):
+    mode==='paginated-pages'?Array.from({length:40},(_,n)=>turn([item('p-'+n,'Page answer '+n+'.')],'pt-'+n)):
     mode==='item-limit'?[turn(Array.from({length:257},(_,n)=>item('i-'+n)))]:
     mode==='empty'||mode==='paginated-empty'?[]:[turn(mode.startsWith('paginated')?paginatedItems:publicItems)];
   if(mode==='paginated-summary')turns=[{...turn(paginatedItems),itemsView:'summary'}];
@@ -73,7 +74,17 @@ createInterface({input:process.stdin}).on('line',line=>{
       send({id:900,method:'item/commandExecution/requestApproval',params:{threadId:'fixture-thread',turnId:'fixture-turn',command:'PRIVATE_APPROVAL_COMMAND'}});
       setTimeout(()=>send({id:message.id,result:history('normal')}),100);return;
     }
-    setTimeout(()=>send({id:message.id,result:history(mode)}),mode==='delayed'?1000:0);
+    const result=history(mode);
+    // A metadata-only read carries no turns, as in the public schema.
+    if(message.params.includeTurns===false)delete result.thread.turns;
+    setTimeout(()=>send({id:message.id,result}),mode==='delayed'?1000:0);
+  } else if(message.method==='thread/turns/list'){
+    if(mode==='paginated-turns-error'){send({id:message.id,error:{code:-32603,message:'PRIVATE_REMOTE_PAGE_ERROR'}});return;}
+    const all=history(mode).thread.turns,{limit,cursor}=message.params,start=cursor?Number(cursor.slice(5)):0;
+    if(all===undefined){send({id:message.id,result:{nextCursor:null,backwardsCursor:null}});return;}
+    if(mode==='paginated-cursor-loop'){send({id:message.id,result:{data:[turn([item('loop-'+start)],'loop-'+start)],nextCursor:'page-'+(start+1),backwardsCursor:null}});return;}
+    const data=all.slice(start,start+limit),next=start+limit<all.length?'page-'+(start+limit):null;
+    send({id:message.id,result:{data,nextCursor:next,backwardsCursor:data.length?'back-'+start:null}});
   } else if(message.method && message.method!=='initialized')send({id:message.id,error:{code:-32601,message:'Unexpected fixture method'}});
 });
 `;
@@ -188,9 +199,10 @@ test('explicit load sends only public read in its bounded child, preserves IDs, 
   assert.deepEqual(recorded.result.entries.map(entry=>entry.role),['user','assistant','tool','tool']);
   assert.deepEqual(recorded.result.entries[1]!.ids,{threadId:THREAD,sessionId:SESSION,turnId:'fixture-turn',itemId:'answer'});
   assert.deepEqual(f.sessions[0]!.snapshot(),before);
-  const rows=await f.logs(),readPid=rows.find(row=>row.message.method==='thread/read')!.pid;
-  assert.deepEqual(rows.filter(row=>row.pid===readPid).map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read']);
-  assert.deepEqual(rows.find(row=>row.message.method==='thread/read')!.message.params,{threadId:THREAD,includeTurns:true});
+  const rows=await f.logs(),readPid=rows.find(row=>row.message.method==='thread/read')!.pid,reads=rows.filter(row=>row.pid===readPid);
+  // Legacy storage: exact-scope metadata first, then the hydrated legacy read; never a page request.
+  assert.deepEqual(reads.map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read','thread/read']);
+  assert.deepEqual(reads.filter(row=>row.message.method==='thread/read').map(row=>row.message.params),[{threadId:THREAD,includeTurns:false},{threadId:THREAD,includeTurns:true}]);
   const db=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));
   try{
     const row=db.prepare('SELECT payload FROM native_history').get() as {payload:string};
@@ -201,7 +213,7 @@ test('explicit load sends only public read in its bounded child, preserves IDs, 
   recorded.result.entries[0]!.text='mutated';assert.equal(f.service.state().nativeHistory!.recorded!.result.entries[0]!.text,'Inspect this fixture.');
 });
 
-test('full hydrated paginated thread/read persists redacted exact-scoped IDs and survives offline restart',async t=>{
+test('paginated history pages thread/turns/list after a metadata read, persists redacted exact-scoped IDs and survives offline restart',async t=>{
   const f=await fixture(t,'paginated'),scope=await f.bind(f.service),before=f.sessions[0]!.snapshot(),requestId=randomUUID();
   const loaded=await f.load(f.service,scope.connectionId,scope.threadId,requestId);
   assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
@@ -222,9 +234,11 @@ test('full hydrated paginated thread/read persists redacted exact-scoped IDs and
     assert.equal(row.project_path,f.projectPath);assert.equal(row.thread_id,THREAD);assert.equal(row.session_id,SESSION);assert.deepEqual(JSON.parse(row.payload),recorded);
     for(const secret of [SECRET,'fixturePassword123','PRIVATE_REASONING','PRIVATE_ARGUMENTS','PRIVATE_STRUCTURED','PRIVATE_TRANSCRIPT_PATH'])assert.ok(!row.payload.includes(secret));
   }finally{db.close();}
-  const rows=await f.logs(),readPid=rows.find(row=>row.message.method==='thread/read')!.pid;
-  assert.deepEqual(rows.filter(row=>row.pid===readPid).map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read']);
-  assert.deepEqual(rows.find(row=>row.message.method==='thread/read')!.message.params,{threadId:THREAD,includeTurns:true});
+  const rows=await f.logs(),readPid=rows.find(row=>row.message.method==='thread/read')!.pid,reads=rows.filter(row=>row.pid===readPid);
+  // The deprecated hydrated read is never sent for paginated storage.
+  assert.deepEqual(reads.map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read','thread/turns/list']);
+  assert.deepEqual(reads[3]!.message.params,{threadId:THREAD,includeTurns:false});
+  assert.deepEqual(reads[4]!.message.params,{threadId:THREAD,limit:32,sortDirection:'asc',itemsView:'full'});
   await f.service.close();const restarted=f.open(f.projectPath,false),h=await http(t,restarted),count=(await f.logs()).length;
   assert.deepEqual(restarted.state().nativeHistory,binding);assert.equal(restarted.state().snapshot,null);
   const cached=await h.call('/v1/codex/history');assert.equal(cached.status,200);assert.deepEqual(JSON.parse(cached.text).nativeHistory,binding);
@@ -233,13 +247,40 @@ test('full hydrated paginated thread/read persists redacted exact-scoped IDs and
   await restarted.close();const other=f.open(await realpath(f.other),false);assert.equal(other.state().nativeHistory,null);assert.equal(f.starts(),1);assert.equal((await f.logs()).length,count);
 });
 
-for(const mode of ['paginated-summary','paginated-missing-view','paginated-empty','paginated-missing-turns'])test(mode+' is recorded with an incomplete marker and cannot pretend to be hydrated',async t=>{
+for(const mode of ['paginated-summary','paginated-missing-view'])test(mode+' is recorded with an incomplete marker and cannot pretend to be hydrated',async t=>{
   const f=await fixture(t,mode),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId);
   assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
   const binding=loaded.state.nativeHistory!,result=binding.recorded!.result;assert.equal(result.completeness,'incomplete');assert.equal(result.marker,HISTORY_GAP_MARKER);assert.ok(result.gaps.length>0);assert.deepEqual(result.entries,[]);
   if(mode==='paginated-summary'||mode==='paginated-missing-view')assert.ok(result.gaps.some(gap=>gap.reason==='items-not-full'));
   assert.ok(!JSON.stringify(binding).includes(SECRET));assert.ok(!JSON.stringify(binding).includes('PRIVATE_'));
   await f.service.close();const restarted=f.open(f.projectPath,false);assert.deepEqual(restarted.state().nativeHistory,binding);assert.equal(restarted.state().snapshot,null);assert.equal(f.starts(),1);
+});
+
+test('a fully enumerated empty paginated thread is a complete empty history',async t=>{
+  const f=await fixture(t,'paginated-empty'),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId);
+  assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
+  const result=loaded.state.nativeHistory!.recorded!.result;
+  assert.equal(result.completeness,'complete');assert.deepEqual(result.entries,[]);assert.deepEqual(result.gaps,[]);assert.equal(result.marker,null);
+  assert.equal((await f.logs()).filter(row=>row.message.method==='thread/turns/list').length,1);
+});
+
+test('multiple bounded pages follow nextCursor in ascending order into one complete projection',async t=>{
+  const f=await fixture(t,'paginated-pages'),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId);
+  assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
+  const result=loaded.state.nativeHistory!.recorded!.result;
+  assert.equal(result.completeness,'complete');assert.equal(result.entries.length,40);
+  assert.deepEqual(result.entries.map(entry=>entry.ids.turnId),Array.from({length:40},(_,n)=>'pt-'+n));
+  const pages=(await f.logs()).filter(row=>row.message.method==='thread/turns/list').map(row=>row.message.params);
+  assert.deepEqual(pages,[{threadId:THREAD,limit:32,sortDirection:'asc',itemsView:'full'},{threadId:THREAD,limit:32,sortDirection:'asc',itemsView:'full',cursor:'page-32'}]);
+});
+
+test('an endless cursor is bounded by the page cap and never reported complete',async t=>{
+  const f=await fixture(t,'paginated-cursor-loop'),scope=await f.bind(f.service),loaded=await f.load(f.service,scope.connectionId);
+  assert.equal(loaded.record.state,'acknowledged',loaded.record.errorCode??undefined);
+  const result=loaded.state.nativeHistory!.recorded!.result;
+  assert.equal(result.completeness,'incomplete');assert.equal(result.truncated,true);assert.equal(result.marker,HISTORY_GAP_MARKER);
+  assert.ok(result.gaps.some(gap=>gap.reason==='turn-limit'));assert.equal(result.entries.length,8);
+  assert.equal((await f.logs()).filter(row=>row.message.method==='thread/turns/list').length,8);
 });
 
 test('paginated turns each require explicit full itemsView while valid hydrated turns retain their IDs',async t=>{
@@ -265,7 +306,7 @@ test('after human reconnect a recorded bound thread can refresh without selectio
   const f=await fixture(t),scope=await f.bind(f.service);await f.load(f.service,scope.connectionId);await f.service.close();
   const restarted=f.open(),connectionId=await f.connect(restarted),before=f.sessions[1]!.snapshot(),count=(await f.logs()).length;
   assert.equal(before.thread,null);assert.equal(before.selection,null);assert.equal((await f.load(restarted,connectionId)).record.state,'acknowledged');
-  assert.deepEqual(f.sessions[1]!.snapshot(),before);assert.deepEqual((await f.logs()).slice(count).map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read']);
+  assert.deepEqual(f.sessions[1]!.snapshot(),before);assert.deepEqual((await f.logs()).slice(count).map(row=>row.message.method),['fixture/spawn','initialize','initialized','thread/read','thread/read']);
 });
 
 test('unknown/foreign/stale bindings are refused before native read; request identity never dispatches twice',async t=>{
@@ -277,10 +318,11 @@ test('unknown/foreign/stale bindings are refused before native read; request ide
   assert.equal((await f.load(f.service,scope.connectionId,THREAD,requestId)).record.state,'acknowledged');
   assert.equal((await f.load(f.service,scope.connectionId,THREAD,requestId)).replayed,true);
   await assert.rejects(f.load(f.service,scope.connectionId,'foreign-thread',requestId),{code:'IDEMPOTENCY'});
-  assert.equal((await f.logs()).filter(row=>row.message.method==='thread/read').length,1);
+  // Exactly one load dispatched: one metadata read plus its one legacy hydration.
+  assert.equal((await f.logs()).filter(row=>row.message.method==='thread/read'&&(row.message.params as {includeTurns?:unknown}).includeTurns===false).length,1);
 });
 
-for(const mode of ['wrong-thread','wrong-session','wrong-cwd','unknown-mode','paginated-wrong-thread','paginated-wrong-session','paginated-wrong-cwd','paginated-envelope','ephemeral','remote-error','invalid-json','frame-limit'])test('history '+mode+' refuses unsafe replacement and retains the last verified recording',async t=>{
+for(const mode of ['wrong-thread','wrong-session','wrong-cwd','unknown-mode','paginated-wrong-thread','paginated-wrong-session','paginated-wrong-cwd','paginated-envelope','paginated-missing-turns','paginated-turns-error','ephemeral','remote-error','invalid-json','frame-limit'])test('history '+mode+' refuses unsafe replacement and retains the last verified recording',async t=>{
   const f=await fixture(t),scope=await f.bind(f.service),first=await f.load(f.service,scope.connectionId);
   await f.setMode(mode);const refused=await f.load(f.service,scope.connectionId);
   assert.equal(refused.record.state,'rejected');assert.deepEqual(refused.state.nativeHistory,first.state.nativeHistory);

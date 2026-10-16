@@ -1,7 +1,8 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { types } from 'node:util';
 import { spawn } from 'node:child_process';
-import { parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
+import { CODEX_HISTORY_MAX_PAGES, CODEX_HISTORY_PAGE_SIZE, NATIVE_HISTORY_LIMITS, codexThreadHistoryMode, codexTurnsPageProgress,
+  parseCodexPaginatedHistory, parseCodexThreadRead, redactNativeHistoryText, type CodexHistoryScope, type NativeHistoryResult } from './history.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { JsonlTransport, type InternalProcess } from './transport.js';
 import { arcaneThreadIsIsolated, proposalThreadIsIsolated, requireArcaneBuildTools, type McpInventoryRow } from './mcp-isolation.js';
@@ -79,10 +80,19 @@ function status(value: unknown): ThreadState['turnStatus'] {
   fail('PROTOCOL', 'Unknown turn status.');
 }
 
-/** One-shot public read path. The lifecycle transport deliberately has no history method. */
+/**
+ * One-shot public read path. The lifecycle transport deliberately has no history method.
+ * Sequence: initialize → metadata-only thread/read (exact scope and storage mode) → either a legacy hydrated
+ * thread/read, or bounded ascending itemsView:'full' thread/turns/list pages for paginated threads.
+ */
 function readHistoryProcess(spec: InternalProcess, bounds: Limits, scope: CodexHistoryScope) {
   const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, shell: false, windowsHide: true, stdio: 'pipe' });
   let done = false, stage = 1, bytes = 0, stderrBytes = 0, used = 0, serverRequests = 0;
+  let phase: 'initialize' | 'metadata' | 'legacy' | 'pages' = 'initialize', metadata: unknown = null, pagedTurns = 0;
+  const pages: unknown[] = [];
+  const request = (method: string, params: Record<string, unknown>) => { stage++; send({ id: stage, method, params }); };
+  const nextPage = (cursor: string | null) => request('thread/turns/list', { threadId: scope.threadId, limit: CODEX_HISTORY_PAGE_SIZE,
+    sortDirection: 'asc', itemsView: 'full', ...(cursor === null ? {} : { cursor }) });
   const frame = Buffer.alloc(bounds.maxFrameBytes);
   let resolveResult!: (value: NativeHistoryResult) => void;
   let rejectResult!: (error: CodexClientError) => void;
@@ -147,11 +157,26 @@ function readHistoryProcess(spec: InternalProcess, bounds: Limits, scope: CodexH
         }
         if (message.id !== stage || Object.hasOwn(message, 'result') === Object.hasOwn(message, 'error')) { protocolError(); return; }
         if (Object.hasOwn(message, 'error')) { finish(new CodexClientError('REMOTE_REJECTED', 'Native history read was refused.', true)); return; }
-        if (stage === 1) {
-          object(message.result); stage = 2;
+        if (phase === 'initialize') {
+          object(message.result); phase = 'metadata';
           send({ method: 'initialized', params: {} });
-          send({ id: 2, method: 'thread/read', params: { threadId: scope.threadId, includeTurns: true } });
-        } else finish(null, parseCodexThreadRead(message.result, scope));
+          request('thread/read', { threadId: scope.threadId, includeTurns: false });
+        } else if (phase === 'metadata') {
+          metadata = message.result;
+          const mode = codexThreadHistoryMode(metadata, scope);
+          // A scope, mode or persistence refusal is final; no content is requested.
+          if (typeof mode !== 'string') { finish(null, mode); return; }
+          if (mode === 'legacy') { phase = 'legacy'; request('thread/read', { threadId: scope.threadId, includeTurns: true }); }
+          else { phase = 'pages'; nextPage(null); }
+        } else if (phase === 'legacy') finish(null, parseCodexThreadRead(message.result, scope));
+        else {
+          pages.push(message.result);
+          const progress = codexTurnsPageProgress(message.result);
+          if (progress) pagedTurns += progress.turns;
+          // Bounded enumeration: an unresolved cursor at the page/turn cap is reported as incomplete, never complete.
+          if (progress && progress.nextCursor !== null && pages.length < CODEX_HISTORY_MAX_PAGES && pagedTurns <= NATIVE_HISTORY_LIMITS.maxTurns) nextPage(progress.nextCursor);
+          else finish(null, parseCodexPaginatedHistory(metadata, pages, scope));
+        }
       }
     } catch { protocolError(); }
   });

@@ -127,16 +127,10 @@ function reject(reason: HistoryGapReason): NativeHistoryResult {
  * Wire strings are bounded before JSON.parse; objects visit only allowlisted fields.
  * Return public entries plus evidence of omissions; never return the raw response.
  */
-export function parseCodexThreadRead(
-  response: unknown, expected: CodexHistoryScope, options: NativeHistoryBounds = {},
-): NativeHistoryResult {
+type GapRecorder = (reason: HistoryGapReason, turnId?: string, itemId?: string) => void;
+function collector(): { result: NativeHistoryResult; gap: GapRecorder } {
   const result = empty();
-  let limit: NativeHistoryLimits;
-  let thread: RecordValue;
-  let threadId: string;
-  let sessionId: string | null;
-  let paginated = false;
-  const gap = (reason: HistoryGapReason, turnId?: string, itemId?: string) => {
+  const gap: GapRecorder = (reason, turnId, itemId) => {
     const entry: NativeHistoryGap = { reason };
     if (turnId !== undefined) entry.turnId = turnId;
     if (itemId !== undefined) entry.itemId = itemId;
@@ -147,10 +141,20 @@ export function parseCodexThreadRead(
     result.marker = HISTORY_GAP_MARKER;
     if (reason === 'byte-limit' || reason === 'turn-limit' || reason === 'item-limit') result.truncated = true;
   };
+  return { result, gap };
+}
+interface ThreadHeader {
+  limit: NativeHistoryLimits; thread: RecordValue; threadId: string; sessionId: string | null;
+  mode: 'legacy' | 'paginated' | undefined; includeTurns: boolean;
+}
+const isResult = (value: ThreadHeader | NativeHistoryResult): value is NativeHistoryResult => Object.hasOwn(value, 'completeness');
+
+/** Envelope, exact thread/workspace/session scope, storage mode and persistence checks shared by every read shape. */
+function threadHeader(response: unknown, expected: CodexHistoryScope, options: NativeHistoryBounds): ThreadHeader | NativeHistoryResult {
   try {
-    limit = bounds(options);
+    const limit = bounds(options);
     const scope = record(expected);
-    threadId = id(field(scope, 'threadId'));
+    const threadId = id(field(scope, 'threadId'));
     const expectedCwd = cwd(field(scope, 'cwd'));
     const expectedSession = field(scope, 'sessionId');
     if (expectedSession !== undefined) id(expectedSession);
@@ -172,33 +176,46 @@ export function parseCodexThreadRead(
       body = record(field(body, 'result'));
     }
     if (has(body, 'nextCursor') || has(body, 'backwardsCursor') || has(body, 'data')) return reject('unsupported-envelope');
-    thread = record(field(body, 'thread'));
+    const thread = record(field(body, 'thread'));
     if (id(field(thread, 'id')) !== threadId || cwd(field(thread, 'cwd')) !== expectedCwd) return reject('scope-mismatch');
     const nativeSession = field(thread, 'sessionId');
-    sessionId = nativeSession == null ? null : id(nativeSession);
+    const sessionId = nativeSession == null ? null : id(nativeSession);
     if (expectedSession !== undefined && expectedSession !== sessionId) return reject('scope-mismatch');
     const mode = field(thread, 'historyMode');
     if (mode !== undefined && mode !== 'legacy' && mode !== 'paginated') return reject('unsupported-history-mode');
-    paginated = mode === 'paginated';
     // A cursor envelope is not a hydrated full-thread response.
     if (has(thread, 'nextCursor') || has(thread, 'backwardsCursor')) return reject('unsupported-envelope');
     if (field(thread, 'ephemeral') === true) return reject('ephemeral-thread');
     if (field(thread, 'ephemeral') !== false) throw new InvalidShape();
-    if (!includeTurns) return { ...reject('turns-not-requested'), completeness: 'incomplete' };
+    return { limit, thread, threadId, sessionId, mode, includeTurns };
   } catch {
     return reject('malformed-response');
   }
+}
 
+export function parseCodexThreadRead(
+  response: unknown, expected: CodexHistoryScope, options: NativeHistoryBounds = {},
+): NativeHistoryResult {
+  const header = threadHeader(response, expected, options);
+  if (isResult(header)) return header;
+  if (!header.includeTurns) return { ...reject('turns-not-requested'), completeness: 'incomplete' };
   let turns: unknown;
   let turnCount: number;
   try {
-    turns = field(thread, 'turns');
+    turns = field(header.thread, 'turns');
     turnCount = Array.isArray(turns) ? arrayLength(turns) : 0;
   } catch { return reject('malformed-response'); }
   if (!Array.isArray(turns)) return { ...reject('missing-turns'), completeness: 'incomplete' };
-  // An empty paginated response cannot establish full-history support on its
-  // installed runtime. Preserve that uncertainty instead of a false empty chat.
-  if (paginated && turnCount === 0) gap('missing-turns');
+  const collected = collector();
+  // An empty HYDRATED paginated thread/read cannot establish full history (that
+  // form is deprecated for paginated threads). Paged reads use parseCodexPaginatedHistory.
+  if (header.mode === 'paginated' && turnCount === 0) collected.gap('missing-turns');
+  return projectTurns(collected, header, turns, turnCount);
+}
+
+/** Shared bounded projection of public turns: identical sanitization, gaps and completeness for every read shape. */
+function projectTurns(collected: { result: NativeHistoryResult; gap: GapRecorder }, header: ThreadHeader, turns: unknown[], turnCount: number): NativeHistoryResult {
+  const { result, gap } = collected, { limit, threadId, sessionId } = header, paginated = header.mode === 'paginated';
   let inputTextBytes = 0;
   let entryBytes = 0;
   let inspectedItems = 0;
@@ -332,6 +349,74 @@ export function parseCodexThreadRead(
   return result;
 }
 
+/** Bounded paged-history request shape (documented thread/turns/list; no experimental negotiation). */
+export const CODEX_HISTORY_PAGE_SIZE = 32;
+export const CODEX_HISTORY_MAX_PAGES = 8;
+function opaqueCursor(value: unknown): string {
+  if (typeof value !== 'string' || !value.length || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw new InvalidShape();
+  return value;
+}
+
+/**
+ * Storage mode reported by a metadata-only thread/read (includeTurns:false), after the same exact
+ * thread/workspace/session/persistence checks. Absent mode is an older legacy schema. A refusal is final.
+ */
+export function codexThreadHistoryMode(metadata: unknown, expected: CodexHistoryScope): 'legacy' | 'paginated' | NativeHistoryResult {
+  const header = threadHeader(metadata, expected, {});
+  if (isResult(header)) return header;
+  return header.mode === 'paginated' ? 'paginated' : 'legacy';
+}
+
+/** Cursor and turn count of one thread/turns/list result, or null when the page shape is not public. */
+export function codexTurnsPageProgress(page: unknown): { nextCursor: string | null; turns: number } | null {
+  try {
+    const body = record(page);
+    const data = field(body, 'data');
+    if (!Array.isArray(data)) return null;
+    const next = field(body, 'nextCursor');
+    return { nextCursor: next === null ? null : opaqueCursor(next), turns: arrayLength(data) };
+  } catch { return null; }
+}
+
+/**
+ * Accept a metadata-only thread/read plus ascending, itemsView:'full' thread/turns/list pages for a
+ * PAGINATED thread. Turns run through the same projection as hydrated reads. A fully enumerated empty
+ * thread is a complete empty history; an unresolved cursor or page cap never reports completeness.
+ */
+export function parseCodexPaginatedHistory(
+  metadata: unknown, pages: readonly unknown[], expected: CodexHistoryScope, options: NativeHistoryBounds = {},
+): NativeHistoryResult {
+  const header = threadHeader(metadata, expected, options);
+  if (isResult(header)) return header;
+  if (header.mode !== 'paginated') return reject('unsupported-history-mode');
+  if (!header.includeTurns) return { ...reject('turns-not-requested'), completeness: 'incomplete' };
+  const collected = collector(), turns: unknown[] = [];
+  try {
+    if (!Array.isArray(pages)) throw new InvalidShape();
+    const pageCount = arrayLength(pages as unknown[]);
+    if (pageCount < 1 || pageCount > CODEX_HISTORY_MAX_PAGES) throw new InvalidShape();
+    let unresolved: string | null = null;
+    for (let index = 0; index < pageCount; index++) {
+      const page = record(arrayField(pages as unknown[], index));
+      if (has(page, 'error')) return reject('rpc-error');
+      if (has(page, 'method') || has(page, 'thread') || has(page, 'result')) return reject('unsupported-envelope');
+      const data = field(page, 'data');
+      if (!Array.isArray(data)) throw new InvalidShape();
+      const next = field(page, 'nextCursor');
+      unresolved = next === null ? null : opaqueCursor(next);
+      const backwards = field(page, 'backwardsCursor');
+      if (backwards !== undefined && backwards !== null) opaqueCursor(backwards);
+      // Pages after the final page are not part of this enumeration.
+      if (unresolved === null && index < pageCount - 1) throw new InvalidShape();
+      const length = arrayLength(data);
+      // Collect one past the cap so the shared projection reports the turn-limit gap.
+      for (let turn = 0; turn < length && turns.length <= header.limit.maxTurns; turn++) turns.push(arrayField(data, turn));
+    }
+    if (unresolved !== null) collected.gap('turn-limit');
+  } catch { return reject('malformed-response'); }
+  return projectTurns(collected, header, turns, turns.length);
+}
+
 export interface NativeHistoryCapability {
   api: string;
   support: 'supported' | 'experimental' | 'unsupported' | 'unverified';
@@ -410,11 +495,12 @@ export function planNativeHistoryCapabilities(input: NativeHistoryPlanInput): Na
     const legacy = mode === 'legacy';
     capability('thread/start', legacy ? 'supported' : 'unsupported', legacy, 'Persistent creation with ephemeral:false; paginated creation fails closed.');
     capability('thread/list', 'supported', true, 'Cursor-based metadata listing with exact workspace and explicit source filters.');
-    capability('thread/read', 'supported', exactId !== null, 'Metadata supported; full includeTurns reads require legacy history.');
+    capability('thread/read', 'supported', exactId !== null, 'Metadata read first; includeTurns hydration only for legacy history (deprecated for paginated threads).');
     capability('thread/resume', legacy ? 'supported' : 'unsupported', legacy && exactId !== null, 'Resume by threadId only; no path, injected history, or fork.');
-    const pages = legacy && exactId !== null && experimental === true && schema === true;
-    capability('thread/turns/list', legacy ? 'experimental' : 'unsupported', pages,
-      'Requires experimental negotiation and matching schema; page parsing is outside this foundation.');
+    // Documented in the pinned public schema; paginated history needs no experimental negotiation.
+    const pages = !legacy && exactId !== null;
+    capability('thread/turns/list', 'supported', pages,
+      'Paginated history: ascending, itemsView full, bounded cursor and page count; legacy threads use hydrated thread/read.');
     plan.requests.push({ method: 'thread/list', params: { cwd: directory, limit: 64, sourceKinds: ['cli', 'vscode', 'appServer', 'exec'], modelProviders: ['openai'] } });
     if (legacy) plan.requests.push({ method: 'thread/start', params: { cwd: directory, ephemeral: false } });
     if (legacy && exactId !== null) {
@@ -423,7 +509,7 @@ export function planNativeHistoryCapabilities(input: NativeHistoryPlanInput): Na
     } else if (!legacy && exactId !== null) {
       plan.requests.push({ method: 'thread/read', params: { threadId: exactId, includeTurns: false } });
     }
-    if (pages) plan.requests.push({ method: 'thread/turns/list', params: { threadId: exactId!, limit: 64, sortDirection: 'asc', itemsView: 'full' } });
+    if (pages) plan.requests.push({ method: 'thread/turns/list', params: { threadId: exactId!, limit: CODEX_HISTORY_PAGE_SIZE, sortDirection: 'asc', itemsView: 'full' } });
     return plan;
   } catch {
     return { ...plan, status: 'invalid', nativeId: null, requests: [], cli: null, nativeApis: [] };

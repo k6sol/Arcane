@@ -70,8 +70,10 @@ createInterface({ input: process.stdin }).on('line', line => {
   }
   if (method === 'mcpServerStatus/list') { send({id,result:{data:[...(mode==='inherited-mcp-active'?[{name:'unsafe-inherited',runtimeStatus:'connected',tools:{write:{}},toolsError:null,pluginId:null}]:[]),{name:'arcane',runtimeStatus:mode==='bad-mcp-inventory'?'unsafe':'connected',tools:Object.fromEntries(["sessions","scene_children","scene_inspect","scene_search","selection_read","script_read","script_search","script_update","script_set_enabled","scene_create","scene_update","receipt_status","receipt_restore","playtest_request","playtest_status","playtest_cancel","skills_recommend","skills_list","skills_get","work_runs","work_ready","work_create","work_claim","work_progress","work_submit","assets_probe","assets_jobs","assets_start","assets_cancel","assets_manifest"].filter(name=>mode!=='missing-script-search'||name!=='script_search').map(name=>[name,{description:'FIXTURE_SECRET'}])),toolsError:null,pluginId:null,accessToken:'FIXTURE_SECRET'}],nextCursor:mode==='mcp-cursor-loop'?'same':null}});return; }
   if(method==='thread/read'&&mode==='image-history-resume'){
-    const turns=JSON.parse(readFileSync(join(dirname(audit),'image-history.json'),'utf8'));
-    send({id,result:{thread:{id:params.threadId,sessionId:'fixture-session-root',cwd:process.cwd(),ephemeral:false,turns}}});return;
+    // Metadata-only reads (includeTurns:false) carry no turns, as in the public schema.
+    const thread={id:params.threadId,sessionId:'fixture-session-root',cwd:process.cwd(),ephemeral:false};
+    if(params.includeTurns===true)thread.turns=JSON.parse(readFileSync(join(dirname(audit),'image-history.json'),'utf8'));
+    send({id,result:{thread}});return;
   }
   if (method === 'thread/start' || method === 'thread/resume') {
     if (mode === 'reject-thread') { send({ id, error: { code: -32001, message: 'FIXTURE_SECRET rejected' } }); return; }

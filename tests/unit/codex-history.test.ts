@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, parseCodexThreadRead,
-  planNativeHistoryCapabilities, redactNativeHistoryText,
+  CODEX_HISTORY_MAX_PAGES, HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, codexThreadHistoryMode, codexTurnsPageProgress,
+  parseCodexPaginatedHistory, parseCodexThreadRead, planNativeHistoryCapabilities, redactNativeHistoryText,
 } from '../../packages/codex-client/src/history.js';
 import type { CodexHistoryScope } from '../../packages/codex-client/src/history.js';
 
@@ -369,25 +369,30 @@ test('persistent Codex plan describes public API support and exact IDs, without 
   assert.deepEqual(plan.requests.find(request => request.method === 'thread/read')?.params, { threadId: THREAD, includeTurns: true });
   assert.deepEqual(plan.requests.find(request => request.method === 'thread/list')?.params.sourceKinds, ['cli', 'vscode', 'appServer', 'exec']);
   assert.ok(!JSON.stringify(plan.requests).includes('fork'));
-  assert.equal(plan.nativeApis.find(api => api.api === 'thread/turns/list')?.support, 'experimental');
+  // Documented paged history is supported, but legacy threads keep the hydrated read and plan no pages.
+  assert.equal(plan.nativeApis.find(api => api.api === 'thread/turns/list')?.support, 'supported');
   assert.equal(plan.nativeApis.find(api => api.api === 'thread/turns/list')?.availableInPlan, false);
+  assert.ok(!plan.requests.some(request => request.method === 'thread/turns/list'));
 });
 
-test('experimental turn pagination requires explicit negotiation and schema evidence', () => {
-  for (const evidence of [{}, { experimentalApi: true }, { turnPaginationSchemaAvailable: true }]) {
+test('legacy plans never page, with or without experimental evidence', () => {
+  for (const evidence of [{}, { experimentalApi: true }, { turnPaginationSchemaAvailable: true }, { experimentalApi: true, turnPaginationSchemaAvailable: true }]) {
     assert.ok(!planNativeHistoryCapabilities({ provider: 'codex', cwd: CWD, nativeId: THREAD, ...evidence }).requests.some(request => request.method === 'thread/turns/list'));
   }
-  const plan = planNativeHistoryCapabilities({ provider: 'codex', cwd: CWD, nativeId: THREAD, experimentalApi: true, turnPaginationSchemaAvailable: true });
-  assert.deepEqual(plan.requests.find(request => request.method === 'thread/turns/list')?.params, { threadId: THREAD, limit: 64, sortDirection: 'asc', itemsView: 'full' });
-  assert.equal(plan.runtimeVerified, false);
 });
 
-test('unsupported paginated storage permits metadata inspection only and never falls back to a fake chat', () => {
-  const plan = planNativeHistoryCapabilities({ provider: 'codex', cwd: CWD, nativeId: THREAD, historyMode: 'paginated', experimentalApi: true, turnPaginationSchemaAvailable: true });
-  assert.equal(plan.status, 'unsupported');
-  assert.deepEqual(plan.requests.map(request => request.method), ['thread/list', 'thread/read']);
-  assert.deepEqual(plan.requests[1]?.params, { threadId: THREAD, includeTurns: false });
-  assert.equal(plan.nativeId, THREAD);
+test('paginated storage plans a metadata read then documented ascending full pages without experimental negotiation', () => {
+  for (const evidence of [{}, { experimentalApi: false }, { experimentalApi: true, turnPaginationSchemaAvailable: true }]) {
+    const plan = planNativeHistoryCapabilities({ provider: 'codex', cwd: CWD, nativeId: THREAD, historyMode: 'paginated', ...evidence });
+    assert.equal(plan.status, 'unsupported', 'paginated thread creation/resume still fail closed');
+    assert.deepEqual(plan.requests.map(request => request.method), ['thread/list', 'thread/read', 'thread/turns/list']);
+    assert.deepEqual(plan.requests[1]?.params, { threadId: THREAD, includeTurns: false });
+    assert.deepEqual(plan.requests[2]?.params, { threadId: THREAD, limit: 32, sortDirection: 'asc', itemsView: 'full' });
+    assert.equal(plan.nativeApis.find(api => api.api === 'thread/turns/list')?.availableInPlan, true);
+    assert.equal(plan.nativeId, THREAD); assert.equal(plan.runtimeVerified, false);
+  }
+  const unidentified = planNativeHistoryCapabilities({ provider: 'codex', cwd: CWD, historyMode: 'paginated' });
+  assert.ok(!unidentified.requests.some(request => request.method === 'thread/turns/list' || request.method === 'thread/read'));
 });
 
 test('Claude Code plan uses documented UUID session/resume and stream-json flags, with web/design sync unverified', () => {
@@ -461,4 +466,60 @@ test('paginated projections still enforce scope, limits and cursor-envelope reje
   assert.ok(limited.truncated);
   assert.ok(reasons(limited).includes('turn-limit'));
   assert.deepEqual(reasons(parseCodexThreadRead(read([], {historyMode:'paginated',nextCursor:'opaque'}),SCOPE)),['unsupported-envelope']);
+});
+
+// ---- documented paged history: metadata-only thread/read + ascending itemsView:'full' thread/turns/list pages ----
+const metadata = (overrides: Record<string, unknown> = {}) => { const value = read([], { historyMode: 'paginated', ...overrides }); delete (value.thread as Record<string, unknown>).turns; return value; };
+const page = (data: unknown[], nextCursor: string | null = null, extra: Record<string, unknown> = {}) => ({ data, nextCursor, backwardsCursor: data.length ? 'back-cursor' : null, ...extra });
+
+test('metadata reads select storage mode only after exact scope and persistence checks', () => {
+  assert.equal(codexThreadHistoryMode(metadata(), SCOPE), 'paginated');
+  assert.equal(codexThreadHistoryMode(metadata({ historyMode: 'legacy' }), SCOPE), 'legacy');
+  const older = metadata(); delete (older.thread as Record<string, unknown>).historyMode;
+  assert.equal(codexThreadHistoryMode(older, SCOPE), 'legacy', 'older schemas without historyMode are legacy');
+  for (const [input, reason] of [[metadata({ id: 'foreign' }), 'scope-mismatch'], [metadata({ cwd: '/foreign' }), 'scope-mismatch'],
+    [metadata({ sessionId: 'foreign' }), 'scope-mismatch'], [metadata({ historyMode: 'future' }), 'unsupported-history-mode'],
+    [metadata({ ephemeral: true }), 'ephemeral-thread'], [{ id: 1, error: { message: 'PRIVATE' } }, 'rpc-error']] as const) {
+    const result = codexThreadHistoryMode(input, SCOPE);
+    assert.ok(typeof result !== 'string'); assert.equal(result.completeness, 'rejected'); assert.deepEqual(reasons(result), [reason]);
+  }
+});
+
+test('paged turns use the shared projection; a fully enumerated empty thread is complete', () => {
+  const two = parseCodexPaginatedHistory(metadata(), [page([turn([user()], 'turn-a')], 'cursor-2'), page([turn([assistant()], 'turn-b')])], SCOPE);
+  assert.equal(two.completeness, 'complete'); assert.deepEqual(two.entries.map(entry => [entry.role, entry.ids.turnId]), [['user', 'turn-a'], ['assistant', 'turn-b']]);
+  assert.ok(two.entries.every(entry => entry.ids.threadId === THREAD && entry.ids.sessionId === SESSION));
+  const empty = parseCodexPaginatedHistory(metadata(), [page([])], SCOPE);
+  assert.equal(empty.completeness, 'complete'); assert.deepEqual(empty.entries, []); assert.deepEqual(empty.gaps, []); assert.equal(empty.marker, null);
+  const secret = parseCodexPaginatedHistory(metadata(), [page([turn([assistant('a', 'token=sk-proj-abcdefghijklmnop')])])], SCOPE);
+  assert.equal(secret.redacted, true); assert.ok(!JSON.stringify(secret).includes('sk-proj-abcdefghijklmnop'));
+});
+
+test('unresolved cursors, page caps and non-full items never report completeness', () => {
+  const unresolved = parseCodexPaginatedHistory(metadata(), [page([turn([user()])], 'more')], SCOPE);
+  assert.equal(unresolved.completeness, 'incomplete'); assert.equal(unresolved.truncated, true); assert.ok(reasons(unresolved).includes('turn-limit'));
+  const summary = parseCodexPaginatedHistory(metadata(), [page([turn([assistant('a', 'NOT_HYDRATED')], TURN, { itemsView: 'summary' })])], SCOPE);
+  assert.equal(summary.completeness, 'incomplete'); assert.deepEqual(reasons(summary), ['items-not-full']); assert.ok(!JSON.stringify(summary).includes('NOT_HYDRATED'));
+  const capped = parseCodexPaginatedHistory(metadata(), Array.from({ length: CODEX_HISTORY_MAX_PAGES + 1 }, (_, n) => page([turn([user()], 't-' + n)], 'c-' + n)), SCOPE);
+  assert.equal(capped.completeness, 'rejected');
+  const many = parseCodexPaginatedHistory(metadata(), [page(Array.from({ length: 65 }, (_, n) => turn([assistant('a-' + n)], 't-' + n)))], SCOPE);
+  assert.equal(many.completeness, 'incomplete'); assert.equal(many.entries.length, NATIVE_HISTORY_LIMITS.maxTurns); assert.ok(reasons(many).includes('turn-limit'));
+});
+
+test('malformed or foreign page shapes and wrong storage modes are refused without extracting content', () => {
+  for (const pages of [[], [{ nextCursor: null }], [page([], 'next'), { data: 'PRIVATE', nextCursor: null }], [page([]), page([])],
+    [page([], '')], [page([], 'bad\ncursor')], [{ ...page([]), backwardsCursor: 7 }]]) {
+    assert.equal(parseCodexPaginatedHistory(metadata(), pages, SCOPE).completeness, 'rejected', JSON.stringify(pages).slice(0, 80));
+  }
+  assert.deepEqual(reasons(parseCodexPaginatedHistory(metadata(), [{ id: 3, error: { message: 'PRIVATE_PAGE_ERROR' } }], SCOPE)), ['rpc-error']);
+  assert.deepEqual(reasons(parseCodexPaginatedHistory(metadata(), [{ thread: {}, data: [], nextCursor: null }], SCOPE)), ['unsupported-envelope']);
+  assert.deepEqual(reasons(parseCodexPaginatedHistory(metadata({ historyMode: 'legacy' }), [page([])], SCOPE)), ['unsupported-history-mode']);
+  assert.deepEqual(reasons(parseCodexPaginatedHistory(metadata({ id: 'foreign' }), [page([turn([user()])])], SCOPE)), ['scope-mismatch']);
+  assert.equal(parseCodexPaginatedHistory(metadata(), [page([])], { ...SCOPE, includeTurns: false }).completeness, 'incomplete');
+});
+
+test('page progress reads only the cursor and turn count of a public page', () => {
+  assert.deepEqual(codexTurnsPageProgress(page([turn([user()]), turn([user()], 't2')], 'next')), { nextCursor: 'next', turns: 2 });
+  assert.deepEqual(codexTurnsPageProgress(page([])), { nextCursor: null, turns: 0 });
+  for (const bad of [null, [], { nextCursor: null }, { data: [], nextCursor: 5 }, { data: [], nextCursor: '' }]) assert.equal(codexTurnsPageProgress(bad), null);
 });

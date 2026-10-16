@@ -335,7 +335,7 @@ test('no-profile public factory leaves launch and generic history helper behavio
   assert.equal(events(records, 'connected')[0]?.snapshot?.mcpIsolation, 'native-config');
   assert.equal(events(records, 'history')[0]?.history?.completeness, 'complete');
   assert.equal(events(records, 'history')[0]?.history?.entries[0]?.text, 'Synthetic public history');
-  assert.equal(calls(records, 'thread/read').length, 1);
+  assert.equal(calls(records, 'thread/read').length, 2);
 });
 
 test('discovery gets no inherited authority; final retains fixed authority, exact isolation and secret-free argv', async t => {
@@ -373,9 +373,12 @@ test('discovery gets no inherited authority; final retains fixed authority, exac
     ids: { threadId: 'fixture-thread', sessionId: 'fixture-session', turnId: 'fixture-turn', itemId: 'fixture-item' },
     role: 'assistant',
   }]);
-  assert.deepEqual(calls(records, 'thread/read').map(row => row.params), [{ threadId: 'fixture-thread', includeTurns: true }]);
+  assert.deepEqual(calls(records, 'thread/read').map(row => row.params), [
+    { threadId: 'fixture-thread', includeTurns: false },
+    { threadId: 'fixture-thread', includeTurns: true },
+  ]);
   assert.deepEqual(records.filter(row => row.event === 'rpc' && row.launch === 3).map(row => row.method),
-    ['initialize', 'initialized', 'thread/read']);
+    ['initialize', 'initialized', 'thread/read', 'thread/read']);
   assert.deepEqual(events(records, 'history-after')[0]?.snapshot, events(records, 'history-before')[0]?.snapshot);
   assert.equal(calls(records, 'thread/resume').length, 0);
   assert.deepEqual(calls(records, 'mcpServerStatus/list').map(row => row.params), [
