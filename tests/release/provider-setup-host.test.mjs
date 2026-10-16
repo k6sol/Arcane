@@ -591,3 +591,71 @@ test('launcher failure is failed; timeout and post-launch context change are unk
   assert.equal(await busy.host.launchHandoffTerminal(handoffRequest(busy)), 'failed'); await pending;
   assert.ok(!busy.processes.some(item => item.command === busy.powershell), 'busy: no launcher');
 });
+
+
+// ---- D4-027: bounded trusted handoff metadata freshness ----
+// The REAL provider-setup source runs in an isolated VM realm whose only clock is a controlled `performance`
+// (no global clock mutation, no sleeps). Documented boundary: eligible for 0 <= elapsed < 60000 ms after the
+// successful verified help read; expired at exactly 60000 ms; expiry is sticky until a later explicit status.
+const sourceText = readFileSync(new URL('../../apps/desktop/electron/provider-setup.cjs', import.meta.url), 'utf8');
+const nodeModules = { 'node:fs/promises': require('node:fs/promises'), 'node:path': require('node:path'), 'node:os': require('node:os'), 'node:util': require('node:util') };
+function clockedHost(settings = {}, help = HELP, clockGlobals) {
+  const f = fixture(settings), clock = { now: 1000 };
+  const globals = clockGlobals ? clockGlobals(clock) : { performance: { now: () => clock.now } };
+  const module = { exports: {} };
+  const context = vm.createContext({ module, Buffer, URL, setTimeout, clearTimeout, process: { platform: 'win32', arch: 'x64', env: {} }, ...globals,
+    require(name) { if (name === 'node:child_process') return { spawn() { assert.fail('module-level spawn'); } }; if (nodeModules[name]) return nodeModules[name]; assert.fail('unexpected import: ' + name); } });
+  vm.runInContext(sourceText, context);
+  const host = module.exports.createProviderSetup(f.options);
+  f.state.reply = (command, args) => args[0] === '--help' ? { code: 0, stdout: help } : null;
+  // Trusted envelopes must be plain objects of the module's own realm.
+  const realmJson = vm.runInContext('JSON', context), inRealm = value => realmJson.parse(JSON.stringify(value));
+  const plainJson = value => JSON.parse(JSON.stringify(value));
+  return { ...f, host, clock, inRealm, plainJson };
+}
+
+test('trusted handoff metadata is eligible for 0 <= elapsed < 60 s and sticky-expired at exactly 60 s; only an explicit status restores it', async () => {
+  const f = clockedHost(); f.clock.now = 1000; await f.host.status('claude');
+  const choices = f.plainJson(f.host.getHandoffChoices());
+  assert.deepEqual(choices, { cliVersion: '2.1.211', aliases: ['fable', 'opus', 'sonnet'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, 'elapsed 0');
+  f.clock.now = 1000 + 59999; assert.deepEqual(f.plainJson(f.host.getHandoffChoices()), choices, 'elapsed 59999 ms: still eligible');
+  const processes = f.processes.length;
+  f.clock.now = 1000 + 60000; assert.equal(f.host.getHandoffChoices(), null, 'elapsed exactly 60000 ms: expired');
+  for (const later of [1000 + 1, 1000 + 30000, 1000 + 59999, 1000 + 120000]) { f.clock.now = later; assert.equal(f.host.getHandoffChoices(), null, 'sticky at ' + later); }
+  assert.equal(f.processes.length, processes, 'expiry never auto-probes, refreshes or renews');
+  const snapshotAfter = await f.host.status('codex'); assert.ok(!('claudeChoices' in snapshotAfter));
+  assert.equal(f.host.getHandoffChoices(), null, 'a status read for another provider does not renew Claude metadata');
+  f.clock.now = 500000; await f.host.status('claude');
+  assert.deepEqual(f.plainJson(f.host.getHandoffChoices()), choices, 'a fresh explicit Claude status restores eligibility');
+  f.clock.now = 500000 + 59999; assert.ok(f.host.getHandoffChoices()); f.clock.now = 500000 + 60000; assert.equal(f.host.getHandoffChoices(), null, 'the new observation has its own fixed bound');
+});
+
+test('backward, non-finite, negative, throwing or missing clocks make metadata ineligible without corrupting legacy auth or snapshots', async () => {
+  const back = clockedHost(); back.clock.now = 5000; await back.host.status('claude'); assert.ok(back.host.getHandoffChoices());
+  back.clock.now = 4999; assert.equal(back.host.getHandoffChoices(), null, 'backward reading');
+  back.clock.now = 5000; assert.equal(back.host.getHandoffChoices(), null, 'a returning clock does not revive');
+  const later = clockedHost(); later.clock.now = 5000; await later.host.status('claude');
+  later.clock.now = Number.NaN; assert.equal(later.host.getHandoffChoices(), null, 'NaN after observation'); later.clock.now = 5001; assert.equal(later.host.getHandoffChoices(), null, 'sticky after NaN');
+  for (const [what, clockGlobals] of [['NaN', () => ({ performance: { now: () => Number.NaN } })], ['Infinity', () => ({ performance: { now: () => Infinity } })],
+    ['negative', () => ({ performance: { now: () => -1 } })], ['string', () => ({ performance: { now: () => '1000' } })],
+    ['throwing', () => ({ performance: { now() { throw new Error('clock'); } } })], ['missing performance', () => ({})]]) {
+    const f = clockedHost({}, HELP, clockGlobals), value = await f.host.status('claude');
+    snapshot(value, 'claude');
+    assert.deepEqual([value.auth, value.cliVersion, f.plainJson(value.claudeChoices)?.aliases], ['subscription', '2.1.211', ['fable', 'opus', 'sonnet']], what + ': legacy auth and display metadata intact');
+    assert.equal(f.host.getHandoffChoices(), null, what + ': trusted metadata ineligible');
+    assert.match((await f.host.launch('claude')).message, /Native Claude Code terminal requested/, what + ': plain launch unchanged');
+  }
+});
+
+test('expired metadata refuses confirmHandoff before any dialog and launchHandoffTerminal before any spawn', async () => {
+  const f = clockedHost(); f.clock.now = 1000; await f.host.status('claude');
+  assert.equal(await f.host.confirmHandoff(f.inRealm(profile()), f.inRealm(session(f))), true, 'fresh metadata: one confirmation'); assert.equal(f.dialogs.length, 1);
+  f.processes.length = 0; assert.equal(await f.host.launchHandoffTerminal(f.inRealm(handoffRequest(f))), 'opened', 'fresh metadata: scoped launch'); assert.equal(f.processes.length, 1);
+  f.processes.length = 0; f.clock.now = 1000 + 60000;
+  assert.equal(await f.host.confirmHandoff(f.inRealm(profile()), f.inRealm(session(f))), false); assert.equal(f.dialogs.length, 1, 'no dialog after expiry');
+  assert.equal(await f.host.launchHandoffTerminal(f.inRealm(handoffRequest(f))), 'failed'); assert.equal(f.processes.length, 0, 'no spawn after expiry');
+  const during = clockedHost(); during.clock.now = 1000; await during.host.status('claude');
+  during.state.beforeConfirm = () => { during.clock.now = 1000 + 60000; };
+  assert.equal(await during.host.confirmHandoff(during.inRealm(profile()), during.inRealm(session(during))), false, 'expiry during the dialog');
+  assert.equal(during.dialogs.length, 1);
+});

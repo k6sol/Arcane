@@ -13,6 +13,9 @@ const DISABLED = 'CLI setup checks are disabled in verification mode.';
 const MAX_BYTES = 16384;
 // Claude `--help` is longer than the status helpers (2.1.177: 15,388 bytes); it gets its own fixed bound.
 const HELP_MAX_BYTES = 65536;
+// Trusted handoff metadata is an observation, not a standing grant: eligible for 0 <= elapsed < 60 s of the
+// runtime monotonic clock (performance.now) after a successful verified help read; at exactly 60 s it is expired.
+const HANDOFF_METADATA_LIFETIME_MS = 60000;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 const EFFORT_ORDER = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const HANDOFF_CREDENTIAL = /^[A-Za-z0-9_-]{43}$/;
@@ -58,7 +61,14 @@ function createProviderSetup(options) {
   const snapshots = new Map(['codex', 'claude'].map(provider => [provider, {
     version: 1, provider, installed: false, auth: 'unknown', cliVersion: null, busy: false, message: null,
   }]));
-  let active = false, ownedLogin = null, disposed = false, epoch = 0, claudeMetadataScope = null;
+  let active = false, ownedLogin = null, disposed = false, epoch = 0, claudeMetadataScope = null, claudeMetadataObservedAt = null;
+  /** Existing runtime monotonic clock; any unusable reading is null (never a default time). */
+  function observedNow() {
+    let value; try { value = performance.now(); } catch { return null; }
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  /** Sticky withdrawal: only a later explicit successful status read can restore eligibility. */
+  function expireHandoffMetadata() { claudeMetadataScope = null; claudeMetadataObservedAt = null; }
   const copy = provider => Object.freeze({ ...snapshots.get(provider), busy: active || !!ownedLogin?.session.status().pending });
   const update = (provider, values) => snapshots.set(provider, { ...snapshots.get(provider), ...values });
   function providerArgument(args) {
@@ -384,7 +394,7 @@ function createProviderSetup(options) {
           stillCurrent(scope);
           if (action === 'status') {
             // Stale metadata is withdrawn immediately; the optional field only appears once a help read happened.
-            if (provider === 'claude') { claudeMetadataScope = null; if (Object.hasOwn(snapshots.get('claude'), 'claudeChoices')) update(provider, { claudeChoices: null }); }
+            if (provider === 'claude') { expireHandoffMetadata(); if (Object.hasOwn(snapshots.get('claude'), 'claudeChoices')) update(provider, { claudeChoices: null }); }
             const cliVersion = parseVersion(provider, await run(command, ['--version'], cwd));
             stillCurrent(scope);
             if (!cliVersion) update(provider, { cliVersion: null, auth: 'unknown', message: 'Native CLI version could not be verified.' });
@@ -398,7 +408,9 @@ function createProviderSetup(options) {
                 const choices = parseClaudeChoices(await run(command, ['--help'], cwd, true, null, HELP_MAX_BYTES), cliVersion);
                 stillCurrent(scope);
                 update(provider, { claudeChoices: choices });
-                claudeMetadataScope = choices ? scope : null;
+                // The observation clock is cached only after a successful verified help read.
+                const observedAt = choices ? observedNow() : null;
+                claudeMetadataScope = observedAt === null ? null : scope; claudeMetadataObservedAt = observedAt;
               }
             }
           } else if (action === 'login' && provider === 'codex') {
@@ -421,7 +433,7 @@ function createProviderSetup(options) {
       }
     } catch {
       update(provider, { auth: 'unknown', message: 'Provider setup is unavailable. No completion was verified.' });
-      if (provider === 'claude' && Object.hasOwn(snapshots.get('claude'), 'claudeChoices')) { claudeMetadataScope = null; update('claude', { claudeChoices: null }); }
+      if (provider === 'claude' && Object.hasOwn(snapshots.get('claude'), 'claudeChoices')) { expireHandoffMetadata(); update('claude', { claudeChoices: null }); }
     } finally { active = false; }
     return copy(provider);
   }
@@ -431,6 +443,9 @@ function createProviderSetup(options) {
     const s = snapshots.get('claude'), c = s.claudeChoices;
     if (!s.installed || s.auth !== 'subscription' || !s.cliVersion || !c || c.cliVersion !== s.cliVersion) return null;
     try { stillCurrent(claudeMetadataScope); } catch { return null; }
+    // Invalid, backward or expired clock readings withdraw the observation (no refresh, probe or renewal).
+    const now = observedNow(), observedAt = claudeMetadataObservedAt;
+    if (now === null || observedAt === null || now < observedAt || now - observedAt >= HANDOFF_METADATA_LIFETIME_MS) { expireHandoffMetadata(); return null; }
     return Object.freeze({ cliVersion: c.cliVersion, aliases: Object.freeze([...c.aliases]), efforts: Object.freeze([...c.efforts]) });
   }
   const sameProject = (value, project) => typeof value === 'string' && typeof project === 'string' && equal(p.normalize(value), p.normalize(project));
