@@ -17,6 +17,41 @@ const origin = 'http://127.0.0.1:45871';
 const token = 'a'.repeat(64);
 const key = path => win32.resolve(path).toLowerCase();
 
+test('packaged smoke records module delivery after initialization and fails when its renderer check refuses',async()=>{
+  const start=mainSource.indexOf('async function checkSmoke() {'),end=mainSource.indexOf('\n}\n',start);
+  assert.ok(start>=0&&end>start);const check=mainSource.slice(start,end+2);
+  for(const modulesAvailable of [true,false]){
+    const writes=new Map(),exits=[],scripts=[];
+    const renderer={nodeAvailable:false,staticIds:true,scrollWidth:100,width:100,height:100,previews:0,desktop:{runtime:'desktop'},
+      codeVerificationBridge:true,desktopVerificationController:true,studioKeysBridge:true,modelOptions:0,conversationOnly:true,providerSetupMounted:true,nativeAssetPermissionControls:true};
+    const nativeState={snapshot:null,actions:[],nativeAssets:{available:true,sealed:false,granted:false,admissionOpen:false}};
+    const context={origin,token,smokeRoot:'C:\\Smoke',closing:false,started:0,daemonReadyMs:1,firstReadyMs:2,
+      sleep:async()=>{},join:win32.join,performance:{now:()=>3},process:{versions:{electron:'fixture'}},
+      projectSession:{verificationUnavailable:false},safeStorage:{isEncryptionAvailable:()=>false},
+      stopDaemon:async()=>true,app:{getVersion:()=> 'fixture',exit:code=>exits.push(code)},
+      writeFile:async(path,value)=>writes.set(path,value),
+      policy:{validOrigin:value=>value===origin,navigationAllowed:()=>false,requestAllowed:()=>false},
+      fetch:async url=>({ok:true,headers:{get:()=>"script-src 'self'"},json:async()=>url.endsWith('/v1/product/state')?{studioSessions:[],commandCounts:{}}:
+        url.endsWith('/v1/learning/state')?{settings:{optIn:false,projectId:'f'.repeat(64)},records:[]}:{state:nativeState}}),
+      window:{webContents:{getLastWebPreferences:()=>({sandbox:true,contextIsolation:true,nodeIntegration:false}),
+        capturePage:async()=>({toPNG:()=>Buffer.from('fixture image')}),executeJavaScript:async code=>{
+          scripts.push(code);
+          if(code.includes('title: document.title'))return JSON.stringify(renderer);
+          if(code.includes("'/task-plan-boot.js'"))return modulesAvailable;
+          if(code==='window.arcaneDesktop.workspacePreferences.read()')return{available:false,preferences:null};
+          if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
+          assert.fail('Unexpected smoke renderer request');
+        }}},Math,JSON,Buffer,
+    };
+    await vm.runInNewContext(check+'\ncheckSmoke()',context,{filename:'owned-check-smoke.cjs'});
+    const report=JSON.parse(writes.get('C:\\Smoke\\checks.json'));
+    assert.equal(report.checks.taskStatusModules,modulesAvailable);assert.equal(exits[0],modulesAvailable?0:1);
+    assert.equal(report.inferenceStarted,false);assert.equal(report.studioOperations,0);
+    assert.equal(scripts.filter(code=>code.includes("'/task-plan-boot.js'")).length,1);
+    if(modulesAvailable)assert.ok(Object.values(report.checks).every(Boolean));
+  }
+});
+
 function filesystemFixture() {
   const entries = new Map();
   const put = (path, options = {}) => entries.set(key(path), { path: win32.resolve(path), kind: 'directory', nlink: 1, ...options });

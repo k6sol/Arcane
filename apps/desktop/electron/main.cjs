@@ -255,7 +255,7 @@ async function checkSmoke() {
       document.getElementById('desktop-verification-refresh')?.disabled === false
   })`));
   const prefs = window.webContents.getLastWebPreferences();
-  checks.taskStatusModules = await window.webContents.executeJavaScript(`(async () => {
+  const taskStatusModules = await window.webContents.executeJavaScript(`(async () => {
     for (const path of ['/task-plan-boot.js', '/codex-task-plan.js']) {
       const response = await fetch(path, { cache: 'no-store', credentials: 'omit', redirect: 'error' });
       if (response.status !== 200 || !/^text\\/javascript(?:;|$)/i.test(response.headers.get('content-type') || '')) return false;
@@ -297,6 +297,7 @@ async function checkSmoke() {
   const afterChatResponse = await fetch(origin + '/v1/codex/state', { headers: { Authorization: 'Bearer ' + token } });
   const afterChat = await afterChatResponse.json();
   const checks = {
+    taskStatusModules: taskStatusModules === true,
     ownDaemonReady: policy.validOrigin(origin), productStateReadable: stateResponse.ok,
     projectMemoryOffByDefault: memoryResponse.ok && memory.settings?.optIn === false && memory.records?.length === 0,
     projectMemoryScoped: /^[a-f0-9]{64}$/.test(memory.settings?.projectId ?? ''),
