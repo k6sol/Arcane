@@ -89,7 +89,7 @@ async function fixture(t) {
   await write('toolchains/electron/dist/electron.exe', pe());
   await write('toolchains/electron/dist/version', '44.7.0');
   await write('toolchains/electron/dist/resources/default_app.asar', 'Never package the default application.');
-  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
+  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
   await write('apps/desktop/electron/icon.png', png);
   await write('apps/desktop/electron/node-LICENSE.txt', fixtureLicense);
   const nodeExecutable = join(root, 'toolchains/node/node.exe');
@@ -182,6 +182,7 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
   assert.ok(data.files.some(file => file.path === 'resources/app/studio-key-vault.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/workspace-preferences.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/provider-login.cjs'));
+  for (const name of ['native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs']) assert.ok(data.files.some(file => file.path === 'resources/app/' + name));
   for (const path of REQUIRED_MANAGED_LUAU_FILES) assert.ok(data.files.some(file => file.path === 'resources/product/' + path), path);
   assert.equal(hash(await readFile(join(result.directory, 'resources/product/' + MANAGED_LUAU_FILES[0]))), MANAGED_LUAU_SHA256);
   assert.ok(data.files.some(file => file.path === 'resources/product/dist/apps/desktop/src/studio-key-settings.js'));
@@ -384,7 +385,7 @@ test('optional host icon is copied only when present; unknown Electron payloads 
 
 test('host code must equal its source snapshot even if an outer file descriptor is rehashed', async t => {
   const { options } = await fixture(t);
-  for (const path of ['resources/app/policy.cjs', 'resources/app/code-verification.cjs', 'resources/app/provider-login.cjs', 'resources/app/studio-key-vault.cjs', 'resources/app/workspace-preferences.cjs']) {
+  for (const path of ['resources/app/policy.cjs', 'resources/app/code-verification.cjs', 'resources/app/provider-login.cjs', 'resources/app/studio-key-vault.cjs', 'resources/app/workspace-preferences.cjs', 'resources/app/native-handoff.cjs', 'resources/app/native-handoff-host.cjs', 'resources/app/native-handoff-ipc.cjs']) {
     const result = await packageWindows(options), bytes = Buffer.from('// Changed host policy fixture.\n');
     await writeFile(join(result.directory, path), bytes);
     await mutateManifest(result.directory, data => {

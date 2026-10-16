@@ -23,7 +23,7 @@ test('packaged smoke records module delivery after initialization and fails when
   for(const modulesAvailable of [true,false]){
     const writes=new Map(),exits=[],scripts=[];
     const renderer={nodeAvailable:false,staticIds:true,scrollWidth:100,width:100,height:100,previews:0,desktop:{runtime:'desktop'},
-      codeVerificationBridge:true,desktopVerificationController:true,studioKeysBridge:true,modelOptions:0,conversationOnly:true,providerSetupMounted:true,nativeAssetPermissionControls:true};
+      codeVerificationBridge:true,desktopVerificationController:true,studioKeysBridge:true,modelOptions:0,conversationOnly:true,providerSetupMounted:true,nativeHandoffMounted:true,nativeAssetPermissionControls:true};
     const nativeState={snapshot:null,actions:[],nativeAssets:{available:true,sealed:false,granted:false,admissionOpen:false}};
     const context={origin,token,smokeRoot:'C:\\Smoke',closing:false,started:0,daemonReadyMs:1,firstReadyMs:2,
       sleep:async()=>{},join:win32.join,performance:{now:()=>3},process:{versions:{electron:'fixture'}},
@@ -363,7 +363,7 @@ function stopFixture(child) {
   const begin = mainSource.indexOf('async function stopDaemon()');
   const end = mainSource.indexOf('async function startDaemon(', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the named desktop shutdown boundary.');
-  const context = { child, token, origin, loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {} };
+  const context = { child, token, origin, nativeHandoff: null, loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {} };
   context.providerSetup = { cancelPending() { context.loginCancellations++; } };
   vm.createContext(context);
   vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.stopOwned = stopDaemon;', context);

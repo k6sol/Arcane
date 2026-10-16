@@ -130,6 +130,7 @@ async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
+  assets.set('/native-handoff.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/native-handoff.js'));
   assets.set('/studio-key-settings.js', resolve(build, 'apps/desktop/src/studio-key-settings.js'));
   assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
   assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));

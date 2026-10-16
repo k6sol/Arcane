@@ -33,6 +33,9 @@ export interface ProviderSetupController {
   isSignedIn(): boolean;
   /** Boolean transitions only; read isSignedIn() once when subscribing. */
   subscribeSignInChange(listener: () => void): () => void;
+  /** Current Claude CLI choices; null when status, sign-in or provider selection is stale. */
+  handoffChoices(): ClaudeSetupChoices | null;
+  subscribeHandoffChoices(listener: () => void): () => void;
   stop(): void;
   resume(): void;
   cleanup(): void;
@@ -122,6 +125,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const select = doc.getElementById('provider-setup-provider') as HTMLSelectElement | null;
   if (!panel || !gate || !select) return {
     isSignedIn: () => false, subscribeSignInChange: (_listener: () => void) => () => {},
+    handoffChoices: () => null, subscribeHandoffChoices: (_listener: () => void) => () => {},
     stop() {}, resume() {}, cleanup() {},
   };
   const native = bridge(doc, options), storage = presentationStorage(doc);
@@ -137,6 +141,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   let savedConnectionPending = false;
   const savedLoginConnections = new Set<string>();
   const signInListeners = new Set<() => void>();
+  const choiceListeners = new Set<() => void>();
+  let lastChoices = '';
   const clearSignInTimer = () => { if (signInTimer !== null) clearTimeout(signInTimer); signInTimer = null; };
   const clearLoginWatch = () => { if (loginTimer !== null) clearTimeout(loginTimer); loginTimer = null; loginWatch = null; };
   provider = providers(select.value) ? select.value : 'codex';
@@ -168,6 +174,13 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     for (const listener of [...signInListeners]) {
       try { listener(); } catch { /* Presentation observers cannot interrupt native setup. */ }
     }
+  };
+  const handoffChoices = (): ClaudeSetupChoices | null => provider === 'claude' && isSignedIn() && !busy && !stopped && !disposed ? status()?.claudeChoices ?? null : null;
+  const notifyChoices = () => {
+    const signature = JSON.stringify(handoffChoices());
+    if (signature === lastChoices) return;
+    lastChoices = signature;
+    for (const listener of [...choiceListeners]) { try { listener(); } catch { /* Observers cannot interrupt setup. */ } }
   };
   const nextAction = (): 'disconnect' | 'connect' | 'status' | 'login' | 'launch' => {
     if (actionError) return 'status';
@@ -220,6 +233,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       signInTimer = setTimeout(() => { signInTimer = null; render(); }, Math.max(1, observed + STATUS_FRESH_MS + 1 - Date.now()));
     }
     notifySignInChange();
+    notifyChoices();
   };
   const requestSettings = (target: string) => { const Event = doc.defaultView?.CustomEvent; if (Event) doc.dispatchEvent(new Event('workspace:settingsrequest', { detail: { target } })); };
   const choose = (next: SetupProvider, publish = true) => {
@@ -342,6 +356,12 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   removers.push(options.chat.subscribeProviderStateChange(render)); render(); requestStatus();
   return {
     isSignedIn,
+    handoffChoices,
+    subscribeHandoffChoices(listener: () => void) {
+      if (disposed) return () => {};
+      choiceListeners.add(listener);
+      return () => { choiceListeners.delete(listener); };
+    },
     subscribeSignInChange(listener: () => void) {
       if (disposed) return () => {};
       signInListeners.add(listener);
@@ -349,6 +369,6 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     },
     stop() { stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; awaitingStatus.clear(); render(); },
     resume() { if (disposed || !stopped) return; stopped = false; epoch++; render(); requestStatus(); },
-    cleanup() { if (disposed) return; disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; awaitingStatus.clear(); notifySignInChange(); signInListeners.clear(); for (const remove of removers.splice(0)) remove(); },
+    cleanup() { if (disposed) return; disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); signInListeners.clear(); choiceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
   };
 }

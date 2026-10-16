@@ -88,6 +88,24 @@ test('Claude sign-in requires a fresh non-busy native status ACK; expiry notifie
   assert.deepEqual(f.calls, ['status:claude', 'status:claude']);
 });
 
+test('handoff choices follow fresh Claude status, provider selection and lifecycle without automatic launch', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
+  const choices = { cliVersion: '2.1.177', aliases: ['opus', 'sonnet'], efforts: ['high', 'max'] };
+  const f = fixture({ preferred: 'claude', state: { auth: 'subscription', cliVersion: choices.cliVersion, claudeChoices: choices } });
+  t.after(() => f.controller.cleanup());
+  const changes: unknown[] = []; f.controller.subscribeHandoffChoices(() => changes.push(f.controller.handoffChoices()));
+  await settled(); assert.deepEqual(f.controller.handoffChoices(), choices);
+  assert.ok(Object.isFrozen(f.controller.handoffChoices()));
+  assert.deepEqual(f.calls, ['status:claude']);
+  t.mock.timers.tick(60001); assert.equal(f.controller.handoffChoices(), null); assert.equal(changes.at(-1), null);
+  assert.deepEqual(f.calls, ['status:claude'], 'expiry never probes or launches');
+  f.control('provider-setup-refresh').emit('click'); await settled(); assert.deepEqual(f.controller.handoffChoices(), choices);
+  f.controller.stop(); assert.equal(f.controller.handoffChoices(), null);
+  f.controller.resume(); await settled(); assert.deepEqual(f.controller.handoffChoices(), choices);
+  f.choose('codex'); await settled(); assert.equal(f.controller.handoffChoices(), null);
+  assert.ok(f.calls.every(call => call.startsWith('status:')), 'only explicit status and resume metadata reads');
+});
+
 test('cached auth from install cannot extend Claude metadata freshness or establish sign-in', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
   const f = fixture({ preferred: 'claude' }); t.after(() => f.controller.cleanup()); await settled(); f.state({ auth: 'subscription' });

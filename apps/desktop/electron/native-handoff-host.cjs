@@ -5,7 +5,7 @@
 // released helper, asks the trusted host port to open a visible terminal with the credential ONLY in its launch
 // env, and seals only on an explicit `opened` acknowledgement. `opened` means the terminal was acknowledged and
 // the daemon sealed the handoff; it never means Claude Code or its Arcane tools connected. No retries, no core
-// token, no process ownership, no provider authentication. Unwired until root composes it.
+// token, no process ownership, no provider authentication.
 const { randomUUID } = require('node:crypto');
 const { types } = require('node:util');
 const nativePath = require('node:path');
@@ -255,10 +255,12 @@ function createNativeHandoffHost(ports) {
     if (disposed) return Object.freeze({ revoked: 0, unknown: 0, retained: 0 });
     cancelPending(); disposed = true;
     let revoked = 0, unknown = 0, retained = 0;
-    for (const record of records.values()) {
+    // The retained record bound also bounds this fan-out. One unavailable daemon must not
+    // multiply its HTTP deadline by the number of handoffs during application shutdown.
+    await Promise.all([...records.values()].map(async record => {
       if ((await revokeOriginal(record)) === 'revoked') revoked++; else unknown++;
       if ((await cleanupOwned(record)) === 'retained') retained++;
-    }
+    }));
     return Object.freeze({ revoked, unknown, retained });
   }
   return Object.freeze({ launch, list, revoke, cancelPending, dispose });

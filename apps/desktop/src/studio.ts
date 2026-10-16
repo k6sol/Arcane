@@ -5,6 +5,7 @@ import { LearningPanel } from './learning-panel.js';
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
+import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
@@ -2115,6 +2116,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const codexApi=new CodexChatApi(token);
   const codexChat = new CodexChat(document, codexApi);
   const providerSetup = startProviderSetup(document, {chat:codexChat});
+  const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
   const startTests=()=>playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn()}):null;
@@ -2152,8 +2154,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       openReview:async(runId,isCurrent)=>{if(await workbench.openWorkRun(runId,isCurrent)&&isCurrent())workspaceShell.showRecordedWork();}});
     if(workflowsStopped)taskPlanCard.stop();
   }).catch(()=>{const mount=document.getElementById('codex-task-plan');if(mount)mount.textContent='Restart Arcane to load task progress.';});
-  window.addEventListener('pagehide', () => { workflowsStopped = true; taskPlanCard?.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; taskPlanCard?.resume(); providerSetup.resume();playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; taskPlanCard?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; taskPlanCard?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,

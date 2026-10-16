@@ -21,6 +21,7 @@ else { try { app.setPath('userData', policy.prepareUserDirectory(app.getPath('us
 const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
 let codeVerification, projectSession, providerSetup;
+let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
 const CODE_VERIFICATION_WARNING = 'Arcane opened without Luau verification. The saved compiler is unavailable. Saved configuration was retained; choose an approved compiler in Tool > Configure Luau verification, then restart Arcane.';
@@ -29,16 +30,21 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
 async function stopDaemon() {
   providerSetup?.cancelPending();
+  const handoff = nativeHandoff; nativeHandoff = null;
+  // Retire authority while the owned daemon closes; cleanup never holds its shutdown request.
+  const handoffCleanup = handoff?.dispose().catch(() => null) ?? Promise.resolve(null);
   const owned = child; child = null; token = ''; origin = '';
-  if (!owned) return true;
-  if (owned.exitCode !== null || owned.signalCode != null) return owned.exitCode === 0;
-  return new Promise(resolve => {
+  if (!owned) { await handoffCleanup; return true; }
+  if (owned.exitCode !== null || owned.signalCode != null) { await handoffCleanup; return owned.exitCode === 0; }
+  const clean = await new Promise(resolve => {
     let finished = false;
     const done = code => { if (finished) return; finished = true; clearTimeout(timer); resolve(code === 0); };
     const timer = setTimeout(() => { if (owned.exitCode === null) owned.kill(); done(1); }, 15000);
     owned.once('exit', done); owned.once('close', done);
     if (owned.connected) owned.send({ type: 'arcane-shutdown', protocolVersion: 1 }, error => { if (error && owned.exitCode === null) owned.kill(); }); else owned.kill();
   });
+  await handoffCleanup;
+  return clean;
 }
 async function startDaemon(project) {
   const canonical = await policy.directPath(project);
@@ -155,6 +161,18 @@ async function startDaemon(project) {
   projectSession = Object.freeze({ projectId: key, projectPath: canonical, stateRoot, activeSettingsHash: verification.settingsHash,
     verificationUnavailable: verification.failure === 'compiler-unavailable',
     verificationEnvironmentAbsent: !['ARCANE_LUAU_COMPILER_PATH', 'ARCANE_LUAU_COMPILER_SHA256', 'ARCANE_LUAU_EVIDENCE_DIRECTORY'].some(name => Object.hasOwn(env, name)) });
+  const handoffDirectory = await ownedDirectory(join(stateRoot, 'native-handoffs'));
+  const handoffEpoch = projectSession;
+  nativeHandoff = require('./native-handoff-host.cjs').createNativeHandoffHost({
+    getSession: () => {
+      if (smoke || closing || switching || !window || window.isDestroyed() || !origin || !token || projectSession !== handoffEpoch) return null;
+      return { projectPath, runtimeDirectory: handoffDirectory, nodePath: nodeExecutable,
+        mcpEntry: join(productRoot, 'dist/apps/mcp/src/main.js'), origin, controlToken: token, epoch: handoffEpoch };
+    },
+    getChoices: () => providerSetup?.getHandoffChoices() ?? null,
+    confirm: (profile, session) => providerSetup.confirmHandoff(profile, session),
+    launchTerminal: request => providerSetup.launchHandoffTerminal(request),
+  });
   if (projectSession.verificationUnavailable) console.warn(CODE_VERIFICATION_WARNING);
   owned.once('exit', () => { if (child === owned && !closing && !switching) { token = ''; origin = ''; void failStartup('The local runtime stopped. Your project records have been retained.'); } });
 }
@@ -168,6 +186,9 @@ function makeWindow() {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   for (const type of ['will-navigate', 'will-redirect', 'will-frame-navigate']) window.webContents.on(type, event => { if (!event.isMainFrame || !policy.navigationAllowed(origin, event.url)) event.preventDefault(); });
   window.webContents.on('will-attach-webview', event => event.preventDefault());
+  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); }
+  });
   window.webContents.on('render-process-gone', () => { if (!closing && !switching) void failStartup('The workspace renderer stopped. Restart Arcane to recover saved records.'); });
   window.once('ready-to-show', () => { firstReadyMs = performance.now() - started; if (!smoke) window.show(); });
   window.on('page-title-updated', event => event.preventDefault());
@@ -236,6 +257,10 @@ async function checkSmoke() {
     conversationOnly: document.getElementById('artifact-panel')?.hidden === true && !document.getElementById('workspace-stage')?.classList.contains('preview-open'),
     providerSetupMounted: !!window.arcaneDesktop?.providerSetup && Object.isFrozen(window.arcaneDesktop.providerSetup) &&
       document.getElementById('provider-setup-panel')?.getAttribute('aria-busy') === 'false' && document.getElementById('provider-setup-refresh')?.disabled === false,
+    nativeHandoffMounted: !!window.arcaneDesktop?.nativeHandoff && Object.isFrozen(window.arcaneDesktop.nativeHandoff) &&
+      document.getElementById('native-handoff-panel')?.getAttribute('aria-busy') === 'false' &&
+      document.getElementById('native-handoff-launch')?.disabled === true && document.getElementById('native-handoff-model')?.value === '' &&
+      document.getElementById('native-handoff-effort')?.value === '',
     nativeAssetPermissionControls: document.getElementById('codex-assets-grant')?.disabled === true &&
       document.getElementById('codex-assets-revoke')?.disabled === true &&
       !!document.getElementById('codex-assets-status')?.textContent &&
@@ -318,6 +343,7 @@ async function checkSmoke() {
     externalNavigationRejected: !policy.navigationAllowed(origin, 'https://example.com/') && !policy.requestAllowed(origin, 'file:///C:/Windows/win.ini'),
     nativeLifecycleNotStarted: renderer.modelOptions <= 1,
     conversationOnlyDefault:renderer.conversationOnly === true,providerSetupMounted:renderer.providerSetupMounted === true,
+    nativeHandoffMounted: renderer.nativeHandoffMounted === true,
     nativeAssetPermissionMounted: nativeAssetResponse.ok && nativeAssetState.state?.snapshot === null &&
       nativeAssetState.state?.nativeAssets?.available === true && nativeAssetState.state.nativeAssets.sealed === false &&
       nativeAssetState.state.nativeAssets.granted === false && nativeAssetState.state.nativeAssets.admissionOpen === false &&
@@ -359,6 +385,14 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       workspacePreferences.installIpc(ipcMain);
+      require('./native-handoff-ipc.cjs').installNativeHandoffIpc(ipcMain, {
+        getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !nativeHandoff ? null :
+          { window, origin, epoch: projectSession },
+        host: Object.fromEntries(['launch', 'list', 'revoke'].map(action => [action, (...args) => {
+          if (!nativeHandoff) throw new Error('Native handoff is unavailable.');
+          return nativeHandoff[action](...args);
+        }])),
+      });
       providerSetup = createProviderSetup({getWindow:()=>closing||switching?null:window,getOrigin:()=>origin,getProjectPath:()=>projectPath,enabled:!smoke,dialog});
       for (const action of ['status','login','install','launch']) ipcMain.handle('arcane:provider-'+action, async (event,...args)=>{
         try {

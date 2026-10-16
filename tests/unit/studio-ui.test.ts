@@ -214,7 +214,7 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const parsed=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:browserSource,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
   assert.ifError(parsed.error);assert.equal(parsed.status,0,parsed.stderr);
   const staticModules=JSON.parse(parsed.stdout) as string[];
-  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./playtest-panel.js','./provider-setup.js','./studio-key-settings.js','./task-usage-ui.js','./workspace-shell.js']);
+  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./native-handoff.js','./playtest-panel.js','./provider-setup.js','./studio-key-settings.js','./task-usage-ui.js','./workspace-shell.js']);
   for(const [name,dependencies] of [['task-plan-boot',['./codex-task-plan.js']],['codex-task-plan',[]]] as const){
     const source=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/'+name+'.js'),'utf8');
     assert.doesNotMatch(source,/\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m,name+' stays browser-only');
@@ -420,6 +420,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
+  assets.set('/native-handoff.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/native-handoff.js'));
   assets.set('/studio-key-settings.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-key-settings.js'));
   assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
   assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));
@@ -762,6 +763,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
+  assets.set('/native-handoff.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/native-handoff.js'));
   assets.set('/studio-key-settings.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-key-settings.js'));
   assets.set('/chat-tabs.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'));
   assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));

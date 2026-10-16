@@ -927,3 +927,5 @@ body.arcane-app {
 .task-plan-review-button{margin-top:10px;min-height:40px}
 @media(max-width:480px){.task-plan{margin:12px 0;padding:12px;border-radius:8px}.task-plan-review-button{width:100%}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+.native-handoff-profile{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-block:12px}.native-handoff-profile label{display:grid;gap:6px}.native-handoff-profile select{width:100%;min-width:0}.native-handoff-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-block:10px;border-top:1px solid var(--border,#303037)}.native-handoff-row span{min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--muted,#a4a4ad)}.native-handoff-row button{flex:none}@media(max-width:480px){.native-handoff-profile{grid-template-columns:1fr}.native-handoff-row{align-items:flex-start}}
