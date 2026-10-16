@@ -1227,6 +1227,10 @@ export class StudioWorkbench {
   private async issueStudioKey() {
     if (!this.keyAvailable || this.keyBusy || this.keyUnknown || this.assetOptions.isSignedIn?.() === false) return;
     const grant = this.keyGrant();
+    // Opening Settings dismisses connection secrets. Navigate before requesting
+    // the key so the returned secret remains usable if desktop storage fails.
+    const drawer = this.doc.getElementById('settings-drawer') as HTMLDialogElement | null;
+    if (drawer && !drawer.open) this.doc.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'workspace-settings' } }));
     const epoch = ++this.keySecretEpoch; this.keyBusy = true; this.renderKeyControls(); this.text('key-notice', 'Issuing an Arcane API key…');
     try {
       const result = await this.api.rotateKey(), key = readIssuedStudioKey(result, this.origin, grant);
@@ -1235,8 +1239,6 @@ export class StudioWorkbench {
         await this.keySettings.rememberIssuedKey(key);
         this.renderIssuedKey();
         this.text('key-notice', 'API key generated. Previous keys no longer work.');
-        const drawer = this.doc.getElementById('settings-drawer') as HTMLDialogElement | null;
-        if (drawer && !drawer.open) this.doc.dispatchEvent(new CustomEvent('workspace:settingsrequest', { detail: { target: 'workspace-settings' } }));
       }
       else if (!this.stopped) this.text('key-notice', 'Key issued; its secret was cleared by navigation. Revoke the record and issue a new key if needed.');
     } catch (error) { this.keyFailure(error, 'Key issuance'); }

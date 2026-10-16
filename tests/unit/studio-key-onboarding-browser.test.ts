@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,7 +17,7 @@ const DRAFT = 'Keep my exact draft.\nIncluding café and trailing spaces.  ';
 const PUBLIC = 'Existing public message <img src=x onerror=alert(1)>';
 const CONNECTION = '11111111-1111-4111-8111-111111111111';
 
-test('key onboarding: actual provider evidence, trusted rotation, native replacement outside Settings, masked Copy, old session revocation and unchanged chat',
+for (const storageAvailable of [true, false]) test('key onboarding: trusted rotation outside Settings with desktop storage ' + (storageAvailable ? 'available' : 'unavailable'),
   { skip: !browserModule, timeout: 60000 }, async t => {
     const build = process.env.ARCANE_UI_BUILD_DIR; assert.ok(build, 'Compile into an owned runtime directory.');
     const directory = await mkdtemp(join(tmpdir(), 'arcane-key-onboarding-'));
@@ -37,6 +37,7 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
         operations: [], approvals: [], events: [{ seq: 1, type: 'delta', threadId: 'fixture-thread', turnId: 'fixture-turn', itemId: 'fixture-public', text: PUBLIC }],
         droppedEvents: 0, lastEventSeq: 1, failureCode: null } });
     const requests: { method: string; path: string; body: unknown }[] = [], errors: string[] = [], unexpected: string[] = [];
+    t.after(() => { if (errors.length || unexpected.length) t.diagnostic(JSON.stringify({ errors, unexpected })); });
     const nativeCalls: { method: string; input: unknown }[] = [], copied: string[] = [], browserCopied: string[] = [];
     // A full legacy vault exercises replacement at the old 32-item limit. These
     // are fake in-memory secrets; no credential file or native vault is accessed.
@@ -44,8 +45,9 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
       ['33333333-3333-4333-8333-' + String(i).padStart(12, '0'), 'unused-fixture-secret']));
     const files = new Map<string, string>([['/studio', resolve('apps/desktop/public/studio.html')], ['/studio.css', resolve('apps/desktop/public/studio.css')],
       ['/brand/arcane-ridges.png', resolve('apps/desktop/public/brand/arcane-ridges.png')]]);
-    for (const name of ['studio', 'studio-key-settings', 'codex-chat', 'codex-history', 'learning-panel', 'workspace-shell', 'provider-setup',
-      'desktop-verification', 'asset-downloads', 'workflow-panel', 'chat-tabs', 'task-usage', 'task-usage-ui']) files.set('/' + name + '.js', resolve(build, 'apps/desktop/src/' + name + '.js'));
+    for (const name of await readdir(resolve(build, 'apps/desktop/src'))) {
+      if (name.endsWith('.js')) files.set('/' + name, resolve(build, 'apps/desktop/src', name));
+    }
     const server = createServer((request, response) => { void (async () => {
       const url = new URL(request.url ?? '/', origin), path = url.pathname;
       const send = (json: unknown, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(json)); };
@@ -64,7 +66,7 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
       }
       if (await bridgeRoutes(request, response, url, HUMAN, origin)) return;
       assert.equal(request.headers.authorization, 'Bearer ' + HUMAN);
-      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/work/runs', '/v1/work/ready', '/v1/assets/conversation-jobs'].includes(path) && request.method === 'GET') {
+      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/work/runs', '/v1/work/ready', '/v1/assets/conversation-jobs', '/v1/playtests'].includes(path) && request.method === 'GET') {
         send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic metadata only.' }, 503); return;
       }
       unexpected.push(request.method + ' ' + path); send({ error: 'FIXTURE_ROUTE' }, 404);
@@ -75,10 +77,11 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
     const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
     const browser = await chromium.launch({ headless: true, executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', args: ['--disable-gpu'] });
     t.after(() => browser.close());
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block' });
     await context.route('**/*', async route => { if (new URL(route.request().url()).origin === origin) await route.continue(); else { unexpected.push(route.request().url()); await route.abort(); } });
     await context.exposeBinding('keyOnboardingVault', async (_source, method: string, input?: { keyId: string; apiKey?: string }) => {
       nativeCalls.push({ method, input: input ?? null });
+      if (!storageAvailable) throw new Error('Fixture desktop storage unavailable.');
       if (method === 'list') return { available: true, items: Object.keys(saved).map(keyId => ({ keyId })) };
       assert.ok(input); assert.deepEqual(Object.keys(input).sort(), ['remember', 'replace'].includes(method) ? ['apiKey', 'keyId'] : ['keyId']);
       if (method === 'replace') { saved = { [input.keyId]: input.apiKey! }; return { remembered: true }; }
@@ -110,7 +113,6 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
       activeKey: document.querySelector('#workspace-chat-tabs [role="tab"][aria-selected="true"]')?.getAttribute('data-chat-key'),
       draft: (document.getElementById('codex-composer') as HTMLTextAreaElement).value }));
     await page.goto(origin + '/studio#' + HUMAN); await text('key-status', 'Key service responding'); await text('codex-messages', PUBLIC);
-    await page.locator('#codex-composer').fill(DRAFT);
     assert.equal(await page.locator('#key-setup-gate').isVisible(), false); assert.equal(await page.locator('#key-setup-generate').isDisabled(), true);
     assert.deepEqual(posts(), []); assert.equal(nativeCalls.length, 0);
     assert.ok(requests.some(request => request.path === '/v1/codex/state'), 'Provider evidence comes from the actual validated GET.');
@@ -119,6 +121,7 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
     assert.equal(await page.locator('#key-setup-gate').isVisible(), false, 'Presentation and stored choice cannot manufacture sign-in evidence.');
     signedIn = true; await page.locator('#key-setup-gate').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#provider-login-gate').isVisible(), false); assert.equal(await page.locator('#key-setup-generate').isEnabled(), true);
+    await page.locator('#codex-composer').fill(DRAFT);
     const before = await chatView(); assert.equal(before.draft, DRAFT); assert.equal(before.model, selection.model); assert.equal(before.effort, selection.effort);
     assert.match(before.scope ?? '', /fixture-thread/); assert.match(before.scope ?? '', new RegExp(CONNECTION));
     assert.deepEqual(JSON.parse(before.activeKey!), [directory, 'codex', 'fixture-thread', 'fixture-session']);
@@ -131,6 +134,24 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
     assert.deepEqual(first.allowedRoots, [...ROOTS]); assert.equal(first.allowWrites, true);
     assert.equal(await page.locator('#settings-drawer').evaluate(node => node.matches(':modal')), true);
     assert.equal(await page.locator('#workspace-settings').isVisible(), true); assert.equal(await page.locator('#key-setup-gate').isVisible(), false);
+    if (!storageAvailable) {
+      await page.waitForFunction(() => !(document.getElementById('settings-key-show') as HTMLButtonElement).disabled);
+      await page.locator('#settings-key-show').click();
+      assert.equal(await page.locator('#settings-key-secret').textContent(), first.apiKey);
+      await page.locator('#settings-key-copy').click();
+      assert.deepEqual(browserCopied, [first.apiKey]); assert.deepEqual(copied, []);
+      assert.deepEqual(await chatView(), before);
+      await page.keyboard.press('Escape'); await page.locator('#settings-drawer').waitFor({state:'hidden'});
+      assert.equal((await page.locator('body').textContent())?.includes(first.apiKey), false);
+      await page.locator('#app-sidebar [data-workspace-target="workspace-settings"]').click();
+      assert.equal(await page.locator('#settings-key-show').isDisabled(), true);
+      assert.equal(await page.locator('#settings-key-copy').isDisabled(), true);
+      assert.equal(posts().filter(request => request.path === '/v1/studio/keys/rotate').length, 1);
+      assert.equal(await page.evaluate(() => JSON.stringify([localStorage, sessionStorage, location.href]).includes('arcane_local_v1_')), false);
+      assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
+      t.diagnostic('Unavailable desktop storage: fresh key remains usable until Settings closes; no native keys or clipboard.');
+      return;
+    }
     assert.deepEqual(saved, { [first.keyId]: first.apiKey }); assert.equal(nativeCalls.filter(call => call.method === 'replace').length, 1);
     assert.equal(nativeCalls.some(call => call.method === 'remember' || call.method === 'reveal' || call.method === 'copy'), false);
     assert.equal(await page.locator('#settings-key-secret').textContent(), '••••••••••••••••••••••••');
@@ -158,9 +179,11 @@ test('key onboarding: actual provider evidence, trusted rotation, native replace
     await page.waitForFunction(() => !(document.getElementById('settings-key-copy') as HTMLButtonElement).disabled);
     await page.locator('#settings-key-copy').click(); assert.deepEqual(copied, [first.apiKey, second.apiKey]);
     assert.equal(nativeCalls.some(call => call.method === 'reveal'), false); assert.deepEqual(await chatView(), before);
-    await page.keyboard.press('Escape'); signedIn = false; await page.locator('#provider-login-gate').waitFor({ state: 'visible' });
+    signedIn = false;
+    await page.waitForFunction(() => (document.getElementById('settings-key-generate') as HTMLButtonElement).disabled);
+    await page.keyboard.press('Escape'); await page.locator('#provider-login-gate').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#key-setup-gate').isVisible(), false);
-    await page.locator('#app-sidebar [data-workspace-target="workspace-settings"]').click(); assert.equal(await page.locator('#settings-key-generate').isDisabled(), true);
+    assert.equal(await page.locator('#settings-key-generate').isDisabled(), true);
     assert.equal(await page.evaluate(() => JSON.stringify([localStorage, sessionStorage, location.href]).includes('arcane_local_v1_')), false);
     assert.equal(await page.locator('#codex-messages img, #codex-messages script').count(), 0);
     assert.equal(posts().filter(request => request.path === '/v1/studio/keys/rotate').length, 2);
