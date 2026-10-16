@@ -265,18 +265,24 @@ for(const failure of ['trigger','revision'])test('explicit Stop still closes the
 test('a rejected task ACK journal update closes the accepted writable native peer and exact job without replay',async t=>{
  const f=await fixture(t,{mode:'hold-ack'});await f.ready();
  const input={requestId:randomUUID(),connectionId:f.service.state().snapshot!.connectionId,action:'turn-start',threadId:THREAD,text:'Held accepted turn',allowWorkspaceWrites:true,allowAssets:true};
- const pending=f.post(input);await until(async()=> (await f.wire()).some(row=>row.method==='turn/start'));
- const origin=f.taskOrigin(),report=packet();assert.ok(origin);f.prepare(origin,report);assert.equal(f.clients[0]!.snapshot().thread!.writeGranted,true);
- const db=new DatabaseSync(sqliteTransportPath(join(f.root,'journal','chat-tasks','chat-tasks.sqlite')));
- try{db.exec("CREATE TRIGGER reject_task_ack BEFORE UPDATE ON chat_tasks BEGIN SELECT RAISE(ABORT,'fixture task acknowledgement refused'); END");
+ // The held turn/start is bounded by the fixture's unchanged 1500 ms native request deadline. Only this case runs
+ // that deadline on a test-owned virtual clock (setTimeout only), held at 0 until the controlled ACK release, so a
+ // slow runner cannot turn the journal-refusal path into the separate timeout path. Polling uses real timers.
+ const realSetTimeout=globalThis.setTimeout,realDelay=(ms:number)=>new Promise<void>(resolve=>{realSetTimeout(resolve,ms);});
+ const realUntil=async(check:()=>Promise<boolean>)=>{const end=Date.now()+6000;while(!await check()){assert.ok(Date.now()<end,'Expected managed task fixture state.');await realDelay(5);}};
+ t.mock.timers.enable({apis:['setTimeout']});let db:DatabaseSync|undefined;
+ try{const pending=f.post(input);await realUntil(async()=> (await f.wire()).some(row=>row.method==='turn/start'));
+   const origin=f.taskOrigin(),report=packet();assert.ok(origin);f.prepare(origin,report);assert.equal(f.clients[0]!.snapshot().thread!.writeGranted,true);
+   db=new DatabaseSync(sqliteTransportPath(join(f.root,'journal','chat-tasks','chat-tasks.sqlite')));
+   db.exec("CREATE TRIGGER reject_task_ack BEFORE UPDATE ON chat_tasks BEGIN SELECT RAISE(ABORT,'fixture task acknowledgement refused'); END");
    await writeFile(join(f.root,'finish-0-ack'),'release',{flag:'wx'});
-   assert.equal((await pending).status,500);assert.equal(f.clients[0]!.snapshot().connected,false);
+   assert.equal((await pending).status,500);t.mock.timers.reset();assert.equal(f.clients[0]!.snapshot().connected,false);
    assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);assert.equal(f.cancelled[0]!.origin,origin);
    assert.throws(()=>f.service.playtestTasks!.assert(origin),/unavailable/);
    const recorded=f.service.state().actions.find(value=>value.requestId===input.requestId);assert.equal(recorded?.state,'acknowledged','The actual native ACK receipt remains recorded.');
    const replayed=await f.post(input);assert.equal(replayed.status,200);assert.equal(replayed.data.replayed,true);assert.equal(replayed.data.record.state,'acknowledged');
    assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
- }finally{db.exec('DROP TRIGGER reject_task_ack');db.close();}
+ }finally{t.mock.timers.reset();if(db){db.exec('DROP TRIGGER reject_task_ack');db.close();}}
 });
 
 test('shutdown fences and closes every navigation-retained native owner despite failing task journal writes',async t=>{
