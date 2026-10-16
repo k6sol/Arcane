@@ -78,9 +78,10 @@ namespace Arcane.Installer
         internal const int RecordMaxBytes = 65536, MaxReleases = 32, MaxFiles = 32768, MaxPathChars = 259;
         internal const long MaxFileBytes = 512L * 1024 * 1024, MaxTotalBytes = 2L * 1024 * 1024 * 1024, ManifestMaxBytes = 8L * 1024 * 1024;
         internal const string RecordName = "installation.json", LockName = "installation.lock", ManifestName = "windows-manifest.json";
-        private static readonly Regex Hash = new Regex("^[a-f0-9]{64}$"), Uuid = new Regex("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$");
-        private static readonly Regex Version = new Regex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"), Instant = new Regex("^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$");
-        private static readonly Regex Device = new Regex("^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$)", RegexOptions.IgnoreCase);
+        // \z, not $: in .NET, $ also matches before a final "\n", which would admit a trailing LF in an otherwise canonical record.
+        private static readonly Regex Hash = new Regex("^[a-f0-9]{64}\\z"), Uuid = new Regex("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\z");
+        private static readonly Regex Version = new Regex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?\\z"), Instant = new Regex("^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z\\z");
+        private static readonly Regex Device = new Regex("^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|\\z)", RegexOptions.IgnoreCase);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetLongPathNameW(string shortPath, StringBuilder longPath, uint length);

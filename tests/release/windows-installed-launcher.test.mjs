@@ -28,7 +28,7 @@ internal static class Peer {
 const HARNESS = String.raw`using System; using System.Text; using System.Runtime.InteropServices; using Arcane.Installer;
 internal static class Harness {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetShortPathNameW(string path, StringBuilder buffer, uint length);
-  private static string J(string v) { return v == null ? "null" : "\"" + v.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
+  private static string J(string v) { return v == null ? "null" : "\"" + v.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r") + "\""; }
   private static string B(bool v) { return v ? "true" : "false"; }
   private static string O(LaunchOutcome o) { return "{\"started\":" + B(o.Started) + ",\"code\":" + J(o.Code) + ",\"record\":" + B(o.RecordVerified) + ",\"manifest\":" + B(o.ManifestVerified) +
     ",\"executable\":" + B(o.ExecutableVerified) + ",\"fullBundle\":" + B(LaunchOutcome.FullBundleVerified) + ",\"installationId\":" + J(o.InstallationId) + ",\"releaseId\":" + J(o.ReleaseId) +
@@ -206,4 +206,24 @@ test('prepared launches pin the executable and recheck root, lock and record imm
   for (const [args, admitted] of [[[], 'true'], [['--root', 'C:\\x'], 'false'], [[''], 'false']]) {
     assert.equal(spawnSync(s.harness, ['admit', ...args], { windowsHide: true, encoding: 'utf8' }).stdout.trim(), admitted);
   }
+});
+
+test('record and manifest text fields reject a trailing LF that an end-of-line anchor would admit', windows, async () => {
+  const s = setup();
+  const outcomes = [], expected = [];
+  const refused = (target, code, label) => { const o = s.call(['launch', target]); outcomes.push([label, o.started, o.code]); expected.push([label, false, code]); };
+  const recordPath = target => join(target, 'installation.json');
+  const edit = (target, change) => { const record = JSON.parse(fs.readFileSync(recordPath(target), 'utf8')); change(record); fs.writeFileSync(recordPath(target), JSON.stringify(record) + '\n'); };
+  // Each record stays canonical (JSON escapes the LF), so only the field boundary can refuse it.
+  let f = await s.installed(s.peers.A);
+  edit(f.target, record => { record.installationId += '\n'; });
+  refused(f.target, 'RECORD', 'installationId + LF');
+  f = await s.installed(s.peers.A);
+  rewriteActive(f.target, manifest => { manifest.version += '\n'; });
+  edit(f.target, record => { record.releases.find(r => r.id === record.activeReleaseId).version += '\n'; });
+  refused(f.target, 'RECORD', 'record and manifest version + LF');
+  f = await s.installed(s.peers.A);
+  rewriteActive(f.target, manifest => { manifest.files.find(x => x.path === 'resources/node/node.exe').sha256 += '\n'; });
+  refused(f.target, 'MANIFEST', 'listed file sha256 + LF');
+  assert.deepEqual(outcomes, expected);
 });
