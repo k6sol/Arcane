@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES, missingArcaneTools, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
+import { CHOICE_BLOCK_LIMITS, parseChoiceBlock } from '../../apps/desktop/src/codex-chat.js';
 import { requireArcaneBuildTools, arcaneThreadIsIsolated, type McpInventoryRow } from '../../packages/codex-client/src/mcp-isolation.js';
 
 const row=(toolNames:readonly string[]):McpInventoryRow=>({name:'arcane',runtimeStatus:'connected',toolNames:[...toolNames],toolsError:false,plugin:false,pluginId:null});
@@ -26,6 +27,15 @@ test('managed task instructions state the host-verified inventory and require to
  for(const text of ['This managed host verified before the turn','scene_create, scene_update and script_update','tool search','instead of reporting them missing or applying nothing',
    'If search is unavailable or fails, report that actual boundary and never fabricate a call'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text),text);
  assert.ok(!/report that exact inventory mismatch/.test(ARCANE_TASK_INSTRUCTIONS));
+});
+test('managed task instructions describe the optional arcane-choices and arcane-plan blocks in the shape the chat renderer accepts',()=>{
+ const choices='fenced block in language arcane-choices holding only JSON {"question":"...","options":["...","..."]} with '+CHOICE_BLOCK_LIMITS.minOptions+' to '+CHOICE_BLOCK_LIMITS.options;
+ const plan='fenced block in language arcane-plan holding only JSON {"steps":["...","..."]} with 1 to '+CHOICE_BLOCK_LIMITS.steps;
+ for(const text of [choices,plan,'Use at most one such block per reply','an explicit in-scope build request needs no plan approval'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text),text);
+ // The described shapes, filled in, are exactly what the shared renderer turns into buttons.
+ assert.deepEqual(parseChoiceBlock('arcane-choices',JSON.stringify({question:'Which door?',options:['Wood','Glass']})),{kind:'choices',question:'Which door?',options:['Wood','Glass']});
+ assert.deepEqual(parseChoiceBlock('arcane-plan',JSON.stringify({steps:['Build the frame','Add the hinge']})),{kind:'plan',steps:['Build the frame','Add the hinge']});
+ assert.ok(ARCANE_TASK_INSTRUCTIONS.indexOf('arcane-choices')>ARCANE_TASK_INSTRUCTIONS.indexOf('Do not claim an edit'),'existing evidence guarantees come first');
 });
 
 test('native asset readiness requires adoption, preparation, staging, detached reconstruction and historical status',()=>{

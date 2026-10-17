@@ -147,6 +147,23 @@ export function decodeChatAttachment(name: string, bytes: Uint8Array): ChatTextA
  * trusted change event can read a File. No scan, model action, or persistence.
  * The host must call syncScope synchronously at each context transition: a
  * getter alone cannot observe an A -> B -> A transition between calls. */
+/** Another chat surface (the Claude chat) that borrows the shared composer attachments while it owns the composer. */
+export interface ChatAttachmentsOwner {
+  /** That surface's own scope; null disables attaching. Changing it clears every attachment, as for the main scope. */
+  getScope(): string | null;
+  imageInputAvailable?(): boolean;
+  onChange?(): void;
+}
+const owners = new WeakMap<Document, ChatAttachmentsOwner>();
+const shared = new WeakMap<Document, ChatAttachmentsController>();
+/** Hands the document's composer attachments to the owner (null returns them); the current selection is cleared either way. */
+export function claimChatAttachments(doc: Document, owner: ChatAttachmentsOwner | null): void {
+  if (owner) owners.set(doc, owner); else owners.delete(doc);
+  try { shared.get(doc)?.syncScope(); } catch { /* Presentation only. */ }
+}
+/** The attachments controller started for this document, if any. */
+export function sharedChatAttachments(doc: Document): ChatAttachmentsController | null { return shared.get(doc) ?? null; }
+
 export function startChatAttachments(doc: Document, options: ChatAttachmentsOptions): ChatAttachmentsController {
   const button = doc.getElementById('workspace-add-context') as HTMLButtonElement | null;
   const input = doc.getElementById('codex-attachment-input') as HTMLInputElement | null;
@@ -160,10 +177,15 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
   const removers: (() => void)[] = [];
 
   const getScope = (): string | null => {
-    try { const value = options.getScope(); return typeof value === 'string' && value.trim() ? value : null; }
+    // A claiming surface's scope is namespaced so it can never equal the main scope.
+    try { const owner = owners.get(doc), value = owner ? owner.getScope() : options.getScope(); return typeof value === 'string' && value.trim() ? (owner ? 'owner:' : '') + value : null; }
     catch { return null; }
   };
-  const notify = (): void => { try { options.onChange?.(); } catch { /* Presentation cannot interrupt invalidation. */ } };
+  const imageInputAvailable = (): boolean | undefined => { const owner = owners.get(doc); return owner ? owner.imageInputAvailable?.() : options.imageInputAvailable?.(); };
+  const notify = (): void => {
+    try { options.onChange?.(); } catch { /* Presentation cannot interrupt invalidation. */ }
+    try { owners.get(doc)?.onChange?.(); } catch { /* Presentation cannot interrupt invalidation. */ }
+  };
   const reset = (): void => {
     epoch++; attachments = [];for(const image of images)URL.revokeObjectURL(image.preview);images=[];picker = null; busy = false; notice = '';
     if (input) input.value = '';
@@ -262,7 +284,7 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
       if(new Set(names).size!==names.length){notice='Choose a distinct basename for each image reference.';render();notify();return;}
       for (const file of metadata) {
         if(file.image){
-          if(options.imageInputAvailable?.()===false){notice='The selected native model does not advertise image input. Your draft is unchanged.';render();notify();return;}
+          if(imageInputAvailable()===false){notice='The selected native model does not advertise image input. Your draft is unchanged.';render();notify();return;}
           if(!Number.isSafeInteger(file.size)||file.size<1||file.size>REFERENCE_INPUT_LIMITS.bytes){notice=TOO_BIG;render();notify();return;}
           if(imageTotal>IMAGE_BYTES-1024){notice=FULL;render();notify();return;}
           continue;
@@ -339,11 +361,11 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
   status?.setAttribute('role', 'status'); status?.setAttribute('aria-live', 'polite');
   scope = getScope(); render();
 
-  return {
+  const controller: ChatAttachmentsController = {
     syncScope, clear,
     selectionRevision:()=>revision,
     prepareReferences(){syncScope();if(busy)throw new Error('Wait for attachments to finish reading.');
-      if(images.length&&options.imageInputAvailable?.()===false)throw new Error('The selected model does not advertise image input. Remove references or choose a supported model.');
+      if(images.length&&imageInputAvailable()===false)throw new Error('The selected model does not advertise image input. Remove references or choose a supported model.');
       return Object.freeze(images.map(({name,dataUrl})=>Object.freeze({name,dataUrl})));},
     prepareText(message) {
       syncScope();
@@ -361,7 +383,10 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
       if (disposed) return;
       stopped = true; reset(); disposed = true;
       for (const remove of removers.splice(0)) remove();
+      if (shared.get(doc) === controller) shared.delete(doc);
       render(); notify();
     },
   };
+  shared.set(doc, controller);
+  return controller;
 }

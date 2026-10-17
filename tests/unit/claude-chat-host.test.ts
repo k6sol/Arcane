@@ -563,3 +563,81 @@ test('the system prompt asks for arcane-choices and arcane-plan blocks; preload 
   reply = { turnId, conversationId, messageId: 'not-an-id' };
   await assert.rejects(exposed.claudeChat.send(request), /unavailable/);
 });
+
+// A real 1x1 PNG (the same bytes used for the recorded Claude Code 2.1.302 stream-json input smoke run).
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const pngRef = (name = 'ref.png', data = PNG_1X1) => ({ name, dataUrl: 'data:image/png;base64,' + data });
+
+test('PNG references go to Claude Code as one stream-json user message; the transcript keeps only image markers', async t => {
+  const f = await fixture(t);
+  f.scripts.push(replay(init(), assistant([{ type: 'text', text: 'OK' }]), result()));
+  const reply = await f.host.send({ ...turnInput('Reply with OK'), images: [pngRef('door.png'), pngRef('wall.png')] });
+  assert.equal((await f.done(reply.turnId)).ok, true);
+  const [run] = f.turns();
+  assert.deepEqual(run!.args.slice(0, 4), ['-p', '--input-format', 'stream-json', '--output-format']);
+  assert.ok(run!.child.input.endsWith('\n') && run!.child.input.trim().split('\n').length === 1, 'exactly one NDJSON line');
+  // The observed Claude Code input shape: {type:'user', message:{role:'user', content:[image blocks..., text block]}}.
+  assert.deepEqual(JSON.parse(run!.child.input), { type: 'user', message: { role: 'user', content: [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_1X1 } },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_1X1 } },
+    { type: 'text', text: 'Reply with OK' }] } });
+  assert.equal(chat.streamJsonMessage(chat.sendInput({ ...turnInput('Reply with OK'), images: [pngRef('door.png'), pngRef('wall.png')] }).images, 'Reply with OK'), run!.child.input);
+  const history = await f.host.history(reply.conversationId);
+  assert.equal(history.messages[0].text, 'Reply with OK\n\n[image: door.png] [image: wall.png]');
+  // Nothing under the state directory holds the image bytes.
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => { for (const entry of await readdir(dir, { withFileTypes: true })) { const full = join(dir, entry.name); if (entry.isDirectory()) await walk(full); else files.push(full); } };
+  await walk(f.state);
+  assert.ok(files.length > 0);
+  for (const file of files) assert.ok(!(await readFile(file, 'utf8')).includes(PNG_1X1.slice(0, 40)), file);
+  // A plain text turn after it keeps the text input format.
+  f.scripts.push(replay(init(), result()));
+  await f.done((await f.host.send(turnInput('Thanks', reply.conversationId))).turnId);
+  assert.deepEqual(f.turns()[1]!.args.slice(0, 3), ['-p', '--input-format', 'text']); assert.equal(f.turns()[1]!.child.input, 'Thanks');
+});
+
+test('image references are validated in the main process: PNG signature, canonical base64, count and the 512 KiB total', async t => {
+  const f = await fixture(t);
+  const big = (bytes: number) => { const buffer = Buffer.alloc(bytes); Buffer.from(PNG_1X1, 'base64').copy(buffer); return buffer.toString('base64'); };
+  const bad: unknown[] = [[], [pngRef(), pngRef(), pngRef(), pngRef(), pngRef()], [pngRef('ref.gif')], [pngRef('a/b.png')], [pngRef('..\\x.png')], [pngRef(' ref.png')],
+    [{ name: 'ref.png', dataUrl: 'data:image/jpeg;base64,' + PNG_1X1 }], [pngRef('ref.png', Buffer.from('GIF89a'.repeat(12)).toString('base64'))],
+    [pngRef('ref.png', PNG_1X1.slice(0, -2) + '=')], [pngRef('ref.png', PNG_1X1 + ' ')], [pngRef('ref.png', big(512 * 1024 + 1))],
+    [pngRef('a.png', big(300 * 1024)), pngRef('b.png', big(300 * 1024))], [{ name: 'ref.png' }], [{ name: 'ref.png', dataUrl: 'data:image/png;base64,' + PNG_1X1, extra: 1 }],
+    'ref.png', { 0: pngRef(), length: 1 }];
+  for (const images of bad) await assert.rejects(f.host.send({ ...turnInput('Look'), images }), { message: chat.CLAUDE_CHAT_MESSAGES.images }, JSON.stringify(images).slice(0, 120));
+  assert.equal(f.turns().length, 0, 'refused references start nothing');
+  assert.deepEqual(await f.host.list(), { conversations: [] }, 'and save nothing');
+  // Exactly at the bound is accepted (four references, 512 KiB in total).
+  assert.equal(chat.sendInput({ ...turnInput('Look'), images: [1, 2, 3, 4].map(n => pngRef(n + '.png', big(128 * 1024))) }).images.length, 4);
+  // The IPC boundary forwards the same refusal message; its validated copy re-validates in the host.
+  const handlers = new Map<string, (event: any, ...args: any[]) => Promise<any>>();
+  const frame = { url: ORIGIN + '/studio' }, contents = { isDestroyed: () => false, mainFrame: frame }, window = { isDestroyed: () => false, webContents: contents };
+  const session = { window, origin: ORIGIN, epoch: {} };
+  chat.installClaudeChatIpc({ handle: (channel: string, handler: any) => handlers.set(channel, handler) }, { getSession: () => session, getHost: () => f.host });
+  const send = (input: unknown) => handlers.get('arcane:claude-chat-send')!({ sender: contents, senderFrame: frame }, input);
+  await assert.rejects(send({ ...turnInput('Look'), images: [pngRef('ref.gif')] }), { message: chat.CLAUDE_CHAT_MESSAGES.images });
+  f.scripts.push(replay(init(), result()));
+  const reply = await send({ ...turnInput('Look'), images: [pngRef()] });
+  await f.done(reply.turnId);
+  assert.equal(JSON.parse(f.turns()[0]!.child.input).message.content[0].source.data, PNG_1X1);
+});
+
+test('preload forwards optional PNG references only as exact bounded records', async () => {
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any; const invoked: unknown[][] = []; const conversationId = randomUUID(), turnId = randomUUID();
+  const context = vm.createContext({ require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on() {}, removeListener() {}, invoke: async (...args: unknown[]) => { invoked.push(args); return vm.runInContext('({ turnId: ' + JSON.stringify(turnId) + ', conversationId: ' + JSON.stringify(conversationId) + ' })', context); } } }) });
+  vm.runInContext(source, context);
+  const inner = (value: unknown) => vm.runInContext('(' + JSON.stringify(value) + ')', context);
+  const base = { conversationId: null, text: 'Look', model: 'sonnet', effort: 'high' };
+  await exposed.claudeChat.send(inner({ ...base, images: [pngRef()] }));
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked.at(-1))), ['arcane:claude-chat-send', { ...base, images: [pngRef()] }]);
+  await exposed.claudeChat.send(inner(base));
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked.at(-1))), ['arcane:claude-chat-send', base], 'text-only sends are unchanged');
+  const count = invoked.length;
+  for (const images of [[], [pngRef(), pngRef(), pngRef(), pngRef(), pngRef()], [pngRef('ref.svg')], [{ name: 'ref.png', dataUrl: 'data:image/gif;base64,R0lG' }],
+    [{ name: 'ref.png' }], [{ ...pngRef(), extra: 1 }], [pngRef('ref.png', 'A'.repeat(800000))], 'x'])
+    await assert.rejects(exposed.claudeChat.send(inner({ ...base, images })), { message: chat.CLAUDE_CHAT_MESSAGES.images });
+  assert.equal(invoked.length, count, 'malformed references never reach the main process');
+});

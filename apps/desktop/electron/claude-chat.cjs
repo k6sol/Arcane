@@ -2,7 +2,8 @@
 
 // Main-process host for the in-app Claude chat. Each turn runs the INSTALLED Claude Code headless (`-p`, stream-json)
 // with no built-in tools, only Arcane's own MCP server (strict owned config) and a scoped, revocable daemon credential
-// minted through the native handoff path. The user's text goes on stdin; stdout NDJSON is parsed with fixed bounds;
+// minted through the native handoff path. The user's text goes on stdin (plain text, or one stream-json user message when
+// the turn carries PNG references, which stay in memory only); stdout NDJSON is parsed with fixed bounds;
 // stderr is never read into any reply. Authentication, billing and model entitlement stay with Claude Code.
 // Import and construction have no native side effects.
 const nativeFs = require('node:fs/promises');
@@ -16,7 +17,13 @@ const LIMITS = Object.freeze({
   textChars: 100000, messageBytes: 65536, messages: 2000, conversations: 200, transcriptBytes: 8 * 1048576, indexBytes: 1048576,
   lineBytes: 4 * 1048576, stdoutBytes: 64 * 1048576, deltaChars: 65536, turns: 4, helperBytes: 65536, helperTimeoutMs: 8000,
   turnTimeoutMs: 30 * 60000, statusMaxAgeMs: 60000, credentialMarginMs: 10 * 60000, instructionsChars: 16000, titleChars: 60, toolName: 128,
+  // PNG references per message: the composer's file count and total image budget (chat-attachments.ts).
+  images: 4, imageBytes: 512 * 1024, imageName: 128,
 });
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const DATA_URL_PREFIX = 'data:image/png;base64,';
+const IMAGE_NAME = /\.(?:png|jpe?g|webp)$/i;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const EVENT_CHANNEL = 'arcane:claude-chat-event';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CHOICE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -73,8 +80,9 @@ const MESSAGES = Object.freeze({
   closed: 'The workspace closed, so the reply was stopped.',
   usageLimit: 'Claude usage limit reached. This message was not answered; try again after the limit resets.',
   rewind: 'This message can no longer be edited.',
+  images: 'Attached images must be at most 4 PNG references within 512 KiB in total.',
 });
-const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text, MESSAGES.rewind]);
+const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text, MESSAGES.rewind, MESSAGES.images]);
 const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
   '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown. ' +
   'When the user writes @selection they mean the current Studio selection: read it with selection_read before acting on it.\n' +
@@ -150,13 +158,53 @@ function bounded(text, maxBytes) {
   while (out.endsWith('�')) out = out.slice(0, -1);
   return out;
 }
-/** Exact `send` envelope (shared by the IPC boundary and the host). */
+/** A plain array (no proxy, holes, accessors or extra keys) of at most `max` entries; null otherwise. */
+function plainArray(value, max) {
+  if (!Array.isArray(value) || types.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > max) return null;
+  const out = [];
+  for (let i = 0; i < value.length; i++) { const field = Object.getOwnPropertyDescriptor(value, String(i)); if (!field || !Object.hasOwn(field, 'value')) return null; out.push(field.value); }
+  return Reflect.ownKeys(value).length === value.length + 1 ? out : null;
+}
+/**
+ * Optional PNG references: 1..4 exact {name, dataUrl} records whose data URL is canonical base64 of a PNG (magic bytes
+ * checked), at most 512 KiB decoded in total. Returns frozen {name, dataUrl} copies (re-validatable); bytes never touch disk.
+ */
+function imagesInput(value) {
+  const list = plainArray(value, LIMITS.images);
+  if (!list || !list.length) fail('images');
+  const maxChars = DATA_URL_PREFIX.length + Math.ceil(LIMITS.imageBytes / 3) * 4;
+  let total = 0;
+  return Object.freeze(list.map(item => {
+    let v; try { v = plain(item, ['name', 'dataUrl']); } catch { fail('images'); }
+    if (typeof v.name !== 'string' || !v.name || v.name.length > LIMITS.imageName || v.name.trim() !== v.name || !IMAGE_NAME.test(v.name) ||
+        CONTROL.test(v.name) || /[\\/<>:"|?*]/.test(v.name) || !v.name.isWellFormed()) fail('images');
+    if (typeof v.dataUrl !== 'string' || v.dataUrl.length > maxChars || !v.dataUrl.startsWith(DATA_URL_PREFIX)) fail('images');
+    const data = v.dataUrl.slice(DATA_URL_PREFIX.length);
+    if (!data || !BASE64.test(data)) fail('images');
+    const bytes = Buffer.from(data, 'base64');
+    total += bytes.length;
+    if (bytes.length < 33 || total > LIMITS.imageBytes || !bytes.subarray(0, 8).equals(PNG_MAGIC) || bytes.toString('base64') !== data) fail('images');
+    return Object.freeze({ name: v.name, dataUrl: v.dataUrl });
+  }));
+}
+/** Lightweight transcript marker for each reference; the bytes are never persisted. */
+const imageMarkers = images => images.map(image => '[image: ' + image.name + ']').join(' ');
+/** Exact `send` envelope (shared by the IPC boundary and the host); `images` is optional. */
 function sendInput(value) {
-  const v = plain(value, ['conversationId', 'text', 'model', 'effort']);
+  const keys = ['conversationId', 'text', 'model', 'effort'];
+  const hasImages = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'images');
+  const v = plain(value, hasImages ? [...keys, 'images'] : keys);
   if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !CHOICE.test(v.model) ||
       typeof v.effort !== 'string' || !CHOICE.test(v.effort)) fail('unavailable');
   if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
-  return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort });
+  const out = { conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort };
+  if (hasImages) out.images = imagesInput(v.images);
+  return Object.freeze(out);
+}
+/** One stream-json user message (the shape Claude Code reads with --input-format stream-json): references in order, then the text. */
+function streamJsonMessage(images, text) {
+  return JSON.stringify({ type: 'user', message: { role: 'user', content: [
+    ...images.map(image => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.dataUrl.slice(DATA_URL_PREFIX.length) } })), { type: 'text', text }] } }) + '\n';
 }
 /** Exact `rewind` envelope: the conversation and the user message the edit replaces (it and everything after are removed). */
 function rewindInput(value) {
@@ -516,7 +564,7 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null, seed: '' };
+      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null, seed: '', images: v.images ?? [] };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     let user = null;
     try {
@@ -527,7 +575,8 @@ function createClaudeChat(options) {
       } else await store.update(conversationId, { updatedAt: at, model: v.model, effort: v.effort });
       // After an edit rewind there is no session to resume: the first turn carries the kept transcript as context.
       if (entry?.rewound === true && !entry.sessionId) turn.seed = rewindSeed(await store.messages(conversationId) ?? []);
-      user = message('user', v.text);
+      // The transcript keeps only a '[image: name]' marker per reference, never the image bytes.
+      user = message('user', v.images ? v.text + '\n\n' + imageMarkers(v.images) : v.text);
       if (!await store.put(conversationId, user)) fail('missing');
     } catch (error) {
       turns.delete(turn.turnId); byConversation.delete(conversationId);
@@ -578,7 +627,9 @@ function createClaudeChat(options) {
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
       const prompt = await loadInstructions();
       if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
-      const args = ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+      // A turn with PNG references sends one stream-json user message; plain text turns keep the text input format.
+      const images = turn.images; turn.images = [];
+      const args = ['-p', '--input-format', images.length ? 'stream-json' : 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
         '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--model', turn.model, '--effort', turn.effort,
         '--permission-mode', 'default', '--tools', '', '--allowedTools', 'mcp__' + MCP_SERVER, '--append-system-prompt', prompt,
         ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
@@ -628,7 +679,7 @@ function createClaudeChat(options) {
         if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
         void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
       });
-      child.stdin.end(text, 'utf8');
+      child.stdin.end(images.length ? streamJsonMessage(images, text) : text, 'utf8');
     } catch { await finish(turn, false, MESSAGES.failed); }
   }
 
@@ -756,4 +807,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, sendInput, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

@@ -197,7 +197,26 @@ const workspacePreferences = Object.freeze({ version: 1,
 // In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
 const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
-  'This message can no longer be edited.'];
+  'This message can no longer be edited.', 'Attached images must be at most 4 PNG references within 512 KiB in total.'];
+// Optional PNG references on send: 1..4 exact {name, dataUrl} records with a bounded base64 PNG data URL (the main process
+// decodes and checks the PNG signature and the 512 KiB total again).
+const CLAUDE_CHAT_IMAGE_PREFIX = 'data:image/png;base64,';
+const claudeChatImages = value => {
+  const bad = () => { throw new Error(CLAUDE_CHAT_ERRORS[6]); };
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length < 1 || value.length > 4 || Reflect.ownKeys(value).length !== value.length + 1) bad();
+  let chars = 0;
+  return Array.from({ length: value.length }, (_, index) => {
+    const field = Object.getOwnPropertyDescriptor(value, String(index)), item = field && Object.hasOwn(field, 'value') ? field.value : null;
+    if (!item || typeof item !== 'object' || Object.getPrototypeOf(item) !== Object.prototype || Reflect.ownKeys(item).length !== 2) bad();
+    for (const key of ['name', 'dataUrl']) { const d = Object.getOwnPropertyDescriptor(item, key); if (!d?.enumerable || !Object.hasOwn(d, 'value') || typeof d.value !== 'string') bad(); }
+    const { name, dataUrl } = item;
+    if (!name || name.length > 128 || name.trim() !== name || !/\.(?:png|jpe?g|webp)$/i.test(name) || /[\u0000-\u001f\u007f-\u009f\\/<>:"|?*]/.test(name)) bad();
+    chars += dataUrl.length;
+    if (!dataUrl.startsWith(CLAUDE_CHAT_IMAGE_PREFIX) || chars > 4 * CLAUDE_CHAT_IMAGE_PREFIX.length + Math.ceil(524288 / 3) * 4 ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(dataUrl.slice(CLAUDE_CHAT_IMAGE_PREFIX.length))) bad();
+    return { name, dataUrl };
+  });
+};
 // The engine's one fixed usage-limit message (claude-chat.cjs MESSAGES.usageLimit); done events may carry it with a reset time.
 const CLAUDE_CHAT_USAGE_LIMIT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
 const claudeChatUnavailable = () => { throw new Error(CLAUDE_CHAT_ERRORS[0]); };
@@ -268,11 +287,13 @@ const claudeChatInvoke = async (action, args) => {
   if (action === 'status' || action === 'list') { if (args.length) claudeChatUnavailable(); }
   else if (action === 'send') {
     const value = args[0];
-    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 4) claudeChatUnavailable();
-    for (const key of ['conversationId', 'text', 'model', 'effort']) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) claudeChatUnavailable(); }
+    const keys = ['conversationId', 'text', 'model', 'effort'];
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) keys.push('images');
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) claudeChatUnavailable();
+    for (const key of keys) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) claudeChatUnavailable(); }
     if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !claudeChatChoice(value.model) || !claudeChatChoice(value.effort)) claudeChatUnavailable();
     if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(CLAUDE_CHAT_ERRORS[4]);
-    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort };
+    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.length === 5 ? { images: claudeChatImages(value.images) } : {}) };
   } else if (action === 'rewind') {
     const value = args[0];
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();

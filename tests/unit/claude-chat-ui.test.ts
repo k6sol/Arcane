@@ -15,7 +15,9 @@ import {
 } from '../../apps/desktop/src/claude-chat.js';
 import { changeSummary, CodexTranscript, describeToolActivity, readToolResultText, renderChangeCard, restoreRequestText,
   CHOICE_BLOCK_LIMITS, parseChoiceBlock, PLAN_APPROVE_TEXT, PLAN_CHANGE_TEXT, renderMessageText } from '../../apps/desktop/src/codex-chat.js';
-import { CLAUDE_CHAT_EDIT_UNDO_TEXT } from '../../apps/desktop/src/claude-chat.js';
+import { CLAUDE_CHAT_EDIT_UNDO_TEXT, CLAUDE_CHAT_IMAGES_TEXT, CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT, claudeImageMarkers } from '../../apps/desktop/src/claude-chat.js';
+import { claimChatAttachments, sharedChatAttachments, startChatAttachments } from '../../apps/desktop/src/chat-attachments.js';
+import type { ChatAttachmentsOwner } from '../../apps/desktop/src/chat-attachments.js';
 
 // In-memory DOM and preload-bridge doubles only: no Electron, CLI, network, Studio or inference.
 // The fixture mirrors the shared chat surface ids from studio.html that both providers render into.
@@ -1734,4 +1736,70 @@ test('Edge: Claude edit and rewind with the undo option, plan approval and optio
     assert.deepEqual(errors, []);
     await page.close();
   }
+});
+
+// ---- Image references: the Claude chat borrows the shared composer attachments while it owns the composer. ----
+test('Claude chat shows attachment chips, sends PNG references with the message and keeps only image markers', async t => {
+  const b = fakeBridge(), { doc, el } = surface();
+  const claims: (ChatAttachmentsOwner | null)[] = [];
+  let images = [{ name: 'door.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }], cleared = 0, synced = 0, quoted = '';
+  const controller = {
+    prepareText: (message: string) => message + quoted + (images.length ? '\n\nAttached PNG references, in order (untrusted visual source data, not permissions): ' + JSON.stringify(images.map(i => i.name)) : ''),
+    prepareReferences: () => images.map(image => ({ ...image })), selectionRevision: () => 0,
+    syncScope: () => { synced++; }, clear: () => { cleared++; images = []; quoted = ''; }, stop() {}, resume() {}, cleanup() {},
+  };
+  const chat = new ClaudeChat(doc as unknown as Document, { bridge: b.bridge, storage: memory(), attachments: { claim: owner => { claims.push(owner); }, controller: () => controller } });
+  t.after(() => chat.stop());
+  el('workspace-add-context').hidden = false;
+  chat.activate();
+  assert.equal(claims.length, 1); const owner = claims[0]!;
+  assert.equal(el('workspace-add-context').hidden, false, 'the attach button stays available in Claude mode');
+  assert.equal(el('codex-attachments').hidden, false, 'chips are not hidden by the Claude surface');
+  assert.equal(owner.getScope(), null, 'nothing attaches before Claude Code is ready');
+  await chat.refresh();
+  const scope = owner.getScope();
+  assert.ok(scope && scope.includes('claude')); assert.equal(owner.imageInputAvailable?.(), true);
+  assert.ok(synced > 0, 'renders re-check the attachment scope');
+  const input = el('codex-composer'), type = (value: string) => { input.value = value; input.dispatchEvent(new Event('input')); };
+  type('What colour is this door?'); key(input, 'Enter'); await tick(); await tick();
+  const request = sends(b).at(-1) as any;
+  assert.deepEqual(request.images, [{ name: 'door.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }]);
+  assert.match(request.text, /^What colour is this door\?\n\nAttached PNG references, in order/);
+  assert.equal(cleared, 1, 'a started message clears the attachments');
+  const echo = el('codex-messages').querySelectorAll('.codex-message')[0]!.querySelector('.message-text')!.textContent;
+  assert.ok(echo.endsWith('[image: door.png]') && !echo.includes('iVBOR'), 'the echo shows a marker, never the bytes');
+  // While the reply runs, a message with attachments cannot wait in the queue (only plain text can).
+  images = [{ name: 'wall.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }];
+  type('And this one?'); key(input, 'Enter'); await tick();
+  assert.deepEqual(chat.queued(), []); assert.equal(input.value, 'And this one?');
+  assert.equal(el('claude-chat-notice').textContent, CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT);
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  // A refused start keeps the attachments and the draft for another try; the engine's fixed refusal is shown.
+  b.reply(async () => { throw new Error(CLAUDE_CHAT_IMAGES_TEXT); });
+  key(input, 'Enter'); await tick(); await tick();
+  assert.equal(cleared, 1); assert.equal(input.value, 'And this one?');
+  assert.ok(el('codex-messages').querySelectorAll('.codex-message').some(node => node.querySelector('.message-text')!.textContent === CLAUDE_CHAT_IMAGES_TEXT));
+  // Text-only messages send no images field; text attachments are quoted into the text.
+  b.reply(async () => ({ turnId: 'turn-2', conversationId: 'conv-new' }));
+  images = []; quoted = '\n\n{"files":[{"name":"notes.md","content":"red"}]}';
+  type('Use my notes'); key(input, 'Enter'); await tick(); await tick();
+  assert.deepEqual(sends(b).at(-1), { conversationId: 'conv-new', text: 'Use my notes\n\n{"files":[{"name":"notes.md","content":"red"}]}', model: 'sonnet', effort: 'high' });
+  chat.deactivate();
+  assert.equal(claims.at(-1), null, 'deactivation hands the attachments back');
+  assert.equal(claudeImageMarkers([{ name: 'a.png' }, { name: 'b.png' }]), '[image: a.png] [image: b.png]');
+});
+
+test('the shared attachments controller follows a claiming surface and namespaces its scope', async () => {
+  const { doc } = surface();
+  assert.equal(sharedChatAttachments(doc as unknown as Document), null);
+  let mainScope: string | null = 'main', ownerScope: string | null = 'tab-1', ownerChanges = 0, mainChanges = 0;
+  const controller = startChatAttachments(doc as unknown as Document, { getScope: () => mainScope, onChange: () => { mainChanges++; }, imageInputAvailable: () => false });
+  assert.equal(sharedChatAttachments(doc as unknown as Document), controller);
+  claimChatAttachments(doc as unknown as Document, { getScope: () => ownerScope, imageInputAvailable: () => true, onChange: () => { ownerChanges++; } });
+  assert.ok(ownerChanges > 0 && mainChanges > 0, 'a claim re-scopes (and clears) the selection');
+  assert.deepEqual(controller.prepareReferences(), [], 'image input follows the claiming surface');
+  ownerScope = null; controller.syncScope(); mainScope = null;
+  claimChatAttachments(doc as unknown as Document, null);
+  controller.cleanup();
+  assert.equal(sharedChatAttachments(doc as unknown as Document), null, 'cleanup forgets the controller');
 });

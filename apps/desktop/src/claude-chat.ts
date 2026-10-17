@@ -8,6 +8,7 @@ import {
   modelListMove, parseToolDetail, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderMessageText, renderToolActivity, restoreRequestText, toolDetailText,
 } from './codex-chat.js';
 import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
+import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
@@ -27,16 +28,25 @@ export interface ClaudeChatBridge {
   status(): Promise<unknown>;
   list(): Promise<unknown>;
   history(conversationId: string): Promise<unknown>;
-  send(request: { conversationId: string | null; text: string; model: string; effort: string }): Promise<unknown>;
+  /** images: optional PNG references (data URLs from the composer); the engine keeps only an '[image: name]' marker. */
+  send(request: { conversationId: string | null; text: string; model: string; effort: string; images?: readonly ClaudeChatImage[] }): Promise<unknown>;
   /** Removes a saved user message and everything after it (edit and rewind). Older bridges lack it; Edit is then hidden. */
   rewind?(request: { conversationId: string; messageId: string }): Promise<unknown>;
   stop(turnId: string): Promise<unknown>;
   remove(conversationId: string): Promise<unknown>;
   onEvent(listener: (event: unknown) => void): () => void;
 }
+export interface ClaudeChatImage { readonly name: string; readonly dataUrl: string }
+/** The shared composer attachments (text files and PNG references) this chat borrows while it owns the composer. */
+export interface ClaudeChatAttachments {
+  claim(owner: ChatAttachmentsOwner | null): void;
+  controller(): ChatAttachmentsController | null;
+}
 export interface ClaudeChatOptions {
   /** Test seam. When omitted the bridge is read from the document's window. */
   bridge?: unknown;
+  /** Test seam. When omitted the document's shared composer attachments are used. */
+  attachments?: ClaudeChatAttachments;
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 }
 
@@ -46,6 +56,10 @@ export const CLAUDE_CHAT_TABS_KEY = 'arcane.claude-chat.tabs.v1';
 export const CLAUDE_CHAT_EMPTY_TEXT = 'New Claude chat. Your first message starts the conversation.';
 export const CLAUDE_CHAT_NO_BRIDGE_TEXT = 'Claude chat requires the Arcane desktop app.';
 export const CLAUDE_CHAT_TAB_LIMIT = 16;
+/** The engine's fixed refusal for image references (claude-chat.cjs MESSAGES.images). */
+export const CLAUDE_CHAT_IMAGES_TEXT = 'Attached images must be at most 4 PNG references within 512 KiB in total.';
+/** Shown when a message with attachments is typed while a reply runs (only plain text can wait in the queue). */
+export const CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT = 'Attachments are sent with the next message after this reply finishes. Wait for it, then send.';
 /** The engine's one fixed usage-limit message (claude-chat.cjs MESSAGES.usageLimit). */
 export const CLAUDE_CHAT_USAGE_LIMIT_TEXT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
 const MAX_TEXT = 1024 * 1024, MAX_INPUT = 100000, MAX_BUFFERED = 2000, DEFAULT_EFFORT = 'high';
@@ -53,7 +67,7 @@ const SEND_PATH = 'M12 19V5m-6 6 6-6 6 6', STOP_PATH = 'M7 7h10v10H7Z';
 // Fixed, already-safe messages the preload bridge may reject with; anything else is replaced by a generic message.
 const KNOWN_BRIDGE_ERRORS = new Set(['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
-  'This message can no longer be edited.']);
+  'This message can no longer be edited.', CLAUDE_CHAT_IMAGES_TEXT]);
 /** Shown after an edit with "Also undo Studio changes": the restore request waits in the composer, the edit in the queue. */
 export const CLAUDE_CHAT_EDIT_UNDO_TEXT = 'Review the restore request in the message box, then send it. Your edited message waits in the queue and is sent after that reply finishes.';
 export const CLAUDE_CHAT_EDIT_UNDO_LABEL = 'Also undo Studio changes made after this message';
@@ -194,6 +208,8 @@ interface Turn {
   turnId: string | null; conversationId: string | null; tabKey: string; stopping: boolean;
   bubble: HTMLElement | null; text: string; echo: string | null; prompt: string;
 }
+/** The transcript's lightweight marker for sent PNG references (claude-chat.cjs imageMarkers). */
+export const claudeImageMarkers = (images: readonly { name: string }[]): string => images.map(image => '[image: ' + image.name + ']').join(' ');
 const editable = (message: ClaudeChatMessage) => message.role === 'user' && !!message.id;
 interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string }
 type El = HTMLElement;
@@ -204,6 +220,9 @@ const SVG_NS = 'http://www.w3.org/2000/svg', RING = 2 * Math.PI * 7;
 export class ClaudeChat {
   private readonly bridge: ClaudeChatBridge | null;
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'> | null;
+  private readonly attachments: ClaudeChatAttachments;
+  /** This chat currently holds the shared composer attachments. */
+  private claimed = false;
   private state: ClaudeChatStatus | null = null;
   private statusError: string | null = null;
   private conversations: ClaudeChatConversation[] = [];
@@ -250,6 +269,23 @@ export class ClaudeChat {
     if (Object.hasOwn(options, 'storage')) storage = options.storage ?? null;
     else { try { storage = doc?.defaultView?.localStorage ?? null; } catch { storage = null; } }
     this.storage = storage;
+    if (options.attachments) this.attachments = options.attachments;
+    else {
+      // The attachments module loads on first activation (as the workspace loads it); until then nothing attaches.
+      let shared: typeof import('./chat-attachments.js') | null = null, loading = false;
+      this.attachments = {
+        claim: owner => {
+          if (shared) { shared.claimChatAttachments(doc, owner); return; }
+          if (!owner || loading) return;
+          loading = true;
+          void import('./chat-attachments.js').then(module => {
+            shared = module;
+            if (this.active && this.claimed) { this.claimed = false; this.claimAttachments(); this.render(); }
+          }).catch(() => { /* Attachments stay unavailable; text chat is unaffected. */ });
+        },
+        controller: () => shared?.sharedChatAttachments(doc) ?? null,
+      };
+    }
     this.restoreTabs();
   }
 
@@ -351,9 +387,9 @@ export class ClaudeChat {
     if (!this.tabs.length) this.createTab(null);
     if (!this.activeTab()) this.activeKey = this.tabs[0]!.key;
     const input = this.input(); if (input) input.value = this.activeTab()?.draft ?? '';
-    const attach = this.el('workspace-add-context');
-    if (attach) { this.restoreAttach = attach.hidden === true; attach.hidden = true; }
-    for (const id of ['welcome-connect', 'codex-conversation-start', 'codex-attachments', 'codex-draft-review']) { const node = this.el(id); if (node) node.hidden = true; }
+    // Text files and PNG references attach through the shared composer controller, scoped to the active Claude tab.
+    this.claimAttachments();
+    for (const id of ['welcome-connect', 'codex-conversation-start', 'codex-draft-review']) { const node = this.el(id); if (node) node.hidden = true; }
     this.showTab(this.activeKey!);
   }
 
@@ -363,12 +399,46 @@ export class ClaudeChat {
     const tab = this.activeTab(), input = this.input();
     if (tab && input) tab.draft = input.value;
     this.closePicker();
+    if (this.claimed) { this.claimed = false; try { this.attachments.claim(null); } catch { /* Presentation only. */ } }
     const attach = this.el('workspace-add-context'); if (attach && this.restoreAttach !== null) attach.hidden = this.restoreAttach;
     this.restoreAttach = null;
     this.el('codex-messages')?.removeAttribute('aria-busy');
     for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
     this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
     if (this.turn) { this.turn.bubble = null; }
+  }
+
+  /**
+   * Borrows the shared composer attachments while this chat owns the composer. Without a controller (it loads after the
+   * chat history) the attach button stays hidden until the next render finds one.
+   */
+  private claimAttachments(): void {
+    const attach = this.el('workspace-add-context'), controller = this.attachments.controller();
+    if (!controller) {
+      if (attach && this.restoreAttach === null) { this.restoreAttach = attach.hidden === true; attach.hidden = true; }
+    } else if (attach && this.restoreAttach !== null) { attach.hidden = this.restoreAttach; this.restoreAttach = null; }
+    if (this.claimed) { controller?.syncScope(); return; }
+    this.claimed = true;
+    try {
+      this.attachments.claim({
+        getScope: () => this.attachmentScope(),
+        // Claude Code models take image input; the engine checks every reference again.
+        imageInputAvailable: () => true,
+        onChange: () => { if (this.active) this.renderControls(); },
+      });
+    } catch { this.claimed = false; }
+  }
+  /** Attachments belong to the active Claude tab while Claude can send; any change clears them. */
+  private attachmentScope(): string | null {
+    const tab = this.activeTab();
+    return this.active && this.ready() && tab ? JSON.stringify(['claude', tab.key]) : null;
+  }
+  /** Composer attachments for the next message, or null when there are none. Throws the controller's readable message. */
+  private takeAttachments(message: string): { text: string; images: ClaudeChatImage[] } | null {
+    const controller = this.attachments.controller();
+    if (!controller) return null;
+    const prepared = controller.prepareText(message), images = controller.prepareReferences().map(image => ({ name: image.name, dataUrl: image.dataUrl }));
+    return prepared === message && !images.length ? null : { text: prepared, images };
   }
 
   /** Reads status and the conversation list. Concurrent calls share one read. */
@@ -507,6 +577,8 @@ export class ClaudeChat {
     const message = input.value.trim();
     if (!message) return false;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return false; }
+    let pending: unknown = null; try { pending = this.takeAttachments(message); } catch { pending = true; }
+    if (pending) { this.notice = CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT; this.render(); return false; }
     if (this.queue.length >= CLAUDE_CHAT_QUEUE_LIMIT) { this.notice = 'Up to ' + CLAUDE_CHAT_QUEUE_LIMIT + ' messages can wait. Remove one or wait for the reply.'; this.render(); return false; }
     this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key });
     input.value = ''; tab.draft = '';
@@ -551,15 +623,23 @@ export class ClaudeChat {
     const message = (queued ?? input.value).trim();
     if (!message) return;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return; }
+    // A typed message carries the composer's attachments: text files are quoted into the text, PNG references travel as images.
+    let attached: { text: string; images: ClaudeChatImage[] } | null = null;
+    if (queued === undefined) {
+      try { attached = this.takeAttachments(message); }
+      catch (error) { this.notice = error instanceof Error && error.message.length <= 300 ? error.message : 'Attachments could not be prepared.'; this.render(); return; }
+      if (attached && attached.text.length > MAX_INPUT) { this.notice = 'This message and its attachments are too long for Claude. Remove an attachment or shorten the message.'; this.render(); return; }
+    }
+    const sent = attached?.text ?? message, images = attached?.images ?? [];
     const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
     const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message };
     this.buffered = []; this.notice = '';
     if (queued === undefined) { input.value = ''; tab.draft = ''; }
-    const echo: ClaudeChatMessage = { id: '', role: 'user', text: message, at: new Date().toISOString() };
+    const echo: ClaudeChatMessage = { id: '', role: 'user', text: images.length ? sent + '\n\n' + claudeImageMarkers(images) : sent, at: new Date().toISOString() };
     const echoArticle = this.appendMessage(echo, true), echoEpoch = this.viewEpoch;
     this.render();
     let reply: Record<string, unknown> | null, failure = 'Claude could not start this message. Try again.';
-    try { reply = record(await bridge.send({ conversationId, text: message, model, effort })); }
+    try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(images.length ? { images } : {}) })); }
     catch (error) { reply = null; failure = bridgeError(error, failure); }
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
     if (!turnId || !nextConversation) {
@@ -572,6 +652,8 @@ export class ClaudeChat {
       this.render(); return;
     }
     turn.turnId = turnId; turn.conversationId = nextConversation;
+    // Sent: the attachments are cleared (a failed start keeps them for another try).
+    if (attached) { try { this.attachments.controller()?.clear(); } catch { /* Presentation only. */ } }
     // The engine's saved id for this message makes it editable once the reply has finished.
     const savedId = text(reply?.messageId, 256);
     if (savedId && echoEpoch === this.viewEpoch) { echo.id = savedId; this.offerEdit(echoArticle, echo); }
@@ -1218,6 +1300,7 @@ export class ClaudeChat {
 
   private render(): void {
     if (!this.active) return;
+    if (this.claimed) this.claimAttachments();
     const notice = this.el('claude-chat-notice'); if (notice) notice.textContent = this.statusText();
     const status = this.el('claude-chat-status');
     if (status) status.textContent = !this.bridge ? 'Unavailable' : this.turn ? 'Working' : this.ready() ? (this.state?.cliVersion ? 'Claude Code ' + this.state.cliVersion : 'Signed in') : this.state ? 'Not signed in' : 'Checking';
