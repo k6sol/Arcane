@@ -326,7 +326,7 @@ test('IPC accepts only the trusted main frame and exact argument shapes', async 
     history: async (id: string) => { calls.push('history:' + id); return {}; }, send: async (input: any) => { calls.push('send'); assert.ok(Object.isFrozen(input)); return f.host.send(input); },
     stop: async () => { calls.push('stop'); return false; }, remove: async () => { calls.push('remove'); return false; } });
   chat.installClaudeChatIpc({ handle: (channel: string, handler: any) => handlers.set(channel, handler) }, { getSession: () => session.current, getHost: () => host });
-  assert.deepEqual([...handlers.keys()].sort(), ['history', 'list', 'remove', 'send', 'status', 'stop'].map(a => 'arcane:claude-chat-' + a));
+  assert.deepEqual([...handlers.keys()].sort(), ['history', 'list', 'remove', 'rewind', 'send', 'status', 'stop'].map(a => 'arcane:claude-chat-' + a));
   const event = { sender: contents, senderFrame: frame };
   const invoke = (action: string, ...args: any[]) => handlers.get('arcane:claude-chat-' + action)!(event, ...args);
   assert.deepEqual(await invoke('status'), { ok: 1 });
@@ -482,4 +482,84 @@ test('preload forwards tool details only as bounded strings', async () => {
   assert.deepEqual(send({}), { name: 'scene_create', status: 'finished' }, 'older engines send no details');
   assert.equal(send({ input: 'x'.repeat(4097) }), null);
   assert.equal(send({ result: { commandId: 'c' } }), null);
+});
+
+test('edit rewind: the edited message and everything after it are removed and persisted; the next turn is a fresh seeded session', async t => {
+  const f = await fixture(t);
+  f.scripts.push(replay(init(), assistant([{ type: 'text', text: 'Plan A ready' }]), result()),
+    replay(init(), assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__arcane__scene_create', input: { name: 'Door' } }]), toolResult('toolu_1'), assistant([{ type: 'text', text: 'Built the door' }]), result()));
+  const first = await f.host.send(turnInput('Make a lobby'));
+  assert.match(first.messageId, /^[0-9a-f-]{36}$/, 'send returns the saved user message id');
+  await f.done(first.turnId);
+  const second = await f.host.send(turnInput('Add a red door', first.conversationId)); await f.done(second.turnId);
+  assert.deepEqual(f.turns()[1]!.args.slice(-2), ['--resume', SESSION]);
+  const saved = (await f.host.history(first.conversationId)).messages;
+  assert.deepEqual(saved.map((m: any) => m.text), ['Make a lobby', 'Plan A ready', 'Add a red door', 'scene_create', 'Built the door']);
+  assert.equal(saved[2].id, second.messageId);
+  // Only a saved user message can be the rewind point; malformed envelopes fail closed.
+  await assert.rejects(f.host.rewind({ conversationId: first.conversationId, messageId: saved[1].id }), { message: 'This message can no longer be edited.' });
+  await assert.rejects(f.host.rewind({ conversationId: first.conversationId, messageId: randomUUID() }), { message: 'This message can no longer be edited.' });
+  await assert.rejects(f.host.rewind({ conversationId: randomUUID(), messageId: second.messageId }), /no longer exists/);
+  for (const bad of [{ conversationId: first.conversationId }, { conversationId: first.conversationId, messageId: 'x' }, { conversationId: first.conversationId, messageId: second.messageId, extra: 1 }])
+    await assert.rejects(f.host.rewind(bad), /unavailable/);
+  const rewound = await f.host.rewind({ conversationId: first.conversationId, messageId: second.messageId });
+  assert.deepEqual({ ...rewound }, { conversationId: first.conversationId, kept: 2 });
+  assert.deepEqual((await f.host.history(first.conversationId)).messages.map((m: any) => m.text), ['Make a lobby', 'Plan A ready']);
+  // Persisted: a fresh host reads the shorter transcript and the rewound flag from disk.
+  const again = await fixture(t, { directory: f.state });
+  assert.deepEqual((await again.host.history(first.conversationId)).messages.map((m: any) => m.text), ['Make a lobby', 'Plan A ready']);
+  const index = JSON.parse(await readFile(join(f.state, 'index.json'), 'utf8'));
+  assert.deepEqual([index.conversations[0].sessionId, index.conversations[0].rewound], [null, true]);
+  // The edited message: no --resume (the CLI has no resume-at), and the kept transcript seeds the fresh session on stdin.
+  const fresh = 'aaaaaaaa-6d33-4477-8247-a08f685e2c29';
+  again.scripts.push(replay(init(fresh), assistant([{ type: 'text', text: 'Blue door built' }]), result({ session_id: fresh })),
+    replay(init(fresh), assistant([{ type: 'text', text: 'ok' }]), result({ session_id: fresh })));
+  const edited = await again.host.send(turnInput('Add a blue door', first.conversationId)); await again.done(edited.turnId);
+  const [run] = again.turns();
+  assert.ok(!run!.args.includes('--resume') && !run!.args.includes('--fork-session'));
+  assert.equal(run!.child.input, chat.rewindSeed([{ role: 'user', text: 'Make a lobby' }, { role: 'assistant', text: 'Plan A ready' }]) + 'Add a blue door');
+  assert.match(run!.child.input, /fresh Claude Code session[\s\S]*User: Make a lobby\n\nAssistant: Plan A ready\n<\/earlier-conversation>[\s\S]*Add a blue door$/);
+  assert.ok(!run!.child.input.includes('red door'), 'discarded turns never reach the model');
+  assert.deepEqual((await again.host.history(first.conversationId)).messages.map((m: any) => m.text), ['Make a lobby', 'Plan A ready', 'Add a blue door', 'Blue door built']);
+  // Later turns resume the new session without a seed.
+  const next = await again.host.send(turnInput('Thanks', first.conversationId)); await again.done(next.turnId);
+  assert.deepEqual(again.turns()[1]!.args.slice(-2), ['--resume', fresh]); assert.equal(again.turns()[1]!.child.input, 'Thanks');
+  // A running reply blocks a rewind of the same conversation.
+  again.scripts.push(child => { child.write(init(fresh)); });
+  const running = await again.host.send(turnInput('One more', first.conversationId));
+  await assert.rejects(again.host.rewind({ conversationId: first.conversationId, messageId: next.messageId }), /still running/);
+  await again.host.stop(running.turnId); await again.done(running.turnId);
+});
+
+test('the system prompt asks for arcane-choices and arcane-plan blocks; preload validates the rewind envelope and replies', async t => {
+  const f = await fixture(t);
+  f.scripts.push(replay(init(), result()));
+  await f.done((await f.host.send(turnInput('Hi'))).turnId);
+  const prompt = f.turns()[0]!.args.at(-1)!;
+  assert.match(prompt, /arcane-choices[\s\S]*\{"question":"\.\.\.","options":\["\.\.\.","\.\.\."\]\}[\s\S]*arcane-plan[\s\S]*\{"steps":\[/);
+  assert.ok(prompt.indexOf('arcane-choices') < prompt.indexOf('ARCANE TASK INSTRUCTIONS FIXTURE'), 'the preamble comes first so it survives the length bound');
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any, reply: unknown = null; const invoked: unknown[][] = [];
+  const context = vm.createContext({ require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on() {}, removeListener() {}, invoke: async (...args: unknown[]) => { invoked.push(args); return vm.runInContext('JSON.parse(' + JSON.stringify(JSON.stringify(reply)) + ')', context); } } }) });
+  vm.runInContext(source, context);
+  // Arguments are built in the preload's realm, as the renderer's world hands them over.
+  const inner = (value: unknown) => vm.runInContext('(' + JSON.stringify(value) + ')', context);
+  const conversationId = randomUUID(), messageId = randomUUID();
+  reply = { conversationId, kept: 3 };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.claudeChat.rewind(inner({ conversationId, messageId })))), { conversationId, kept: 3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked.at(-1))), ['arcane:claude-chat-rewind', { conversationId, messageId }]);
+  const count = invoked.length;
+  for (const bad of [[], [inner({ conversationId })], [inner({ conversationId, messageId: 'x' })], [inner({ conversationId, messageId, text: 'x' })], [inner({ conversationId, messageId }), 1]])
+    await assert.rejects(exposed.claudeChat.rewind(...bad), /unavailable/);
+  assert.equal(invoked.length, count, 'malformed rewinds never reach the main process');
+  for (const bad of [{ conversationId, kept: -1 }, { conversationId, kept: 1.5 }, { conversationId: 'x', kept: 1 }]) { reply = bad; await assert.rejects(exposed.claudeChat.rewind(inner({ conversationId, messageId })), /unavailable/); }
+  const turnId = randomUUID(), request = inner({ conversationId, text: 'x', model: 'sonnet', effort: 'high' });
+  reply = { turnId, conversationId, messageId };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.claudeChat.send(request))), { turnId, conversationId, messageId });
+  reply = { turnId, conversationId };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.claudeChat.send(request))), { turnId, conversationId }, 'older engines omit the id');
+  reply = { turnId, conversationId, messageId: 'not-an-id' };
+  await assert.rejects(exposed.claudeChat.send(request), /unavailable/);
 });

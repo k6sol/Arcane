@@ -232,6 +232,12 @@ test('real Edge Send opens a selected draft and submits once; Enter sends and St
   await page.waitForFunction(()=>document.getElementById('codex-submit')?.getAttribute('aria-label')==='Stop task');
   assert.equal(client.calls.filter(row=>row.method==='turn-start').length,2);
   assert.equal(client.calls.filter(row=>row.method==='thread-start').length,1);
+  // Native threads cannot be rewound from Arcane: "Edit as new message" copies the text into the message box and sends nothing.
+  const edit=page.locator('#codex-messages .codex-message.human .chat-message-edit').first();
+  assert.equal(await edit.innerText(),'Edit as new message');
+  await edit.click();
+  assert.equal(await page.locator('#codex-composer').inputValue(),message);
+  assert.equal(client.calls.filter(row=>row.method==='turn-start').length,2,'Edit as new message never sends');
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.chat-send-synthetic.png'});
   assert.deepEqual(b.errors,[]);
   t.diagnostic('Actual Edge, production UI and durable service with labelled synthetic native clients. No paid inference or Studio operations.');
@@ -701,4 +707,22 @@ test('typing immediately invalidates an open draft review without notifying conv
   assert.equal(f.doc.getElementById('codex-confirm-submit').disabled,true);
   assert.equal(f.doc.getElementById('codex-composer').value,draft);assert.equal(changes,0);
   assert.ok(f.calls.every(call=>call.method==='GET'));
+});
+
+test('synthetic Codex reply with an arcane-choices block renders option buttons; a click with a draft only adds the answer to the message box',async()=>{
+  const initial=state();initial.snapshot!.thread=thread();initial.nativeHistory=cacheBinding(PROJECT,'fixture-thread','fixture-session');
+  initial.snapshot!.events=[{type:'delta',seq:1,threadId:'fixture-thread',turnId:'turn-c',itemId:'item-c',text:'Pick one.\n\n```arcane-choices\n{"question":"Which door?","options":["Red <b>door</b>","Blue door"]}\n```'}];initial.snapshot!.lastEventSeq=1;
+  const f=contextChat(initial),composer=f.doc.getElementById('codex-composer');composer.value='Keep this draft';
+  await f.chat.refresh();
+  const walk=(node:any):any[]=>[node,...(node.children??[]).flatMap(walk)];
+  const nodes=walk(f.doc.getElementById('codex-messages'));
+  const block=nodes.find(node=>node.className==='chat-choices')!,buttons=nodes.filter(node=>String(node.className).split(' ').includes('chat-choice'));
+  assert.ok(block,'the fenced block becomes a choice group');assert.equal(block.dataset.state,'open','the latest reply after the last user message is live');
+  assert.deepEqual(buttons.map(node=>node.textContent),['Red <b>door</b>','Blue door'],'options are plain text');
+  buttons[1].dispatchEvent(new Event('click'));
+  assert.equal(composer.value,'Keep this draft\n\nBlue door','with a draft the answer is written into the message box, never sent with it');
+  assert.ok(f.calls.every(call=>call.method==='GET'),'no native action was dispatched');
+  const invalid=structuredClone(initial);invalid.snapshot!.events=[{type:'delta',seq:2,threadId:'fixture-thread',turnId:'turn-d',itemId:'item-d',text:'```arcane-choices\n{"question":"Q","options":["Only"]}\n```'}];invalid.snapshot!.lastEventSeq=2;
+  f.set(invalid);await f.chat.refresh();
+  assert.equal(walk(f.doc.getElementById('codex-messages')).filter(node=>node.className==='chat-choices').length,1,'an invalid block stays text');
 });

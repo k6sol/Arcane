@@ -4,10 +4,10 @@
 // model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
 // the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
 import {
-  composerMenuOpen, composerPickerCheck, crossProviderRows, describeToolActivity, fillModelOptions, firstModelRow, installComposerCommands, modelListEntry,
-  modelListMove, parseToolDetail, positionComposerPopover, prependProviderLogo, renderChangeCard, renderMessageText, renderToolActivity, toolDetailText,
+  closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderRows, describeToolActivity, fillModelOptions, firstModelRow, installComposerCommands, modelListEntry,
+  modelListMove, parseToolDetail, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderMessageText, renderToolActivity, restoreRequestText, toolDetailText,
 } from './codex-chat.js';
-import type { ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
+import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
@@ -28,6 +28,8 @@ export interface ClaudeChatBridge {
   list(): Promise<unknown>;
   history(conversationId: string): Promise<unknown>;
   send(request: { conversationId: string | null; text: string; model: string; effort: string }): Promise<unknown>;
+  /** Removes a saved user message and everything after it (edit and rewind). Older bridges lack it; Edit is then hidden. */
+  rewind?(request: { conversationId: string; messageId: string }): Promise<unknown>;
   stop(turnId: string): Promise<unknown>;
   remove(conversationId: string): Promise<unknown>;
   onEvent(listener: (event: unknown) => void): () => void;
@@ -50,7 +52,11 @@ const MAX_TEXT = 1024 * 1024, MAX_INPUT = 100000, MAX_BUFFERED = 2000, DEFAULT_E
 const SEND_PATH = 'M12 19V5m-6 6 6-6 6 6', STOP_PATH = 'M7 7h10v10H7Z';
 // Fixed, already-safe messages the preload bridge may reject with; anything else is replaced by a generic message.
 const KNOWN_BRIDGE_ERRORS = new Set(['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
-  'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.']);
+  'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
+  'This message can no longer be edited.']);
+/** Shown after an edit with "Also undo Studio changes": the restore request waits in the composer, the edit in the queue. */
+export const CLAUDE_CHAT_EDIT_UNDO_TEXT = 'Review the restore request in the message box, then send it. Your edited message waits in the queue and is sent after that reply finishes.';
+export const CLAUDE_CHAT_EDIT_UNDO_LABEL = 'Also undo Studio changes made after this message';
 const bridgeError = (error: unknown, fallback: string) => { try { const message = (error as Error)?.message; return typeof message === 'string' && KNOWN_BRIDGE_ERRORS.has(message) ? message : fallback; } catch { return fallback; } };
 const BRIDGE_KEYS = ['status', 'list', 'history', 'send', 'stop', 'remove', 'onEvent'] as const;
 
@@ -188,6 +194,7 @@ interface Turn {
   turnId: string | null; conversationId: string | null; tabKey: string; stopping: boolean;
   bubble: HTMLElement | null; text: string; echo: string | null; prompt: string;
 }
+const editable = (message: ClaudeChatMessage) => message.role === 'user' && !!message.id;
 interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string }
 type El = HTMLElement;
 /** Claude-only composer nodes created on first activation (studio.html stays provider-neutral). */
@@ -232,6 +239,10 @@ export class ClaudeChat {
   private readonly modelListeners = new Set<() => void>();
   private limit: ProviderUsageLimit | null = null;
   private readonly usageListeners = new Set<() => void>();
+  /** Messages shown for the active tab, in order (tool entries updated in place); used to find an edit's discarded changes. */
+  private shown: ClaudeChatMessage[] = [];
+  /** An edit's rewind call is in flight; sending waits for it. */
+  private rewinding = false;
 
   constructor(readonly doc: Document, options: ClaudeChatOptions = {}) {
     this.bridge = Object.hasOwn(options, 'bridge') ? readClaudeChatBridge({ arcaneDesktop: { claudeChat: options.bridge } }) : readClaudeChatBridge(doc?.defaultView);
@@ -356,7 +367,7 @@ export class ClaudeChat {
     this.restoreAttach = null;
     this.el('codex-messages')?.removeAttribute('aria-busy');
     for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
-    this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = [];
+    this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
     if (this.turn) { this.turn.bubble = null; }
   }
 
@@ -485,6 +496,7 @@ export class ClaudeChat {
 
   /** Enter or Send: sends now, or queues the message while a reply is running. */
   submit(): void {
+    if (this.rewinding) return;
     if (this.turn) this.enqueue(); else void this.send();
   }
 
@@ -535,7 +547,7 @@ export class ClaudeChat {
   /** Sends the composer text, or one queued message (which leaves the composer untouched). */
   async send(queued?: string): Promise<void> {
     const bridge = this.bridge, input = this.input(), tab = this.activeTab();
-    if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn) return;
+    if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn || this.rewinding) return;
     const message = (queued ?? input.value).trim();
     if (!message) return;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return; }
@@ -543,7 +555,8 @@ export class ClaudeChat {
     const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message };
     this.buffered = []; this.notice = '';
     if (queued === undefined) { input.value = ''; tab.draft = ''; }
-    this.appendMessage({ id: '', role: 'user', text: message, at: new Date().toISOString() }, true);
+    const echo: ClaudeChatMessage = { id: '', role: 'user', text: message, at: new Date().toISOString() };
+    const echoArticle = this.appendMessage(echo, true), echoEpoch = this.viewEpoch;
     this.render();
     let reply: Record<string, unknown> | null, failure = 'Claude could not start this message. Try again.';
     try { reply = record(await bridge.send({ conversationId, text: message, model, effort })); }
@@ -559,6 +572,9 @@ export class ClaudeChat {
       this.render(); return;
     }
     turn.turnId = turnId; turn.conversationId = nextConversation;
+    // The engine's saved id for this message makes it editable once the reply has finished.
+    const savedId = text(reply?.messageId, 256);
+    if (savedId && echoEpoch === this.viewEpoch) { echo.id = savedId; this.offerEdit(echoArticle, echo); }
     if (this.tabs.includes(tab) && tab.conversationId === null) tab.conversationId = nextConversation;
     if (!this.conversations.some(row => row.conversationId === nextConversation)) {
       this.conversations.unshift({ conversationId: nextConversation, title: message.split('\n')[0]!.slice(0, 80), updatedAt: new Date().toISOString(), model, effort });
@@ -693,7 +709,7 @@ export class ClaudeChat {
         if (message.role === 'user' && turn.echo !== null && message.text.trim() === turn.echo) { turn.echo = null; return; }
         if (!visible) { if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; } return; }
         if (message.role === 'assistant' && turn.bubble) {
-          this.setText(turn.bubble, message.text || turn.text);
+          this.setText(turn.bubble, message.text || turn.text, true);
           turn.bubble.setAttribute('aria-busy', 'false');
           turn.bubble = null; turn.text = ''; return;
         }
@@ -773,18 +789,124 @@ export class ClaudeChat {
     article.setAttribute('data-role', message.role);
     article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : 'Error');
     const body = this.make('pre', undefined, 'message-text');
-    article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text) : Object.assign(body, { textContent: message.text }));
+    article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text, this.choiceOptions()) : Object.assign(body, { textContent: message.text }));
     if (message.role === 'error') article.append(this.make('p', 'Not completed', 'message-acknowledgement'));
     const details = this.make('details', undefined, 'message-details');
     details.append(this.make('summary', 'Message details'), this.make('pre', 'Claude · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : ''), 'hint mono'));
     article.append(details);
+    if (editable(message)) this.offerEdit(article, message);
     return article;
   }
-  /** Replaces an assistant message body; fenced code renders as <pre><code>, never as HTML. */
-  private setText(article: HTMLElement, value: string): void {
-    const body = article.querySelector<HTMLElement>(".message-text"), next = renderMessageText(this.doc, value);
+  /**
+   * Replaces an assistant message body; fenced code renders as <pre><code>, never as HTML. A finished (`live`) reply's
+   * arcane-choices / arcane-plan block becomes buttons; while streaming it stays display-only.
+   */
+  private setText(article: HTMLElement, value: string, live = false): void {
+    const body = article.querySelector<HTMLElement>(".message-text"), next = renderMessageText(this.doc, value, live ? this.choiceOptions() : {});
     if (body) body.replaceWith(next); else article.prepend(next);
   }
+  private choiceOptions(): ChoiceBlockOptions { return { choose: answer => this.answerChoice(answer) }; }
+  /**
+   * A choice or "Approve plan" click: the user's explicit answer, sent as exactly one next message. While a reply runs in
+   * this chat it waits in the queue (sent after that reply finishes; returned to the draft otherwise).
+   */
+  answerChoice(answer: string): boolean {
+    const tab = this.activeTab(), message = answer.trim();
+    if (!this.active || !tab || !message || message.length > MAX_INPUT || this.rewinding) return false;
+    if (this.turn) {
+      if (!this.turnOwnsActiveTab() || this.turn.turnId === null || this.queue.length >= CLAUDE_CHAT_QUEUE_LIMIT || !this.ready()) return false;
+      this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key }); this.render();
+      return true;
+    }
+    if (!this.canSend()) return false;
+    void this.send(message);
+    return true;
+  }
+
+  // ---- Edit a past message and rewind ----
+  /** Adds the hover/focus "Edit" action to one saved user message (only when the bridge can rewind). */
+  private offerEdit(article: HTMLElement, message: ClaudeChatMessage): void {
+    if (!this.bridge?.rewind || !editable(message) || article.querySelector('.chat-message-edit')) return;
+    const button = this.make('button', 'Edit', 'quiet chat-message-edit'); button.type = 'button';
+    button.setAttribute('aria-label', 'Edit this message'); button.title = 'Edit this message and continue the chat from here';
+    button.addEventListener('click', () => { if (this.active) this.beginEdit(article, message); });
+    article.append(button);
+  }
+  /** Studio changes (receipts) made by tool calls after the user message `messageId`, oldest first. */
+  changesAfter(messageId: string): ToolChange[] {
+    const at = this.shown.findIndex(row => row.id === messageId && row.role === 'user');
+    if (at < 0) return [];
+    const changes: ToolChange[] = [];
+    for (const row of this.shown.slice(at + 1)) {
+      if (!row.tool) continue;
+      const change = describeToolActivity(row.tool.name, parseToolDetail(row.tool.input), parseToolDetail(row.tool.result), row.tool.status).change;
+      if (change && !changes.some(item => item.receipt === change.receipt)) changes.push(change);
+    }
+    return changes;
+  }
+  /** Inline editor in place of the message text: textarea, optional undo checkbox, Send and Cancel. Nothing is sent until Send. */
+  private beginEdit(article: HTMLElement, message: ClaudeChatMessage): void {
+    if (this.turn || this.rewinding) { this.notice = 'Wait for the reply to finish before editing a message.'; this.render(); return; }
+    if (article.querySelector('.chat-edit')) return;
+    const changes = this.changesAfter(message.id);
+    const form = this.make('form', undefined, 'chat-edit'); form.setAttribute('aria-label', 'Edit message');
+    const area = this.make('textarea', undefined, 'chat-edit-input'); area.value = message.text; area.setAttribute('aria-label', 'Edited message');
+    area.rows = Math.min(8, Math.max(2, message.text.split('\n').length));
+    const undo = this.make('input'); undo.type = 'checkbox'; undo.className = 'chat-edit-undo-box'; undo.disabled = !changes.length;
+    const label = this.make('label', undefined, 'chat-edit-undo');
+    label.append(undo, this.make('span', CLAUDE_CHAT_EDIT_UNDO_LABEL + (changes.length ? ' (' + changes.length + ')' : '')));
+    const hint = this.make('p', 'Replies after this message are removed from this chat. ' + (changes.length
+      ? 'With the box checked, a restore request for those Studio changes is written into the message box for you to review and send first.'
+      : 'No Studio changes were made after this message.'), 'chat-edit-hint');
+    const actions = this.make('div', undefined, 'chat-edit-actions');
+    const send = this.make('button', 'Send edited message', 'chat-edit-send'); send.type = 'submit';
+    const cancel = this.make('button', 'Cancel', 'secondary chat-edit-cancel'); cancel.type = 'button';
+    actions.append(send, cancel);
+    form.append(area, label, hint, actions);
+    const close = () => { try { article.replaceWith(this.messageElement(message)); } catch { /* Already gone with its transcript. */ } };
+    const submit = () => { if (this.active) void this.submitEdit(message, area.value, undo.checked === true && !undo.disabled); };
+    form.addEventListener('submit', event => { event.preventDefault(); submit(); });
+    cancel.addEventListener('click', close);
+    area.addEventListener('keydown', event => {
+      const key = event as KeyboardEvent;
+      if (key.key === 'Escape') { event.preventDefault(); close(); return; }
+      if (key.key === 'Enter' && !key.shiftKey && !key.isComposing && !key.altKey && !key.ctrlKey && !key.metaKey) { event.preventDefault(); submit(); }
+    });
+    const body = article.querySelector<HTMLElement>('.message-text'); if (body) body.hidden = true;
+    for (const selector of ['.chat-message-edit', '.message-details']) { const node = article.querySelector<HTMLElement>(selector); if (node) node.hidden = true; }
+    article.dataset.editing = 'true'; article.append(form);
+    try { area.focus({ preventScroll: true }); } catch { /* Focus is presentation only. */ }
+  }
+  /**
+   * Rewinds the saved conversation to just before `message` (the engine drops it and everything after it), reloads the
+   * kept transcript, then continues: the edited text is sent now, or — with "Also undo Studio changes" — a restore request
+   * for the discarded turns' receipts (newest first) is written into the message box for the user to review and send, and
+   * the edited text waits in the queue behind it. Studio is never changed without that explicit Send.
+   */
+  async submitEdit(message: ClaudeChatMessage, value: string, undo: boolean): Promise<void> {
+    const bridge = this.bridge, tab = this.activeTab(), edited = value.trim();
+    if (!this.active || !bridge?.rewind || !tab?.conversationId || this.turn || this.rewinding || !editable(message)) return;
+    if (!edited) { this.notice = 'The edited message is empty.'; this.render(); return; }
+    if (edited.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return; }
+    if (!this.canSend()) { this.notice = 'Claude is not ready to send. Check the model and sign-in, then try again.'; this.render(); return; }
+    const changes = undo ? this.changesAfter(message.id) : [], conversationId = tab.conversationId;
+    this.rewinding = true; this.notice = 'Editing…'; this.render();
+    try { await bridge.rewind({ conversationId, messageId: message.id }); }
+    catch (error) { this.rewinding = false; this.notice = bridgeError(error, 'This message could not be edited. Try again.'); this.render(); return; }
+    this.rewinding = false;
+    if (this.activeTab() !== tab || tab.conversationId !== conversationId) return;
+    await this.showTab(tab.key);
+    if (!this.active || this.activeKey !== tab.key) return;
+    if (changes.length) {
+      prefillComposer(this.doc, restoreRequestText(changes));
+      this.queue.push({ id: ++this.queueSeq, text: edited, tabKey: tab.key });
+      this.notice = CLAUDE_CHAT_EDIT_UNDO_TEXT; this.render();
+      return;
+    }
+    this.notice = '';
+    await this.send(edited);
+  }
+
   private appendMessage(message: ClaudeChatMessage, scroll: boolean): HTMLElement {
     const known = message.id && message.tool ? this.tools.get(message.id) : undefined;
     if (known) {
@@ -792,11 +914,14 @@ export class ClaudeChat {
       const tool: ClaudeChatTool = { ...message.tool!, ...(message.tool!.input === undefined && known.tool.input !== undefined ? { input: known.tool.input } : {}) };
       const next = this.toolArticle(message, tool, known.text);
       known.article.replaceWith(next); this.tools.set(message.id, { article: next, tool, text: known.text });
+      const row = this.shown.findIndex(item => item.id === message.id && !!item.tool);
+      if (row >= 0) this.shown[row] = { ...message, tool };
       return next;
     }
-    // A new user message starts a new turn: the previous turn's changes are summarised first.
-    if (message.role === 'user') this.flushChanges();
     const box = this.el('codex-messages');
+    // A new user message starts a new turn: the previous turn's changes are summarised first, and earlier choice buttons close.
+    if (message.role === 'user') { this.flushChanges(); closeChoiceBlocks(box); }
+    if (this.active) this.shown.push(message);
     const element = this.messageElement(message);
     if (!box) return element;
     const near = scroll || this.nearBottom();
@@ -807,7 +932,7 @@ export class ClaudeChat {
   }
 
   private clearMessages(): void {
-    this.tools.clear(); this.messageCount = 0; this.turnChanges = [];
+    this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
     const box = this.el('codex-messages'); if (!box || !this.active) return;
     box.replaceChildren(this.make('p', this.loading ? 'Loading conversation…' : CLAUDE_CHAT_EMPTY_TEXT, 'empty'));
   }
@@ -1086,7 +1211,7 @@ export class ClaudeChat {
         const path = submit.querySelector?.('svg path'); path?.setAttribute('d', stopMode ? STOP_PATH : SEND_PATH); path?.setAttribute('fill', stopMode ? 'currentColor' : 'none');
       }
       const controls = submit.closest?.<HTMLElement>('.composer-controls'); if (controls) controls.dataset.taskActive = String(stopMode);
-      submit.disabled = stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || !(input?.value.trim());
+      submit.disabled = stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || this.rewinding || !(input?.value.trim());
     }
     const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create) create.disabled = !!turn && turn.turnId === null;
   }

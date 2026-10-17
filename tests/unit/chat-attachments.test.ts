@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CHAT_ATTACHMENT_LIMITS, decodeChatAttachment, startChatAttachments } from '../../apps/desktop/src/chat-attachments.js';
+import { CHAT_ATTACHMENT_LIMITS, REFERENCE_INPUT_LIMITS, ReferenceImageError, decodeChatAttachment, referencePngName, referenceScale, sniffReferenceImage, startChatAttachments } from '../../apps/desktop/src/chat-attachments.js';
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
 const tick = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
@@ -95,12 +95,12 @@ test('safe names are bounded basenames and never paths, executable extensions, c
   }
 });
 
-test('mount configures text and PNG picker hooks without reading files', () => {
+test('mount configures text and image picker hooks without reading files', () => {
   const f = fixture();
   assert.equal(f.button.textContent, ''); assert.equal(f.button.type, 'button'); // Vector icon is preserved by the controller.
-  assert.equal(f.button.attributes.get('aria-label'), 'Attach text files or PNG references');
+  assert.equal(f.button.attributes.get('aria-label'), 'Attach text files or images');
   assert.equal(f.input.type, 'file'); assert.equal(f.input.hidden, true); assert.equal(f.input.multiple, true);
-  assert.equal(f.input.accept, '.txt,.md,.lua,.luau,.json,.csv,.png');
+  assert.equal(f.input.accept, '.txt,.md,.lua,.luau,.json,.csv,.png,.jpg,.jpeg,.webp');
   assert.equal(f.status.attributes.get('aria-live'), 'polite'); assert.equal(f.chips.hidden, true);
   assert.equal(f.input.clicks, 0); assert.equal(f.controller.prepareText('plain'), 'plain'); f.controller.cleanup();
 });
@@ -131,7 +131,7 @@ test('prepareText preserves the human message and JSON quotes untrusted source w
 
 test('batch count and total byte limits reject before any file read, including existing attachments', async () => {
   const f = fixture(), data = tracked('file.txt', encode('text'));
-  const unknown = tracked('picture.jpg', encode('text'));
+  const unknown = tracked('picture.gif', encode('text'));
   f.choose([data.value, unknown.value]); await tick(); assert.equal(data.reads(), 0); assert.equal(unknown.reads(), 0);
   f.choose(Array.from({ length: 5 }, () => data.value)); await tick(); assert.equal(data.reads(), 0);
   assert.match(f.status.textContent, /at most 4/);
@@ -242,4 +242,80 @@ test('stop/resume are idempotent, cleanup removes listeners, and callbacks canno
   const emptyDoc = new DocumentFixture(); let badScope = false;
   const controller = startChatAttachments(emptyDoc as unknown as Document, { getScope() { if (badScope) throw new Error('PRIVATE'); return 'valid'; }, onChange() { throw new Error('PRIVATE'); } });
   badScope = true; controller.syncScope(); controller.clear(); assert.equal(controller.prepareText('human'), 'human'); controller.cleanup();
+});
+
+// ---- Image references: magic-byte sniffing and resize planning (pure; no canvas, files or network). ----
+function chunk(kind: string, data: Uint8Array = new Uint8Array()): Uint8Array {
+  const out = new Uint8Array(data.length + 12), view = new DataView(out.buffer);
+  view.setUint32(0, data.length); out.set([...kind].map(c => c.charCodeAt(0)), 4); out.set(data, 8); return out;
+}
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0)); let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.length; } return out;
+}
+function pngBytes(width: number, height: number, options: { colorType?: number; interlace?: number; extra?: Uint8Array[] } = {}): Uint8Array {
+  const ihdr = new Uint8Array(13), view = new DataView(ihdr.buffer);
+  view.setUint32(0, width); view.setUint32(4, height); ihdr[8] = 8; ihdr[9] = options.colorType ?? 6; ihdr[12] = options.interlace ?? 0;
+  return concat(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), ...(options.extra ?? []), chunk('IDAT', new Uint8Array([1, 2, 3])), chunk('IEND'));
+}
+function jpegBytes(width: number, height: number, marker = 0xc0): Uint8Array {
+  const app0 = [0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const sof = [0xff, 0xff, marker, 0, 17, 8, height >> 8, height & 255, width >> 8, width & 255, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1];
+  return new Uint8Array([0xff, 0xd8, ...app0, ...sof, 0xff, 0xda, 0, 2, 0xff, 0xd9]);
+}
+function webpBytes(kind: 'VP8 ' | 'VP8L' | 'VP8X', width: number, height: number, flags = 0): Uint8Array {
+  const body = new Uint8Array(18), view = new DataView(body.buffer);
+  if (kind === 'VP8 ') { body.set([0x9d, 0x01, 0x2a], 3); view.setUint16(6, width, true); view.setUint16(8, height, true); }
+  else if (kind === 'VP8L') { body[0] = 0x2f; view.setUint32(1, (width - 1) | (height - 1) << 14, true); }
+  else { body[0] = flags; const w = width - 1, h = height - 1; body.set([w & 255, w >> 8 & 255, w >> 16, h & 255, h >> 8 & 255, h >> 16], 4); }
+  const out = concat(new TextEncoder().encode('RIFF'), new Uint8Array(4), new TextEncoder().encode('WEBP' + kind), new Uint8Array([18, 0, 0, 0]), body);
+  new DataView(out.buffer).setUint32(4, out.length - 8, true); return out;
+}
+const refused = (pattern: RegExp) => (error: unknown) => error instanceof ReferenceImageError && pattern.test(error.message);
+
+test('image references are identified by magic bytes with their declared size', () => {
+  assert.deepEqual({ ...sniffReferenceImage(pngBytes(128, 64)) }, { format: 'png', width: 128, height: 64, strictPng: true });
+  assert.deepEqual({ ...sniffReferenceImage(pngBytes(128, 64, { colorType: 2 })) }, { format: 'png', width: 128, height: 64, strictPng: true });
+  // Valid PNGs the daemon would refuse byte for byte are still accepted, then resized into a strict PNG.
+  for (const png of [pngBytes(10, 10, { colorType: 3 }), pngBytes(10, 10, { interlace: 1 }), pngBytes(5000, 10)])
+    assert.equal(sniffReferenceImage(png).strictPng, false);
+  assert.deepEqual({ ...sniffReferenceImage(jpegBytes(1920, 1080)) }, { format: 'jpeg', width: 1920, height: 1080, strictPng: false });
+  assert.deepEqual({ ...sniffReferenceImage(jpegBytes(640, 480, 0xc2)) }, { format: 'jpeg', width: 640, height: 480, strictPng: false });
+  assert.deepEqual({ ...sniffReferenceImage(webpBytes('VP8 ', 300, 200)) }, { format: 'webp', width: 300, height: 200, strictPng: false });
+  assert.deepEqual({ ...sniffReferenceImage(webpBytes('VP8L', 1024, 768)) }, { format: 'webp', width: 1024, height: 768, strictPng: false });
+  assert.deepEqual({ ...sniffReferenceImage(webpBytes('VP8X', 4000, 3000)) }, { format: 'webp', width: 4000, height: 3000, strictPng: false });
+});
+
+test('SVG, text, GIF, animation, truncation and oversized images are refused before decoding', () => {
+  const encodeText = (text: string) => new TextEncoder().encode(text);
+  for (const bytes of [encodeText('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), encodeText('<?xml version="1.0"?><svg/>'),
+    encodeText('GIF89a\u0001\u0000\u0001\u0000'), new Uint8Array(), new Uint8Array([0xff, 0xd8, 0xff]),
+    pngBytes(10, 10, { extra: [chunk('acTL', new Uint8Array(8))] }), pngBytes(10, 10).subarray(0, 50), concat(pngBytes(10, 10), new Uint8Array([0])),
+    pngBytes(0, 10), jpegBytes(0, 10), new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0, 2]),
+    webpBytes('VP8X', 10, 10, 0x02), webpBytes('VP8X', 10, 10).subarray(0, 32)])
+    assert.throws(() => sniffReferenceImage(bytes), refused(/PNG, JPEG or WebP/));
+  for (const bytes of [pngBytes(REFERENCE_INPUT_LIMITS.side + 1, 1), jpegBytes(8000, 8000), webpBytes('VP8X', 16_384, 16_384),
+    new Uint8Array(REFERENCE_INPUT_LIMITS.bytes + 1)])
+    assert.throws(() => sniffReferenceImage(bytes), refused(/16 MiB and 16384 pixels/));
+});
+
+test('resize planning keeps references within 4096 pixels per side and the remaining pixel budget', () => {
+  assert.equal(referenceScale(1000, 1000, 8_000_000), 1);
+  assert.equal(referenceScale(8192, 1024, 8_000_000), 0.5);
+  const scale = referenceScale(6000, 4000, 2_000_000);
+  assert.ok(Math.floor(6000 * scale) * Math.floor(4000 * scale) <= 2_000_000 && scale > 0.28);
+  assert.equal(referenceScale(0, 10, 100), 0); assert.equal(referenceScale(10, 10, 0), 0);
+  assert.equal(referencePngName('photo.JPG'), 'photo.png'); assert.equal(referencePngName('shot.webp'), 'shot.png');
+  assert.equal(referencePngName('art.jpeg'), 'art.png'); assert.equal(referencePngName('ref.png'), 'ref.png');
+});
+
+test('image intake refuses oversized files and colliding names before reading, and disguised SVG by its bytes', async () => {
+  const f = fixture(), big = tracked('huge.jpg', jpegBytes(10, 10), REFERENCE_INPUT_LIMITS.bytes + 1);
+  f.choose([big.value]); await tick(); assert.equal(big.reads(), 0); assert.match(f.status.textContent, /16 MiB/);
+  const jpg = tracked('photo.jpg', jpegBytes(10, 10)), png = tracked('photo.png', pngBytes(10, 10));
+  f.choose([jpg.value, png.value]); await tick(); assert.equal(jpg.reads() + png.reads(), 0); assert.match(f.status.textContent, /distinct basename/);
+  const svg = tracked('vector.png', new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>'));
+  f.choose([svg.value]); await tick(); await tick();
+  assert.equal(svg.reads(), 1); assert.match(f.status.textContent, /PNG, JPEG or WebP/); assert.equal(f.chips.hidden, true);
+  assert.deepEqual(f.controller.prepareReferences(), []); f.controller.cleanup();
 });

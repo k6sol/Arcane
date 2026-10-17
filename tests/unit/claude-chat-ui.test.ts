@@ -13,7 +13,9 @@ import {
   claudeEffortLabel, claudeModelLabel, claudeModelName, linkChatProviders, readClaudeChatStatus, readClaudeChatBridge,
   CLAUDE_CHAT_QUEUE_RETURNED_TEXT, compactTokens, usageMeterText,
 } from '../../apps/desktop/src/claude-chat.js';
-import { changeSummary, CodexTranscript, describeToolActivity, readToolResultText, renderChangeCard, restoreRequestText } from '../../apps/desktop/src/codex-chat.js';
+import { changeSummary, CodexTranscript, describeToolActivity, readToolResultText, renderChangeCard, restoreRequestText,
+  CHOICE_BLOCK_LIMITS, parseChoiceBlock, PLAN_APPROVE_TEXT, PLAN_CHANGE_TEXT, renderMessageText } from '../../apps/desktop/src/codex-chat.js';
+import { CLAUDE_CHAT_EDIT_UNDO_TEXT } from '../../apps/desktop/src/claude-chat.js';
 
 // In-memory DOM and preload-bridge doubles only: no Electron, CLI, network, Studio or inference.
 // The fixture mirrors the shared chat surface ids from studio.html that both providers render into.
@@ -1329,7 +1331,164 @@ test('composer commands: "/" opens a keyboard menu (Esc closes, Enter runs witho
   assert.deepEqual(sends(b).map((row: any) => row.text), ['Make @selection'], 'with the menu closed Enter sends');
 });
 
-test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu', { skip: !browserModule, timeout: 60000 }, async t => {
+// ---- Edit a past message and rewind; interactive choices and plan approval ----
+const lobbyCreate = { sessionId: 's', parent: ws('Workspace'), className: 'Part', name: 'Door' };
+const lobbyHistory = () => ({ conversationId: 'conv-new', messages: [
+  { id: 'u1', role: 'user', text: 'Make a lobby', at: '' }, { id: 'a1', role: 'assistant', text: 'Lobby ready.', at: '' },
+  { id: 'u2', role: 'user', text: 'Add a red door', at: '' },
+  { id: 't1', role: 'tool', text: 'scene_create', at: '', tool: { name: 'scene_create', status: 'finished', input: JSON.stringify(lobbyCreate), result: receipt('cmd-door', 'scene.create', lobbyCreate) } },
+  { id: 'a2', role: 'assistant', text: 'Door added.', at: '' }] });
+async function rewindFixture(t: { after: (fn: () => void) => void }, rewind?: (request: any) => Promise<unknown>) {
+  const order: string[] = [];
+  let b!: ReturnType<typeof fakeBridge>;
+  b = fakeBridge({
+    rewind: rewind ?? (async (request: any) => { order.push('rewind'); b.calls.push(['rewind', request]); b.histories.set('conv-new', { conversationId: 'conv-new', messages: lobbyHistory().messages.slice(0, 2) }); return { conversationId: 'conv-new', kept: 2 }; }),
+  });
+  b.histories.set('conv-new', lobbyHistory());
+  b.reply(async () => { order.push('send'); return { turnId: 'turn-1', conversationId: 'conv-new', messageId: 'u3' }; });
+  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  await f.chat.open('conv-new'); await tick();
+  return { b, f, order };
+}
+const settle = async () => { for (let i = 0; i < 6; i++) await tick(); };
+
+test('Claude edit: Edit rewinds the saved transcript after that message, reloads it and sends the edited text exactly once', async t => {
+  const { b, f, order } = await rewindFixture(t);
+  const edits = f.messages.querySelectorAll('.chat-message-edit');
+  assert.deepEqual(edits.map(node => node.getAttribute('aria-label')), ['Edit this message', 'Edit this message'], 'only the two user messages offer Edit');
+  click(edits[1]!);
+  const form = f.messages.querySelector('.chat-edit')!, area = form.querySelector('.chat-edit-input')!, box = form.querySelector('.chat-edit-undo-box')!;
+  assert.equal(area.value, 'Add a red door'); assert.equal(box.disabled, false);
+  assert.match(form.querySelector('.chat-edit-undo')!.textContent, /^Also undo Studio changes made after this message \(1\)$/);
+  assert.match(form.querySelector('.chat-edit-hint')!.textContent, /Replies after this message are removed/);
+  assert.deepEqual(sends(b), [], 'opening the editor sends nothing');
+  area.value = 'Add a blue door';
+  form.dispatchEvent(new Event('submit', { cancelable: true })); await settle();
+  assert.deepEqual(b.calls.filter(call => call[0] === 'rewind'), [['rewind', { conversationId: 'conv-new', messageId: 'u2' }]]);
+  assert.deepEqual(order, ['rewind', 'send'], 'the saved transcript is rewound before the edited text is sent');
+  assert.deepEqual(sends(b), [{ conversationId: 'conv-new', text: 'Add a blue door', model: 'sonnet', effort: 'high' }]);
+  assert.deepEqual(f.bubbles().map(row => row.role + ':' + row.text), ['user:Make a lobby', 'assistant:Lobby ready.', 'user:Add a blue door'], 'the discarded turn is gone');
+  assert.equal(f.messages.querySelector('.chat-change-card'), null);
+  assert.equal(f.input.value, '', 'the composer is untouched');
+  // The re-sent message is editable once its saved id arrives.
+  assert.equal(f.messages.querySelectorAll('.chat-message-edit').length, 2);
+});
+
+test('Claude edit: "Also undo Studio changes" writes the restore request into the message box and queues the edit; nothing is sent until Send', async t => {
+  const { b, f } = await rewindFixture(t);
+  click(f.messages.querySelectorAll('.chat-message-edit')[1]!);
+  const form = f.messages.querySelector('.chat-edit')!;
+  form.querySelector('.chat-edit-input')!.value = 'Add a blue door'; (form.querySelector('.chat-edit-undo-box') as any).checked = true;
+  form.dispatchEvent(new Event('submit', { cancelable: true })); await settle();
+  assert.equal(b.calls.filter(call => call[0] === 'rewind').length, 1);
+  assert.deepEqual(sends(b), [], 'the restore request is never sent automatically');
+  assert.equal(f.input.value, restoreRequestText([{ kind: 'created', text: '', receipt: 'cmd-door', path: null }]));
+  assert.deepEqual(f.chat.queued().map(item => item.text), ['Add a blue door']);
+  assert.equal(f.notice.textContent, CLAUDE_CHAT_EDIT_UNDO_TEXT);
+  // The user reviews and sends the restore request; the edited message follows only after that reply succeeds.
+  key(f.input, 'Enter'); await settle();
+  assert.deepEqual(sends(b).map((row: any) => row.text), [restoreRequestText([{ kind: 'created', text: '', receipt: 'cmd-door', path: null }])]);
+  b.emit({ conversationId: 'conv-new', type: 'done', ok: true, error: null, usage: null }); await settle();
+  assert.deepEqual(sends(b).map((row: any) => row.text).at(-1), 'Add a blue door');
+  assert.equal(sends(b).length, 2);
+});
+
+test('Claude edit: a refused rewind keeps the transcript and sends nothing; Edit needs an idle chat and a rewind-capable bridge', async t => {
+  const { b, f } = await rewindFixture(t, async () => { throw new Error('This message can no longer be edited.'); });
+  click(f.messages.querySelectorAll('.chat-message-edit')[0]!);
+  const form = f.messages.querySelector('.chat-edit')!; form.querySelector('.chat-edit-input')!.value = 'Make a castle';
+  assert.equal(form.querySelector('.chat-edit-undo-box')!.disabled, false);
+  form.dispatchEvent(new Event('submit', { cancelable: true })); await settle();
+  assert.deepEqual(sends(b), []); assert.equal(f.notice.textContent, 'This message can no longer be edited.');
+  assert.equal(f.bubbles().length, 5, 'the transcript is unchanged');
+  // Cancel (Escape) restores the original message with its Edit action.
+  key(f.messages.querySelector('.chat-edit-input')!, 'Escape');
+  assert.equal(f.messages.querySelector('.chat-edit'), null); assert.equal(f.messages.querySelectorAll('.chat-message-edit').length, 2);
+  // While a reply runs, Edit explains instead of opening.
+  f.type('Next'); key(f.input, 'Enter'); await tick();
+  click(f.messages.querySelectorAll('.chat-message-edit')[0]!);
+  assert.equal(f.messages.querySelector('.chat-edit'), null); assert.match(f.notice.textContent, /Wait for the reply to finish/);
+  // Without bridge.rewind (older desktop builds) no Edit action is offered.
+  const plain = fakeBridge(); plain.histories.set('conv-new', lobbyHistory());
+  const g = mount(plain.bridge); t.after(() => g.chat.stop()); await g.chat.refresh(); await g.chat.open('conv-new'); await tick();
+  assert.equal(g.messages.querySelectorAll('.chat-message-edit').length, 0);
+});
+
+test('choice blocks: strict JSON parsing; anything invalid stays a plain code block', () => {
+  assert.deepEqual(parseChoiceBlock('arcane-choices', '{"question":"Which door?","options":["Red","Blue"]}'), { kind: 'choices', question: 'Which door?', options: ['Red', 'Blue'] });
+  assert.deepEqual(parseChoiceBlock('arcane-plan', ' {"steps":["Build the lobby","Add a door"]}\n'), { kind: 'plan', steps: ['Build the lobby', 'Add a door'] });
+  const invalid: [string, string][] = [
+    ['arcane-choices', '{"question":"Q","options":["Only one"]}'], ['arcane-choices', '{"question":"Q","options":["A","a"]}'],
+    ['arcane-choices', '{"question":"Q","options":["A","B"],"extra":1}'], ['arcane-choices', '{"question":"","options":["A","B"]}'],
+    ['arcane-choices', '{"question":"Q","options":["A",2]}'], ['arcane-choices', '{"question":"Q","options":' + JSON.stringify(Array.from({ length: 7 }, (_, i) => 'o' + i)) + '}'],
+    ['arcane-choices', '{"question":"Q","options":["' + 'x'.repeat(CHOICE_BLOCK_LIMITS.option + 1) + '","B"]}'], ['arcane-choices', '{"question":"Q\\u0007","options":["A","B"]}'],
+    ['arcane-choices', '{"question":"Q","options":["A","B"]'], ['arcane-choices', '["A","B"]'], ['arcane-choices', '{"__proto__":{"x":1},"question":"Q","options":["A","B"]}'],
+    ['arcane-plan', '{"steps":[]}'], ['arcane-plan', '{"steps":"Build"}'], ['arcane-plan', '{"steps":["A"],"question":"Q"}'],
+    ['arcane-plan', JSON.stringify({ steps: Array.from({ length: 13 }, (_, i) => 'Step ' + i) })], ['arcane-plan', '{"steps":["' + 'y'.repeat(5000) + '"]}'],
+    ['arcane-other', '{"steps":["A"]}'], ['arcane-plan', '{"options":["A","B"],"question":"Q"}'],
+  ];
+  for (const [language, body] of invalid) assert.equal(parseChoiceBlock(language, body), null, language + ' ' + body.slice(0, 80));
+  const { doc } = surface();
+  const text = (value: string) => renderMessageText(doc as unknown as Document, value, { choose: () => true }) as unknown as Element;
+  const broken = text('Pick one:\n```arcane-choices\n{"question":"Q","options":["A"]}\n```');
+  assert.equal(broken.querySelector('.chat-choices'), null); assert.equal(broken.querySelector('code')!.textContent, '{"question":"Q","options":["A"]}');
+  assert.equal(text('Unclosed\n```arcane-plan\n{"steps":["A"]}').querySelector('.chat-choices'), null, 'an unfinished fence is not a block');
+  const before = innerHtmlWrites;
+  const xss = text('```arcane-choices\n{"question":"<b>Pick</b>","options":["<img src=x onerror=alert(1)>","Safe"]}\n```');
+  assert.deepEqual(xss.querySelectorAll('.chat-choice').map(node => node.textContent), ['<img src=x onerror=alert(1)>', 'Safe'], 'options are text, never HTML');
+  assert.equal(xss.querySelector('.chat-choices-question')!.textContent, '<b>Pick</b>'); assert.equal(innerHtmlWrites, before);
+  const inline = text('```arcane-plan {"steps":["Only step"]}```');
+  assert.deepEqual(inline.querySelectorAll('li').map(node => node.textContent), ['Only step'], 'a one-line fence also works');
+  const display = renderMessageText(doc as unknown as Document, '```arcane-plan\n{"steps":["A"]}\n```') as unknown as Element;
+  assert.ok(display.querySelectorAll('button').every(node => node.disabled), 'without a send callback the block is display-only');
+});
+
+test('Claude choices: a click sends exactly one message; plan approval sends once and Change plan only pre-fills', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  f.type('Make a door'); key(f.input, 'Enter'); await tick();
+  b.emit({ type: 'message', message: { id: 'a1', role: 'assistant', text: 'Which colour?\n\n```arcane-choices\n{"question":"Which door colour?","options":["Red","Blue"]}\n```', at: '' } });
+  const options = () => f.messages.querySelectorAll('.chat-choice');
+  assert.deepEqual(options().map(node => node.textContent), ['Red', 'Blue']);
+  assert.equal(f.messages.querySelector('.chat-choices')!.getAttribute('aria-label'), 'Question: Which door colour?');
+  // While the reply is still running the answer waits in the queue (one message), then sends after it finishes.
+  click(options()[1]!); click(options()[1]!); click(options()[0]!);
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['Make a door']); assert.deepEqual(f.chat.queued().map(item => item.text), ['Blue']);
+  assert.ok(options().every(node => node.disabled)); assert.equal(options()[1]!.getAttribute('aria-pressed'), 'true');
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['Make a door', 'Blue'], 'exactly one answer was sent');
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  // A plan on an idle chat: Change plan pre-fills without sending; Approve sends exactly once.
+  f.chat.newChat(); b.reply(async () => ({ turnId: 'turn-2', conversationId: 'conv-plan' }));
+  f.type('Build an obby'); key(f.input, 'Enter'); await tick();
+  b.emit({ turnId: 'turn-2', conversationId: 'conv-plan', type: 'message', message: { id: 'p1', role: 'assistant', text: '```arcane-plan\n{"steps":["Platforms","Checkpoints","Kill bricks"]}\n```', at: '' } });
+  b.emit({ turnId: 'turn-2', conversationId: 'conv-plan', type: 'done', ok: true, error: null, usage: null }); await tick();
+  const plan = f.messages.querySelector('.chat-choices')!;
+  assert.deepEqual(plan.querySelectorAll('li').map(node => node.textContent), ['Platforms', 'Checkpoints', 'Kill bricks']);
+  const [approve, change] = plan.querySelectorAll('button');
+  assert.deepEqual([approve!.textContent, change!.textContent], ['Approve plan', 'Change plan']);
+  const sent = sends(b).length;
+  click(change!); assert.equal(f.input.value, PLAN_CHANGE_TEXT); assert.equal(sends(b).length, sent, 'Change plan never sends');
+  f.type('');
+  b.reply(async () => ({ turnId: 'turn-3', conversationId: 'conv-plan' }));
+  click(approve!); click(approve!); await tick();
+  assert.deepEqual(sends(b).slice(sent).map((row: any) => row.text), [PLAN_APPROVE_TEXT]);
+  assert.equal(plan.dataset.state, 'answered');
+});
+
+test('Claude choices: saved replies answered by a later message stay closed; the latest open block stays live', async t => {
+  const b = fakeBridge();
+  b.histories.set('conv-new', { conversationId: 'conv-new', messages: [
+    { id: 'u1', role: 'user', text: 'Door?', at: '' }, { id: 'a1', role: 'assistant', text: '```arcane-choices\n{"question":"Colour?","options":["Red","Blue"]}\n```', at: '' },
+    { id: 'u2', role: 'user', text: 'Red', at: '' }, { id: 'a2', role: 'assistant', text: '```arcane-choices\n{"question":"Size?","options":["Small","Large"]}\n```', at: '' }] });
+  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh(); await f.chat.open('conv-new'); await tick();
+  const blocks = f.messages.querySelectorAll('.chat-choices');
+  assert.deepEqual(blocks.map(node => node.dataset.state), ['closed', 'open']);
+  assert.ok(blocks[0]!.querySelectorAll('button').every(node => node.disabled));
+  click(blocks[1]!.querySelectorAll('button')[1]!); await tick();
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['Large']);
+});
+
+test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu',{ skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/chatux/shots');
   await mkdir(shots, { recursive: true });
   const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
@@ -1446,6 +1605,132 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     await page.screenshot({ path: join(shots, 'activity-mobile-' + scheme + '.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, 'no horizontal scroll at phone width');
     if (scheme === 'dark') { await page.emulateMedia({ forcedColors: 'active' }); await page.screenshot({ path: join(shots, 'activity-forced-colors.png') }); }
+    assert.deepEqual(errors, []);
+    await page.close();
+  }
+});
+
+test('Edge: Claude edit and rewind with the undo option, plan approval and option buttons', { skip: !browserModule, timeout: 60000 }, async t => {
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/rewind/shots');
+  await mkdir(shots, { recursive: true });
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const create = { parent: { instanceId: 'i', sessionId: 's', root: 'Workspace', pathSegments: [], className: 'Folder' }, className: 'Part', name: 'RedDoor' };
+  const saved = [
+    { id: '00000000-0000-4000-8000-000000000001', role: 'user', text: 'Make a lobby with a spawn point', at: '2026-10-17T10:00:00.000Z' },
+    { id: '00000000-0000-4000-8000-000000000002', role: 'assistant', text: 'The lobby and spawn point are ready.', at: '2026-10-17T10:00:05.000Z' },
+    { id: '00000000-0000-4000-8000-000000000003', role: 'user', text: 'Add a red door to the lobby', at: '2026-10-17T10:01:00.000Z' },
+    { id: '00000000-0000-4000-8000-000000000004', role: 'tool', text: 'scene_create', at: '2026-10-17T10:01:03.000Z', tool: { name: 'scene_create', status: 'finished', input: JSON.stringify(create),
+      result: JSON.stringify({ commandId: 'cmd-red-door', state: 'succeeded', terminal: true, command: { method: 'scene.create', args: create } }) } },
+    { id: '00000000-0000-4000-8000-000000000005', role: 'assistant', text: 'Added RedDoor to Workspace.', at: '2026-10-17T10:01:06.000Z' }];
+  const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
+    import {startProviderSetup} from '/provider-setup.js';
+    import {startWorkspaceShell} from '/workspace-shell.js';
+    import {ClaudeChat} from '/claude-chat.js';
+    const f = window.fx = { calls: [], rewinds: [] };
+    let saved = ${JSON.stringify(saved)};
+    const chat = new CodexChat(document, new CodexChatApi('${'a'.repeat(64)}'));
+    const native = Object.freeze({ version: 1, ...Object.fromEntries(['status','login','install','launch'].map(action => [action, async provider =>
+      ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.177', busy: false, message: null })])) });
+    const setup = startProviderSetup(document, { chat, nativeBridge: native });
+    const bridge = Object.freeze({ version: 1,
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet'], efforts: ['low', 'medium', 'high'], defaultModel: 'opus', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' }, message: null }),
+      list: async () => ({ conversations: [{ conversationId: 'conv-lobby', title: 'Lobby', updatedAt: '2026-10-17T10:01:06.000Z', model: 'opus', effort: 'high' }] }),
+      history: async id => ({ conversationId: id, messages: saved }),
+      rewind: async request => { f.rewinds.push(request); saved = saved.slice(0, saved.findIndex(m => m.id === request.messageId)); return { conversationId: request.conversationId, kept: saved.length }; },
+      send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-lobby', messageId: '00000000-0000-4000-8000-00000000010' + f.calls.length }; },
+      stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
+    const claude = new ClaudeChat(document, { bridge, storage: null });
+    f.claude = claude;
+    setup.subscribeChatSurface(() => { if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); } else { claude.deactivate(); chat.yieldSurface(false); } });
+    startWorkspaceShell(document);
+    await chat.start(); f.ready = true;`;
+  const server = createServer((request, response) => { void (async () => {
+    const url = request.url?.split('?')[0] ?? '';
+    if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
+    if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
+    const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
+      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+    if (!file) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
+    response.end(await readFile(resolve(file)));
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
+  const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+  const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  t.after(() => browser.close());
+  for (const scheme of ['dark', 'light'] as const) {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, colorScheme: scheme }); page.setDefaultTimeout(8000);
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
+    await page.waitForFunction(() => (window as any).fx?.ready === true);
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
+    await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+    await page.evaluate(() => (window as any).fx.refreshed);
+    await page.evaluate(() => (window as any).fx.claude.open('conv-lobby'));
+    const human = page.locator('#codex-messages .codex-message.human');
+    await human.nth(1).waitFor();
+    assert.equal(await human.locator('.chat-message-edit').count(), 2);
+    await human.nth(1).hover();
+    assert.equal(await human.nth(1).locator('.chat-message-edit').evaluate(node => getComputedStyle(node).opacity), '1', 'Edit shows on hover');
+    await page.screenshot({ path: join(shots, 'rewind-edit-hover-' + scheme + '.png') });
+    await human.nth(1).locator('.chat-message-edit').click();
+    const editor = page.locator('#codex-messages .chat-edit');
+    await editor.locator('.chat-edit-input').fill('Add a blue door to the lobby');
+    await editor.locator('.chat-edit-undo-box').check();
+    assert.match(await editor.locator('.chat-edit-undo').innerText(), /Also undo Studio changes made after this message \(1\)/);
+    await page.screenshot({ path: join(shots, 'rewind-editor-' + scheme + '.png') });
+    await editor.locator('.chat-edit-send').click();
+    await page.waitForFunction(() => (document.getElementById('codex-composer') as HTMLTextAreaElement).value.includes('cmd-red-door'));
+    assert.deepEqual(await page.evaluate(() => (window as any).fx.rewinds), [{ conversationId: 'conv-lobby', messageId: '00000000-0000-4000-8000-000000000003' }]);
+    assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 0, 'the restore request waits for the user');
+    assert.deepEqual(await page.locator('#codex-messages .codex-message .message-text').allInnerTexts(), ['Make a lobby with a spawn point', 'The lobby and spawn point are ready.']);
+    assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Add a blue door to the lobby']);
+    await page.screenshot({ path: join(shots, 'rewind-undo-prefill-' + scheme + '.png') });
+    // The user sends the restore request; the edited message follows after that reply finishes.
+    await page.locator('#codex-composer').press('Enter');
+    await page.waitForFunction(() => (window as any).fx.calls.length === 1);
+    await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-lobby', type: 'done', ok: true, error: null, usage: null }));
+    await page.waitForFunction(() => (window as any).fx.calls.length === 2);
+    assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Add a blue door to the lobby');
+    // The reply presents a plan, then (next reply) a question with options.
+    await page.evaluate(() => {
+      const fx = (window as any).fx;
+      fx.emit({ turnId: 'turn-2', conversationId: 'conv-lobby', type: 'message', message: { id: '00000000-0000-4000-8000-000000000201', role: 'assistant', at: '2026-10-17T10:02:00.000Z',
+        text: 'Here is the plan for the blue door:\n\n```arcane-plan\n{"steps":["Create a blue Part named BlueDoor in Workspace.Lobby","Anchor it and size it 4 x 7 x 1","Add a ProximityPrompt that opens the door"]}\n```' } });
+      fx.emit({ turnId: 'turn-2', conversationId: 'conv-lobby', type: 'done', ok: true, error: null, usage: null });
+    });
+    const plan = page.locator('#codex-messages .chat-choices[data-kind=plan]');
+    await plan.waitFor();
+    await plan.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: join(shots, 'choices-plan-' + scheme + '.png') });
+    await plan.getByRole('button', { name: 'Approve plan' }).click();
+    await page.waitForFunction(() => (window as any).fx.calls.length === 3);
+    assert.equal(await page.evaluate(() => (window as any).fx.calls[2].text), 'I approve the plan. Go ahead.');
+    assert.equal(await plan.getByRole('button', { name: 'Approve plan' }).isDisabled(), true);
+    await page.evaluate(() => {
+      const fx = (window as any).fx;
+      fx.emit({ turnId: 'turn-3', conversationId: 'conv-lobby', type: 'message', message: { id: '00000000-0000-4000-8000-000000000301', role: 'assistant', at: '2026-10-17T10:03:00.000Z',
+        text: 'BlueDoor is in place.\n\n```arcane-choices\n{"question":"How should the door open?","options":["Slide sideways","Swing on a hinge","Fade out"]}\n```' } });
+      fx.emit({ turnId: 'turn-3', conversationId: 'conv-lobby', type: 'done', ok: true, error: null, usage: null });
+    });
+    const choices = page.locator('#codex-messages .chat-choices[data-kind=choices]');
+    await choices.waitFor(); await choices.scrollIntoViewIfNeeded();
+    await choices.getByRole('button', { name: 'Swing on a hinge' }).focus();
+    await page.screenshot({ path: join(shots, 'choices-options-' + scheme + '.png') });
+    await choices.getByRole('button', { name: 'Swing on a hinge' }).click();
+    await page.waitForFunction(() => (window as any).fx.calls.length === 4);
+    assert.equal(await page.evaluate(() => (window as any).fx.calls[3].text), 'Swing on a hinge');
+    await choices.getByRole('button', { name: 'Fade out' }).click({ force: true }).catch(() => {});
+    assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 4, 'exactly one answer');
+    await page.screenshot({ path: join(shots, 'choices-answered-' + scheme + '.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await choices.scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+    assert.equal(await choices.getByRole('button', { name: 'Fade out' }).isVisible(), true);
+    await page.screenshot({ path: join(shots, 'choices-mobile-' + scheme + '.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, 'no horizontal scroll at phone width');
+    if (scheme === 'dark') { await page.emulateMedia({ forcedColors: 'active' }); await page.screenshot({ path: join(shots, 'choices-forced-colors.png') }); }
     assert.deepEqual(errors, []);
     await page.close();
   }

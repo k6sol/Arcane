@@ -72,11 +72,32 @@ const MESSAGES = Object.freeze({
   output: 'Claude Code produced more output than Arcane accepts. The reply was stopped.',
   closed: 'The workspace closed, so the reply was stopped.',
   usageLimit: 'Claude usage limit reached. This message was not answered; try again after the limit resets.',
+  rewind: 'This message can no longer be edited.',
 });
-const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text]);
+const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text, MESSAGES.rewind]);
 const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
   '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown. ' +
-  'When the user writes @selection they mean the current Studio selection: read it with selection_read before acting on it.';
+  'When the user writes @selection they mean the current Studio selection: read it with selection_read before acting on it.\n' +
+  'When you need the user to decide between a few options, end the reply with exactly one fenced block (language arcane-choices) holding ' +
+  'only JSON {"question":"...","options":["...","..."]} with 2 to 6 short plain-text options. Before a multi-step build that changes ' +
+  'Studio, present the plan as one fenced block (language arcane-plan) holding only JSON {"steps":["...","..."]} with 1 to 12 short steps, ' +
+  'then wait for approval before changing anything. Use at most one such block per reply; Arcane shows it as buttons and the user\'s ' +
+  'choice arrives as their next message.';
+/** Fresh-session context after an edit: the kept transcript, newest text kept when it is long. */
+const SEED_CHARS = 48000;
+function rewindSeed(messages) {
+  const lines = [];
+  for (const m of messages) {
+    if (m.role === 'user') lines.push('User: ' + m.text);
+    else if (m.role === 'assistant') lines.push('Assistant: ' + m.text);
+    else if (m.role === 'tool' && m.tool) lines.push('Tool ' + m.tool.name + ' (' + m.tool.status + ')');
+  }
+  let body = lines.join('\n\n');
+  if (body.length > SEED_CHARS) body = '[earlier messages omitted]\n' + body.slice(body.length - SEED_CHARS);
+  return '[Arcane: the user edited an earlier message, so this reply starts a fresh Claude Code session. The conversation up to that ' +
+    'point is quoted below for context only. Tool steps listed there already happened; do not repeat them unless the user asks.]\n' +
+    '<earlier-conversation>\n' + (body || '(no earlier messages)') + '\n</earlier-conversation>\n\nThe user\'s message now:\n';
+}
 const FALLBACK_INSTRUCTIONS = 'You are the Arcane Roblox development assistant. Use Arcane\'s advertised MCP tools. Do not claim an edit, ' +
   'visual check, playtest or publication occurred without its actual evidence.';
 
@@ -137,6 +158,12 @@ function sendInput(value) {
   if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
   return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort });
 }
+/** Exact `rewind` envelope: the conversation and the user message the edit replaces (it and everything after are removed). */
+function rewindInput(value) {
+  const v = plain(value, ['conversationId', 'messageId']);
+  if (!isId(v.conversationId) || !isId(v.messageId)) fail('unavailable');
+  return Object.freeze({ conversationId: v.conversationId, messageId: v.messageId });
+}
 /** CLI aliases/efforts from the fixed `--help` paragraphs (provider-setup's parseClaudeChoices logic). */
 function parseChoices(stdout) {
   const help = stdout.replace(/\r\n/g, '\n');
@@ -192,7 +219,9 @@ function createStore({ fs, p, directory, now, limits }) {
   }
   function validEntry(e) {
     try {
-      const v = plain(e, ['conversationId', 'title', 'createdAt', 'updatedAt', 'model', 'effort', 'sessionId']);
+      const keys = ['conversationId', 'title', 'createdAt', 'updatedAt', 'model', 'effort', 'sessionId'];
+      const v = plain(e, e && typeof e === 'object' && Object.hasOwn(e, 'rewound') ? [...keys, 'rewound'] : keys);
+      if ('rewound' in v && typeof v.rewound !== 'boolean') return null;
       if (!isId(v.conversationId) || typeof v.title !== 'string' || v.title.length > 200 || CONTROL.test(v.title) || !ISO.test(v.createdAt) || !ISO.test(v.updatedAt) ||
           typeof v.model !== 'string' || !CHOICE.test(v.model) || typeof v.effort !== 'string' || !CHOICE.test(v.effort) || !(v.sessionId === null || isId(v.sessionId))) return null;
       return { ...v };
@@ -264,6 +293,19 @@ function createStore({ fs, p, directory, now, limits }) {
       return true;
     }),
     messages: id => serial(async () => { if (!(await load()).some(e => e.conversationId === id)) return null; return (await messagesOf(id)).map(m => ({ ...m, ...(m.tool ? { tool: toolCopy(m.tool) } : {}) })); }),
+    /**
+     * Edit rewind: removes the user message `messageId` and everything after it, persists the shorter transcript and
+     * marks the conversation for a fresh, seeded session. Returns the kept messages, or null when that is not a user message.
+     */
+    truncate: (id, messageId) => serial(async () => {
+      const e = (await load()).find(item => item.conversationId === id); if (!e) return null;
+      const messages = await messagesOf(id), at = messages.findIndex(m => m.id === messageId);
+      if (at < 0 || messages[at].role !== 'user') return null;
+      messages.splice(at);
+      await persistMessages(id, messages);
+      Object.assign(e, { sessionId: null, rewound: true, updatedAt: isoNow(now) }); await persistIndex();
+      return messages.map(m => ({ ...m, ...(m.tool ? { tool: toolCopy(m.tool) } : {}) }));
+    }),
     /** Append, or replace by id; skipped when the conversation was removed meanwhile. */
     put: (id, message) => serial(async () => {
       if (!(await load()).some(e => e.conversationId === id)) return false;
@@ -474,21 +516,39 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null };
+      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null, seed: '' };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
+    let user = null;
     try {
       const at = isoNow(now);
       if (!entry) {
         const title = v.text.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
         await store.create({ conversationId, title, createdAt: at, updatedAt: at, model: v.model, effort: v.effort, sessionId: null }, new Set(byConversation.keys()));
       } else await store.update(conversationId, { updatedAt: at, model: v.model, effort: v.effort });
-      if (!await store.put(conversationId, message('user', v.text))) fail('missing');
+      // After an edit rewind there is no session to resume: the first turn carries the kept transcript as context.
+      if (entry?.rewound === true && !entry.sessionId) turn.seed = rewindSeed(await store.messages(conversationId) ?? []);
+      user = message('user', v.text);
+      if (!await store.put(conversationId, user)) fail('missing');
     } catch (error) {
       turns.delete(turn.turnId); byConversation.delete(conversationId);
       throw error instanceof ClaudeChatError ? error : new ClaudeChatError('unavailable');
     }
-    void runTurn(turn, v.text);
-    return Object.freeze({ turnId: turn.turnId, conversationId });
+    void runTurn(turn, turn.seed + v.text);
+    return Object.freeze({ turnId: turn.turnId, conversationId, messageId: user.id });
+  }
+  /**
+   * Edit a past user message: drop it and everything after it from the saved transcript. The Claude Code CLI offers
+   * `--fork-session` but no documented way to resume at an earlier message, so the next `send` starts a fresh session
+   * seeded with the kept transcript (rewindSeed) instead of resuming the discarded one.
+   */
+  async function rewind(input) {
+    if (disposed) fail('unavailable');
+    const v = rewindInput(input);
+    if (!await store.get(v.conversationId)) fail('missing');
+    if (byConversation.has(v.conversationId)) fail('busy');
+    const kept = await store.truncate(v.conversationId, v.messageId);
+    if (!kept) fail('rewind');
+    return Object.freeze({ conversationId: v.conversationId, kept: kept.length });
   }
 
   async function finish(turn, ok, error, usage = null, limit = null) {
@@ -497,7 +557,7 @@ function createClaudeChat(options) {
     if (!ok) statusCache = null; // the next turn re-reads native sign-in status
     try {
       if (error) await store.put(turn.conversationId, message('error', error));
-      await store.update(turn.conversationId, { updatedAt: isoNow(now), ...(turn.sessionId ? { sessionId: turn.sessionId } : {}) });
+      await store.update(turn.conversationId, { updatedAt: isoNow(now), ...(turn.sessionId ? { sessionId: turn.sessionId, rewound: false } : {}) });
     } catch { /* the done event still reports the outcome */ }
     turns.delete(turn.turnId); if (byConversation.get(turn.conversationId) === turn) byConversation.delete(turn.conversationId);
     emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage,
@@ -577,7 +637,7 @@ function createClaudeChat(options) {
     const base = { turnId: turn.turnId, conversationId: turn.conversationId };
     if (isId(event.session_id) && (event.type === 'system' && event.subtype === 'init' || event.type === 'result') && turn.sessionId !== event.session_id) {
       turn.sessionId = event.session_id;
-      void store.update(turn.conversationId, { sessionId: turn.sessionId }).catch(() => {});
+      void store.update(turn.conversationId, { sessionId: turn.sessionId, rewound: false }).catch(() => {});
     }
     // (b) The concrete model the CLI ran for an alias; it names the version shown for that alias from the next status read.
     if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
@@ -663,7 +723,7 @@ function createClaudeChat(options) {
     for (const c of owned) c.retired = true;
     await Promise.all(owned.map(retire));
   }
-  const host = { version: 1, status: () => status(), list, history, send, stop, remove };
+  const host = { version: 1, status: () => status(), list, history, send, rewind, stop, remove };
   Object.defineProperties(host, { dispose: { value: dispose }, activeTurns: { value: () => turns.size } });
   return Object.freeze(host);
 }
@@ -677,13 +737,14 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
         !policy.validOrigin(session.origin) || !policy.navigationAllowed(session.origin, frame.url) || new URL(frame.url).href !== frame.url) fail('unavailable');
     return session;
   }
-  for (const action of ['status', 'list', 'history', 'send', 'stop', 'remove']) ipcMain.handle('arcane:claude-chat-' + action, async (event, ...args) => {
+  for (const action of ['status', 'list', 'history', 'send', 'rewind', 'stop', 'remove']) ipcMain.handle('arcane:claude-chat-' + action, async (event, ...args) => {
     try {
       const before = scope(event), host = getHost();
       if (!host) fail('unavailable');
       let input;
       if (action === 'status' || action === 'list') { if (args.length) fail('unavailable'); }
       else if (action === 'send') { if (args.length !== 1) fail('unavailable'); input = sendInput(args[0]); }
+      else if (action === 'rewind') { if (args.length !== 1) fail('unavailable'); input = rewindInput(args[0]); }
       else { if (args.length !== 1 || !isId(args[0])) fail('unavailable'); input = args[0]; }
       const response = input === undefined ? await host[action]() : await host[action](input);
       const after = getSession();
@@ -695,4 +756,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

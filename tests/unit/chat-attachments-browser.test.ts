@@ -314,7 +314,7 @@ test('Edge trusted filechooser: literal chips, quoted untrusted source and exact
   assert.equal(f.posts.length, 0); assert.equal(f.chooserCount(), 0);
   assert.equal(await page.locator('#workspace-add-context').getAttribute('type'), 'button');
   assert.equal(await page.locator('#workspace-add-context svg').count(), 1);
-  assert.equal(await page.locator('#codex-attachment-input').getAttribute('accept'), '.txt,.md,.lua,.luau,.json,.csv,.png');
+  assert.equal(await page.locator('#codex-attachment-input').getAttribute('accept'), '.txt,.md,.lua,.luau,.json,.csv,.png,.jpg,.jpeg,.webp');
   await choose(f, files);
   assert.equal(f.posts.length, 0, 'Choosing files does not submit or grant authority');
   assert.equal(await page.locator('#codex-composer').inputValue(), draft);

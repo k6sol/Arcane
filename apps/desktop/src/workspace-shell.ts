@@ -391,10 +391,27 @@ export class WorkspaceShell {
   }
 
   private bindShortcuts(): void {
+    // Advertise the shortcuts to assistive technology on the controls they act on.
+    for (const [id, keys] of [['codex-composer', 'Control+/'], ['claude-chat-input', 'Control+/'], ['codex-model-trigger', 'Control+Shift+M'], ['workspace-search', 'Control+K']] as const)
+      this.doc.getElementById(id)?.setAttribute('aria-keyshortcuts', keys);
+    for (const control of this.doc.querySelectorAll<HTMLElement>('[data-workspace-target]')) if (control.getAttribute('data-workspace-target') === 'workspace-settings') control.setAttribute('aria-keyshortcuts', 'Control+,');
     this.listen(this.doc, 'keydown', event => {
       const keyboard = event as KeyboardEvent;
-      if (event.defaultPrevented || keyboard.isComposing || keyboard.repeat || keyboard.altKey || keyboard.shiftKey || !(keyboard.ctrlKey || keyboard.metaKey)) return;
+      if (event.defaultPrevented || keyboard.isComposing || keyboard.altKey) return;
+      if (keyboard.key === 'Escape') { if (!keyboard.ctrlKey && !keyboard.metaKey && !keyboard.shiftKey && this.closePopover()) event.preventDefault(); return; }
+      if (keyboard.repeat || !(keyboard.ctrlKey || keyboard.metaKey)) return;
       const key = keyboard.key.toLowerCase();
+      // Another modal (settings or a confirmation) owns the keyboard; only Ctrl+/ may leave settings for the composer.
+      const modal = this.openDialog(), settingsOnly = !modal || modal === this.settingsDialog();
+      if (keyboard.shiftKey) {
+        if (key === 'm' && !modal) {
+          const trigger = this.doc.getElementById('codex-model-trigger') as HTMLButtonElement | null;
+          if (!this.shown(trigger) || trigger.disabled) return;
+          event.preventDefault();
+          if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+        }
+        return;
+      }
       if (key === 'n' && this.doc.getElementById('new-chat')?.getAttribute('data-chat-action') !== 'new' && this.composer()) { event.preventDefault(); this.openComposer(); }
       if (key === 'k') {
         const search = this.doc.getElementById('workspace-search');
@@ -402,7 +419,48 @@ export class WorkspaceShell {
         if (!search || (editable && editable !== search && editable.getAttribute('contenteditable') !== 'false')) return;
         event.preventDefault(); this.focus(search); this.openSearch?.();
       }
+      if ((key === '/' || keyboard.code === 'Slash') && settingsOnly) {
+        const codex = this.composer(), claude = this.doc.getElementById('claude-chat-input');
+        if (this.shown(codex)) { event.preventDefault(); this.openComposer(); }
+        else if (this.shown(claude)) { event.preventDefault(); if (modal) this.closeSettings(false); claude.focus(); }
+      }
+      if (key === ',' && settingsOnly) { event.preventDefault(); this.navigate('workspace-settings'); }
+      if (key === 'w' && !modal) {
+        // Same control and rules as the visible tab's own close button: a disabled close (busy turn) stays closed.
+        for (const id of ['workspace-chat-tabs', 'claude-chat-tabs']) {
+          const strip = this.doc.getElementById(id), tab = Array.from(strip?.querySelectorAll<HTMLElement>('button') ?? []).find(node => node.getAttribute('role') === 'tab' && node.getAttribute('aria-selected') === 'true');
+          if (!this.shown(strip) || !tab) continue;
+          const close = Array.from(tab.parentElement?.children ?? []).find(node => node !== tab && node.tagName === 'BUTTON') as HTMLButtonElement | undefined;
+          if (close && !close.disabled) { event.preventDefault(); close.click(); }
+          return;
+        }
+      }
     });
+  }
+
+  /** Visible to the person: present, not inside a hidden or inert subtree, and laid out. */
+  private shown(element: Element | null): element is HTMLElement {
+    if (!element || element.closest('[hidden], [inert]')) return false;
+    const rects = (element as HTMLElement).getClientRects?.();
+    return !rects || rects.length > 0;
+  }
+
+  private openDialog(): HTMLDialogElement | null {
+    return Array.from(this.doc.querySelectorAll<HTMLDialogElement>('dialog')).find(dialog => dialog.hasAttribute('open')) ?? null;
+  }
+
+  /** Escape outside a popover closes the open one, using the same control a click would. */
+  private closePopover(): boolean {
+    if (this.openDialog()) return false;
+    const picker = this.doc.getElementById('codex-model-popover'), trigger = this.doc.getElementById('codex-model-trigger') as HTMLButtonElement | null;
+    if (picker && !picker.hidden && trigger && !trigger.disabled) { trigger.click(); trigger.focus(); return true; }
+    for (const menu of this.doc.querySelectorAll<HTMLDetailsElement>('details')) {
+      if (!menu.open || !(menu.classList.contains('chat-tabs-history') || menu.classList.contains('tool-switcher'))) continue;
+      menu.open = false; menu.querySelector<HTMLElement>('summary')?.focus(); return true;
+    }
+    const dock = Array.from(this.doc.getElementById('studio-diagnostics')?.querySelectorAll<HTMLButtonElement>('button') ?? []).find(node => node.getAttribute('aria-expanded') === 'true');
+    if (dock) { dock.click(); dock.focus(); return true; }
+    return false;
   }
 
   private notice(message: string): void {

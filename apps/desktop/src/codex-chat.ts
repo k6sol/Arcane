@@ -498,11 +498,15 @@ export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger
  * Shared assistant text rendering for both providers. Plain text stays one pre.message-text. Text with ``` fences becomes
  * div.message-text.claude-message-body holding <p> paragraphs and <pre><code> blocks. DOM nodes and textContent only.
  */
-export function renderMessageText(doc:Document,value:string):HTMLElement {
+export function renderMessageText(doc:Document,value:string,options:ChoiceBlockOptions={}):HTMLElement {
   if(!value.includes('```')){const pre=doc.createElement('pre');pre.className='message-text';pre.textContent=value;return pre;}
   const box=doc.createElement('div');box.className='message-text claude-message-body';box.dataset.format='rich';
-  value.split('```').forEach((part,index)=>{
+  value.split('```').forEach((part,index,parts)=>{
     if(index%2===1){
+      // A complete arcane-choices / arcane-plan fence becomes buttons; anything that does not validate stays a code block.
+      const marker=/^(arcane-(?:choices|plan))[ \t]*(?:\r?\n|(?=\{))/.exec(part);
+      const block=marker&&index<parts.length-1?parseChoiceBlock(marker[1]!,part.slice(marker[0].length)):null;
+      if(block){box.append(renderChoiceBlock(doc,block,options));return;}
       let code=part,language='';const newline=code.indexOf('\n');
       if(newline>=0&&/^[A-Za-z0-9_+#.-]{0,32}$/.test(code.slice(0,newline).trim())){language=code.slice(0,newline).trim();code=code.slice(newline+1);}
       const pre=doc.createElement('pre'),element=doc.createElement('code');element.textContent=code.replace(/\n$/,'');
@@ -513,6 +517,82 @@ export function renderMessageText(doc:Document,value:string):HTMLElement {
       const p=doc.createElement('p');p.textContent=trimmed;box.append(p);
     }
   });
+  return box;
+}
+// ---- Interactive choices (both providers): an assistant reply may end with a small fenced JSON block that asks the user to
+// pick an option (```arcane-choices {"question":"…","options":["…"]}```) or to approve a plan (```arcane-plan {"steps":["…"]}```).
+// The JSON is validated strictly and shown with textContent only; a click is the user's explicit answer and sends exactly one
+// message. Anything that does not validate stays an ordinary code block.
+export const CHOICE_BLOCK_LIMITS=Object.freeze({bytes:4096,question:300,option:120,minOptions:2,options:6,step:300,steps:12});
+export type ChoiceBlock={kind:'choices';question:string;options:string[]}|{kind:'plan';steps:string[]};
+export interface ChoiceBlockOptions {
+  /** Sends `answer` as the user's next message; returns true when it was sent or queued. Absent: the block is display-only. */
+  choose?:(answer:string)=>boolean;
+}
+/** The message an "Approve plan" click sends, and the text "Change plan" writes into the message box (never sent). */
+export const PLAN_APPROVE_TEXT='I approve the plan. Go ahead.', PLAN_CHANGE_TEXT='Please change the plan: ';
+const choiceText=(value:unknown,max:number):string|null=>typeof value==='string'&&value.length<=max&&!/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/u.test(value)&&value.trim()?value.trim():null;
+const exactKeys=(value:unknown,keys:readonly string[]):value is Record<string,unknown>=>{
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.getPrototypeOf(value)!==Object.prototype)return false;
+  const own=Object.keys(value);return own.length===keys.length&&keys.every(key=>own.includes(key));
+};
+/** Strict parse of one arcane-choices / arcane-plan fence body; null on any problem (the caller then shows plain text). */
+export function parseChoiceBlock(language:string,body:string):ChoiceBlock|null {
+  if(typeof body!=='string'||utf8(body)>CHOICE_BLOCK_LIMITS.bytes)return null;
+  let value:unknown;try{value=JSON.parse(body);}catch{return null;}
+  const strings=(list:unknown,min:number,max:number,chars:number):string[]|null=>{
+    if(!Array.isArray(list)||list.length<min||list.length>max)return null;
+    const out=list.map(item=>choiceText(item,chars));
+    if(out.some(item=>item===null))return null;
+    return new Set(out.map(item=>item!.toLocaleLowerCase())).size===out.length?out as string[]:null;
+  };
+  if(language==='arcane-choices'&&exactKeys(value,['question','options'])){
+    const question=choiceText(value.question,CHOICE_BLOCK_LIMITS.question),options=strings(value.options,CHOICE_BLOCK_LIMITS.minOptions,CHOICE_BLOCK_LIMITS.options,CHOICE_BLOCK_LIMITS.option);
+    return question&&options?{kind:'choices',question,options}:null;
+  }
+  if(language==='arcane-plan'&&exactKeys(value,['steps'])){
+    const steps=strings(value.steps,1,CHOICE_BLOCK_LIMITS.steps,CHOICE_BLOCK_LIMITS.step);
+    return steps?{kind:'plan',steps}:null;
+  }
+  return null;
+}
+function closeChoiceBlock(box:HTMLElement,state:'answered'|'closed'):void {
+  box.dataset.state=state;
+  for(const button of Array.from(box.querySelectorAll<HTMLButtonElement>('button')))button.disabled=true;
+}
+/** A later user message answers or supersedes every open choice block above it. */
+export function closeChoiceBlocks(root:{querySelectorAll?:(selector:string)=>ArrayLike<Element>|Iterable<Element>}|null):void {
+  for(const box of Array.from(root?.querySelectorAll?.('.chat-choices')??[]) as HTMLElement[])if(box.dataset.state==='open')closeChoiceBlock(box,'closed');
+}
+/** Buttons for one validated block. Plan: "Approve plan" sends PLAN_APPROVE_TEXT; "Change plan" only pre-fills the message box. */
+export function renderChoiceBlock(doc:Document,block:ChoiceBlock,options:ChoiceBlockOptions={}):HTMLElement {
+  const make=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string)=>{const node=doc.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
+  const box=make('section',undefined,'chat-choices');box.dataset.kind=block.kind;box.setAttribute('role','group');
+  box.dataset.state=options.choose?'open':'closed';
+  const status=make('p','','chat-choices-status');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+  if(block.kind==='plan'){
+    box.setAttribute('aria-label','Proposed plan');box.append(make('strong','Proposed plan','chat-choices-question'));
+    const list=make('ol',undefined,'chat-plan-steps');for(const step of block.steps)list.append(make('li',step));box.append(list);
+  } else {box.setAttribute('aria-label','Question: '+block.question);box.append(make('p',block.question,'chat-choices-question'));}
+  const actions=make('div',undefined,'chat-choices-actions');
+  const answer=(button:HTMLButtonElement,text:string)=>{
+    if(box.dataset.state!=='open'||!options.choose)return;
+    let accepted=false;try{accepted=options.choose(text)===true;}catch{accepted=false;}
+    if(!accepted){status.textContent='This answer could not be sent now. Try again when the chat is ready.';return;}
+    closeChoiceBlock(box,'answered');button.setAttribute('aria-pressed','true');status.textContent='Sent: '+text;
+  };
+  const button=(label:string,className:string,onClick:(node:HTMLButtonElement)=>void)=>{
+    const node=make('button',label,className);node.type='button';node.disabled=!options.choose;
+    node.addEventListener('click',()=>onClick(node));actions.append(node);return node;
+  };
+  if(block.kind==='plan'){
+    button('Approve plan','chat-choice chat-choice-primary',node=>answer(node,PLAN_APPROVE_TEXT));
+    button('Change plan','secondary chat-choice',()=>{
+      if(box.dataset.state!=='open')return;
+      if(prefillComposer(doc,PLAN_CHANGE_TEXT))status.textContent='Describe the change in the message box, then send it.';
+    });
+  } else for(const option of block.options)button(option,'secondary chat-choice',node=>answer(node,option));
+  box.append(actions,status);
   return box;
 }
 /** Shared selected-row check mark for model and reasoning options. */
@@ -1587,6 +1667,32 @@ export class CodexChat {
       await this.dispatch('turn-start',{threadId:live.threadId,text:message,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
+  /**
+   * A choice button click (an explicit answer). With an empty message box and an idle chat it is sent as the next message
+   * through the normal Send path; otherwise it is written into the message box for the user to send, so no draft or
+   * attachment is ever replaced or sent along with it.
+   */
+  private answerChoice(answer:string):boolean {
+    if(this.surfaceYielded||!this.providerAllowsCodex()||!answer.trim())return false;
+    const input=this.doc.getElementById('codex-composer') as HTMLTextAreaElement|null;
+    if(!input)return false;
+    let plain=false;
+    try{plain=!input.value.trim()&&(this.attachments?.prepareText(answer)??answer)===answer&&!(this.attachments?.prepareReferences().length);}catch{plain=false;}
+    if(plain&&!this.preparingMessage&&this.messageTargetReady()&&!this.draftNeedsReview()){
+      const EventType=this.doc.defaultView?.Event??Event;
+      input.value=answer;input.dispatchEvent(new EventType('input',{bubbles:true}));void this.submitMessage();return true;
+    }
+    if(!prefillComposer(this.doc,answer))return false;
+    this.text('codex-notice','Your answer is in the message box. Send it when ready.');
+    return true;
+  }
+  /** Saved native threads cannot be rewound from Arcane, so a past message is copied into the message box as a new message. */
+  private editAsNewButton(text:string):HTMLButtonElement {
+    const button=this.make('button','Edit as new message','quiet chat-message-edit');button.type='button';
+    button.title='Copy this message into the message box to edit and send it as a new message. Earlier replies are kept.';
+    button.addEventListener('click',()=>{if(!this.surfaceYielded&&prefillComposer(this.doc,text))this.text('codex-notice','The message is in the message box. Edit it, then send it as a new message.');});
+    return button;
+  }
   private startConversation(event: Event) {
     const input = event as MouseEvent;
     if (!event.isTrusted || event.defaultPrevented || input.button !== 0 || input.altKey || input.ctrlKey || input.metaKey || input.shiftKey || !this.canStartConversation()) return;
@@ -2104,7 +2210,9 @@ export class CodexChat {
     // Studio changes are summarised once per turn, after that turn's last message.
     let turnChanges:ToolChange[]=[],turnKey:string|null=null;
     const flushChanges=()=>{const card=renderChangeCard(this.doc,turnChanges);if(card)messages.append(card);turnChanges=[];};
-    for(const message of displayedMessages){
+    // Choice buttons stay live only in replies after the last message the user sent.
+    const lastHuman=displayedMessages.findLastIndex(message=>message.role==='human');
+    for(const [index,message] of displayedMessages.entries()){
       const turn=message.key.split('\0')[1]??null;
       if(turn!==turnKey){flushChanges();turnKey=turn;}
       const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');
@@ -2117,7 +2225,8 @@ export class CodexChat {
         card.dataset.toolState=state;card.append(...renderToolActivity(this.doc,activity,state,this.api.safe(message.scope+(message.text?'\n'+message.text:''))));
         messages.append(card);continue;
       }
-      card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text)):this.make('pre',message.text,'message-text'));
+      card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text),index>lastHuman?{choose:answer=>this.answerChoice(answer)}:{}):this.make('pre',message.text,'message-text'));
+      if(message.role==='human'&&message.text.trim())card.append(this.editAsNewButton(message.text));
       if(message.acknowledgement){const acknowledgement=message.acknowledgement==='Native acknowledgement: acknowledged'?'Accepted':message.acknowledgement==='Native acknowledgement: rejected'?'Not accepted':'Awaiting confirmation';card.append(this.make('p',acknowledgement,'message-acknowledgement'));}
       const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));card.append(metadata);messages.append(card);
     }

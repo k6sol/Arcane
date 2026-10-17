@@ -513,3 +513,33 @@ test('duplicate starts share bindings and pagehide/pageshow cycles cleanly rebin
   }
   f.untouched(); shell.cleanup(); assert.equal(f.doc.allListenerCount, baseline);
 });
+
+test('discoverable shortcuts focus the composer, open the model picker, close the current tab and dismiss popovers through existing controls', () => {
+  const f = fixture();
+  const trigger = f.add('button', 'codex-model-trigger'), popover = f.add('div', 'codex-model-popover');
+  let picks = 0; trigger.addEventListener('click', () => { picks++; popover.hidden = !popover.hidden; trigger.setAttribute('aria-expanded', String(!popover.hidden)); });
+  popover.hidden = true; trigger.setAttribute('aria-expanded', 'false');
+  const strip = f.add('div', 'workspace-chat-tabs'), wrap = f.add('span', '', strip), tab = f.add('button', '', wrap, 'Chat 1'), close = f.add('button', '', wrap, '×');
+  tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', 'true');
+  let closes = 0; close.addEventListener('click', () => closes++);
+  f.composer.value = 'Keep this draft';
+  const shell = startWorkspaceShell(f.doc.document);
+  // Advertised to assistive technology on the controls themselves.
+  assert.equal(f.composer.getAttribute('aria-keyshortcuts'), 'Control+/'); assert.equal(trigger.getAttribute('aria-keyshortcuts'), 'Control+Shift+M');
+  assert.equal(f.search.getAttribute('aria-keyshortcuts'), 'Control+K');
+  assert.equal(f.search.key('/', { ctrlKey: true }).defaultPrevented, true); assert.equal(f.doc.activeElement, f.composer);
+  assert.equal(f.composer.value, 'Keep this draft'); assert.equal(f.inputs, 0);
+  assert.equal(f.doc.body.key('M', { ctrlKey: true, shiftKey: true }).defaultPrevented, true); assert.equal(picks, 1); assert.equal(popover.hidden, false);
+  assert.equal(f.doc.body.key('M', { ctrlKey: true, shiftKey: true }).defaultPrevented, true); assert.equal(picks, 1, 'An open picker stays open');
+  assert.equal(f.doc.body.key('Escape').defaultPrevented, true); assert.equal(popover.hidden, true); assert.equal(picks, 2); assert.equal(f.doc.activeElement, trigger);
+  assert.equal(f.doc.body.key('Escape').defaultPrevented, false, 'Nothing open: Escape is left alone');
+  assert.equal(f.doc.body.key('w', { ctrlKey: true }).defaultPrevented, true); assert.equal(closes, 1);
+  close.disabled = true; assert.equal(f.doc.body.key('w', { ctrlKey: true }).defaultPrevented, false); assert.equal(closes, 1, 'A busy tab keeps its close rule');
+  close.disabled = false; const dialog = f.add('dialog', 'confirm-dialog'); dialog.setAttribute('open', '');
+  assert.equal(f.doc.body.key('w', { ctrlKey: true }).defaultPrevented, false); assert.equal(f.doc.body.key('M', { ctrlKey: true, shiftKey: true }).defaultPrevented, false);
+  assert.equal(closes, 1); assert.equal(picks, 2); dialog.remove();
+  trigger.disabled = true; assert.equal(f.doc.body.key('M', { ctrlKey: true, shiftKey: true }).defaultPrevented, false);
+  assert.equal(f.doc.body.key(',', { ctrlKey: true }).defaultPrevented, true);
+  f.untouched(); shell.cleanup();
+  assert.equal(f.doc.body.key('w', { ctrlKey: true }).defaultPrevented, false); assert.equal(closes, 1);
+});

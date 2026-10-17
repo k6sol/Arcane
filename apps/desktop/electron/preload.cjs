@@ -196,7 +196,8 @@ const workspacePreferences = Object.freeze({ version: 1,
 });
 // In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
 const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
-  'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.'];
+  'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
+  'This message can no longer be edited.'];
 // The engine's one fixed usage-limit message (claude-chat.cjs MESSAGES.usageLimit); done events may carry it with a reset time.
 const CLAUDE_CHAT_USAGE_LIMIT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
 const claudeChatUnavailable = () => { throw new Error(CLAUDE_CHAT_ERRORS[0]); };
@@ -253,8 +254,14 @@ const claudeChatReply = (action, value) => {
     if (!claudeChatId(value.conversationId) || !claudeChatList(value.messages, 2000)) claudeChatUnavailable();
     return { conversationId: value.conversationId, messages: value.messages.map(claudeChatMessage) };
   }
+  if (action === 'rewind') {
+    if (!claudeChatId(value.conversationId) || !Number.isSafeInteger(value.kept) || value.kept < 0 || value.kept > 2000) claudeChatUnavailable();
+    return { conversationId: value.conversationId, kept: value.kept };
+  }
   if (!claudeChatId(value.turnId) || !claudeChatId(value.conversationId)) claudeChatUnavailable();
-  return { turnId: value.turnId, conversationId: value.conversationId };
+  // The saved id of the sent user message (lets the renderer offer Edit on it); older engines omit it.
+  if (value.messageId !== undefined && !claudeChatId(value.messageId)) claudeChatUnavailable();
+  return { turnId: value.turnId, conversationId: value.conversationId, ...(value.messageId === undefined ? {} : { messageId: value.messageId }) };
 };
 const claudeChatInvoke = async (action, args) => {
   let input;
@@ -266,6 +273,11 @@ const claudeChatInvoke = async (action, args) => {
     if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !claudeChatChoice(value.model) || !claudeChatChoice(value.effort)) claudeChatUnavailable();
     if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(CLAUDE_CHAT_ERRORS[4]);
     input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort };
+  } else if (action === 'rewind') {
+    const value = args[0];
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();
+    for (const key of ['conversationId', 'messageId']) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value') || !claudeChatId(d.value)) claudeChatUnavailable(); }
+    input = { conversationId: value.conversationId, messageId: value.messageId };
   } else { if (args.length !== 1 || !claudeChatId(args[0])) claudeChatUnavailable(); input = args[0]; }
   let value;
   try { value = await ipcRenderer.invoke('arcane:claude-chat-' + action, ...(input === undefined ? [] : [input])); }
@@ -296,6 +308,7 @@ const claudeChatEvent = value => {
 const claudeChat = Object.freeze({ version: 1,
   status: (...args) => claudeChatInvoke('status', args), list: (...args) => claudeChatInvoke('list', args),
   history: (...args) => claudeChatInvoke('history', args), send: (...args) => claudeChatInvoke('send', args),
+  rewind: (...args) => claudeChatInvoke('rewind', args),
   stop: (...args) => claudeChatInvoke('stop', args), remove: (...args) => claudeChatInvoke('remove', args),
   onEvent: listener => {
     if (typeof listener !== 'function') claudeChatUnavailable();
