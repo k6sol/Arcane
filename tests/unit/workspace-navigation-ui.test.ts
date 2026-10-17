@@ -122,7 +122,7 @@ test('Edge workspace navigator: ranked tools, keyboard selection, shared draft, 
       const style = getComputedStyle(document.documentElement);
       return ['--bg', '--text', '--accent'].map(name => style.getPropertyValue(name).trim());
     });
-    assert.deepEqual(palette, ['#faf9f5', '#141413', '#d97757']);
+    assert.deepEqual(palette, ['#f5f5f5', '#080808', '#ff3340']);
     for (const viewport of [{ width: 945, height: 618 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
       await page.evaluate(()=>(window as unknown as {navigationShell:{showConversation():void}}).navigationShell.showConversation());

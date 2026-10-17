@@ -74,7 +74,7 @@ function surface() {
   const submit = make('button', 'codex-submit'); submit.type = 'submit'; submit.append(svg);
   const composer = make('textarea', 'codex-composer');
   const form = make('form', 'codex-compose', 'composer', make('div', 'codex-attachments'), composer, make('div', '', 'composer-controls',
-    make('button', 'codex-model-trigger', 'composer-model-trigger', make('span', 'codex-model-provider', 'model-provider-tag'), make('span', 'codex-model-label'), make('span', 'codex-effort-label', 'picker-effort')),
+    make('button', 'codex-model-trigger', 'composer-model-trigger', make('span', 'codex-model-label'), make('span', 'codex-effort-label', 'picker-effort')),
     make('span', 'codex-model-picker-status'), make('button', 'workspace-add-context'), submit), make('div', 'codex-draft-review'));
   const popover = make('div', 'codex-model-popover', 'composer-model-popover',
     make('section', 'codex-picker-summary', 'picker-summary', make('strong', 'codex-picker-effort-value'), make('button', 'codex-picker-reset'),
@@ -87,7 +87,6 @@ function surface() {
     make('button', 'welcome-connect'), make('button', 'codex-conversation-start'), form, popover);
   doc.register(root);
   const el = (id: string) => doc.getElementById(id)!;
-  el('codex-model-provider').textContent = 'ChatGPT';
   el('codex-messages').clientHeight = 300;
   return { doc, root, el };
 }
@@ -168,11 +167,11 @@ test('activation takes over the shared surface and deactivation hands it back un
   assert.equal(f.chat.isActive(), true);
   assert.equal(f.input.value, '', 'the Claude tab draft is shown');
   for (const id of ['workspace-add-context', 'welcome-connect', 'codex-conversation-start']) assert.equal(f.el(id).hidden, true, id);
-  assert.equal(f.el('codex-model-provider').textContent, 'Claude');
+  assert.equal(f.doc.getElementById('codex-model-provider'), null, 'No provider tag: the model name carries the provider');
   assert.equal(f.tabs().length, 1); assert.equal(f.tabs()[0]!.textContent, 'New chat'); assert.equal(f.tabs()[0]!.getAttribute('aria-controls'), 'codex-messages');
   f.type('Claude draft');
   f.chat.deactivate();
-  assert.equal(f.el('workspace-add-context').hidden, false); assert.equal(f.el('codex-model-provider').textContent, 'ChatGPT');
+  assert.equal(f.el('workspace-add-context').hidden, false);
   f.input.value = 'Codex again'; key(f.input, 'Enter'); await tick(); assert.deepEqual(sends(b), []);
   f.chat.activate(); assert.equal(f.input.value, 'Claude draft', 'the Claude draft survives the round trip');
 });
@@ -182,8 +181,7 @@ test('the shared picker shows provider type, friendly model and reasoning, and c
   storage.setItem(CLAUDE_CHAT_CHOICE_KEY, JSON.stringify({ model: 'opus', effort: 'max' }));
   const f = mount(b.bridge, storage); t.after(() => f.chat.stop());
   await f.chat.refresh();
-  assert.equal(f.el('codex-model-provider').textContent, 'Claude');
-  assert.equal(f.el('codex-model-label').textContent, 'Opus'); assert.equal(f.el('codex-effort-label').textContent, 'max');
+  assert.equal(f.el('codex-model-label').textContent, 'Claude Opus', 'the full model name carries the provider'); assert.equal(f.el('codex-effort-label').textContent, 'max');
   assert.equal(f.el('codex-effort-label').hidden, false);
   assert.equal(f.trigger.getAttribute('aria-label'), 'Claude model: Claude Opus (opus), reasoning: Max');
   assert.equal(f.trigger.disabled, false); assert.equal(f.input.disabled, false);
@@ -208,7 +206,7 @@ test('the shared picker shows provider type, friendly model and reasoning, and c
   const search = f.el('codex-model-search'); search.value = 'hai'; search.dispatchEvent(new Event('input'));
   assert.deepEqual(options().map(row => row.textContent), ['Claude Haiku 4.5']);
   click(options()[0]!);
-  assert.equal(f.el('codex-model-label').textContent, 'Haiku 4.5'); assert.equal(f.el('codex-picker-summary').hidden, false);
+  assert.equal(f.el('codex-model-label').textContent, 'Claude Haiku 4.5'); assert.equal(f.el('codex-picker-summary').hidden, false);
   assert.deepEqual(JSON.parse(storage.data.get(CLAUDE_CHAT_CHOICE_KEY)!), { model: 'claude-haiku-4-5-20251001', effort: 'high' });
   key(f.el('codex-picker-current-model'), 'Escape'); // keydown bubbles from inside the popover
   f.el('codex-model-popover').dispatchEvent(Object.assign(new Event('keydown'), { key: 'Escape' }));
@@ -218,7 +216,7 @@ test('the shared picker shows provider type, friendly model and reasoning, and c
   const denied = { getItem: () => { throw Error('denied'); }, setItem: () => { throw Error('denied'); } };
   const g = mount(fakeBridge().bridge, denied); t.after(() => g.chat.stop());
   await g.chat.refresh();
-  assert.equal(g.el('codex-model-label').textContent, 'Sonnet', 'falls back to the reported default'); assert.equal(g.el('codex-effort-label').textContent, 'high');
+  assert.equal(g.el('codex-model-label').textContent, 'Claude Sonnet', 'falls back to the reported default'); assert.equal(g.el('codex-effort-label').textContent, 'high');
   click(g.trigger); assert.doesNotThrow(() => click(g.el('codex-picker-reset')));
 });
 
@@ -322,7 +320,7 @@ test('Saved chats list newest first; opening adds a tab, loads history and ignor
   const code = rich.querySelector('code')!; assert.equal(code.textContent, 'print(1)'); assert.equal(code.getAttribute('data-language'), 'lua');
   assert.equal(rich.className, 'message-text claude-message-body');
   assert.deepEqual(f.tabs().map(tab => [tab.textContent, tab.getAttribute('aria-selected')]), [['Old chat', 'false'], ['Newer chat', 'true']]);
-  assert.equal(f.el('codex-model-label').textContent, 'Opus'); assert.equal(f.el('codex-effort-label').textContent, 'max', 'conversation choice is applied');
+  assert.equal(f.el('codex-model-label').textContent, 'Claude Opus'); assert.equal(f.el('codex-effort-label').textContent, 'max', 'conversation choice is applied');
   assert.deepEqual(JSON.parse(storage.data.get(CLAUDE_CHAT_TABS_KEY)!), { version: 1, open: ['old', 'new'], active: 'new' });
   // Tabs switch, close and keep per-tab drafts.
   f.type('half-written');
@@ -585,7 +583,8 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   await page.locator('#codex-messages .codex-message.codex').waitFor();
   await page.locator('#codex-composer').fill('Codex draft stays put');
   const trigger = () => page.locator('#codex-model-trigger').innerText();
-  assert.match(await trigger(), /ChatGPT\s*GPT-6\.1-Sol\s*low/);
+  assert.match(await trigger(), /^GPT-6\.1-Sol\s*low$/);
+  assert.equal(await page.locator('#codex-model-provider').count(), 0, 'No provider tag: the model name carries the provider');
   assert.equal(await page.locator('#codex-messages .codex-message.codex pre code').innerText(), 'local lobby = workspace.Lobby', 'Codex fenced code renders as a code block');
   await page.screenshot({ path: join(shots, 'codex-mode.png') });
   await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-summary').waitFor();
@@ -603,7 +602,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   assert.equal(await page.locator('#codex-composer').inputValue(), '', 'the Codex draft is not shown in Claude');
   assert.equal(await page.locator('#workspace-chat-tabs').isVisible(), false);
   assert.deepEqual(await page.locator('#claude-chat-tabs [role=tab]').allInnerTexts(), ['Lobby plan']);
-  assert.match(await trigger(), /Claude\s*Opus\s*high/);
+  assert.match(await trigger(), /^Claude Opus\s*high$/);
   assert.equal(await page.locator('#codex-messages .codex-message.codex pre code').innerText(), 'local lobby = workspace.Lobby');
   assert.equal(await page.locator('#codex-messages .codex-message.codex p').innerText(), 'Here is the lobby plan.');
   assert.deepEqual(await layout(), codexLayout, 'composer and New chat keep the exact Codex geometry');
@@ -616,7 +615,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   assert.deepEqual(await page.locator('#codex-model-options .picker-model-option').allInnerTexts(), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku']);
   await page.screenshot({ path: join(shots, 'claude-models.png') });
   await page.locator('#codex-model-options [data-picker-model="sonnet"]').click();
-  assert.match(await trigger(), /Claude\s*Sonnet\s*high/); await page.keyboard.press('Escape');
+  assert.match(await trigger(), /^Claude Sonnet\s*high$/); await page.keyboard.press('Escape');
   await page.locator('#codex-composer').fill('Add a spawn pad'); await page.locator('#codex-composer').press('Enter');
   await page.waitForFunction(() => (window as any).fx.calls.length === 1);
   assert.deepEqual(await page.evaluate(() => (window as any).fx.calls[0]), { conversationId: 'conv-lobby', text: 'Add a spawn pad', model: 'sonnet', effort: 'high' });
@@ -626,6 +625,6 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   await page.waitForFunction(() => document.getElementById('claude-chat-tabs')!.hidden);
   assert.equal(await page.locator('#codex-composer').inputValue(), 'Codex draft stays put');
   assert.equal(await page.locator('#codex-messages .codex-message.human').count(), 0);
-  assert.match(await trigger(), /ChatGPT\s*GPT-6\.1-Sol\s*low/);
+  assert.match(await trigger(), /^GPT-6\.1-Sol\s*low$/, 'Codex model name replaces the Claude label');
   assert.deepEqual(errors, []);
 });

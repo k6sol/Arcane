@@ -596,7 +596,7 @@ function pngPixels(png: Buffer) {
   return { width, height, rgb: (x: number, y: number) => [...pixels.subarray(y * stride + x * channels, y * stride + x * channels + 3)] };
 }
 
-test('actual Edge native range fills to the thumb centre with flat soft red, Ultra-only blue-purple and dark remainder', { skip: !browserModule, timeout: 30000 }, async t => {
+test('actual Edge native range fills to the thumb centre with flat Arcane red, Ultra-only crimson-to-red and dark remainder', { skip: !browserModule, timeout: 30000 }, async t => {
   const initial = state(); initial.snapshot!.models[0]!.efforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']; initial.workflowModel = workflowNativeModel(initial)!.proof;
   const levels = initial.snapshot!.models[0]!.efforts, lastIndex = levels.length - 1;
   const f = await browserFixture(t, initial), { page } = f;
@@ -615,16 +615,16 @@ test('actual Edge native range fills to the thumb centre with flat soft red, Ult
     assert.ok(Math.abs(parseFloat(computed.position) / 100 - fraction) < 0.000001);
     assert.equal(parseFloat(computed.offset), fraction * 24);
     assert.ok(Math.abs(12 + computed.width * parseFloat(computed.position) / 100 - parseFloat(computed.offset) - thumbCentre) < 0.001);
-    assert.equal(computed.fill, effort === 'ultra' ? '#5772f4' : '#de7185'); assert.equal(computed.end, effort === 'ultra' ? '#aa6bea' : '#de7185'); assert.equal(computed.rest, '#303038');
+    assert.equal(computed.fill, effort === 'ultra' ? '#9b0b22' : '#ff3340'); assert.equal(computed.end, effort === 'ultra' ? '#ff6b75' : '#ff3340'); assert.equal(computed.rest, '#2a2a30');
     const png = await slider.screenshot(), pixels = pngPixels(png), y = Math.floor(pixels.height / 2);
     const near = (value: number[], expected: number[]) => assert.ok(value.every((channel, i) => Math.abs(channel - expected[i]!) <= 3), JSON.stringify({ value, expected, index }));
-    if (index < lastIndex) near(pixels.rgb(Math.floor((thumbCentre + 18 + pixels.width - 5) / 2), y), [48, 48, 56]);
+    if (index < lastIndex) near(pixels.rgb(Math.floor((thumbCentre + 18 + pixels.width - 5) / 2), y), [42, 42, 48]);
     if (index > 0 && effort !== 'ultra') {
-      near(pixels.rgb(18, y), [222, 113, 133]); near(pixels.rgb(Math.floor(thumbCentre - 18), y), [222, 113, 133]);
+      near(pixels.rgb(18, y), [255, 51, 64]); near(pixels.rgb(Math.floor(thumbCentre - 18), y), [255, 51, 64]);
     }
     if (effort === 'ultra') {
       const left = pixels.rgb(18, y), right = pixels.rgb(pixels.width - 30, y);
-      assert.ok(left[2]! > left[0]! && right[2]! > right[0]!); assert.ok(right[0]! > left[0]! + 30, 'Actual Ultra pixels progress from blue to purple');
+      assert.ok(left[0]! > left[1]! + 60 && right[0]! > right[1]! + 60); assert.ok(right[0]! > left[0]! + 30, 'Actual Ultra pixels progress from deep crimson to bright red');
     }
     if (process.env.ARCANE_UI_SCREENSHOT) {
       await mkdir(resolve(process.env.ARCANE_UI_SCREENSHOT), { recursive: true });

@@ -101,5 +101,10 @@ el<HTMLFormElement>('selection').addEventListener('submit', event => {
     .finally(() => { busy = false; refresh.disabled = false; updateControls(); });
 });
 updateControls();
+// Mark the selected in-page section; the URL fragment carries the session and is never used for navigation state.
+const sections = typeof document.querySelectorAll === 'function' ? [...document.querySelectorAll<HTMLAnchorElement>('.sidebar nav a')] : [];
+const current = (link: HTMLAnchorElement | undefined) => { for (const item of sections) item.toggleAttribute('aria-current', item === link); link?.setAttribute('aria-current', 'page'); };
+for (const link of sections) link.addEventListener('click', () => current(link));
+current(sections[0]);
 if (!/^[a-f0-9]{64}$/.test(token)) { status.className = 'error'; status.textContent = 'Open provider connections from Arcane Settings, or use the session link printed by npm run start:lab. This tab has no valid local session.'; refresh.disabled = true; save.disabled = true; }
 else void api<State>('/v1/state').then(data => { state = data; render(); return probe(); }).catch(error => { status.className = 'error'; status.textContent = String(error); });

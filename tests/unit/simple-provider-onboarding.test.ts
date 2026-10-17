@@ -31,7 +31,7 @@ test('production onboarding keeps empty mounts, a minimal sign-in gate and conci
   assert.match(pickerSetup, /id="codex-picker-claude"[^>]*type="button"[^>]*data-workspace-target="provider-setup-panel">Claude CLI<\/button>/);
   assert.doesNotMatch(pickerSetup, /native terminal/);
   assert.match(html, /Claude Code opens in its native terminal\./);
-  assert.match(css, /--accent:#d97757/); assert.match(css, /var\(--accent\)/);
+  assert.match(css, /--accent:#ff3340/); assert.match(css, /var\(--accent\)/);
   assert.match(css, /font-family:"Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(css, /\[hidden\]\{display:none!important\}/);

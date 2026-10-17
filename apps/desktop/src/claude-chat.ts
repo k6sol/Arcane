@@ -282,7 +282,6 @@ export class ClaudeChat {
     this.closePicker();
     const attach = this.el('workspace-add-context'); if (attach && this.restoreAttach !== null) attach.hidden = this.restoreAttach;
     this.restoreAttach = null;
-    const provider = this.el('codex-model-provider'); if (provider) provider.textContent = 'ChatGPT';
     this.el('codex-messages')?.removeAttribute('aria-busy');
     this.active = false; this.tools.clear(); this.messageCount = 0;
     if (this.turn) { this.turn.bubble = null; }
@@ -674,8 +673,7 @@ export class ClaudeChat {
     const model = tab && models.includes(tab.model) ? tab.model : '', effort = tab && efforts.includes(tab.effort) ? tab.effort : '';
     const name = model ? claudeModelName(model) : null, enabled = this.pickerEnabled();
     const set = (id: string, value: string) => { const node = this.el(id); if (node && node.textContent !== value) node.textContent = value; };
-    set('codex-model-provider', 'Claude');
-    set('codex-model-label', name?.short ?? 'Choose model');
+    set('codex-model-label', name?.full ?? 'Choose model');
     set('codex-effort-label', effort); const effortLabel = this.el('codex-effort-label'); if (effortLabel) effortLabel.hidden = !effort;
     const trigger = this.el<HTMLButtonElement>('codex-model-trigger');
     if (trigger) {

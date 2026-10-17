@@ -1,62 +1,63 @@
-/* Claude design tokens: warm ivory surfaces, soft warm-gray type, one clay accent.
-   Light is the default; dark (the desktop default) is a deep espresso lit by ember glows. Premium tokens live in the layer below. */
+/* Arcane design tokens: deep black surfaces, white type and one Arcane red.
+   Dark is the default; light (prefers-color-scheme:light) keeps white surfaces, black type and the same red.
+   Premium tokens (glass, glow, gradients) live in the layer at the end of this file. */
 :root{
-  color-scheme:light dark;
-  --font-ui:"Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif;
-  --font-display:"Tiempos Text","Source Serif 4",Georgia,"Times New Roman",serif;
+  color-scheme:dark light;
+  --font-ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif;
+  --font-display:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif;
   --font-mono:ui-monospace,"Cascadia Code",Consolas,"SFMono-Regular",Menlo,monospace;
   --radius-sm:8px;--radius:10px;--radius-lg:12px;--radius-xl:18px;
-  --bg:#faf9f5;--panel:#f0eee6;--raised:#ffffff;--input:#ffffff;--sunken:#f5f4ee;--hover:#e9e7de;--hover-strong:#dedbd0;--user-bubble:#f0eee6;
-  --line:#e8e6dc;--line-strong:#8a8880;
-  --text:#141413;--text-secondary:#5e5d59;--muted:#63625c;
-  --accent:#d97757;--accent-hover:#c6613f;--accent-tint:#f5e6df;--accent-line:#e3bfae;--accent-text:#9c4728;
-  --action:#b4532f;--action-hover:#9f4727;--on-accent:#ffffff;--focus-ring:#c6613f;
-  --warning:#8a5a00;--warning-bg:#faf0dc;--warning-line:#d9b36a;
-  --danger:#b3261e;--danger-bg:#fbe9e7;--danger-line:#e3a59f;
-  --success:#2f6b3a;--success-bg:#e7f2e6;--success-line:#9cc7a1;
-  --info:#3b5ba9;--info-bg:#e8edf8;--info-line:#a9b9e0;
-  --scrim:rgba(20,20,19,.32);--shadow-color:rgba(20,20,19,.08);
-  --shadow-sm:0 1px 2px rgba(20,20,19,.05);
-  --shadow-md:0 1px 3px rgba(20,20,19,.04),0 4px 16px rgba(20,20,19,.06);
-  --shadow-lg:0 2px 6px rgba(20,20,19,.05),0 16px 40px rgba(20,20,19,.10);
-  --scrollbar-thumb:#cfccc1;--scrollbar-track:transparent;
+  --bg:#080808;--panel:#0d0d0f;--raised:#18181b;--input:#0d0d0f;--sunken:#0a0a0b;--hover:#1c1c20;--hover-strong:#27272c;--user-bubble:#1a0b0e;
+  --line:rgba(255,255,255,.08);--line-strong:rgba(255,255,255,.14);--field-line:rgba(255,255,255,.2);
+  --text:#f5f5f5;--text-secondary:#b8b8bd;--muted:#8d8d94;
+  --accent:#ff3340;--accent-hover:#ff4d57;--accent-deep:#c8102e;--accent-dark:#5c0712;--accent-tint:rgba(255,51,64,.12);--accent-line:rgba(255,51,64,.38);--accent-text:#ff4d57;
+  --action:#d4152b;--action-hover:#e01b2c;--on-accent:#ffffff;--focus-ring:#ff3340;
+  --warning:#f0b85a;--warning-bg:#1f170a;--warning-line:#6e5524;
+  --danger:#ff7a82;--danger-bg:#24090d;--danger-line:#7a2630;
+  --success:#7fd49a;--success-bg:#0d1c12;--success-line:#2f6a44;
+  --info:#b8b8bd;--info-bg:#18181b;--info-line:#3a3a40;
+  --scrim:rgba(0,0,0,.66);--shadow-color:rgba(0,0,0,.6);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  --shadow-md:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.4);
+  --shadow-lg:0 2px 6px rgba(0,0,0,.45),0 24px 60px rgba(0,0,0,.6);
+  --scrollbar-thumb:#2c2c31;--scrollbar-track:transparent;
   --ease:cubic-bezier(.2,0,0,1);
 }
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme=light]){
-    --bg:#151210;--panel:#1c1815;--raised:#241f1b;--input:#110e0c;--sunken:#100d0b;--hover:#2d2621;--hover-strong:#3b322b;--user-bubble:#2b1f19;
-    --line:#352d27;--line-strong:#8a7e73;
-    --text:#f7f0e8;--text-secondary:#d3c7ba;--muted:#ab9e91;
-    --accent:#d97757;--accent-hover:#e58b69;--accent-tint:#3a2219;--accent-line:#7d4631;--accent-text:#f4ad8d;
-    --action:#b4532f;--action-hover:#9e4a1c;--on-accent:#ffffff;--focus-ring:#f0a07e;
-    --warning:#e9b862;--warning-bg:#33281a;--warning-line:#7a6234;
-    --danger:#f59a8e;--danger-bg:#3a1f1b;--danger-line:#8a4a43;
-    --success:#93d0a0;--success-bg:#1d2e22;--success-line:#4f7a59;
-    --info:#a3baf2;--info-bg:#1f2638;--info-line:#4d5f8f;
-    --scrim:rgba(8,6,5,.6);--shadow-color:rgba(0,0,0,.45);
-    --shadow-sm:0 1px 2px rgba(0,0,0,.3);
-    --shadow-md:0 1px 3px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.32);
-    --shadow-lg:0 2px 6px rgba(0,0,0,.35),0 24px 60px rgba(0,0,0,.5);
-    --scrollbar-thumb:#4a4038;
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]){
+    --bg:#f5f5f5;--panel:#fafafa;--raised:#ffffff;--input:#ffffff;--sunken:#f0f0f1;--hover:#ececee;--hover-strong:#e0e0e3;--user-bubble:#fff0f1;
+    --line:rgba(8,8,8,.09);--line-strong:rgba(8,8,8,.16);--field-line:rgba(8,8,8,.24);
+    --text:#080808;--text-secondary:#3f3f46;--muted:#5f5f66;
+    --accent:#ff3340;--accent-hover:#ff4d57;--accent-tint:rgba(255,51,64,.08);--accent-line:rgba(200,16,46,.3);--accent-text:#c8102e;
+    --action:#d4152b;--action-hover:#c8102e;--on-accent:#ffffff;--focus-ring:#c8102e;
+    --warning:#8a5a00;--warning-bg:#fbf3e2;--warning-line:#d9b36a;
+    --danger:#b3261e;--danger-bg:#fdecec;--danger-line:#e8a3a3;
+    --success:#2f6b3a;--success-bg:#e9f4ea;--success-line:#9cc7a1;
+    --info:#3f3f46;--info-bg:#f0f0f1;--info-line:#c9c9cf;
+    --scrim:rgba(8,8,8,.32);--shadow-color:rgba(8,8,8,.1);
+    --shadow-sm:0 1px 2px rgba(8,8,8,.06);
+    --shadow-md:0 1px 3px rgba(8,8,8,.05),0 4px 16px rgba(8,8,8,.07);
+    --shadow-lg:0 2px 6px rgba(8,8,8,.06),0 16px 40px rgba(8,8,8,.12);
+    --scrollbar-thumb:#cfcfd4;
   }
 }
-:root[data-theme=dark]{
-  --bg:#151210;--panel:#1c1815;--raised:#241f1b;--input:#110e0c;--sunken:#100d0b;--hover:#2d2621;--hover-strong:#3b322b;--user-bubble:#2b1f19;
-  --line:#352d27;--line-strong:#8a7e73;
-  --text:#f7f0e8;--text-secondary:#d3c7ba;--muted:#ab9e91;
-  --accent:#d97757;--accent-hover:#e58b69;--accent-tint:#3a2219;--accent-line:#7d4631;--accent-text:#f4ad8d;
-  --action:#b4532f;--action-hover:#9e4a1c;--on-accent:#ffffff;--focus-ring:#f0a07e;
-  --warning:#e9b862;--warning-bg:#33281a;--warning-line:#7a6234;
-  --danger:#f59a8e;--danger-bg:#3a1f1b;--danger-line:#8a4a43;
-  --success:#93d0a0;--success-bg:#1d2e22;--success-line:#4f7a59;
-  --info:#a3baf2;--info-bg:#1f2638;--info-line:#4d5f8f;
-  --scrim:rgba(8,6,5,.6);--shadow-color:rgba(0,0,0,.45);
-  --shadow-sm:0 1px 2px rgba(0,0,0,.3);
-  --shadow-md:0 1px 3px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.32);
-  --shadow-lg:0 2px 6px rgba(0,0,0,.35),0 24px 60px rgba(0,0,0,.5);
-  --scrollbar-thumb:#4a4038;
+:root[data-theme=light]{
+  --bg:#f5f5f5;--panel:#fafafa;--raised:#ffffff;--input:#ffffff;--sunken:#f0f0f1;--hover:#ececee;--hover-strong:#e0e0e3;--user-bubble:#fff0f1;
+  --line:rgba(8,8,8,.09);--line-strong:rgba(8,8,8,.16);--field-line:rgba(8,8,8,.24);
+  --text:#080808;--text-secondary:#3f3f46;--muted:#5f5f66;
+  --accent:#ff3340;--accent-hover:#ff4d57;--accent-tint:rgba(255,51,64,.08);--accent-line:rgba(200,16,46,.3);--accent-text:#c8102e;
+  --action:#d4152b;--action-hover:#c8102e;--on-accent:#ffffff;--focus-ring:#c8102e;
+  --warning:#8a5a00;--warning-bg:#fbf3e2;--warning-line:#d9b36a;
+  --danger:#b3261e;--danger-bg:#fdecec;--danger-line:#e8a3a3;
+  --success:#2f6b3a;--success-bg:#e9f4ea;--success-line:#9cc7a1;
+  --info:#3f3f46;--info-bg:#f0f0f1;--info-line:#c9c9cf;
+  --scrim:rgba(8,8,8,.32);--shadow-color:rgba(8,8,8,.1);
+  --shadow-sm:0 1px 2px rgba(8,8,8,.06);
+  --shadow-md:0 1px 3px rgba(8,8,8,.05),0 4px 16px rgba(8,8,8,.07);
+  --shadow-lg:0 2px 6px rgba(8,8,8,.06),0 16px 40px rgba(8,8,8,.12);
+  --scrollbar-thumb:#cfcfd4;
 }
-:root{color-scheme:light dark;font-family:var(--font-ui);font-size:14px}
+:root{color-scheme:dark light;font-family:var(--font-ui);font-size:14px}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}button,input,select,textarea{font:inherit}button,a,input,select,textarea,summary{outline-offset:4px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent)}a{color:inherit;text-decoration:none}button{border:1px solid transparent;border-radius:7px;background:var(--accent);color:var(--on-accent);padding:10px 15px;font-weight:650;cursor:pointer;line-height:1.3}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:var(--raised);border-color:var(--line);color:var(--text)}.quiet{background:transparent;color:var(--muted);padding:5px 0;font-size:12px}.danger{color:var(--danger)}input:not([type=checkbox]),select,textarea{width:100%;min-width:0;color:var(--text);background:var(--input);border:1px solid var(--line-strong);border-radius:8px;padding:10px 11px}input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px;margin:0;flex-shrink:0}input[type=number]{font-variant-numeric:tabular-nums}textarea{resize:vertical;font:12px/1.65 var(--font-mono);tab-size:2}select{cursor:pointer}label{display:flex;flex-direction:column;gap:7px;font-size:12px;color:var(--muted)}fieldset{border:0;padding:0;margin:16px 0}legend{padding:0 0 10px;font-weight:600;color:var(--text);font-size:12px}h1,h2,h3,p{margin:0}h1{font-size:34px;letter-spacing:-1.3px;line-height:1.2;font-weight:650}h2{font-size:17px;letter-spacing:-.3px;font-weight:600}h3{font-size:14px;font-weight:600;overflow-wrap:anywhere}p{line-height:1.6}.hint,.muted{color:var(--muted)}.hint{font-size:12px;line-height:1.6;margin:10px 0}.eyebrow{font-size:10px;letter-spacing:1.7px;color:var(--muted);font-weight:650}.accent{color:var(--accent-text)}.mono,code,pre{font-family:var(--font-mono)}code{overflow-wrap:anywhere;color:var(--accent-text)}pre{margin:10px 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;font-size:11px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;max-height:380px;overflow:auto;tab-size:2}.topbar{height:72px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:40px;padding:0 32px;background:var(--panel)}.brand{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:750;letter-spacing:2px}.brand-mark{background:var(--accent);color:var(--on-accent);display:grid;place-items:center;width:30px;height:30px;border-radius:8px;font-size:21px;letter-spacing:-1px}.brand-detail{font-size:9px;letter-spacing:1px;font-weight:500;color:var(--muted);margin-left:10px}.topbar nav{display:flex;align-items:center;gap:26px;font-size:12px;height:100%}.topbar nav a{height:100%;display:flex;align-items:center;color:var(--muted);border-bottom:2px solid transparent}.topbar nav a[aria-current]{color:var(--text);border-color:var(--accent)}.topbar>.badge{margin-left:auto}.badge{display:inline-flex;align-items:center;border-radius:5px;padding:5px 8px;border:1px solid var(--line);font-size:10px;line-height:1.4;font-weight:650;white-space:nowrap}.neutral{color:var(--muted);background:var(--raised)}.good{color:var(--accent-text);background:var(--success-bg);border-color:var(--success-line)}.warning{color:var(--warning);background:var(--warning-bg);border-color:var(--warning-line)}.error{color:var(--danger);background:var(--accent-tint);border-color:var(--accent-line)}.small-label{font-size:9px;letter-spacing:1px;color:var(--muted)}main{padding:32px;max-width:1680px;margin:auto}.page-heading{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px}.page-heading .eyebrow{margin-bottom:8px}.page-heading .muted{margin-top:8px;font-size:13px}.refresh-tools{display:flex;align-items:center;gap:18px}.inline-check{display:flex;flex-direction:row;align-items:center;gap:9px;line-height:1.5}.notice{border:1px solid var(--line);border-radius:7px;background:var(--raised);padding:12px 15px;color:var(--muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}.notice.warning,.notice.error{color:inherit}.notice.error{color:var(--danger);background:var(--accent-tint);border-color:var(--accent-line)}.notice.warning{color:var(--warning);background:var(--warning-bg);border-color:var(--warning-line)}.project-strip{display:grid;grid-template-columns:minmax(200px,1fr) auto auto auto;gap:28px;padding:22px 0 26px}.project-strip p{font-size:12px;margin-top:5px;overflow-wrap:anywhere}.workbench{display:grid;grid-template-columns:310px minmax(0,1fr);gap:22px;align-items:start}.sidebar,.workspace-main{display:flex;flex-direction:column;gap:20px;min-width:0}.panel{border:1px solid var(--line);border-radius:10px;padding:22px;background:var(--panel);min-width:0}.compact{padding:20px}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}.section-heading h2>span{color:var(--text);margin-left:8px}.sidebar .section-heading h2{font-size:13px;color:var(--muted)}.section-heading .eyebrow{margin-bottom:7px}.identity{font-size:11px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 12px;margin:14px 0;line-height:1.5}.identity dt{color:var(--muted)}.identity dd{margin:0;overflow-wrap:anywhere;font-family:var(--font-mono)}.root-checks{display:grid;grid-template-columns:1fr;gap:9px}.root-checks label{flex-direction:row;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px}.grant-check{padding:12px 0;border-top:1px solid var(--line);color:var(--text)}#key-issue{width:100%}.key-result{border:1px solid var(--accent-line);background:var(--accent-tint);border-radius:7px;padding:13px;margin-top:18px}.instructions{margin-top:16px;font-size:11px}.instructions ol{padding-left:18px;color:var(--muted);line-height:1.7}.instructions li{margin:6px 0}.instructions code{font-size:10px}.evidence details{font-size:11px}.evidence pre{max-height:260px}summary{cursor:pointer;font-size:12px;color:var(--muted);line-height:1.6}.form-row{display:flex;align-items:flex-start;gap:14px}.form-row>label{flex:1;min-width:0}.form-row>.short-field{flex:0 0 92px}.reference-box{border:1px solid var(--line);border-radius:7px;background:var(--panel);padding:14px;margin:16px 0}.reference-heading{display:flex;align-items:center;justify-content:space-between}#ref-label{font-size:12px;margin-top:8px;overflow-wrap:anywhere}#selected-ref{max-height:145px;font-size:10px}#browse-parent-field{margin:12px 0}.button-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.button-row button{font-size:11px}.property-editor{display:grid;gap:9px}.property-row{display:grid;grid-template-columns:145px minmax(0,1fr);align-items:center;gap:12px}.property-row>label{flex-direction:row;align-items:center;gap:8px;font:11px var(--font-mono)}.property-row .vector{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.property-row input,.property-row select{font-size:11px;padding:8px}.property-row .baseline{grid-column:2;font-size:10px;color:var(--muted);margin-top:-5px;overflow-wrap:anywhere}.payload{margin-top:18px}.command-footer{display:flex;justify-content:space-between;align-items:center;gap:20px;border-top:1px solid var(--line);margin-top:18px;padding-top:16px}.command-footer .hint{margin:0;max-width:70%}.command-footer button{flex-shrink:0}#unknown-request{margin-top:15px}#unknown-request .button-row{margin-top:10px}.history-filter{flex-direction:row;align-items:center;gap:8px;font-size:11px}.history-filter select{width:auto;padding:7px;font-size:11px}.receipt-layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:20px}.command-history{max-height:780px;overflow:auto}.history-item{width:100%;text-align:left;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:7px;padding:12px;margin-bottom:8px;font-weight:400;display:block}.history-item[aria-pressed=true]{border-color:var(--accent);background:var(--accent-tint)}.history-item>span{display:block}.history-item .history-title{font:11px var(--font-mono);margin-bottom:7px}.history-item .history-meta{font-size:10px;color:var(--muted);margin-top:7px;overflow-wrap:anywhere}.history-item .badge{display:inline-flex}.empty{padding:22px 6px;color:var(--muted);font-size:12px;line-height:1.7}.receipt-inspector{border-left:1px solid var(--line);padding-left:20px;min-width:0}.receipt-inspector .section-heading{margin-bottom:10px}.receipt-inspector details{margin-top:14px}.receipt-nodes{display:flex;flex-direction:column;gap:8px;margin:16px 0}.node-row{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px}.node-row p{font-size:11px;overflow-wrap:anywhere}.node-row .node-meta{font:10px/1.7 var(--font-mono);color:var(--muted);margin:3px 0 8px}.node-row .button-row{gap:15px}.node-row button{font-size:10px}.diff-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}.diff-grid pre{max-height:240px}#mutation-preview{padding-top:20px;margin-top:20px;border-top:1px solid var(--line)}footer{display:flex;justify-content:space-between;gap:20px;padding-top:30px;font-size:9px;letter-spacing:1px;color:var(--muted)}dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:26px;width:min(600px,calc(100% - 32px));max-height:90vh;overflow:auto}dialog::backdrop{background:var(--bg);backdrop-filter:blur(3px)}dialog h2{margin:10px 0}dialog p{font-size:12px;color:var(--muted)}dialog pre{max-height:280px}.dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:22px}[hidden]{display:none!important}
 .build-panel{margin-top:22px}.build-tasks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.build-task{padding:15px;border:1px solid var(--line);border-radius:7px;background:var(--panel);min-width:0}.build-task .task-top{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:12px}.build-task .task-id{font:10px var(--font-mono);color:var(--muted)}.build-task p{font-size:11px;color:var(--muted);margin-top:8px;overflow-wrap:anywhere}.build-task details{margin-top:10px}.build-task pre{font-size:10px}
 @media(max-width:800px){.build-tasks{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.build-tasks{grid-template-columns:1fr}}
@@ -81,7 +82,7 @@
 @media(max-width:800px){.codex-layout{grid-template-columns:1fr}.codex-setup{border:0;padding-right:0;border-bottom:1px solid var(--line);padding-bottom:22px}.codex-setup>.form-row{flex-direction:row}.codex-messages{min-height:220px;max-height:480px}.codex-thread-controls{grid-template-columns:1fr 1fr}.codex-thread-controls h3,.codex-thread-controls label{grid-column:1/-1}}
 @media(max-width:560px){.codex-panel{padding:16px}.codex-panel>summary h2{font-size:21px}.codex-intro .button-row{gap:8px}.codex-layout{gap:18px}.codex-messages{padding:14px}.codex-approval{padding:14px}.codex-compose-footer{align-items:flex-start;flex-direction:column}#codex-submit{width:100%}.codex-thread-controls{grid-template-columns:1fr}.codex-thread-controls h3,.codex-thread-controls label{grid-column:auto}.codex-panel .badge{margin-left:0}}
 
-/* One conversation on warm ivory surfaces with a sparing clay accent. */
+/* One conversation on black surfaces with a sparing red accent. */
 :root{font-family:var(--font-ui)}
 .arcane-app{min-width:320px}.icon,.tool-icon{width:20px;height:20px;flex-shrink:0}.arcane-logo{width:40px;height:40px;color:var(--accent-text)}.roblox-icon{color:var(--info)}.blender-icon{color:var(--warning)}
 .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
@@ -184,16 +185,16 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
 ::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:var(--panel)}
 ::-webkit-scrollbar-thumb{background:var(--hover-strong);border:3px solid var(--line);border-radius:10px}
 ::-webkit-scrollbar-thumb:hover{background:var(--hover-strong)}
-.app-sidebar{scrollbar-width:thin;scrollbar-color:rgba(135,134,127,.28) transparent;scrollbar-gutter:stable}
-.app-sidebar:hover,.app-sidebar:focus-within{scrollbar-color:rgba(135,134,127,.65) transparent}
+.app-sidebar{scrollbar-width:thin;scrollbar-color:rgba(150,150,158,.28) transparent;scrollbar-gutter:stable}
+.app-sidebar:hover,.app-sidebar:focus-within{scrollbar-color:rgba(150,150,158,.65) transparent}
 @supports selector(::-webkit-scrollbar){
   html{scrollbar-color:auto}
   .app-sidebar,.app-sidebar:hover,.app-sidebar:focus-within{scrollbar-color:auto;scrollbar-width:auto}
 }
 .app-sidebar::-webkit-scrollbar{width:6px;height:6px}
 .app-sidebar::-webkit-scrollbar-track,.app-sidebar::-webkit-scrollbar-corner{background:transparent}
-.app-sidebar::-webkit-scrollbar-thumb{background:rgba(135,134,127,.28);border:0;border-radius:3px}
-.app-sidebar:hover::-webkit-scrollbar-thumb,.app-sidebar:focus-within::-webkit-scrollbar-thumb,.app-sidebar::-webkit-scrollbar-thumb:hover{background:rgba(135,134,127,.65)}
+.app-sidebar::-webkit-scrollbar-thumb{background:rgba(150,150,158,.28);border:0;border-radius:3px}
+.app-sidebar:hover::-webkit-scrollbar-thumb,.app-sidebar:focus-within::-webkit-scrollbar-thumb,.app-sidebar::-webkit-scrollbar-thumb:hover{background:rgba(150,150,158,.65)}
 @media(forced-colors:active){
   html,.app-sidebar,.app-sidebar:hover,.app-sidebar:focus-within,.codex-messages,.conversation-scroll,.artifact-stage,.artifact-files,pre{scrollbar-color:auto;scrollbar-width:auto}
   ::-webkit-scrollbar-thumb,::-webkit-scrollbar-thumb:hover{background:ButtonText;border-color:Canvas}
@@ -202,7 +203,7 @@ body.arcane-app{height:100svh;display:flex;flex-direction:column;overflow:hidden
   .arcane-app :where(button,a,input,select,textarea,summary,[role=button]):focus-visible,.workspace-search:focus-within,.artifact-stage .asset-previews figure[role="button"]:focus-visible{outline-color:Highlight}
 }
 
-/* Surfaces and the primary action come from the Claude design tokens at the top of this file. */
+/* Surfaces and the primary action come from the Arcane design tokens at the top of this file. */
 button{background:var(--action)}
 .app-sidebar{background:var(--panel)}
 .wordmark .arcane-logo,.welcome-logo .arcane-logo{filter:drop-shadow(0 0 14px transparent)}
@@ -811,18 +812,18 @@ body.arcane-app {
   margin:2px 0;padding:0;border:0;border-radius:0;background:transparent;
   accent-color:var(--accent);cursor:pointer;
 }
-.arcane-app #codex-picker-effort-slider {--effort-fill:#de7185;--effort-fill-end:#de7185;--effort-rest:#303038;--effort-fill-position:calc(12px + var(--effort-position,0%) - var(--effort-offset,0px))}
-.arcane-app #codex-picker-effort-slider[data-effort-tone=ultra] {--effort-fill:#5772f4;--effort-fill-end:#aa6bea}
+.arcane-app #codex-picker-effort-slider {--effort-fill:#ff3340;--effort-fill-end:#ff3340;--effort-rest:#2a2a30;--effort-fill-position:calc(12px + var(--effort-position,0%) - var(--effort-offset,0px))}
+.arcane-app #codex-picker-effort-slider[data-effort-tone=ultra] {--effort-fill:#9b0b22;--effort-fill-end:#ff6b75}
 .arcane-app #codex-picker-effort-slider::-webkit-slider-runnable-track {height:16px;border:0;border-radius:999px;background:linear-gradient(90deg,var(--effort-fill) 0%,var(--effort-fill-end) var(--effort-fill-position),var(--effort-rest) var(--effort-fill-position),var(--effort-rest) 100%)}
-.arcane-app #codex-picker-effort-slider::-webkit-slider-thumb {appearance:none;-webkit-appearance:none;width:24px;height:24px;margin-top:-4px;border:1px solid #fff9;border-radius:50%;background:#f8f8fc;box-shadow:0 2px 5px #0005}
+.arcane-app #codex-picker-effort-slider::-webkit-slider-thumb {appearance:none;-webkit-appearance:none;width:24px;height:24px;margin-top:-4px;border:1px solid #fff9;border-radius:50%;background:#f5f5f5;box-shadow:0 2px 6px #0007,0 0 0 3px rgba(255,51,64,.18)}
 .arcane-app #codex-picker-effort-slider::-moz-range-track {height:16px;border:0;border-radius:999px;background:var(--effort-rest)}
 .arcane-app #codex-picker-effort-slider::-moz-range-progress {height:16px;border:0;border-radius:999px;background:linear-gradient(90deg,var(--effort-fill),var(--effort-fill-end))}
-.arcane-app #codex-picker-effort-slider::-moz-range-thumb {width:22px;height:22px;border:1px solid #fff9;border-radius:50%;background:#f8f8fc;box-shadow:0 2px 5px #0005}
+.arcane-app #codex-picker-effort-slider::-moz-range-thumb {width:22px;height:22px;border:1px solid #fff9;border-radius:50%;background:#f5f5f5;box-shadow:0 2px 6px #0007,0 0 0 3px rgba(255,51,64,.18)}
 .arcane-app #codex-picker-effort-slider:disabled {cursor:not-allowed}
-.arcane-app #codex-picker-effort-slider:disabled::-webkit-slider-runnable-track {background:#46434d}
-.arcane-app #codex-picker-effort-slider:disabled::-webkit-slider-thumb {background:#bdb9c6;border-color:#bdb9c6}
-.arcane-app #codex-picker-effort-slider:disabled::-moz-range-track {background:#46434d}
-.arcane-app #codex-picker-effort-slider:disabled::-moz-range-thumb {background:#bdb9c6;border-color:#bdb9c6}
+.arcane-app #codex-picker-effort-slider:disabled::-webkit-slider-runnable-track {background:#3a3a40}
+.arcane-app #codex-picker-effort-slider:disabled::-webkit-slider-thumb {background:#8d8d94;border-color:#8d8d94}
+.arcane-app #codex-picker-effort-slider:disabled::-moz-range-track {background:#3a3a40}
+.arcane-app #codex-picker-effort-slider:disabled::-moz-range-thumb {background:#8d8d94;border-color:#8d8d94}
 .arcane-app .native-effort {min-width:0;color:var(--muted);font-size:11px}
 .arcane-app :is(#codex-picker-reset,#codex-picker-back) {
   align-self:flex-start;min-height:32px;padding:6px 2px;
@@ -960,7 +961,7 @@ body.arcane-app {
 @media(max-width:480px){.task-plan{margin:12px 0;padding:12px;border-radius:8px}.task-plan-review-button{width:100%}}
 .native-handoff-profile{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-block:12px}.native-handoff-profile label{display:grid;gap:6px}.native-handoff-profile select{width:100%;min-width:0}.native-handoff-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-block:10px;border-top:1px solid var(--border,var(--line))}.native-handoff-row span{min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--muted,var(--muted))}.native-handoff-row button{flex:none}@media(max-width:480px){.native-handoff-profile{grid-template-columns:1fr}.native-handoff-row{align-items:flex-start}}
 
-/* Claude design layer: calm editorial surfaces over the existing layout contracts.
+/* Base design layer: calm surfaces over the existing layout contracts.
    Colour, type, radius and depth only; grid areas, sizes and visibility rules stay above. */
 [hidden]{display:none!important}
 html{background:var(--bg);scrollbar-color:var(--scrollbar-thumb) var(--scrollbar-track)}
@@ -977,7 +978,7 @@ pre{background:var(--sunken);border-color:var(--line);border-radius:var(--radius
 .workspace-welcome h2,.key-setup-gate h2,.settings-page-heading,.settings-drawer-header h2,.artifact-empty h2,.tools-heading h2,.codex-panel>summary h2{font-family:var(--font-display);font-weight:500;letter-spacing:-.01em}
 .eyebrow,.small-label,.sidebar-label{color:var(--muted)}
 
-/* Controls: one clay primary action, quiet secondary surfaces. */
+/* Controls: one red primary action, quiet secondary surfaces. */
 button{background:var(--action);border-color:transparent;color:var(--on-accent);border-radius:var(--radius-sm);font-weight:550}
 button:disabled{opacity:.55}
 .secondary{background:var(--raised);border-color:var(--line-strong);color:var(--text)}
@@ -995,7 +996,7 @@ input[type=checkbox],input[type=radio],input[type=range]{accent-color:var(--acti
 .arcane-app :is(.badge,.status-text).error,.danger{color:var(--danger)}
 .history-item[aria-pressed=true],.work-task-card[aria-pressed=true]{border-color:var(--accent-line);background:var(--accent-tint)}
 
-/* Shell: ivory canvas, warm sidebar, thin borders. */
+/* Shell: black canvas, quiet sidebar, thin borders. */
 .arcane-app .app-main{background:var(--bg)}
 .arcane-app .app-sidebar{background:var(--panel);border-color:var(--line)}
 .arcane-app .wordmark{color:var(--text);font-family:var(--font-display);font-weight:500;letter-spacing:.06em}
@@ -1053,7 +1054,7 @@ input[type=checkbox],input[type=radio],input[type=range]{accent-color:var(--acti
 .arcane-app .chat-asset-card{background:var(--raised);border-color:var(--line);box-shadow:var(--shadow-sm)}
 .arcane-app .chat-asset-card[data-selected=true]{border-color:var(--accent);background:var(--accent-tint)}
 
-/* Composer: a raised ivory card with a clay focus edge and a round send action. */
+/* Composer: a raised card with a red focus edge and a round send action. */
 .arcane-app .workspace-stage .composer{background:var(--raised);border-color:var(--line);box-shadow:var(--shadow-md)}
 .arcane-app .workspace-stage .composer:focus-within{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-tint),var(--shadow-md)}
 .arcane-app .workspace-stage .composer textarea{background:transparent;color:var(--text);caret-color:var(--accent)}
@@ -1099,7 +1100,7 @@ input[type=checkbox],input[type=radio],input[type=range]{accent-color:var(--acti
 .viewer-toolbar{background:var(--panel)}
 .viewer-toolbar select,.viewer-toolbar button,.viewer-animation select,.viewer-animation button{background:var(--raised);border-color:var(--line-strong);color:var(--text)}
 
-/* Settings drawer: an ivory sheet with a warm index column and white cards. */
+/* Settings drawer: a sheet with an index column and cards. */
 .arcane-app .settings-drawer{background:var(--bg);border-color:var(--line);box-shadow:var(--shadow-lg);color:var(--text)}
 .arcane-app .settings-drawer::backdrop{background:var(--scrim);backdrop-filter:blur(3px)}
 .arcane-app .settings-drawer-header{background:var(--bg);border-color:var(--line)}
@@ -1124,7 +1125,7 @@ input[type=checkbox],input[type=radio],input[type=range]{accent-color:var(--acti
 #workflow-panel .arcane-workflow button[data-primary]{background:var(--action);border-color:var(--action);color:var(--on-accent)}
 #workflow-panel .arcane-workflow :focus-visible{outline-color:var(--focus-ring)}
 
-/* Interaction feedback: quiet warm hovers, short colour-only transitions. */
+/* Interaction feedback: quiet hovers, short colour-only transitions. */
 @media (hover:hover) and (pointer:fine){
   button:hover:not(:disabled){filter:none}
   .arcane-app :is(.nav-link,.icon-button,.tool-switcher>summary,.chat-tabs-history>button,.workspace-chat-tabs [role=tab]):hover{background:var(--hover);color:var(--text)}
@@ -1225,204 +1226,268 @@ button.claude-chat-delete[data-confirm=true]:hover:not(:disabled){background:var
   .claude-chat-composer:focus-within{outline:2px solid Highlight;outline-offset:2px}
   .claude-tool-chip::before{background:CanvasText;forced-color-adjust:none}
 }
-/* Premium layer: an ember-lit canvas, frosted glass surfaces and luminous hairline edges.
-   All light is static (no animated gradients). Colour, depth and type only; layout contracts stay above. */
+/* Premium layer: deep black lit by restrained crimson light, glass surfaces with hairline edges, white type, one red.
+   All light is static (no animated gradients, no images, no network fonts). Colour, depth and type only;
+   layout contracts stay above. */
 :root{
-  --grad-action:linear-gradient(135deg,#c2562f 0%,#b4532f 48%,#9e4a1c 100%);
-  --grad-action-hover:linear-gradient(135deg,#b4532f 0%,#a8461f 55%,#923f19 100%);
-  --grad-text:linear-gradient(112deg,#1f140e 0%,#5e2d18 45%,#b4532f 100%);
-  --grad-tint:linear-gradient(135deg,rgba(217,119,87,.16) 0%,rgba(232,164,96,.08) 100%);
-  --grad-user:linear-gradient(135deg,rgba(217,119,87,.17) 0%,rgba(236,170,110,.10) 60%,rgba(214,130,150,.08) 100%);
-  --edge:linear-gradient(135deg,rgba(217,119,87,.55) 0%,rgba(217,119,87,.10) 30%,rgba(140,90,60,.10) 65%,rgba(232,164,96,.45) 100%);
-  --ring:linear-gradient(120deg,#f0a07e 0%,#d97757 38%,#e9ad6c 70%,#c7708f 100%);
-  --glow:rgba(217,119,87,.22);--glow-strong:rgba(217,119,87,.42);
-  --glass:rgba(255,253,249,.66);--glass-strong:rgba(255,254,251,.86);--glass-solid:#fffdf9;
-  --glass-line:rgba(120,72,44,.13);--glass-hi:rgba(255,255,255,.9);
-  --rail:linear-gradient(180deg,rgba(248,242,233,.88) 0%,rgba(243,234,222,.82) 100%);
-  --bar:rgba(250,247,241,.62);
-  --code-bg:linear-gradient(180deg,#fffdfa 0%,#f8f3ec 100%);
-  --canvas:radial-gradient(1100px 640px at 92% -12%,rgba(234,148,104,.30),transparent 62%),
-    radial-gradient(900px 620px at -8% 110%,rgba(238,182,116,.26),transparent 62%),
-    radial-gradient(760px 520px at 46% 48%,rgba(222,150,160,.10),transparent 70%),
-    linear-gradient(180deg,#fbf8f2 0%,#f4ede2 100%);
-  --vignette:radial-gradient(ellipse 130% 100% at 50% 35%,transparent 58%,rgba(110,60,30,.09) 100%);
-  --grain:repeating-radial-gradient(circle at 21% 33%,rgba(90,50,30,.022) 0 1px,transparent 1px 3px),
-    repeating-radial-gradient(circle at 74% 68%,rgba(90,50,30,.018) 0 1px,transparent 1px 2.6px);
-  --lift:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(80,40,20,.06),0 14px 34px -16px rgba(120,60,30,.22);
-  --lift-lg:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(80,40,20,.05),0 34px 80px -30px rgba(120,60,30,.34);
+  --grad-action:linear-gradient(180deg,#e01b2c 0%,#c8102e 100%);
+  --grad-action-hover:linear-gradient(180deg,#e01b2c 0%,#d4152b 100%);
+  --grad-text:linear-gradient(100deg,#ffffff 0%,#ffffff 48%,#ffd3d6 78%,#ff7f88 100%);
+  --grad-tint:linear-gradient(135deg,rgba(255,51,64,.16) 0%,rgba(255,51,64,.04) 100%);
+  --grad-user:linear-gradient(135deg,rgba(255,51,64,.15) 0%,rgba(200,16,46,.07) 55%,rgba(255,255,255,.02) 100%);
+  --edge:linear-gradient(135deg,rgba(255,51,64,.5) 0%,rgba(255,255,255,.1) 30%,rgba(255,255,255,.05) 68%,rgba(255,255,255,.16) 100%);
+  --edge-quiet:linear-gradient(180deg,rgba(255,255,255,.18) 0%,rgba(255,255,255,.06) 100%);
+  --ring:linear-gradient(120deg,#ff4d57 0%,#ff3340 35%,#c8102e 70%,#ff4d57 100%);
+  --bar-red:linear-gradient(180deg,#ff6b74 0%,#ff3340 50%,#c8102e 100%);
+  --glow:rgba(255,51,64,.16);--glow-strong:rgba(255,51,64,.42);
+  --glass:rgba(20,20,23,.6);--glass-strong:rgba(14,14,16,.88);--glass-solid:#111113;
+  --glass-line:rgba(255,255,255,.08);--glass-hi:rgba(255,255,255,.06);
+  --rail:linear-gradient(180deg,rgba(14,14,16,.9) 0%,rgba(9,9,10,.9) 100%);
+  --bar:rgba(8,8,8,.62);
+  --code-bg:linear-gradient(180deg,rgba(4,4,5,.86) 0%,rgba(10,10,12,.78) 100%);
+  --canvas:radial-gradient(1100px 620px at 86% -16%,rgba(200,16,46,.2),transparent 62%),
+    radial-gradient(900px 640px at -12% 118%,rgba(92,7,18,.5),transparent 62%),
+    radial-gradient(700px 420px at 50% 30%,rgba(255,51,64,.035),transparent 70%),
+    linear-gradient(180deg,#0b0b0c 0%,#080808 100%);
+  --vignette:radial-gradient(ellipse 120% 95% at 50% 40%,transparent 55%,rgba(0,0,0,.55) 100%);
+  --grain:repeating-radial-gradient(circle at 21% 33%,rgba(255,255,255,.012) 0 1px,transparent 1px 3px),
+    repeating-radial-gradient(circle at 74% 68%,rgba(255,255,255,.009) 0 1px,transparent 1px 2.6px);
+  --lift:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(0,0,0,.45),0 16px 36px -18px rgba(0,0,0,.85);
+  --lift-lg:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(0,0,0,.4),0 40px 90px -30px rgba(0,0,0,.9);
 }
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme=light]){
-    --grad-text:linear-gradient(112deg,#fff7ef 0%,#f9d6bf 38%,#f2a582 68%,#e0805d 100%);
-    --grad-tint:linear-gradient(135deg,rgba(217,119,87,.22) 0%,rgba(232,164,96,.08) 100%);
-    --grad-user:linear-gradient(135deg,rgba(217,119,87,.26) 0%,rgba(200,110,70,.14) 55%,rgba(170,90,120,.12) 100%);
-    --edge:linear-gradient(135deg,rgba(240,160,126,.55) 0%,rgba(255,220,200,.08) 32%,rgba(255,220,200,.05) 66%,rgba(232,164,96,.38) 100%);
-    --glow:rgba(217,119,87,.26);--glow-strong:rgba(226,124,88,.5);
-    --glass:rgba(32,26,22,.58);--glass-strong:rgba(30,25,21,.84);--glass-solid:#1d1916;
-    --glass-line:rgba(255,214,190,.09);--glass-hi:rgba(255,236,222,.07);
-    --rail:linear-gradient(180deg,rgba(30,24,21,.82) 0%,rgba(20,16,14,.78) 100%);
-    --bar:rgba(22,18,16,.55);
-    --code-bg:linear-gradient(180deg,rgba(10,8,7,.62) 0%,rgba(10,8,7,.46) 100%);
-    --canvas:radial-gradient(1200px 720px at 94% -14%,rgba(217,119,87,.30),transparent 60%),
-      radial-gradient(1000px 680px at -10% 112%,rgba(214,140,70,.19),transparent 60%),
-      radial-gradient(820px 540px at 50% 46%,rgba(170,80,100,.07),transparent 70%),
-      linear-gradient(180deg,#1a1613 0%,#110e0c 100%);
-    --vignette:radial-gradient(ellipse 125% 100% at 50% 38%,transparent 55%,rgba(0,0,0,.38) 100%);
-    --grain:repeating-radial-gradient(circle at 21% 33%,rgba(255,240,225,.010) 0 1px,transparent 1px 3px),
-      repeating-radial-gradient(circle at 74% 68%,rgba(255,240,225,.008) 0 1px,transparent 1px 2.6px);
-    --lift:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(0,0,0,.3),0 18px 40px -18px rgba(0,0,0,.7);
-    --lift-lg:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(0,0,0,.3),0 40px 90px -30px rgba(0,0,0,.8);
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]){
+    --grad-text:linear-gradient(100deg,#080808 0%,#1c1c1f 45%,#7a0a1a 78%,#c8102e 100%);
+    --grad-tint:linear-gradient(135deg,rgba(255,51,64,.1) 0%,rgba(255,51,64,.03) 100%);
+    --grad-user:linear-gradient(135deg,rgba(255,51,64,.09) 0%,rgba(255,51,64,.04) 60%,rgba(255,255,255,0) 100%);
+    --edge:linear-gradient(135deg,rgba(255,51,64,.45) 0%,rgba(8,8,8,.08) 30%,rgba(8,8,8,.06) 68%,rgba(8,8,8,.12) 100%);
+    --edge-quiet:linear-gradient(180deg,rgba(8,8,8,.12) 0%,rgba(8,8,8,.07) 100%);
+    --glow:rgba(255,51,64,.1);--glow-strong:rgba(255,51,64,.3);
+    --glass:rgba(255,255,255,.72);--glass-strong:rgba(255,255,255,.9);--glass-solid:#ffffff;
+    --glass-line:rgba(8,8,8,.09);--glass-hi:rgba(255,255,255,.95);
+    --rail:linear-gradient(180deg,rgba(255,255,255,.9) 0%,rgba(250,250,250,.88) 100%);
+    --bar:rgba(255,255,255,.7);
+    --code-bg:linear-gradient(180deg,#121214 0%,#0d0d0f 100%);
+    --canvas:radial-gradient(1100px 620px at 88% -16%,rgba(255,51,64,.08),transparent 62%),
+      radial-gradient(900px 640px at -12% 118%,rgba(200,16,46,.06),transparent 62%),
+      linear-gradient(180deg,#f7f7f8 0%,#f2f2f3 100%);
+    --vignette:radial-gradient(ellipse 130% 100% at 50% 35%,transparent 60%,rgba(8,8,8,.04) 100%);
+    --grain:repeating-radial-gradient(circle at 21% 33%,rgba(8,8,8,.014) 0 1px,transparent 1px 3px),
+      repeating-radial-gradient(circle at 74% 68%,rgba(8,8,8,.01) 0 1px,transparent 1px 2.6px);
+    --lift:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(8,8,8,.06),0 12px 30px -16px rgba(8,8,8,.18);
+    --lift-lg:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(8,8,8,.05),0 30px 70px -30px rgba(8,8,8,.25);
   }
 }
-:root[data-theme=dark]{
-  --grad-text:linear-gradient(112deg,#fff7ef 0%,#f9d6bf 38%,#f2a582 68%,#e0805d 100%);
-  --grad-tint:linear-gradient(135deg,rgba(217,119,87,.22) 0%,rgba(232,164,96,.08) 100%);
-  --grad-user:linear-gradient(135deg,rgba(217,119,87,.26) 0%,rgba(200,110,70,.14) 55%,rgba(170,90,120,.12) 100%);
-  --edge:linear-gradient(135deg,rgba(240,160,126,.55) 0%,rgba(255,220,200,.08) 32%,rgba(255,220,200,.05) 66%,rgba(232,164,96,.38) 100%);
-  --glow:rgba(217,119,87,.26);--glow-strong:rgba(226,124,88,.5);
-  --glass:rgba(32,26,22,.58);--glass-strong:rgba(30,25,21,.84);--glass-solid:#1d1916;
-  --glass-line:rgba(255,214,190,.09);--glass-hi:rgba(255,236,222,.07);
-  --rail:linear-gradient(180deg,rgba(30,24,21,.82) 0%,rgba(20,16,14,.78) 100%);
-  --bar:rgba(22,18,16,.55);
-  --code-bg:linear-gradient(180deg,rgba(10,8,7,.62) 0%,rgba(10,8,7,.46) 100%);
-  --canvas:radial-gradient(1200px 720px at 94% -14%,rgba(217,119,87,.30),transparent 60%),
-    radial-gradient(1000px 680px at -10% 112%,rgba(214,140,70,.19),transparent 60%),
-    radial-gradient(820px 540px at 50% 46%,rgba(170,80,100,.07),transparent 70%),
-    linear-gradient(180deg,#1a1613 0%,#110e0c 100%);
-  --vignette:radial-gradient(ellipse 125% 100% at 50% 38%,transparent 55%,rgba(0,0,0,.38) 100%);
-  --grain:repeating-radial-gradient(circle at 21% 33%,rgba(255,240,225,.010) 0 1px,transparent 1px 3px),
-    repeating-radial-gradient(circle at 74% 68%,rgba(255,240,225,.008) 0 1px,transparent 1px 2.6px);
-  --lift:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(0,0,0,.3),0 18px 40px -18px rgba(0,0,0,.7);
-  --lift-lg:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(0,0,0,.3),0 40px 90px -30px rgba(0,0,0,.8);
+:root[data-theme=light]{
+  --grad-text:linear-gradient(100deg,#080808 0%,#1c1c1f 45%,#7a0a1a 78%,#c8102e 100%);
+  --grad-tint:linear-gradient(135deg,rgba(255,51,64,.1) 0%,rgba(255,51,64,.03) 100%);
+  --grad-user:linear-gradient(135deg,rgba(255,51,64,.09) 0%,rgba(255,51,64,.04) 60%,rgba(255,255,255,0) 100%);
+  --edge:linear-gradient(135deg,rgba(255,51,64,.45) 0%,rgba(8,8,8,.08) 30%,rgba(8,8,8,.06) 68%,rgba(8,8,8,.12) 100%);
+  --edge-quiet:linear-gradient(180deg,rgba(8,8,8,.12) 0%,rgba(8,8,8,.07) 100%);
+  --glow:rgba(255,51,64,.1);--glow-strong:rgba(255,51,64,.3);
+  --glass:rgba(255,255,255,.72);--glass-strong:rgba(255,255,255,.9);--glass-solid:#ffffff;
+  --glass-line:rgba(8,8,8,.09);--glass-hi:rgba(255,255,255,.95);
+  --rail:linear-gradient(180deg,rgba(255,255,255,.9) 0%,rgba(250,250,250,.88) 100%);
+  --bar:rgba(255,255,255,.7);
+  --code-bg:linear-gradient(180deg,#121214 0%,#0d0d0f 100%);
+  --canvas:radial-gradient(1100px 620px at 88% -16%,rgba(255,51,64,.08),transparent 62%),
+    radial-gradient(900px 640px at -12% 118%,rgba(200,16,46,.06),transparent 62%),
+    linear-gradient(180deg,#f7f7f8 0%,#f2f2f3 100%);
+  --vignette:radial-gradient(ellipse 130% 100% at 50% 35%,transparent 60%,rgba(8,8,8,.04) 100%);
+  --grain:repeating-radial-gradient(circle at 21% 33%,rgba(8,8,8,.014) 0 1px,transparent 1px 3px),
+    repeating-radial-gradient(circle at 74% 68%,rgba(8,8,8,.01) 0 1px,transparent 1px 2.6px);
+  --lift:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(8,8,8,.06),0 12px 30px -16px rgba(8,8,8,.18);
+  --lift-lg:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(8,8,8,.05),0 30px 70px -30px rgba(8,8,8,.25);
 }
 
-/* Canvas: layered ember light, a soft vignette and fine static grain behind every surface. */
+/* Canvas: restrained crimson light, a faint vignette and fine static grain behind every surface. */
 html{background:var(--bg)}
-body.arcane-app{background:var(--vignette),var(--grain),var(--canvas);background-color:var(--bg)}
+body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grain),var(--canvas);background-color:var(--bg)}
 .arcane-app .app-main,.arcane-app .app-content{background:transparent}
-::selection{background:rgba(217,119,87,.32);color:var(--text)}
+::selection{background:rgba(255,51,64,.34);color:var(--text)}
 
-/* Sidebar rail: frosted gradient with a luminous active indicator. */
-.arcane-app .app-sidebar{background:var(--rail);border-right:1px solid var(--glass-line);box-shadow:inset -1px 0 0 var(--glass-hi),18px 0 48px -36px rgba(0,0,0,.55);backdrop-filter:blur(22px) saturate(150%)}
-.arcane-app .wordmark>span{background:var(--grad-text);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--text)}
-.arcane-app .wordmark small{-webkit-text-fill-color:var(--muted);color:var(--muted)}
-.arcane-app .wordmark .arcane-logo,.arcane-app .chat-avatar .arcane-logo{color:var(--accent);filter:drop-shadow(0 0 10px var(--glow-strong))}
-.arcane-app .new-chat{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge) border-box;border:1px solid transparent;color:var(--text);box-shadow:var(--lift)}
-.arcane-app .new-chat .icon{color:var(--accent-text)}
-.arcane-app .sidebar-label{letter-spacing:.08em;text-transform:uppercase;font-size:12px;font-weight:600;color:var(--muted)}
-.arcane-app .nav-link{position:relative;border:1px solid transparent}
-.arcane-app .nav-link[aria-pressed=true]{background:linear-gradient(90deg,rgba(217,119,87,.20) 0%,rgba(217,119,87,.06) 70%,transparent 100%);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi)}
-.arcane-app .nav-link[aria-pressed=true]::before{content:"";position:absolute;left:-1px;top:9px;bottom:9px;width:3px;border-radius:3px;background:linear-gradient(180deg,#f6b291 0%,#d97757 100%);box-shadow:0 0 12px 1px var(--glow-strong)}
-.arcane-app .sidebar-secondary{border-top:1px solid var(--glass-line)}
+/* Sidebar rail: frosted black with crisp tool cards and a glowing red active bar. */
+.arcane-app .app-sidebar{background:var(--rail);border-right:1px solid var(--glass-line);box-shadow:inset -1px 0 0 var(--glass-hi);backdrop-filter:blur(22px) saturate(140%);gap:24px}
+.arcane-app .wordmark{gap:12px;font-family:var(--font-display);font-size:17px;font-weight:650;letter-spacing:.32em;color:var(--text)}
+.arcane-app .wordmark>span{color:var(--text)}
+.arcane-app .wordmark small{font-family:var(--font-ui);font-size:12px;font-weight:400;letter-spacing:.01em;color:var(--muted);margin-top:4px}
+.arcane-app .wordmark .arcane-logo{width:30px;height:34px;color:var(--accent);filter:drop-shadow(0 0 10px var(--glow-strong))}
+.arcane-app .chat-avatar .arcane-logo{color:var(--accent);filter:drop-shadow(0 0 8px var(--glow-strong))}
+.arcane-app .new-chat{min-height:44px;border-radius:12px;background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge) border-box;border:1px solid transparent;color:var(--text);font-weight:550;box-shadow:var(--lift)}
+.arcane-app .new-chat .icon{color:var(--accent)}
+.arcane-app .new-chat kbd{padding:2px 6px;border:1px solid var(--glass-line);border-radius:6px;background:var(--glass-hi);color:var(--muted);font-size:11px}
+.arcane-app .sidebar-label{margin:0 12px 8px;letter-spacing:.14em;text-transform:uppercase;font-size:12px;font-weight:600;color:var(--muted)}
+.arcane-app .sidebar-links{gap:6px}
+.arcane-app .nav-link{position:relative;border:1px solid transparent;border-radius:12px;color:var(--text-secondary)}
+.arcane-app .sidebar-links .nav-link{min-height:58px;padding:10px 12px;align-items:center}
+.arcane-app .sidebar-links .nav-link>span{color:var(--text);font-weight:550}
+.arcane-app .sidebar-links .nav-link small{font-weight:400;color:var(--muted)}
+.arcane-app .sidebar-links .tool-icon{box-sizing:content-box;width:18px;height:18px;padding:8px;border-radius:10px;border:1px solid var(--glass-line);background:linear-gradient(180deg,var(--glass-hi),transparent),var(--glass);color:var(--text-secondary);box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app .blender-icon ellipse[fill]{fill:var(--accent)}
+.arcane-app .nav-link[aria-pressed=true]{background:linear-gradient(90deg,rgba(255,51,64,.16) 0%,rgba(255,51,64,.05) 60%,transparent 100%);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app .nav-link[aria-pressed=true]::before{content:"";position:absolute;left:-1px;top:12px;bottom:12px;width:3px;border-radius:3px;background:var(--bar-red);box-shadow:0 0 12px 1px var(--glow-strong)}
+.arcane-app .nav-link[aria-pressed=true] .tool-icon{color:var(--accent);border-color:rgba(255,51,64,.4);background:var(--grad-tint),var(--glass-solid);box-shadow:inset 0 1px 0 var(--glass-hi),0 0 18px -6px var(--glow-strong)}
+.arcane-app .sidebar-secondary{gap:2px;border-top:1px solid var(--glass-line)}
+.arcane-app .sidebar-secondary .nav-link{min-height:40px;padding:9px 12px;font-size:13px}
+.arcane-app .sidebar-secondary .icon{width:18px;height:18px;color:var(--muted)}
 
-/* Top bar: a translucent glass strip; tabs and search become soft glass pills. */
-.arcane-app .workspace-topbar{background:var(--bar);border-bottom:1px solid var(--glass-line);box-shadow:inset 0 -1px 0 var(--glass-hi);backdrop-filter:blur(18px) saturate(150%)}
-.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true]{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge) border-box;border:1px solid transparent;color:var(--text);box-shadow:var(--lift)}
-.arcane-app .workspace-search{background:var(--glass);border-color:var(--glass-line);box-shadow:inset 0 1px 0 var(--glass-hi),0 6px 20px -14px rgba(0,0,0,.5);backdrop-filter:blur(14px)}
-.arcane-app .workspace-search:focus-within{border-color:var(--accent-line);box-shadow:inset 0 1px 0 var(--glass-hi),0 0 0 4px rgba(217,119,87,.12),0 0 28px -8px var(--glow-strong)}
-.arcane-app .workspace-search-results,.arcane-app .chat-tabs-history[open],.arcane-app .tool-switcher .workspace-tabs,.arcane-app .composer-model-popover{background:var(--glass-strong);border:1px solid var(--glass-line);box-shadow:var(--lift-lg);backdrop-filter:blur(24px) saturate(150%)}
+/* Top bar: a translucent black strip; tabs are quiet until selected, then a glass pill with a red underline. */
+.arcane-app .workspace-topbar{background:var(--bar);border-bottom:1px solid var(--glass-line);box-shadow:inset 0 -1px 0 var(--glass-hi);backdrop-filter:blur(18px) saturate(140%)}
+.arcane-app .workspace-chat-tabs [role=tab]{position:relative;border-radius:10px;color:var(--muted)}
+.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true]{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge-quiet) border-box;border:1px solid transparent;color:var(--text);box-shadow:var(--lift)}
+.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true]::after{content:"";position:absolute;left:14px;right:14px;bottom:-1px;height:2px;border-radius:2px;background:var(--accent);box-shadow:0 0 10px var(--glow-strong)}
+.arcane-app .chat-tab>button[aria-label^="Close "]{width:28px;min-height:32px;padding:6px;border-radius:8px;color:var(--muted)}
+.arcane-app .workspace-search{border-radius:12px;background:var(--glass);border-color:var(--glass-line);box-shadow:inset 0 1px 0 var(--glass-hi);backdrop-filter:blur(14px)}
+.arcane-app .workspace-search kbd{padding:2px 6px;border:1px solid var(--glass-line);border-radius:6px;background:var(--glass-hi)}
+.arcane-app .workspace-search:focus-within{border-color:var(--accent-line);outline:2px solid var(--focus-ring);outline-offset:2px;box-shadow:inset 0 1px 0 var(--glass-hi),0 0 28px -8px var(--glow-strong)}
+.arcane-app .workspace-search-results,.arcane-app .chat-tabs-history[open],.arcane-app .tool-switcher .workspace-tabs,.arcane-app .composer-model-popover{background:var(--glass-strong);border:1px solid var(--glass-line);box-shadow:var(--lift-lg);backdrop-filter:blur(24px) saturate(140%)}
+.arcane-app .workspace-search-options button[aria-selected=true]{background:var(--grad-tint);border-color:var(--glass-line);border-left-color:var(--accent);color:var(--text)}
 .arcane-app .icon-button{color:var(--text-secondary)}
 .arcane-app .chat-topline .preview-toggle,.arcane-app .codex-panel .badge{background:var(--glass);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi)}
 
-/* Primary actions: a clay-to-ember gradient with an inner highlight and a soft glow. */
-.arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]){background:var(--grad-action);border-color:rgba(255,196,168,.30);color:#fff;text-shadow:0 1px 0 rgba(60,20,8,.25);box-shadow:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(60,20,8,.22),0 8px 22px -8px var(--glow-strong),0 0 0 1px rgba(110,40,15,.18)}
-.arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]):disabled{background:var(--hover-strong);border-color:var(--glass-line);color:var(--muted);text-shadow:none;box-shadow:inset 0 1px 0 var(--glass-hi)}
-.arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]):focus-visible{box-shadow:inset 0 1px 0 rgba(255,255,255,.26),0 0 0 4px rgba(217,119,87,.18),0 10px 30px -6px var(--glow-strong)}
+/* Conversation heading: compact, with the mark and a quiet live status. */
+.arcane-app .workspace-stage h1{font-family:var(--font-display);font-size:14px;font-weight:600;letter-spacing:.01em}
+.arcane-app .chat-heading .status-text{color:var(--muted)}
+
+/* Primary actions: Arcane red gradient, white text (AA on the lightest stop), inner highlight, red glow on hover/focus. */
+.arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]){background:var(--grad-action);border-color:rgba(255,120,128,.32);color:#fff;text-shadow:0 1px 0 rgba(60,0,8,.3);box-shadow:inset 0 1px 0 rgba(255,255,255,.22),inset 0 -1px 0 rgba(60,0,8,.3),0 8px 22px -10px var(--glow-strong)}
+.arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]):disabled{background:var(--hover);border-color:var(--glass-line);color:var(--muted);text-shadow:none;box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]):focus-visible{box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 0 0 4px rgba(255,51,64,.2),0 10px 30px -6px var(--glow-strong)}
+.arcane-app #codex-picker-apply:not(:disabled){background:var(--grad-action);border-color:rgba(255,120,128,.32);color:#fff}
 
 /* Secondary actions: glass with a hairline edge. */
-.arcane-app :is(.secondary,.welcome-connect:not(.conversation-start),.settings-secret-row button,.claude-chat-stop){background:var(--glass);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi),0 6px 18px -12px rgba(0,0,0,.45);backdrop-filter:blur(12px)}
+.arcane-app :is(.secondary,.welcome-connect:not(.conversation-start),.settings-secret-row button,.claude-chat-stop){background:var(--glass);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi),0 6px 18px -12px rgba(0,0,0,.5);backdrop-filter:blur(12px)}
 
-/* Welcome hero: big serif display type in gradient ink, over a glowing ember orb. */
-.arcane-app .workspace-welcome{background:radial-gradient(closest-side at 50% 42%,var(--glow) 0%,rgba(217,119,87,.07) 55%,transparent 100%)}
-.arcane-app .welcome-logo,.arcane-app #provider-login-gate .connection-emblem{display:grid;place-items:center;width:78px;height:78px;margin-bottom:26px;border-radius:50%;background:radial-gradient(circle at 50% 30%,rgba(255,214,190,.22) 0%,rgba(217,119,87,.12) 55%,rgba(217,119,87,.02) 75%);box-shadow:inset 0 1px 0 var(--glass-hi),0 0 0 1px var(--glass-line),0 0 70px -6px var(--glow-strong)}
-.arcane-app .welcome-logo .arcane-logo,.arcane-app #provider-login-gate .connection-emblem .arcane-logo{width:40px;height:40px;color:var(--accent);filter:drop-shadow(0 0 14px var(--glow-strong))}
-.arcane-app :is(.workspace-welcome,#provider-login-gate,.key-setup-gate) h2,.arcane-app .claude-chat-empty{font-family:var(--font-display);font-weight:400;letter-spacing:-.025em;line-height:1.08;background:var(--grad-text);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--text)}
-.arcane-app .workspace-welcome h2{font-size:clamp(34px,2.6vw + 14px,56px);margin-bottom:16px;padding-bottom:.08em}
-.arcane-app .workspace-welcome p{font-size:16px;color:var(--text-secondary)}
+/* Welcome hero: the Arcane mark in a red halo above large white-to-red display type. */
+.arcane-app .workspace-welcome{max-width:640px;background:radial-gradient(closest-side at 50% 30%,rgba(255,51,64,.16) 0%,rgba(200,16,46,.06) 50%,transparent 100%)}
+.arcane-app .welcome-logo,.arcane-app #provider-login-gate .connection-emblem{position:relative;display:grid;place-items:center;width:92px;height:92px;margin-bottom:30px;border-radius:28px;border:1px solid transparent;background:radial-gradient(circle at 50% 0%,rgba(255,255,255,.1),transparent 60%) padding-box,linear-gradient(180deg,#19191c,#0c0c0e) padding-box,var(--edge) border-box;box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 0 0 6px rgba(255,51,64,.04),0 0 90px -10px rgba(255,51,64,.55),0 24px 50px -20px rgba(0,0,0,.9)}
+.arcane-app .welcome-logo .arcane-logo,.arcane-app #provider-login-gate .connection-emblem .arcane-logo{width:44px;height:44px;color:var(--accent);filter:drop-shadow(0 0 12px rgba(255,51,64,.7)) drop-shadow(0 0 2px rgba(255,120,128,.6))}
+.arcane-app :is(.workspace-welcome,#provider-login-gate,.key-setup-gate) h2,.arcane-app .claude-chat-empty{font-family:var(--font-display);font-weight:650;letter-spacing:-.035em;line-height:1.04;background:var(--grad-text);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--text)}
+.arcane-app .workspace-welcome h2{font-size:clamp(38px,2.8vw + 14px,62px);margin-bottom:16px;padding-bottom:.08em}
+.arcane-app .workspace-welcome p{font-size:16px;line-height:1.65;color:var(--text-secondary)}
+.arcane-app .welcome-connect:not(.conversation-start){min-height:44px;padding:10px 18px;border-radius:12px;background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge) border-box;border:1px solid transparent;font-weight:550}
+.arcane-app .welcome-connect .icon{width:16px;height:16px;color:var(--accent)}
 
-/* Sign-in: a frosted card with a luminous gradient edge. */
-.arcane-app #provider-login-gate{max-width:480px;padding:48px 40px 40px;border:1px solid transparent;border-radius:28px;background:linear-gradient(var(--glass-strong),var(--glass-strong)) padding-box,var(--edge) border-box;box-shadow:var(--lift-lg),0 0 140px -50px var(--glow-strong);backdrop-filter:blur(26px) saturate(150%)}
+@media(max-height:760px){
+  .arcane-app .welcome-logo,.arcane-app #provider-login-gate .connection-emblem{width:68px;height:68px;border-radius:22px;margin-bottom:20px}
+  .arcane-app .welcome-logo .arcane-logo,.arcane-app #provider-login-gate .connection-emblem .arcane-logo{width:34px;height:34px}
+  .arcane-app .workspace-welcome h2{font-size:clamp(34px,2vw + 14px,46px)}
+}
+@media(max-width:760px){
+  .arcane-app .welcome-logo,.arcane-app #provider-login-gate .connection-emblem{width:56px;height:56px;border-radius:18px;margin-bottom:16px}
+  .arcane-app .welcome-logo .arcane-logo,.arcane-app #provider-login-gate .connection-emblem .arcane-logo{width:28px;height:28px}
+  .arcane-app .workspace-welcome h2{font-size:30px;margin-bottom:10px}
+  .arcane-app .workspace-welcome p{font-size:14px}
+  .arcane-app #provider-login-gate{padding:32px 20px 24px;border-radius:22px}
+  .arcane-app #provider-login-gate h2{font-size:34px}
+}
+@media(max-height:650px){
+  .arcane-app .welcome-logo,.arcane-app #provider-login-gate .connection-emblem{width:44px;height:44px;border-radius:14px;margin-bottom:10px}
+  .arcane-app .welcome-logo .arcane-logo,.arcane-app #provider-login-gate .connection-emblem .arcane-logo{width:24px;height:24px}
+  .arcane-app .workspace-welcome h2,.arcane-app #provider-login-gate h2{font-size:28px;margin-bottom:8px}
+  .arcane-app #provider-login-gate{padding:24px 20px}
+}
+
+/* Sign-in: a frosted black card with a luminous red edge. */
+.arcane-app #provider-login-gate{max-width:480px;padding:48px 40px 40px;border:1px solid transparent;border-radius:28px;background:linear-gradient(var(--glass-strong),var(--glass-strong)) padding-box,var(--edge) border-box;box-shadow:var(--lift-lg),0 0 160px -50px var(--glow-strong);backdrop-filter:blur(26px) saturate(140%)}
 .arcane-app #provider-login-gate h2{font-size:clamp(38px,2.4vw + 16px,52px);margin-bottom:12px;padding-bottom:.08em}
 .arcane-app #provider-login-message{color:var(--text-secondary)}
-.arcane-app #provider-login-gate button[aria-pressed=true]{background:var(--grad-tint);border-color:var(--accent);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi),0 0 0 3px rgba(217,119,87,.12),0 0 24px -8px var(--glow-strong)}
+.arcane-app #provider-login-gate .provider-choices{padding:4px;gap:4px;width:auto;border:1px solid var(--glass-line);border-radius:14px;background:var(--glass)}
+.arcane-app #provider-login-gate .provider-choices button{min-width:120px;border-radius:10px;background:transparent;border-color:transparent;box-shadow:none;backdrop-filter:none;color:var(--text-secondary)}
+.arcane-app #provider-login-gate .provider-choices button[aria-pressed=true]{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge) border-box;border:1px solid transparent;color:var(--text);box-shadow:var(--lift),0 0 22px -10px var(--glow-strong)}
 .arcane-app #provider-login-gate .provider-next button{border-radius:14px;font-size:14px}
 
-/* Classic composer: a floating glass dock with a gradient focus ring. */
-.arcane-app .workspace-stage .composer,.arcane-app .claude-chat-composer{background:var(--glass-strong);border:1px solid var(--glass-line);border-radius:22px;box-shadow:var(--lift-lg);backdrop-filter:blur(24px) saturate(150%)}
-.arcane-app .workspace-stage .composer:focus-within,.arcane-app .claude-chat-composer:focus-within{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--ring) border-box;border-color:transparent;box-shadow:var(--lift-lg),0 0 0 4px rgba(217,119,87,.12),0 0 46px -10px var(--glow-strong)}
-.arcane-app .composer-model-trigger{background:var(--glass);border-color:var(--glass-line);box-shadow:inset 0 1px 0 var(--glass-hi)}
-.arcane-app .workspace-stage .composer{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--edge) border-box;border-color:transparent}
-.arcane-app .workspace-stage .codex-message.human{background:var(--grad-user),var(--panel);border:1px solid rgba(217,119,87,.30);border-radius:22px 22px 6px 22px;box-shadow:inset 0 1px 0 var(--glass-hi),0 10px 24px -22px var(--glow-strong)}
-.arcane-app .workspace-stage .codex-message.codex{position:relative;padding-left:40px}
-.arcane-app .workspace-stage .codex-message.codex::before{content:"";position:absolute;left:2px;top:22px;width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#ffd3bb 0%,#e8875f 45%,#a8461f 100%);box-shadow:0 0 0 3px rgba(217,119,87,.12),0 0 18px -2px var(--glow-strong)}
-.arcane-app .workspace-stage .codex-message.codex pre.message-text{font-family:var(--font-display);font-size:16.5px;line-height:1.75;letter-spacing:.003em;color:var(--text)}
-.arcane-app .workspace-stage .codex-message.tool{width:fit-content;max-width:100%;margin:4px 0 14px 40px;padding:10px 16px 6px 14px;background:var(--glass-strong);border:1px solid var(--glass-line);border-left:2px solid var(--accent);border-radius:14px;box-shadow:inset 0 1px 0 var(--glass-hi),-6px 0 22px -14px var(--glow-strong)}
-.arcane-app .workspace-stage .codex-message.tool pre.message-text{font:13px/1.7 var(--font-mono);color:var(--text-secondary)}
+/* Conversation: white prose with a small red mark, red-tinted glass for the user, glass tool cards. */
+.arcane-app .workspace-stage .codex-message.human{background:var(--grad-user),var(--glass-solid);border:1px solid rgba(255,51,64,.22);border-radius:20px 20px 6px 20px;box-shadow:inset 0 1px 0 var(--glass-hi),0 14px 32px -24px rgba(0,0,0,.8)}
+.arcane-app .workspace-stage .codex-message.human :is(.message-text,pre.message-text){color:var(--text)}
+.arcane-app .workspace-stage .codex-message.codex{position:relative;padding-left:34px}
+.arcane-app .workspace-stage .codex-message.codex::before{content:"";position:absolute;left:6px;top:29px;width:9px;height:9px;border-radius:2px;transform:rotate(45deg);background:linear-gradient(135deg,#ff6b74,#c8102e);box-shadow:0 0 0 3px rgba(255,51,64,.12),0 0 14px rgba(255,51,64,.6)}
+.arcane-app .workspace-stage .codex-message.codex :is(.message-text,pre.message-text){font-family:var(--font-ui);font-size:15px;line-height:1.75;letter-spacing:.002em;color:var(--text)}
+.arcane-app .workspace-stage .codex-message.codex .claude-message-body p{margin:0 0 .8em}
+.arcane-app .workspace-stage .codex-message.tool{width:fit-content;max-width:100%;margin:2px 0 14px 34px;padding:10px 16px 6px 14px;background:var(--glass);border:1px solid var(--glass-line);border-left:2px solid var(--accent);border-radius:12px;box-shadow:inset 0 1px 0 var(--glass-hi),-8px 0 24px -16px var(--glow-strong)}
+.arcane-app .workspace-stage .codex-message.tool pre.message-text{font:12.5px/1.75 var(--font-mono);color:var(--text-secondary)}
 .arcane-app .workspace-stage .codex-message.tool .message-details>summary{min-height:28px;padding:4px 0}
-.arcane-app .message-acknowledgement{color:var(--accent-text)}
-.arcane-app .model-provider-tag{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 9px;border:1px solid rgba(217,119,87,.45);border-radius:999px;background:var(--grad-tint),var(--glass-solid);color:var(--accent-text);font-size:12px;font-weight:600;line-height:1.4;letter-spacing:.02em;white-space:nowrap;box-shadow:inset 0 1px 0 var(--glass-hi),0 0 14px -6px var(--glow-strong)}
+.arcane-app .message-acknowledgement{color:var(--accent-text);font-weight:500}
+.arcane-app .message-details>summary{color:var(--muted)}
 
-/* Claude chat: a glass workspace with a gradient rail, typeset prose and glowing tool pills. */
-.arcane-app .claude-chat{background:var(--glass);border:1px solid var(--glass-line);border-radius:24px;box-shadow:var(--lift-lg);backdrop-filter:blur(26px) saturate(140%)}
-.arcane-app .claude-chat-sidebar{background:linear-gradient(180deg,rgba(217,119,87,.07) 0%,transparent 40%),var(--rail);border-right:1px solid var(--glass-line);padding:14px 12px}
-.arcane-app .claude-chat-new{min-height:42px;margin-bottom:6px;border-radius:12px}
-.arcane-app .claude-chat-item{position:relative;border-radius:10px}
-.arcane-app .claude-chat-item[aria-current=true]{background:linear-gradient(90deg,rgba(217,119,87,.22) 0%,rgba(217,119,87,.06) 75%,transparent 100%);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi);padding-left:16px}
-.arcane-app .claude-chat-item[aria-current=true]::before{content:"";position:absolute;left:5px;top:10px;bottom:10px;width:3px;border-radius:3px;background:linear-gradient(180deg,#f6b291,#d97757);box-shadow:0 0 10px 1px var(--glow-strong)}
-.arcane-app .claude-chat-main>.claude-chat-status{order:0;flex:0 0 auto;display:flex;align-items:center;gap:8px;margin:0;padding:12px clamp(16px,4vw,48px);border-bottom:1px solid var(--glass-line);background:linear-gradient(180deg,var(--glass-hi),transparent);color:var(--text-secondary);font-size:12px}
-.arcane-app .claude-chat-main>.claude-chat-status::before{content:"";flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(217,119,87,.16),0 0 10px var(--glow-strong)}
-.arcane-app .claude-chat-messages{gap:22px;padding-top:32px}
-.arcane-app .claude-message[data-role=user] .claude-message-body{background:var(--grad-user),var(--panel);border:1px solid rgba(217,119,87,.30);border-radius:20px 20px 6px 20px;padding:13px 18px;color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi),0 14px 34px -20px var(--glow-strong)}
-.arcane-app .claude-message[data-role=assistant]::before{content:"";flex:0 0 auto;width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#ffd3bb 0%,#e8875f 45%,#a8461f 100%);box-shadow:0 0 0 3px rgba(217,119,87,.12),0 0 18px -2px var(--glow-strong)}
-.arcane-app .claude-message[data-role=assistant] .claude-message-body{font-family:var(--font-display);font-size:16.5px;line-height:1.72;color:var(--text);letter-spacing:.003em}
-.arcane-app .claude-message-body pre{position:relative;padding:16px 18px;background:var(--code-bg);border:1px solid var(--glass-line);border-radius:14px;box-shadow:inset 0 1px 0 var(--glass-hi),0 18px 40px -26px rgba(0,0,0,.6);font:13px/1.65 var(--font-mono);color:var(--text)}
-.arcane-app .claude-message-body pre::before{content:"";position:absolute;left:18px;right:18px;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(240,160,126,.55),transparent)}
-.arcane-app .claude-message-body :not(pre)>code{background:rgba(217,119,87,.12);border:1px solid rgba(217,119,87,.18);color:var(--accent-text);font-family:var(--font-mono)}
-.arcane-app .claude-tool-chip{min-height:30px;padding:5px 14px 5px 11px;background:var(--glass-strong);border:1px solid var(--glass-line);color:var(--text-secondary);box-shadow:inset 0 1px 0 var(--glass-hi),0 6px 16px -10px rgba(0,0,0,.5);backdrop-filter:blur(10px)}
-.arcane-app .claude-tool-chip[data-status=started]{background:var(--grad-tint),var(--glass-solid);border-color:rgba(217,119,87,.55);color:var(--accent-text);box-shadow:inset 0 1px 0 var(--glass-hi),0 0 0 3px rgba(217,119,87,.10),0 0 24px -6px var(--glow-strong)}
-.arcane-app .claude-tool-chip[data-status=started]::before{background:var(--accent);box-shadow:0 0 0 3px rgba(217,119,87,.2),0 0 10px var(--accent)}
-.arcane-app .claude-tool-chip[data-status=finished]::before{background:var(--success);box-shadow:0 0 8px var(--success)}
-.arcane-app .claude-tool-chip[data-status=failed]{background:linear-gradient(135deg,rgba(220,80,70,.14),rgba(220,80,70,.05)),var(--glass-solid);border-color:var(--danger-line);color:var(--danger);box-shadow:inset 0 1px 0 var(--glass-hi),0 0 22px -8px rgba(230,90,80,.5)}
-.arcane-app .claude-tool-chip[data-status=failed]::before{background:var(--danger);box-shadow:0 0 8px var(--danger)}
-.arcane-app .claude-message[data-role=error] .claude-message-body{border-radius:14px;box-shadow:inset 0 1px 0 var(--glass-hi)}
-.arcane-app .claude-chat-composer{margin-bottom:18px;padding:14px 14px 12px}
-.arcane-app .claude-chat-send{border-radius:999px;padding-inline:18px}
-.arcane-app :is(.claude-chat-model,.claude-chat-effort){background:transparent;color:var(--text-secondary)}
+/* Code: dark glass panels with a red edge, in both themes. */
+.arcane-app :is(.claude-message-body,.message-text) pre,.arcane-app .claude-message-body pre{position:relative;margin:12px 0;padding:16px 18px 16px 20px;background:var(--code-bg);border:1px solid rgba(255,255,255,.08);border-left:2px solid var(--accent);border-radius:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.05),-10px 0 28px -20px rgba(255,51,64,.7),0 18px 40px -26px rgba(0,0,0,.7);font:13px/1.7 var(--font-mono);color:#ececef;white-space:pre;overflow:auto}
+.arcane-app .claude-message-body pre::before{content:"";position:absolute;left:0;right:18px;top:0;height:1px;background:linear-gradient(90deg,rgba(255,51,64,.6),rgba(255,255,255,.08) 40%,transparent)}
+.arcane-app .claude-message-body pre code{color:inherit;background:transparent;border:0;padding:0}
+.arcane-app .claude-message-body :not(pre)>code,.arcane-app .codex-message :not(pre)>code{background:rgba(255,51,64,.1);border:1px solid rgba(255,51,64,.2);color:var(--accent-text);font-family:var(--font-mono)}
 
-/* Preview panel and settings: glass sheets with luminous edges. */
+/* Composer: a floating glass dock that lights red on focus. */
+.arcane-app .workspace-stage .composer,.arcane-app .claude-chat-composer{border-radius:22px;background:linear-gradient(var(--glass-strong),var(--glass-strong)) padding-box,var(--edge-quiet) border-box;border:1px solid transparent;box-shadow:var(--lift-lg),0 0 0 1px rgba(0,0,0,.2);backdrop-filter:blur(24px) saturate(140%)}
+.arcane-app .workspace-stage .composer:focus-within,.arcane-app .claude-chat-composer:focus-within{background:linear-gradient(var(--glass-solid),var(--glass-solid)) padding-box,var(--ring) border-box;border-color:transparent;box-shadow:var(--lift-lg),0 0 0 4px rgba(255,51,64,.12),0 0 50px -12px var(--glow-strong)}
+.arcane-app .workspace-stage .composer textarea{caret-color:var(--accent)}
+.arcane-app #workspace-add-context{border:1px solid var(--glass-line);background:var(--glass-hi);color:var(--text-secondary)}
+.arcane-app .composer-model-trigger{min-height:34px;padding:6px 10px;border-radius:10px;background:var(--glass);border:1px solid var(--glass-line);color:var(--text);font-size:12px;font-weight:550;box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app .composer-model-trigger:hover:not(:disabled),.arcane-app .composer-model-trigger[aria-expanded=true]{background:var(--hover);border-color:var(--accent-line);color:var(--text)}
+.arcane-app #codex-model-label{max-width:200px;color:var(--text)}
+.arcane-app .picker-effort{padding-left:8px;border-left:1px solid var(--line-strong);color:var(--muted);font-weight:500}
+.arcane-app .composer-model-trigger .icon{color:var(--muted)}
+.arcane-app .workspace-stage #codex-submit{border-radius:50%}
+
+/* Model picker popover. */
+.arcane-app .composer-model-popover{border-radius:16px;padding:12px}
+.arcane-app .picker-summary-heading>.icon{color:var(--accent)}
+.arcane-app #codex-picker-effort-value{color:var(--text)}
+.arcane-app #codex-picker-current-model{border-radius:10px;background:var(--glass);border-color:var(--glass-line);box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app .picker-model-option{border-radius:9px}
+.arcane-app .picker-model-option[aria-selected=true],.arcane-app .picker-effort-option[aria-checked=true]{background:var(--grad-tint);border-color:rgba(255,51,64,.32);color:var(--text)}
+.arcane-app .picker-selected-check{color:var(--accent)}
+.arcane-app .composer-model-popover input[type=search]{background:var(--input);border-color:var(--glass-line)}
+
+/* Preview panel and settings: glass sheets with hairline edges. */
 .arcane-app .artifact-panel{background:var(--glass);border:1px solid var(--glass-line);border-radius:22px;box-shadow:var(--lift-lg);backdrop-filter:blur(24px) saturate(140%)}
 .arcane-app .artifact-toolbar nav button.is-active{color:var(--text);border-bottom-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent),0 10px 20px -14px var(--glow-strong)}
-.arcane-app .settings-drawer{background:linear-gradient(var(--glass-strong),var(--glass-strong)) padding-box,var(--edge) border-box;border:1px solid transparent;border-radius:24px;box-shadow:var(--lift-lg),0 0 160px -60px var(--glow-strong);backdrop-filter:blur(30px) saturate(150%)}
-.arcane-app .settings-drawer::backdrop{background:radial-gradient(900px 600px at 70% 20%,rgba(217,119,87,.14),transparent 70%),var(--scrim);backdrop-filter:blur(10px) saturate(120%)}
+.arcane-app .preview-cube path[stroke="#b34643"]{stroke:var(--accent)}
+.arcane-app .settings-drawer{background:linear-gradient(var(--glass-strong),var(--glass-strong)) padding-box,var(--edge) border-box;border:1px solid transparent;border-radius:24px;box-shadow:var(--lift-lg),0 0 160px -60px var(--glow-strong);backdrop-filter:blur(30px) saturate(140%)}
+.arcane-app .settings-drawer::backdrop{background:radial-gradient(900px 600px at 70% 20%,rgba(200,16,46,.14),transparent 70%),var(--scrim);backdrop-filter:blur(10px) saturate(120%)}
 .arcane-app .settings-drawer-header{background:linear-gradient(180deg,var(--glass-hi),transparent);border-bottom:1px solid var(--glass-line)}
-.arcane-app .settings-drawer-header h2,.arcane-app .settings-page-heading{font-family:var(--font-display);font-weight:400;letter-spacing:-.02em;background:var(--grad-text);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--text);padding-bottom:.06em}
-.arcane-app .settings-drawer-header h2{font-size:24px}
-.arcane-app .settings-page-heading{font-size:32px}
-.arcane-app .settings-sidebar{background:linear-gradient(180deg,rgba(217,119,87,.06) 0%,transparent 45%);border-right:1px solid var(--glass-line)}
-.arcane-app .settings-nav button{position:relative}
-.arcane-app .settings-nav button[aria-current=page]{background:linear-gradient(90deg,rgba(217,119,87,.20) 0%,rgba(217,119,87,.05) 80%,transparent 100%);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi)}
-.arcane-app .settings-nav button[aria-current=page]::before{content:"";position:absolute;left:-1px;top:10px;bottom:10px;width:3px;border-radius:3px;background:linear-gradient(180deg,#f6b291,#d97757);box-shadow:0 0 12px 1px var(--glow-strong)}
+.arcane-app .settings-drawer-header h2,.arcane-app .settings-page-heading{font-family:var(--font-display);font-weight:650;letter-spacing:-.03em;background:var(--grad-text);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--text);padding-bottom:.06em}
+.arcane-app .settings-drawer-header h2{font-size:22px}
+.arcane-app .settings-page-heading{font-size:30px}
+.arcane-app .settings-sidebar{background:linear-gradient(180deg,rgba(255,51,64,.05) 0%,transparent 40%);border-right:1px solid var(--glass-line)}
+.arcane-app .settings-nav button{position:relative;border-radius:10px}
+.arcane-app .settings-nav button[aria-current=page]{background:linear-gradient(90deg,rgba(255,51,64,.16) 0%,rgba(255,51,64,.04) 80%,transparent 100%);border-color:var(--glass-line);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app .settings-nav button[aria-current=page]::before{content:"";position:absolute;left:-1px;top:10px;bottom:10px;width:3px;border-radius:3px;background:var(--bar-red);box-shadow:0 0 12px 1px var(--glow-strong)}
 .arcane-app :is(.settings-card,.settings-page>.panel,.settings-drawer .settings-group .panel){background:linear-gradient(180deg,var(--glass-hi) 0%,transparent 40%),var(--glass);border:1px solid var(--glass-line);border-radius:16px;box-shadow:inset 0 1px 0 var(--glass-hi),0 18px 40px -28px rgba(0,0,0,.6)}
-.arcane-app :is(.settings-drawer,.claude-chat,.workspace-stage) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea):not(.claude-chat-input):not(.claude-chat-model):not(.claude-chat-effort):not(#codex-composer){background:var(--input);border-color:var(--glass-line);box-shadow:inset 0 1px 2px rgba(0,0,0,.18)}
+.arcane-app .settings-card h3{font-family:var(--font-display);font-weight:600;letter-spacing:-.01em}
+.arcane-app :is(.settings-drawer,.claude-chat,.workspace-stage) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea):not(.claude-chat-input):not(.claude-chat-model):not(.claude-chat-effort):not(#codex-composer){background:var(--input);border-color:var(--field-line);box-shadow:inset 0 1px 2px rgba(0,0,0,.2)}
 .arcane-app .settings-secret-row code{background:var(--input);border-color:var(--glass-line)}
+.arcane-app .roblox-icon,.arcane-app .blender-icon{color:var(--text-secondary)}
+.arcane-app .settings-text-button{margin-right:18px;font-weight:550}
 
-/* Hover: brighter glass and stronger ember glow, without movement. */
+/* Legacy Claude chat surface (unused by the unified shell) keeps the same palette. */
+.arcane-app .claude-chat{background:var(--glass);border:1px solid var(--glass-line);border-radius:24px;box-shadow:var(--lift-lg)}
+.arcane-app .claude-chat-item[aria-current=true]{background:var(--grad-tint);border-color:var(--glass-line);color:var(--text)}
+.arcane-app .claude-message[data-role=user] .claude-message-body{background:var(--grad-user),var(--glass-solid);border:1px solid rgba(255,51,64,.24);border-radius:20px 20px 6px 20px;color:var(--text)}
+.arcane-app .claude-tool-chip{background:var(--glass-strong);border:1px solid var(--glass-line);color:var(--text-secondary)}
+.arcane-app .claude-tool-chip[data-status=started]{background:var(--grad-tint),var(--glass-solid);border-color:var(--accent-line);color:var(--accent-text)}
+.arcane-app .claude-tool-chip[data-status=failed]{border-color:var(--danger-line);color:var(--danger)}
+
+/* Hover: brighter glass and a stronger red glow, without movement. */
 @media (hover:hover) and (pointer:fine){
-  .arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]):hover:not(:disabled){background:var(--grad-action-hover);border-color:rgba(255,196,168,.42);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),inset 0 -1px 0 rgba(60,20,8,.22),0 12px 30px -8px var(--glow-strong),0 0 0 1px rgba(110,40,15,.2)}
+  .arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate,#workflow-panel .arcane-workflow button[data-primary]):hover:not(:disabled){background:var(--grad-action-hover);border-color:rgba(255,140,146,.45);box-shadow:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(60,0,8,.3),0 0 0 3px rgba(255,51,64,.14),0 12px 32px -8px var(--glow-strong)}
   .arcane-app :is(.secondary,.welcome-connect:not(.conversation-start),.settings-secret-row button,.claude-chat-stop):hover:not(:disabled),.arcane-app .new-chat:hover{background:linear-gradient(var(--hover),var(--hover)) padding-box,var(--edge) border-box;border-color:transparent;color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi),0 10px 26px -14px var(--glow-strong)}
   .arcane-app :is(.nav-link,.claude-chat-item,.settings-nav button):hover:not([aria-pressed=true]):not([aria-current=true]):not([aria-current=page]){background:linear-gradient(90deg,var(--hover),transparent);color:var(--text)}
-  .arcane-app .claude-tool-chip:hover{border-color:var(--accent-line)}
+  .arcane-app .sidebar-links .nav-link:hover .tool-icon{color:var(--text);border-color:var(--line-strong)}
+  .arcane-app .workspace-chat-tabs [role=tab]:hover:not([aria-selected=true]){background:var(--glass);color:var(--text)}
+  .arcane-app #provider-login-gate .provider-choices button:hover:not([aria-pressed=true]):not(:disabled){background:var(--glass-hi);color:var(--text)}
+  .arcane-app .picker-model-option:hover:not([aria-selected=true]){background:var(--hover)}
+  .arcane-app #workspace-add-context:hover{background:var(--hover);border-color:var(--line-strong);color:var(--text)}
 }
 
 /* Forced colors: drop decorative light; keep system text, edges and indicators. */
 @media (forced-colors:active){
   .arcane-app .workspace-stage .codex-message.codex::before{background:CanvasText;box-shadow:none;forced-color-adjust:none}
-  .arcane-app .model-provider-tag{border-color:CanvasText;box-shadow:none}
   .arcane-app :is(.wordmark>span,.wordmark small,.workspace-welcome h2,#provider-login-gate h2,.key-setup-gate h2,.claude-chat-empty,.settings-drawer-header h2,.settings-page-heading){-webkit-text-fill-color:CanvasText;background:none}
-  .arcane-app :is(.app-sidebar,.workspace-topbar,.workspace-search,.claude-chat,.claude-chat-composer,.workspace-stage .composer,.artifact-panel,.settings-drawer,#provider-login-gate,.settings-card,.claude-tool-chip,.claude-message[data-role=user] .claude-message-body,.new-chat,.secondary){backdrop-filter:none;box-shadow:none;border-color:CanvasText}
-  .arcane-app :is(.nav-link[aria-pressed=true],.claude-chat-item[aria-current=true],.settings-nav button[aria-current=page])::before{background:Highlight;box-shadow:none;forced-color-adjust:none}
+  .arcane-app :is(.app-sidebar,.workspace-topbar,.workspace-search,.claude-chat,.claude-chat-composer,.workspace-stage .composer,.artifact-panel,.settings-drawer,#provider-login-gate,.settings-card,.claude-tool-chip,.claude-message[data-role=user] .claude-message-body,.new-chat,.secondary,.composer-model-trigger,.welcome-logo,.tool-icon,.workspace-chat-tabs [role=tab][aria-selected=true]){backdrop-filter:none;box-shadow:none;border-color:CanvasText}
+  .arcane-app :is(.nav-link[aria-pressed=true],.claude-chat-item[aria-current=true],.settings-nav button[aria-current=page])::before,.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true]::after{background:Highlight;box-shadow:none;forced-color-adjust:none}
   .arcane-app :is(.claude-chat-main>.claude-chat-status,.claude-message[data-role=assistant])::before{background:CanvasText;box-shadow:none;forced-color-adjust:none}
   .arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate){border-color:ButtonText;box-shadow:none;text-shadow:none}
+  .arcane-app :is(.claude-message-body,.message-text) pre{border-color:CanvasText;box-shadow:none}
 }
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
