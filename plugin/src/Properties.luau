@@ -3,7 +3,7 @@ local V = require(script.Parent.Validation)
 local Properties = {}
 Properties.PART_FIELDS = table.freeze({"Size", "Position", "Color", "Anchored", "CanCollide", "Transparency", "Material"})
 Properties.CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript"})
-Properties.MATERIALS = table.freeze({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt"})
+Properties.MATERIALS = table.freeze({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt", "Marble", "Granite", "Limestone", "Sandstone", "Basalt", "Pebble", "LeafyGrass", "Mud", "Snow", "Ice", "Pavement", "Plaster", "DiamondPlate", "CorrodedMetal", "Foil"})
 
 function Properties.decode(name: string, value: any, isPart: boolean): any
 	if name == "Name" then return V.string(value, "Name", 100) end

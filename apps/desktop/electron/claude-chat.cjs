@@ -16,7 +16,7 @@ const os = require('node:os');
 const LIMITS = Object.freeze({
   textChars: 100000, messageBytes: 65536, messages: 2000, conversations: 200, transcriptBytes: 8 * 1048576, indexBytes: 1048576,
   lineBytes: 4 * 1048576, stdoutBytes: 64 * 1048576, deltaChars: 65536, turns: 4, helperBytes: 65536, helperTimeoutMs: 8000,
-  turnTimeoutMs: 30 * 60000, statusMaxAgeMs: 60000, credentialMarginMs: 10 * 60000, instructionsChars: 16000, titleChars: 60, toolName: 128,
+  turnTimeoutMs: 30 * 60000, statusMaxAgeMs: 60000, credentialMarginMs: 10 * 60000, credentialReuseMs: 2 * 60000, credentialSlackMs: 5000, instructionsChars: 16000, titleChars: 60, toolName: 128,
   // PNG references per message: the composer's file count and total image budget (chat-attachments.ts).
   images: 4, imageBytes: 512 * 1024, imageName: 128,
 });
@@ -106,6 +106,15 @@ function rewindSeed(messages) {
     'point is quoted below for context only. Tool steps listed there already happened; do not repeat them unless the user asks.]\n' +
     '<earlier-conversation>\n' + (body || '(no earlier messages)') + '\n</earlier-conversation>\n\nThe user\'s message now:\n';
 }
+/** The composer's Playtest switch as a short system note; absent (older renderers) adds nothing. */
+function playtestNote(playtest) {
+  if (playtest === true) return '\n\nArcane setting: Playtest is ON. After you finish building, you may verify the result with one bounded ' +
+    'playtest (playtest_request with a short duration, then playtest_status). Arcane approves playtests you request in this chat automatically. ' +
+    'Report only the result the playtest actually returned.';
+  if (playtest === false) return '\n\nArcane setting: Playtest is OFF. Do not call playtest_request. If a playtest would help, say so and ' +
+    'suggest turning on Playtest in the message box.';
+  return '';
+}
 const FALLBACK_INSTRUCTIONS = 'You are the Arcane Roblox development assistant. Use Arcane\'s advertised MCP tools. Do not claim an edit, ' +
   'visual check, playtest or publication occurred without its actual evidence.';
 
@@ -193,12 +202,15 @@ const imageMarkers = images => images.map(image => '[image: ' + image.name + ']'
 function sendInput(value) {
   const keys = ['conversationId', 'text', 'model', 'effort'];
   const hasImages = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'images');
-  const v = plain(value, hasImages ? [...keys, 'images'] : keys);
+  const hasPlaytest = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'playtest');
+  const v = plain(value, [...keys, ...(hasImages ? ['images'] : []), ...(hasPlaytest ? ['playtest'] : [])]);
+  if (hasPlaytest && typeof v.playtest !== 'boolean') fail('unavailable');
   if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !CHOICE.test(v.model) ||
       typeof v.effort !== 'string' || !CHOICE.test(v.effort)) fail('unavailable');
   if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
   const out = { conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort };
   if (hasImages) out.images = imagesInput(v.images);
+  if (hasPlaytest) out.playtest = v.playtest;
   return Object.freeze(out);
 }
 /** One stream-json user message (the shape Claude Code reads with --input-format stream-json): references in order, then the text. */
@@ -487,28 +499,55 @@ function createClaudeChat(options) {
     if (statusCache && statusCache.command && now() - statusCache.at >= 0 && now() - statusCache.at < limits.statusMaxAgeMs) return statusCache;
     await status(); return statusCache;
   }
-  /** One native question per project session (this host instance); concurrent first turns share it. A decline asks again next time. */
+  /** The persisted per-project switch (Settings > Permissions); absent or failing ports mean "ask". */
+  async function autoApproved() {
+    try { return typeof options.permissions?.claudeTools === 'function' && (await options.permissions.claudeTools()) === true; } catch { return false; }
+  }
+  /**
+   * Consent to use Arcane project tools. With the project's "Let Claude use Arcane tools" switch on (the default) no
+   * question is shown. Otherwise one in-app question per project session (this host instance); concurrent first turns
+   * share it, a decline asks again next time, and "Always allow" saves the switch for this project.
+   */
   function ensureApproval(cliVersion) {
     if (approved) return Promise.resolve(true);
     approval ??= (async () => {
+      if (await autoApproved()) { if (disposed) return false; approved = true; return true; }
       const window = options.getWindow();
       if (!window || window.isDestroyed?.()) return false;
       const dialog = options.dialog ?? require('electron').dialog;
+      const remember = typeof options.permissions?.allowClaudeTools === 'function';
       const result = await dialog.showMessageBox(window, {
         type: 'question', title: 'Arcane Claude chat', message: 'Use Claude chat with Arcane project tools?',
         detail: 'Claude chat runs the installed Claude Code ' + cliVersion + ' in the background for this project, using your Claude sign-in and subscription usage. ' +
-          'Arcane gives it only its own project tools and a temporary project credential (work coordination and Studio commands you already allowed; it expires in 30 minutes and can be revoked). ' +
-          'Built-in shell, file and web tools are turned off. Arcane asks once each time this project is opened.\n\nProject: ' + projectPath,
-        buttons: ['Cancel', 'Allow'], defaultId: 0, cancelId: 0, noLink: true,
+          'Arcane gives it only its own project tools and a scoped project credential (work coordination and Studio commands you already allowed). ' +
+          'The credential renews automatically while you work and is revoked when the project closes. Built-in shell, file and web tools are turned off. ' +
+          (remember ? 'Choose Always allow to stop asking for this project; you can change it in Settings > Permissions.' : 'Arcane asks once each time this project is opened.') +
+          '\n\nProject: ' + projectPath,
+        buttons: remember ? ['Cancel', 'Allow', 'Always allow'] : ['Cancel', 'Allow'], defaultId: 0, cancelId: 0, noLink: true,
       });
       if (disposed || options.getWindow() !== window) return false;
-      approved = result?.response === 1; return approved;
+      approved = result?.response === 1 || remember && result?.response === 2;
+      if (approved && result.response === 2) { try { await options.permissions.allowClaudeTools(); } catch { /* allowed for this session only */ } }
+      return approved;
     })().catch(() => false).finally(() => { approval = null; });
     return approval;
   }
-  /** Reuse the scoped credential while comfortably unexpired; otherwise mint once (shared by concurrent turns). */
+  /** Settings switched to "ask": forget this session's consent and retire the shared credential (running replies finish). */
+  function revokeApproval() {
+    approved = false;
+    const c = credential; credential = null;
+    if (c) { c.retired = true; if (!c.users && credentials.has(c)) void retire(c); }
+  }
+  const remainingMs = c => Date.parse(c.expiresAt) - now();
+  /** A shared credential must still cover a full reply (turn timeout minus a short reuse window). */
+  const reuseFloor = () => Math.max(limits.credentialMarginMs, limits.turnTimeoutMs - limits.credentialReuseMs);
+  /**
+   * Reuse the scoped credential only while it can cover a whole reply, so a long reply never outlives its tools. Otherwise
+   * mint a fresh one transparently (shared by concurrent turns) and revoke the old one once idle. The daemon never extends
+   * a credential, so renewal is always a new, equally scoped mint through the same handoff path.
+   */
   async function acquireCredential(model, effort) {
-    const usable = c => c && !c.retired && Date.parse(c.expiresAt) - now() > limits.credentialMarginMs;
+    const usable = c => c && !c.retired && remainingMs(c) >= reuseFloor();
     if (usable(credential)) { credential.users++; return credential; }
     minting ??= (async () => {
       const previous = credential; credential = null;
@@ -528,7 +567,12 @@ function createClaudeChat(options) {
     minted.users++; return minted;
   }
   async function retire(c) { credentials.delete(c); try { await handoff.release(c.handoffId); } catch { /* the broker's dispose still revokes */ } }
-  function releaseCredential(c) { if (!c) return; c.users = Math.max(0, c.users - 1); if (c.retired && !c.users && credentials.has(c)) void retire(c); }
+  function releaseCredential(c) {
+    if (!c) return; c.users = Math.max(0, c.users - 1);
+    // An idle credential that can no longer cover a full reply is revoked now; the next turn mints a fresh one.
+    if (!c.retired && !c.users && credential === c && remainingMs(c) < reuseFloor()) { c.retired = true; credential = null; }
+    if (c.retired && !c.users && credentials.has(c)) void retire(c);
+  }
   async function loadInstructions() {
     if (instructions !== null) return instructions;
     let text = FALLBACK_INSTRUCTIONS;
@@ -564,7 +608,7 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null, seed: '', images: v.images ?? [] };
+      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     let user = null;
     try {
@@ -625,7 +669,7 @@ function createClaudeChat(options) {
       turn.credential = await acquireCredential(turn.model, turn.effort);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
-      const prompt = await loadInstructions();
+      const prompt = (await loadInstructions()) + playtestNote(turn.playtest);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
       // A turn with PNG references sends one stream-json user message; plain text turns keep the text input format.
       const images = turn.images; turn.images = [];
@@ -639,7 +683,9 @@ function createClaudeChat(options) {
         child = spawn(command, args, { cwd: projectPath, env: { ...nativeEnvironment(), ...turn.credential.env }, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       } catch { return finish(turn, false, MESSAGES.start); }
       turn.child = child;
-      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; killTree(child); } }, limits.turnTimeoutMs);
+      // A reply is also bounded by its credential's remaining lifetime, so its tools never expire mid-reply.
+      const budget = Math.max(1000, Math.min(limits.turnTimeoutMs, remainingMs(turn.credential) - limits.credentialSlackMs));
+      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; killTree(child); } }, budget);
       let pending = [], pendingBytes = 0, skipping = false, total = 0;
       const line = buffer => {
         if (!buffer.length) return;
@@ -775,7 +821,7 @@ function createClaudeChat(options) {
     await Promise.all(owned.map(retire));
   }
   const host = { version: 1, status: () => status(), list, history, send, rewind, stop, remove };
-  Object.defineProperties(host, { dispose: { value: dispose }, activeTurns: { value: () => turns.size } });
+  Object.defineProperties(host, { dispose: { value: dispose }, activeTurns: { value: () => turns.size }, revokeApproval: { value: revokeApproval } });
   return Object.freeze(host);
 }
 
@@ -807,4 +853,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, sendInput, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, sendInput, playtestNote, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

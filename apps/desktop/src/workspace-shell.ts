@@ -1,6 +1,11 @@
 /// <reference lib="dom" />
 
 const shells = new WeakMap<Document, WorkspaceShell>();
+/** The shell announces a viewer's compact ("thin") sidebar choice; the display preferences owner persists it. */
+export const WORKSPACE_COMPACT_EVENT = 'workspace:compactsidebar';
+/** The display preferences owner restores a saved choice; the shell applies it without announcing it again. */
+export const WORKSPACE_COMPACT_RESTORE_EVENT = 'workspace:compactsidebarrestore';
+const compactDetail = (event: Event): boolean | null => { const detail = (event as CustomEvent).detail as unknown; return detail && typeof detail === 'object' && typeof (detail as { compact?: unknown }).compact === 'boolean' ? (detail as { compact: boolean }).compact : null; };
 
 /** StudioWorkbench emits this only for observed asset activity; it grants no authority. */
 export const WORKSPACE_ASSET_ACTIVITY_EVENT = 'workspace:assetactivity';
@@ -93,6 +98,7 @@ export class WorkspaceShell {
       sync();
       this.button(toggle, () => { sidebar.classList.toggle('collapsed'); sync(); });
     }
+    this.bindCompactSidebar();
     const settings = doc.getElementById('preview-settings');
     if (settings) this.button(settings, () => { this.navigate('asset-heading'); });
     const expand = doc.getElementById('preview-expand'), preview = doc.getElementById('artifact-panel');
@@ -390,6 +396,43 @@ export class WorkspaceShell {
     this.recentTargets.length = Math.min(this.recentTargets.length, 6);
   }
 
+  get compactSidebar(): boolean { return this.doc.getElementById('app-sidebar')?.classList?.contains('compact') ?? false; }
+  /** Thin mode: the sidebar becomes an icon rail and the chat tabs strip gets compact. Labels stay in the accessible name; tooltips show them. */
+  setCompactSidebar(compact: boolean, announce = true): void {
+    const sidebar = this.doc.getElementById('app-sidebar'); if (!sidebar) return;
+    sidebar.classList?.toggle('compact', compact);
+    this.doc.body?.classList.toggle('shell-compact', compact);
+    for (const item of Array.from(sidebar.querySelectorAll?.<HTMLElement>('.nav-link, .new-chat, .wordmark') ?? [])) {
+      const span = item.querySelector?.('span');
+      const label = (item.getAttribute('aria-label') ?? item.getAttribute('data-search-label') ?? (span ? span.firstChild?.textContent : item.textContent) ?? '').trim();
+      if (compact && label && !item.hasAttribute('title')) { item.setAttribute('title', label); item.setAttribute('data-compact-title', ''); }
+      if (!compact && item.hasAttribute('data-compact-title')) { item.removeAttribute('title'); item.removeAttribute('data-compact-title'); }
+    }
+    const toggle = this.doc.getElementById('sidebar-compact-toggle');
+    if (toggle) {
+      toggle.setAttribute('aria-expanded', String(!compact));
+      const label = compact ? 'Expand sidebar' : 'Collapse sidebar to icons';
+      toggle.setAttribute('aria-label', label); toggle.setAttribute('title', label + ' (Ctrl+B)');
+    }
+    const check = this.doc.getElementById('settings-compact-sidebar') as HTMLInputElement | null;
+    if (check) check.checked = compact;
+    if (!announce) return;
+    try {
+      const View = this.doc.defaultView?.CustomEvent ?? (typeof CustomEvent === 'function' ? CustomEvent : null);
+      if (View) this.doc.dispatchEvent(new View(WORKSPACE_COMPACT_EVENT, { detail: { compact } }));
+    } catch { /* Persistence is optional; the choice applies now. */ }
+  }
+  private bindCompactSidebar(): void {
+    const sidebar = this.doc.getElementById('app-sidebar'); if (!sidebar) return;
+    // Storage-free: the starting state is whatever the page already shows (a restore may have applied it).
+    this.setCompactSidebar(this.compactSidebar, false);
+    this.listen(this.doc, WORKSPACE_COMPACT_RESTORE_EVENT, event => { const compact = compactDetail(event); if (compact !== null) this.setCompactSidebar(compact, false); });
+    const toggle = this.doc.getElementById('sidebar-compact-toggle');
+    if (toggle) { toggle.setAttribute('aria-controls', sidebar.id); toggle.setAttribute('aria-keyshortcuts', 'Control+B'); this.button(toggle, () => this.setCompactSidebar(!this.compactSidebar)); }
+    const check = this.doc.getElementById('settings-compact-sidebar') as HTMLInputElement | null;
+    if (check) this.listen(check, 'change', () => this.setCompactSidebar(check.checked));
+  }
+
   private bindShortcuts(): void {
     // Advertise the shortcuts to assistive technology on the controls they act on.
     for (const [id, keys] of [['codex-composer', 'Control+/'], ['claude-chat-input', 'Control+/'], ['codex-model-trigger', 'Control+Shift+M'], ['workspace-search', 'Control+K']] as const)
@@ -425,6 +468,7 @@ export class WorkspaceShell {
         else if (this.shown(claude)) { event.preventDefault(); if (modal) this.closeSettings(false); claude.focus(); }
       }
       if (key === ',' && settingsOnly) { event.preventDefault(); this.navigate('workspace-settings'); }
+      if (key === 'b' && !modal && this.doc.getElementById('app-sidebar')) { event.preventDefault(); this.setCompactSidebar(!this.compactSidebar); }
       if (key === 'w' && !modal) {
         // Same control and rules as the visible tab's own close button: a disabled close (busy turn) stays closed.
         for (const id of ['workspace-chat-tabs', 'claude-chat-tabs']) {

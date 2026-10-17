@@ -20,7 +20,13 @@ export interface StudioContinuityProof {
   connected: boolean; observedAt: string; expiresAt: string;
 }
 export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context'] as const;
-export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore'] as const;
+export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.build', 'environment.apply'] as const;
+/** One atomic hierarchy per scene.build command: one undo recording and one receipt.
+ * instances counts every created Instance, including the root, placement Models and welds. */
+export const SCENE_BUILD_LIMITS = Object.freeze({ items: 2000, prototypes: 32, prototypeParts: 64, instances: 4000, keys: 32 });
+/** environment.apply: bounded terrain fills plus Lighting/effect settings in one undo recording.
+ * Terrain is undone with Studio Undo; receipts record the prior lighting values. */
+export const ENVIRONMENT_LIMITS = Object.freeze({ terrainShapes: 128, extent: 2048, volume: 400_000_000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
 export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
@@ -79,7 +85,7 @@ export interface StudioUploadContextObservation extends StudioImportContextObser
     | {status: 'unavailable'; id: null; provenance: 'StudioService:GetUserId'};
 }
 export interface MutationReceipt {
-  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled'; ref: InstanceRef;
+  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply'; ref: InstanceRef;
   before: Record<string, Json> | null; after: Record<string, Json>;
 }
 export interface PluginPairInput { code: string; protocolVersion: 1; identity: StudioIdentity; capabilities: string[] }

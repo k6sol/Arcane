@@ -289,11 +289,15 @@ const claudeChatInvoke = async (action, args) => {
     const value = args[0];
     const keys = ['conversationId', 'text', 'model', 'effort'];
     if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) keys.push('images');
+    // The composer's Playtest switch, when mounted: a plain boolean the engine turns into a short system note.
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'playtest')) keys.push('playtest');
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) claudeChatUnavailable();
     for (const key of keys) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) claudeChatUnavailable(); }
     if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !claudeChatChoice(value.model) || !claudeChatChoice(value.effort)) claudeChatUnavailable();
     if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(CLAUDE_CHAT_ERRORS[4]);
-    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.length === 5 ? { images: claudeChatImages(value.images) } : {}) };
+    if (keys.includes('playtest') && typeof value.playtest !== 'boolean') claudeChatUnavailable();
+    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('images') ? { images: claudeChatImages(value.images) } : {}),
+      ...(keys.includes('playtest') ? { playtest: value.playtest } : {}) };
   } else if (action === 'rewind') {
     const value = args[0];
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();
@@ -370,4 +374,61 @@ const workspaceProject = Object.freeze({ version: 1,
     catch { throw new Error('The project picker is unavailable.'); }
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject }));
+// In-app dialogs: the host sends one bounded question at a time; the workspace renders it and answers with the request id
+// and one button index (the host validates both again). attach() registers the single listener and tells the host it may
+// stop using native message boxes for this document.
+const DIALOG_UNAVAILABLE = 'In-app dialogs are unavailable.';
+const dialogText = (value, max) => typeof value === 'string' && value.length <= max && !/[\u0000-\u0009\u000b-\u001f\u007f]/.test(value);
+const dialogRequest = value => {
+  if (!value || typeof value !== 'object' || value.version !== 1 || typeof value.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.id) ||
+      !['none', 'info', 'question', 'warning', 'error'].includes(value.type) || !dialogText(value.title, 120) || !dialogText(value.message, 600) || !dialogText(value.detail, 4000) ||
+      !Array.isArray(value.buttons) || value.buttons.length < 1 || value.buttons.length > 4 || !value.buttons.every(label => dialogText(label, 48) && label.length > 0)) return null;
+  const index = n => Number.isSafeInteger(n) && n >= 0 && n < value.buttons.length;
+  if (!index(value.defaultId) || !index(value.cancelId)) return null;
+  return { id: value.id, type: value.type, title: value.title, message: value.message, detail: value.detail, buttons: [...value.buttons], defaultId: value.defaultId, cancelId: value.cancelId };
+};
+let dialogListener = null;
+const dialogs = Object.freeze({ version: 1,
+  attach: async listener => {
+    if (typeof listener !== 'function' || dialogListener) throw new Error(DIALOG_UNAVAILABLE);
+    dialogListener = (_event, payload) => { const request = dialogRequest(payload); if (request) { try { listener(request); } catch { /* renderer errors stay there */ } } };
+    ipcRenderer.on('arcane:dialog-request', dialogListener);
+    try { const value = await ipcRenderer.invoke('arcane:dialog-attach'); if (!value || value.attached !== true) throw new Error(); return { attached: true }; }
+    catch { ipcRenderer.removeListener('arcane:dialog-request', dialogListener); dialogListener = null; throw new Error(DIALOG_UNAVAILABLE); }
+  },
+  reply: async (...args) => {
+    const value = args[0];
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2 ||
+        typeof value.id !== 'string' || !Number.isSafeInteger(value.response)) throw new Error(DIALOG_UNAVAILABLE);
+    try { const out = await ipcRenderer.invoke('arcane:dialog-reply', { id: value.id, response: value.response }); return { accepted: out?.accepted === true }; }
+    catch { throw new Error(DIALOG_UNAVAILABLE); }
+  },
+});
+// Persistent per-project agent permissions (Settings > Permissions): two booleans, read and saved by the host.
+const PERMISSIONS_UNAVAILABLE = 'Project permissions are unavailable.';
+const permissionSettings = value => {
+  if (!value || typeof value !== 'object' || typeof value.claudeTools !== 'boolean' || typeof value.codexAutoApprove !== 'boolean') throw new Error(PERMISSIONS_UNAVAILABLE);
+  return { claudeTools: value.claudeTools, codexAutoApprove: value.codexAutoApprove };
+};
+const projectPermissions = Object.freeze({ version: 1,
+  read: async (...args) => {
+    try {
+      if (args.length) throw new Error();
+      const value = await ipcRenderer.invoke('arcane:project-permissions-read');
+      if (!value || typeof value.available !== 'boolean') throw new Error();
+      return { available: value.available, settings: permissionSettings(value.settings) };
+    } catch { throw new Error(PERMISSIONS_UNAVAILABLE); }
+  },
+  save: async (...args) => {
+    try {
+      const value = args[0];
+      if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype) throw new Error();
+      const keys = Reflect.ownKeys(value);
+      if (!keys.length || keys.some(key => !['claudeTools', 'codexAutoApprove'].includes(key) || typeof value[key] !== 'boolean')) throw new Error();
+      const out = await ipcRenderer.invoke('arcane:project-permissions-save', Object.fromEntries(keys.map(key => [key, value[key]])));
+      if (!out || out.saved !== true) throw new Error();
+      return { saved: true, settings: permissionSettings(out.settings) };
+    } catch { throw new Error(PERMISSIONS_UNAVAILABLE); }
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions }));

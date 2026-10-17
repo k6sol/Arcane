@@ -98,7 +98,7 @@ class DocumentFixture extends Events {
 }
 interface Call { path: string; init: RequestInit; body: unknown }
 type Handler = (call: Call) => Promise<Response>;
-function fixture(t: TestContext, initial: JobFixture[] = [job()], signedIn = true, visible = true) {
+function fixture(t: TestContext, initial: JobFixture[] = [job()], signedIn = true, visible = true, autoApprove?: () => boolean) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW });
   const doc = new DocumentFixture(), calls: Call[] = [];
   if (!visible) doc.visibilityState = 'hidden';
@@ -115,7 +115,7 @@ function fixture(t: TestContext, initial: JobFixture[] = [job()], signedIn = tru
     calls.push(call); return handler(call);
   };
   const panel = startPlaytestPanel({ root: doc.root as unknown as HTMLElement,
-    token: () => token, isSignedIn: () => authenticated, transport });
+    token: () => token, isSignedIn: () => authenticated, transport, ...(autoApprove ? { autoApprove } : {}) });
   t.after(() => panel.stop());
   return {
     panel, doc, root: doc.root, calls,
@@ -613,4 +613,55 @@ test('manual refresh coalesces an in-flight read and polling never overlaps it',
   f.handler(async () => late.promise); const first = f.panel.refresh(), second = f.panel.refresh();
   assert.equal(first, second); t.mock.timers.tick(5000); await flush(); assert.equal(f.calls.length, 2);
   late.resolve(Response.json({ jobs: [job()] })); await first; await second; assert.equal(f.posts().length, 0);
+});
+
+// ---- Composer Playtest switch: automatic approval of the managed chat's requests ----
+const AGENT_ACTOR = 'agent-' + 'f'.repeat(64);
+function agentJob(id = 'job-1') { const value = job(id); value.actor = AGENT_ACTOR; return value; }
+
+test('switch on: a managed chat request first seen while on is approved once, with the exact digest, and stays cancellable', async t => {
+  let on = true;
+  const f = fixture(t, [agentJob()], true, true, () => on);
+  await f.panel.refresh(); assert.match(f.root.textContent, /Playtest is on · approving automatically/);
+  t.mock.timers.tick(250); await flush();
+  assert.equal(f.posts().length, 1);
+  assert.equal(f.posts()[0]!.path, '/v1/playtests/approve');
+  assert.deepEqual(f.posts()[0]!.body, { id: 'job-1', displayDigest: DIGEST }, 'same route and digest as the human click');
+  assert.match(f.root.textContent, /Approved automatically · Playtest is on/);
+  assert.equal(button(f, 'Stop').disabled, false, 'Stop stays available after automatic approval');
+  for (let index = 0; index < 10; index++) { t.mock.timers.tick(250); await flush(); }
+  assert.equal(f.posts().length, 1, 'never approved twice');
+  on = false;
+});
+
+test('switch off: requests keep the human review and are never approved automatically', async t => {
+  const f = fixture(t, [agentJob()], true, true, () => false);
+  await f.panel.refresh();
+  for (let index = 0; index < 20; index++) { t.mock.timers.tick(250); await flush(); }
+  assert.equal(f.posts().length, 0); assert.doesNotMatch(f.root.textContent, /automatically/);
+  assert.equal(button(f, 'Run test').disabled, false);
+});
+
+test('a request first seen while off is not approved when the switch turns on later', async t => {
+  let on = false;
+  const f = fixture(t, [agentJob()], true, true, () => on);
+  await f.panel.refresh(); on = true;
+  for (let index = 0; index < 20; index++) { t.mock.timers.tick(250); await flush(); }
+  assert.equal(f.posts().length, 0, 'consent for an earlier request stays with the person');
+});
+
+test('switch on never approves a request made from this panel, an expired consent or one that needs review', async t => {
+  const human = job('job-human'), expired = agentJob('job-expired'), review = agentJob('job-review');
+  expired.display.consentExpiresAt = NOW - 1; review.review.requiresHumanReview = true;
+  const f = fixture(t, [human, expired, review], true, true, () => true);
+  await f.panel.refresh();
+  for (let index = 0; index < 20; index++) { t.mock.timers.tick(250); await flush(); }
+  assert.equal(f.posts().length, 0);
+});
+
+test('a throwing switch reads as off', async t => {
+  const f = fixture(t, [agentJob()], true, true, () => { throw new Error('unavailable'); });
+  await f.panel.refresh();
+  for (let index = 0; index < 8; index++) { t.mock.timers.tick(250); await flush(); }
+  assert.equal(f.posts().length, 0);
 });

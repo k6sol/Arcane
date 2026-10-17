@@ -4,12 +4,14 @@ import { z } from 'zod';
 import type { Json } from '../../../packages/protocol/src/studio.js';
 import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
-import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
+import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, sceneBuildDescription, environmentDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
+import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput } from './scene-build.js';
 import { validateProperties } from '../../../packages/core/src/studio-policy.js';
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
 import { nativeAdoptGlbInput, assetInput, assetJobId, assetHistoryInput, nativeAssetHistoryInput, nativeAssetJobId } from './asset-schemas.js';
 import { scenarioPlanSchema } from '../../../packages/studio-test-controller/src/scenario.js';
+import { registerViewportTool } from './viewport-tool.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -89,6 +91,18 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       if (!keys.length || Object.keys(args.expected).length !== keys.length || keys.some(key => !Object.hasOwn(args.expected, key))) throw new BridgeError('INPUT', 'expected must cover exactly every changed property, and properties must be nonempty.');
       return client.execute(sessionId, 'scene.update', args as Record<string, Json>, { timeoutMs, signal });
     });
+  register('scene_build', sceneBuildDescription(),
+    z.strictObject({ ...target, parent: ref, ...sceneBuildShape }), { ...WRITE, destructiveHint: false },
+    async ({ sessionId, timeoutMs, parent, ...input }, signal) => {
+      const compiled = compileSceneBuild(input as SceneBuildInput, parent as Json);
+      const outcome = await client.execute(sessionId, 'scene.build', compiled.args, { timeoutMs, signal });
+      // Never echo the compiled hierarchy back into model context; the receipt summarises it.
+      const command = outcome.command ? { ...outcome.command, args: { compiled: true, items: (compiled.args.items as Json[]).length, instances: compiled.instances } } : null;
+      return { ...outcome, command, plannedInstances: compiled.instances, ...(compiled.scatter.length ? { scatter: compiled.scatter } : {}) };
+    });
+  register('environment_apply', environmentDescription(),
+    z.strictObject({ ...target, ...environmentShape }), WRITE,
+    ({ sessionId, timeoutMs, ...input }, signal) => client.execute(sessionId, 'environment.apply', compileEnvironment(input), { timeoutMs, signal }));
   register('receipt_status', 'Read: look up an existing immutable command/receipt by commandId, including queued, dispatched, failed or needs_reconciliation states. This does not enqueue or replay work; use after an ambiguous timeout.',
     z.strictObject({ commandId: id, timeoutMs }), READ,
     ({ commandId, timeoutMs }, signal) => client.receiptStatus(commandId, { timeoutMs, signal }));
@@ -144,6 +158,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('assets_manifest', 'Read: fetch the daemon-validated local artifact manifest for this exact jobId, including assembly/source-request hashes, mesh geometry hashes, bounds, floor origins and measured PBR values, socket/export poses, audit measurements and limitations. This does not import into Studio, upload, publish or claim Roblox scale verification.' + assetScope,
     z.strictObject({ jobId: scopedAssetJobId, timeoutMs }), READ,
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
+  registerViewportTool(server, client);
   if (client.assetAudience === 'native-session') {
     register('assets_adopt_glb','Write: adopt an existing owned project-relative GLB into a managed immutable chat asset for interactive preview. Requires the exact native project/conversation capture and explicit asset admission. Validates actual bounded GLB bytes, embedded image budgets and direct ordinary-file containment before copying; no links, URLs, Python/scripts or caller authority fields. Uses explicit adopted provenance, never bundled-Blender evidence. Engine import/upload remains unavailable pending safe conversion. The returned job acknowledgement is not engine acceptance. Inspect assets_jobs after ambiguity; never auto-retry.'+assetScope,
       nativeAdoptGlbInput, { ...WRITE,destructiveHint:false },

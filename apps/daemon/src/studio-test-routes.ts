@@ -22,6 +22,7 @@ export interface StudioTestRouteService {
     list(...args: Parameters<StudioTestService['requests']['list']>): unknown;
     cancel(...args: Parameters<StudioTestService['requests']['cancel']>): Promise<unknown>;
     capture?: NonNullable<StudioTestService['requests']['capture']>;
+    viewport?: NonNullable<StudioTestService['requests']['viewport']>;
   };
   humanControl: { approve(...args: Parameters<StudioTestService['humanControl']['approve']>): Promise<unknown> };
   lifecycle: { close(...args: Parameters<StudioTestService['lifecycle']['close']>): Promise<void> };
@@ -32,10 +33,12 @@ export type StudioTestActor = Readonly<{ kind: 'human' | 'agent'; id: string }>;
 export type StudioTestActorResolver = (request: IncomingMessage) => StudioTestActor | null;
 
 export const STUDIO_TEST_HTTP_LIMITS = Object.freeze({ bodyBytes: 16 * 1024, responseBytes: 128 * 1024, deadlineMs: 8_000 });
+/** The viewport endpoint returns one bounded base64 PNG and needs a native round trip. */
+export const STUDIO_VIEWPORT_HTTP_LIMITS = Object.freeze({ responseBytes: 960 * 1024, deadlineMs: 25_000 });
 const PREFIX = '/v1/playtests';
 const ID = /^[A-Za-z0-9_-]{1,128}(?![\s\S])/;
 const DIGEST = /^[a-f0-9]{64}(?![\s\S])/;
-const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST']]);
+const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST'], [PREFIX + '/viewport', 'POST']]);
 const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   AUTH: [401, 'An authenticated local caller is required.'],
   HOST: [403, 'The exact configured loopback host is required.'],
@@ -50,7 +53,7 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   BODY_LIMIT: [413, 'The JSON body exceeds 16 KiB.'],
   BODY: [400, 'The request body is incomplete or invalid JSON.'],
   BODY_TIMEOUT: [408, 'The JSON body exceeded its 8 second deadline.'],
-  RESPONSE_LIMIT: [502, 'The playtest response exceeds 128 KiB.'],
+  RESPONSE_LIMIT: [502, 'The playtest response exceeds its byte bound.'],
   TIMEOUT: [504, 'The playtest request exceeded its 8 second deadline.'],
   BUSY: [409, 'A playtest operation is already in progress.'],
   CONSENT_EXPIRED: [409, 'The displayed approval has expired.'],
@@ -71,6 +74,11 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   SESSION_REVOKED: [409, 'The paired Studio session was revoked; no playtest job was created.'],
   SCENARIO_DENIED: [422, 'The scenario is outside the paired Studio safe scope; no playtest job was created.'],
   PREPARE_FAILED: [424, 'Playtest preparation failed; no playtest job was created.'],
+  // Viewport refusals: read-only, so every refusal is definite and nothing changed in Studio.
+  VIEWPORT_TOOL_UNSUPPORTED: [422, 'Native Studio does not advertise the reviewed screen capture tool; no viewport image was taken.'],
+  VIEWPORT_INVALID: [424, 'Native Studio returned an unusable viewport image; nothing was changed.'],
+  VIEWPORT_FAILED: [424, 'The viewport capture failed; nothing was changed.'],
+  VIEWPORT_CAMERA_UNKNOWN: [409, 'The Studio camera could not be confirmed restored after a framed capture; check the Edit camera.'],
 };
 /** Fences only this route raises; a service error reusing one of these names is not that fence. */
 const ROUTE_ONLY = new Set(['AUTH', 'HOST', 'ORIGIN', 'SCOPE', 'METHOD', 'QUERY', 'CONTENT_TYPE', 'BODY_LIMIT', 'BODY', 'BODY_TIMEOUT', 'RESPONSE_LIMIT']);
@@ -95,6 +103,19 @@ function prepareRefusal(error: unknown): unknown {
   if (code !== undefined && SCENARIO_POLICY.has(code)) return new RouteError('SCENARIO_DENIED');
   if (code !== undefined && Object.hasOwn(ERRORS, code) && !ROUTE_ONLY.has(code)) return error;
   return new RouteError('PREPARE_FAILED');
+}
+/** Viewport capture is read-only: refusals are definite, except an unconfirmed camera restore. */
+function viewportRefusal(error: unknown): unknown {
+  if (error instanceof RouteError) return error;
+  if (error instanceof Error && error.name === 'ZodError') return new RouteError('INVALID_REQUEST');
+  const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+  if (code === 'EFFECT_UNKNOWN') return new RouteError('VIEWPORT_CAMERA_UNKNOWN');
+  if (code === 'UNSUPPORTED_TOOL') return new RouteError('VIEWPORT_TOOL_UNSUPPORTED');
+  if (code === 'BAD_NATIVE_RESPONSE') return new RouteError('VIEWPORT_INVALID');
+  if (code === 'SESSION') return new RouteError('SESSION_NOT_FOUND');
+  if (code === 'REVOKED') return new RouteError('SESSION_REVOKED');
+  if (code !== undefined && Object.hasOwn(ERRORS, code) && !ROUTE_ONLY.has(code)) return error;
+  return new RouteError('VIEWPORT_FAILED');
 }
 function identifier(value: unknown): string {
   if (typeof value !== 'string' || !ID.test(value)) fail('INVALID_REQUEST');
@@ -230,13 +251,15 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
     const authorization = request.headers.authorization;
     const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
     let expired = false, disconnected = false, readingBody = false;
+    const viewing = url.pathname === PREFIX + '/viewport';
     const controller = new AbortController();
     const send = (status: number, payload: unknown) => {
       if (response.destroyed || response.writableEnded || response.headersSent) return;
       let json = JSON.stringify(payload);
-      if (json === undefined || Buffer.byteLength(json) > STUDIO_TEST_HTTP_LIMITS.responseBytes) fail('RESPONSE_LIMIT');
+      const responseBytes = viewing && status === 200 ? STUDIO_VIEWPORT_HTTP_LIMITS.responseBytes : STUDIO_TEST_HTTP_LIMITS.responseBytes;
+      if (json === undefined || Buffer.byteLength(json) > responseBytes) fail('RESPONSE_LIMIT');
       if (credential) json = json.replaceAll(JSON.stringify(credential).slice(1, -1), '[REDACTED]');
-      if (Buffer.byteLength(json) > STUDIO_TEST_HTTP_LIMITS.responseBytes) fail('RESPONSE_LIMIT');
+      if (Buffer.byteLength(json) > responseBytes) fail('RESPONSE_LIMIT');
       response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(json),
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
         ...(status >= 400 ? { Connection: 'close' } : {}) });
@@ -277,7 +300,7 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           expired = true; controller.abort(); reject(new RouteError(readingBody ? 'BODY_TIMEOUT' : 'TIMEOUT'));
-        }, STUDIO_TEST_HTTP_LIMITS.deadlineMs);
+        }, viewing ? STUDIO_VIEWPORT_HTTP_LIMITS.deadlineMs : STUDIO_TEST_HTTP_LIMITS.deadlineMs);
         onClose = () => { disconnected = true; controller.abort(); reject(new RouteError('SCOPE')); };
         response.once('close', onClose);
       });
@@ -299,6 +322,14 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
         readingBody = true;
         const value = await readJson(request, controller.signal);
         readingBody = false; guard();
+        if (viewing) {
+          if (!service.requests.viewport) fail('UNAVAILABLE');
+          const input = record(value, ['sessionId', 'nativeStudioId', 'maxDimension', 'camera'], ['sessionId']);
+          let captured: unknown;
+          try { captured = await service.requests.viewport(input, initial.id); } catch (error) { throw viewportRefusal(error); }
+          guard();
+          return captured;
+        }
         let job: unknown;
         if (url.pathname === PREFIX + '/prepare') {
           const input = prepareInput(value);

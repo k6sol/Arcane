@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "protocolVersion": 1,
-  "pluginVersion": "0.1.9",
+  "pluginVersion": "0.2.0",
   "format": "roblox-xml-v4",
   "preferredArtifact": "ArcaneLocalBridge.rbxmx",
   "entry": "ArcaneLocalBridge",
   "runtimeIdentity": {
     "scheme": "arcane-plugin-source-v1",
-    "sha256": "0d60f280e0ef39b82b0b87da0e10ac294da91c3b99f624c3fad03d601c34177d"
+    "sha256": "ce47b4adca2301090f380549f1fc20dcd99925cffbb5da2e2f1d98c61b435c83"
   },
   "sources": [
     {
@@ -22,8 +22,8 @@
     },
     {
       "path": "src/Validation.luau",
-      "bytes": 17172,
-      "sha256": "3943c97797654e776245ba71895c25faad59fcd4db94f03ab24366529b6e3e27"
+      "bytes": 17434,
+      "sha256": "6224527d7e6ad5341d87313aa3abe83978f1773e270e7573356b85beb036c180"
     },
     {
       "path": "src/Registry.luau",
@@ -32,13 +32,13 @@
     },
     {
       "path": "src/Properties.luau",
-      "bytes": 4416,
-      "sha256": "5d49f5da0bab9bb10277d8ced4ebd2f5a185aba77e22a355025f5790b6a26cc5"
+      "bytes": 4583,
+      "sha256": "53a3ed7a9e8366660844160171ad81c9264ae3ec0a5d358a2517956ad2ee8f59"
     },
     {
       "path": "src/Operations.luau",
-      "bytes": 37219,
-      "sha256": "e27076c1aeb7bdaafe089d5c3bb589f745ddfe5c3660ea7f0f0d9e95d2af6172"
+      "bytes": 57296,
+      "sha256": "6b3724265dd5a6995079838bbe02fd3291a97f415a4d7349718c349d42c64bc9"
     },
     {
       "path": "src/Transport.luau",
@@ -90,14 +90,14 @@
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 203623,
-      "sha256": "23002444313799fa11d8714015c66e45e27afd78e2da545d7c6f0832871319fe"
+      "bytes": 224129,
+      "sha256": "1aac65f1ac198370f4818d211f6b059e7ea7fdad69c9d30f7e3ee14236ea438e"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 203623,
-      "sha256": "23002444313799fa11d8714015c66e45e27afd78e2da545d7c6f0832871319fe"
+      "bytes": 224129,
+      "sha256": "1aac65f1ac198370f4818d211f6b059e7ea7fdad69c9d30f7e3ee14236ea438e"
     }
   ]
 }

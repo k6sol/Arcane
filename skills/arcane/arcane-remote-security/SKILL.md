@@ -6,15 +6,26 @@ license: MIT
 
 # Remote validation and abuse resistance
 
-## Trace the trusted decision
-Start at every reachable entrypoint for the feature: remotes, prompts, touches and callbacks. Locate the authoritative state transition and its owner. Validate sender eligibility, requested action, current state, proximity where relevant, ownership and cooldown before mutating anything.
+## Server checklist for every remote, prompt and touch
+1. Rate limit per player and action (token bucket, e.g. 2/s burst 4 for purchases, 10/s for combat input). Drop silently over the limit.
+2. Type and shape: `typeof` each argument, reject NaN/inf (`v == v`, bounded magnitude), cap string length (ids <= 32 chars, `[%w_-]` only) and table size. Never accept Instances outside expected containers.
+3. State: the player is alive, in the right round or zone, owns the item, and the cooldown has passed (server clock).
+4. Proximity: `(target.Position - root.Position).Magnitude <= limit` (interaction 10-12 studs plus a small latency margin).
+5. Server-derived values: price, damage, reward and drop tables come from server definitions. The client sends only ids and intent.
+6. Idempotence: action ids or authoritative state so a replayed request cannot grant twice.
+A ready-made guard (rate limiter + validators) is in reference `arcane-luau-architecture:patterns`.
 
-Check shape and size as well as type. Reject non-finite numbers, invalid identifiers, spoofed tables/instances and references outside permitted containers. Derive price, damage and reward definitions on the server rather than accepting them from the client. Do not confuse a client-side rate limit with server protection.
+## Anti-exploit basics
+- Clients fully control their own character physics and any LocalScript. Client-side checks and obfuscation are UX, not protection.
+- Movement sanity on the server (10 Hz): horizontal speed above WalkSpeed x 1.5 for over 1 s, or a jump in position beyond 3x expected, resets the player to the last valid position. Log it; do not ban on one sample.
+- Unanchored server-owned parts that matter (doors, loot, NPCs): `SetNetworkOwner(nil)`.
+- Touched rewards: handle on the server, debounce per player, and check the toucher's distance and state.
+- Keep secrets, admin lists and server modules in ServerScriptService or ServerStorage, never ReplicatedStorage.
+- Never use client-provided text for anything without `TextService` filtering when other players will see it.
+- Security logging is rate limited too, so it cannot become a memory or spam attack.
 
-Bound expensive work with per-action/per-player limits appropriate to real play. Prevent duplicate outcomes through action IDs or authoritative state where needed. Security logging must not become a new spam/memory attack.
-
-## Review trade-offs
-Do not invent broad bans from one anomalous packet or reject normal latency without evidence. Explain residual risks and tests. No client-only anti-cheat or obfuscation replaces server validation.
+## Trade-offs
+Do not reject normal latency or invent broad bans from one anomalous packet. Explain residual risks. Persistence safety: `arcane-datastore-safety`.
 
 ## Verification
-Exercise malformed payloads, oversized data, NaN/infinity, stale state, distant requests, replay and flooding in an isolated fixture. Assert authoritative balances/items/damage remain valid and legitimate interaction still works.
+Exercise malformed payloads, oversized data, NaN/inf, stale state, distant requests, replay and flooding in an isolated fixture. Assert balances, items and damage stay valid and legitimate play still works.

@@ -114,18 +114,103 @@ export function taskUsageCost(scope: TaskUsageScope, model: string, current: Tok
   return subscription ? { kind: 'included', label: 'Included in plan', estimate } : estimate ?
     { kind: 'estimate', label: estimate.label, estimate } : { kind: 'unavailable', label: 'Estimate unavailable', estimate: null };
 }
+// ---- Maintained price table and cost display (estimates only; never a bill) ----
+/** Published standard API list prices in USD per million tokens. Exact model IDs only: an unknown model shows tokens only. */
+export interface UsagePrice { readonly inputPerMillion: number; readonly cachedInputPerMillion: number | null; readonly outputPerMillion: number }
+export const USAGE_PRICES_AS_OF = '2026-10-06';
+export const USAGE_PRICE_TABLE_ID = 'arcane-price-table';
+const price = (inputPerMillion: number, cachedInputPerMillion: number | null, outputPerMillion: number): UsagePrice => Object.freeze({ inputPerMillion, cachedInputPerMillion, outputPerMillion });
+const USAGE_PRICES: Readonly<Record<string, UsagePrice>> = Object.freeze(Object.assign(Object.create(null) as Record<string, UsagePrice>, {
+  // ChatGPT models.
+  'gpt-5': price(1.25, 0.125, 10), 'gpt-5-codex': price(1.25, 0.125, 10), 'gpt-5-mini': price(0.25, 0.025, 2), 'gpt-5-nano': price(0.05, 0.005, 0.4),
+  'gpt-5.1': price(1.25, 0.125, 10), 'gpt-5.1-codex': price(1.25, 0.125, 10), 'gpt-5.1-codex-max': price(1.25, 0.125, 10), 'gpt-5.1-codex-mini': price(0.25, 0.025, 2),
+  'gpt-5.2': price(1.75, 0.175, 14), 'gpt-4.1': price(2, 0.5, 8), 'gpt-4.1-mini': price(0.4, 0.1, 1.6), 'gpt-4o': price(2.5, 1.25, 10), 'gpt-4o-mini': price(0.15, 0.075, 0.6),
+  'o3': price(2, 0.5, 8), 'o4-mini': price(1.1, 0.275, 4.4),
+  // Claude models (the Claude engine reports cache tokens inside input, so only the base input rate applies).
+  'claude-fable-5-1': price(10, null, 50), 'claude-fable-5': price(10, null, 50), 'claude-opus-5-5': price(4, null, 20), 'claude-opus-5': price(5, null, 25),
+  'claude-opus-4-8': price(5, null, 25), 'claude-opus-4-7': price(5, null, 25), 'claude-opus-4-6': price(5, null, 25),
+  'claude-sonnet-5-5': price(2, null, 10), 'claude-sonnet-5': price(2, null, 10), 'claude-sonnet-4-6': price(3, null, 15),
+  'claude-haiku-5-5': price(0.1, null, 0.5), 'claude-haiku-4-5': price(1, null, 5),
+}));
+/** The maintained price for an exact model ID (a trailing release date or context suffix is ignored); null when unknown. */
+export function usagePrice(model: unknown): UsagePrice | null {
+  if (typeof model !== 'string' || model.length > 128) return null;
+  const id = model.trim().toLowerCase().replace(/\[1m\]$/, '');
+  return USAGE_PRICES[id] ?? USAGE_PRICES[id.replace(/-(?:\d{4}-\d{2}-\d{2}|\d{8})$/, '')] ?? null;
+}
+/** USD estimate from the price table. Cached input uses the cached rate when the table has one. */
+export function estimateUsageUsd(model: unknown, tokens: { inputTokens: number; outputTokens: number; cachedInputTokens?: number }): number | null {
+  const rates = usagePrice(model), ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_COUNT;
+  if (!rates || !ok(tokens.inputTokens) || !ok(tokens.outputTokens)) return null;
+  const cached = rates.cachedInputPerMillion !== null && ok(tokens.cachedInputTokens) ? Math.min(tokens.cachedInputTokens, tokens.inputTokens) : 0;
+  const amount = ((tokens.inputTokens - cached) * rates.inputPerMillion + cached * (rates.cachedInputPerMillion ?? 0) + tokens.outputTokens * rates.outputPerMillion) / 1_000_000;
+  return Number.isFinite(amount) ? amount : null;
+}
+/** A rate card for the exact task from the maintained table, or undefined for an unknown model. */
+export function tableRateCard(scope: TaskUsageScope, model: string): TaskUsageRateCard | undefined {
+  const rates = usagePrice(model);
+  if (!rates || rates.cachedInputPerMillion === null) return undefined;
+  return { authorized: true, scope: { ...scope }, model, currency: 'USD', inputPerMillion: rates.inputPerMillion, outputPerMillion: rates.outputPerMillion,
+    cachedInputPerMillion: rates.cachedInputPerMillion, cacheWriteInputPerMillion: rates.inputPerMillion, missingCacheWrite: 'not-applicable',
+    provenance: { id: USAGE_PRICE_TABLE_ID, asOf: USAGE_PRICES_AS_OF } };
+}
+/** Viewer's cost display choice. `rate` converts USD to `currency`; without it costs stay in USD. */
+export interface CostDisplayPreferences { show: boolean; currency: string; rate: number | null }
+export const COST_CURRENCIES = Object.freeze(['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'NZD', 'JPY', 'CNY', 'HKD', 'SGD', 'KRW', 'INR', 'BRL', 'MXN', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'ZAR', 'TRY', 'ILS', 'AED'] as const);
+const EURO = 'AT BE CY DE EE ES FI FR GR HR IE IT LT LU LV MT NL PT SI SK'.split(' ');
+const REGION_CURRENCY: Readonly<Record<string, string>> = Object.freeze({ US: 'USD', GB: 'GBP', CA: 'CAD', AU: 'AUD', NZ: 'NZD', JP: 'JPY', CN: 'CNY', HK: 'HKD', SG: 'SGD', KR: 'KRW',
+  IN: 'INR', BR: 'BRL', MX: 'MXN', CH: 'CHF', SE: 'SEK', NO: 'NOK', DK: 'DKK', PL: 'PLN', CZ: 'CZK', ZA: 'ZAR', TR: 'TRY', IL: 'ILS', AE: 'AED', ...Object.fromEntries(EURO.map(r => [r, 'EUR'])) });
+/** A usable BCP 47 locale, or en-US. */
+export function costLocale(value: unknown): string {
+  try { return typeof value === 'string' && value.length <= 64 && Intl.NumberFormat.supportedLocalesOf([value]).length ? value : 'en-US'; } catch { return 'en-US'; }
+}
+/** The locale's usual currency when Arcane lists it; USD otherwise. */
+export function currencyForLocale(locale: string): string {
+  let region: string | undefined;
+  try { region = new Intl.Locale(costLocale(locale)).maximize().region; } catch { region = undefined; }
+  return (region && REGION_CURRENCY[region]) ?? 'USD';
+}
+export const DEFAULT_COST_PREFERENCES: Readonly<CostDisplayPreferences> = Object.freeze({ show: true, currency: 'USD', rate: null });
+/** Validates a stored preference row; anything unexpected falls back to the defaults (show on, locale currency, no rate). */
+export function readCostPreferences(value: unknown, fallbackCurrency = 'USD'): CostDisplayPreferences {
+  const row = value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const listed = (v: unknown): v is string => typeof v === 'string' && (COST_CURRENCIES as readonly string[]).includes(v);
+  const currency = listed(row.currency) ? row.currency : listed(fallbackCurrency) ? fallbackCurrency : 'USD';
+  const rate = typeof row.rate === 'number' && Number.isFinite(row.rate) && row.rate > 0 && row.rate <= 1_000_000 && currency !== 'USD' ? row.rate : null;
+  return { show: row.show !== false, currency, rate };
+}
+/** '~$0.31' (or the converted local currency when a rate is set). Tiny amounts keep two significant digits instead of rounding to zero. */
+export function formatUsageCost(usd: number, preferences: CostDisplayPreferences = DEFAULT_COST_PREFERENCES, locale = 'en-US'): string {
+  const converted = preferences.currency !== 'USD' && preferences.rate !== null;
+  const currency = converted ? preferences.currency : 'USD', amount = Math.max(0, usd) * (converted ? preferences.rate! : 1);
+  const options: Intl.NumberFormatOptions = amount > 0 && amount < 0.01 ? { maximumSignificantDigits: 2 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+  try { return '~' + new Intl.NumberFormat(costLocale(locale), { style: 'currency', currency, currencyDisplay: 'narrowSymbol', ...options }).format(amount); }
+  catch { return '~' + amount.toFixed(amount > 0 && amount < 0.01 ? 4 : 2) + ' ' + currency; }
+}
+/** Compact token count: 950, 12.3k, 1.2M. */
+export function compactTokenCount(value: number): string {
+  if (value < 1000) return String(Math.round(value));
+  if (value < 1e6) return (value / 1000).toFixed(value < 1e5 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  return (value / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+/** Cost display context for the footer: preferences plus the formatting locale. */
+export interface TaskUsageCostDisplay { preferences: CostDisplayPreferences; locale: string }
 function duration(ms: number): string {
   const seconds = Math.floor(ms / 1000), hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds / 60) % 60;
   return hours ? `${hours}h ${minutes}m ${seconds % 60}s` : minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
 }
-export function taskUsageFooter(view: Omit<TaskUsageView, 'footer'>): TaskUsageView['footer'] {
+export function taskUsageFooter(view: Omit<TaskUsageView, 'footer'>, display?: TaskUsageCostDisplay): TaskUsageView['footer'] {
   const reliable = view.current !== null || view.cumulative !== null || view.elapsedMs !== null;
   const visible = view.active || reliable;
   if (!visible) return { visible: false, text: '', accessibleLabel: '', detail: '' };
-  const parts = [view.current ? `Tokens ${view.current.totalTokens.toLocaleString('en-US')}` : view.lastRequest ?
+  // With a display context the estimate reads 'Tokens 12,400 (~$0.31)'; without one, the original labels remain.
+  const estimate = view.cost.estimate, money = display && estimate && estimate.currency === 'USD' && display.preferences.show
+    ? formatUsageCost(estimate.amount, display.preferences, display.locale) : null;
+  const parts = [view.current ? `Tokens ${view.current.totalTokens.toLocaleString('en-US')}${money ? ` (${money})` : ''}` : view.lastRequest ?
     `Last reported tokens ${view.lastRequest.totalTokens.toLocaleString('en-US')} (request)` : view.active ? 'Tokens pending' : 'Task tokens unavailable'];
-  if (view.cost.kind !== 'unavailable') parts.push(view.cost.label);
-  if (view.cost.kind === 'included' && view.cost.estimate) parts.push(view.cost.estimate.label);
+  if (view.cost.kind === 'included') parts.push(view.cost.label);
+  else if (view.cost.kind === 'estimate' && !display) parts.push(view.cost.label);
+  if (view.cost.kind === 'included' && estimate && !display) parts.push(estimate.label);
   parts.push(view.elapsedMs === null ? 'Elapsed unavailable' : `${view.elapsedKind === 'observed' ? 'Observed elapsed' : view.elapsedKind === 'reported' ? 'Reported elapsed' : 'Elapsed'} ${duration(view.elapsedMs)}`);
   if (view.status === 'unknown') parts.push('Task state unknown');
   const c = view.current;
@@ -133,6 +218,11 @@ export function taskUsageFooter(view: Omit<TaskUsageView, 'footer'>): TaskUsageV
   if (view.cumulative) details.push(`Thread total ${view.cumulative.totalTokens}.`);
   if (view.lastRequest) details.push(`Last reported request ${view.lastRequest.totalTokens} tokens.`);
   if (view.modelContextWindow !== null) details.push(`Reported model context window ${view.modelContextWindow} tokens.`);
+  if (money && display) {
+    const converted = display.preferences.currency !== 'USD' && display.preferences.rate !== null;
+    details.push(`${money} is an ${view.cost.kind === 'included' ? 'estimated API-equivalent cost; your plan is not charged per token' : 'estimated API cost'}` +
+      ` (Arcane price table, ${USAGE_PRICES_AS_OF}${converted ? `; converted at your rate of ${display.preferences.rate} ${display.preferences.currency} per USD` : ''}).`);
+  }
   const detail = details.join(' ');
   return { visible, text: parts.join(' · '), accessibleLabel: `Task usage. ${parts.join('. ')}. ${detail}`, detail };
 }
@@ -172,6 +262,8 @@ export class TaskUsageTracker {
     if (task.baseline && !task.current) { task.uncertain = true; task.baseline = null; task.cumulative = null; task.lastRequest = null; return; }
     task.cumulative = { ...usage.total }; task.lastRequest = { ...usage.last }; task.context = usage.modelContextWindow;
   }
+  /** Presentation context for the footer's cost estimate (set by the footer UI). */
+  costDisplay: TaskUsageCostDisplay | undefined;
   read(state: ReadonlyTaskUsageState, card?: TaskUsageRateCard): TaskUsageView {
     const now = this.#now(), snapshot = state.snapshot;
     const empty = (): TaskUsageView => {
@@ -180,7 +272,7 @@ export class TaskUsageTracker {
       const view = { scope: null, status: 'unknown' as const, active: false, current: null, cumulative: null, lastRequest: null,
         modelContextWindow: null, elapsedMs: null, elapsedKind: 'unavailable' as const, reportedDurationMs: null,
         cost: { kind: 'unavailable' as const, label: 'Estimate unavailable', estimate: null } };
-      return { ...view, footer: taskUsageFooter(view) };
+      return { ...view, footer: taskUsageFooter(view, this.costDisplay) };
     };
     if (!identifier(state.projectId) || !snapshot || !identifier(snapshot.connectionId) || !snapshot.thread || !identifier(snapshot.thread.threadId) ||
         !count(snapshot.lastEventSeq, Number.MAX_SAFE_INTEGER) || !count(snapshot.droppedEvents, Number.MAX_SAFE_INTEGER) ||
@@ -235,7 +327,7 @@ export class TaskUsageTracker {
       const view: Omit<TaskUsageView, 'footer'> = { scope: null, status: 'starting', active: true, current: null, cumulative: null, lastRequest: null,
         modelContextWindow: null, elapsedMs: null, elapsedKind: 'unavailable', reportedDurationMs: null,
         cost: snapshot.account?.auth === 'subscription' ? { kind: 'included', label: 'Included in plan', estimate: null } : { kind: 'unavailable', label: 'Estimate unavailable', estimate: null } };
-      return { ...view, footer: taskUsageFooter(view) };
+      return { ...view, footer: taskUsageFooter(view, this.costDisplay) };
     }
     const task = this.#task(ledger, { projectId: state.projectId, connectionId: snapshot.connectionId, threadId: thread.threadId, turnId: thread.turnId }, thread.selection.model);
     const report = snapshot.usage as TokenUsageReport | undefined;
@@ -273,8 +365,8 @@ export class TaskUsageTracker {
       current: current ? { ...current } : null, cumulative: task?.cumulative ? { ...task.cumulative } : null,
       lastRequest: task?.lastRequest ? { ...task.lastRequest } : null, modelContextWindow: task?.context ?? null,
       elapsedMs, elapsedKind: elapsedMs === null ? 'unavailable' : useReported ? 'reported' : task?.partial ? 'observed' : 'elapsed', reportedDurationMs: reported,
-      cost: task ? taskUsageCost(task.scope, task.model, task.modelReliable ? current : null, subscription, card) : { kind: 'unavailable', label: 'Estimate unavailable', estimate: null } };
-    return { ...view, footer: taskUsageFooter(view) };
+      cost: task ? taskUsageCost(task.scope, task.model, task.modelReliable ? current : null, subscription, card ?? tableRateCard(task.scope, task.model)) : { kind: 'unavailable', label: 'Estimate unavailable', estimate: null } };
+    return { ...view, footer: taskUsageFooter(view, this.costDisplay) };
   }
   /** Stop when the bridge is explicitly cleared or disposed. No background elapsed is invented. */
   clear(): void { if (this.#selected) settle(this.#selected, this.#now(), true); this.#selected = null; }

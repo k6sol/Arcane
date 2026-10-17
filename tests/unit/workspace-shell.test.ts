@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { startWorkspaceShell } from '../../apps/desktop/src/workspace-shell.js';
+import { startWorkspaceShell, WORKSPACE_COMPACT_EVENT, WORKSPACE_COMPACT_RESTORE_EVENT } from '../../apps/desktop/src/workspace-shell.js';
 
 // Small DOM fixture with bubbling and button/form defaults. No browser, host,
 // daemon, native client, or inferred workspace data is involved.
@@ -542,4 +542,30 @@ test('discoverable shortcuts focus the composer, open the model picker, close th
   assert.equal(f.doc.body.key(',', { ctrlKey: true }).defaultPrevented, true);
   f.untouched(); shell.cleanup();
   assert.equal(f.doc.body.key('w', { ctrlKey: true }).defaultPrevented, false); assert.equal(closes, 1);
+});
+
+test('compact sidebar: edge button, settings checkbox and Ctrl+B toggle an icon rail with aria and tooltips, storage-free', () => {
+  const f = fixture();
+  const edge = f.add('button', 'sidebar-compact-toggle', f.sidebar), check = f.add('input', 'settings-compact-sidebar');
+  const link = f.navigation.get('asset-heading')!; link.className = 'nav-link';
+  const announced: boolean[] = [];
+  f.doc.addEventListener(WORKSPACE_COMPACT_EVENT, (event => { announced.push((event as CustomEvent).detail.compact); }) as EventListener);
+  const shell = startWorkspaceShell(f.doc.document);
+  assert.equal(edge.getAttribute('aria-expanded'), 'true'); assert.equal(edge.getAttribute('aria-controls'), 'app-sidebar');
+  assert.equal(edge.getAttribute('aria-keyshortcuts'), 'Control+B'); assert.equal(edge.getAttribute('aria-label'), 'Collapse sidebar to icons');
+  edge.click();
+  assert.equal(f.sidebar.classList.contains('compact'), true); assert.equal(f.doc.body.classList.contains('shell-compact'), true);
+  assert.equal(edge.getAttribute('aria-expanded'), 'false'); assert.equal(edge.getAttribute('aria-label'), 'Expand sidebar');
+  assert.equal(link.getAttribute('title'), 'Assets', 'icon-only links show their label as a tooltip');
+  assert.equal((check as unknown as HTMLInputElement & { checked: boolean }).checked, true);
+  assert.equal(f.doc.body.key('b', { ctrlKey: true }).defaultPrevented, true);
+  assert.equal(f.sidebar.classList.contains('compact'), false); assert.equal(link.hasAttribute('title'), false, 'only tooltips the shell added are removed');
+  assert.deepEqual(announced, [true, false]);
+  f.doc.dispatchEvent(new CustomEvent(WORKSPACE_COMPACT_RESTORE_EVENT, { detail: { compact: true } }));
+  assert.equal(f.sidebar.classList.contains('compact'), true); assert.deepEqual(announced, [true, false], 'a restore is applied without being announced again');
+  (check as unknown as { checked: boolean }).checked = false; check.dispatchEvent(new Event('change'));
+  assert.equal(f.sidebar.classList.contains('compact'), false);
+  assert.equal(f.doc.body.key('b', { ctrlKey: true, shiftKey: true }).defaultPrevented, false);
+  f.untouched(); shell.cleanup();
+  assert.equal(f.doc.body.key('b', { ctrlKey: true }).defaultPrevented, false, 'cleanup removes the shortcut');
 });

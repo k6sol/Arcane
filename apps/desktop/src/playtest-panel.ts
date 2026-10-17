@@ -5,6 +5,9 @@ export interface PlaytestPanelOptions {
   token: () => string;
   isSignedIn: () => boolean;
   transport?: typeof fetch;
+  /** The composer's Playtest switch. When it returns true, a request from the managed chat that first appeared while the
+   * switch was on is approved automatically through the same route and digest a click uses. Omitted or false: never. */
+  autoApprove?: () => boolean;
 }
 export interface PlaytestPanelController { stop(): void; refresh(): Promise<void> }
 
@@ -22,6 +25,8 @@ interface Job {
   id: string; targetName: string; state: 'needs_approval' | 'running' | 'complete' | 'cancelled';
   displayDigest: string; display: Readonly<Row>; scope: string; durationMs: number;
   consentExpiresAt: number; evidence: 'native' | 'fixture';
+  /** Requested by a managed chat (an agent caller), not by a person in this panel. */
+  agent: boolean;
   scenarioPlan?:ScenarioPlanView;
   review: { phase: string; outcome: string | null; code: string | null; cleanup: string; requiresHumanReview: boolean;
     scenario?: {state:string;inputRelease:string;temporary:string;steps:Row[];capture:{id:string;sha256:string;bytes:number}|null} };
@@ -172,7 +177,8 @@ function scenarioPlanView(plan:Row):ScenarioPlanView {
 function readJob(value: unknown): Job {
   const source = object(value), id = text(source.id, 128);
   if (!/^[A-Za-z0-9_-]+$/.test(id)) invalid();
-  text(source.actor); // Deliberately neither retained nor displayed.
+  // Deliberately never displayed; only whether a managed chat (agent caller) asked is kept.
+  const agent = /^agent-[a-f0-9]{64}$/.test(text(source.actor));
   const targetName = text(source.targetName), displayDigest = text(source.displayDigest, 64);
   if (!/^[a-f0-9]{64}$/.test(displayDigest) || source.nativeAcceptance !== false ||
       !['native', 'fixture'].includes(source.evidence as string) ||
@@ -243,7 +249,7 @@ function readJob(value: unknown): Job {
   }else if(review.scenario!==undefined||proposal.subjectDigest!==undefined)invalid();
   return {
     id, targetName, state: source.state as Job['state'], displayDigest, display,
-    scope: JSON.stringify(display), durationMs, consentExpiresAt, evidence: source.evidence as Job['evidence'],
+    scope: JSON.stringify(display), durationMs, consentExpiresAt, evidence: source.evidence as Job['evidence'], agent,
     ...(scenarioPlan?{scenarioPlan}:{}),
     review: {
       phase: text(review.phase, 64), outcome: review.outcome === null ? null : text(review.outcome, 64),
@@ -317,6 +323,9 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   let request: { controller: AbortController; epoch: number; promise: Promise<void> } | null = null;
   // Negative deduplication only: an ambiguous command is never sent again for this scope.
   const attempted = new Set<string>();
+  // Automatic approval: whether the Playtest switch was on when each job was first seen, and which jobs it approved.
+  const firstSeenOn = new Map<string, boolean>(), autoApproved = new Set<string>();
+  const autoOn = (): boolean => { try { return options.autoApprove?.() === true; } catch { return false; } };
   interface JobView { job: Job; signature: string; element: HTMLElement; heading: HTMLElement; details: HTMLDetailsElement; controls: HTMLButtonElement[]; remove(): void }
   const rendered = new Map<string, JobView>();
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, content?: string, className?: string): HTMLElementTagNameMap[K] => {
@@ -389,6 +398,8 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       const label = node('p', state.label, state.danger ? 'playtest-status danger' : 'playtest-status');
       label.setAttribute('role', 'status'); label.setAttribute('aria-live', 'polite'); element.append(label);
     }
+    if(autoApproved.has(job.id)&&job.state!=='needs_approval')element.append(node('p','Approved automatically · Playtest is on','playtest-auto'));
+    else if(job.state==='needs_approval'&&job.agent&&firstSeenOn.get(job.id)===true&&autoOn())element.append(node('p','Playtest is on · approving automatically','playtest-auto'));
     if(job.review.outcome!==null)element.append(node('p','Result: '+job.review.outcome+' · Code: '+(job.review.code??'unavailable')+' · Cleanup: '+job.review.cleanup,'playtest-result'));
     if (job.evidence === 'fixture' || !active(job)) element.append(node('p',
       job.evidence === 'fixture' ? 'Fixture evidence · Native acceptance unverified' : 'Native evidence · Native acceptance unverified', 'playtest-evidence'));
@@ -469,7 +480,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     let changed = root.children.length !== selected.length + 1;
     const next = new Map<string, JobView>();
     for (const job of selected) {
-      const signature = JSON.stringify([job.id, job.targetName, job.state, job.scope, job.displayDigest, job.evidence, status(job),job.review]);
+      const signature = JSON.stringify([job.id, job.targetName, job.state, job.scope, job.displayDigest, job.evidence, status(job),job.review,autoApproved.has(job.id),autoOn()]);
       const previous = rendered.get(job.id);
       let row = previous;
       if (!row || row.signature !== signature) {
@@ -539,8 +550,22 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     if (!token) return Promise.resolve();
     if (request) return request.promise;
     return run(token, 'GET', '/v1/playtests', undefined, value => {
-      jobs = readJobs(value); stale = false; render();
+      jobs = readJobs(value); stale = false;
+      for (const job of jobs) if (!firstSeenOn.has(job.id)) firstSeenOn.set(job.id, job.state === 'needs_approval' && autoOn());
+      render();
     }, () => { stale = true; message('Couldn’t refresh test status. Refresh status to check again.'); busy(); });
+  }
+  /** The pending request the switch may approve: from the managed chat, first seen while on, with the same checks a click has. */
+  function autoCandidate(): Job | null {
+    if (!autoOn() || request || stale) return null;
+    return jobs.find(job => job.state === 'needs_approval' && job.agent && firstSeenOn.get(job.id) === true &&
+      job.consentExpiresAt > Date.now() && !job.review.requiresHumanReview && job.review.cleanup !== 'unknown' &&
+      !attempted.has(attemptKey(job, 'approve'))) ?? null;
+  }
+  function autoApprove(): void {
+    const job = autoCandidate();
+    if (!job || !syncContext()) return;
+    autoApproved.add(job.id); void mutate(job, 'approve');
   }
   function mutate(captured: Job, action: 'approve' | 'cancel'): Promise<void> {
     const token = syncContext(), latest = jobs.find(job => job.id === captured.id);
@@ -565,6 +590,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     timer = setTimeout(() => {
       timer = undefined;
       if (syncContext() && !request && Date.now() >= nextPoll) void refresh();
+      else autoApprove();
       busy(); schedule();
     }, AUTH_CHECK_MS);
   }
@@ -586,7 +612,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       stopped = true; if (timer !== undefined) clearTimeout(timer); timer = undefined;
       doc.removeEventListener('visibilitychange', visibility);
       view?.removeEventListener('pagehide', hide); view?.removeEventListener('pageshow', show);
-      refreshButton.removeEventListener('click', refreshClick); invalidate(); attempted.clear();
+      refreshButton.removeEventListener('click', refreshClick); invalidate(); attempted.clear(); firstSeenOn.clear(); autoApproved.clear();
     },
   };
 }

@@ -57,20 +57,25 @@
     },
     {
       "id": "arcane-luau-architecture",
-      "title": "Luau architecture and refactoring",
-      "description": "Implement typed, maintainable Roblox modules within existing project conventions; use for feature code or dependency-aware refactors.",
+      "title": "Luau architecture and scripting",
+      "description": "Write production-quality typed Luau for Roblox: server/client split, ModuleScripts, server-validated remotes, cleanup ownership, CollectionService, TweenService, RunService and performance, using Arcane's disabled-until-activated script flow.",
       "category": "engineering",
       "keywords": [
         "luau",
+        "script",
+        "scripting",
         "modules",
         "architecture",
         "refactor",
         "types",
-        "code"
+        "code",
+        "cleanup",
+        "collectionservice",
+        "tween"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-luau-architecture/SKILL.md",
-      "sha256": "3758afffb8d06ddcd1016d35030582eeeabf02ca651cc226653155ff6782346b",
+      "sha256": "d2da9c1699c9a7f7643387ba33ef3db8b709640b6a5c74d4f0850784c031986d",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -78,7 +83,13 @@
         "code.analyse",
         "studio.test"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-luau-architecture/references/patterns.md",
+          "sha256": "c987ff2b907dc53e830a76da75945eeb0012d57c73bb8a5e6dc15f4e85ecf170"
+        }
+      ]
     },
     {
       "id": "arcane-networking",
@@ -112,14 +123,17 @@
       "keywords": [
         "security",
         "exploit",
+        "anti-exploit",
+        "cheat",
         "validation",
         "remote",
         "abuse",
-        "authority"
+        "authority",
+        "rate-limit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-remote-security/SKILL.md",
-      "sha256": "43ad853cc053431435f582ca414a50c1d7efecfd3e393dbd7c98410f1d126692",
+      "sha256": "40aea8002f51a58618402b051cd66c63f38aa1ee39c9b79b90d3a4559af041b3",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -149,6 +163,30 @@
       "evaluationRuns": [],
       "verificationCapabilities": [
         "studio.test"
+      ],
+      "references": []
+    },
+    {
+      "id": "arcane-datastore-safety",
+      "title": "DataStore safety",
+      "description": "Write or review Roblox DataStore code that never loses or overwrites player data: pcall with budgeted retries, UpdateAsync, session locking, BindToClose and Studio API-access awareness.",
+      "category": "engineering",
+      "keywords": [
+        "datastore",
+        "persistence",
+        "session-lock",
+        "updateasync",
+        "bindtoclose",
+        "budget"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-datastore-safety/SKILL.md",
+      "sha256": "acecbc0620ac2f938e9dd0789c5055217bb32547660cd860ef56f15fee914d90",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "code.analyse"
       ],
       "references": []
     },
@@ -196,6 +234,33 @@
       "approved": false,
       "evaluationRuns": [],
       "verificationCapabilities": [
+        "studio.test"
+      ],
+      "references": []
+    },
+    {
+      "id": "arcane-gameplay-systems",
+      "title": "Gameplay system recipes",
+      "description": "Concise server-authoritative recipes for common Roblox systems: checkpoints, round loop, leaderstats, doors and keys, NPC dialogue and pathfinding NPCs, built in batches and verified by playtest.",
+      "category": "engineering",
+      "keywords": [
+        "checkpoint",
+        "leaderstats",
+        "round",
+        "door",
+        "key",
+        "dialogue",
+        "pathfinding",
+        "system"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-gameplay-systems/SKILL.md",
+      "sha256": "c25652efcd7b088d791a87443dd10a7e894012239777edd3a331a8b7ed28985e",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
         "studio.test"
       ],
       "references": []
@@ -371,8 +436,8 @@
     },
     {
       "id": "arcane-interface",
-      "title": "Game UI and interaction design",
-      "description": "Create or improve Roblox HUDs, menus and world-space interfaces with consistent hierarchy, feedback and real in-engine usability.",
+      "title": "Game UI design system",
+      "description": "Build modern, responsive Roblox ScreenGui interfaces from a design system: tokens, UICorner/UIStroke/UIGradient components, scale layouts, typography, hover/press tweens, accessible contrast and clean LocalScript modules.",
       "category": "craft",
       "keywords": [
         "ui",
@@ -380,11 +445,15 @@
         "hud",
         "menu",
         "screen",
-        "interface"
+        "interface",
+        "shop",
+        "notification",
+        "settings",
+        "button"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-interface/SKILL.md",
-      "sha256": "5320f3e6a1c64b8d432f520ebb1c36e0f17a3b7f994c52fab7298119972a3add",
+      "sha256": "399492e9581db939ee099f6b393319652843eb83553ebf45e3c90e59ae54a0a4",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -392,7 +461,13 @@
         "studio.capture",
         "studio.input"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "recipes",
+          "path": "skills/arcane/arcane-interface/references/recipes.md",
+          "sha256": "91843a96e4b9c5873e7ab970a238a8acd9077e4d08642b3f3e21317865f09a22"
+        }
+      ]
     },
     {
       "id": "arcane-accessibility",
@@ -691,20 +766,26 @@
     },
     {
       "id": "arcane-vfx",
-      "title": "Readable and bounded VFX",
-      "description": "Build Roblox effects tied to real game events with coherent style, pooling/lifecycle controls and device-tested readability.",
+      "title": "VFX: particles, beams, trails and lights",
+      "description": "Build Roblox VFX with exact presets: ParticleEmitter fire, smoke, sparks, magic, waterfall, dust, fireflies and leaves, plus Beams, Trails, lights and Highlight, with pooling and performance budgets.",
       "category": "craft",
       "keywords": [
         "vfx",
         "particle",
+        "particles",
         "effect",
-        "impact",
+        "fire",
+        "smoke",
+        "sparks",
+        "magic",
+        "beam",
         "trail",
-        "lighting"
+        "light",
+        "highlight"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-vfx/SKILL.md",
-      "sha256": "d620c9c74e0589a3c4d93e5537b0838e52b240483dd93f8e3b4b9187e0f4e0aa",
+      "sha256": "5d73cdd3f4424b9391f5a3f8711f4c457683d8678771b73ceb7570bb21605d74",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1164,13 +1245,90 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-world-building/SKILL.md",
-      "sha256": "803a4ebe12e2b861da07a194a624b93d8c8ddfee0777a8d96a92ba87b8df3a3d",
+      "sha256": "afe3738e87e3191c7d64e80376a15c68d5c8d4065907516e9bf5eee0a6ea6078",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
       "verificationCapabilities": [
         "studio.capture",
         "studio.test"
+      ],
+      "references": []
+    },
+    {
+      "id": "arcane-architectural-features",
+      "title": "Architectural features and spawn pedestals",
+      "description": "Build detailed Roblox architecture such as classical columns, stepped plinths, stairs and spawn pedestals with correct SpawnLocation placement, in one batch call.",
+      "category": "craft",
+      "keywords": [
+        "pillar",
+        "column",
+        "plinth",
+        "spawn",
+        "stairs",
+        "architecture"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-architectural-features/SKILL.md",
+      "sha256": "df298e1580f91e63da74ee44fa91b74effd7922b29e78dd2d7ae5ef5bedbc42c",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write"
+      ],
+      "references": []
+    },
+    {
+      "id": "arcane-natural-scenes",
+      "title": "Natural scenes and forests",
+      "description": "Build high-detail natural Roblox scenes fast: terrain ground and paths, varied multi-part trees, undergrowth, natural Poisson-disk placement and atmosphere in a few batch calls.",
+      "category": "craft",
+      "keywords": [
+        "forest",
+        "trees",
+        "terrain",
+        "foliage",
+        "scatter",
+        "lighting"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-natural-scenes/SKILL.md",
+      "sha256": "3c7dc83f8050b50b198bcb96216eec13e6474ba524c07cbb3588a7deca446b92",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write"
+      ],
+      "references": []
+    },
+    {
+      "id": "arcane-photoreal",
+      "title": "Photoreal lighting, materials and scale",
+      "description": "Make Roblox scenes look photoreal: Future lighting, mood presets (golden hour, foggy forest, night, horror, sci-fi) with Atmosphere and post-processing, terrain grass, MaterialVariants, SurfaceAppearance, real-world scale and imperfection rules.",
+      "category": "craft",
+      "keywords": [
+        "photoreal",
+        "realistic",
+        "realism",
+        "lighting",
+        "mood",
+        "atmosphere",
+        "fog",
+        "post-processing",
+        "materialvariant",
+        "surfaceappearance"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-photoreal/SKILL.md",
+      "sha256": "bfa37b7f4e9ef5360c1754514787181bdc29fe333c0339715a0ffced12f3611a",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.capture"
       ],
       "references": []
     },

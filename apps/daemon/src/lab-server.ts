@@ -31,6 +31,8 @@ import { codexRoutes } from './codex-routes.js';
 import {createStudioTestService, type StudioTestService, type NativeTestConnection} from './studio-test-service.js';
 import {studioTestRoutes, STUDIO_TEST_HTTP_LIMITS, type StudioTestActorResolver, type StudioTestRouteService} from './studio-test-routes.js';
 import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
+import { plansRoutes } from './plans-routes.js';
+import { ActionsLedger } from './actions-ledger.js';
 
 const unavailableTestMessages = {
   UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
@@ -143,6 +145,9 @@ export async function createConnectionLab(options: Options) {
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
   const nativeChat = codex ? codexRoutes(codex, {workflowModels:true}) : null;
+  // Arcane actions metering and Plans & credits (informational; never blocks work, never charges).
+  const plans = options.studioStore ? plansRoutes({ ledger: new ActionsLedger(join(options.stateDirectory, 'arcane-actions')),
+    codexState: () => codex?.state(), studioEvents: () => options.studioStore?.events(100) ?? [] }) : null;
   // Quiesce every retained task before other services publish terminal evidence.
   // Cleanup still runs if an individual private lifecycle hook fails.
   const fenceTasks = (): unknown[] => {
@@ -279,6 +284,7 @@ export async function createConnectionLab(options: Options) {
           ['/codex-task-plan.js', [join(options.cwd, 'dist/apps/desktop/src/codex-task-plan.js'), 'text/javascript']],
           ['/task-plan-boot.js', [join(options.cwd, 'dist/apps/desktop/src/task-plan-boot.js'), 'text/javascript']],
           ['/studio-diagnostics.js', [join(options.cwd, 'dist/apps/desktop/src/studio-diagnostics.js'), 'text/javascript']],
+          ['/arcane-dialog.js', [join(options.cwd, 'dist/apps/desktop/src/arcane-dialog.js'), 'text/javascript']],
           ['/chat-tabs.js', [join(options.cwd, 'dist/apps/desktop/src/chat-tabs.js'), 'text/javascript']],
           ['/chat-attachments.js', [join(options.cwd, 'dist/apps/desktop/src/chat-attachments.js'), 'text/javascript']],
           ['/task-usage.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage.js'), 'text/javascript']],
@@ -288,6 +294,7 @@ export async function createConnectionLab(options: Options) {
           ['/asset-viewer.js', [join(options.cwd, 'dist/apps/desktop/src/asset-viewer.js'), 'text/javascript']],
           ['/automatic-asset-previews.js', [join(options.cwd, 'dist/apps/desktop/src/automatic-asset-previews.js'), 'text/javascript']],
           ['/playtest-panel.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-panel.js'), 'text/javascript']],
+          ['/playtest-toggle.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-toggle.js'), 'text/javascript']],
           ['/glb-preflight.js', [join(options.cwd, 'dist/apps/desktop/src/glb-preflight.js'), 'text/javascript']],
           ['/asset-viewer-runtime.mjs', [join(options.cwd, 'apps/desktop/public/asset-viewer-runtime.mjs'), 'text/javascript']],
           ...[
@@ -299,6 +306,7 @@ export async function createConnectionLab(options: Options) {
           ['/provider-setup.js',[join(options.cwd,'dist/apps/desktop/src/provider-setup.js'),'text/javascript']],
           ['/claude-chat.js',[join(options.cwd,'dist/apps/desktop/src/claude-chat.js'),'text/javascript']],
           ['/setup-checklist.js',[join(options.cwd,'dist/apps/desktop/src/setup-checklist.js'),'text/javascript']],
+          ['/plans.js',[join(options.cwd,'dist/apps/desktop/src/plans.js'),'text/javascript']],
           ['/native-handoff.js',[join(options.cwd,'dist/apps/desktop/src/native-handoff.js'),'text/javascript']],
           ['/studio-key-settings.js',[join(options.cwd,'dist/apps/desktop/src/studio-key-settings.js'),'text/javascript']],
           ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
@@ -312,6 +320,7 @@ export async function createConnectionLab(options: Options) {
         response.writeHead(200, { 'Content-Type': asset[1] + (asset[1].startsWith('image/') ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(data); return;
       }
+      if(plans&&await plans.handle(request,response,url,token,origin))return;
       if(testApi&&await testApi(request,response,url,origin))return;
       if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;

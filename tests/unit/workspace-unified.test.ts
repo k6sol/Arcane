@@ -397,15 +397,15 @@ test('markup has one composer, closed advanced settings, live review notices and
   const drawerTag = html.match(/<dialog\b[^>]*\bid="settings-drawer"[^>]*>/)?.[0];
   assert.ok(drawerTag); assert.match(drawerTag, /aria-labelledby="settings-drawer-heading"/); assert.doesNotMatch(drawerTag, /\bopen\b/);
   const sections = [...html.matchAll(/<section\b[^>]*\bdata-settings-section(?:\s|>)[^>]*>/g)].map(match => match[0]);
-  assert.equal(sections.length, 4);
-  const ids = ['workspace-settings', 'settings-connections', 'settings-tools', 'settings-advanced'];
+  assert.equal(sections.length, 5);
+  const ids = ['workspace-settings', 'settings-connections', 'settings-tools', 'settings-plans', 'settings-advanced'];
   for (const [index, id] of ids.entries()) {
     assert.match(sections[index]!, new RegExp('id="' + id + '"'));
     assert.doesNotMatch(sections[index]!, /\bopen\b/);
     assert.equal(/\bhidden\b/.test(sections[index]!), index !== 0);
   }
   assert.deepEqual([...html.matchAll(/data-settings-section-target="([^"]+)"[^>]*>([^<]+)<\/button>/g)].map(match => [match[1], match[2]]),
-    ids.map((id, index) => [id, ['General', 'Connections', 'Tools', 'Advanced'][index]]));
+    ids.map((id, index) => [id, ['General', 'Connections', 'Tools', 'Plans &amp; credits', 'Advanced'][index]]));
   assert.doesNotMatch(html, /<details\b[^>]*\bid="workspace-settings"|class="settings-index"/);
   const settingsAt = html.indexOf('id="workspace-settings"');
   for (const id of ['codex-unknown', 'codex-approval-section']) assert.ok(html.indexOf('id="' + id + '"') < settingsAt);

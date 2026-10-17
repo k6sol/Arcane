@@ -9,6 +9,8 @@ import {
 } from './codex-chat.js';
 import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
+import { USAGE_PRICES_AS_OF, compactTokenCount, estimateUsageUsd, formatUsageCost, type TaskUsageCostDisplay } from './task-usage.js';
+import { costDisplay, onCostPreferences, replyUsageText } from './task-usage-ui.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
@@ -29,7 +31,8 @@ export interface ClaudeChatBridge {
   list(): Promise<unknown>;
   history(conversationId: string): Promise<unknown>;
   /** images: optional PNG references (data URLs from the composer); the engine keeps only an '[image: name]' marker. */
-  send(request: { conversationId: string | null; text: string; model: string; effort: string; images?: readonly ClaudeChatImage[] }): Promise<unknown>;
+  /** `playtest` mirrors the composer's Playtest switch (#playtest-toggle) when it is mounted; the engine turns it into a short system note. */
+  send(request: { conversationId: string | null; text: string; model: string; effort: string; images?: readonly ClaudeChatImage[]; playtest?: boolean }): Promise<unknown>;
   /** Removes a saved user message and everything after it (edit and rewind). Older bridges lack it; Edit is then hidden. */
   rewind?(request: { conversationId: string; messageId: string }): Promise<unknown>;
   stop(turnId: string): Promise<unknown>;
@@ -141,30 +144,54 @@ function readUsageLimit(value: unknown, error: string | null): ProviderUsageLimi
   if (limit) return { resetsAt: typeof reset === 'number' && Number.isSafeInteger(reset) && reset >= 1e9 && reset < 1e11 ? reset : null };
   return error === CLAUDE_CHAT_USAGE_LIMIT_TEXT ? { resetsAt: null } : null;
 }
-export function formatClaudeUsage(value: unknown): string | null {
+/** One finished reply's tokens and cost: Claude Code's reported cost, else the maintained price table for the model, else none. */
+export interface ClaudeReplyCost { tokens: number; inputTokens: number; outputTokens: number; usd: number | null; source: 'reported' | 'table' | null }
+export function claudeReplyCost(value: unknown, model: string | null = null): ClaudeReplyCost | null {
   const usage = record(value); if (!usage) return null;
   const input = finite(usage.inputTokens), output = finite(usage.outputTokens), cost = finite(usage.costUsd);
-  const parts: string[] = [];
-  if (input !== null) parts.push(Math.round(input) + ' input tokens');
-  if (output !== null) parts.push(Math.round(output) + ' output tokens');
-  if (cost !== null) parts.push('$' + cost.toFixed(4));
-  return parts.length ? 'Done · ' + parts.join(' · ') : null;
+  if (input === null && output === null) return null;
+  const inputTokens = Math.max(0, input ?? 0), outputTokens = Math.max(0, output ?? 0);
+  const reported = cost !== null && cost >= 0 ? cost : null, table = reported === null && model ? estimateUsageUsd(model, { inputTokens, outputTokens }) : null;
+  return { tokens: inputTokens + outputTokens, inputTokens, outputTokens, usd: reported ?? table, source: reported !== null ? 'reported' : table !== null ? 'table' : null };
 }
-/** Tokens reported by finished replies in one conversation during this app session (presentation only). */
-export interface ClaudeConversationUsage { inputTokens: number; outputTokens: number; costUsd: number | null; replies: number }
+const DEFAULT_DISPLAY: TaskUsageCostDisplay = { preferences: { show: true, currency: 'USD', rate: null }, locale: 'en-US' };
+export function formatClaudeUsage(value: unknown, model: string | null = null, display: TaskUsageCostDisplay = DEFAULT_DISPLAY): string | null {
+  const reply = claudeReplyCost(value, model);
+  return reply ? 'Done · ' + replyUsageText(reply.tokens, reply.usd, display) : null;
+}
+const conversion = (display: TaskUsageCostDisplay) => display.preferences.currency !== 'USD' && display.preferences.rate !== null
+  ? ' Converted at your rate of ' + display.preferences.rate + ' ' + display.preferences.currency + ' per USD.' : '';
+/** The tooltip for one reply's usage line: exact counts and where the cost came from. */
+export function claudeReplyUsageTitle(reply: ClaudeReplyCost, display: TaskUsageCostDisplay = DEFAULT_DISPLAY): string {
+  const format = (n: number) => Math.round(n).toLocaleString('en-US');
+  const counts = format(reply.tokens) + ' tokens (' + format(reply.inputTokens) + ' input including cache, ' + format(reply.outputTokens) + ' output).';
+  if (reply.usd === null || !display.preferences.show) return counts + (reply.usd === null ? ' No cost estimate is available for this model.' : '');
+  return counts + ' ' + formatUsageCost(reply.usd, display.preferences, display.locale) + (reply.source === 'reported'
+    ? ' is Claude Code\'s own cost estimate at API prices. Your subscription is not charged per token.'
+    : ' is estimated from Arcane\'s price table (' + USAGE_PRICES_AS_OF + ') with all input at the base rate, so it may be high.') + conversion(display);
+}
+/** Tokens and estimated cost of finished replies in one conversation, recorded on this device (presentation only). */
+export interface ClaudeConversationUsage {
+  inputTokens: number; outputTokens: number; costUsd: number | null; replies: number;
+  /** Replies whose cost came from the price table rather than Claude Code, and replies with no cost at all. */
+  tableCostReplies: number; uncostedReplies: number;
+}
 /** Compact token count: 950, 12.3k, 1.2M. */
-export function compactTokens(value: number): string {
-  if (value < 1000) return String(Math.round(value));
-  if (value < 1e6) return (value / 1000).toFixed(value < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'k';
-  return (value / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
-}
+export const compactTokens = compactTokenCount;
 /** The meter's accessible description and tooltip. */
-export function usageMeterText(usage: ClaudeConversationUsage): string {
+export function usageMeterText(usage: ClaudeConversationUsage, display: TaskUsageCostDisplay = DEFAULT_DISPLAY): string {
   const total = usage.inputTokens + usage.outputTokens, format = (n: number) => Math.round(n).toLocaleString('en-US');
+  const cost = usage.costUsd !== null && display.preferences.show ? formatUsageCost(usage.costUsd, display.preferences, display.locale) : null;
   return 'Tokens used in this conversation: ' + format(total) + ' (' + format(usage.inputTokens) + ' input, ' + format(usage.outputTokens) + ' output' +
-    (usage.costUsd !== null ? ', $' + usage.costUsd.toFixed(4) : '') + ') across ' + usage.replies + (usage.replies === 1 ? ' reply' : ' replies') +
-    ' since Arcane opened. The red arc is the output share.';
+    (cost ? ', ' + cost + ' estimated' : '') + ') across ' + usage.replies + (usage.replies === 1 ? ' reply' : ' replies') + ' recorded on this device.' +
+    (cost ? ' Costs are estimates at API prices' + (usage.tableCostReplies ? ', partly from Arcane\'s price table' : '') +
+      (usage.uncostedReplies ? '; ' + usage.uncostedReplies + (usage.uncostedReplies === 1 ? ' reply has' : ' replies have') + ' no estimate' : '') +
+      '; your subscription is not charged per token.' + conversion(display) : '') +
+    ' The red arc is the output share.';
 }
+/** Per-conversation usage totals kept on this device (bounded). */
+export const CLAUDE_CHAT_USAGE_KEY = 'arcane.claude-chat.usage.v1';
+const USAGE_ROWS = 200;
 /** At most this many messages wait in the queue while a reply runs. */
 export const CLAUDE_CHAT_QUEUE_LIMIT = 5;
 export const CLAUDE_CHAT_QUEUE_RETURNED_TEXT = 'Queued messages were not sent because the reply did not finish. They are back in the message box.';
@@ -317,6 +344,8 @@ export class ClaudeChat {
     };
     const input = this.input();
     installComposerCommands(this.doc);
+    const offCost = onCostPreferences(this.doc, () => { if (this.active) { this.refreshReplyUsage(); this.renderMeter(); } });
+    this.removers.push(offCost);
     listen(this.el('codex-compose'), 'submit', event => { event.preventDefault(); this.submit(); });
     listen(this.el('codex-submit'), 'click', event => { if (this.turnOwnsActiveTab()) { event.preventDefault(); void this.stopTurn(); } });
     listen(input, 'keydown', event => {
@@ -639,7 +668,8 @@ export class ClaudeChat {
     const echoArticle = this.appendMessage(echo, true), echoEpoch = this.viewEpoch;
     this.render();
     let reply: Record<string, unknown> | null, failure = 'Claude could not start this message. Try again.';
-    try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(images.length ? { images } : {}) })); }
+    const playtestSwitch = this.doc.getElementById?.('playtest-toggle'), playtest = playtestSwitch ? { playtest: playtestSwitch.getAttribute('aria-checked') === 'true' } : {};
+    try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(images.length ? { images } : {}), ...playtest })); }
     catch (error) { reply = null; failure = bridgeError(error, failure); }
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
     if (!turnId || !nextConversation) {
@@ -687,6 +717,7 @@ export class ClaudeChat {
       this.notice = bridgeError(error, 'This conversation could not be deleted. Try again.'); this.render(); return;
     }
     this.deleting.delete(conversationId);
+    this.loadUsage(); if (this.usage.delete(conversationId)) this.saveUsage();
     this.conversations = this.conversations.filter(row => row.conversationId !== conversationId);
     const tab = this.tabs.find(row => row.conversationId === conversationId);
     if (tab) { tab.draft = ''; this.closeTab(tab.key); }
@@ -813,8 +844,10 @@ export class ClaudeChat {
         }
         if (visible) this.flushChanges();
         if (visible && !ok && !(turn.stopping && !error)) this.appendMessage({ id: '', role: 'error', text: error ?? 'Claude stopped before finishing.', at: '' }, true);
-        this.notice = turn.stopping && !ok ? 'Stopped.' : formatClaudeUsage(event.usage) ?? (ok ? 'Done.' : '');
-        this.addUsage(turn.conversationId, event.usage);
+        const model = this.turnModel(turn.tabKey), display = this.costDisplay(), reply = claudeReplyCost(event.usage, model);
+        this.notice = turn.stopping && !ok ? 'Stopped.' : formatClaudeUsage(event.usage, model, display) ?? (ok ? 'Done.' : '');
+        if (visible && reply) this.appendReplyUsage(reply, display);
+        this.addUsage(turn.conversationId, reply);
         if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
         // The queue continues only after a reply that finished; a failure, Stop or usage limit returns it to the draft.
         if (ok) this.drainQueue(); else this.returnQueue();
@@ -825,18 +858,70 @@ export class ClaudeChat {
     }
   }
 
-  /** Accumulates a finished reply's reported tokens for its conversation's meter. */
-  private addUsage(conversationId: string | null, value: unknown): void {
-    const usage = record(value); if (!conversationId || !usage) return;
-    const input = finite(usage.inputTokens), output = finite(usage.outputTokens), cost = finite(usage.costUsd);
-    if (input === null && output === null) return;
-    const row = this.usage.get(conversationId) ?? { inputTokens: 0, outputTokens: 0, costUsd: null, replies: 0 };
-    row.inputTokens += input ?? 0; row.outputTokens += output ?? 0; row.replies++;
-    if (cost !== null) row.costUsd = (row.costUsd ?? 0) + cost;
-    this.usage.set(conversationId, row);
+  /** The exact model ID a tab's turn ran on (alias resolved when Claude Code reported it). */
+  private turnModel(tabKey: string): string | null {
+    const alias = this.tabs.find(tab => tab.key === tabKey)?.model ?? null;
+    return alias ? this.state?.resolved[alias] ?? alias : null;
   }
-  /** Token totals for a conversation reported during this app session; null before its first finished reply. */
+  private costDisplay(): TaskUsageCostDisplay { return costDisplay(this.doc, this.storage); }
+  /** A subtle '12k tokens (~$0.31)' line under the finished reply. Its numbers stay on the node so a preference change re-renders it. */
+  private appendReplyUsage(reply: ClaudeReplyCost, display: TaskUsageCostDisplay): void {
+    const box = this.el('codex-messages'); if (!box || !this.active) return;
+    const line = this.make('p', replyUsageText(reply.tokens, reply.usd, display), 'reply-usage');
+    line.dataset.tokens = String(reply.tokens); line.dataset.inputTokens = String(reply.inputTokens); line.dataset.outputTokens = String(reply.outputTokens);
+    if (reply.usd !== null) line.dataset.usd = String(reply.usd);
+    if (reply.source) line.dataset.costSource = reply.source;
+    line.title = claudeReplyUsageTitle(reply, display);
+    const last = Array.from(box.querySelectorAll<HTMLElement>('.codex-message')).at(-1);
+    if (last && last.getAttribute('data-role') === 'assistant') last.append(line); else box.append(line);
+  }
+  /** Re-renders every visible reply usage line after a cost preference change. */
+  private refreshReplyUsage(): void {
+    const box = this.el('codex-messages'); if (!box) return;
+    const display = this.costDisplay();
+    for (const line of Array.from(box.querySelectorAll<HTMLElement>('.reply-usage'))) {
+      const number = (key: string) => { const value = Number(line.dataset[key]); return Number.isFinite(value) && value >= 0 ? value : null; };
+      const tokens = number('tokens'); if (tokens === null) continue;
+      const source = line.dataset.costSource === 'reported' || line.dataset.costSource === 'table' ? line.dataset.costSource : null;
+      const reply: ClaudeReplyCost = { tokens, inputTokens: number('inputTokens') ?? 0, outputTokens: number('outputTokens') ?? 0, usd: number('usd'), source };
+      line.textContent = replyUsageText(reply.tokens, reply.usd, display); line.title = claudeReplyUsageTitle(reply, display);
+    }
+  }
+  /** Accumulates a finished reply's tokens and cost for its conversation's meter, and keeps the totals on this device. */
+  private addUsage(conversationId: string | null, reply: ClaudeReplyCost | null): void {
+    if (!conversationId || !reply) return;
+    this.loadUsage();
+    const row = this.usage.get(conversationId) ?? { inputTokens: 0, outputTokens: 0, costUsd: null, replies: 0, tableCostReplies: 0, uncostedReplies: 0 };
+    row.inputTokens += reply.inputTokens; row.outputTokens += reply.outputTokens; row.replies++;
+    if (reply.usd !== null) row.costUsd = (row.costUsd ?? 0) + reply.usd; else row.uncostedReplies++;
+    if (reply.source === 'table') row.tableCostReplies++;
+    this.usage.delete(conversationId); this.usage.set(conversationId, row);
+    while (this.usage.size > USAGE_ROWS) this.usage.delete(this.usage.keys().next().value!);
+    this.saveUsage();
+  }
+  private usageLoaded = false;
+  private loadUsage(): void {
+    if (this.usageLoaded) return;
+    this.usageLoaded = true;
+    try {
+      const stored = record(JSON.parse(this.storage?.getItem(CLAUDE_CHAT_USAGE_KEY) ?? 'null')), rows = record(stored?.rows);
+      if (stored?.version !== 1 || !rows) return;
+      const count = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1e12 ? v : null;
+      for (const [id, value] of Object.entries(rows).slice(-USAGE_ROWS)) {
+        const row = record(value); if (!row || !id || id.length > 256 || this.usage.has(id)) continue;
+        const input = count(row.inputTokens), output = count(row.outputTokens), replies = count(row.replies);
+        if (input === null || output === null || !replies) continue;
+        this.usage.set(id, { inputTokens: input, outputTokens: output, costUsd: row.costUsd === null ? null : count(row.costUsd), replies: Math.round(replies),
+          tableCostReplies: Math.round(count(row.tableCostReplies) ?? 0), uncostedReplies: Math.round(count(row.uncostedReplies) ?? 0) });
+      }
+    } catch { /* Usage history is optional presentation. */ }
+  }
+  private saveUsage(): void {
+    try { this.storage?.setItem(CLAUDE_CHAT_USAGE_KEY, JSON.stringify({ version: 1, rows: Object.fromEntries(this.usage) })); } catch { /* Totals stay for this session. */ }
+  }
+  /** Token and cost totals for a conversation recorded on this device; null before its first finished reply. */
   conversationUsage(conversationId: string | null = this.activeConversation()): ClaudeConversationUsage | null {
+    this.loadUsage();
     const row = conversationId ? this.usage.get(conversationId) : undefined; return row ? { ...row } : null;
   }
   /** Shows the visible turn's Studio changes as one card after its messages. */
@@ -1351,16 +1436,18 @@ export class ClaudeChat {
         const circle = this.doc.createElementNS(SVG_NS, 'circle'); circle.setAttribute('cx', '9'); circle.setAttribute('cy', '9'); circle.setAttribute('r', '7'); circle.setAttribute('class', name);
         ring.append(circle);
       }
-      meter.append(ring as unknown as HTMLElement, this.make('span', '', 'usage-meter-count'));
+      meter.append(ring as unknown as HTMLElement, this.make('span', '', 'usage-meter-count'), this.make('span', '', 'usage-meter-cost'));
       controls.prepend(meter);
     }
     if (!meter) return;
     const usage = this.conversationUsage();
     meter.hidden = !this.active || !usage;
     if (!usage) return;
-    const total = usage.inputTokens + usage.outputTokens, label = usageMeterText(usage);
+    const display = this.costDisplay(), total = usage.inputTokens + usage.outputTokens, label = usageMeterText(usage, display);
     meter.setAttribute('aria-label', label); meter.title = label;
     const count = meter.querySelector?.<HTMLElement>('.usage-meter-count'); if (count) count.textContent = compactTokens(total);
+    const cost = meter.querySelector?.<HTMLElement>('.usage-meter-cost');
+    if (cost) { const shown = usage.costUsd !== null && display.preferences.show; cost.textContent = shown ? formatUsageCost(usage.costUsd!, display.preferences, display.locale) : ''; cost.hidden = !shown; }
     const arc = meter.querySelector?.('.usage-ring-output');
     const share = total > 0 ? usage.outputTokens / total : 0;
     arc?.setAttribute('stroke-dasharray', (Math.max(share, total ? 0.04 : 0) * RING).toFixed(2) + ' ' + RING.toFixed(2));

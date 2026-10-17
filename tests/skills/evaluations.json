@@ -1266,6 +1266,138 @@
         "grading": "Review actual behavior/artifacts; do not score by matching response words"
       },
       "runStatus": "not-run"
+    },
+    {
+      "id": "behavior-natural-scenes",
+      "primarySkill": "arcane-natural-scenes",
+      "skills": [
+        "arcane-natural-scenes",
+        "arcane-world-building"
+      ],
+      "genre": "cozy-social",
+      "workerRequest": "Raise the spawn onto a detailed pillar and grow a natural forest around it.",
+      "fixtureRequirements": [
+        "Paired disposable place with a baseplate and one SpawnLocation; plugin 0.2.0+."
+      ],
+      "reviewerOracle": {
+        "observableAssertions": [
+          "Ground is Terrain or irregular layered slabs, never a single flat disc.",
+          "Trees use 3+ multi-part archetypes with colour, scale and yaw variation.",
+          "Placement is clustered Poisson-like with a clearing; no rings, grids or rows.",
+          "The build used a few scene_build/environment_apply calls, not one call per part."
+        ],
+        "evidence": [
+          "Exact starting and resulting revisions",
+          "Actual artifacts and scenario observations; explicit unsupported checks"
+        ],
+        "grading": "Review actual behavior/artifacts; do not score by matching response words"
+      },
+      "runStatus": "not-run"
+    },
+    {
+      "id": "behavior-architectural-features",
+      "primarySkill": "arcane-architectural-features",
+      "skills": [
+        "arcane-architectural-features"
+      ],
+      "genre": "adventure",
+      "workerRequest": "Put the spawn point on top of a classical circular column with stairs.",
+      "fixtureRequirements": [
+        "Paired disposable place with an existing SpawnLocation; plugin 0.2.0+."
+      ],
+      "reviewerOracle": {
+        "observableAssertions": [
+          "Column has stepped plinth, fluting, capital and material contrast.",
+          "Exactly one effective SpawnLocation sits flush, upright and unobstructed on top.",
+          "The top is reachable by stairs."
+        ],
+        "evidence": [
+          "Exact starting and resulting revisions",
+          "Actual artifacts and scenario observations; explicit unsupported checks"
+        ],
+        "grading": "Review actual behavior/artifacts; do not score by matching response words"
+      },
+      "runStatus": "not-run"
+    },
+    {
+      "id": "behavior-datastore-safety",
+      "primarySkill": "arcane-datastore-safety",
+      "skills": [
+        "arcane-datastore-safety",
+        "arcane-persistence"
+      ],
+      "genre": "simulator",
+      "workerRequest": "Add coin saving to my game without breaking existing player data.",
+      "fixtureRequirements": [
+        "Disposable place with an existing DataStore key layout and Studio API access disabled."
+      ],
+      "reviewerOracle": {
+        "observableAssertions": [
+          "Existing keys are read and upgraded, never wiped or renamed.",
+          "Player saves use pcall, budgeted retries, UpdateAsync, session lock and BindToClose.",
+          "No data-mutating code was executed during the edit."
+        ],
+        "evidence": [
+          "Exact starting and resulting revisions",
+          "Actual artifacts and scenario observations; explicit unsupported checks"
+        ],
+        "grading": "Review actual behavior/artifacts; do not score by matching response words"
+      },
+      "runStatus": "not-run"
+    },
+    {
+      "id": "behavior-gameplay-systems",
+      "primarySkill": "arcane-gameplay-systems",
+      "skills": [
+        "arcane-gameplay-systems",
+        "arcane-luau-architecture",
+        "arcane-remote-security"
+      ],
+      "genre": "obby",
+      "workerRequest": "Add checkpoints, kill bricks and a Stage leaderboard to my obby.",
+      "fixtureRequirements": [
+        "Paired disposable place with a short obby course and one SpawnLocation; plugin 0.2.0+; playtest approval available."
+      ],
+      "reviewerOracle": {
+        "observableAssertions": [
+          "All checkpoint and hazard parts were built in one scene_build batch.",
+          "Server script advances Stage only to the next checkpoint and respawns the player there; the client decides nothing.",
+          "Scripts stayed disabled until activation, and a playtest asserted the Checkpoint player attribute."
+        ],
+        "evidence": [
+          "Exact starting and resulting revisions",
+          "Actual artifacts and scenario observations; explicit unsupported checks"
+        ],
+        "grading": "Review actual behavior/artifacts; do not score by matching response words"
+      },
+      "runStatus": "not-run"
+    },
+    {
+      "id": "behavior-photoreal",
+      "primarySkill": "arcane-photoreal",
+      "skills": [
+        "arcane-photoreal",
+        "arcane-natural-scenes",
+        "arcane-vfx"
+      ],
+      "genre": "adventure",
+      "workerRequest": "Make my forest clearing look realistic at golden hour with fireflies after dark.",
+      "fixtureRequirements": [
+        "Paired disposable place with an existing terrain forest clearing; Lighting grant; plugin 0.2.0+."
+      ],
+      "reviewerOracle": {
+        "observableAssertions": [
+          "One environment_apply sets a coherent golden-hour lighting, atmosphere and post-processing preset.",
+          "Settings Arcane cannot change (Future lighting, terrain decoration, material variants) are reported to the user, not claimed.",
+          "Firefly emitters are created by a disabled script and verified by playtest capture, not an edit-mode screenshot."
+        ],
+        "evidence": [
+          "Exact starting and resulting revisions",
+          "Actual artifacts and scenario observations; explicit unsupported checks"
+        ],
+        "grading": "Review actual behavior/artifacts; do not score by matching response words"
+      },
+      "runStatus": "not-run"
     }
   ],
   "guardCases": [

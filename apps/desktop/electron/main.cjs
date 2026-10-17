@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, Menu, dialog, nativeTheme, ipcMain, safeStorage, clipboard } = require('electron');
+const { app, BrowserWindow, Menu, dialog: nativeDialog, nativeTheme, ipcMain, safeStorage, clipboard } = require('electron');
 const { spawn } = require('node:child_process');
 const { join, resolve, basename } = require('node:path');
 const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
@@ -27,6 +27,15 @@ let studioKeyVault;
 let workspacePreferences;
 let claudeChat;
 let studioPlugin;
+let projectPermissions;
+// Workflow questions (Claude chat consent, provider setup, plugin install, project switch, Luau setup, About) render as
+// Arcane-styled in-app dialogs once the trusted workspace renderer attaches (in-app-dialog.cjs). Before that, e.g. for
+// startup failures, and whenever the renderer is gone, the native message box remains. Folder/file pickers stay native.
+let appDialogs = null;
+const dialog = Object.freeze({
+  showMessageBox: (...args) => appDialogs ? appDialogs.showMessageBox(...args) : nativeDialog.showMessageBox(...args),
+  showOpenDialog: (...args) => nativeDialog.showOpenDialog(...args),
+});
 /** Exact main-frame workspace renderer for zero-argument native intents (plugin install, project picker). */
 function rendererEvent(event) {
   const contents = window?.webContents, frame = event?.senderFrame;
@@ -48,7 +57,10 @@ async function startClaudeChat() {
   if (smoke || !projectSession || !nativeHandoff) return;
   const chatDirectory = await ownedDirectory(join(projectSession.stateRoot, 'claude-chat')), chatBroker = nativeHandoff, chatEpoch = projectSession;
   void stopClaudeChat();
-  claudeChat = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog,
+  // Persisted per-project consent (Settings > Permissions): on by default, so Claude chat starts without a question.
+  const permissions = projectPermissions ? { claudeTools: async () => projectSession === chatEpoch && (await projectPermissions.read()).claudeTools === true,
+    allowClaudeTools: async () => { if (projectSession === chatEpoch) await projectPermissions.save({ claudeTools: true }); } } : undefined;
+  claudeChat = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
       release: handoffId => chatBroker.releaseChat(handoffId) },
@@ -217,6 +229,10 @@ function makeWindow() {
     if (isMainFrame) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); }
   });
   window.webContents.on('render-process-gone', () => { if (!closing && !switching) void failStartup('The workspace renderer stopped. Restart Arcane to recover saved records.'); });
+  // A document change, crash or close answers any open in-app dialog with its cancel button and detaches the renderer.
+  const dialogContents = window.webContents;
+  dialogContents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => { if (isMainFrame && !inPlace) appDialogs?.detach(dialogContents); });
+  for (const type of ['render-process-gone', 'destroyed']) dialogContents.on(type, () => appDialogs?.detach(dialogContents));
   window.once('ready-to-show', () => { firstReadyMs = performance.now() - started; if (!smoke) window.show(); });
   window.on('page-title-updated', event => event.preventDefault());
   window.on('closed', () => { window = null; if (!switching && !closing) app.quit(); });
@@ -263,7 +279,7 @@ function installMenu() {
 }
 async function failStartup(message) {
   providerSetup?.dispose(); void stopClaudeChat();
-  if (closing) return; closing = true;
+  if (closing) return; closing = true; appDialogs?.dispose();
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
   await stopDaemon(); app.exit(1);
@@ -428,6 +444,13 @@ else {
         if (smoke || args.length || !rendererEvent(event)) throw new Error('The project picker is unavailable.');
         void chooseProject(); return { requested: true };
       });
+      appDialogs = require('./in-app-dialog.cjs').createInAppDialogs({ native: nativeDialog, getWindow: () => closing || switching ? null : window, trusted: rendererEvent });
+      appDialogs.installIpc(ipcMain);
+      projectPermissions = require('./project-permissions.cjs').createProjectPermissions({ enabled: !smoke,
+        getSession: () => closing || switching || !projectSession ? null : { stateRoot: projectSession.stateRoot, epoch: projectSession } });
+      projectPermissions.installIpc(ipcMain, { trusted: rendererEvent });
+      // Switching Claude tools to "ask" revokes this session's consent and its shared credential immediately.
+      projectPermissions.subscribe(next => { if (!next.claudeTools) claudeChat?.revokeApproval?.(); });
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
         getHost: () => claudeChat ?? null,

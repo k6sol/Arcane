@@ -50,7 +50,7 @@ class FakeChild extends EventEmitter {
 type Script = (child: FakeChild, args: string[]) => void;
 const replay = (...lines: string[]): Script => child => { for (const l of lines) child.write(l); child.close(0); };
 
-async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string } = {}) {
+async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string; permissions?: unknown; expiresInMs?: number } = {}) {
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-claude-chat-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, 'project'), state = options.directory ?? join(root, 'state');
@@ -79,7 +79,7 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
     dialog: { showMessageBox: async (w: unknown, value: any) => { dialogs.push(value); assert.equal(w, window); return { response: options.response ?? 1 }; } },
     handoff: {
       prepare: async (selection: unknown) => {
-        const receipt: any = { handoffId: randomUUID(), expiresAt: new Date(Date.now() + 30 * 60000).toISOString(), configPath: join(root, 'arcane.mcp.json') };
+        const receipt: any = { handoffId: randomUUID(), expiresAt: new Date(Date.now() + (options.expiresInMs ?? 30 * 60000)).toISOString(), configPath: join(root, 'arcane.mcp.json') };
         Object.defineProperty(receipt, 'env', { value: Object.freeze({ ARCANE_DAEMON_URL: ORIGIN, ARCANE_LOCAL_TOKEN: CREDENTIAL }), enumerable: false });
         prepared.push({ selection, receipt }); return Object.freeze(receipt);
       },
@@ -87,6 +87,7 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
     },
     instructions: async () => 'ARCANE TASK INSTRUCTIONS FIXTURE',
     ...(options.limits ? { limits: options.limits } : {}),
+    ...(options.permissions ? { permissions: options.permissions } : {}),
   });
   const turns = () => spawns.filter(s => s.args[0] === '-p');
   const done = (turnId: string) => waitFor(() => events.find(e => e.turnId === turnId && e.type === 'done'));
@@ -640,4 +641,42 @@ test('preload forwards optional PNG references only as exact bounded records', a
     [{ name: 'ref.png' }], [{ ...pngRef(), extra: 1 }], [pngRef('ref.png', 'A'.repeat(800000))], 'x'])
     await assert.rejects(exposed.claudeChat.send(inner({ ...base, images })), { message: chat.CLAUDE_CHAT_MESSAGES.images });
   assert.equal(invoked.length, count, 'malformed references never reach the main process');
+});
+
+test('saved project consent: auto-approve starts without a question; "Always allow" is remembered; switching off asks again', async t => {
+  const auto = await fixture(t, { permissions: { claudeTools: async () => true, allowClaudeTools: async () => assert.fail('nothing to remember') } });
+  auto.scripts.push(replay(init(), assistant([{ type: 'text', text: 'done' }]), result()));
+  const a = await auto.host.send(turnInput('go')); assert.equal((await auto.done(a.turnId)).ok, true);
+  assert.equal(auto.dialogs.length, 0, 'auto-approved: no consent question'); assert.equal(auto.turns().length, 1);
+  let saved = 0, allowed = false;
+  const ask = await fixture(t, { response: 2, permissions: { claudeTools: async () => allowed, allowClaudeTools: async () => { saved++; allowed = true; } } });
+  ask.scripts.push(replay(init(), result()), replay(init(), result()), replay(init(), result()));
+  const b = await ask.host.send(turnInput('go')); await ask.done(b.turnId);
+  assert.equal(ask.dialogs.length, 1); assert.deepEqual(ask.dialogs[0].buttons, ['Cancel', 'Allow', 'Always allow']);
+  assert.equal(ask.dialogs[0].defaultId, 0); assert.equal(ask.dialogs[0].cancelId, 0); assert.match(ask.dialogs[0].detail, /Settings > Permissions/);
+  assert.equal(saved, 1, '"Always allow" saves the project switch');
+  ask.host.revokeApproval();
+  assert.equal(ask.released.length, 1, 'switching off revokes the idle shared credential at once');
+  allowed = false;
+  const c = await ask.host.send(turnInput('again', b.conversationId)); await ask.done(c.turnId);
+  assert.equal(ask.dialogs.length, 2, 'asks again after the switch went off');
+  const failing = await fixture(t, { response: 0, permissions: { claudeTools: async () => { throw new Error('disk'); } } });
+  const d = await failing.host.send(turnInput('go')); assert.equal((await failing.done(d.turnId)).error, chat.CLAUDE_CHAT_MESSAGES.declined);
+  assert.equal(failing.dialogs.length, 1, 'an unreadable setting falls back to asking'); assert.deepEqual(failing.dialogs[0].buttons, ['Cancel', 'Allow']);
+});
+
+test('credential renewal: a credential that cannot cover a full reply is replaced transparently and the old one revoked', async t => {
+  const f = await fixture(t, { expiresInMs: 20 * 60000, permissions: { claudeTools: async () => true } });
+  f.scripts.push(replay(init(), result()), replay(init(), result()));
+  const a = await f.host.send(turnInput('one')); assert.equal((await f.done(a.turnId)).ok, true);
+  assert.equal(f.released.length, 1, 'an idle credential below the reuse floor is revoked after the reply');
+  const b = await f.host.send(turnInput('two', a.conversationId)); assert.equal((await f.done(b.turnId)).ok, true);
+  assert.equal(f.prepared.length, 2, 'the next reply minted a fresh scoped credential without asking');
+  assert.equal(f.dialogs.length, 0);
+  const fresh = await fixture(t, { permissions: { claudeTools: async () => true } });
+  fresh.scripts.push(replay(init(), result()), replay(init(), result()));
+  const c = await fresh.host.send(turnInput('one')); await fresh.done(c.turnId);
+  const d = await fresh.host.send(turnInput('two', c.conversationId)); await fresh.done(d.turnId);
+  assert.equal(fresh.prepared.length, 1, 'a fresh credential is reused while it still covers a full reply'); assert.equal(fresh.released.length, 0);
+  assert.ok(chat.CLAUDE_CHAT_LIMITS.turnTimeoutMs - chat.CLAUDE_CHAT_LIMITS.credentialReuseMs > chat.CLAUDE_CHAT_LIMITS.credentialMarginMs);
 });

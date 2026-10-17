@@ -13,6 +13,7 @@ import {decodeTestInventory,decodeTestState,decodeTestMode,decodeTestLogs,decode
 import {scenarioPlanSchema,SCENARIO_LIMITS} from '../../../packages/studio-test-controller/src/scenario.js';
 import {createStudioTestCaptureStore} from './studio-test-captures.js';
 import {scenarioSubjectDigest,scenarioSubjectProgram} from './studio-test-subjects.js';
+import {captureEditViewport,viewportRequestSchema,VIEWPORT_LIMITS} from '../../../packages/studio-test-controller/src/viewport.js';
 import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled} from '../../../packages/protocol/src/chat-task-playtest.js';
 
 const id=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), hash=z.string().regex(/^[a-f0-9]{64}$/);
@@ -27,13 +28,15 @@ interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;
 export interface StudioTestView {id:string;targetName:string;actor:string;state:'needs_approval'|'running'|'complete'|'cancelled';display:Readonly<ConsentDisplay>;displayDigest:string;review:Readonly<TestReview>;evidence:'fixture'|'native';nativeAcceptance:false}
 type Job={view:StudioTestView;control:ReturnType<typeof createStudioTestControl>;connection:NativeTestConnection;proposalId:string;expiry:ReturnType<typeof setTimeout>;closing:Promise<void>|null;cancelled:boolean;reserved:boolean;reservation:StudioTestReservation|null;verifySubjects:((signal:AbortSignal)=>Promise<void>)|null;
   origin:StudioTestTaskOrigin|null;terminalSent:boolean;reportDigest:string|null;subjects:'current'|'changed'|'unobserved';revalidate:((signal:AbortSignal)=>Promise<'current'|'changed'|'unobserved'>)|null};
+/** At most 30 viewport captures per rolling ten minutes; one at a time. */
+export const VIEWPORT_RATE=Object.freeze({captures:30,deadlineMs:20_000});
 function rejected(code:'INVALID_REQUEST'|'BINDING_CHANGED'|'BUSY'|'PLACE_DENIED'|'STALE_PROOF'|'HUMAN_AUTH_REQUIRED'|'FENCED'|'BAD_NATIVE_RESPONSE'):never{throw new StudioTestError(code);}
 
 /** Dedicated vetted SDK client. The only additional execution is this fixed
  * read-only metadata witness; no caller Luau, paths, flags or URLs are accepted. */
-async function connectNativeTest():Promise<NativeTestConnection>{
+async function connectNativeTest(maxBufferSize:number=SCENARIO_LIMITS.wireBytes):Promise<NativeTestConnection>{
   const executable=await discoverNativeStudioExecutable();
-  const transport=new StdioClientTransport({command:executable.path,args:[],cwd:dirname(executable.path),stderr:'ignore',maxBufferSize:SCENARIO_LIMITS.wireBytes});
+  const transport=new StdioClientTransport({command:executable.path,args:[],cwd:dirname(executable.path),stderr:'ignore',maxBufferSize});
   const client=new Client({name:'arcane-owned-playtest',version:'0.1.0'},{capabilities:{}});
   try{
     await client.connect(transport,{timeout:10000,maxTotalTimeout:10000});
@@ -67,7 +70,7 @@ export async function createStudioTestService(options:Options){
     try{await ledger.close();}catch{/* Preserve the original capture failure. */}
     throw error;
   });
-  let current:Job|null=null, preparing=false,closed=false;
+  let current:Job|null=null, preparing=false,closed=false,viewing=false;const viewportTimes:number[]=[];
   const jobs=new Map<string,Job>();const humanContexts=new WeakSet<object>();
   const identity=(s:ReturnType<StudioStore['session']>)=>digest({sessionId:s.id,clientLifetimeId:s.clientSessionId,placeId:s.placeId,universeId:s.universeId,name:s.name,roots:s.allowedRoots,writes:s.allowWrites,revoked:s.revokedAt});
   const eligible=(sessionId:string)=>{const s=options.store.session(sessionId);if(s.placeId!==0||s.universeId!==0||!s.allowWrites)rejected('PLACE_DENIED');return s;};
@@ -87,7 +90,7 @@ export async function createStudioTestService(options:Options){
     })();return j.closing;
   };
   const prepare=async(input:unknown,actor:string):Promise<StudioTestView>=>{
-    if(closed||preparing||current&&(current.reserved||current.view.state==='needs_approval'||current.view.state==='running')||ledger.unresolved())rejected('BUSY');
+    if(closed||preparing||viewing||current&&(current.reserved||current.view.state==='needs_approval'||current.view.state==='running')||ledger.unresolved())rejected('BUSY');
     if(!id.safeParse(actor).success)rejected('HUMAN_AUTH_REQUIRED');
     const origin=options.taskPort?.capture(actor)??null;if(origin)options.taskPort!.assert(origin);
     const a=request.parse(input),session=eligible(a.sessionId),p=session.proof;
@@ -167,12 +170,46 @@ export async function createStudioTestService(options:Options){
       return view(j);
     }finally{preparing=false;if(connection)await connection.close();}
   };
+  /** Read-only Edit viewport image for the exact paired, unpublished, Edit-mode
+   * session through the built-in Studio MCP screen_capture tool. Never starts
+   * Play, sends input, reserves the place, or accepts caller Luau. */
+  const viewport=async(input:unknown,actor:string)=>{
+    if(!id.safeParse(actor).success)rejected('HUMAN_AUTH_REQUIRED');
+    const now=Date.now();while(viewportTimes.length&&now-viewportTimes[0]!>600_000)viewportTimes.shift();
+    if(closed||preparing||viewing||current?.view.state==='running'||current?.reserved||viewportTimes.length>=VIEWPORT_RATE.captures)rejected('BUSY');
+    const a=viewportRequestSchema.parse(input),session=eligible(a.sessionId),p=session.proof;
+    if(!p||!p.connected||p.pluginArtifactHash!==options.pluginArtifactHash||Date.parse(p.expiresAt)<=Date.now())rejected('STALE_PROOF');
+    if(p.mode!=='Edit')throw new StudioTestError('MODE_MISMATCH');
+    viewing=true;viewportTimes.push(now);let connection:NativeTestConnection|undefined;
+    try{
+      connection=await(options.connect??(()=>connectNativeTest(VIEWPORT_LIMITS.wireBytes)))();
+      if(options.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');
+      const native=connection;
+      const inventory=decodeTestInventory(await native.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{timeout:5000,maxTotalTimeout:5000})) as {id:string;name:string}[];
+      const candidates=a.nativeStudioId?inventory.filter(s=>s.id===a.nativeStudioId):inventory.filter(s=>s.name===session.name);
+      if(candidates.length!==1)rejected('BINDING_CHANGED');
+      const nativeStudioId=candidates[0]!.id,scope=identity(session);
+      const verifyBinding=async(signal:AbortSignal)=>{
+        const s=eligible(session.id),proof=s.proof;
+        if(!proof||!proof.connected||proof.mode!=='Edit'||Date.parse(proof.expiresAt)<=Date.now()||proof.clientLifetimeId!==p.clientLifetimeId||proof.pluginArtifactHash!==options.pluginArtifactHash||proof.markerName!==p.markerName||identity(s)!==scope)rejected('BINDING_CHANGED');
+        const witness=await native.witness(nativeStudioId,proof.markerName,'Edit',signal);
+        if(witness.placeId!==0||witness.universeId!==s.universeId||witness.sessionId!==s.id||witness.clientLifetimeId!==s.clientSessionId||witness.pluginArtifactHash!==options.pluginArtifactHash)rejected('BINDING_CHANGED');
+        return digest({scope,nativeStudioId,clientLifetimeId:proof.clientLifetimeId,playEpoch:proof.playEpoch,markerName:proof.markerName});
+      };
+      const image=await captureEditViewport({client:native.client,nativeStudioId,captureId:'ArcaneViewport_'+randomUUID().replaceAll('-',''),maxDimension:a.maxDimension,
+        ...(a.camera?{camera:a.camera}:{}),verifyBinding,decodeMode:decodeTestMode,...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{})},AbortSignal.timeout(VIEWPORT_RATE.deadlineMs));
+      return {viewport:{sessionId:session.id,nativeStudioId,mode:'Edit' as const,mimeType:'image/png' as const,width:image.width,height:image.height,
+        originalWidth:image.originalWidth,originalHeight:image.originalHeight,downscaled:image.downscaled,bytes:image.bytes,sha256:image.sha256,camera:image.camera,evidence:native.evidence},
+        data:image.png.toString('base64')};
+    }finally{viewing=false;if(connection)await connection.close().catch(()=>{});}
+  };
   return Object.freeze({
     async cancelExact(jobId:string,origin:StudioTestTaskOrigin){const j=jobs.get(jobId);if(!j||j.origin!==origin)rejected('HUMAN_AUTH_REQUIRED');j.cancelled=true;if(j.view.state==='needs_approval')j.view.state='cancelled';const review=j.control.requests.status();if(review.runId&&review.phase!=='done')await j.control.requests.stop({runId:review.runId});await closeJob(j);const final=j.control.requests.status();if(j.reserved||final.runId!==null&&final.cleanup!=='complete'||final.scenario?.inputRelease==='unknown')rejected('FENCED');},
     async revalidateExact(jobId:string,origin:StudioTestTaskOrigin,reportDigest:string):Promise<'current'|'changed'|'unobserved'>{const j=jobs.get(jobId);if(!j||j.origin!==origin||j.reportDigest!==reportDigest||!j.revalidate)rejected('HUMAN_AUTH_REQUIRED');if(j.reserved||j.control.requests.status().cleanup!=='complete')return 'unobserved';return j.revalidate(AbortSignal.timeout(15000));},
     requests:Object.freeze({
       prepare,status:(jobId:string,actor:string)=>view(owned(jobId,actor)),
       list:(actor:string)=>[...jobs.values()].filter(j=>actor==='human'||j.view.actor===actor).map(view),
+      viewport,
       async capture(jobId:string,actor:string){const j=owned(jobId,actor),image=j.control.requests.status().scenario?.capture;if(!image)rejected('INVALID_REQUEST');return {image,bytes:await captures.read(image)};},
       async cancel(jobId:string,actor:string){
         const j=owned(jobId,actor);j.cancelled=true;
@@ -209,4 +246,4 @@ export async function createStudioTestService(options:Options){
 }
 type CreatedStudioTestService=Awaited<ReturnType<typeof createStudioTestService>>;
 /** Capture is an optional extension for older trusted host/test integrations. */
-export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{requests:Omit<CreatedStudioTestService['requests'],'capture'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'>>};
+export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'>>};

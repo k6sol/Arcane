@@ -11,7 +11,7 @@ import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model
 import {
   ClaudeChat, CLAUDE_CHAT_CHOICE_KEY, CLAUDE_CHAT_EMPTY_TEXT, CLAUDE_CHAT_NO_BRIDGE_TEXT, CLAUDE_CHAT_TABS_KEY,
   claudeEffortLabel, claudeModelLabel, claudeModelName, linkChatProviders, readClaudeChatStatus, readClaudeChatBridge,
-  CLAUDE_CHAT_QUEUE_RETURNED_TEXT, compactTokens, usageMeterText,
+  CLAUDE_CHAT_QUEUE_RETURNED_TEXT, CLAUDE_CHAT_USAGE_KEY, compactTokens, usageMeterText,
 } from '../../apps/desktop/src/claude-chat.js';
 import { changeSummary, CodexTranscript, describeToolActivity, readToolResultText, renderChangeCard, restoreRequestText,
   CHOICE_BLOCK_LIMITS, parseChoiceBlock, PLAN_APPROVE_TEXT, PLAN_CHANGE_TEXT, renderMessageText } from '../../apps/desktop/src/codex-chat.js';
@@ -291,7 +291,10 @@ test('Enter sends; streamed deltas, messages, tools and usage render as Codex tr
   b.emit({ type: 'done', ok: true, error: null, usage: { inputTokens: 12, outputTokens: 34, costUsd: 0.0123 } });
   await tick();
   assert.deepEqual(f.bubbles().map(row => row.role), ['user', 'assistant', 'tool', 'assistant']);
-  assert.equal(f.notice.textContent, 'Done · 12 input tokens · 34 output tokens · $0.0123');
+  assert.equal(f.notice.textContent, 'Done · 46 tokens (~$0.01)');
+  const line = f.messages.querySelector('.reply-usage')!;
+  assert.equal(line.textContent, '46 tokens (~$0.01)', 'the finished reply shows a subtle tokens and cost line');
+  assert.match(line.title, /46 tokens \(12 input including cache, 34 output\)\. ~\$0\.01 is Claude Code's own cost estimate/);
   assert.equal(f.submit.getAttribute('aria-label'), 'Send message'); assert.equal(f.chat.running(), false);
   assert.equal(f.tabs()[0]!.textContent, 'Build a lobby', 'the new conversation names its tab');
   assert.deepEqual(f.saved().map(row => row.textContent), ['Build a lobby']); assert.equal(f.saved()[0]!.getAttribute('aria-current'), 'true');
@@ -812,7 +815,7 @@ const FENCE = '`'.repeat(3);
 test('Edge: Codex and Claude share one chat surface; only provider labels differ', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/unify/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
   const reply = JSON.stringify('Here is the lobby plan.\n\n' + FENCE + 'lua\nlocal lobby = workspace.Lobby\n' + FENCE);
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
@@ -900,7 +903,8 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   assert.match(await trigger(), /^Sonnet 5\.5\s*high$/); await page.keyboard.press('Escape');
   await page.locator('#codex-composer').fill('Add a spawn pad'); await page.locator('#codex-composer').press('Enter');
   await page.waitForFunction(() => (window as any).fx.calls.length === 1);
-  assert.deepEqual(await page.evaluate(() => (window as any).fx.calls[0]), { conversationId: 'conv-lobby', text: 'Add a spawn pad', model: 'sonnet', effort: 'high' });
+  assert.deepEqual(await page.evaluate(() => (window as any).fx.calls[0]), { conversationId: 'conv-lobby', text: 'Add a spawn pad', model: 'sonnet', effort: 'high', playtest: false },
+    'the composer Playtest switch (off by default) travels with the message');
   await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-lobby', type: 'done', ok: true, error: null, usage: null }));
   // Back to Codex: its transcript, picker and draft return untouched.
   await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'codex' } })));
@@ -914,7 +918,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
 test('Edge: one model list switches between ChatGPT and Claude in one click and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/xprovider/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1040,7 +1044,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
 test('Edge: usage-limit notice offers the other provider in both directions and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/usage/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1285,7 +1289,7 @@ test('Claude queue: Enter during a reply queues a removable chip; it sends after
 });
 
 test('Claude usage meter: tokens from finished replies accumulate per conversation with a ring, count and tooltip', async t => {
-  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const b = fakeBridge(), store = memory(); const f = mount(b.bridge, store); t.after(() => f.chat.stop()); await f.chat.refresh();
   const meter = () => f.el('claude-usage-meter');
   assert.equal(meter().hidden, true, 'no usage before a reply');
   f.type('One'); key(f.input, 'Enter'); await tick();
@@ -1293,13 +1297,18 @@ test('Claude usage meter: tokens from finished replies accumulate per conversati
   assert.equal(meter().hidden, false); assert.equal(meter().querySelector('.usage-meter-count')!.textContent, '4k');
   f.type('Two'); key(f.input, 'Enter'); await tick();
   b.emit({ type: 'done', ok: true, error: null, usage: { inputTokens: 9000, outputTokens: 1000, costUsd: null } }); await tick();
-  assert.deepEqual(f.chat.conversationUsage(), { inputTokens: 12584, outputTokens: 1400, costUsd: 0.01, replies: 2 });
+  // The second reply had no reported cost: its estimate comes from the price table for the resolved Sonnet model.
+  const usage = f.chat.conversationUsage()!;
+  assert.deepEqual({ ...usage, costUsd: Number(usage.costUsd!.toFixed(6)) }, { inputTokens: 12584, outputTokens: 1400, costUsd: 0.038, replies: 2, tableCostReplies: 1, uncostedReplies: 0 });
   assert.equal(meter().querySelector('.usage-meter-count')!.textContent, '14k');
-  assert.equal(meter().getAttribute('aria-label'), usageMeterText({ inputTokens: 12584, outputTokens: 1400, costUsd: 0.01, replies: 2 }));
-  assert.match(meter().title, /^Tokens used in this conversation: 13,984 \(12,584 input, 1,400 output, \$0\.0100\) across 2 replies/);
+  assert.equal(meter().querySelector('.usage-meter-cost')!.textContent, '~$0.04');
+  assert.equal(meter().getAttribute('aria-label'), usageMeterText(usage));
+  assert.match(meter().title, /^Tokens used in this conversation: 13,984 \(12,584 input, 1,400 output, ~\$0\.04 estimated\) across 2 replies recorded on this device\. Costs are estimates at API prices, partly from Arcane's price table; your subscription is not charged per token\./);
+  // Totals are kept on this device: a new controller over the same storage shows them again.
+  assert.match(store.data.get(CLAUDE_CHAT_USAGE_KEY) ?? '', /"replies":2/);
   f.chat.newChat(); assert.equal(meter().hidden, true, 'a new chat has its own meter');
   f.chat.deactivate(); assert.equal(meter().hidden, true);
-  assert.deepEqual([950, 12345, 1_250_000].map(compactTokens), ['950', '12k', '1.3M']);
+  assert.deepEqual([950, 12345, 1_250_000].map(compactTokens), ['950', '12.3k', '1.3M']);
 });
 
 test('composer commands: "/" opens a keyboard menu (Esc closes, Enter runs without sending) and "@" inserts @selection', async t => {
@@ -1493,7 +1502,7 @@ test('Claude choices: saved replies answered by a later message stay closed; the
 test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu',{ skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/chatux/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1573,7 +1582,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Then add a checkpoint']);
     assert.equal(await page.locator('#codex-messages .chat-change-summary').innerText(), '1 created · 1 script edited');
     assert.equal(await page.locator('#claude-usage-meter').isVisible(), true);
-    assert.equal(await page.locator('#claude-usage-meter .usage-meter-count').innerText(), '20k');
+    assert.equal(await page.locator('#claude-usage-meter .usage-meter-count').innerText(), '19.9k');
     await page.locator('#codex-messages .chat-change-card').scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(shots, 'activity-change-card-' + scheme + '.png') });
     await page.locator('#codex-messages .chat-change-restore').click();
@@ -1615,7 +1624,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
 test('Edge: Claude edit and rewind with the undo option, plan approval and option buttons', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/rewind/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
   const create = { parent: { instanceId: 'i', sessionId: 's', root: 'Workspace', pathSegments: [], className: 'Folder' }, className: 'Part', name: 'RedDoor' };
   const saved = [
     { id: '00000000-0000-4000-8000-000000000001', role: 'user', text: 'Make a lobby with a spawn point', at: '2026-10-17T10:00:00.000Z' },

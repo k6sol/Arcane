@@ -458,6 +458,60 @@ export function approvalEligible(state:ChatState|null,a:Approval):boolean {
   if(a.method==='item/commandExecution/requestApproval')return !!a.command&&a.cwd===state!.projectPath;
   return !!a.changes?.length&&a.changes.every(c=>scopedPath(c.path,state!.projectPath)&&(c.movePath===null||scopedPath(c.movePath,state!.projectPath)));
 }
+// ------------------------------------------------------------- auto-approval
+// With the project's "Auto-approve edits and tool use" switch on (Settings > Permissions, persisted per project by the
+// desktop host), a request is accepted without a click only when it is ALREADY acceptable by hand (approvalEligible:
+// exact connection/thread/turn, workspace writes granted for this task, subscription account, unexpired, the native
+// policy's own safe-to-accept flag, every path inside the workspace) AND none of the hard fences below match. Fenced
+// requests keep the normal review card. Revoke, interrupt and disconnect stay one click away; every accept is the same
+// recorded native approval action as a manual one.
+const SENSITIVE_PATH=/(^|\/)(\.git|\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.docker)(\/|$)|(^|\/)\.env($|\.)|(^|\/)(\.npmrc|\.pypirc|\.netrc|\.git-credentials|id_rsa|id_ed25519|id_ecdsa)$|\.(pem|key|pfx|p12|keystore)$|secret|credential|password|token/i;
+const COMMAND_FENCES:readonly (readonly [RegExp,string])[]=[
+  [/\b(rm|rmdir|del|erase|rd|remove-item|shred|mkfs|diskpart|truncate|clear-content|clear-recyclebin)\b|(^|[;&|]\s*)format\b|\bdd\s+if=/i,'deletes or overwrites data'],
+  [/\bgit\s+(reset|clean|checkout|restore|rebase|stash|filter-branch|filter-repo|gc|prune|update-ref|reflog)\b|\bgit\s+branch\s+-[dD]\b|\bgit\s+tag\s+-d\b/i,'rewrites version history'],
+  [/\b(curl|wget|invoke-webrequest|iwr|invoke-restmethod|irm|start-bitstransfer|ssh|scp|sftp|ftp|rsync|nc|ncat|netcat|telnet|invoke-command|enter-pssession|new-pssession)\b|\bgit\s+(clone|fetch|pull|push|remote|submodule)\b|https?:\/\/|\bwww\./i,'uses the network'],
+  [/\b(npm|pnpm|yarn|bun)\s+(i|install|add|update|upgrade|up|publish|login|adduser|exec|dlx|x|link)\b|\b(npx|pnpx|bunx|pipx|choco|winget|scoop|brew|apt|apt-get|dnf|yum|gem|docker|podman|kubectl|gh|az|aws|gcloud)\b|\b(pip3?|uv|poetry|cargo|go|dotnet)\s+(install|add|get|publish|tool)\b/i,'installs software or uses an online service'],
+  [/\b(publish|deploy|upload|release)\b|\brojo\s+upload\b|\bmantle\b|\brbxcloud\b/i,'publishes or deploys'],
+  [/\$env:|%[A-Za-z_][A-Za-z0-9_]*%|\$HOME\b|\$\{|(^|[\s"'=])~(?=[\\/\s]|$)|\benv:|\b(printenv|get-credential|cmdkey|vaultcmd|convertfrom-securestring|keychain)\b|\.ssh\b|\.aws\b|\.git-credentials|\.npmrc|\.netrc|(^|[\s\\/"'])\.env\b|\b(secret|credential|password|passwd|token)s?\b/i,'reads environment variables or credentials'],
+  [/\b(shutdown|reboot|restart-computer|stop-computer|reg|regedit|bcdedit|netsh|icacls|takeown|attrib|chmod|chown|sudo|runas|setx|schtasks|crontab|set-executionpolicy|taskkill|stop-process|kill|pkill|killall)\b|\bnet\s+(user|localgroup|share|use)\b|\bsc(\.exe)?\s+(delete|stop|config|create)\b/i,'changes the system or other processes'],
+  [/\b(iex|invoke-expression|eval|frombase64string)\b|-enc(odedcommand)?\b|base64\s+(-d|--decode)|\|\s*(sh|bash|zsh|pwsh|powershell|cmd)\b|`|\$\(/i,'runs hidden or generated code'],
+];
+/** One leading shell wrapper (`powershell -Command "…"`, `bash -lc '…'`, `cmd /c …`) is unwrapped so the real command is checked. */
+function innerCommand(command:string):string {
+  const m=/^\s*(?:"[^"]*[\\/])?(?:[A-Za-z]:[\\/][^"\s]*[\\/])?(?:powershell|pwsh|cmd|bash|sh|zsh)(?:\.exe)?"?\s+(?:-NoLogo\s+|-NoProfile\s+|-NonInteractive\s+)*(?:-Command|-c|-lc|\/c|\/s\s+\/c)\s+([\s\S]+)$/i.exec(command);
+  if(!m)return command;
+  const body=m[1]!.trim();
+  return /^(["']).*\1$/s.test(body)?body.slice(1,-1):body;
+}
+/** Absolute paths outside the workspace and parent-directory escapes are fenced (the null device is fine). */
+function commandEscapesRoot(command:string,root:string):boolean {
+  const r=root.replaceAll('\\','/').replace(/\/$/,'').toLowerCase();
+  if(/(^|[\s"'=:(,;|&<>])\.\.([\\/]|$|[\s"';|&])/.test(command))return true;
+  for(const m of command.matchAll(/(?:^|[\s"'=(,;|&<>])((?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"';|&<>]*)/g)){
+    const path=m[1]!.replaceAll('\\','/').toLowerCase();
+    if(path==='/dev/null')continue;
+    if(path!==r&&!path.startsWith(r+'/'))return true;
+  }
+  return false;
+}
+export interface AutoApprovalVerdict { accept: boolean; reason: string }
+/** Pure policy: may this exact pending request be accepted automatically? Never weaker than approvalEligible. */
+export function autoApprovalVerdict(state:ChatState|null,a:Approval):AutoApprovalVerdict {
+  if(!approvalEligible(state,a))return {accept:false,reason:'it is outside the reviewed scope'};
+  const root=state!.projectPath;
+  if(a.method==='item/fileChange/requestApproval') {
+    const changes=a.changes??[];
+    if(changes.some(c=>c.kind==='delete'))return {accept:false,reason:'it deletes files'};
+    if(changes.some(c=>SENSITIVE_PATH.test(c.path.replaceAll('\\','/'))||c.movePath!==null&&SENSITIVE_PATH.test(c.movePath.replaceAll('\\','/'))))return {accept:false,reason:'it touches version-control or credential files'};
+    return {accept:true,reason:changes.length===1?'edit '+changes[0]!.path:'edit '+changes.length+' files'};
+  }
+  const command=a.command??'';
+  if(!command.trim()||command.length>2000||/[\r\n]/.test(command))return {accept:false,reason:'the command is too long to check'};
+  const inner=innerCommand(command);
+  for(const [pattern,reason] of COMMAND_FENCES)if(pattern.test(inner))return {accept:false,reason:'it '+reason};
+  if(commandEscapesRoot(inner,root))return {accept:false,reason:'it reaches outside the workspace'};
+  return {accept:true,reason:'run '+(inner.length>80?inner.slice(0,79)+'…':inner)};
+}
 /** Append atomically to the existing composer; never submit or change permissions. */
 export function appendWorkflowText(doc: Document, value: string): boolean {
   const input=doc.getElementById('codex-composer') as HTMLTextAreaElement|null;
@@ -618,7 +672,18 @@ export interface ToolChange {
   /** Dotted Studio path (display only) for scripts and updated instances. */
   path:string|null;
 }
-export interface ToolActivity { text:string; change:ToolChange|null }
+/** How consecutive calls of one kind on one container collapse into a single card (see groupToolCards). */
+export interface ToolGroupInfo {
+  /** Same key = same kind of call on the same target container. */
+  key:string;
+  /** Present and past verb, e.g. ['Creating','Created']. */
+  verbs:readonly [string,string];
+  /** Singular and plural noun for one call's subject, e.g. ['part','parts']. */
+  noun:readonly [string,string];
+  /** Dotted Studio container the calls target, or null. */
+  container:string|null;
+}
+export interface ToolActivity { text:string; change:ToolChange|null; group?:ToolGroupInfo|null }
 const activityRecord=(value:unknown):Record<string,unknown>|null=>value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:null;
 const activityText=(value:unknown,max=100):string|null=>typeof value==='string'&&value.trim()&&!/[\x00-\x1f\x7f]/.test(value)?value.trim().slice(0,max):null;
 /** Parses a bounded JSON tool detail; anything else is null. */
@@ -665,6 +730,8 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
       return 'Creating '+kind+(name?' '+quoted(name):'')+(parent?' in '+parent:'');
     }
     case 'scene_update':return 'Updating '+(ref??'an instance')+propertyList(args);
+    case 'scene_build':{const parent=studioRefPath(args?.parent);return 'Building a scene'+(parent?' in '+parent:'');}
+    case 'environment_apply':return 'Shaping terrain and lighting';
     case 'receipt_status':return 'Checking a change receipt';
     case 'receipt_restore':return 'Restoring an earlier change';
     case 'playtest_request':return 'Starting a playtest';
@@ -683,6 +750,42 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
  * result carries a succeeded receipt; ambiguous or failed outcomes never produce a change.
  */
 export function describeToolActivity(name:string,input:unknown,result:unknown,state:ToolActivityState):ToolActivity {
+  const activity=describeToolCall(name,input,result,state),tool=arcaneToolName(name),command=activityRecord(activityRecord(result)?.command);
+  return {...activity,group:toolGroupInfo(tool,activityRecord(input)??activityRecord(command?.args))};
+}
+/** "MeshPart" -> ['mesh part','mesh parts']. */
+function classNoun(className:string|null):[string,string] {
+  if(!className||!/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(className))return ['instance','instances'];
+  const words=className.replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g,'$1 $2').toLowerCase();
+  return [words,/(s|x|ch|sh)$/.test(words)?words+'es':/[^aeiou]y$/.test(words)?words.slice(0,-1)+'ies':words+'s'];
+}
+/** Parent container of a dotted Studio path (Workspace.Forest.Tree -> Workspace.Forest), or null for a root. */
+function parentPath(path:string|null):string|null {
+  if(!path)return null;const at=path.lastIndexOf('.');return at>0?path.slice(0,at):null;
+}
+/** Grouping for repeatable calls; null keeps a call on its own line (playtests, plans, assets, connection checks). */
+function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupInfo|null {
+  const ref=studioRefPath(args?.ref),make=(verbs:[string,string],noun:[string,string],container:string|null,variant='')=>
+    ({key:tool+(variant?':'+variant:'')+' @ '+(container??''),verbs,noun,container});
+  switch(tool){
+    case 'scene_create':return make(['Creating','Created'],classNoun(activityText(args?.className,64)),studioRefPath(args?.parent));
+    case 'scene_update':return make(['Updating','Updated'],['instance','instances'],parentPath(ref));
+    case 'scene_build':return make(['Building','Built'],['scene','scenes'],studioRefPath(args?.parent));
+    case 'environment_apply':return make(['Shaping','Shaped'],['environment','environments'],null);
+    case 'scene_inspect':return make(['Inspecting','Inspected'],['instance','instances'],parentPath(ref));
+    case 'scene_children':return make(['Reading','Read'],['container','containers'],null);
+    case 'scene_search':return make(['Running','Ran'],['search','searches'],activityText(args?.root,64));
+    case 'script_read':return make(['Reading','Read'],['script','scripts'],parentPath(ref));
+    case 'script_update':return make(['Updating','Updated'],['script','scripts'],parentPath(ref));
+    case 'script_search':return make(['Running','Ran'],['script search','script searches'],null);
+    case 'script_set_enabled':{const enabled=args?.enabled!==false;
+      return make(enabled?['Enabling','Enabled']:['Disabling','Disabled'],['script','scripts'],parentPath(ref),enabled?'on':'off');}
+    case 'receipt_status':return make(['Checking','Checked'],['change receipt','change receipts'],null);
+    case 'skills_get':return make(['Reading','Read'],['skill guide','skill guides'],null);
+  }
+  return null;
+}
+function describeToolCall(name:string,input:unknown,result:unknown,state:ToolActivityState):ToolActivity {
   const tool=arcaneToolName(name),outcome=activityRecord(result),command=activityRecord(outcome?.command);
   const args=activityRecord(input)??activityRecord(command?.args);
   const phrase=toolPhrase(tool,args).trim();
@@ -719,11 +822,116 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const label=doc.createElement('span');label.className='message-text tool-activity-text';label.textContent=activity.text;
   const status=doc.createElement('span');status.className='visually-hidden';status.textContent=' · '+STATE_WORDS[state];
   line.append(mark,label,status);
+  const group=activity.group;
+  if(group){line.dataset.toolGroup=group.key;line.dataset.toolVerbs=group.verbs.join('|');line.dataset.toolNoun=group.noun.join('|');if(group.container)line.dataset.toolContainer=group.container;}
   const more=doc.createElement('details');more.className='message-details tool-details';
   const summary=doc.createElement('summary');summary.textContent='Details';
   const pre=doc.createElement('pre');pre.className='hint mono';pre.textContent=details;
   more.append(summary,pre);
   return [line,more];
+}
+// ---- Grouped tool cards: consecutive calls of one kind on one container collapse into one compact, expandable card. ----
+/** Calls needed before a run of same-kind lines becomes one card. */
+export const TOOL_GROUP_MIN=2;
+const isToolArticle=(node:Element):node is HTMLElement=>node.tagName==='ARTICLE'&&node.classList.contains('codex-message')&&node.classList.contains('tool');
+const toolLine=(article:Element)=>article.querySelector<HTMLElement>('.tool-activity');
+const articleState=(article:HTMLElement):ToolActivityState=>{const value=article.dataset.toolState??toolLine(article)?.dataset.toolState;return value==='started'||value==='failed'?value:'finished';};
+/** Summary of a run of grouped lines, e.g. "Created 48 parts in Workspace.Forest" (live "Creating 12 parts in …" while running). */
+export function toolGroupSummary(members:readonly HTMLElement[]):{text:string;state:ToolActivityState;failed:number} {
+  const lines=members.map(toolLine),first=lines[0]?.dataset;
+  const verbs=(first?.toolVerbs??'Running|Ran').split('|'),container=first?.toolContainer??null;
+  const nouns=new Set(lines.map(line=>line?.dataset.toolNoun??''));
+  const noun=(nouns.size===1&&[...nouns][0]?[...nouns][0]!:'instance|instances').split('|');
+  const states=members.map(articleState),failed=states.filter(state=>state==='failed').length,running=states.includes('started');
+  const count=running?members.length:members.length-failed,where=container?' in '+container:'';
+  const phrase=(verb:string|undefined,n:number)=>(verb??'Running')+' '+n+' '+(n===1?noun[0]:noun[1]??noun[0])+where;
+  const text=running?phrase(verbs[0],count)+'…':count?phrase(verbs[1],count):phrase(verbs[0],members.length);
+  return {text:text+(failed?' · '+failed+' failed':''),state:running?'started':failed?'failed':'finished',failed};
+}
+function makeToolGroup(doc:Document,key:string,id:string):HTMLDetailsElement {
+  const group=doc.createElement('details');group.className='tool-group';group.dataset.toolGroup=key;group.dataset.groupId=id;
+  const summary=doc.createElement('summary');summary.className='tool-group-summary';
+  const mark=doc.createElement('span');mark.className='tool-activity-mark';mark.setAttribute('aria-hidden','true');
+  const label=doc.createElement('span');label.className='tool-group-text';
+  const status=doc.createElement('span');status.className='visually-hidden tool-group-status';
+  const count=doc.createElement('span');count.className='tool-group-count';count.setAttribute('aria-hidden','true');
+  summary.append(mark,label,status,count);
+  const items=doc.createElement('div');items.className='tool-group-items';
+  group.append(summary,items);return group;
+}
+function paintToolGroup(group:HTMLElement,members:readonly HTMLElement[]):void {
+  const {text,state}=toolGroupSummary(members);
+  const set=(selector:string,value:string)=>{const node=group.querySelector<HTMLElement>(selector);if(node&&node.textContent!==value)node.textContent=value;};
+  if(group.dataset.toolState!==state)group.dataset.toolState=state;
+  const mark=group.querySelector<HTMLElement>('.tool-group-summary>.tool-activity-mark');if(mark&&mark.dataset.toolState!==state)mark.dataset.toolState=state;
+  set('.tool-group-text',text);set('.tool-group-status',' · '+STATE_WORDS[state]+' · '+members.length+' steps');
+  set('.tool-group-count',members.length+' steps');
+}
+/**
+ * Collapses consecutive tool lines that share a group key into one card per run (TOOL_GROUP_MIN or more), keeps each
+ * line (with its own Details) inside the card's expandable list, and unwraps a run that shrinks to one line. Idempotent:
+ * a second call on an unchanged transcript changes nothing. `open` restores which cards were expanded (by group id).
+ */
+export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=new Set()):void {
+  const doc=container.ownerDocument;
+  interface Entry { article:HTMLElement; key:string|null; top:Element; group:HTMLElement|null }
+  const entries:(Entry|null)[]=[];
+  for(const child of [...container.children]){
+    if(child.classList.contains('tool-group')){
+      const items=child.querySelector('.tool-group-items');
+      for(const article of [...(items?.children??[])])if(isToolArticle(article))entries.push({article,key:toolLine(article)?.dataset.toolGroup??null,top:child,group:child as HTMLElement});
+    }else if(isToolArticle(child))entries.push({article:child,key:toolLine(child)?.dataset.toolGroup??null,top:child,group:null});
+    else entries.push(null);
+  }
+  const runs:Entry[][]=[];let run:Entry[]|null=null;
+  for(const entry of entries){
+    if(!entry||!entry.key){run=null;if(entry)runs.push([entry]);continue;}
+    if(!run||run[0]!.key!==entry.key){run=[];runs.push(run);}
+    run.push(entry);
+  }
+  const used=new Set<Element>(),ordinals=new Map<string,number>();
+  for(const members of runs){
+    const key=members[0]!.key;
+    if(!key||members.length<TOOL_GROUP_MIN){
+      // Too short to group: a line still inside a card moves back out, just before it.
+      for(const entry of members)if(entry.group)container.insertBefore(entry.article,entry.group);
+      continue;
+    }
+    const ordinal=ordinals.get(key)??0;ordinals.set(key,ordinal+1);
+    let group=members.find(entry=>entry.group&&!used.has(entry.group))?.group??null;
+    if(!group){const created=makeToolGroup(doc,key,key+'#'+ordinal);created.open=open.has(created.dataset.groupId!);group=created;}
+    used.add(group);
+    const first=members[0]!.top;
+    if(first!==group)container.insertBefore(group,first);
+    const items=group.querySelector('.tool-group-items')!,articles=members.map(entry=>entry.article),current=[...items.children];
+    if(current.length<=articles.length&&current.every((node,index)=>node===articles[index]))items.append(...articles.slice(current.length));
+    else items.replaceChildren(...articles);
+    paintToolGroup(group,articles);
+  }
+  for(const child of [...container.children])if(child.classList.contains('tool-group')&&!used.has(child))child.remove();
+}
+const groupedTranscripts=new WeakSet<Element>();
+/** Keeps the shared transcript (#codex-messages, used by both providers) grouped as lines arrive. Presentation only. */
+export function installToolGrouping(doc:Document):void {
+  try{
+    const container=doc.getElementById('codex-messages'),Observer=doc.defaultView?.MutationObserver;
+    if(!container||!Observer||groupedTranscripts.has(container))return;
+    groupedTranscripts.add(container);
+    const open=new Set<string>();
+    container.addEventListener('toggle',event=>{
+      const target=event.target as HTMLDetailsElement|null,id=target?.classList?.contains('tool-group')?target.dataset.groupId:undefined;
+      if(id){if(target!.open)open.add(id);else open.delete(id);}
+    },true);
+    let busy=false;
+    const observer=new Observer(records=>{
+      if(busy||!records.some(record=>record.target===container||(record.target as Element|null)?.closest?.('.tool-group')))return;
+      busy=true;
+      try{groupToolCards(container,open);}catch{/* Grouping is presentation only. */}
+      finally{observer.takeRecords();busy=false;}
+    });
+    observer.observe(container,{childList:true,subtree:true});
+    groupToolCards(container,open);
+  }catch{/* Grouping is presentation only. */}
 }
 /** Pretty raw detail text for the collapsed Details: JSON is indented, other text kept as is. */
 export function toolDetailText(parts:readonly [string,unknown][]):string {
@@ -1100,7 +1308,45 @@ export class CodexChat {
   private yieldedComposer='';
   private crossProvider:CrossProviderModels|null=null;
   private pendingSelection:{model:string;effort:string|null;at:number}|null=null;
+  /** Project switch "Auto-approve edits and tool use" (off until the desktop host reports the saved setting). */
+  private autoApprove=false;
+  private readonly autoHandled=new Set<string>();
+  private readonly autoLog:{at:number;summary:string}[]=[];
+  private readonly autoListeners=new Set<()=>void>();
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
+  /** Apply the persisted per-project switch; turning it off stops automatic acceptance immediately. */
+  setAutoApprove(enabled:boolean):void {
+    this.autoApprove=enabled===true;
+    if(this.autoApprove&&!this.stopped)this.autoReview();
+  }
+  autoApproveEnabled():boolean { return this.autoApprove; }
+  /** The most recent automatic acceptances in this session (newest last); each is also a recorded native approval action. */
+  autoApprovals():readonly {at:number;summary:string}[] { return this.autoLog.map(entry=>({...entry})); }
+  subscribeAutoApprovals(listener:()=>void):()=>void { this.autoListeners.add(listener);return()=>{this.autoListeners.delete(listener);}; }
+  /** Accept pending requests the auto-approval policy allows; fenced ones keep their review card. Each handle is tried once. */
+  private autoReview():void {
+    const s=this.snapshot();
+    if(!s)return;
+    const live=new Set(s.approvals.map(a=>a.handle));
+    for(const handle of [...this.autoHandled])if(!live.has(handle))this.autoHandled.delete(handle);
+    if(!this.autoApprove||this.stopped||!this.fresh||this.uncertain.size||this.state?.displayLimited)return;
+    for(const a of s.approvals) {
+      if(this.autoHandled.has(a.handle)||[...this.pending.values()].some(p=>p.action==='approval'&&'handle' in p&&p.handle===a.handle))continue;
+      const verdict=autoApprovalVerdict(this.state,a);
+      if(!verdict.accept) {
+        // Ask once per request; it may become eligible later (e.g. writes enabled), so only fenced verdicts are remembered.
+        if(verdict.reason!=='it is outside the reviewed scope'){this.autoHandled.add(a.handle);this.text('codex-notice','Needs your review: this request was not auto-approved because '+verdict.reason+'.');}
+        continue;
+      }
+      this.autoHandled.add(a.handle);
+      void this.dispatch('approval',{threadId:a.threadId,turnId:a.turnId,handle:a.handle,decision:'accept'}).then(record=>{
+        if(!record||record.state!=='acknowledged'||this.stopped)return;
+        this.autoLog.push({at:Date.now(),summary:verdict.reason});if(this.autoLog.length>32)this.autoLog.shift();
+        this.text('codex-notice','Auto-approved: '+verdict.reason+'.');
+        for(const listener of this.autoListeners){try{listener();}catch{/* display only */}}
+      });
+    }
+  }
   /** Presentation-only attachment mount; it creates no native thread or task. */
   enableTextAttachments(controller:ChatAttachmentsController):void {
     this.attachments?.cleanup();this.attachments=controller;
@@ -1975,6 +2221,7 @@ export class CodexChat {
     this.on('codex-interrupt','click',()=>this.stopCurrentTask());
     this.on('codex-composer','input',()=>this.composerInput());
     installComposerCommands(this.doc);
+    installToolGrouping(this.doc);
     this.on('codex-composer','keydown',event=>{
       const key=event as KeyboardEvent;
       // While the "/" or "@" menu is open, Enter picks from it instead of sending.
@@ -2297,6 +2544,7 @@ export class CodexChat {
     this.renderPicker();
     this.tabs?.render(!!this.tabBlockReason());
     this.applyPendingSelection();
+    this.autoReview();
   }
   /** The input hot path only validates the composer; no tabs, catalogue or state notifications. */
   private renderComposer():void {
@@ -2326,6 +2574,8 @@ export class CodexChat {
     if(!this.providerAllowsCodex())return;
     if(this.tabTransition||this.tabs&&!this.tabs.bound(this.state))return;
     const t=this.snapshot()?.thread;if(!t||!this.normal()||!IDLE.includes(t.turnStatus))return;
+    // Auto-approve mode: enabling workspace edits for this conversation needs no separate confirmation.
+    if(this.autoApprove){void this.dispatch('grant-writes',{threadId:t.threadId});return;}
     this.confirmation={action:'grant-writes',fields:{threadId:t.threadId},fingerprint:this.scope(),connectionId:this.snapshot()!.connectionId,generation:this.generation};
     this.text('codex-confirm-title','Grant workspace writes to this thread');
     this.text('codex-confirm-preview','Connection '+this.snapshot()!.connectionId+'\nThread '+t.threadId+'\nTurn '+(t.turnId??'Not started')+'\nWorkspace '+this.state!.projectPath+'\nScope: this workspace only, network disabled, individual native approvals remain required.');

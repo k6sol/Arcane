@@ -17,7 +17,7 @@ local function enumCategory(names: {string}): any
 	for index, name in ipairs(names) do category[name] = table.freeze({Name = name, Value = index - 1, EnumType = category, _enumItem = true}) end
 	return category
 end
-local materials: any = enumCategory({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt"})
+local materials: any = enumCategory({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt", "Marble", "Granite", "Limestone", "Sandstone", "Basalt", "Pebble", "LeafyGrass", "Mud", "Snow", "Ice", "Pavement", "Plaster", "DiamondPlate", "CorrodedMetal", "Foil"})
 local Enum: any = {Material = materials, PartType = enumCategory({"Ball", "Block", "Cylinder"}), FinishRecordingOperation = {Commit = "Commit", Cancel = "Cancel"}}
 local nativeTypeof = typeof
 local function typeof(value: any): string

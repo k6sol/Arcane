@@ -36,8 +36,8 @@ async function fixture(t) {
 
 test('real authored pack validates without claiming behavioral approval', async () => {
   const result = await validatePack(ROOT);
-  assert.equal(result.skills, 50);
-  assert.equal(result.references, 15);
+  assert.equal(result.skills, 55);
+  assert.equal(result.references, 17);
   assert.equal(result.approved, 0);
   assert.equal(result.behaviorRuns, 0);
   assert.equal(result.verification, 'offline-structure-and-integrity-only');
@@ -210,4 +210,81 @@ test('quarantined entries cannot be loaded through experimental opt-in', async t
   await f.save();
   await rejects(() => packSkills([f.id], { root: f.root, allowExperimental: true }), 'UNAPPROVED');
   assert.deepEqual(await searchSkills('fixture', { root: f.root }), []);
+});
+
+test('scene recipes are prescriptive: terrain ground, natural Poisson placement, anti-ring rule and batch tools', async () => {
+  const read = async id => (await readContained(ROOT, `skills/arcane/${id}/SKILL.md`)).text;
+  const nature = await read('arcane-natural-scenes'), architecture = await read('arcane-architectural-features'), world = await read('arcane-world-building');
+  for (const text of ['environment_apply', 'terrain', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
+    'Pine', 'Oak', 'Birch', 'tint', 'scale [0.75,1.25]', 'CastShadow false', 'ClockTime', 'atmosphere', '800-2500']) assert.ok(nature.includes(text), text);
+  for (const text of ['scene_build', 'Fluting', 'capital', 'spiral stair', 'SpawnLocation', 'Never rotate it', 'flush', 'Marble', 'Slate', 'Limestone', 'scene_update'])
+    assert.ok(architecture.includes(text), text);
+  assert.match(world, /Never place foliage in rings, grids or rows/);
+  assert.match(world, /Poisson-disk/);
+});
+
+test('DataStore safety skill encodes the non-destructive persistence rules', async () => {
+  const text = (await readContained(ROOT, 'skills/arcane/arcane-datastore-safety/SKILL.md')).text;
+  for (const rule of ['Never wipe, rename', 'pcall', 'GetRequestBudgetForRequestType', 'UpdateAsync, not SetAsync', 'Session lock', 'BindToClose',
+    'Never run data-mutating code', 'Studio Access to API Services', 'must never be saved over with defaults']) assert.ok(text.includes(rule), rule);
+  const pack = await packSkills(['arcane-datastore-safety'], { root: ROOT, allowExperimental: true });
+  assert.ok(pack.context.includes('## Loaded skill: arcane-datastore-safety'));
+});
+
+const readSkill = async id => (await readContained(ROOT, `skills/arcane/${id}/SKILL.md`)).text;
+// Built-in particle textures verified in a Studio install's content/textures/particles folder.
+const BUILT_IN_PARTICLES = new Set(['fire_main.dds', 'fire_sparks_main.dds', 'smoke_main.dds', 'sparkles_main.dds', 'explosion01_smoke_main.dds',
+  'explosion01_core_main.dds', 'explosion01_shockwave_main.dds', 'forcefield_glow_main.dds', 'forcefield_vortex_main.dds', 'SquareParticle.png']);
+
+test('VFX skill gives exact emitter presets, verified built-in textures and runtime verification', async () => {
+  const vfx = await readSkill('arcane-vfx');
+  for (const text of ['scene_build', 'script_update', 'script_set_enabled', 'playtest_request', 'Never invent rbxassetid', 'Fire core', 'Embers', 'Smoke',
+    'Impact sparks', 'Magic aura', 'Waterfall sheet', 'Waterfall mist', 'Dust motes', 'Fireflies', 'Falling leaves', 'LightEmission', 'Spread', 'Drag',
+    'NumberSequenceKeypoint', 'ColorSequenceKeypoint', 'Beam', 'Trail', 'PointLight', 'SpotLight', 'Highlight', 'Emit(', 'arcane-photoreal']) assert.ok(vfx.includes(text), text);
+  for (const name of ['fire_main.dds', 'smoke_main.dds', 'sparkles_main.dds', 'fire_sparks_main.dds', 'SquareParticle.png']) assert.ok(vfx.includes(name), name);
+  for (const skill of (await loadRegistry(ROOT)).skills) {
+    for (const item of [skill, ...skill.references]) {
+      const text = (await readContained(ROOT, item.path)).text;
+      assert.doesNotMatch(text, /rbxassetid:\/\/\d/, `${item.path} must not invent asset ids`);
+      for (const [, file] of text.matchAll(/rbxasset:\/\/textures\/particles\/([\w.]+)/g)) assert.ok(BUILT_IN_PARTICLES.has(file), file);
+    }
+  }
+});
+
+test('photoreal skill encodes mood presets with exact environment_apply fields, scale and imperfection rules', async () => {
+  const text = await readSkill('arcane-photoreal');
+  for (const mood of ['Clear day', 'Golden hour', 'Foggy forest', 'Night', 'Horror', 'Sci-fi']) assert.ok(text.includes(`| ${mood} |`), mood);
+  for (const field of ['ClockTime', 'ExposureCompensation', 'OutdoorAmbient', 'ColorShift_Top', 'ShadowSoftness', 'EnvironmentDiffuseScale', 'EnvironmentSpecularScale',
+    'Density', 'Haze', 'Decay', 'TintColor', 'Technology = Future', 'Decoration = true', 'MaterialVariant', 'SurfaceAppearance', 'DepthOfFieldEffect',
+    'FogStart/FogEnd are ignored', 'avatar 5.5 studs', 'Door 4 x 7.5', 'No identical neighbours', 'studio_viewport_capture', 'environment_apply']) assert.ok(text.includes(field), field);
+  assert.doesNotMatch(text, /\bExposure \d/);
+});
+
+test('interface skill is a design system with tokens, responsive rules, accessible contrast and declared recipes', async () => {
+  const text = await readSkill('arcane-interface');
+  for (const rule of ['UICorner', 'UIStroke', 'UIGradient', 'UIPadding', 'UIListLayout', 'UIGridLayout', 'UIAspectRatioConstraint', 'UIScale', 'UISizeConstraint',
+    'UITextSizeConstraint', 'BuilderSans', 'Activated', '44 px', '4.5:1', 'ResetOnSpawn false', 'CoreUISafeInsets', 'script_set_enabled', 'click-gui', 'arcane-interface:recipes'])
+    assert.ok(text.includes(rule), rule);
+  const pack = await packSkills(['arcane-interface'], { root: ROOT, allowExperimental: true, references: ['arcane-interface:recipes'] });
+  for (const recipe of ['## Main menu', '## HUD with health and stamina', '## Shop', '## Inventory grid', '## Notifications', '## Loading screen', '## Settings panel'])
+    assert.ok(pack.context.includes(recipe), recipe);
+});
+
+test('scripting, security and systems skills are prescriptive and cross-linked instead of duplicated', async () => {
+  const luau = await readSkill('arcane-luau-architecture'), security = await readSkill('arcane-remote-security'), systems = await readSkill('arcane-gameplay-systems');
+  for (const rule of ['--!strict', 'Never trust the client', 'script_set_enabled', 'playtest_request', 'CollectionService', 'TweenService', 'RunService', 'task.wait',
+    'arcane-datastore-safety', 'arcane-remote-security', 'arcane-luau-architecture:patterns']) assert.ok(luau.includes(rule), rule);
+  const patterns = await packSkills(['arcane-luau-architecture'], { root: ROOT, allowExperimental: true, references: ['arcane-luau-architecture:patterns'] });
+  for (const code of ['GetInstanceAddedSignal', 'OnServerEvent', 'os.clock()', 'task.cancel', 'Disconnect()', 'PlayerRemoving']) assert.ok(patterns.context.includes(code), code);
+  for (const rule of ['Rate limit', 'NaN', 'Proximity', 'Server-derived values', 'Idempotence', 'SetNetworkOwner(nil)', 'Anti-exploit']) assert.ok(security.includes(rule), rule);
+  for (const recipe of ['## Checkpoints', '## Round loop', '## Leaderstats', '## Doors and keys', '## NPC dialogue', '## Pathfinding NPC', 'scene_build',
+    'assert-player-attribute', 'arcane-rounds', 'arcane-npc', 'arcane-datastore-safety', 'ComputeAsync', 'leaderstats']) assert.ok(systems.includes(recipe), recipe);
+  for (const id of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-world-building']) assert.ok((await readSkill(id)).includes('arcane-photoreal'), id);
+});
+
+test('skill entrypoints stay lean enough for the default router budget', async () => {
+  for (const skill of (await loadRegistry(ROOT)).skills) {
+    const bytes = (await readContained(ROOT, skill.path)).bytes.length;
+    assert.ok(bytes <= 7 * 1024, `${skill.id} is ${bytes} bytes`);
+  }
 });

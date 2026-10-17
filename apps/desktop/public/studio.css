@@ -1709,5 +1709,193 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
   .arcane-app .chat-choice[aria-pressed=true]{border-color:Highlight;outline:2px solid Highlight}
 }
 /* ---- End chat edit/rewind and interactive choices ---- */
+/* ---- Compact (thin) sidebar and tabs, reply cost estimates ---- */
+/* Width changes never animate; only the shared color transitions apply. */
+.arcane-app .sidebar-compact-toggle{display:flex;align-items:center;justify-content:center;align-self:flex-end;flex:0 0 auto;width:36px;height:36px;min-height:36px;padding:0;margin-top:-14px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--text-secondary)}
+.arcane-app .sidebar-compact-toggle .icon{width:18px;height:18px}
+.arcane-app .sidebar-compact-toggle:hover{color:var(--text);border-color:#ff3340}
+.arcane-app .sidebar-compact-toggle:focus-visible{outline:2px solid #ff3340;outline-offset:2px}
+.arcane-app .app-sidebar.compact .compact-chevron{transform:translateX(29px) scaleX(-1)}
+@media(min-width:761px){
+  body.arcane-app.shell-compact{--shell-sidebar:68px}
+  .arcane-app .app-sidebar.compact{width:68px;padding:18px 10px 14px;gap:14px;align-items:center;overflow-x:hidden}
+  .arcane-app .app-sidebar.compact .wordmark{justify-content:center;gap:0;margin:0}
+  .arcane-app .app-sidebar.compact .wordmark .arcane-logo{width:28px;height:32px}
+  .arcane-app .app-sidebar.compact :is(.wordmark>span,.new-chat>span,.new-chat>kbd,.nav-link>span,.sidebar-label,.sidebar-note){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+  .arcane-app .app-sidebar.compact :is(.sidebar-links,.sidebar-secondary){align-items:center;gap:6px;width:100%}
+  .arcane-app .app-sidebar.compact :is(.new-chat,.nav-link){width:46px;min-height:44px;height:44px;padding:0;gap:0;justify-content:center}
+  .arcane-app .app-sidebar.compact .nav-link .tool-icon{margin:0}
+  .arcane-app .app-sidebar.compact .sidebar-secondary .icon{display:block}
+  .arcane-app .app-sidebar.compact .sidebar-compact-toggle{align-self:center;margin-top:-6px}
+  .arcane-app .app-sidebar.compact .nav-link[aria-pressed=true]::before{top:10px;bottom:10px}
+}
+@media(max-width:760px){.arcane-app .sidebar-compact-toggle{display:none}}
+/* Compact chat tabs: shorter strip, a status dot as the icon, truncated titles (the full name stays the accessible name). */
+body.arcane-app.shell-compact .workspace-topbar{min-height:48px;padding-block:5px}
+body.arcane-app.shell-compact .workspace-chat-tabs{gap:2px}
+body.arcane-app.shell-compact .workspace-chat-tabs [role=tab]{display:block;min-height:32px;max-width:136px;padding:6px 10px 6px 22px;position:relative;border-radius:8px;font-size:12px;line-height:20px;text-overflow:ellipsis}
+body.arcane-app.shell-compact .workspace-chat-tabs [role=tab]::before{content:"";position:absolute;left:9px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:var(--text-secondary)}
+body.arcane-app.shell-compact .workspace-chat-tabs [role=tab][aria-selected=true]::before{background:#ff3340}
+body.arcane-app.shell-compact .workspace-chat-tabs [role=tab] :is(svg,img){display:none}
+body.arcane-app.shell-compact .chat-tab>button[aria-label^="Close "]{min-height:32px;width:26px;padding:4px}
+body.arcane-app.shell-compact .chat-tabs-history>summary{min-height:32px;padding-block:6px}
+body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min-width:36px}
+/* Display settings card. */
+.arcane-app #display-settings .settings-check{display:flex;flex-direction:row;align-items:center;justify-content:flex-start;gap:10px;min-height:36px;margin:0;color:var(--text);font-size:13px;text-align:left}
+.arcane-app #display-settings .settings-check input{flex:0 0 16px;width:16px;min-width:16px;height:16px;min-height:16px;margin:0;padding:0;accent-color:#ff3340}
+.arcane-app .display-settings .settings-check kbd{margin-left:6px;font-size:11px;color:var(--text-secondary)}
+.arcane-app .display-settings .cost-currency-row{display:flex;flex-wrap:wrap;gap:12px;margin-top:6px}
+.arcane-app .display-settings .cost-currency-row label{display:grid;gap:4px;flex:1 1 140px;font-size:12px;color:var(--text-secondary)}
+.arcane-app .display-settings .cost-currency-row :is(select,input){min-height:36px;width:100%}
+.arcane-app .display-settings .cost-currency-row :is(select,input):disabled{opacity:1;color:var(--text-secondary)}
+/* Cost estimates: one quiet line under a reply, and the meter total. */
+.arcane-app .reply-usage{margin:8px 0 0;font-size:11.5px;line-height:1.4;color:var(--text-secondary);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.arcane-app #codex-messages>.reply-usage{margin:-6px 0 10px}
+.arcane-app .claude-usage-meter .usage-meter-cost{margin-left:4px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.arcane-app .claude-usage-meter .usage-meter-cost[hidden]{display:none}
+@media(forced-colors:active){
+  .arcane-app .sidebar-compact-toggle{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-app .sidebar-compact-toggle:focus-visible{outline-color:Highlight}
+  body.arcane-app.shell-compact .workspace-chat-tabs [role=tab]::before{background:CanvasText;forced-color-adjust:none}
+  body.arcane-app.shell-compact .workspace-chat-tabs [role=tab][aria-selected=true]::before{background:Highlight}
+  .arcane-app :is(.reply-usage,.usage-meter-cost){color:CanvasText}
+}
+/* ---- End compact sidebar and cost estimates ---- */
+/* ---- Plans & credits and Arcane actions chip (owned block; keep before the reduced-motion reset) ----
+   Black glass surfaces, white type and one Arcane red. Tokens only, no transitions. */
+.arcane-app .arcane-balance-chip{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:0 12px;margin-left:auto;border:1px solid var(--line-strong);border-radius:999px;background:color-mix(in srgb,var(--panel) 82%,transparent);backdrop-filter:blur(10px);color:var(--text);font:600 12px/1 var(--font-ui);font-variant-numeric:tabular-nums;white-space:nowrap;cursor:pointer}
+.arcane-app .arcane-balance-chip[hidden]{display:none}
+.arcane-app .arcane-balance-chip:hover{border-color:var(--accent-line);background:var(--hover)}
+.arcane-app .arcane-balance-chip-mark{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--accent-tint)}
+.arcane-app .arcane-balance-chip-value{font-size:13px;font-weight:700}
+.arcane-app .arcane-balance-chip-unit{color:var(--text-secondary);font-weight:500}
+.arcane-app .plans-usage-total{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;margin:4px 0 2px;color:var(--text)}
+.arcane-app .plans-usage-number{font:700 34px/1.1 var(--font-display);font-variant-numeric:tabular-nums;color:var(--text)}
+.arcane-app .plans-usage-unit{font-size:14px;color:var(--text-secondary)}
+.arcane-app .plans-days{display:flex;align-items:stretch;gap:4px;height:52px;margin:10px 0 6px;padding:0;list-style:none}
+.arcane-app .plans-day{flex:1 1 0;display:flex;align-items:flex-end;min-width:0}
+.arcane-app .plans-day-bar{display:block;width:100%;height:calc(var(--plans-day,0) * 1%);min-height:3px;border-radius:3px 3px 1px 1px;background:var(--accent)}
+.arcane-app .plans-day-bar[data-empty=true]{background:var(--line-strong)}
+.arcane-app .plans-usage-note{color:var(--text-secondary)}
+.arcane-app .plans-warning{color:var(--warning)}
+.arcane-app .plans-placeholder{display:inline-block;margin:0 0 10px;padding:3px 8px;border:1px dashed var(--accent-line);border-radius:6px;color:var(--text-secondary);font-size:12px}
+.arcane-app .plans-placeholder[hidden]{display:none}
+.arcane-app .plans-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.arcane-app .plans-offer{display:flex;flex-direction:column;gap:6px;min-width:0;padding:16px;border:1px solid var(--line-strong);border-radius:var(--radius-lg);background:color-mix(in srgb,var(--raised) 88%,transparent);color:var(--text)}
+.arcane-app .plans-offer[data-highlight=true]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-line),0 0 24px var(--accent-tint)}
+.arcane-app .plans-offer-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.arcane-app .plans-offer-name{margin:0;font-size:15px;font-weight:650;color:var(--text)}
+.arcane-app .plans-offer-badge{padding:2px 8px;border:1px solid var(--accent-line);border-radius:999px;background:var(--accent-tint);color:var(--accent-text);font-size:12px;font-weight:650}
+.arcane-app .plans-offer-price{display:flex;align-items:baseline;gap:6px;margin:4px 0 0}
+.arcane-app .plans-offer-amount{font:700 26px/1.1 var(--font-display);color:var(--text);font-variant-numeric:tabular-nums}
+.arcane-app .plans-offer-period{font-size:13px;color:var(--text-secondary)}
+.arcane-app .plans-offer-amount-line{margin:0;font-size:13px;font-weight:600;color:var(--text)}
+.arcane-app .plans-offer-blurb{margin:0;font-size:13px;line-height:1.45;color:var(--text-secondary)}
+.arcane-app .plans-offer-features{margin:4px 0 0;padding:0;list-style:none;display:grid;gap:4px;font-size:13px;color:var(--text-secondary)}
+.arcane-app .plans-offer-features li::before{content:"";display:inline-block;width:6px;height:6px;margin:0 8px 1px 0;border-radius:50%;background:var(--accent)}
+.arcane-app .plans-buy{margin-top:auto;min-height:36px;padding:0 14px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:transparent;color:var(--text);font:600 13px/1 var(--font-ui);cursor:pointer}
+.arcane-app .plans-offer-features + .plans-buy,.arcane-app .plans-offer-blurb + .plans-buy{margin-top:10px}
+.arcane-app .plans-buy:hover{border-color:var(--accent-line);background:var(--hover)}
+.arcane-app .plans-buy-primary{border-color:var(--action);background:var(--action);color:var(--on-accent)}
+.arcane-app .plans-buy-primary:hover{border-color:var(--action-hover);background:var(--action-hover)}
+.arcane-app .plans-buy:disabled{cursor:progress;opacity:.7}
+.arcane-app .plans-notice{display:grid;gap:4px;margin:0 0 14px;padding:12px 14px;border:1px solid var(--accent-line);border-left:3px solid var(--accent);border-radius:var(--radius);background:color-mix(in srgb,var(--panel) 86%,var(--accent) 6%);color:var(--text)}
+.arcane-app .plans-notice[hidden]{display:none}
+.arcane-app .plans-notice[data-kind=error]{border-color:var(--danger-line);border-left-color:var(--danger)}
+.arcane-app .plans-notice-title{font-size:14px;color:var(--text)}
+.arcane-app .plans-notice-text{font-size:13px;line-height:1.45;color:var(--text-secondary)}
+.arcane-app #plans-gateway-state[data-state=ready]{color:var(--success)}
+@media (max-width:640px){.arcane-app .arcane-balance-chip-unit{display:none}.arcane-app .plans-grid{grid-template-columns:1fr}}
+@media (forced-colors:active){
+  .arcane-app .arcane-balance-chip,.arcane-app .plans-offer,.arcane-app .plans-notice,.arcane-app .plans-buy{border-color:CanvasText;background:Canvas;color:CanvasText;backdrop-filter:none;forced-color-adjust:auto}
+  .arcane-app .plans-offer[data-highlight=true]{outline:2px solid Highlight;outline-offset:-2px;box-shadow:none}
+  .arcane-app .plans-buy-primary{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-app :is(.arcane-balance-chip-mark,.plans-day-bar),.arcane-app .plans-offer-features li::before{background:CanvasText;forced-color-adjust:none}
+  .arcane-app .plans-day-bar[data-empty=true]{background:GrayText}
+  .arcane-app :is(.plans-offer-badge,.plans-placeholder){border-color:CanvasText;color:CanvasText;background:Canvas}
+}
+/* ---- End Plans & credits ---- */
+/* ---- Playtest switch (composer) and grouped tool cards. Black glass, white text, red off / green on; no transitions. ---- */
+.arcane-app{--playtest-off:#ff3340;--playtest-on:#2fbf71}
+@media (prefers-color-scheme:light){:root:not([data-theme=dark]) .arcane-app{--playtest-off:#d6102a;--playtest-on:#1d8a50}}
+:root[data-theme=light] .arcane-app{--playtest-off:#d6102a;--playtest-on:#1d8a50}
+.arcane-app .playtest-toggle{grid-column:2;grid-row:1;justify-self:start;align-self:center;display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;min-height:32px;padding:4px 11px 4px 9px;border:1px solid var(--glass-line,var(--line));border-radius:999px;background:var(--glass-hi,transparent);color:var(--text);font:500 12px/1 var(--font-ui);white-space:nowrap;box-shadow:none;text-shadow:none}
+.arcane-app .playtest-toggle-dot{flex:0 0 8px;width:8px;height:8px;border-radius:50%;background:var(--playtest-off);box-shadow:0 0 0 3px color-mix(in srgb,var(--playtest-off) 22%,transparent)}
+.arcane-app .playtest-toggle[aria-checked=true] .playtest-toggle-dot{background:var(--playtest-on);box-shadow:0 0 0 3px color-mix(in srgb,var(--playtest-on) 24%,transparent)}
+.arcane-app .playtest-toggle-label{color:var(--text)}
+.arcane-app .playtest-toggle-state{min-width:2.2em;padding-left:7px;border-left:1px solid var(--line-strong);color:var(--text-secondary);font-weight:650;font-variant-numeric:tabular-nums}
+.arcane-app .playtest-toggle[aria-checked=true] .playtest-toggle-state{color:var(--success)}
+.arcane-app .playtest-toggle[aria-checked=true]{border-color:color-mix(in srgb,var(--playtest-on) 45%,var(--line))}
+.arcane-app .playtest-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(hover:hover) and (pointer:fine){.arcane-app .playtest-toggle:hover:not(:disabled){background:var(--hover);border-color:var(--line-strong)}}
+.arcane-app .playtest-auto{margin:4px 0 0;font-size:12px;color:var(--success)}
+.arcane-app .workspace-stage .tool-group{width:fit-content;min-width:min(340px,100%);max-width:100%;margin:2px 0 14px 34px;padding:0;background:var(--glass,var(--panel));border:1px solid var(--glass-line,var(--line));border-left:2px solid var(--accent);border-radius:12px;color:var(--text)}
+.arcane-app .workspace-stage .tool-group[data-tool-state=failed]{border-left-color:var(--danger)}
+.arcane-app .workspace-stage .tool-group[data-tool-state=finished]{border-left-color:var(--playtest-on)}
+.arcane-app .tool-group-summary{display:flex;align-items:center;gap:9px;min-height:40px;padding:8px 14px 8px 12px;list-style:none;cursor:pointer;color:var(--text);font:13px/1.5 var(--font-ui)}
+.arcane-app .tool-group-summary::-webkit-details-marker{display:none}
+.arcane-app .tool-group-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.arcane-app .tool-group-count{flex:0 0 auto;padding:2px 8px;border:1px solid var(--line-strong);border-radius:999px;color:var(--text-secondary);font-size:11.5px;font-variant-numeric:tabular-nums}
+.arcane-app .tool-group-count::after{content:"";display:inline-block;width:5px;height:5px;margin:0 1px 2px 7px;border:solid currentColor;border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+.arcane-app .tool-group[open] .tool-group-count::after{transform:rotate(-135deg);margin-bottom:-1px}
+.arcane-app .tool-group-summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:11px}
+.arcane-app .tool-group-items{display:grid;max-height:420px;overflow:auto;margin:0 10px 8px 12px;border-top:1px solid var(--line)}
+.arcane-app .workspace-stage .tool-group .codex-message.tool{width:auto;margin:0;padding:4px 2px 2px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none}
+.arcane-app .workspace-stage .tool-group .codex-message.tool:last-child{border-bottom:0}
+.arcane-app .tool-group .tool-activity .tool-activity-text{font-size:12.5px;color:var(--text-secondary)}
+@media(hover:hover) and (pointer:fine){.arcane-app .tool-group-summary:hover .tool-group-count{border-color:var(--accent);color:var(--text)}}
+@media(max-width:560px){.arcane-app .workspace-stage .tool-group{margin-left:0;min-width:0}.arcane-app .playtest-toggle{padding-inline:8px}}
+@media(forced-colors:active){
+  .arcane-app .playtest-toggle{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-app .playtest-toggle-dot{forced-color-adjust:none;background:Canvas;border:2px solid CanvasText;box-shadow:none}
+  .arcane-app .playtest-toggle[aria-checked=true] .playtest-toggle-dot{background:Highlight;border-color:Highlight}
+  .arcane-app .playtest-toggle[aria-checked=true]{outline:2px solid Highlight;outline-offset:1px}
+  .arcane-app .playtest-toggle-state,.arcane-app .playtest-toggle[aria-checked=true] .playtest-toggle-state{color:ButtonText;border-color:ButtonText}
+  .arcane-app .workspace-stage .tool-group{border-color:CanvasText;background:Canvas;color:CanvasText}
+  .arcane-app :is(.tool-group-count,.playtest-auto){border-color:CanvasText;color:CanvasText}
+}
+/* ---- End Playtest switch and grouped tool cards ---- */
+/* ---- In-app dialogs and Permissions (arcane-dialog.ts) ---- */
+/* Black glass, white type and one Arcane red; no motion. Light theme keeps the same structure with its own tokens. */
+.arcane-app .arcane-modal-layer{position:fixed;inset:0;z-index:2147483000;display:grid;place-items:center;padding:16px;background:var(--scrim);backdrop-filter:blur(6px)}
+.arcane-app .arcane-modal{width:min(520px,100%);max-height:calc(100vh - 32px);overflow:auto;padding:22px 22px 18px;border:1px solid var(--line-strong);border-top:2px solid #ff3340;border-radius:14px;background:var(--glass-solid);color:var(--text);box-shadow:var(--shadow-lg)}
+.arcane-app .arcane-modal:focus{outline:none}
+.arcane-app .arcane-modal:focus-visible{outline:2px solid #ff3340;outline-offset:2px}
+.arcane-app .arcane-modal-head{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+.arcane-app .arcane-modal-mark{flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:#ff3340;box-shadow:0 0 0 4px var(--accent-tint)}
+.arcane-app .arcane-modal[data-type=info] .arcane-modal-mark,.arcane-app .arcane-modal[data-type=none] .arcane-modal-mark{background:var(--text-secondary);box-shadow:0 0 0 4px var(--line)}
+.arcane-app .arcane-modal-title{margin:0;font:650 16px/1.35 var(--font-display);letter-spacing:-.2px;color:var(--text);overflow-wrap:anywhere}
+.arcane-app .arcane-modal-body{display:grid;gap:8px}
+.arcane-app .arcane-modal-message{margin:0;font-size:14px;line-height:1.55;color:var(--text);overflow-wrap:anywhere}
+.arcane-app .arcane-modal-detail{margin:0;font-size:12.5px;line-height:1.6;color:var(--text-secondary);white-space:pre-line;overflow-wrap:anywhere}
+.arcane-app .arcane-modal-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:18px}
+.arcane-app .arcane-modal-button{min-height:34px;padding:7px 16px;border:1px solid var(--line-strong);border-radius:8px;background:transparent;color:var(--text);font-size:13px;font-weight:600;transition:none}
+.arcane-app .arcane-modal-button:hover{border-color:#ff3340}
+.arcane-app .arcane-modal-button:focus-visible{outline:2px solid #ff3340;outline-offset:2px}
+.arcane-app .arcane-modal-primary{border-color:#ff3340;background:#c8102e;color:#fff}
+.arcane-app .arcane-modal-primary:hover{background:#d4152b}
+@media (max-width:600px){.arcane-app .arcane-modal-actions{flex-direction:column-reverse}.arcane-app .arcane-modal-button{width:100%}}
+.arcane-app .permission-switch{display:flex;flex-direction:row;align-items:flex-start;gap:12px;margin:12px 0 0;padding:12px 0 0;border-top:1px solid var(--line);color:var(--text);font-size:13px;cursor:pointer}
+.arcane-app .permission-switch input[type=checkbox]{appearance:none;flex:0 0 auto;width:34px;height:20px;margin:1px 0 0;border:1px solid var(--line-strong);border-radius:999px;background:var(--raised);position:relative;cursor:pointer;transition:none}
+.arcane-app .permission-switch input[type=checkbox]::after{content:"";position:absolute;top:3px;left:3px;width:12px;height:12px;border-radius:50%;background:var(--text-secondary)}
+.arcane-app .permission-switch input[type=checkbox]:checked{border-color:#ff3340;background:#c8102e}
+.arcane-app .permission-switch input[type=checkbox]:checked::after{left:17px;background:#fff}
+.arcane-app .permission-switch input[type=checkbox]:focus-visible{outline:2px solid #ff3340;outline-offset:2px}
+.arcane-app .permission-switch input[type=checkbox]:disabled{opacity:.55;cursor:not-allowed}
+.arcane-app .permission-switch-text{display:grid;gap:4px;min-width:0}
+.arcane-app .permission-switch-text strong{font-weight:600;color:var(--text)}
+.arcane-app .permission-switch-help{font-size:12px;line-height:1.55;color:var(--text-secondary);overflow-wrap:anywhere}
+.arcane-app .permissions-log{margin:8px 0 0;padding-left:18px;display:grid;gap:4px;font-size:12px;line-height:1.5;color:var(--text-secondary);overflow-wrap:anywhere}
+.arcane-app .permissions-log time{color:var(--text);font-variant-numeric:tabular-nums}
+@media (forced-colors:active){
+  .arcane-app .arcane-modal{border-color:CanvasText;background:Canvas;color:CanvasText;forced-color-adjust:auto}
+  .arcane-app .arcane-modal-mark{background:CanvasText;box-shadow:none}
+  .arcane-app .arcane-modal-button{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-app .arcane-modal-primary{border:2px solid Highlight}
+  .arcane-app .arcane-modal-button:focus-visible,.arcane-app .permission-switch input[type=checkbox]:focus-visible{outline-color:Highlight}
+  .arcane-app .permission-switch input[type=checkbox]{appearance:auto;width:16px;height:16px}
+  .arcane-app .permission-switch input[type=checkbox]::after{content:none}
+}
+/* ---- End in-app dialogs and Permissions ---- */
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

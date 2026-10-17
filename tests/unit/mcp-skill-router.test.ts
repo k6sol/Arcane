@@ -129,6 +129,38 @@ test('router combines combat and server security rather than routing a multi-dom
   assert.ok(!result.ids.includes('arcane-blender-props'));
 });
 
+test('router maps everyday VFX, GUI, scripting, systems, data and realism phrasing to the prescriptive skill first', async () => {
+  const cases: [string, string, string[]][] = [
+    ['Add a campfire with fire, smoke and sparks particles', 'arcane-vfx', []],
+    ['Make some cool vfx for my sword', 'arcane-vfx', []],
+    ['Make a magic waterfall with fireflies and falling leaves', 'arcane-vfx', []],
+    ['Design a main menu GUI', 'arcane-interface', []],
+    ['Build a modern ui with a hud, health bar and shop', 'arcane-interface', []],
+    ['Make a settings menu and notifications ui', 'arcane-interface', []],
+    ['Write a script for a coin system', 'arcane-luau-architecture', ['arcane-gameplay-systems']],
+    ['Refactor my scripts to use ModuleScripts and CollectionService tags', 'arcane-luau-architecture', []],
+    ['Add obby checkpoints and leaderstats', 'arcane-gameplay-systems', []],
+    ['Make a round system with intermission', 'arcane-gameplay-systems', ['arcane-luau-architecture']],
+    ['Add doors that need keys', 'arcane-gameplay-systems', []],
+    ['Add NPC dialogue with quests', 'arcane-gameplay-systems', ['arcane-npc']],
+    ['Save player coins with a datastore', 'arcane-persistence', ['arcane-datastore-safety']],
+    ['Stop exploiters from cheating my shop remote', 'arcane-remote-security', []],
+    ['Make the scene look realistic', 'arcane-photoreal', []],
+    ['photoreal lighting at golden hour', 'arcane-photoreal', []],
+    ['spooky horror lighting with fog', 'arcane-photoreal', []],
+  ];
+  for (const [request, first, alsoIncluded] of cases) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    const domain = result.selected.filter(row => row.reason.startsWith('Task relevance')).map(row => row.id);
+    assert.equal(domain[0], first, request);
+    for (const id of alsoIncluded) assert.ok([...result.ids, ...result.deferredIds].includes(id), `${request}: ${id}`);
+    assert.ok(result.bytes <= result.byteBudget, request);
+    assert.ok(result.context.includes(`## Loaded skill: ${first}\n`), request);
+  }
+  const ui = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Design a main menu GUI' });
+  assert.ok(!ui.ids.includes('arcane-vfx')); assert.ok(!ui.ids.includes('arcane-photoreal'));
+});
+
 test('approved-only router result stays empty and explicit; no manufactured approval or skill content', async () => {
   const result = await recommendSkills(new SkillRegistry(), { ...INPUT, allowExperimental: false });
   assert.equal(result.available, false); assert.deepEqual(result.ids, []); assert.equal(result.context, '');

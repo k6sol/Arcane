@@ -14,6 +14,7 @@ import { NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse } fro
 import { parseNativeStudioStagingStatusResponse } from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
 import {nativeStudioReconstructionResponse,parseNativeStudioReconstructionStatusResponse} from '../../../packages/asset-pipeline/src/studio-reconstruction-wire.js';
 import { playtestJobResponse, playtestListResponse, playtestPreparedResponse, playtestRequestInput, type PlaytestRequest } from './playtest-schemas.js';
+import { viewportCaptureInput, viewportCaptureResponse, type ViewportCaptureInput } from './viewport-tool.js';
 
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
@@ -210,6 +211,18 @@ export class DaemonClient {
   }
   async playtestCancel(jobId:string,options:WaitOptions={}) {
     return this.postOnce('/v1/playtests/cancel',{id:jobId},playtestJobResponse(jobId),{jobId},'Read playtest_status for this job. Its owned stop/cleanup may still be in progress; never retry a stop blindly.',options);
+  }
+
+  /** Read-only: one bounded Edit viewport PNG. A failure is definite and never retried here. */
+  async viewportCapture(input: ViewportCaptureInput, options: WaitOptions = {}) {
+    const parsed = viewportCaptureInput.safeParse(input);
+    if (!parsed.success) throw new BridgeError('INPUT', 'Invalid bounded viewport request.');
+    const deadline = this.deadline(options);
+    try {
+      const result = viewportCaptureResponse(parsed.data.sessionId).safeParse(await this.http('/v1/playtests/viewport', deadline.signal, parsed.data));
+      if (!result.success) throw new BridgeError('PROTOCOL', 'Daemon returned an invalid viewport image record.');
+      return result.data;
+    } finally { deadline.dispose(); }
   }
 
   async workRuns(options: WaitOptions = {}): Promise<{ runs: WorkRun[] }> {

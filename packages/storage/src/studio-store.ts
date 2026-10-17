@@ -7,7 +7,7 @@ import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
-import { canonical, validateCommandArgs } from '../../core/src/studio-policy.js';
+import { canonical, validateCommandArgs, sceneBuildInstanceCount } from '../../core/src/studio-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
@@ -1242,6 +1242,8 @@ export class StudioStore {
         if (c.method === 'scene.update' && (!nativePropertiesMatch(object(c.args.properties) as Record<string, Json>, after.properties, r.className as string) || canonical(object(mutation.before).properties) !== canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
         if (c.method === 'script.set_enabled' && (!sameReceiptRef(mutation.ref,c.args.ref) || canonical(mutation.before) !== canonical({ source:c.args.expectedSource,enabled:c.args.expectedEnabled }) || canonical(after) !== canonical({source:c.args.expectedSource,enabled:c.args.enabled}))) throw new ArcaneError('RECEIPT', 'Execution-state receipt does not match the exact source/state baseline.');
         if (c.method === 'scene.create' && mutation.before !== null) throw new ArcaneError('RECEIPT', 'Creation receipt must have a null baseline.');
+        if (c.method === 'scene.build' && (mutation.before !== null || after.count !== sceneBuildInstanceCount(c.args)
+          || r.className !== object(c.args.container).className)) throw new ArcaneError('RECEIPT', 'Build receipt does not match the exact requested hierarchy.');
       }
       c.state = completedState === 'failed' && result && typeof result === 'object' && !Array.isArray(result) && result.partial === true ? 'needs_reconciliation' : completedState;
       c.result = result; c.error = error; c.finishedAt = this.iso(); this.saveCommand(c);
@@ -1257,6 +1259,7 @@ export class StudioStore {
   private restoreInput(input: unknown): Record<string, Json> {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
     if(this.db.prepare('SELECT 1 FROM studio_test_commands WHERE command_id=?').get(prior.id))throw new ArcaneError('TEST_RESERVATION','Temporary setup receipts require their original private restoration owner.');
+    if (prior.method === 'environment.apply') throw new ArcaneError('RESTORE', 'Terrain and lighting changes are reverted with Studio Undo (one recording); the receipt lists the prior lighting values.');
     if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet'||prior.method==='asset.reconstruct') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
     return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };

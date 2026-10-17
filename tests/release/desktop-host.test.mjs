@@ -315,7 +315,11 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['claudeChat', 'codeVerification', 'nativeHandoff', 'platform', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['claudeChat', 'codeVerification', 'dialogs', 'nativeHandoff', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.equal(Object.isFrozen(exposed.dialogs), true);
+  assert.deepEqual(Object.keys(exposed.dialogs).sort(), ['attach', 'reply', 'version']);
+  assert.equal(Object.isFrozen(exposed.projectPermissions), true);
+  assert.deepEqual(Object.keys(exposed.projectPermissions).sort(), ['read', 'save', 'version']);
   assert.equal(Object.isFrozen(exposed.studioPlugin), true);
   assert.deepEqual(Object.keys(exposed.studioPlugin).sort(), ['install', 'status', 'version']);
   assert.equal(Object.isFrozen(exposed.workspaceProject), true);
@@ -563,4 +567,104 @@ test('profile preparation errors are caught before lock and routed to controlled
   assert.match(mainSource,/catch \{ profilePreparationFailed = true; \}/);
   assert.match(mainSource,/const locked = !profilePreparationFailed && app.requestSingleInstanceLock\(\)/);
   assert.match(mainSource,/if \(profilePreparationFailed\) app.whenReady\(\).then\(\(\) => failStartup/);
+});
+
+// ---------------------------------------------------------------- in-app dialogs and persistent project permissions
+const hostRequire = (await import('node:module')).createRequire(import.meta.url);
+const requireHost = name => hostRequire('../../apps/desktop/electron/' + name);
+function dialogFixture({ trusted = () => true } = {}) {
+  const handlers = new Map(), sent = [], natives = [];
+  const contents = Object.assign(new EventEmitter(), { destroyed: false, isDestroyed() { return this.destroyed; }, send(channel, value) { sent.push({ channel, value }); } });
+  const window = { destroyed: false, isDestroyed() { return this.destroyed; }, webContents: contents };
+  let ids = 0;
+  const host = requireHost('in-app-dialog.cjs').createInAppDialogs({ getWindow: () => window, trusted, timeoutMs: 200,
+    randomUUID: () => '00000000-0000-4000-8000-' + String(++ids).padStart(12, '0'),
+    native: { async showMessageBox(...args) { natives.push(args); return { response: 0 }; }, async showOpenDialog() { return { canceled: true, filePaths: [] }; } } });
+  host.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } });
+  const event = { sender: contents };
+  const invoke = (channel, ...args) => handlers.get(channel)(event, ...args);
+  return { host, handlers, sent, natives, window, contents, event, invoke };
+}
+const nextTick = () => new Promise(resolve => setImmediate(resolve));
+
+test('in-app dialogs: native until the trusted renderer attaches, then a validated in-app answer', async () => {
+  const f = dialogFixture();
+  const config = { type: 'question', title: 'Switch project', message: 'Stop this workspace?', detail: 'Line one\n\nLine two', buttons: ['Cancel', 'Open project'], defaultId: 0, cancelId: 0 };
+  assert.deepEqual(await f.host.showMessageBox(f.window, config), { response: 0 }); assert.equal(f.natives.length, 1, 'native before attach');
+  await f.host.showMessageBox({ type: 'error', message: 'Startup failed' }); assert.equal(f.natives.length, 2, 'no owner: native (startup failure path)');
+  assert.deepEqual(await f.invoke('arcane:dialog-attach'), { attached: true });
+  const pending = f.host.showMessageBox(f.window, config); await nextTick();
+  assert.equal(f.sent.length, 1); const { channel, value } = f.sent[0];
+  assert.equal(channel, 'arcane:dialog-request');
+  assert.deepEqual({ ...value, buttons: [...value.buttons] }, { version: 1, id: '00000000-0000-4000-8000-000000000001', type: 'question', title: 'Switch project', message: 'Stop this workspace?', detail: 'Line one\n\nLine two', buttons: ['Cancel', 'Open project'], defaultId: 0, cancelId: 0 });
+  for (const bad of [[{ id: value.id, response: 2 }], [{ id: value.id, response: -1 }], [{ id: '00000000-0000-4000-8000-000000000009', response: 1 }], [{ id: value.id, response: 1, extra: true }], [{ id: value.id }], []])
+    await assert.rejects(f.invoke('arcane:dialog-reply', ...bad), /not accepted/);
+  await assert.rejects(f.handlers.get('arcane:dialog-reply')({ sender: {} }, { id: value.id, response: 1 }), /not accepted/, 'another sender cannot answer');
+  assert.deepEqual(await f.invoke('arcane:dialog-reply', { id: value.id, response: 1 }), { accepted: true });
+  assert.deepEqual(await pending, { response: 1, checkboxChecked: false });
+  await assert.rejects(f.invoke('arcane:dialog-reply', { id: value.id, response: 1 }), /not accepted/, 'one answer only');
+  assert.equal(f.natives.length, 2, 'no native dialog once attached');
+});
+
+test('in-app dialogs: timeout, navigation and untrusted attach all fail safe to cancel or native', async () => {
+  const f = dialogFixture();
+  await f.invoke('arcane:dialog-attach');
+  const timed = await f.host.showMessageBox(f.window, { buttons: ['Cancel', 'Allow', 'Always allow'], cancelId: 0, defaultId: 0 });
+  assert.deepEqual(timed, { response: 0, checkboxChecked: false }, 'timeout answers cancel');
+  const pending = f.host.showMessageBox(f.window, { buttons: ['Open instructions', 'Cancel'] }); await nextTick();
+  assert.equal(f.sent.at(-1).value.cancelId, 1, 'a Cancel label is the cancel button when none is given');
+  f.host.detach(f.contents);
+  assert.deepEqual(await pending, { response: 1, checkboxChecked: false }, 'navigation cancels the open question');
+  await f.host.showMessageBox(f.window, { buttons: ['OK'] }); assert.equal(f.natives.length, 1, 'detached: native again');
+  const other = { isDestroyed: () => false, webContents: f.contents };
+  await f.invoke('arcane:dialog-attach'); await f.host.showMessageBox(other, { buttons: ['OK'] }); assert.equal(f.natives.length, 2, 'a different owner window never gets an in-app answer');
+  const g = dialogFixture({ trusted: () => false });
+  await assert.rejects(g.invoke('arcane:dialog-attach'), /unavailable/);
+  await g.host.showMessageBox(g.window, { buttons: ['OK'] }); assert.equal(g.natives.length, 1);
+  assert.equal(typeof f.host.showOpenDialog, 'function', 'folder pickers stay native');
+  const { dialogRequest } = requireHost('in-app-dialog.cjs');
+  assert.equal(dialogRequest({ buttons: ['', 'OK'] }, 'id'), null, 'empty button labels are refused');
+  const clean = dialogRequest({ type: 'weird', title: 'T‮itle', message: 'a\nb', detail: 'x'.repeat(5000), buttons: ['OK'], defaultId: 7 }, 'id');
+  assert.equal(clean.type, 'info'); assert.equal(clean.title, 'T itle'); assert.equal(clean.message, 'a b'); assert.equal(clean.detail.length, 4000); assert.equal(clean.defaultId, 0);
+});
+
+test('main routes workflow message boxes through the in-app host and keeps pickers and startup failures native', () => {
+  assert.match(mainSource, /dialog: nativeDialog/);
+  assert.match(mainSource, /showMessageBox: \(\.\.\.args\) => appDialogs \? appDialogs\.showMessageBox\(\.\.\.args\) : nativeDialog\.showMessageBox\(\.\.\.args\)/);
+  assert.match(mainSource, /showOpenDialog: \(\.\.\.args\) => nativeDialog\.showOpenDialog\(\.\.\.args\)/);
+  assert.match(mainSource, /createInAppDialogs\(\{ native: nativeDialog, getWindow: \(\) => closing \|\| switching \? null : window, trusted: rendererEvent \}\)/);
+  assert.match(mainSource, /projectPermissions\.installIpc\(ipcMain, \{ trusted: rendererEvent \}\)/);
+  assert.match(mainSource, /if \(isMainFrame && !inPlace\) appDialogs\?\.detach\(dialogContents\)/);
+  assert.match(mainSource, /createClaudeChat\(\{[^\n]*dialog, permissions,/);
+});
+
+test('project permissions persist per project, default to auto-approve and accept only exact boolean patches', async () => {
+  const { mkdtemp, readFile, writeFile, rm, mkdir } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'arcane-permissions-')); const a = join(root, 'a'), b = join(root, 'b');
+  await mkdir(a); await mkdir(b);
+  try {
+    let session = { stateRoot: a, epoch: {} };
+    const handlers = new Map(), changes = [];
+    const make = () => requireHost('project-permissions.cjs').createProjectPermissions({ getSession: () => session });
+    const p = make(); p.subscribe((next, previous) => changes.push([previous.claudeTools, next.claudeTools]));
+    p.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } }, { trusted: event => event.ok === true });
+    assert.deepEqual({ ...await p.read() }, { claudeTools: true, codexAutoApprove: true }, 'auto-approve by default');
+    assert.deepEqual({ ...await p.save({ claudeTools: false }) }, { claudeTools: false, codexAutoApprove: true });
+    assert.deepEqual(changes, [[true, false]]);
+    const saved = JSON.parse(await readFile(join(a, 'agent-permissions.json'), 'utf8'));
+    assert.equal(saved.version, 1); assert.equal(saved.claudeTools, false); assert.equal(saved.codexAutoApprove, true);
+    assert.deepEqual({ ...await make().read() }, { claudeTools: false, codexAutoApprove: true }, 'survives a restart');
+    session = { stateRoot: b, epoch: {} };
+    assert.deepEqual({ ...await p.read() }, { claudeTools: true, codexAutoApprove: true }, 'another project keeps its own record');
+    for (const bad of [{}, { claudeTools: 'yes' }, { other: true }, [], null, Object.create({ claudeTools: true })]) await assert.rejects(p.save(bad), /unavailable/);
+    await assert.rejects(handlers.get('arcane:project-permissions-read')({ ok: false }), /unavailable/, 'untrusted sender');
+    assert.deepEqual(await handlers.get('arcane:project-permissions-read')({ ok: true }), { available: true, settings: { claudeTools: true, codexAutoApprove: true } });
+    assert.deepEqual(await handlers.get('arcane:project-permissions-save')({ ok: true }, { codexAutoApprove: false }), { saved: true, settings: { claudeTools: true, codexAutoApprove: false } });
+    await writeFile(join(a, 'agent-permissions.json'), '{not json');
+    session = { stateRoot: a, epoch: {} };
+    assert.deepEqual({ ...await make().read() }, { claudeTools: true, codexAutoApprove: true }, 'a damaged record falls back to defaults');
+    const off = requireHost('project-permissions.cjs').createProjectPermissions({ getSession: () => session, enabled: false });
+    await assert.rejects(off.save({ claudeTools: true }), /unavailable/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

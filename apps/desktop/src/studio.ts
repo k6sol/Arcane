@@ -14,6 +14,7 @@ import { ArtifactDownloads } from './asset-downloads.js';
 import { AssetViewerPanel } from './asset-viewer.js';
 import { AutomaticAssetPreviews } from './automatic-asset-previews.js';
 import { startPlaytestPanel } from './playtest-panel.js';
+import { startPlaytestToggle } from './playtest-toggle.js';
 import { StudioKeySettings, trustedKeyAction } from './studio-key-settings.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
@@ -2149,7 +2150,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
-  const startTests=()=>playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn()}):null;
+  // Composer Playtest switch (remembered per project); when on, the panel approves the managed chat's requests itself.
+  const playtestToggle=startPlaytestToggle(document,{projectKey:()=>workbench.getCurrentProduct()?.projectId??null});
+  const startTests=()=>playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn(),autoApprove:()=>playtestToggle.enabled()}):null;
   let playtests=startTests();
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
     isSignedIn: () => providerSetup.isSignedIn(),
@@ -2193,6 +2196,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }).catch(()=>{const mount=document.getElementById('codex-task-plan');if(mount)mount.textContent='Restart Arcane to load task progress.';});
   // Live Studio error dock (studio-diagnostics.ts). Optional: a missing module never breaks the workspace.
   let studioDiagnostics:{stop():void;resume():void}|null=null;
+  // Arcane-styled in-app dialogs and the per-project Permissions card (arcane-dialog.ts). Optional: without it the
+  // desktop host keeps native dialogs and nothing is auto-approved.
+  let arcaneDialogs:{stop():void;resume():void}|null=null;
+  void import('./arcane-dialog.js').then(module=>{arcaneDialogs=module.startArcaneDialogs(document,{desktop:(window as unknown as {arcaneDesktop?:unknown}).arcaneDesktop,codex:codexChat});if(workflowsStopped)arcaneDialogs.stop();}).catch(()=>{});
+  window.addEventListener('pagehide',()=>arcaneDialogs?.stop());
+  window.addEventListener('pageshow',event=>{if(event.persisted)arcaneDialogs?.resume();});
+  // Plans & credits: local Arcane actions usage and the checkout seam that stays disabled until configured.
+  void import('./plans.js').then(module=>{const plans=module.startPlans(document,{token:()=>token,desktop:(window as unknown as {arcaneDesktop?:import('./plans.js').PlansOptions['desktop']}).arcaneDesktop??null,open:url=>{window.open(url,'_blank','noopener,noreferrer');}});window.addEventListener('pagehide',()=>plans.stop());window.addEventListener('pageshow',event=>{if(event.persisted)plans.resume();});}).catch(()=>{});
   void import('./studio-diagnostics.js').then(module=>{studioDiagnostics=module.startStudioDiagnostics(document,{token:()=>token,showConversation:()=>workspaceShell.showConversation()});if(workflowsStopped)studioDiagnostics.stop();}).catch(()=>{});
   window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); studioDiagnostics?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });

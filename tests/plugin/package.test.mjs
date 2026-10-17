@@ -122,8 +122,8 @@ test('portable bundle has one enabled Script and all strict ModuleScripts as chi
   items.forEach((item, index) => assert.equal(item.source, files[index].source.replace(/\r\n?/g, '\n')));
   assert.equal(manifest.format, 'roblox-xml-v4');
   assert.equal(manifest.protocolVersion, 1);
-  assert.equal(manifest.pluginVersion, '0.1.9');
-  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.1\.9"$/m);
+  assert.equal(manifest.pluginVersion, '0.2.0');
+  assert.match(byFile['Validation.luau'], /^Validation\.VERSION = "0\.2\.0"$/m);
   assert.deepEqual(manifest.sources, expectedSources.map(([, , filename], index) => ({
     path: `src/${filename}`, bytes: Buffer.byteLength(items[index].source),
     sha256: createHash('sha256').update(items[index].source).digest('hex'),

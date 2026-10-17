@@ -56,3 +56,17 @@ test('native asset readiness requires adoption, preparation, staging, detached r
  const inherited={...row(['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status']),name:'inherited',runtimeStatus:'disabled'};
  assert.throws(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES),inherited],true),{code:'MCP_CAPABILITIES'});
 });
+test('managed task instructions keep builds fast, token-lean, natural and DataStore-safe',()=>{
+ for(const text of ['scene_build','environment_apply','plan once','few large batches','never re-read unchanged state','never rings or grids','Terrain ground','PLUGIN_UPDATE_REQUIRED',
+   'never wipe, rename or migrate existing keys','UpdateAsync','session locking','BindToClose'])assert.ok(ARCANE_TASK_INSTRUCTIONS.toLowerCase().includes(text.toLowerCase()),text);
+ assert.ok(ARCANE_TOOL_NAMES.includes('scene_build')&&ARCANE_TOOL_NAMES.includes('environment_apply'));
+ assert.ok(ARCANE_TASK_INSTRUCTIONS.length<5200,'instructions stay concise');
+});
+
+test('the read-only viewport tool is a required build tool and the instructions bound visual checks',()=>{
+ assert.ok(ARCANE_TOOL_NAMES.includes('studio_viewport_capture'));
+ assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes('studio_viewport_capture'));
+ assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES.filter(name=>name!=='studio_viewport_capture')),['studio_viewport_capture']);
+ assert.match(ARCANE_TASK_INSTRUCTIONS,/studio_viewport_capture[^.]*critique the image against the request[^.]*then fix what you see/);
+ assert.match(ARCANE_TASK_INSTRUCTIONS,/at most 2–3 checks per task/);
+});

@@ -392,7 +392,7 @@ return {}
 <ProtectedString name="Source"><![CDATA[--!strict
 local Validation = {}
 Validation.PROTOCOL = 1
-Validation.VERSION = "0.1.9"
+Validation.VERSION = "0.2.0"
 Validation.ARGUMENT_BYTES = 256 * 1024
 Validation.RESULT_BYTES = 512 * 1024
 Validation.SOURCE_BYTES = 100 * 1024
@@ -403,7 +403,9 @@ Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context"})
-Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore"})
+Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.build", "environment.apply"})
+Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
+Validation.BUILD_PART_CLASSES = table.freeze({"Part", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reconstruct"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
@@ -856,7 +858,7 @@ local V = require(script.Parent.Validation)
 local Properties = {}
 Properties.PART_FIELDS = table.freeze({"Size", "Position", "Color", "Anchored", "CanCollide", "Transparency", "Material"})
 Properties.CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript"})
-Properties.MATERIALS = table.freeze({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt"})
+Properties.MATERIALS = table.freeze({"Plastic", "SmoothPlastic", "Metal", "Wood", "WoodPlanks", "Concrete", "Brick", "Glass", "Neon", "Slate", "Sand", "Fabric", "Grass", "Ground", "Rock", "Cobblestone", "Asphalt", "Marble", "Granite", "Limestone", "Sandstone", "Basalt", "Pebble", "LeafyGrass", "Mud", "Snow", "Ice", "Pavement", "Plaster", "DiamondPlate", "CorrodedMetal", "Foil"})
 
 function Properties.decode(name: string, value: any, isPart: boolean): any
 	if name == "Name" then return V.string(value, "Name", 100) end
@@ -1527,6 +1529,345 @@ function Operations:create(command: any, args: any, guard: () -> ()): any
 	return result
 end
 
+-- Fixed assignment order: Shape before Size (a Ball constrains Size), rotation before position.
+local BUILD_ORDER = table.freeze({"Shape", "Material", "Size", "Orientation", "Position", "Color", "Transparency", "Reflectance", "Anchored", "CanCollide", "CastShadow"})
+
+function Operations:buildProperties(className: string, properties: any): {[string]: any}
+	local values = if properties == nil then {} else properties
+	V.object(values, "properties")
+	local decoded: {[string]: any} = {}
+	local count = 0
+	for key, value in pairs(values) do
+		count += 1
+		if count > V.MAX_PROPERTIES then V.fail("INPUT", "Too many properties.") end
+		if key == "Name" then V.fail("PROPERTY", "Use the item name field.") end
+		decoded[key] = P.decode(key, value, true, table.find(V.PART_SHAPE_CLASSES, className) ~= nil)
+	end
+	return decoded
+end
+
+local function buildTriple(value: any, low: number, high: number, label: string): {number}
+	local list = V.list(value, 3, label)
+	if #list ~= 3 then V.fail("INPUT", label .. " needs three numbers.") end
+	for _, item in ipairs(list) do V.number(item, low, high, label) end
+	return list
+end
+
+-- One atomic hierarchy: decode and plan everything, allocate detached, verify every
+-- property, then parent the root once inside a single undo recording.
+function Operations:build(command: any, args: any, guard: () -> ()): any
+	V.fields(args, {"parent", "container", "prototypes", "items"}, "build arguments")
+	local L = V.BUILD_LIMITS
+	local parent = self.registry:resolve(args.parent)
+	local rootSpec = V.fields(args.container, {"className", "name"}, "build container")
+	if rootSpec.className ~= "Model" and rootSpec.className ~= "Folder" then V.fail("CLASS", "The build root must be a Model or Folder.") end
+	local plan: {any} = {{className = rootSpec.className, name = V.string(rootSpec.name, "name", 100), parent = 0}}
+	local function add(entry: any): number
+		table.insert(plan, entry)
+		if #plan > L.instances then V.fail("BODY_LIMIT", "A build may create at most " .. L.instances .. " instances.") end
+		return #plan
+	end
+	local prototypes: {any} = {}
+	local rawPrototypes = if args.prototypes == nil then V.array({}) else args.prototypes
+	for _, raw in ipairs(V.list(rawPrototypes, L.prototypes, "prototypes")) do
+		local proto = V.fields(raw, {"name", "weld", "parts"}, "prototype")
+		V.string(proto.name, "prototype name", 100)
+		local parts: {any} = {}
+		for _, rawPart in ipairs(V.list(proto.parts, L.prototypeParts, "prototype parts")) do
+			local part = V.fields(rawPart, {"className", "name", "properties", "tint"}, "prototype part")
+			if type(part.className) ~= "string" or not table.find(V.BUILD_PART_CLASSES, part.className) then V.fail("CLASS", "Unsupported build part class.") end
+			table.insert(parts, {className = part.className, name = V.string(part.name, "part name", 100),
+				properties = self:buildProperties(part.className, part.properties), tint = V.boolean(part.tint, "tint")})
+		end
+		if #parts == 0 then V.fail("INPUT", "A prototype needs at least one part.") end
+		table.insert(prototypes, {weld = V.boolean(proto.weld, "weld"), parts = parts})
+	end
+	local items = V.list(args.items, L.items, "build items")
+	if #items == 0 then V.fail("INPUT", "A build needs at least one item.") end
+	local containers: {[number]: number} = {}
+	local keyed: {any} = {}
+	local keys: {[string]: boolean} = {}
+	for index, raw in ipairs(items) do
+		local item = V.object(raw, "build item")
+		local parentIndex = V.integer(item.parent, 0, index - 1, "item parent")
+		local into = if parentIndex == 0 then 1 else containers[parentIndex]
+		if not into then V.fail("INPUT", "Only group items can contain other items.") end
+		local name = V.string(item.name, "item name", 100)
+		local created: number
+		if item.kind == "group" then
+			V.fields(item, {"kind", "className", "name", "parent", "key"}, "group item")
+			if item.className ~= "Model" and item.className ~= "Folder" then V.fail("CLASS", "Group items must be Model or Folder.") end
+			created = add({className = item.className, name = name, parent = into})
+			containers[index] = created
+		elseif item.kind == "part" then
+			V.fields(item, {"kind", "className", "name", "parent", "properties", "key"}, "part item")
+			if type(item.className) ~= "string" or not table.find(V.BUILD_PART_CLASSES, item.className) then V.fail("CLASS", "Unsupported build part class.") end
+			created = add({className = item.className, name = name, parent = into, properties = self:buildProperties(item.className, item.properties)})
+		elseif item.kind == "place" then
+			V.fields(item, {"kind", "template", "name", "parent", "at", "yaw", "scale", "tint", "ground", "key"}, "placement")
+			local proto = prototypes[V.integer(item.template, 1, math.max(1, #prototypes), "prototype index")]
+			if not proto then V.fail("INPUT", "Placement names an unknown prototype.") end
+			local at = table.clone(buildTriple(item.at, -100000, 100000, "placement position"))
+			if item.ground ~= nil and V.boolean(item.ground, "placement ground") then
+				-- Read-only probe of existing terrain/parts; nothing from this build is parented yet.
+				local hit = self.registry:root("Workspace"):Raycast(Vector3.new(at[1], at[2] + 500, at[3]), Vector3.new(0, -1000, 0))
+				if hit then at[2] = hit.Position.Y end
+			end
+			local yaw = V.number(item.yaw, -360, 360, "placement yaw")
+			local scale = V.number(item.scale, 0.1, 20, "placement scale")
+			local tint = if item.tint == nil or item.tint == V.NULL then nil else buildTriple(item.tint, 0, 2, "placement tint")
+			local radians = math.rad(yaw)
+			local c, s = math.cos(radians), math.sin(radians)
+			local single = #proto.parts == 1
+			local holder = into
+			if not single then created = add({className = "Model", name = name, parent = into}); holder = created end
+			local first: number? = nil
+			for _, part in ipairs(proto.parts) do
+				local properties = table.clone(part.properties)
+				local size = properties.Size
+				if size then
+					local x, y, z = size.X * scale, size.Y * scale, size.Z * scale
+					for _, n in ipairs({x, y, z}) do if n < 0.05 or n > 2048 then V.fail("PROPERTY", "A scaled prototype part must stay 0.05..2048 studs.") end end
+					properties.Size = Vector3.new(x, y, z)
+				end
+				local rel = properties.Position or Vector3.new(0, 0, 0)
+				local rx, ry, rz = rel.X * scale, rel.Y * scale, rel.Z * scale
+				local px, py, pz = at[1] + rx * c + rz * s, at[2] + ry, at[3] - rx * s + rz * c
+				for _, n in ipairs({px, py, pz}) do if math.abs(n) > 100000 then V.fail("PROPERTY", "A placed part must stay within 100000 studs.") end end
+				properties.Position = Vector3.new(px, py, pz)
+				local o = properties.Orientation or Vector3.new(0, 0, 0)
+				properties.Orientation = Vector3.new(o.X, (o.Y + yaw + 180) % 360 - 180, o.Z)
+				local color = properties.Color
+				if tint and part.tint and color then
+					properties.Color = Color3.new(math.clamp(color.R * tint[1], 0, 1), math.clamp(color.G * tint[2], 0, 1), math.clamp(color.B * tint[3], 0, 1))
+				end
+				local partIndex = add({className = part.className, name = if single then name else part.name, parent = holder, properties = properties})
+				if single then created = partIndex end
+				if not first then first = partIndex
+				elseif proto.weld then add({className = "WeldConstraint", name = "Weld", parent = partIndex, part0 = first, part1 = partIndex}) end
+			end
+			if not single then plan[created].primary = first end
+		else
+			V.fail("INPUT", "Item kind must be group, part or place.")
+		end
+		if item.key ~= nil then
+			local key = V.string(item.key, "item key", 64)
+			if not string.match(key, "^[%w_%-]+$") or keys[key] then V.fail("INPUT", "Item keys must be unique [A-Za-z0-9_-].") end
+			keys[key] = true
+			table.insert(keyed, {key = key, index = created})
+			if #keyed > L.keys then V.fail("INPUT", "Too many keyed items.") end
+		end
+	end
+	if self.registry.count + #keyed + 1 > V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
+	return self:record(command, guard, function(progress: any): any
+		guard()
+		self.registry:resolve(args.parent)
+		local instances: {any} = table.create(#plan)
+		local prepared, prepareError = pcall(function()
+			for index, entry in ipairs(plan) do
+				local instance = Instance.new(entry.className)
+				instances[index] = instance
+				instance.Name = entry.name
+				local properties = entry.properties
+				if properties then
+					for _, key in ipairs(BUILD_ORDER) do
+						local value = properties[key]
+						if value ~= nil then instance[key] = value end
+					end
+					for _, key in ipairs(BUILD_ORDER) do
+						local value = properties[key]
+						if value ~= nil and not P.assignedMatches(instance, key, value) then
+							V.fail("VERIFY", "Built property differs from the requested value: " .. entry.name .. "." .. key)
+						end
+					end
+				end
+				if entry.part0 then
+					instance.Part0, instance.Part1 = instances[entry.part0], instances[entry.part1]
+					if instance.Part0 ~= instances[entry.part0] or instance.Part1 ~= instances[entry.part1] then V.fail("VERIFY", "Weld did not bind its parts.") end
+				end
+				if index > 1 then instance.Parent = instances[entry.parent] end
+			end
+			for index, entry in ipairs(plan) do
+				if entry.primary then instances[index].PrimaryPart = instances[entry.primary] end
+			end
+			guard()
+		end)
+		if not prepared then
+			-- Nothing was parented into the place; discard every detached allocation.
+			for index = #instances, 1, -1 do pcall(function() instances[index]:Destroy() end) end
+			error(prepareError, 0)
+		end
+		local root = instances[1]
+		progress.touched = true
+		root.Parent = parent
+		local ref = self.registry:ref(root)
+		progress.ref = ref
+		local snapshots, parents, children, classes = table.create(#instances), table.create(#instances), table.create(#instances), {}
+		for index, instance in ipairs(instances) do
+			snapshots[index] = V.immutable(P.snapshot(instance))
+			parents[index] = instance.Parent
+			children[index] = #instance:GetChildren()
+			classes[instance.ClassName] = (classes[instance.ClassName] or 0) + 1
+		end
+		self.registry.owned[root] = {parent = parent, build = {instances = instances, parents = parents, snapshots = snapshots, children = children}}
+		local refs = {}
+		for _, entry in ipairs(keyed) do refs[entry.key] = self.registry:ref(instances[entry.index]) end
+		return {ref = ref, refs = refs, created = {count = #instances, classes = classes},
+			mutation = {kind = "scene.build", ref = ref, before = V.NULL, after = {count = #instances, classes = classes}}}
+	end)
+end
+
+local TERRAIN_MATERIALS = table.freeze({"Air", "Grass", "LeafyGrass", "Ground", "Mud", "Rock", "Slate", "Sand", "Sandstone", "Limestone", "Basalt", "Granite", "Pebble",
+	"Snow", "Ice", "Glacier", "Salt", "Cobblestone", "Asphalt", "Concrete", "Brick", "WoodPlanks", "CrackedLava", "Water"})
+local ENVIRONMENT_SECTIONS = table.freeze({
+	{key = "lighting", props = {ClockTime = {0, 24}, Brightness = {0, 10}, ExposureCompensation = {-3, 3}, EnvironmentDiffuseScale = {0, 1}, EnvironmentSpecularScale = {0, 1},
+		ShadowSoftness = {0, 1}, FogStart = {0, 100000}, FogEnd = {0, 100000}, Ambient = "color", OutdoorAmbient = "color", ColorShift_Top = "color", FogColor = "color", GlobalShadows = "boolean"}},
+	{key = "atmosphere", className = "Atmosphere", props = {Density = {0, 1}, Offset = {0, 1}, Haze = {0, 10}, Glare = {0, 10}, Color = "color", Decay = "color"}},
+	{key = "bloom", className = "BloomEffect", props = {Intensity = {0, 2}, Size = {0, 56}, Threshold = {0, 4}}},
+	{key = "colorCorrection", className = "ColorCorrectionEffect", props = {Brightness = {-1, 1}, Contrast = {-1, 1}, Saturation = {-1, 1}, TintColor = "color"}},
+	{key = "sunRays", className = "SunRaysEffect", props = {Intensity = {0, 1}, Spread = {0, 1}}},
+})
+
+local function environmentValue(value: any, kind: any, label: string): any
+	if kind == "boolean" then return V.boolean(value, label) end
+	if kind == "color" then
+		local rgb = buildTriple(value, 0, 1, label)
+		return Color3.new(rgb[1], rgb[2], rgb[3])
+	end
+	return V.number(value, kind[1], kind[2], label)
+end
+local function environmentEncode(value: any): any
+	if type(value) == "number" or type(value) == "boolean" then return value end
+	return V.array({value.R, value.G, value.B})
+end
+local function environmentMatches(actual: any, expected: any): boolean
+	if type(expected) == "boolean" then return actual == expected end
+	if type(expected) == "number" then return type(actual) == "number" and math.abs(actual - expected) <= 0.001 end
+	return math.abs(actual.R - expected.R) <= 0.002 and math.abs(actual.G - expected.G) <= 0.002 and math.abs(actual.B - expected.B) <= 0.002
+end
+
+-- Bounded terrain fills plus fixed Lighting/effect settings in one undo recording.
+-- Lighting changes are verified and reverted on failure before any terrain write.
+function Operations:environment(command: any, args: any, guard: () -> ()): any
+	local allowed = {"terrain"}
+	for _, section in ipairs(ENVIRONMENT_SECTIONS) do table.insert(allowed, section.key) end
+	V.fields(args, allowed, "environment arguments")
+	local fills: {any} = {}
+	local terrain: any = nil
+	if args.terrain ~= nil then
+		local workspace = self.registry:root("Workspace")
+		for _, child in ipairs(workspace:GetChildren()) do if child.ClassName == "Terrain" then terrain = child end end
+		if not terrain then V.fail("TERRAIN", "Workspace has no Terrain object.") end
+		local volume = 0
+		for _, raw in ipairs(V.list(args.terrain, 128, "terrain shapes")) do
+			local shape = V.object(raw, "terrain shape")
+			local center = buildTriple(shape.center, -100000, 100000, "terrain center")
+			local material = V.enum(shape.material, TERRAIN_MATERIALS, Enum.Material, "terrain material")
+			local fill: any = {shape = shape.shape, material = material, center = center}
+			if shape.shape == "Ball" then
+				V.fields(shape, {"shape", "material", "center", "radius"}, "terrain ball")
+				fill.radius = V.number(shape.radius, 1, 1024, "terrain radius")
+				volume += 4 / 3 * math.pi * fill.radius ^ 3
+			elseif shape.shape == "Cylinder" then
+				V.fields(shape, {"shape", "material", "center", "radius", "height", "orientation"}, "terrain cylinder")
+				fill.radius = V.number(shape.radius, 1, 1024, "terrain radius")
+				fill.height = V.number(shape.height, 1, 2048, "terrain height")
+				fill.orientation = if shape.orientation == nil then nil else buildTriple(shape.orientation, -360, 360, "terrain orientation")
+				volume += math.pi * fill.radius ^ 2 * fill.height
+			elseif shape.shape == "Block" or shape.shape == "Wedge" then
+				V.fields(shape, {"shape", "material", "center", "size", "orientation"}, "terrain block")
+				fill.size = buildTriple(shape.size, 1, 2048, "terrain size")
+				fill.orientation = if shape.orientation == nil then nil else buildTriple(shape.orientation, -360, 360, "terrain orientation")
+				volume += fill.size[1] * fill.size[2] * fill.size[3]
+			else
+				V.fail("INPUT", "Terrain shape must be Block, Ball, Cylinder or Wedge.")
+			end
+			table.insert(fills, fill)
+		end
+		if #fills == 0 then V.fail("INPUT", "Choose at least one terrain shape.") end
+		if volume > 400000000 then V.fail("BODY_LIMIT", "Terrain fills exceed the bounded volume.") end
+	end
+	local lighting: any = nil
+	local changes: {any} = {}
+	for _, section in ipairs(ENVIRONMENT_SECTIONS) do
+		local values = args[section.key]
+		if values ~= nil then
+			lighting = lighting or self.registry:root("Lighting")
+			local names: {string} = {}
+			for name in pairs(section.props) do table.insert(names, name) end
+			V.fields(values, names, section.key)
+			local decoded: {[string]: any} = {}
+			local count = 0
+			for name, value in pairs(values) do
+				decoded[name] = environmentValue(value, section.props[name], section.key .. "." .. name)
+				count += 1
+			end
+			if count == 0 then V.fail("INPUT", "Set at least one " .. section.key .. " property.") end
+			local target: any = if section.className then nil else lighting
+			if section.className then
+				for _, child in ipairs(lighting:GetChildren()) do if child.ClassName == section.className then target = child; break end end
+			end
+			table.insert(changes, {key = section.key, className = section.className, target = target, values = decoded})
+		end
+	end
+	if #fills == 0 and #changes == 0 then V.fail("INPUT", "Choose terrain shapes or lighting/effect settings.") end
+	local subject = lighting or terrain
+	return self:record(command, guard, function(progress: any): any
+		guard()
+		local created: {any} = {}
+		local reverts: {any} = {}
+		local before: {[string]: any} = {}
+		local after: {[string]: any} = {}
+		local ok, failure = pcall(function()
+			for _, change in ipairs(changes) do
+				local snapshot: {[string]: any} = {}
+				if change.target then
+					for name in pairs(change.values) do snapshot[name] = environmentEncode(change.target[name]) end
+					before[change.key] = snapshot
+				else
+					change.target = Instance.new(change.className)
+					change.target.Name = change.className
+					change.created = true
+					table.insert(created, change.target)
+					before[change.key] = "created"
+				end
+				local applied: {[string]: any} = {}
+				for name, value in pairs(change.values) do
+					if not change.created then table.insert(reverts, {target = change.target, name = name, value = change.target[name]}) end
+					change.target[name] = value
+					if not environmentMatches(change.target[name], value) then V.fail("VERIFY", change.key .. "." .. name .. " did not take the requested value.") end
+					applied[name] = environmentEncode(value)
+				end
+				after[change.key] = applied
+			end
+			guard()
+		end)
+		if not ok then
+			local reverted = pcall(function()
+				for index = #reverts, 1, -1 do reverts[index].target[reverts[index].name] = reverts[index].value end
+			end)
+			for _, instance in ipairs(created) do pcall(function() instance:Destroy() end) end
+			if not reverted then progress.touched = true end
+			error(failure, 0)
+		end
+		progress.touched = true
+		for _, fill in ipairs(fills) do
+			local center = Vector3.new(fill.center[1], fill.center[2], fill.center[3])
+			local o = fill.orientation or {0, 0, 0}
+			local cframe = CFrame.new(center.X, center.Y, center.Z) * CFrame.fromOrientation(math.rad(o[1]), math.rad(o[2]), math.rad(o[3]))
+			if fill.shape == "Ball" then terrain:FillBall(center, fill.radius, fill.material)
+			elseif fill.shape == "Cylinder" then terrain:FillCylinder(cframe, fill.height, fill.radius, fill.material)
+			elseif fill.shape == "Wedge" then terrain:FillWedge(cframe, Vector3.new(fill.size[1], fill.size[2], fill.size[3]), fill.material)
+			else terrain:FillBlock(cframe, Vector3.new(fill.size[1], fill.size[2], fill.size[3]), fill.material) end
+		end
+		for _, instance in ipairs(created) do instance.Parent = lighting end
+		local ref = self.registry:ref(subject)
+		progress.ref = ref
+		after.terrainShapes = #fills
+		return {ref = ref, mutation = {kind = "environment.apply", ref = ref, before = before, after = after}}
+	end)
+end
+
 function Operations:restore(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"receiptCommandId", "mutation"}, "restore arguments")
 	local receiptId = V.string(args.receiptCommandId, "receipt command ID", 256)
@@ -1551,6 +1892,27 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 			guard()
 			self.registry:resolve(original.ref)
 			if not matches() then V.fail("CONFLICT", "Created instance changed before restoration.") end
+			progress.ref = original.ref
+			progress.touched = true
+			instance:Destroy()
+			return {restored = true, ref = original.ref}
+		end)
+	elseif original.kind == "scene.build" then
+		local owned = self.registry.owned[instance]
+		local build = owned and owned.build
+		local function matches(): boolean
+			if not build or instance.Parent ~= owned.parent then return false end
+			for index, item in ipairs(build.instances) do
+				if item.Parent ~= build.parents[index] or #item:GetChildren() ~= build.children[index]
+					or not V.equal(P.snapshot(item), build.snapshots[index]) then return false end
+			end
+			return true
+		end
+		if not matches() then V.fail("CONFLICT", "The built hierarchy changed, moved, or gained children; restoration refused.") end
+		self:record(command, guard, function(progress: any): any
+			guard()
+			self.registry:resolve(original.ref)
+			if not matches() then V.fail("CONFLICT", "The built hierarchy changed before restoration.") end
 			progress.ref = original.ref
 			progress.touched = true
 			instance:Destroy()
@@ -1601,6 +1963,8 @@ function Operations:execute(command: any, guard: () -> ()): any
 		result = {ref = self.registry:ref(instance), source = self:source(instance)}
 		if instance:IsA("BaseScript") then result.enabled = not instance.Disabled end
 	elseif method == "scene.create" then result = self:create(command, args, guard)
+	elseif method == "scene.build" then result = self:build(command, args, guard)
+	elseif method == "environment.apply" then result = self:environment(command, args, guard)
 	elseif method == "scene.update" then result = self:updateProperties(command, args, guard)
 	elseif method == "script.update" then result = self:updateSource(command, args, guard)
 	elseif method == "script.set_enabled" then result = self:setEnabled(command, args, guard)

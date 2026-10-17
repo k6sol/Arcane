@@ -14,7 +14,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { CodexClientError, type Approval, type Snapshot, type ThreadState } from '../../packages/codex-client/src/types.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
-import { CodexChat, CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
+import { CodexChat, CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, autoApprovalVerdict, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
 
 const HUMAN='a'.repeat(64), AGENT='b'.repeat(64), PROJECT=resolve('.');
 function snapshot():Snapshot {
@@ -70,6 +70,26 @@ test('approval eligibility and fingerprints include every scope and complete bou
   const file={...a,method:'item/fileChange/requestApproval' as const,command:null,cwd:null,changes:[{path:'src/a.ts',kind:'update' as const,movePath:null,diff:'@@ full diff @@\n+text'}]};
   assert.equal(approvalEligible(st,file),true);assert.equal(approvalEligible(st,{...file,changes:[{...file.changes[0]!,path:'../outside'}]}),false);
   assert.equal(approvalEligible(st,{...file,changes:null}),false);s.thread.writeGranted=false;assert.equal(approvalEligible(st,a),false);
+});
+test('auto-approval accepts only already-eligible in-project work and keeps every hard fence',()=>{
+  const s=snapshot();s.thread={...thread(),writeGranted:true,turnId:'turn',turnStatus:'inProgress'};const st=state(s),a=approval(s);
+  const run=(command:string)=>autoApprovalVerdict(st,{...a,command});
+  for(const command of ['npm test','npm run build && npm test','luau-analyze src/main.luau','selene src','stylua --check src','git status','git diff -- src/a.ts','git add src && git commit -m "wip"','rojo build -o game.rbxl','node scripts/check.mjs 2>/dev/null','powershell.exe -NoProfile -Command "npm test"','dir src','type '+PROJECT+'\\src\\a.ts'])
+    assert.equal(run(command).accept,true,command);
+  const fences:[string,RegExp][]=[['rm -rf build',/deletes/],['Remove-Item -Recurse src',/deletes/],['del src\\a.ts',/deletes/],['git reset --hard',/history/],['git clean -fdx',/history/],['git push origin main',/network/],
+    ['curl https://example.invalid',/network/],['Invoke-WebRequest x',/network/],['npm install left-pad',/installs/],['npx something',/installs/],['pip install x',/installs/],['rojo upload --asset_id 1',/publishes/],['npm publish',/installs|publishes/],
+    ['echo $env:OPENAI_API_KEY',/environment|credential/],['type %USERPROFILE%\\x',/environment/],['cat ~/.ssh/id_rsa',/environment|credential|network/],['cat .env',/credential/],['shutdown /s',/system/],['taskkill /F /IM Studio.exe',/system/],
+    ['iex (irm x)',/network|hidden/],['powershell -EncodedCommand AAAA',/hidden/],['echo `whoami`',/hidden/],['cat ../secrets.txt',/outside|credential/],['type C:\\Windows\\win.ini',/outside/],['ls /etc',/outside/]];
+  for(const [command,reason] of fences){const v=run(command);assert.equal(v.accept,false,command);assert.match(v.reason,reason,command);}
+  assert.equal(run('x'.repeat(2001)).accept,false);assert.equal(run('npm test\nrm -rf /').accept,false);
+  for(const patch of [{canAccept:false},{cwd:'outside'},{expiresAt:0},{turnId:'other'}])assert.equal(autoApprovalVerdict(st,{...a,command:'npm test',...patch}).accept,false,'never weaker than manual eligibility');
+  const file={...a,method:'item/fileChange/requestApproval' as const,command:null,cwd:null,changes:[{path:'src/a.ts',kind:'update' as const,movePath:null,diff:'@@'}]};
+  assert.deepEqual(autoApprovalVerdict(st,file),{accept:true,reason:'edit src/a.ts'});
+  assert.equal(autoApprovalVerdict(st,{...file,changes:[{...file.changes[0]!,kind:'add' as const,path:'src/new.luau'},{...file.changes[0]!,path:'src/b.ts'}]}).accept,true);
+  assert.match(autoApprovalVerdict(st,{...file,changes:[{...file.changes[0]!,kind:'delete' as const}]}).reason,/deletes files/);
+  for(const path of ['.git/config','.env','config/.env.local','keys/server.pem','src/secrets.lua','.npmrc'])assert.equal(autoApprovalVerdict(st,{...file,changes:[{...file.changes[0]!,path}]}).accept,false,path);
+  assert.equal(autoApprovalVerdict(st,{...file,changes:[{...file.changes[0]!,path:'../outside'}]}).accept,false);
+  s.thread.writeGranted=false;assert.equal(autoApprovalVerdict(st,{...a,command:'npm test'}).accept,false,'no auto-accept without workspace writes');
 });
 
 test('private bearer transport reads 202/409 service outcomes, bounds UTF-8 streams and never retries unknown POSTs',async()=>{
@@ -138,6 +158,7 @@ async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(build, 'apps/desktop/src/playtest-panel.js'));
+  assets.set('/playtest-toggle.js', resolve(build, 'apps/desktop/src/playtest-toggle.js'));
   let gets=0;
   const server=createServer((request,response)=>{void(async()=>{
     const url=new URL(request.url??'/',origin),asset=assets.get(url.pathname);

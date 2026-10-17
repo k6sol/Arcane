@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TaskUsageTracker, readTaskUsage, taskUsageCost, type ReadonlyTaskUsageState, type TaskUsageRateCard, type TaskUsageSnapshot, type TaskUsageScope } from '../../apps/desktop/src/task-usage.js';
+import { TaskUsageTracker, currencyForLocale, estimateUsageUsd, formatUsageCost, readCostPreferences, usagePrice, readTaskUsage, taskUsageCost, type ReadonlyTaskUsageState, type TaskUsageRateCard, type TaskUsageSnapshot, type TaskUsageScope } from '../../apps/desktop/src/task-usage.js';
 import type { NativeTokenUsage, SessionEvent, ThreadState, TokenUsageBreakdown } from '../../packages/codex-client/src/types.js';
 
 const scope: TaskUsageScope = { projectId: 'project:A', connectionId: 'connection:A', threadId: 'thread:A', turnId: 'turn:1' };
@@ -248,4 +248,45 @@ test('same-cursor snapshot of an old turn cannot replace the latest human task',
   const stale = snapshot([], 'completed'); stale.lastEventSeq = 4;
   stale.usage = { ...usage(), threadId: scope.threadId, turnId: scope.turnId, seq: 1 };
   const v = tracker.read(state(stale)); assert.equal(v.scope?.turnId, 'turn:2'); assert.equal(v.current?.totalTokens, 110);
+});
+
+test('price table: exact model IDs only, cached input at the cached rate, unknown models never priced', () => {
+  assert.deepEqual(usagePrice('gpt-5.1-codex'), { inputPerMillion: 1.25, cachedInputPerMillion: 0.125, outputPerMillion: 10 });
+  assert.equal(usagePrice('claude-sonnet-5-5')?.outputPerMillion, 10);
+  assert.equal(usagePrice('claude-haiku-4-5-20251001')?.inputPerMillion, 1, 'a release date suffix is ignored');
+  for (const unknown of ['fixture-model', 'gpt-5.1-codex-ultra', 'sonnet', '', null, 42]) assert.equal(usagePrice(unknown), null);
+  // 1M input of which 400k cached, 100k output on gpt-5.1-codex: 600k*1.25 + 400k*0.125 + 100k*10 per million = 0.75 + 0.05 + 1.0
+  assert.ok(Math.abs(estimateUsageUsd('gpt-5.1-codex', { inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000 })! - 1.8) < 1e-9);
+  assert.equal(estimateUsageUsd('fixture-model', { inputTokens: 10, outputTokens: 10 }), null);
+});
+
+test('cost formatting: ~$ by default, local currency only with a user rate, tiny amounts not rounded to zero', () => {
+  const usd = readCostPreferences(null);
+  assert.deepEqual(usd, { show: true, currency: 'USD', rate: null });
+  assert.equal(formatUsageCost(2.456, usd), '~$2.46');
+  assert.equal(formatUsageCost(0.0042, usd), '~$0.0042');
+  assert.equal(formatUsageCost(0, usd), '~$0.00');
+  const euroNoRate = readCostPreferences({ currency: 'EUR' });
+  assert.equal(formatUsageCost(2.456, euroNoRate, 'de-DE').includes('$'), true, 'without a rate the cost stays in USD');
+  const euro = readCostPreferences({ currency: 'EUR', rate: 0.5, show: true });
+  assert.match(formatUsageCost(2, euro, 'de-DE'), /^~1,00\s€$/);
+  assert.equal(readCostPreferences({ currency: 'XXX', rate: -1, show: 'no' }).currency, 'USD');
+  assert.equal(readCostPreferences({ show: false }).show, false);
+  assert.equal(currencyForLocale('en-GB'), 'GBP'); assert.equal(currencyForLocale('fr-FR'), 'EUR'); assert.equal(currencyForLocale('xx'), 'USD');
+  assert.equal(readCostPreferences({}, currencyForLocale('ja-JP')).currency, 'JPY');
+});
+
+test('a known model gets a table estimate in the footer: API-equivalent for plans, tokens only for unknown models or when hidden', () => {
+  const known = 'gpt-5.1-codex', s = snapshot([usageEvent(1, usage(tokens(1_000_000, 100_000, 400_000)))]);
+  s.thread!.selection.model = known;
+  const tracker = new TaskUsageTracker(() => 0);
+  tracker.costDisplay = { preferences: readCostPreferences(null), locale: 'en-US' };
+  const v = tracker.read(state(s));
+  assert.equal(v.cost.kind, 'included'); assert.ok(Math.abs(v.cost.estimate!.amount - 1.8) < 1e-9);
+  assert.match(v.footer.text, /^Tokens 1,100,000 \(~\$1\.80\) · Included in plan/);
+  assert.match(v.footer.detail, /~\$1\.80 is an estimated API-equivalent cost; your plan is not charged per token/);
+  tracker.costDisplay = { preferences: { show: false, currency: 'USD', rate: null }, locale: 'en-US' };
+  assert.doesNotMatch(tracker.read(state(s)).footer.text, /~\$/);
+  const unknown = new TaskUsageTracker(() => 0); unknown.costDisplay = { preferences: readCostPreferences(null), locale: 'en-US' };
+  assert.doesNotMatch(unknown.read(state(snapshot([usageEvent(1)]))).footer.text, /~\$|\$/);
 });

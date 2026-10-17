@@ -12,7 +12,7 @@ test('behavior catalogue covers each authored skill exactly once without claimin
   assert.equal(catalogue.definitionOnly, true);
   assert.equal(catalogue.runStatus, 'not-run');
   assert.deepEqual(catalogue.runs, []);
-  assert.equal(catalogue.cases.length, 50);
+  assert.equal(catalogue.cases.length, 55);
   assert.deepEqual(catalogue.cases.map(c => c.primarySkill).sort(), registry.skills.map(s => s.id).sort());
 });
 

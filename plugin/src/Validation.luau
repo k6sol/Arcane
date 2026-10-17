@@ -1,7 +1,7 @@
 --!strict
 local Validation = {}
 Validation.PROTOCOL = 1
-Validation.VERSION = "0.1.9"
+Validation.VERSION = "0.2.0"
 Validation.ARGUMENT_BYTES = 256 * 1024
 Validation.RESULT_BYTES = 512 * 1024
 Validation.SOURCE_BYTES = 100 * 1024
@@ -12,7 +12,9 @@ Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context"})
-Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore"})
+Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.build", "environment.apply"})
+Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
+Validation.BUILD_PART_CLASSES = table.freeze({"Part", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reconstruct"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})

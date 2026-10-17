@@ -35,10 +35,11 @@ const SESSION_ID = 'fixture-studio-session';
 const REFERENCE: InstanceRef = { instanceId: 'opaque-1', sessionId: SESSION_ID, root: 'Workspace', pathSegments: ['Same', 'Same'], className: 'Part' };
 const TOOL_ACCESS = {
   sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true, script_search: true,
-  script_update: false, script_set_enabled: false, scene_create: false, scene_update: false, receipt_status: true, receipt_restore: false,
+  script_update: false, script_set_enabled: false, scene_create: false, scene_update: false, scene_build: false, environment_apply: false, receipt_status: true, receipt_restore: false,
   playtest_request:false,playtest_status:true,playtest_cancel:false,
   skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
   work_progress: false, work_submit: false, assets_probe: true, assets_jobs: true, assets_start: false, assets_cancel: false, assets_manifest: true,
+  studio_viewport_capture: true,
 };
 const EDITOR_SOURCE = '--!strict\nreturn "café 🧩"\n';
 type Behavior = 'normal' | 'timeout' | 'lost-ack' | 'redirect' | 'invalid' | 'oversize' | 'wrong-session' | 'failed' | 'reconciliation' | 'forbidden' | 'poll-failure' | 'hang-enqueue' | 'server-error';
