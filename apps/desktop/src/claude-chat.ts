@@ -3,7 +3,7 @@
 // the same nodes as the Codex chat (tabs strip, Saved chats, #codex-messages transcript, composer and the composer
 // model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
 // the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
-import { composerModelGroupHeading, composerPickerCheck, crossProviderRows, firstModelRow, orderModelGroups, positionComposerPopover, renderMessageText } from './codex-chat.js';
+import { composerPickerCheck, crossProviderRows, fillModelOptions, firstModelRow, modelListEntry, modelListMove, positionComposerPopover, prependProviderLogo, renderMessageText } from './codex-chat.js';
 import type { ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit } from './codex-chat.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
@@ -13,6 +13,8 @@ export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: str
 export interface ClaudeChatStatus {
   installed: boolean; signedIn: boolean; cliVersion: string | null; models: string[]; efforts: string[];
   defaultModel: string | null; message: string | null;
+  /** Concrete model id per CLI alias, as resolved by the desktop engine (e.g. opus -> claude-opus-5-5). */
+  resolved: Record<string, string>;
 }
 export interface ClaudeChatConversation { conversationId: string; title: string; updatedAt: string; model: string; effort: string }
 export interface ClaudeChatUsage { inputTokens: number; outputTokens: number; costUsd: number | null }
@@ -65,12 +67,22 @@ const names = (value: unknown): string[] => Array.isArray(value)
 const ROLES: readonly ClaudeChatRole[] = ['user', 'assistant', 'tool', 'error'];
 const TOOL_STATES: readonly ClaudeToolStatus[] = ['started', 'finished', 'failed'];
 
+/** A concrete Claude model id: 'claude-' then lowercase family/version parts. */
+export const CLAUDE_MODEL_ID = /^claude-[a-z0-9][a-z0-9.-]{0,62}$/;
+/** Engine-resolved alias ids; only reported aliases with a concrete id are kept. Older engines send none. */
+function readResolved(value: unknown, models: readonly string[]): Record<string, string> {
+  const map = record(value), output: Record<string, string> = Object.create(null) as Record<string, string>;
+  if (!map) return output;
+  for (const alias of models) { const id = Object.hasOwn(map, alias) ? map[alias] : undefined; if (typeof id === 'string' && CLAUDE_MODEL_ID.test(id)) output[alias] = id; }
+  return output;
+}
 export function readClaudeChatStatus(value: unknown): ClaudeChatStatus {
   const state = record(value);
   if (!state || typeof state.installed !== 'boolean' || typeof state.signedIn !== 'boolean') throw Error('Claude status unavailable.');
   return {
     installed: state.installed, signedIn: state.installed && state.signedIn, cliVersion: nullableText(state.cliVersion, 100),
     models: names(state.models), efforts: names(state.efforts), defaultModel: nullableText(state.defaultModel, 128), message: nullableText(state.message, 2048),
+    resolved: readResolved(state.resolved, names(state.models)),
   };
 }
 export function readClaudeChatMessage(value: unknown): ClaudeChatMessage | null {
@@ -113,11 +125,12 @@ export function formatClaudeUsage(value: unknown): string | null {
   return parts.length ? 'Done · ' + parts.join(' · ') : null;
 }
 
-const FAMILIES = ['opus', 'sonnet', 'haiku'] as const;
+const FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'] as const;
 const title = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
 /**
  * Friendly Claude model names derived from CLI aliases or versioned ids, e.g. 'opus' -> Opus, 'claude-opus-4-1-20250805'
- * -> Opus 4.1, 'claude-3-5-haiku-20241022' -> Haiku 3.5, 'sonnet[1m]' -> Sonnet (1M context). Unknown ids stay verbatim.
+ * -> Opus 4.1, 'claude-fable-5-1' -> Fable 5.1, 'claude-3-5-haiku-20241022' -> Haiku 3.5, 'sonnet[1m]' -> Sonnet (1M context).
+ * Unknown ids stay verbatim. A bare alias has no version: see claudeModelLabel for the resolved name.
  */
 export function claudeModelName(id: string): { short: string; full: string } {
   const raw = id.trim().toLowerCase();
@@ -135,6 +148,14 @@ export function claudeModelName(id: string): { short: string; full: string } {
   else if (rest === 'default') short = 'Default';
   else return { short: id, full: id };
   return { short: short + context, full: 'Claude ' + short + context };
+}
+/**
+ * Display name for a model choice. An alias shows the version of the concrete model the engine resolved it to
+ * (opus + {opus: 'claude-opus-5-5'} -> Opus 5.5); without a resolution it shows the bare family, never a guessed version.
+ */
+export function claudeModelLabel(model: string, resolved: Readonly<Record<string, string>> = {}): { short: string; full: string; id: string } {
+  const id = Object.hasOwn(resolved, model) && CLAUDE_MODEL_ID.test(resolved[model]!) ? resolved[model]! : model;
+  return { ...claudeModelName(id), id };
 }
 const EFFORT_LABELS: Record<string, string> = { xhigh: 'Extra high', max: 'Max' };
 export function claudeEffortLabel(effort: string): string { return EFFORT_LABELS[effort] ?? title(effort); }
@@ -336,7 +357,7 @@ export class ClaudeChat {
     if (!this.bridge || this.state && !this.state.installed) return null;
     const ready = this.ready();
     return { provider: 'claude', label: 'Claude', available: ready, hint: !this.state ? (this.refreshing ? 'Checking Claude Code…' : 'Sign in to use') : ready ? 'Choose a model' : 'Sign in to use',
-      models: ready ? this.models().map(id => ({ id, label: claudeModelName(id).full, title: id })) : [] };
+      models: ready ? this.models().map(id => { const name = this.modelLabel(id); return { id, label: name.short, title: name.id === id ? id : id + ' → ' + name.id }; }) : [] };
   }
   /** Reads Claude Code status once so another provider's model list can show Claude models. */
   loadModels(): Promise<void> { return this.state || !this.bridge ? Promise.resolve() : this.refresh(); }
@@ -491,6 +512,7 @@ export class ClaudeChat {
     return !!this.bridge && !this.deleting.has(conversationId) && !(turn && (turn.turnId === null || turn.conversationId === conversationId));
   }
   private ready(): boolean { return !!this.bridge && !!this.state?.installed && !!this.state.signedIn && !this.statusError; }
+  private modelLabel(model: string): { short: string; full: string; id: string } { return claudeModelLabel(model, this.state?.resolved); }
   private models(): string[] { const state = this.state; return state ? state.models.length ? state.models : state.defaultModel ? [state.defaultModel] : [] : []; }
   private efforts(): string[] { return this.state?.efforts ?? []; }
   private canSend(): boolean { const tab = this.activeTab(); return this.ready() && !!tab && this.models().includes(tab.model) && this.efforts().includes(tab.effort); }
@@ -741,11 +763,16 @@ export class ClaudeChat {
     const inModels = !!models?.contains(target), inEfforts = !!efforts?.contains(target);
     if (target === search && key.key === 'Enter') { key.preventDefault(); if (models) firstModelRow(models)?.click(); return; }
     if (target === search && ['ArrowDown', 'ArrowUp'].includes(key.key)) {
-      const rows = Array.from(models?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
-      const row = key.key === 'ArrowDown' ? rows[0] : rows.at(-1); if (row) { key.preventDefault(); row.focus({ preventScroll: true }); }
+      const row = models ? modelListEntry(models, key.key) : null; if (row) { key.preventDefault(); row.focus({ preventScroll: true }); }
       return;
     }
-    if ((inModels || inEfforts) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key.key)) {
+    if (inModels && ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key.key)) {
+      // Up/Down/Home/End stay within a provider column; Left/Right move between the ChatGPT and Claude columns.
+      if (!['ArrowLeft', 'ArrowRight'].includes(key.key) || models!.dataset.layout === 'columns') key.preventDefault();
+      const row = modelListMove(models!, target, key.key); if (row) { row.focus({ preventScroll: true }); row.scrollIntoView?.({ block: 'nearest' }); }
+      return;
+    }
+    if (inEfforts && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key.key)) {
       const rows = Array.from((inModels ? models! : efforts!).querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
       const index = rows.indexOf(target as HTMLButtonElement), step = key.key === 'ArrowUp' ? -1 : 1;
       const next = key.key === 'Home' ? 0 : key.key === 'End' ? rows.length - 1 : (index + step + rows.length) % rows.length;
@@ -758,14 +785,14 @@ export class ClaudeChat {
   private renderPicker(): void {
     const tab = this.activeTab(), models = this.models(), efforts = this.efforts();
     const model = tab && models.includes(tab.model) ? tab.model : '', effort = tab && efforts.includes(tab.effort) ? tab.effort : '';
-    const name = model ? claudeModelName(model) : null, enabled = this.pickerEnabled();
+    const name = model ? this.modelLabel(model) : null, enabled = this.pickerEnabled();
     const set = (id: string, value: string) => { const node = this.el(id); if (node && node.textContent !== value) node.textContent = value; };
-    set('codex-model-label', name?.full ?? 'Choose model');
+    set('codex-model-label', name?.short ?? 'Choose model');
     set('codex-effort-label', effort); const effortLabel = this.el('codex-effort-label'); if (effortLabel) effortLabel.hidden = !effort;
     const trigger = this.el<HTMLButtonElement>('codex-model-trigger');
     if (trigger) {
       trigger.disabled = !enabled; trigger.setAttribute('aria-busy', 'false');
-      const label = name ? 'Claude model: ' + name.full + ' (' + model + ')' + (effort ? ', reasoning: ' + claudeEffortLabel(effort) : '') : 'Choose Claude model and reasoning';
+      const label = name ? 'Claude model: ' + name.short + ' (' + (name.id === model ? model : model + ', ' + name.id) + ')' + (effort ? ', reasoning: ' + claudeEffortLabel(effort) : '') : 'Choose Claude model and reasoning';
       trigger.setAttribute('aria-label', label); trigger.title = label;
     }
     set('codex-model-picker-status', !this.bridge ? CLAUDE_CHAT_NO_BRIDGE_TEXT : !this.ready() ? 'Sign in to Claude Code to choose a model.' :
@@ -777,25 +804,25 @@ export class ClaudeChat {
     const host = this.el('codex-model-options');
     if (host) {
       const focusModel = (this.doc.activeElement as HTMLElement | null)?.dataset?.pickerModel;
-      host.replaceChildren();
-      const rows = models.filter(item => query.every(word => (claudeModelName(item).full + ' ' + item).toLocaleLowerCase().includes(word)));
+      const rows = models.filter(item => { const label = this.modelLabel(item); return query.every(word => (label.full + ' ' + item + ' ' + label.id).toLocaleLowerCase().includes(word)); });
       let cross: ComposerModelGroup | null = null;
       try { cross = this.crossProvider?.group() ?? null; } catch { cross = null; }
-      const own: HTMLElement[] = cross && rows.length ? [composerModelGroupHeading(this.doc, 'Claude', 'claude')] : [];
+      const own: HTMLElement[] = [];
       for (const item of rows) {
         const row = this.make('button', undefined, 'picker-model-option'); row.type = 'button';
         row.dataset.pickerModel = item; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item === model));
         row.tabIndex = item === (rows.includes(model) ? model : rows[0]) ? 0 : -1;
-        row.title = item + (item === this.state?.defaultModel ? ' · Claude Code default' : '');
-        row.append(this.make('span', claudeModelName(item).full), composerPickerCheck(this.doc, item === model));
+        const label = this.modelLabel(item);
+        row.title = (label.id === item ? item : item + ' → ' + label.id) + (item === this.state?.defaultModel ? ' · Claude Code default' : '');
+        row.append(this.make('span', label.short), composerPickerCheck(this.doc, item === model));
         row.addEventListener('click', () => { if (this.active && this.pickerOpen()) this.chooseModel(item); });
         own.push(row);
       }
       // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
       const other = cross ? crossProviderRows(this.doc, cross, query, id => { if (this.active && this.pickerOpen()) { this.closePicker(); this.crossProvider?.choose(id); } }) : [];
-      for (const node of orderModelGroups('claude' satisfies ComposerProvider, own, cross, other)) host.append(node);
+      fillModelOptions(this.doc, host, { provider: 'claude', label: 'Claude', rows: own, empty: models.length ? 'No matching models' : 'No models reported' }, cross, other, query);
       const empty = this.el('codex-model-empty');
-      if (empty) { empty.hidden = rows.length + other.length > 0; empty.textContent = models.length ? 'No Claude models match your search.' : 'Claude Code reported no models.'; }
+      if (empty) { empty.hidden = !!cross || rows.length > 0; empty.textContent = models.length ? 'No Claude models match your search.' : 'Claude Code reported no models.'; }
       if (focusModel) Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(row => row.dataset.pickerModel === focusModel)?.focus({ preventScroll: true });
     }
     const effortHost = this.el('codex-picker-efforts');
@@ -814,7 +841,7 @@ export class ClaudeChat {
     if (reasoning) { reasoning.textContent = 'Reasoning' + (effort ? ' · ' + effort : ''); reasoning.disabled = !efforts.length; reasoning.setAttribute('aria-expanded', String(this.reasoningOpen)); }
     const hint = this.el('codex-picker-effort-hint'); if (hint) hint.textContent = efforts.length ? 'Reasoning levels reported by Claude Code.' : 'Claude Code reported no reasoning levels.';
     set('codex-picker-effort-value', effort ? claudeEffortLabel(effort) : 'Reasoning');
-    set('codex-picker-current-model-label', name?.full ?? 'Choose model');
+    set('codex-picker-current-model-label', name?.short ?? 'Choose model');
     const slider = this.el<HTMLInputElement>('codex-picker-effort-slider');
     if (slider) {
       const index = efforts.indexOf(effort), ratio = efforts.length > 1 && index >= 0 ? Math.min(1, index / (efforts.length - 1)) : 0;
@@ -857,6 +884,7 @@ export class ClaudeChat {
     for (const tab of this.tabs) {
       const wrap = this.make('span', undefined, 'chat-tab'); wrap.setAttribute('role', 'presentation');
       const button = this.make('button', this.tabTitle(tab)); button.type = 'button'; button.setAttribute('role', 'tab'); button.dataset.chatKey = tab.key;
+      prependProviderLogo(this.doc, button, 'claude'); // Claude tabs lead with the Claude mark; the text still names the chat.
       button.title = tab.conversationId ? this.tabTitle(tab) + ' · Claude' : 'New Claude chat';
       button.setAttribute('aria-selected', String(tab.key === this.activeKey)); button.setAttribute('aria-controls', 'codex-messages');
       button.tabIndex = tab.key === this.activeKey ? 0 : -1; button.disabled = sending && tab.key !== this.activeKey;
@@ -877,7 +905,7 @@ export class ClaudeChat {
     for (const row of sortConversations(this.conversations)) {
       const button = this.make('button', row.title || 'Untitled chat'); button.type = 'button';
       button.dataset.conversationId = row.conversationId; button.setAttribute('aria-current', String(row.conversationId === current));
-      const name = row.model ? claudeModelName(row.model).full : '';
+      const name = row.model ? this.modelLabel(row.model).full : '';
       button.title = [name, row.effort, row.updatedAt].filter(Boolean).join(' · ');
       button.disabled = sending || !this.bridge;
       button.addEventListener('click', () => { if (!this.active) return; menu.open = false; void this.open(row.conversationId); });

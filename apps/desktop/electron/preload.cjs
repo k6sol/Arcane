@@ -216,13 +216,24 @@ const claudeChatMessage = value => {
   }
   return out;
 };
+// Alias -> concrete model id (display only). Older engines omit it; otherwise a plain object keyed by reported aliases.
+const claudeChatModelId = value => typeof value === 'string' && /^claude-[a-z0-9][a-z0-9.-]{0,62}$/.test(value);
+const claudeChatResolved = (value, models) => {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) claudeChatUnavailable();
+  const keys = Object.keys(value), out = {};
+  if (keys.length > 32 || keys.some(key => !models.includes(key) || !claudeChatModelId(value[key]))) claudeChatUnavailable();
+  for (const key of keys) out[key] = value[key];
+  return out;
+};
 const claudeChatReply = (action, value) => {
   if (!value || typeof value !== 'object') claudeChatUnavailable();
   if (action === 'status') {
     if (typeof value.installed !== 'boolean' || typeof value.signedIn !== 'boolean' || !(value.cliVersion === null || claudeChatText(value.cliVersion, 64)) ||
         !claudeChatList(value.models, 32) || !value.models.every(claudeChatChoice) || !claudeChatList(value.efforts, 16) || !value.efforts.every(claudeChatChoice) ||
         !(value.defaultModel === null || value.models.includes(value.defaultModel)) || !(value.message === null || claudeChatText(value.message, 512))) claudeChatUnavailable();
-    return { installed: value.installed, signedIn: value.signedIn, cliVersion: value.cliVersion, models: [...value.models], efforts: [...value.efforts], defaultModel: value.defaultModel, message: value.message };
+    return { installed: value.installed, signedIn: value.signedIn, cliVersion: value.cliVersion, models: [...value.models], efforts: [...value.efforts], defaultModel: value.defaultModel,
+      resolved: claudeChatResolved(value.resolved, value.models), message: value.message };
   }
   if (action === 'list') {
     if (!claudeChatList(value.conversations, 200)) claudeChatUnavailable();

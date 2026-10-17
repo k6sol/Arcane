@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import type { ChatState, CodexChat } from './codex-chat.js';
+import { prependProviderLogo } from './codex-chat.js';
 import type { CodexSavedThread } from '../../daemon/src/codex-service.js';
 import { validateHistoryBinding, type HistoryBinding } from './codex-history.js';
 
@@ -383,7 +384,9 @@ export class ChatTabs {
       for (const [index,row] of this.rows.entries()) {
         const wrap=this.doc.createElement('span');wrap.setAttribute('role','presentation');wrap.className='chat-tab';
         const button=this.doc.createElement('button');button.type='button';button.setAttribute('role','tab');button.dataset.chatKey=row.key;
-        button.textContent=this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);button.title=this.safe(row.kind==='draft'?'Unsent local draft':row.threadId!);
+        button.textContent=this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);
+        prependProviderLogo(this.doc,button,'codex'); // Codex tabs belong to ChatGPT.
+        button.title=this.safe(row.kind==='draft'?'Unsent local draft':row.threadId!);
         button.setAttribute('aria-selected',String(row.key===this.activeKey));button.setAttribute('aria-controls','codex-messages');button.tabIndex=row.key===this.activeKey?0:-1;
         button.disabled=blocked&&row.key!==this.activeKey;button.addEventListener('click',()=>void this.callbacks.select(row.key));
         const close=this.doc.createElement('button');close.type='button';close.textContent='×';close.setAttribute('aria-label','Close '+button.textContent);close.disabled=blocked&&row.key===this.activeKey;

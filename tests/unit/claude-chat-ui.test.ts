@@ -10,7 +10,7 @@ import type { ChatState } from '../../apps/desktop/src/codex-chat.js';
 import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model.js';
 import {
   ClaudeChat, CLAUDE_CHAT_CHOICE_KEY, CLAUDE_CHAT_EMPTY_TEXT, CLAUDE_CHAT_NO_BRIDGE_TEXT, CLAUDE_CHAT_TABS_KEY,
-  claudeEffortLabel, claudeModelName, linkChatProviders, readClaudeChatBridge,
+  claudeEffortLabel, claudeModelLabel, claudeModelName, linkChatProviders, readClaudeChatStatus, readClaudeChatBridge,
 } from '../../apps/desktop/src/claude-chat.js';
 
 // In-memory DOM and preload-bridge doubles only: no Electron, CLI, network, Studio or inference.
@@ -105,7 +105,8 @@ function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | 
   return { chat, doc, root, el, input, messages, submit: el('codex-submit'), form: el('codex-compose'), notice: el('claude-chat-notice'), trigger: el('codex-model-trigger'), type, bubbles, tabs, saved, remove };
 }
 function memory() { const data = new Map<string, string>(); return { data, getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v); } }; }
-const signedIn = { installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'claude-haiku-4-5-20251001'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null };
+const signedIn = { installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'claude-haiku-4-5-20251001'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null,
+  resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' } };
 function fakeBridge(overrides: Record<string, unknown> = {}) {
   const calls: unknown[][] = []; let listener: ((event: unknown) => void) | null = null;
   const histories = new Map<string, unknown>();
@@ -141,6 +142,17 @@ test('friendly model names show the family and any version; efforts get readable
   assert.equal(claudeModelName('sonnet[1m]').full, 'Claude Sonnet (1M context)');
   assert.equal(claudeModelName('opusplan').full, 'Claude Opus Plan');
   assert.deepEqual(claudeModelName('mystery-model'), { short: 'mystery-model', full: 'mystery-model' });
+  assert.deepEqual(claudeModelName('claude-fable-5-1'), { short: 'Fable 5.1', full: 'Claude Fable 5.1' });
+  assert.equal(claudeModelName('claude-opus-5-5').short, 'Opus 5.5'); assert.equal(claudeModelName('fable').short, 'Fable', 'a bare alias claims no version');
+  // Aliases show the version of the concrete model the engine resolved; unresolved aliases never guess one.
+  const resolved = { fable: 'claude-fable-5-1', opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' };
+  assert.deepEqual(['fable', 'opus', 'sonnet', 'haiku'].map(alias => claudeModelLabel(alias, resolved).short), ['Fable 5.1', 'Opus 5.5', 'Sonnet 5.5', 'Haiku 5.5']);
+  assert.deepEqual(claudeModelLabel('opus', resolved), { short: 'Opus 5.5', full: 'Claude Opus 5.5', id: 'claude-opus-5-5' });
+  assert.equal(claudeModelLabel('opus').short, 'Opus'); assert.equal(claudeModelLabel('opus', { opus: 'gpt-5' }).short, 'Opus', 'only Claude model ids resolve');
+  assert.equal(claudeModelLabel('claude-haiku-4-5-20251001', resolved).short, 'Haiku 4.5', 'explicit versioned ids name themselves');
+  const status = readClaudeChatStatus({ ...signedIn, resolved: { opus: 'claude-opus-5-5', mystery: 'claude-x-1', sonnet: 'Sonnet!' } });
+  assert.deepEqual({ ...status.resolved }, { opus: 'claude-opus-5-5' }, 'only reported aliases with concrete ids are kept');
+  assert.deepEqual({ ...readClaudeChatStatus({ ...signedIn, resolved: undefined }).resolved }, {}, 'older engines resolve nothing');
   assert.deepEqual(['low', 'medium', 'high', 'xhigh', 'max'].map(claudeEffortLabel), ['Low', 'Medium', 'High', 'Extra high', 'Max']);
 });
 
@@ -183,16 +195,16 @@ test('the shared picker shows provider type, friendly model and reasoning, and c
   storage.setItem(CLAUDE_CHAT_CHOICE_KEY, JSON.stringify({ model: 'opus', effort: 'max' }));
   const f = mount(b.bridge, storage); t.after(() => f.chat.stop());
   await f.chat.refresh();
-  assert.equal(f.el('codex-model-label').textContent, 'Claude Opus', 'the full model name carries the provider'); assert.equal(f.el('codex-effort-label').textContent, 'max');
+  assert.equal(f.el('codex-model-label').textContent, 'Opus 5.5', 'the composer shows the resolved model and version'); assert.equal(f.el('codex-effort-label').textContent, 'max');
   assert.equal(f.el('codex-effort-label').hidden, false);
-  assert.equal(f.trigger.getAttribute('aria-label'), 'Claude model: Claude Opus (opus), reasoning: Max');
+  assert.equal(f.trigger.getAttribute('aria-label'), 'Claude model: Opus 5.5 (opus, claude-opus-5-5), reasoning: Max');
   assert.equal(f.trigger.disabled, false); assert.equal(f.input.disabled, false);
   assert.equal(f.submit.disabled, true, 'empty draft cannot be sent');
   f.type('  '); assert.equal(f.submit.disabled, true); f.type('Build a lobby'); assert.equal(f.submit.disabled, false);
   click(f.trigger);
   assert.equal(f.el('codex-model-popover').hidden, false); assert.equal(f.trigger.getAttribute('aria-expanded'), 'true');
   assert.equal(f.el('codex-picker-effort-value').textContent, 'Max');
-  assert.equal(f.el('codex-picker-current-model-label').textContent, 'Claude Opus');
+  assert.equal(f.el('codex-picker-current-model-label').textContent, 'Opus 5.5');
   const slider = f.el('codex-picker-effort-slider');
   assert.equal(slider.max, '4'); assert.equal(slider.value, '4'); assert.equal(slider.dataset.effortTone, 'ultra');
   slider.value = '1'; slider.dispatchEvent(new Event('input'));
@@ -202,13 +214,14 @@ test('the shared picker shows provider type, friendly model and reasoning, and c
   click(f.el('codex-picker-current-model'));
   assert.equal(f.el('codex-picker-model-list').hidden, false); assert.equal(f.el('codex-picker-summary').hidden, true);
   const options = () => f.el('codex-model-options').querySelectorAll('.picker-model-option');
-  assert.deepEqual(options().map(row => row.textContent), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
+  assert.deepEqual(options().map(row => row.textContent), ['Opus 5.5', 'Sonnet 5.5', 'Haiku 4.5']);
   assert.deepEqual(options().map(row => row.getAttribute('aria-selected')), ['true', 'false', 'false']);
-  assert.equal(options()[1]!.title, 'sonnet · Claude Code default');
+  assert.equal(options()[1]!.title, 'sonnet → claude-sonnet-5-5 · Claude Code default');
+  assert.equal(f.el('codex-model-options').dataset.layout, undefined, 'without the other provider the list stays one plain list');
   const search = f.el('codex-model-search'); search.value = 'hai'; search.dispatchEvent(new Event('input'));
-  assert.deepEqual(options().map(row => row.textContent), ['Claude Haiku 4.5']);
+  assert.deepEqual(options().map(row => row.textContent), ['Haiku 4.5']);
   click(options()[0]!);
-  assert.equal(f.el('codex-model-label').textContent, 'Claude Haiku 4.5'); assert.equal(f.el('codex-picker-summary').hidden, false);
+  assert.equal(f.el('codex-model-label').textContent, 'Haiku 4.5'); assert.equal(f.el('codex-picker-summary').hidden, false);
   assert.deepEqual(JSON.parse(storage.data.get(CLAUDE_CHAT_CHOICE_KEY)!), { model: 'claude-haiku-4-5-20251001', effort: 'high' });
   key(f.el('codex-picker-current-model'), 'Escape'); // keydown bubbles from inside the popover
   f.el('codex-model-popover').dispatchEvent(Object.assign(new Event('keydown'), { key: 'Escape' }));
@@ -218,7 +231,7 @@ test('the shared picker shows provider type, friendly model and reasoning, and c
   const denied = { getItem: () => { throw Error('denied'); }, setItem: () => { throw Error('denied'); } };
   const g = mount(fakeBridge().bridge, denied); t.after(() => g.chat.stop());
   await g.chat.refresh();
-  assert.equal(g.el('codex-model-label').textContent, 'Claude Sonnet', 'falls back to the reported default'); assert.equal(g.el('codex-effort-label').textContent, 'high');
+  assert.equal(g.el('codex-model-label').textContent, 'Sonnet 5.5', 'falls back to the reported default'); assert.equal(g.el('codex-effort-label').textContent, 'high');
   click(g.trigger); assert.doesNotThrow(() => click(g.el('codex-picker-reset')));
 });
 
@@ -309,7 +322,7 @@ test('Saved chats list newest first; opening adds a tab, loads history and ignor
   const storage = memory();
   const f = mount(b.bridge, storage); t.after(() => f.chat.stop()); await f.chat.refresh();
   assert.deepEqual(f.saved().map(item => item.textContent), ['Newer chat', 'Old chat']);
-  assert.equal(f.saved()[0]!.title, 'Claude Opus · max · 2026-05-01T00:00:00Z');
+  assert.equal(f.saved()[0]!.title, 'Claude Opus 5.5 · max · 2026-05-01T00:00:00Z');
   click(f.saved()[1]!); await tick();
   assert.equal(f.messages.querySelector('.empty')!.textContent, 'Loading conversation…');
   assert.deepEqual(f.tabs().map(tab => tab.textContent), ['Old chat'], 'the empty draft tab is reused');
@@ -322,7 +335,7 @@ test('Saved chats list newest first; opening adds a tab, loads history and ignor
   const code = rich.querySelector('code')!; assert.equal(code.textContent, 'print(1)'); assert.equal(code.getAttribute('data-language'), 'lua');
   assert.equal(rich.className, 'message-text claude-message-body');
   assert.deepEqual(f.tabs().map(tab => [tab.textContent, tab.getAttribute('aria-selected')]), [['Old chat', 'false'], ['Newer chat', 'true']]);
-  assert.equal(f.el('codex-model-label').textContent, 'Claude Opus'); assert.equal(f.el('codex-effort-label').textContent, 'max', 'conversation choice is applied');
+  assert.equal(f.el('codex-model-label').textContent, 'Opus 5.5'); assert.equal(f.el('codex-effort-label').textContent, 'max', 'conversation choice is applied');
   assert.deepEqual(JSON.parse(storage.data.get(CLAUDE_CHAT_TABS_KEY)!), { version: 1, open: ['old', 'new'], active: 'new' });
   // Tabs switch, close and keep per-tab drafts.
   f.type('half-written');
@@ -536,7 +549,10 @@ function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unk
     requestProvider: (next: 'codex' | 'claude') => { requests.push(next); return true; } };
   const setSurface = (next: 'codex' | 'claude') => { surface = next; for (const fn of [...listeners]) fn(); };
   const link = linkChatProviders({ codex, claude: f.chat, provider });
-  const layout = () => f.el('codex-model-options').children.map(node => node.className === 'model-group-heading' ? '# ' + node.textContent : node.textContent + (node.disabled ? ' [disabled]' : ''));
+  const item = (node: Element): string => node.className === 'model-group-heading' ? '# ' + node.textContent : node.className.includes('model-column-empty') ? '(' + node.textContent + ')' : node.textContent + (node.disabled ? ' [disabled]' : '');
+  // Columns flatten left to right: '# Provider' heading, then that column's rows.
+  const layout = () => f.el('codex-model-options').children.flatMap(node => node.className === 'model-column' ? node.children.map(item) : [item(node)]);
+  const columns = () => f.el('codex-model-options').children.filter(node => node.className === 'model-column').map(node => node.dataset.pickerGroup);
   const row = (id: string) => f.el('codex-model-options').querySelectorAll('.picker-model-option').find(node => node.dataset.pickerModel === id)!;
   const press = (target: Element, value: string) => {
     const event = new Event('keydown', { cancelable: true });
@@ -545,22 +561,36 @@ function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unk
   };
   const setCodexLimit = (value: { resetsAt: number | null } | null) => { codexLimit = value; for (const fn of [...codexListeners]) fn(); };
   const usage = { root: f.el('usage-limit-notice'), message: f.el('usage-limit-message'), action: f.el('usage-limit-action') };
-  return { ...f, calls, requests, setSurface, link, layout, row, press, codexSource: () => source!, codexYielded: () => yielded, setCodexLimit, usage };
+  return { ...f, calls, requests, setSurface, link, layout, columns, row, press, codexSource: () => source!, codexYielded: () => yielded, setCodexLimit, usage };
 }
 
-test('Claude mode: the model list shows ChatGPT and Claude sections; search filters both; same-provider choice is unchanged', async t => {
+test('Claude mode: ChatGPT and Claude columns side by side with logo headings; search filters both; same-provider choice is unchanged', async t => {
   const f = linked('claude'); t.after(() => f.chat.stop());
   await tick(); await tick();
   assert.equal(f.chat.isActive(), true); assert.equal(f.codexYielded(), true);
   click(f.trigger); click(f.el('codex-picker-current-model'));
-  assert.deepEqual(f.layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
+  assert.equal(f.el('codex-model-options').dataset.layout, 'columns');
+  assert.deepEqual(f.columns(), ['codex', 'claude'], 'ChatGPT is the left column and Claude the right, whichever provider is active');
+  assert.deepEqual(f.layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Opus 5.5', 'Sonnet 5.5', 'Haiku 4.5']);
+  for (const column of f.el('codex-model-options').children) {
+    const heading = column.children[0]!, logo = heading.children[0]!;
+    assert.equal(column.getAttribute('role'), 'group'); assert.equal(column.getAttribute('aria-label'), heading.textContent + ' models');
+    assert.equal(logo.tagName, 'SVG'); assert.equal(logo.getAttribute('data-provider'), column.dataset.pickerGroup);
+    assert.equal(logo.getAttribute('aria-hidden'), 'true', 'the mark is decorative beside the provider name');
+    assert.match(logo.children[0]!.getAttribute('d')!, /^M[0-9.]+ [0-9.]+/);
+  }
   assert.equal(f.row('gpt-6.1-sol').dataset.pickerProvider, 'codex'); assert.equal(f.row('opus').dataset.pickerProvider, undefined);
+  assert.equal(f.row('opus').getAttribute('aria-selected'), 'false'); assert.equal(f.row('sonnet').getAttribute('aria-selected'), 'true');
+  assert.equal(f.row('sonnet').querySelector('svg')!.getAttribute('data-selected'), 'true', 'the current choice carries the check mark');
   const search = f.el('codex-model-search'); search.value = 'mini'; search.dispatchEvent(new Event('input'));
-  assert.deepEqual(f.layout(), ['# ChatGPT', 'GPT-6.1-Mini'], 'search filters both sections and hides empty headings');
+  assert.deepEqual(f.layout(), ['# ChatGPT', 'GPT-6.1-Mini', '# Claude', '(No matching models)'], 'search filters both columns; both keep their place');
+  search.value = '5.5'; search.dispatchEvent(new Event('input'));
+  assert.deepEqual(f.layout(), ['# ChatGPT', '(No matching models)', '# Claude', 'Opus 5.5', 'Sonnet 5.5'], 'versions are searchable');
   search.value = ''; search.dispatchEvent(new Event('input'));
-  click(f.row('opus')); assert.equal(f.el('codex-model-label').textContent, 'Claude Opus'); assert.deepEqual(f.requests, []);
+  click(f.row('opus')); assert.equal(f.el('codex-model-label').textContent, 'Opus 5.5'); assert.deepEqual(f.requests, []);
   f.chat.setCrossProviderModels(null); click(f.el('codex-picker-current-model'));
-  assert.deepEqual(f.layout(), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5'], 'without a link the list is unchanged');
+  assert.deepEqual(f.layout(), ['Opus 5.5', 'Sonnet 5.5', 'Haiku 4.5'], 'without a link the list is one plain list');
+  assert.equal(f.el('codex-model-options').dataset.layout, undefined);
 });
 
 test('Claude mode: choosing a ChatGPT model requests Codex explicitly and carries the draft, model and effort', async t => {
@@ -587,44 +617,57 @@ test('Codex mode: choosing a Claude model switches surface, selects it with a su
   assert.deepEqual([source.group()!.available, source.group()!.hint], [false, 'Sign in to use'], 'Claude status has not been read yet');
   source.opened!(); await tick(); await tick();
   assert.ok(f.calls.some(call => call[0] === 'changed'), 'an open Codex list redraws once Claude models arrive');
-  assert.deepEqual(source.group()!.models.map(row => row.label), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
+  assert.deepEqual(source.group()!.models.map(row => [row.label, row.title]), [['Opus 5.5', 'opus → claude-opus-5-5'], ['Sonnet 5.5', 'sonnet → claude-sonnet-5-5'], ['Haiku 4.5', 'claude-haiku-4-5-20251001']]);
   f.input.value = 'ok, make the spawn point higher and';
   source.choose('opus');
   assert.deepEqual(f.requests, ['claude']); assert.equal(f.chat.isActive(), false);
   f.setSurface('claude'); await tick();
   assert.equal(f.chat.isActive(), true);
   assert.equal(f.input.value, 'ok, make the spawn point higher and');
-  assert.equal(f.el('codex-model-label').textContent, 'Claude Opus');
+  assert.equal(f.el('codex-model-label').textContent, 'Opus 5.5');
   assert.equal(f.el('codex-effort-label').textContent, 'low', 'the Codex effort is kept because Claude reports it');
   assert.deepEqual(f.calls.filter(call => call[0] === 'take'), [['take', 'ok, make the spawn point higher and']]);
   const g = linked('codex'); t.after(() => g.chat.stop());
   await g.chat.loadModels(); g.chat.activate();
   g.chat.receiveHandoff({ draft: '', model: 'sonnet', effort: 'minimal' });
-  assert.equal(g.el('codex-model-label').textContent, 'Claude Sonnet'); assert.equal(g.el('codex-effort-label').textContent, 'high', 'an unsupported effort uses Claude’s default');
+  assert.equal(g.el('codex-model-label').textContent, 'Sonnet 5.5'); assert.equal(g.el('codex-effort-label').textContent, 'high', 'an unsupported effort uses Claude’s default');
 });
 
-test('a signed-out provider section is one disabled row and keyboard navigation crosses both sections', async t => {
+test('a signed-out provider column is one disabled row; arrows stay in a column and Left/Right cross columns', async t => {
   const f = linked('claude', chatgpt(false)); t.after(() => f.chat.stop());
   await tick(); await tick();
   click(f.trigger); click(f.el('codex-picker-current-model'));
-  assert.deepEqual(f.layout(), ['# ChatGPT', 'ChatGPTSign in to use [disabled]', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
-  assert.equal(f.press(f.el('codex-model-search'), 'ArrowDown'), 'Claude Opus', 'disabled rows are skipped');
+  assert.deepEqual(f.layout(), ['# ChatGPT', 'Sign in to use [disabled]', '# Claude', 'Opus 5.5', 'Sonnet 5.5', 'Haiku 4.5']);
+  assert.equal(f.press(f.el('codex-model-search'), 'ArrowDown'), 'Opus 5.5', 'search enters the active provider column');
+  assert.equal(f.press(f.doc.activeElement!, 'ArrowLeft'), 'Opus 5.5', 'a signed-out column has no row to move to');
   const g = linked('claude'); t.after(() => g.chat.stop());
   await tick(); await tick();
   click(g.trigger); click(g.el('codex-picker-current-model'));
-  assert.equal(g.press(g.el('codex-model-search'), 'ArrowDown'), 'GPT-6.1-Sol');
-  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'GPT-6.1-Mini');
-  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'Claude Opus', 'ArrowDown moves from the ChatGPT section into Claude');
-  assert.equal(g.press(g.doc.activeElement!, 'End'), 'Claude Haiku 4.5');
-  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'GPT-6.1-Sol', 'navigation wraps across sections');
-  assert.equal(g.press(g.doc.activeElement!, 'ArrowUp'), 'Claude Haiku 4.5');
+  assert.equal(g.press(g.el('codex-model-search'), 'ArrowDown'), 'Opus 5.5', 'search enters the active (Claude) column first');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'Sonnet 5.5');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowLeft'), 'GPT-6.1-Mini', 'Left moves to the ChatGPT column at the same position');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'GPT-6.1-Sol', 'Down wraps within the column');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowLeft'), 'GPT-6.1-Sol', 'nothing is left of ChatGPT');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowRight'), 'Opus 5.5', 'Right moves back to Claude');
+  assert.equal(g.press(g.doc.activeElement!, 'End'), 'Haiku 4.5');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowLeft'), 'GPT-6.1-Mini', 'a shorter column clamps to its last row');
+  assert.equal(g.press(g.doc.activeElement!, 'Home'), 'GPT-6.1-Sol');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowUp'), 'GPT-6.1-Mini', 'Up wraps within the column');
   g.press(g.el('codex-model-search'), 'Enter');
   assert.deepEqual(g.requests, [], 'search Enter prefers the active provider’s first match');
-  assert.equal(g.el('codex-model-label').textContent, 'Claude Opus');
+  assert.equal(g.el('codex-model-label').textContent, 'Opus 5.5');
   click(g.el('codex-picker-current-model'));
   const search = g.el('codex-model-search'); search.value = 'sol'; search.dispatchEvent(new Event('input'));
   g.press(search, 'Enter');
   assert.deepEqual(g.requests, ['codex'], 'Enter on a search that only matches ChatGPT switches provider explicitly');
+});
+
+test('Claude chat tabs lead with the Claude mark; the tab text still names the chat', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const tab = f.tabs()[0]!, logo = tab.children[0]!;
+  assert.equal(tab.textContent, 'New chat'); assert.equal(tab.dataset.provider, 'claude');
+  assert.equal(logo.tagName, 'SVG'); assert.equal(logo.getAttribute('data-provider'), 'claude'); assert.equal(logo.getAttribute('aria-hidden'), 'true');
+  assert.equal(innerHtmlWrites, 0);
 });
 
 // ---- Usage-limit notice: an exhausted provider offers the other one in one click; the draft moves, nothing is resent. ----
@@ -775,7 +818,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
     const setup = startProviderSetup(document, { chat, nativeBridge: native });
     const conversations = [{ conversationId: 'conv-lobby', title: 'Lobby plan', updatedAt: '2026-10-01T00:00:00Z', model: 'opus', effort: 'high' }];
     const bridge = Object.freeze({ version: 1,
-      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null }),
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }, message: null }),
       list: async () => ({ conversations }),
       history: async id => ({ conversationId: id, messages: [
         { id: '1', role: 'user', text: 'Plan a lobby for my obby.', at: '' },
@@ -833,20 +876,21 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   assert.equal(await page.locator('#codex-composer').inputValue(), '', 'the Codex draft is not shown in Claude');
   assert.equal(await page.locator('#workspace-chat-tabs').isVisible(), false);
   assert.deepEqual(await page.locator('#claude-chat-tabs [role=tab]').allInnerTexts(), ['Lobby plan']);
-  assert.match(await trigger(), /^Claude Opus\s*high$/);
+  assert.match(await trigger(), /^Opus 5\.5\s*high$/);
+  assert.equal(await page.locator('#claude-chat-tabs [role=tab] svg.provider-logo[data-provider=claude]').count(), 1, 'Claude tabs lead with the Claude mark');
   assert.equal(await page.locator('#codex-messages .codex-message.codex pre code').innerText(), 'local lobby = workspace.Lobby');
   assert.equal(await page.locator('#codex-messages .codex-message.codex p').innerText(), 'Here is the lobby plan.');
   assert.deepEqual(await layout(), codexLayout, 'composer and New chat keep the exact Codex geometry');
   await page.screenshot({ path: join(shots, 'claude-mode.png') });
   await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-summary').waitFor();
-  assert.equal(await page.locator('#codex-picker-current-model-label').innerText(), 'Claude Opus');
+  assert.equal(await page.locator('#codex-picker-current-model-label').innerText(), 'Opus 5.5');
   assert.equal(await page.locator('#codex-picker-effort-value').innerText(), 'High');
   await page.screenshot({ path: join(shots, 'claude-picker.png') });
   await page.locator('#codex-picker-current-model').click(); await page.locator('#codex-model-options').waitFor();
-  assert.deepEqual(await page.locator('#codex-model-options .picker-model-option').allInnerTexts(), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku']);
+  assert.deepEqual(await page.locator('#codex-model-options .picker-model-option').allInnerTexts(), ['Opus 5.5', 'Sonnet 5.5', 'Haiku 5.5']);
   await page.screenshot({ path: join(shots, 'claude-models.png') });
   await page.locator('#codex-model-options [data-picker-model="sonnet"]').click();
-  assert.match(await trigger(), /^Claude Sonnet\s*high$/); await page.keyboard.press('Escape');
+  assert.match(await trigger(), /^Sonnet 5\.5\s*high$/); await page.keyboard.press('Escape');
   await page.locator('#codex-composer').fill('Add a spawn pad'); await page.locator('#codex-composer').press('Enter');
   await page.waitForFunction(() => (window as any).fx.calls.length === 1);
   assert.deepEqual(await page.evaluate(() => (window as any).fx.calls[0]), { conversationId: 'conv-lobby', text: 'Add a spawn pad', model: 'sonnet', effort: 'high' });
@@ -874,7 +918,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
       ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.177', busy: false, message: null })])) });
     const setup = startProviderSetup(document, { chat, nativeBridge: native });
     const bridge = Object.freeze({ version: 1,
-      status: async () => { f.status++; return { installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null }; },
+      status: async () => { f.status++; return { installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }, message: null }; },
       list: async () => ({ conversations: [] }), history: async id => ({ conversationId: id, messages: [] }),
       send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-1' }; },
       stop: async () => true, remove: async () => true, onEvent: () => () => {} });
@@ -909,27 +953,55 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
   const draft = 'ok, make the spawn point higher and';
   await page.locator('#codex-composer').fill(draft);
   const trigger = () => page.locator('#codex-model-trigger').innerText();
-  const layout = () => page.locator('#codex-model-options').evaluate(host => Array.from(host.children).map(node =>
+  const layout = () => page.locator('#codex-model-options').evaluate(host => Array.from(host.querySelectorAll('.model-group-heading, .picker-model-option, .model-column-empty')).map(node =>
     node.classList.contains('model-group-heading') ? '# ' + node.textContent : (node as HTMLButtonElement).innerText.replace(/\s+/g, ' ').trim() + ((node as HTMLButtonElement).disabled ? ' [disabled]' : '')));
+  const boxes = () => page.evaluate(() => Object.fromEntries(Array.from(document.querySelectorAll<HTMLElement>('#codex-model-options .model-column')).map(column => {
+    const box = column.getBoundingClientRect(), logo = column.querySelector('.model-group-heading svg.provider-logo')!.getBoundingClientRect();
+    return [column.dataset.pickerGroup, { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), logo: Math.round(logo.width) }];
+  })));
   assert.match(await trigger(), /^GPT-6\.1-Sol\s*low$/);
   // Codex mode: open the list; Claude models load lazily under their own heading.
   await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-current-model').click();
   await page.waitForFunction(() => !!document.querySelector('#codex-model-options [data-picker-model="opus"]'));
-  assert.deepEqual(await layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku']);
-  // Keyboard: from search, ArrowDown walks from the ChatGPT section into Claude.
+  assert.deepEqual(await layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Opus 5.5', 'Sonnet 5.5', 'Haiku 5.5']);
+  // Two columns side by side: ChatGPT on the left, Claude on the right, each headed by its logo mark.
+  let geometry = await boxes();
+  assert.ok(geometry.codex!.x < geometry.claude!.x && geometry.codex!.y === geometry.claude!.y, JSON.stringify(geometry));
+  assert.ok(geometry.codex!.logo >= 16 && geometry.claude!.logo >= 16, 'logo marks render at heading size');
+  assert.equal(await page.locator('#codex-model-popover').getAttribute('data-columns'), 'split');
+  // Keyboard: arrows stay within a column; Left/Right cross between the ChatGPT and Claude columns.
   await page.locator('#codex-model-search').focus(); await page.keyboard.press('ArrowDown');
   const focused = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.pickerModel ?? null);
   assert.equal(await focused(), 'gpt-6.1-sol');
-  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); assert.equal(await focused(), 'opus');
-  await page.keyboard.press('ArrowUp'); assert.equal(await focused(), 'gpt-6.1-mini');
-  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown'); assert.equal(await focused(), 'gpt-6.1-mini');
+  await page.keyboard.press('ArrowDown'); assert.equal(await focused(), 'gpt-6.1-sol', 'Down wraps within the ChatGPT column');
+  await page.keyboard.press('ArrowRight'); assert.equal(await focused(), 'opus');
+  await page.keyboard.press('ArrowDown'); assert.equal(await focused(), 'sonnet');
+  await page.keyboard.press('ArrowLeft'); assert.equal(await focused(), 'gpt-6.1-mini');
+  assert.equal(await page.locator('#codex-model-popover').isVisible(), true, 'Left/Right never choose a model');
+  await page.keyboard.press('ArrowRight');
+  for (const scheme of ['dark', 'light'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.screenshot({ path: join(shots, 'columns-' + scheme + '.png') });
+    const box = (await page.locator('#codex-model-popover').boundingBox())!;
+    await page.screenshot({ path: join(shots, 'columns-' + scheme + '-popover.png'), clip: { x: Math.max(0, box.x - 16), y: Math.max(0, box.y - 16), width: box.width + 32, height: box.height + 32 } });
+  }
+  await page.emulateMedia({ colorScheme: null });
   await page.screenshot({ path: join(shots, 'codex-mode-both-groups.png') });
+  // A narrow window stacks the columns: ChatGPT above Claude.
+  await page.setViewportSize({ width: 400, height: 860 });
+  await page.waitForFunction(() => document.getElementById('codex-model-popover')!.dataset.columns === 'stacked');
+  geometry = await boxes();
+  assert.ok(geometry.codex!.y < geometry.claude!.y && geometry.codex!.x === geometry.claude!.x, JSON.stringify(geometry));
+  await page.emulateMedia({ colorScheme: 'dark' }); await page.screenshot({ path: join(shots, 'columns-narrow-dark.png') }); await page.emulateMedia({ colorScheme: null });
+  await page.setViewportSize({ width: 1280, height: 860 });
+  await page.waitForFunction(() => document.getElementById('codex-model-popover')!.dataset.columns === 'split');
   // One click on a Claude model: provider switches, Claude Opus is selected with the Codex effort, the draft stays.
   await page.locator('#codex-model-options [data-picker-model="opus"]').click();
   await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
-  await page.waitForFunction(() => /Claude Opus/.test(document.getElementById('codex-model-trigger')!.innerText));
+  await page.waitForFunction(() => /Opus 5\.5/.test(document.getElementById('codex-model-trigger')!.innerText));
   assert.equal(await page.locator('#codex-composer').inputValue(), draft, 'the typed draft carried across the switch');
-  assert.match(await trigger(), /^Claude Opus\s*low$/);
+  assert.match(await trigger(), /^Opus 5\.5\s*low$/);
   assert.equal(await page.locator('#provider-setup-provider').inputValue(), 'claude', 'the switch is the persisted provider choice');
   assert.deepEqual(await page.evaluate(() => (window as any).fx.calls), [], 'switching never sends');
   await page.screenshot({ path: join(shots, 'after-switch-to-claude.png') });
@@ -937,8 +1009,17 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
   await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-summary').waitFor();
   assert.equal(await page.locator('#codex-picker-effort-slider').getAttribute('max'), '4');
   await page.locator('#codex-picker-current-model').click(); await page.locator('#codex-model-options [data-picker-model="gpt-6.1-sol"]').waitFor();
-  assert.deepEqual(await layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku']);
+  assert.deepEqual(await layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Opus 5.5', 'Sonnet 5.5', 'Haiku 5.5']);
+  geometry = await boxes(); assert.ok(geometry.codex!.x < geometry.claude!.x, 'Claude mode keeps ChatGPT on the left');
+  assert.equal(await page.locator('#codex-model-options [data-picker-model="opus"]').getAttribute('aria-selected'), 'true');
   await page.screenshot({ path: join(shots, 'claude-mode-both-groups.png') });
+  for (const scheme of ['dark', 'light'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    const tabs = (await page.locator('#claude-chat-tabs').boundingBox())!;
+    await page.screenshot({ path: join(shots, 'tabs-claude-' + scheme + '.png'), clip: { x: Math.max(0, tabs.x - 8), y: Math.max(0, tabs.y - 8), width: Math.min(700, tabs.width + 16), height: tabs.height + 16 } });
+    await page.screenshot({ path: join(shots, 'claude-columns-' + scheme + '.png') });
+  }
+  await page.emulateMedia({ colorScheme: null });
   // Back to ChatGPT in one click: the draft follows again and the Codex catalogue applies the carried effort.
   await page.locator('#codex-model-options [data-picker-model="gpt-6.1-sol"]').click();
   await page.waitForFunction(() => document.getElementById('claude-chat-tabs')!.hidden);
@@ -963,7 +1044,7 @@ test('Edge: usage-limit notice offers the other provider in both directions and 
       ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.177', busy: false, message: null })])) });
     const setup = startProviderSetup(document, { chat, nativeBridge: native });
     const bridge = Object.freeze({ version: 1,
-      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null }),
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }, message: null }),
       list: async () => ({ conversations: [] }), history: async id => ({ conversationId: id, messages: [] }),
       send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-1' }; },
       stop: async () => true, remove: async () => true, onEvent: fn => { f.listener = fn; return () => {}; } });

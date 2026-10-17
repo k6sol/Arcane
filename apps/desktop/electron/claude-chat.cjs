@@ -22,6 +22,27 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CHOICE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/u;
+/** A concrete Claude model id (e.g. claude-opus-5-5); aliases resolve to one of these for display only. */
+const MODEL_ID = /^claude-[a-z0-9][a-z0-9.-]{0,62}$/;
+/**
+ * Maintained fallback: the current concrete model behind each Claude Code alias, used only when neither `--help` lists a
+ * versioned id for the alias nor a finished turn's system/init event reported one. Update when Claude Code moves an alias.
+ */
+const ALIAS_MODELS = Object.freeze({ fable: 'claude-fable-5-1', opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' });
+/** The id names the alias's family as one of its dash-separated parts ('claude-opus-5-5' belongs to 'opus'). */
+const ofAlias = (alias, id) => typeof id === 'string' && MODEL_ID.test(id) && id.split('-').includes(alias);
+/**
+ * Concrete model per alias, in order of evidence: (a) a versioned id `--help` lists for the alias's family, (b) the model
+ * the CLI reported in a turn's system/init event for that alias, (c) the maintained ALIAS_MODELS table. Others stay unresolved.
+ */
+function resolveAliases(aliases, listed, observed) {
+  const out = {};
+  for (const alias of aliases) {
+    const id = listed.find(value => ofAlias(alias, value)) ?? observed.get(alias) ?? (Object.hasOwn(ALIAS_MODELS, alias) ? ALIAS_MODELS[alias] : undefined);
+    if (ofAlias(alias, id)) out[alias] = id;
+  }
+  return Object.freeze(out);
+}
 const EFFORT_ORDER = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const ROLES = Object.freeze(['user', 'assistant', 'tool', 'error']);
 const TOOL_STATES = Object.freeze(['started', 'finished', 'failed']);
@@ -92,11 +113,13 @@ function sendInput(value) {
 function parseChoices(stdout) {
   const help = stdout.replace(/\r\n/g, '\n');
   const modelParagraph = /--model\s+<model>([\s\S]*?)(?:\n\s{2}--|\n\s{2}-[a-z])/m.exec(help)?.[1] ?? '';
-  const aliases = [...new Set([...modelParagraph.matchAll(/'([a-z][a-z0-9-]+)'/g)].map(m => m[1]).filter(v => !v.startsWith('claude-')))];
+  const quoted = [...new Set([...modelParagraph.matchAll(/'([a-z][a-z0-9.-]+)'/g)].map(m => m[1]))];
+  const aliases = quoted.filter(v => !v.startsWith('claude-') && CHOICE.test(v) && !v.includes('.'));
+  const ids = quoted.filter(v => MODEL_ID.test(v)).slice(0, 32);
   const effortParagraph = /--effort\s+<level>([\s\S]*?)(?:\n\s{2}--|\n\s{2}-[a-z])/m.exec(help)?.[1] ?? '';
   const efforts = EFFORT_ORDER.filter(e => new RegExp('\\b' + e + '\\b').test(effortParagraph));
   if (!aliases.length || aliases.length > 32 || aliases.some(alias => !CHOICE.test(alias)) || !efforts.length) return null;
-  return { aliases, efforts };
+  return { aliases, efforts, ids };
 }
 /** A CLI result error is forwarded only when it is a short plain sentence: no URL, address, path, or token-like run. */
 function safeResultText(value) {
@@ -233,6 +256,8 @@ function createClaudeChat(options) {
   const projectPath = options.projectPath;
   const store = createStore({ fs, p, directory: options.stateDirectory, now, limits });
   const turns = new Map(), byConversation = new Map();
+  // Alias -> concrete model id reported by system/init events of this host's turns (in memory; display only).
+  const observedModels = new Map();
   let disposed = false, statusCache = null, approval = null, approved = false, credential = null, minting = null, instructions = null;
   const credentials = new Set();
 
@@ -309,7 +334,7 @@ function createClaudeChat(options) {
     });
   }
   const snapshot = (values, command = null) => {
-    const value = Object.freeze({ installed: false, signedIn: false, cliVersion: null, models: Object.freeze([]), efforts: Object.freeze([]), defaultModel: null, message: null, ...values });
+    const value = Object.freeze({ installed: false, signedIn: false, cliVersion: null, models: Object.freeze([]), efforts: Object.freeze([]), defaultModel: null, resolved: Object.freeze({}), message: null, ...values });
     statusCache = { at: now(), value, command }; return value;
   };
   async function readStatus() {
@@ -334,7 +359,7 @@ function createClaudeChat(options) {
     const choices = help.ok && help.code === 0 ? parseChoices(help.stdout) : null;
     if (!choices) return snapshot({ installed: true, signedIn, cliVersion, message: message ?? MESSAGES.choices }, command);
     return snapshot({ installed: true, signedIn, cliVersion, models: Object.freeze([...choices.aliases]), efforts: Object.freeze([...choices.efforts]),
-      defaultModel: choices.aliases.includes('sonnet') ? 'sonnet' : choices.aliases[0], message }, command);
+      defaultModel: choices.aliases.includes('sonnet') ? 'sonnet' : choices.aliases[0], resolved: resolveAliases(choices.aliases, choices.ids, observedModels), message }, command);
   }
   let statusRun = null;
   function status() { statusRun ??= readStatus().catch(() => snapshot({ message: MESSAGES.unavailable })).finally(() => { statusRun = null; }); return statusRun; }
@@ -524,6 +549,11 @@ function createClaudeChat(options) {
       turn.sessionId = event.session_id;
       void store.update(turn.conversationId, { sessionId: turn.sessionId }).catch(() => {});
     }
+    // (b) The concrete model the CLI ran for an alias; it names the version shown for that alias from the next status read.
+    if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
+      const id = event.model.replace(/\[[0-9]{1,4}[km]\]$/i, '');
+      if (ofAlias(turn.model, id) && (observedModels.has(turn.model) || observedModels.size < 32)) observedModels.set(turn.model, id);
+    }
     if (event.type === 'rate_limit_event') {
       const info = event.rate_limit_info;
       if (info && typeof info === 'object' && info.status === 'rejected') turn.limit = { resetsAt: resetSeconds(info.resetsAt) };
@@ -633,4 +663,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

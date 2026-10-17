@@ -464,6 +464,8 @@ export function appendWorkflowText(doc: Document, value: string): boolean {
 
 /** Composer nodes shared with another provider's chat; Codex handlers on them pause while the surface is yielded. */
 const SHARED_SURFACE_IDS=new Set(['codex-composer','codex-compose','codex-submit']);
+/** Model list width with the two provider columns, and the narrowest width that still fits them side by side. */
+export const MODEL_COLUMNS_WIDTH=500, MODEL_COLUMNS_MIN=420;
 /** Shared model-picker placement: above or below the trigger, inside the visual viewport. */
 export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger:HTMLElement,wide:boolean):void {
   const view = doc.defaultView;
@@ -472,9 +474,12 @@ export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger
   const leftEdge = (viewport?.offsetLeft ?? 0) + margin, topEdge = (viewport?.offsetTop ?? 0) + margin;
   const width = Math.max(0, (viewport?.width ?? view.innerWidth) - margin * 2);
   const bottomEdge = topEdge + Math.max(0, (viewport?.height ?? view.innerHeight) - margin * 2);
-  const rect = trigger.getBoundingClientRect(), panelWidth = Math.min(wide?300:240, width);
+  // Two provider columns need room side by side; below MODEL_COLUMNS_MIN they stack (ChatGPT above Claude).
+  const columns = wide && !!popover.querySelector('#codex-model-options[data-layout=columns]');
+  const rect = trigger.getBoundingClientRect(), panelWidth = Math.min(columns?MODEL_COLUMNS_WIDTH:wide?300:240, width);
   const above = Math.max(0, rect.top - topEdge - gap), below = Math.max(0, bottomEdge - rect.bottom - gap);
   const useAbove = above >= below;
+  if (columns) popover.dataset.columns = panelWidth < MODEL_COLUMNS_MIN ? 'stacked' : 'split'; else delete popover.dataset.columns;
   popover.style.width = panelWidth + 'px';
   popover.style.maxHeight = Math.min(480, useAbove ? above : below) + 'px';
   popover.style.left = Math.max(leftEdge, Math.min(rect.left, leftEdge + width - panelWidth)) + 'px';
@@ -526,43 +531,117 @@ export interface CrossProviderModels {
   /** The model list opened: the other provider may read its models lazily. */
   opened?():void;
 }
-/** Unstyled-by-default group heading in the shared model list; `.model-group-heading` is styled by studio.css. */
+/** Provider logo marks: monochrome inline SVG (currentColor), built from fixed path data with createElementNS only. */
+const PROVIDER_MARKS:Record<ComposerProvider,{name:string;path:string}>={
+  codex:{name:'ChatGPT',path:'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z'},
+  claude:{name:'Claude',path:'M4.7144 15.9555l4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z'},
+};
+/**
+ * The provider's logo mark. Decorative by default (aria-hidden) where adjacent text already names the provider; with
+ * `labelled` it carries role=img and the provider name.
+ */
+export function providerLogo(doc:Document,provider:ComposerProvider,labelled=false):SVGSVGElement {
+  const mark=PROVIDER_MARKS[provider],ns='http://www.w3.org/2000/svg';
+  const icon=doc.createElementNS(ns,'svg');
+  icon.setAttribute('class','provider-logo');icon.setAttribute('viewBox','0 0 24 24');icon.setAttribute('fill','currentColor');
+  icon.setAttribute('focusable','false');icon.setAttribute('data-provider',provider);
+  if(labelled){icon.setAttribute('role','img');icon.setAttribute('aria-label',mark.name);}else icon.setAttribute('aria-hidden','true');
+  const path=doc.createElementNS(ns,'path');path.setAttribute('d',mark.path);icon.append(path);return icon;
+}
+/**
+ * Leads a chat tab with its provider's decorative mark; the tab text keeps naming the chat. The mark is presentation
+ * only, so a document without SVG support simply shows the text.
+ */
+export function prependProviderLogo(doc:Document,target:HTMLElement,provider:ComposerProvider):void {
+  if(typeof doc.createElementNS!=='function'||typeof target.prepend!=='function')return;
+  try{target.dataset.provider=provider;target.prepend(providerLogo(doc,provider));}catch{/* The text label remains. */}
+}
+/** Column heading in the shared model list: the provider's logo mark and name. Styled by studio.css. */
 export function composerModelGroupHeading(doc:Document,label:string,provider:ComposerProvider):HTMLElement {
   const heading=doc.createElement('div');heading.className='model-group-heading';heading.setAttribute('role','presentation');
-  heading.dataset.pickerGroup=provider;heading.textContent=label;return heading;
+  heading.dataset.pickerGroup=provider;
+  const name=doc.createElement('span');name.textContent=label;
+  heading.append(providerLogo(doc,provider),name);return heading;
 }
 const GROUP_ORDER:Record<ComposerProvider,number>={codex:0,claude:1};
 /**
- * Rows for the other provider's section: heading plus one option per matching model, or one disabled row with the
- * sign-in hint. An available provider without reported models offers one row that switches provider only (id '').
+ * Rows for the other provider's column: one option per matching model, or one disabled row with the sign-in hint. An
+ * available provider without reported models offers one row that switches provider only (id '').
  */
 export function crossProviderRows(doc:Document,group:ComposerModelGroup,query:readonly string[],choose:(model:string)=>void):HTMLElement[] {
   const matches=(text:string)=>query.every(word=>text.toLocaleLowerCase().includes(word));
-  const row=(id:string,label:string,title:string,hint:string|null,disabled:boolean)=>{
+  const row=(id:string,label:string,title:string,disabled:boolean)=>{
     const button=doc.createElement('button');button.type='button';button.className='picker-model-option';button.tabIndex=-1;
     button.dataset.pickerModel=id;button.dataset.pickerProvider=group.provider;button.setAttribute('role','option');button.setAttribute('aria-selected','false');
     button.disabled=disabled;button.title=title;
-    const name=doc.createElement('span');name.textContent=label;button.append(name);
-    if(hint){const note=doc.createElement('span');note.className='hint';note.textContent=hint;button.append(note);}
+    const name=doc.createElement('span');name.textContent=label;if(disabled)name.className='hint';button.append(name);
     button.append(composerPickerCheck(doc,false));
     if(!disabled)button.addEventListener('click',()=>choose(id));
     return button;
   };
   const rows:HTMLElement[]=[];
   if(!group.available||!group.models.length){
-    if(matches(group.label))rows.push(row('',group.label,group.label+' · '+group.hint,group.hint,!group.available));
-  } else for(const model of group.models)if(matches(model.label+' '+model.id+' '+group.label))rows.push(row(model.id,model.label,model.title??model.id,null,false));
-  return rows.length?[composerModelGroupHeading(doc,group.label,group.provider),...rows]:[];
+    if(matches(group.label+' '+group.hint))rows.push(row('',group.hint,group.label+' · '+group.hint,!group.available));
+  } else for(const model of group.models)if(matches(model.label+' '+model.id+' '+(model.title??'')+' '+group.label))rows.push(row(model.id,model.label,model.title??model.id,false));
+  return rows;
 }
 /** Search Enter target: the first enabled own-provider row, else the first enabled row of the other provider. */
 export function firstModelRow(host:HTMLElement):HTMLButtonElement|null {
   const rows=Array.from(host.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
   return rows.find(row=>!row.dataset.pickerProvider)??rows[0]??null;
 }
-/** Places the own section and the other provider's section in a fixed order (ChatGPT first, then Claude). */
-export function orderModelGroups(own:ComposerProvider,ownNodes:HTMLElement[],other:ComposerModelGroup|null,otherNodes:HTMLElement[]):HTMLElement[] {
-  if(!other)return ownNodes;
-  return GROUP_ORDER[own]<GROUP_ORDER[other.provider]?[...ownNodes,...otherNodes]:[...otherNodes,...ownNodes];
+/** Search ArrowUp target: the last enabled own-provider row, else the last enabled row. */
+function lastModelRow(host:HTMLElement):HTMLButtonElement|null {
+  const rows=Array.from(host.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+  return rows.filter(row=>!row.dataset.pickerProvider).at(-1)??rows.at(-1)??null;
+}
+/** One provider's column: logo heading, then its rows, or a short note when nothing matches. */
+function composerModelColumn(doc:Document,provider:ComposerProvider,label:string,rows:HTMLElement[],empty:string):HTMLElement {
+  const column=doc.createElement('div');column.className='model-column';column.dataset.pickerGroup=provider;
+  column.setAttribute('role','group');column.setAttribute('aria-label',label+' models');
+  column.append(composerModelGroupHeading(doc,label,provider));
+  if(rows.length)column.append(...rows);
+  else{const note=doc.createElement('p');note.className='model-column-empty hint';note.textContent=empty;column.append(note);}
+  return column;
+}
+/**
+ * Fills the shared model list. Without the other provider it is one plain list of the own rows. With it, two columns
+ * side by side in a fixed order: ChatGPT on the left, Claude on the right (stacked ChatGPT above Claude when narrow).
+ */
+export function fillModelOptions(doc:Document,host:HTMLElement,own:{provider:ComposerProvider;label:string;rows:HTMLElement[];empty:string},other:ComposerModelGroup|null,otherRows:HTMLElement[],query:readonly string[]):void {
+  host.replaceChildren();
+  if(!other){delete host.dataset.layout;for(const row of own.rows)host.append(row);return;}
+  host.dataset.layout='columns';
+  const mine=composerModelColumn(doc,own.provider,own.label,own.rows,own.empty);
+  const theirs=composerModelColumn(doc,other.provider,other.label,otherRows,query.length?'No matching models':'No models reported');
+  if(GROUP_ORDER[own.provider]<GROUP_ORDER[other.provider])host.append(mine,theirs);else host.append(theirs,mine);
+}
+/**
+ * Keyboard movement in the model list. Up/Down/Home/End stay within the focused column (wrapping); Left/Right move to
+ * the neighbouring column at the same position. Disabled rows are skipped. Null when there is nowhere to go.
+ */
+export function modelListMove(host:HTMLElement,target:HTMLElement,key:string):HTMLButtonElement|null {
+  const enabled=(scope:HTMLElement)=>Array.from(scope.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+  const columns=Array.from(host.querySelectorAll<HTMLElement>('.model-column'));
+  const column=columns.find(item=>item.contains(target))??null;
+  const rows=enabled(column??host),index=rows.indexOf(target as HTMLButtonElement);
+  if(key==='ArrowLeft'||key==='ArrowRight'){
+    if(!column)return null;
+    const step=key==='ArrowLeft'?-1:1;
+    for(let at=columns.indexOf(column)+step;at>=0&&at<columns.length;at+=step){
+      const next=enabled(columns[at]!);if(next.length)return next[Math.min(Math.max(index,0),next.length-1)]!;
+    }
+    return null;
+  }
+  if(!rows.length)return null;
+  if(key==='Home')return rows[0]!;
+  if(key==='End')return rows.at(-1)!;
+  if(key==='ArrowDown'||key==='ArrowUp')return rows[(index+(key==='ArrowUp'?-1:1)+rows.length)%rows.length]!;
+  return null;
+}
+/** Search ArrowDown/ArrowUp: enter the list at the own provider's first or last enabled row. */
+export function modelListEntry(host:HTMLElement,key:string):HTMLButtonElement|null {
+  return key==='ArrowDown'?firstModelRow(host):key==='ArrowUp'?lastModelRow(host):null;
 }
 
 interface Uncertain { input:ChatAction; read:boolean }
@@ -1333,11 +1412,16 @@ export class CodexChat {
       }
       const target = event.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts');
       const inModels = models.contains(target), inEfforts = efforts.contains(target);
+      const columns = models.dataset.layout === 'columns';
+      if (inModels && columns && ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key.key)) {
+        event.preventDefault(); // Up/Down/Home/End within the column; Left/Right between the provider columns.
+        const row = modelListMove(models, target, key.key); if (row) { row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' }); }
+        return;
+      }
       if(inModels&&key.key==='ArrowRight'){event.preventDefault();(target as HTMLButtonElement).click();return;}
       if(inEfforts&&key.key==='ArrowLeft'){event.preventDefault();this.setReasoningOpen(false);this.reasoningTrigger()?.focus({preventScroll:true});return;}
       if (target === this.el('codex-model-search') && ['ArrowDown', 'ArrowUp'].includes(key.key)) {
-        const rows = Array.from(models.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
-        const row = key.key === 'ArrowDown' ? rows[0] : rows.at(-1);
+        const row = modelListEntry(models, key.key);
         if (row) { event.preventDefault(); row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' }); }
       } else if ((inModels || inEfforts) && ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key.key)) {
         const rows = Array.from((inModels ? models : efforts).querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
@@ -1390,11 +1474,10 @@ export class CodexChat {
       this.pickerSignature = signature;
       const focused = this.doc.activeElement as HTMLElement | null;
       const focusModel = focused?.dataset.pickerModel, focusEffort = focused?.dataset.pickerEffort;
-      const host = this.el('codex-model-options'); host.replaceChildren();
-      const models = (snapshot?.models ?? []).filter(item => query.every(word => (item.displayName + ' ' + item.model).toLocaleLowerCase().includes(word)));
+      const host = this.el('codex-model-options');
+      const models = (snapshot?.models ?? []).filter(item => query.every(word => (item.displayName + ' ' + item.model + ' chatgpt').toLocaleLowerCase().includes(word)));
       const tabModel=models.find(item=>item.model===model)?.model??models[0]?.model;
       const own: HTMLElement[] = [];
-      if (cross && models.length) own.push(composerModelGroupHeading(this.doc, 'ChatGPT', 'codex'));
       for (const item of models) {
         const row = this.make('button', undefined, 'picker-model-option'); row.type = 'button'; row.tabIndex = item.model===tabModel?0:-1;
         row.dataset.pickerModel = item.model; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item.model === model)); row.disabled = !enabled;
@@ -1414,8 +1497,8 @@ export class CodexChat {
       }
       // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
       const other = cross ? crossProviderRows(this.doc, cross, query, id => { if (!this.surfaceYielded && !this.picker()!.hidden) { this.closePicker(); this.crossProvider?.choose(id); } }) : [];
-      for (const node of orderModelGroups('codex', own, cross, other)) host.append(node);
-      this.el('codex-model-empty').hidden = models.length + other.length > 0;
+      fillModelOptions(this.doc, host, { provider: 'codex', label: 'ChatGPT', rows: own, empty: snapshot?.models.length ? 'No matching models' : 'No models reported' }, cross, other, query);
+      this.el('codex-model-empty').hidden = !!cross || models.length > 0;
       this.text('codex-model-empty', snapshot?.models.length ? 'No reported models match your search.' : 'No Codex models have been reported. Review connection setup.');
       const effortHost = this.el('codex-picker-efforts'); effortHost.replaceChildren();
       const efforts = snapshot?.models.find(item => item.model === model)?.efforts ?? [];

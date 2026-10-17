@@ -50,7 +50,7 @@ class FakeChild extends EventEmitter {
 type Script = (child: FakeChild, args: string[]) => void;
 const replay = (...lines: string[]): Script => child => { for (const l of lines) child.write(l); child.close(0); };
 
-async function fixture(t: TestContext, options: { auth?: unknown; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string } = {}) {
+async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string } = {}) {
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-claude-chat-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, 'project'), state = options.directory ?? join(root, 'state');
@@ -66,7 +66,7 @@ async function fixture(t: TestContext, options: { auth?: unknown; locate?: strin
     if (args[0] !== '-p') setImmediate(() => {
       if (args[0] === '--version') child.write('2.1.301 (Claude Code)\n');
       else if (args[0] === 'auth') child.write(JSON.stringify(options.auth ?? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'private@example.invalid' }));
-      else if (args[0] === '--help') child.write(HELP);
+      else if (args[0] === '--help') child.write(options.help ?? HELP);
       child.stderr.emit('data', Buffer.from('helper stderr private@example.invalid'));
       child.close(0);
     });
@@ -101,8 +101,9 @@ const turnInput = (text: string, conversationId: string | null = null) => ({ con
 test('status reads version, subscription sign-in and help choices without leaking helper output', async t => {
   const f = await fixture(t);
   const s = await f.host.status();
-  assert.deepEqual({ ...s, models: [...s.models], efforts: [...s.efforts] }, { installed: true, signedIn: true, cliVersion: '2.1.301', models: ['fable', 'opus', 'sonnet'],
-    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null });
+  assert.deepEqual({ ...s, models: [...s.models], efforts: [...s.efforts], resolved: { ...s.resolved } }, { installed: true, signedIn: true, cliVersion: '2.1.301', models: ['fable', 'opus', 'sonnet'],
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', resolved: { fable: 'claude-fable-5-1', opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' }, message: null });
+  assert.ok(Object.isFrozen(s.resolved));
   assert.ok(Object.isFrozen(s)); assert.ok(!JSON.stringify(s).includes('private@'));
   assert.deepEqual(f.spawns.map(x => x.args), [['--version'], ['auth', 'status', '--json'], ['--help']]);
   assert.ok(f.spawns.every(x => x.options.shell === false && x.options.windowsHide === true && !('ANTHROPIC_API_KEY' in x.options.env) && !('ARCANE_LOCAL_TOKEN' in x.options.env)));
@@ -113,6 +114,43 @@ test('status reads version, subscription sign-in and help choices without leakin
   assert.deepEqual([(await out.host.status()).signedIn, (await out.host.status()).message], [false, chat.CLAUDE_CHAT_MESSAGES.signedOut]);
   const api = await fixture(t, { auth: { loggedIn: true, authMethod: 'api_key' } });
   assert.deepEqual([(await api.host.status()).signedIn, (await api.host.status()).message], [false, chat.CLAUDE_CHAT_MESSAGES.notSubscription]);
+});
+
+test('aliases resolve to concrete models: listed help ids, then the init model a turn reported, then the maintained table', async t => {
+  assert.deepEqual({ ...chat.CLAUDE_ALIAS_MODELS }, { fable: 'claude-fable-5-1', opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' });
+  // (a) A versioned id listed in --help wins for its family; it is not offered as a separate alias.
+  const listed = HELP.replace("'fable', 'opus', or 'sonnet') or a", "'fable', 'opus', or 'sonnet') or a full name such as 'claude-opus-5-6' or a");
+  const parsed = chat.parseChoices(listed);
+  assert.deepEqual([parsed.aliases, parsed.ids], [['fable', 'opus', 'sonnet'], ['claude-opus-5-6']]);
+  const a = await fixture(t, { help: listed });
+  assert.deepEqual({ ...(await a.host.status()).resolved }, { fable: 'claude-fable-5-1', opus: 'claude-opus-5-6', sonnet: 'claude-sonnet-5-5' });
+  // (b) The model a turn's system/init event reports for an alias replaces the table entry from the next status read.
+  const b = await fixture(t);
+  const init = (model: string) => line({ type: 'system', subtype: 'init', cwd: 'C:\\x', session_id: SESSION, tools: [], mcp_servers: [], model, permissionMode: 'default', apiKeySource: 'none', claude_code_version: '2.1.301' });
+  b.scripts.push(replay(init('claude-sonnet-5-7[1m]'), result()));
+  await b.done((await b.host.send(turnInput('Hi there'))).turnId);
+  assert.equal((await b.host.status()).resolved.sonnet, 'claude-sonnet-5-7', 'the context-size suffix is not part of the id');
+  // A reported model of another family (or not a Claude id) is never attributed to the alias.
+  b.scripts.push(replay(init('claude-opus-9-9'), result()), replay(init('gpt-5'), result()));
+  await b.done((await b.host.send(turnInput('Again'))).turnId); await b.done((await b.host.send(turnInput('Once more'))).turnId);
+  assert.equal((await b.host.status()).resolved.sonnet, 'claude-sonnet-5-7');
+  assert.deepEqual(chat.resolveAliases(['opusplan', 'mystery'], [], new Map()), {}, 'aliases without evidence stay unresolved');
+});
+
+test('preload passes resolved model ids only for reported aliases and only as Claude model ids', async () => {
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any, reply: unknown = null;
+  // Replies are built inside the preload's realm, as Electron's structured clone delivers them.
+  const context = vm.createContext({ require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on() {}, removeListener() {}, invoke: async () => vm.runInContext('JSON.parse(' + JSON.stringify(JSON.stringify(reply)) + ')', context) } }) });
+  vm.runInContext(source, context);
+  const base = { installed: true, signedIn: true, cliVersion: '2.1.301', models: ['fable', 'opus'], efforts: ['high'], defaultModel: 'opus', message: null };
+  const status = async (value: unknown) => { reply = value; return JSON.parse(JSON.stringify(await exposed.claudeChat.status())); };
+  assert.deepEqual((await status({ ...base, resolved: { fable: 'claude-fable-5-1', opus: 'claude-opus-5-5' } })).resolved, { fable: 'claude-fable-5-1', opus: 'claude-opus-5-5' });
+  assert.deepEqual((await status(base)).resolved, {}, 'older engines without the field still pass');
+  for (const resolved of [{ haiku: 'claude-haiku-5-5' }, { opus: 'Opus 5.5' }, { opus: 'claude-opus-5-5 https://x' }, ['claude-opus-5-5'], null])
+    await assert.rejects(status({ ...base, resolved }), /unavailable/i, JSON.stringify(resolved));
 });
 
 test('turn lifecycle: exact argv, stdin prompt, scoped env, streamed events, tool chips, usage and persisted transcript', async t => {

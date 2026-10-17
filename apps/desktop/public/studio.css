@@ -1499,5 +1499,23 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
   .arcane-app :is(#provider-login-gate .provider-next button,.conversation-start,.workspace-stage #codex-submit,.claude-chat-send,#key-setup-generate){border-color:ButtonText;box-shadow:none;text-shadow:none}
   .arcane-app :is(.claude-message-body,.message-text) pre{border-color:CanvasText;box-shadow:none}
 }
+/* ---- Provider columns and logo marks (model list: ChatGPT left, Claude right; chat tabs lead with their provider's mark) ---- */
+.arcane-app .provider-logo{display:block;width:16px;height:16px;flex:0 0 auto;color:currentColor}
+.arcane-app #codex-model-options[data-layout=columns]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:8px;max-height:min(340px,calc(100svh - 160px));padding:2px}
+.arcane-app .composer-model-popover[data-columns=stacked] #codex-model-options[data-layout=columns]{grid-template-columns:minmax(0,1fr)}
+.arcane-app .model-column{display:flex;flex-direction:column;gap:2px;min-width:0;padding:6px;border:1px solid var(--glass-line,var(--line));border-radius:12px;background:linear-gradient(180deg,var(--glass-hi,transparent) 0%,transparent 60%)}
+.arcane-app .model-column .model-group-heading{display:flex;align-items:center;gap:8px;margin:0 0 4px;padding:6px 6px 8px;border-bottom:1px solid var(--glass-line,var(--line));color:var(--text);font-size:13px;font-weight:600;letter-spacing:0;text-transform:none}
+.arcane-app .model-column .model-group-heading::after{content:none}
+.arcane-app .model-column .model-group-heading .provider-logo{width:18px;height:18px}
+.arcane-app .model-column .picker-model-option{min-height:36px}
+.arcane-app .model-column .picker-model-option:disabled .hint{color:var(--text-secondary)}
+.arcane-app .model-column-empty{margin:0;padding:8px 6px;color:var(--text-secondary);font-size:12px}
+.arcane-app .workspace-chat-tabs [role=tab] .provider-logo{width:14px;height:14px;color:var(--text-secondary)}
+.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true] .provider-logo{color:var(--text)}
+@media (forced-colors:active){
+  .arcane-app .model-column{border-color:CanvasText;background:none}
+  .arcane-app .model-column .model-group-heading{border-color:CanvasText}
+  .arcane-app .provider-logo{color:CanvasText}
+}
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
