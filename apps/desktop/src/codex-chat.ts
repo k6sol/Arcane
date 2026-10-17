@@ -484,6 +484,59 @@ export function composerPickerCheck(doc:Document,selected:boolean):SVGSVGElement
   const path=doc.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','m5 12 4 4L19 6');
   if(selected)icon.append(path);return icon;
 }
+export type ComposerProvider='codex'|'claude';
+/** One provider's section of the shared composer model list (presentation data only). */
+export interface ComposerModelGroup {
+  provider:ComposerProvider; label:string;
+  /** False when the provider is not signed in: its section shows one disabled row with `hint`. */
+  available:boolean; hint:string;
+  models:readonly {id:string;label:string;title?:string}[];
+}
+/** The other provider's section of the model list. Choosing from it switches provider explicitly; it never starts a turn. */
+export interface CrossProviderModels {
+  group():ComposerModelGroup|null;
+  choose(model:string):void;
+  /** The model list opened: the other provider may read its models lazily. */
+  opened?():void;
+}
+/** Unstyled-by-default group heading in the shared model list; `.model-group-heading` is styled by studio.css. */
+export function composerModelGroupHeading(doc:Document,label:string,provider:ComposerProvider):HTMLElement {
+  const heading=doc.createElement('div');heading.className='model-group-heading';heading.setAttribute('role','presentation');
+  heading.dataset.pickerGroup=provider;heading.textContent=label;return heading;
+}
+const GROUP_ORDER:Record<ComposerProvider,number>={codex:0,claude:1};
+/**
+ * Rows for the other provider's section: heading plus one option per matching model, or one disabled row with the
+ * sign-in hint. An available provider without reported models offers one row that switches provider only (id '').
+ */
+export function crossProviderRows(doc:Document,group:ComposerModelGroup,query:readonly string[],choose:(model:string)=>void):HTMLElement[] {
+  const matches=(text:string)=>query.every(word=>text.toLocaleLowerCase().includes(word));
+  const row=(id:string,label:string,title:string,hint:string|null,disabled:boolean)=>{
+    const button=doc.createElement('button');button.type='button';button.className='picker-model-option';button.tabIndex=-1;
+    button.dataset.pickerModel=id;button.dataset.pickerProvider=group.provider;button.setAttribute('role','option');button.setAttribute('aria-selected','false');
+    button.disabled=disabled;button.title=title;
+    const name=doc.createElement('span');name.textContent=label;button.append(name);
+    if(hint){const note=doc.createElement('span');note.className='hint';note.textContent=hint;button.append(note);}
+    button.append(composerPickerCheck(doc,false));
+    if(!disabled)button.addEventListener('click',()=>choose(id));
+    return button;
+  };
+  const rows:HTMLElement[]=[];
+  if(!group.available||!group.models.length){
+    if(matches(group.label))rows.push(row('',group.label,group.label+' · '+group.hint,group.hint,!group.available));
+  } else for(const model of group.models)if(matches(model.label+' '+model.id+' '+group.label))rows.push(row(model.id,model.label,model.title??model.id,null,false));
+  return rows.length?[composerModelGroupHeading(doc,group.label,group.provider),...rows]:[];
+}
+/** Search Enter target: the first enabled own-provider row, else the first enabled row of the other provider. */
+export function firstModelRow(host:HTMLElement):HTMLButtonElement|null {
+  const rows=Array.from(host.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+  return rows.find(row=>!row.dataset.pickerProvider)??rows[0]??null;
+}
+/** Places the own section and the other provider's section in a fixed order (ChatGPT first, then Claude). */
+export function orderModelGroups(own:ComposerProvider,ownNodes:HTMLElement[],other:ComposerModelGroup|null,otherNodes:HTMLElement[]):HTMLElement[] {
+  if(!other)return ownNodes;
+  return GROUP_ORDER[own]<GROUP_ORDER[other.provider]?[...ownNodes,...otherNodes]:[...otherNodes,...ownNodes];
+}
 
 interface Uncertain { input:ChatAction; read:boolean }
 interface Confirmation { action:'grant-writes'|'approval'|'review-draft'; fields:Record<string,unknown>; fingerprint:string; connectionId:string; generation:number }
@@ -539,6 +592,8 @@ export class CodexChat {
   /** While another provider's chat renders into the shared transcript/composer/picker, Codex keeps its state but stops drawing there. */
   private surfaceYielded=false;
   private yieldedComposer='';
+  private crossProvider:CrossProviderModels|null=null;
+  private pendingSelection:{model:string;effort:string|null;at:number}|null=null;
   constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
   /** Presentation-only attachment mount; it creates no native thread or task. */
   enableTextAttachments(controller:ChatAttachmentsController):void {
@@ -590,11 +645,53 @@ export class CodexChat {
    */
   yieldSurface(yielded:boolean):void {
     if(yielded===this.surfaceYielded)return;
-    if(yielded){this.closePicker();this.flushDraft();this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
+    if(yielded){this.closePicker();this.flushDraft();this.pendingSelection=null;this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
     else {this.surfaceYielded=false;this.el<HTMLTextAreaElement>('codex-composer').value=this.yieldedComposer;this.yieldedComposer='';this.messageSignature='';this.pickerSignature='';this.selectionSignature='';}
     this.render();
   }
   surfaceIsYielded():boolean {return this.surfaceYielded;}
+  /** The other provider's section of the shared model list (null hides it). */
+  setCrossProviderModels(source:CrossProviderModels|null):void {this.crossProvider=source;this.crossProviderChanged();}
+  /** The other provider's models or sign-in changed: redraw an open list. */
+  crossProviderChanged():void {if(this.surfaceYielded||this.stopped)return;this.pickerSignature='';this.renderPicker();}
+  /** Codex's section for the other provider's model list: reported models once connected with a subscription account. */
+  modelGroup():ComposerModelGroup {
+    const s=this.snapshot(),signedIn=!!this.state&&this.fresh&&!this.stopped&&s?.account?.auth==='subscription';
+    const models=signedIn&&s?.connected&&s.ready?s.models.map(row=>({id:row.model,label:this.api.safe(row.displayName),title:this.api.safe(row.model)})):[];
+    return {provider:'codex',label:'ChatGPT',available:signedIn,hint:signedIn?'Connect to choose a model':'Sign in to use',models};
+  }
+  /** Effort of the visible Codex choice, carried to the other provider when the user switches from the model list. */
+  currentEffort():string|null {return this.displaySelection()?.effort??(this.value('codex-effort')||null);}
+  /** Moves the unsent composer text out of Codex for a provider switch; the Codex tab keeps an empty draft. */
+  takeComposerDraft():string {
+    if(this.surfaceYielded||this.stopped)return '';
+    const text=this.value('codex-composer');if(!text)return '';
+    this.setComposer('');this.clearDraftOrigins();this.draftDirty=true;this.stashTabDraft();this.renderComposer();this.publishState();
+    return text;
+  }
+  /**
+   * Receives a provider switch from the model list: the carried draft becomes the composer text, and the chosen model is
+   * applied through the existing guarded select path once Codex can select models. Nothing starts a thread or turn.
+   */
+  receiveHandoff(handoff:{draft:string;model:string|null;effort:string|null}):void {
+    if(this.stopped)return;
+    if(handoff.draft){this.setComposer(handoff.draft);this.composerInput();}
+    this.pendingSelection=handoff.model?{model:handoff.model,effort:handoff.effort,at:Date.now()}:null;
+    this.applyPendingSelection();
+  }
+  private applyPendingSelection():void {
+    const pending=this.pendingSelection;
+    if(!pending||this.surfaceYielded||this.stopped)return;
+    if(Date.now()-pending.at>120000){this.pendingSelection=null;return;}
+    if(!this.canSelectModel()||this.pending.size)return;
+    this.pendingSelection=null;
+    const item=this.snapshot()?.models.find(row=>row.model===pending.model);if(!item)return;
+    const effort=pending.effort&&item.efforts.includes(pending.effort)?pending.effort:item.defaultEffort&&item.efforts.includes(item.defaultEffort)?item.defaultEffort:item.efforts[0];
+    if(!effort)return;
+    this.el<HTMLSelectElement>('codex-model').value=item.model;this.populateEfforts();this.el<HTMLSelectElement>('codex-effort').value=effort;
+    this.renderControls();
+    if(!this.el<HTMLButtonElement>('codex-select').disabled)void this.dispatch('select',{model:item.model,effort});
+  }
   private readonly workflowContextListeners = new Set<() => void>();
   /** Parent boot seam: the only dynamic module load; it starts no native action. */
   async enableChatTabs(options: ChatTabsOptions = {}): Promise<void> {
@@ -1094,6 +1191,7 @@ export class CodexChat {
   private openPicker() {
     const popover = this.picker();
     if (!popover || !this.pickerCanOpen()) return;
+    try { this.crossProvider?.opened?.(); } catch { /* The other provider's section is optional. */ }
     popover.hidden = false; this.el('codex-model-trigger').setAttribute('aria-expanded', 'true');
     this.el<HTMLInputElement>('codex-model-search').value = ''; this.pickerSignature = '';
     this.showPickerModels(false);this.renderPicker();
@@ -1218,7 +1316,7 @@ export class CodexChat {
         if (inEfforts) row.click();
       } else if (target === this.el('codex-model-search') && key.key === 'Enter') {
         event.preventDefault(); // Searching must never submit the surrounding conversation form.
-        this.el('codex-model-options').querySelector<HTMLButtonElement>('button:not(:disabled)')?.click();
+        firstModelRow(this.el('codex-model-options'))?.click(); // Own models first; the other provider only when it alone matches.
       }
     });
     const outside = (event: Event) => {
@@ -1254,7 +1352,8 @@ export class CodexChat {
     if (popover.hidden) return;
     const query = this.value('codex-model-search').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const model = this.value('codex-model'), effort = this.value('codex-effort'), enabled = this.canSelectModel();
-    const signature = JSON.stringify([snapshot?.models ?? [], query, model, effort, enabled]);
+    const cross = this.crossProvider?.group() ?? null;
+    const signature = JSON.stringify([snapshot?.models ?? [], query, model, effort, enabled, cross]);
     if (signature !== this.pickerSignature) {
       this.pickerSignature = signature;
       const focused = this.doc.activeElement as HTMLElement | null;
@@ -1262,6 +1361,8 @@ export class CodexChat {
       const host = this.el('codex-model-options'); host.replaceChildren();
       const models = (snapshot?.models ?? []).filter(item => query.every(word => (item.displayName + ' ' + item.model).toLocaleLowerCase().includes(word)));
       const tabModel=models.find(item=>item.model===model)?.model??models[0]?.model;
+      const own: HTMLElement[] = [];
+      if (cross && models.length) own.push(composerModelGroupHeading(this.doc, 'ChatGPT', 'codex'));
       for (const item of models) {
         const row = this.make('button', undefined, 'picker-model-option'); row.type = 'button'; row.tabIndex = item.model===tabModel?0:-1;
         row.dataset.pickerModel = item.model; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item.model === model)); row.disabled = !enabled;
@@ -1277,9 +1378,12 @@ export class CodexChat {
           }
           this.renderControls();
           this.showPickerModels(false);this.applyPickerSelection();
-        }); host.append(row);
+        }); own.push(row);
       }
-      this.el('codex-model-empty').hidden = models.length > 0;
+      // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
+      const other = cross ? crossProviderRows(this.doc, cross, query, id => { if (!this.surfaceYielded && !this.picker()!.hidden) { this.closePicker(); this.crossProvider?.choose(id); } }) : [];
+      for (const node of orderModelGroups('codex', own, cross, other)) host.append(node);
+      this.el('codex-model-empty').hidden = models.length + other.length > 0;
       this.text('codex-model-empty', snapshot?.models.length ? 'No reported models match your search.' : 'No Codex models have been reported. Review connection setup.');
       const effortHost = this.el('codex-picker-efforts'); effortHost.replaceChildren();
       const efforts = snapshot?.models.find(item => item.model === model)?.efforts ?? [];
@@ -1629,6 +1733,7 @@ export class CodexChat {
     for(const card of Array.from(this.el('codex-approvals').children)){const a=s?.approvals.find(a=>a.handle===(card as HTMLElement).dataset.handle);for(const b of Array.from(card.querySelectorAll<HTMLButtonElement>('button[data-decision]')))b.disabled=this.stopped||!a||a.connectionId!==s?.connectionId||a.threadId!==t?.threadId||a.turnId!==t?.turnId||a.expiresAt<=Date.now()||[...this.pending.values()].some(p=>p.action==='approval'&&p.handle===a.handle)||(b.dataset.decision==='accept'&&(!this.fresh||!!this.uncertain.size||!approvalEligible(this.state,a)));}
     this.renderPicker();
     this.tabs?.render(!!this.tabBlockReason());
+    this.applyPendingSelection();
   }
   /** The input hot path only validates the composer; no tabs, catalogue or state notifications. */
   private renderComposer():void {

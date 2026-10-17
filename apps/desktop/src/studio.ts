@@ -5,7 +5,7 @@ import { LearningPanel } from './learning-panel.js';
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
-import { ClaudeChat } from './claude-chat.js';
+import { ClaudeChat, linkChatProviders } from './claude-chat.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
@@ -2123,14 +2123,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // the Claude surface, Codex pauses drawing there (its state is never destroyed) and the Claude chat renders instead.
   const claudeChat = document.getElementById('codex-compose') ? new ClaudeChat(document) : null;
   let claudeChatStopped = false;
+  // The composer model list shows ChatGPT and Claude models; picking the other provider's model switches provider
+  // explicitly and carries the unsent draft. The link also owns the surface hand-off below.
+  const chatLink = claudeChat ? linkChatProviders({ codex: codexChat, claude: claudeChat, provider: providerSetup, enabled: () => !claudeChatStopped }) : null;
   const showClaudeChat = () => {
-    const claude = !claudeChatStopped && !!claudeChat && providerSetup.chatSurface() === 'claude';
-    try {
-      if (claude) { codexChat.yieldSurface(true); claudeChat!.activate(); void claudeChat!.refresh(); }
-      else { claudeChat?.deactivate(); codexChat.yieldSurface(false); }
-    } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
+    if (chatLink) { chatLink.sync(); return; }
+    try { codexChat.yieldSurface(false); } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
   };
-  providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat();
+  if (!chatLink) { providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat(); }
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
@@ -2169,7 +2169,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       openReview:async(runId,isCurrent)=>{if(await workbench.openWorkRun(runId,isCurrent)&&isCurrent())workspaceShell.showRecordedWork();}});
     if(workflowsStopped)taskPlanCard.stop();
   }).catch(()=>{const mount=document.getElementById('codex-task-plan');if(mount)mount.textContent='Restart Arcane to load task progress.';});
-  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; claudeChat?.stop(); taskPlanCard?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); taskPlanCard?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');

@@ -10,7 +10,7 @@ import type { ChatState } from '../../apps/desktop/src/codex-chat.js';
 import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model.js';
 import {
   ClaudeChat, CLAUDE_CHAT_CHOICE_KEY, CLAUDE_CHAT_EMPTY_TEXT, CLAUDE_CHAT_NO_BRIDGE_TEXT, CLAUDE_CHAT_TABS_KEY,
-  claudeEffortLabel, claudeModelName, readClaudeChatBridge,
+  claudeEffortLabel, claudeModelName, linkChatProviders, readClaudeChatBridge,
 } from '../../apps/desktop/src/claude-chat.js';
 
 // In-memory DOM and preload-bridge doubles only: no Electron, CLI, network, Studio or inference.
@@ -34,6 +34,7 @@ class Element extends EventTarget {
   prepend(child: Element) { this.append(child); this.children.unshift(this.children.pop()!); }
   replaceWith(next: Element) { const parent = this.parent!; next.parent = parent; parent.children[parent.children.indexOf(this)] = next; this.ownerDocument.register(next); }
   focus() { this.focused++; this.ownerDocument.activeElement = this; }
+  click() { this.dispatchEvent(new Event('click', { cancelable: true })); }
   contains(node: unknown): boolean { return node === this || this.children.some(child => child.contains(node)); }
   all(): Element[] { return this.children.flatMap(child => [child, ...child.all()]); }
   matches(selector: string): boolean {
@@ -508,6 +509,153 @@ test('delete is disabled while that conversation has a running turn and failures
 
 // Real production HTML/CSS and controllers in headless Edge: Codex and Claude render into the same chat surface.
 // Synthetic Codex HTTP state and a fake Claude preload bridge only; no daemon, CLI, network or inference.
+// ---- Cross-provider model list: one list with ChatGPT and Claude sections; picking the other provider switches. ----
+const chatgpt = (available = true) => ({ provider: 'codex' as const, label: 'ChatGPT', available, hint: available ? 'Connect to choose a model' : 'Sign in to use',
+  models: available ? [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' }, { id: 'gpt-6.1-mini', label: 'GPT-6.1-Mini' }] : [] });
+type Cross = import('../../apps/desktop/src/codex-chat.js').CrossProviderModels;
+function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unknown = fakeBridge().bridge) {
+  const f = mount(bridge, memory(), false);
+  const calls: unknown[][] = []; let source: Cross | null = null;
+  let codexDraft = '', yielded = false;
+  // Codex double: owns the shared composer while not yielded, exactly like CodexChat.yieldSurface.
+  const codex = {
+    yieldSurface(value: boolean) { if (value === yielded) return; calls.push(['yield', value]); if (value) codexDraft = f.input.value; else f.input.value = codexDraft; yielded = value; },
+    setCrossProviderModels(value: Cross | null) { source = value; },
+    crossProviderChanged() { calls.push(['changed']); },
+    modelGroup: () => codexGroup,
+    currentEffort: () => 'low',
+    takeComposerDraft() { const value = f.input.value; f.input.value = ''; calls.push(['take', value]); return value; },
+    receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }) { calls.push(['receive', handoff]); if (handoff.draft) f.input.value = handoff.draft; },
+  };
+  let surface: 'codex' | 'claude' = initial; const listeners = new Set<() => void>(); const requests: string[] = [];
+  const provider = { chatSurface: () => surface, subscribeChatSurface: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+    requestProvider: (next: 'codex' | 'claude') => { requests.push(next); return true; } };
+  const setSurface = (next: 'codex' | 'claude') => { surface = next; for (const fn of [...listeners]) fn(); };
+  const link = linkChatProviders({ codex, claude: f.chat, provider });
+  const layout = () => f.el('codex-model-options').children.map(node => node.className === 'model-group-heading' ? '# ' + node.textContent : node.textContent + (node.disabled ? ' [disabled]' : ''));
+  const row = (id: string) => f.el('codex-model-options').querySelectorAll('.picker-model-option').find(node => node.dataset.pickerModel === id)!;
+  const press = (target: Element, value: string) => {
+    const event = new Event('keydown', { cancelable: true });
+    Object.defineProperties(event, { key: { value }, isComposing: { value: false }, target: { value: target } });
+    f.el('codex-model-popover').dispatchEvent(event); return f.doc.activeElement?.textContent;
+  };
+  return { ...f, calls, requests, setSurface, link, layout, row, press, codexSource: () => source!, codexYielded: () => yielded };
+}
+
+test('Claude mode: the model list shows ChatGPT and Claude sections; search filters both; same-provider choice is unchanged', async t => {
+  const f = linked('claude'); t.after(() => f.chat.stop());
+  await tick(); await tick();
+  assert.equal(f.chat.isActive(), true); assert.equal(f.codexYielded(), true);
+  click(f.trigger); click(f.el('codex-picker-current-model'));
+  assert.deepEqual(f.layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
+  assert.equal(f.row('gpt-6.1-sol').dataset.pickerProvider, 'codex'); assert.equal(f.row('opus').dataset.pickerProvider, undefined);
+  const search = f.el('codex-model-search'); search.value = 'mini'; search.dispatchEvent(new Event('input'));
+  assert.deepEqual(f.layout(), ['# ChatGPT', 'GPT-6.1-Mini'], 'search filters both sections and hides empty headings');
+  search.value = ''; search.dispatchEvent(new Event('input'));
+  click(f.row('opus')); assert.equal(f.el('codex-model-label').textContent, 'Claude Opus'); assert.deepEqual(f.requests, []);
+  f.chat.setCrossProviderModels(null); click(f.el('codex-picker-current-model'));
+  assert.deepEqual(f.layout(), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5'], 'without a link the list is unchanged');
+});
+
+test('Claude mode: choosing a ChatGPT model requests Codex explicitly and carries the draft, model and effort', async t => {
+  const f = linked('claude'); t.after(() => f.chat.stop());
+  await tick(); await tick();
+  f.type('ok, make the spawn point higher and');
+  click(f.trigger); const slider = f.el('codex-picker-effort-slider'); slider.value = '2'; slider.dispatchEvent(new Event('input'));
+  click(f.el('codex-picker-current-model')); click(f.row('gpt-6.1-mini'));
+  assert.deepEqual(f.requests, ['codex']); assert.equal(f.el('codex-model-popover').hidden, true);
+  assert.equal(f.chat.isActive(), true, 'nothing switches until provider setup reports the Codex surface');
+  f.setSurface('codex');
+  assert.equal(f.chat.isActive(), false); assert.equal(f.codexYielded(), false);
+  assert.deepEqual(f.calls.find(call => call[0] === 'receive'), ['receive', { draft: 'ok, make the spawn point higher and', model: 'gpt-6.1-mini', effort: 'high' }]);
+  assert.equal(f.input.value, 'ok, make the spawn point higher and', 'the draft follows the switch');
+  f.input.value = '';
+  f.setSurface('claude'); assert.equal(f.input.value, '', 'the Claude tab kept no copy of the moved draft');
+  assert.equal(f.calls.filter(call => call[0] === 'take').length, 0, 'a switch the user did not pick from the list moves no draft');
+});
+
+test('Codex mode: choosing a Claude model switches surface, selects it with a supported effort and keeps the draft', async t => {
+  const f = linked('codex'); t.after(() => f.chat.stop());
+  assert.equal(f.chat.isActive(), false);
+  const source = f.codexSource();
+  assert.deepEqual([source.group()!.available, source.group()!.hint], [false, 'Sign in to use'], 'Claude status has not been read yet');
+  source.opened!(); await tick(); await tick();
+  assert.ok(f.calls.some(call => call[0] === 'changed'), 'an open Codex list redraws once Claude models arrive');
+  assert.deepEqual(source.group()!.models.map(row => row.label), ['Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
+  f.input.value = 'ok, make the spawn point higher and';
+  source.choose('opus');
+  assert.deepEqual(f.requests, ['claude']); assert.equal(f.chat.isActive(), false);
+  f.setSurface('claude'); await tick();
+  assert.equal(f.chat.isActive(), true);
+  assert.equal(f.input.value, 'ok, make the spawn point higher and');
+  assert.equal(f.el('codex-model-label').textContent, 'Claude Opus');
+  assert.equal(f.el('codex-effort-label').textContent, 'low', 'the Codex effort is kept because Claude reports it');
+  assert.deepEqual(f.calls.filter(call => call[0] === 'take'), [['take', 'ok, make the spawn point higher and']]);
+  const g = linked('codex'); t.after(() => g.chat.stop());
+  await g.chat.loadModels(); g.chat.activate();
+  g.chat.receiveHandoff({ draft: '', model: 'sonnet', effort: 'minimal' });
+  assert.equal(g.el('codex-model-label').textContent, 'Claude Sonnet'); assert.equal(g.el('codex-effort-label').textContent, 'high', 'an unsupported effort uses Claude’s default');
+});
+
+test('a signed-out provider section is one disabled row and keyboard navigation crosses both sections', async t => {
+  const f = linked('claude', chatgpt(false)); t.after(() => f.chat.stop());
+  await tick(); await tick();
+  click(f.trigger); click(f.el('codex-picker-current-model'));
+  assert.deepEqual(f.layout(), ['# ChatGPT', 'ChatGPTSign in to use [disabled]', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku 4.5']);
+  assert.equal(f.press(f.el('codex-model-search'), 'ArrowDown'), 'Claude Opus', 'disabled rows are skipped');
+  const g = linked('claude'); t.after(() => g.chat.stop());
+  await tick(); await tick();
+  click(g.trigger); click(g.el('codex-picker-current-model'));
+  assert.equal(g.press(g.el('codex-model-search'), 'ArrowDown'), 'GPT-6.1-Sol');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'GPT-6.1-Mini');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'Claude Opus', 'ArrowDown moves from the ChatGPT section into Claude');
+  assert.equal(g.press(g.doc.activeElement!, 'End'), 'Claude Haiku 4.5');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowDown'), 'GPT-6.1-Sol', 'navigation wraps across sections');
+  assert.equal(g.press(g.doc.activeElement!, 'ArrowUp'), 'Claude Haiku 4.5');
+  g.press(g.el('codex-model-search'), 'Enter');
+  assert.deepEqual(g.requests, [], 'search Enter prefers the active provider’s first match');
+  assert.equal(g.el('codex-model-label').textContent, 'Claude Opus');
+  click(g.el('codex-picker-current-model'));
+  const search = g.el('codex-model-search'); search.value = 'sol'; search.dispatchEvent(new Event('input'));
+  g.press(search, 'Enter');
+  assert.deepEqual(g.requests, ['codex'], 'Enter on a search that only matches ChatGPT switches provider explicitly');
+});
+
+test('provider setup requestProvider is an explicit, persisted choice that still waits for a signed-in Claude status', async t => {
+  const { startProviderSetup, PROVIDER_PRESENTATION_KEY, PROVIDER_PREFERENCE_EVENT } = await import('../../apps/desktop/src/provider-setup.js');
+  const ids = ['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider', 'provider-login-start', 'claude-chat-terminal'];
+  const doc = new EventTarget() as EventTarget & { getElementById(id: string): unknown; defaultView: unknown };
+  const nodes = new Map<string, Element>(ids.map(id => [id, new DocumentFixture().createElement('div')]));
+  nodes.get('provider-setup-provider')!.value = 'codex';
+  doc.getElementById = id => nodes.get(id) ?? null;
+  const stored = new Map<string, string>();
+  doc.defaultView = { CustomEvent, location: { protocol: 'http:', origin: 'http://fixture.test' },
+    localStorage: { getItem: (k: string) => stored.get(k) ?? null, setItem: (k: string, v: string) => stored.set(k, v) } };
+  let claudeAuth = 'signed-out'; const calls: string[] = [];
+  const native = Object.freeze({ version: 1, ...Object.fromEntries(['status', 'login', 'install', 'launch'].map(action => [action, async (provider: string) => {
+    calls.push(action + ':' + provider);
+    return { version: 1, provider, installed: true, auth: provider === 'claude' ? claudeAuth : 'subscription', cliVersion: '2.1.177', busy: false, message: null };
+  }])) });
+  const controller = startProviderSetup(doc as unknown as Document, { nativeBridge: native, autoSelectSignedIn: true, chat: {
+    providerConnectionStatus: () => ({ connected: true, ready: true, fresh: true, auth: 'subscription' }), subscribeProviderStateChange: () => () => {} } });
+  t.after(() => controller.cleanup());
+  const published: unknown[] = []; doc.addEventListener(PROVIDER_PREFERENCE_EVENT, event => published.push((event as CustomEvent).detail));
+  await tick();
+  assert.equal(controller.selectedProvider(), 'codex');
+  assert.equal(controller.requestProvider('claude'), true);
+  assert.equal(controller.selectedProvider(), 'claude');
+  assert.deepEqual(JSON.parse(stored.get(PROVIDER_PRESENTATION_KEY)!), { version: 1, provider: 'claude' });
+  assert.deepEqual(published, [{ provider: 'claude' }]);
+  await tick(); await tick();
+  assert.equal(controller.chatSurface(), 'codex', 'a signed-out Claude status does not open the Claude surface');
+  assert.equal(controller.selectedProvider(), 'claude', 'an explicit choice ends startup auto-selection');
+  claudeAuth = 'subscription'; assert.equal(controller.requestProvider('claude'), true); await tick(); await tick();
+  assert.equal(controller.chatSurface(), 'claude', 'repeating the choice re-reads Claude status');
+  assert.equal(controller.requestProvider('codex'), true); assert.equal(controller.chatSurface(), 'codex', 'switching back is immediate');
+  controller.stop(); assert.equal(controller.requestProvider('claude'), false);
+  assert.ok(calls.every(call => call.startsWith('status:')), 'only status is read; no login, install or launch');
+});
+
 const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 const CONNECTION = randomUUID();
 function codexState(): ChatState {
@@ -626,5 +774,94 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   assert.equal(await page.locator('#codex-composer').inputValue(), 'Codex draft stays put');
   assert.equal(await page.locator('#codex-messages .codex-message.human').count(), 0);
   assert.match(await trigger(), /^GPT-6\.1-Sol\s*low$/, 'Codex model name replaces the Claude label');
+  assert.deepEqual(errors, []);
+});
+
+test('Edge: one model list switches between ChatGPT and Claude in one click and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/xprovider/shots');
+  await mkdir(shots, { recursive: true });
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
+    import {startProviderSetup} from '/provider-setup.js';
+    import {startWorkspaceShell} from '/workspace-shell.js';
+    import {ClaudeChat, linkChatProviders} from '/claude-chat.js';
+    const f = window.fx = { calls: [], status: 0 };
+    const chat = new CodexChat(document, new CodexChatApi('${'a'.repeat(64)}'));
+    const native = Object.freeze({ version: 1, ...Object.fromEntries(['status','login','install','launch'].map(action => [action, async provider =>
+      ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.177', busy: false, message: null })])) });
+    const setup = startProviderSetup(document, { chat, nativeBridge: native });
+    const bridge = Object.freeze({ version: 1,
+      status: async () => { f.status++; return { installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null }; },
+      list: async () => ({ conversations: [] }), history: async id => ({ conversationId: id, messages: [] }),
+      send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-1' }; },
+      stop: async () => true, remove: async () => true, onEvent: () => () => {} });
+    const claude = new ClaudeChat(document, { bridge, storage: null });
+    f.claude = claude;
+    linkChatProviders({ codex: chat, claude, provider: setup });
+    startWorkspaceShell(document);
+    await chat.start(); f.ready = true;`;
+  const state = () => { const value = codexState() as unknown as { snapshot: { models: unknown[] } };
+    value.snapshot.models.push({ model: 'gpt-6.1-mini', id: 'opaque-mini', displayName: 'GPT-6.1-Mini', efforts: ['low', 'medium'], defaultEffort: 'medium', entitlement: 'unverified' });
+    return value; };
+  const server = createServer((request, response) => { void (async () => {
+    const url = request.url?.split('?')[0] ?? '';
+    if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: state() })); return; }
+    if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
+    const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
+      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+    if (!file) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
+    response.end(await readFile(resolve(file)));
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
+  const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+  const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }); page.setDefaultTimeout(8000);
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
+  await page.waitForFunction(() => (window as any).fx?.ready === true);
+  await page.waitForFunction(() => document.getElementById('provider-login-gate')?.hidden === true);
+  const draft = 'ok, make the spawn point higher and';
+  await page.locator('#codex-composer').fill(draft);
+  const trigger = () => page.locator('#codex-model-trigger').innerText();
+  const layout = () => page.locator('#codex-model-options').evaluate(host => Array.from(host.children).map(node =>
+    node.classList.contains('model-group-heading') ? '# ' + node.textContent : (node as HTMLButtonElement).innerText.replace(/\s+/g, ' ').trim() + ((node as HTMLButtonElement).disabled ? ' [disabled]' : '')));
+  assert.match(await trigger(), /^GPT-6\.1-Sol\s*low$/);
+  // Codex mode: open the list; Claude models load lazily under their own heading.
+  await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-current-model').click();
+  await page.waitForFunction(() => !!document.querySelector('#codex-model-options [data-picker-model="opus"]'));
+  assert.deepEqual(await layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku']);
+  // Keyboard: from search, ArrowDown walks from the ChatGPT section into Claude.
+  await page.locator('#codex-model-search').focus(); await page.keyboard.press('ArrowDown');
+  const focused = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.pickerModel ?? null);
+  assert.equal(await focused(), 'gpt-6.1-sol');
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); assert.equal(await focused(), 'opus');
+  await page.keyboard.press('ArrowUp'); assert.equal(await focused(), 'gpt-6.1-mini');
+  await page.keyboard.press('ArrowDown');
+  await page.screenshot({ path: join(shots, 'codex-mode-both-groups.png') });
+  // One click on a Claude model: provider switches, Claude Opus is selected with the Codex effort, the draft stays.
+  await page.locator('#codex-model-options [data-picker-model="opus"]').click();
+  await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+  await page.waitForFunction(() => /Claude Opus/.test(document.getElementById('codex-model-trigger')!.innerText));
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft, 'the typed draft carried across the switch');
+  assert.match(await trigger(), /^Claude Opus\s*low$/);
+  assert.equal(await page.locator('#provider-setup-provider').inputValue(), 'claude', 'the switch is the persisted provider choice');
+  assert.deepEqual(await page.evaluate(() => (window as any).fx.calls), [], 'switching never sends');
+  await page.screenshot({ path: join(shots, 'after-switch-to-claude.png') });
+  // Claude mode: the list again shows both providers; the effort slider follows Claude's five levels.
+  await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-summary').waitFor();
+  assert.equal(await page.locator('#codex-picker-effort-slider').getAttribute('max'), '4');
+  await page.locator('#codex-picker-current-model').click(); await page.locator('#codex-model-options [data-picker-model="gpt-6.1-sol"]').waitFor();
+  assert.deepEqual(await layout(), ['# ChatGPT', 'GPT-6.1-Sol', 'GPT-6.1-Mini', '# Claude', 'Claude Opus', 'Claude Sonnet', 'Claude Haiku']);
+  await page.screenshot({ path: join(shots, 'claude-mode-both-groups.png') });
+  // Back to ChatGPT in one click: the draft follows again and the Codex catalogue applies the carried effort.
+  await page.locator('#codex-model-options [data-picker-model="gpt-6.1-sol"]').click();
+  await page.waitForFunction(() => document.getElementById('claude-chat-tabs')!.hidden);
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+  assert.match(await trigger(), /^GPT-6\.1-Sol\s*low$/);
+  assert.equal(await page.locator('#provider-setup-provider').inputValue(), 'codex');
+  await page.screenshot({ path: join(shots, 'after-switch-back-to-chatgpt.png') });
   assert.deepEqual(errors, []);
 });

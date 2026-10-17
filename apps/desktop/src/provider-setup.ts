@@ -49,6 +49,14 @@ export interface ProviderSetupController {
   /** Which provider owns the shared in-app chat surface: Codex, or Claude after a signed-in Claude status. */
   chatSurface(): ChatSurface;
   subscribeChatSurface(listener: () => void): () => void;
+  /**
+   * Explicit provider choice from in-app UI (the composer model list): persists it like the Settings choice, ends
+   * startup auto-selection and reads that provider's native status. It grants no authority; the Claude surface still
+   * waits for a signed-in Claude status. Returns false when setup is stopped.
+   */
+  requestProvider(next: SetupProvider): boolean;
+  /** The currently selected provider (not proof of sign-in). */
+  selectedProvider(): SetupProvider;
   stop(): void;
   resume(): void;
   cleanup(): void;
@@ -140,6 +148,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     isSignedIn: () => false, subscribeSignInChange: (_listener: () => void) => () => {},
     handoffChoices: () => null, subscribeHandoffChoices: (_listener: () => void) => () => {},
     chatSurface: () => 'codex', subscribeChatSurface: (_listener: () => void) => () => {},
+    requestProvider: (_next: SetupProvider) => false, selectedProvider: () => 'codex',
     stop() {}, resume() {}, cleanup() {},
   };
   const native = bridge(doc, options), storage = presentationStorage(doc);
@@ -414,6 +423,14 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       return () => { choiceListeners.delete(listener); };
     },
     chatSurface: () => surface,
+    requestProvider(next: SetupProvider) {
+      if (stopped || disposed || !providers(next)) return false;
+      autoSelect = false;
+      if (next !== provider) choose(next);
+      else if (next === 'claude' && !claudeChatEvidence) requestStatus();
+      return true;
+    },
+    selectedProvider: () => provider,
     subscribeChatSurface(listener: () => void) {
       if (disposed) return () => {};
       surfaceListeners.add(listener);

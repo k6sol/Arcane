@@ -837,6 +837,10 @@ body.arcane-app {
 .arcane-app #codex-picker-back .icon {width:14px;height:14px}
 .arcane-app #codex-picker-model-list {min-width:0}
 .arcane-app .picker-model-list-heading {display:flex;align-items:center;gap:8px;margin-bottom:8px;color:var(--text-secondary);font-size:12px}
+/* Provider groups in the shared model list (ChatGPT / Claude). */
+.arcane-app .model-group-heading {display:flex;align-items:center;gap:8px;margin:10px 4px 4px;color:var(--text-secondary);font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.arcane-app .model-group-heading:first-child {margin-top:2px}
+.arcane-app .model-group-heading::after {content:"";flex:1;height:1px;background:linear-gradient(90deg,rgba(255,51,64,.45),rgba(255,255,255,0))}
 .arcane-app .picker-model-list-heading #codex-picker-back {width:28px;min-width:28px;height:28px;min-height:28px;margin:0;padding:6px}
 .arcane-app .composer-model-popover input[type=search] {
   min-height:36px;padding:8px 10px;font-size:12px;border-radius:8px;

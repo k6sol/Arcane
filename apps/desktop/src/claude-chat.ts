@@ -3,7 +3,8 @@
 // the same nodes as the Codex chat (tabs strip, Saved chats, #codex-messages transcript, composer and the composer
 // model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
 // the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
-import { composerPickerCheck, positionComposerPopover, renderMessageText } from './codex-chat.js';
+import { composerModelGroupHeading, composerPickerCheck, crossProviderRows, firstModelRow, orderModelGroups, positionComposerPopover, renderMessageText } from './codex-chat.js';
+import type { ComposerModelGroup, ComposerProvider, CrossProviderModels } from './codex-chat.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
@@ -163,6 +164,10 @@ export class ClaudeChat {
   private pickerModels = false;
   private reasoningOpen = false;
   private restoreAttach: boolean | null = null;
+  private crossProvider: CrossProviderModels | null = null;
+  private crossSignature = '';
+  private pendingChoice: { model: string; effort: string | null } | null = null;
+  private readonly modelListeners = new Set<() => void>();
 
   constructor(readonly doc: Document, options: ClaudeChatOptions = {}) {
     this.bridge = Object.hasOwn(options, 'bridge') ? readClaudeChatBridge({ arcaneDesktop: { claudeChat: options.bridge } }) : readClaudeChatBridge(doc?.defaultView);
@@ -297,10 +302,66 @@ export class ClaudeChat {
       try { this.state = readClaudeChatStatus(await bridge.status()); this.statusError = null; }
       catch { this.state = null; this.statusError = 'Claude Code status is unavailable. Reopen the chat to try again.'; }
       this.applyDefaults();
+      this.applyPendingChoice();
+      for (const listener of [...this.modelListeners]) { try { listener(); } catch { /* Observers cannot break the chat. */ } }
       await this.reloadList();
     })().finally(() => { this.refreshing = null; this.render(); });
     this.render();
     return this.refreshing;
+  }
+
+  // ---- Cross-provider model list (presentation only; switching provider is the link's explicit choice) ----
+  /** The other provider's section of the shared model list (null hides it). */
+  setCrossProviderModels(source: CrossProviderModels | null): void { this.crossProvider = source; this.crossSignature = ''; this.crossProviderChanged(); }
+  /** The other provider's models or sign-in changed: redraw an open list when its section differs. */
+  crossProviderChanged(): void {
+    let signature = '';
+    try { signature = JSON.stringify(this.crossProvider?.group() ?? null); } catch { signature = ''; }
+    if (signature === this.crossSignature) return;
+    this.crossSignature = signature;
+    if (this.active && this.pickerOpen()) this.renderPicker();
+  }
+  /** Claude's section for the other provider's model list; null without the desktop bridge or an installed CLI. */
+  modelGroup(): ComposerModelGroup | null {
+    if (!this.bridge || this.state && !this.state.installed) return null;
+    const ready = this.ready();
+    return { provider: 'claude', label: 'Claude', available: ready, hint: !this.state ? (this.refreshing ? 'Checking Claude Code…' : 'Sign in to use') : ready ? 'Choose a model' : 'Sign in to use',
+      models: ready ? this.models().map(id => ({ id, label: claudeModelName(id).full, title: id })) : [] };
+  }
+  /** Reads Claude Code status once so another provider's model list can show Claude models. */
+  loadModels(): Promise<void> { return this.state || !this.bridge ? Promise.resolve() : this.refresh(); }
+  /** Status (models, efforts, sign-in) was read. */
+  subscribeModels(listener: () => void): () => void { this.modelListeners.add(listener); return () => { this.modelListeners.delete(listener); }; }
+  /** Effort of the active Claude tab, carried to the other provider when the user switches from the model list. */
+  currentEffort(): string | null { return this.activeTab()?.effort || null; }
+  /** Moves the unsent composer text out of Claude for a provider switch; the Claude tab keeps an empty draft. */
+  takeComposerDraft(): string {
+    const input = this.input(), tab = this.activeTab();
+    if (!this.active || !input || !input.value) return '';
+    const value = input.value; input.value = ''; if (tab) tab.draft = '';
+    this.renderControls();
+    return value;
+  }
+  /**
+   * Receives a provider switch from the model list: the carried draft becomes the composer text and the chosen model
+   * is selected with the carried effort when Claude Code reports it (otherwise its default). Nothing is sent.
+   */
+  receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }): void {
+    if (!this.active) this.activate();
+    const tab = this.activeTab(), input = this.input();
+    if (handoff.draft && tab) { tab.draft = handoff.draft; if (input) input.value = handoff.draft; }
+    this.pendingChoice = handoff.model ? { model: handoff.model, effort: handoff.effort } : null;
+    this.applyPendingChoice();
+    this.render();
+  }
+  private applyPendingChoice(): void {
+    const pending = this.pendingChoice, tab = this.activeTab();
+    if (!pending || !tab || !this.state) return;
+    this.pendingChoice = null;
+    if (!this.models().includes(pending.model)) return;
+    tab.model = pending.model;
+    if (pending.effort && this.efforts().includes(pending.effort)) tab.effort = pending.effort;
+    this.applyDefaultsTo(tab); this.saveChoice(tab);
   }
 
   /** New chat: reuses an empty draft tab, otherwise opens a new one. */
@@ -652,7 +713,7 @@ export class ClaudeChat {
     }
     const target = key.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts'), search = this.el('codex-model-search');
     const inModels = !!models?.contains(target), inEfforts = !!efforts?.contains(target);
-    if (target === search && key.key === 'Enter') { key.preventDefault(); models?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.click(); return; }
+    if (target === search && key.key === 'Enter') { key.preventDefault(); if (models) firstModelRow(models)?.click(); return; }
     if (target === search && ['ArrowDown', 'ArrowUp'].includes(key.key)) {
       const rows = Array.from(models?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
       const row = key.key === 'ArrowDown' ? rows[0] : rows.at(-1); if (row) { key.preventDefault(); row.focus({ preventScroll: true }); }
@@ -692,6 +753,9 @@ export class ClaudeChat {
       const focusModel = (this.doc.activeElement as HTMLElement | null)?.dataset?.pickerModel;
       host.replaceChildren();
       const rows = models.filter(item => query.every(word => (claudeModelName(item).full + ' ' + item).toLocaleLowerCase().includes(word)));
+      let cross: ComposerModelGroup | null = null;
+      try { cross = this.crossProvider?.group() ?? null; } catch { cross = null; }
+      const own: HTMLElement[] = cross && rows.length ? [composerModelGroupHeading(this.doc, 'Claude', 'claude')] : [];
       for (const item of rows) {
         const row = this.make('button', undefined, 'picker-model-option'); row.type = 'button';
         row.dataset.pickerModel = item; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(item === model));
@@ -699,10 +763,13 @@ export class ClaudeChat {
         row.title = item + (item === this.state?.defaultModel ? ' · Claude Code default' : '');
         row.append(this.make('span', claudeModelName(item).full), composerPickerCheck(this.doc, item === model));
         row.addEventListener('click', () => { if (this.active && this.pickerOpen()) this.chooseModel(item); });
-        host.append(row);
+        own.push(row);
       }
+      // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
+      const other = cross ? crossProviderRows(this.doc, cross, query, id => { if (this.active && this.pickerOpen()) { this.closePicker(); this.crossProvider?.choose(id); } }) : [];
+      for (const node of orderModelGroups('claude' satisfies ComposerProvider, own, cross, other)) host.append(node);
       const empty = this.el('codex-model-empty');
-      if (empty) { empty.hidden = rows.length > 0; empty.textContent = models.length ? 'No Claude models match your search.' : 'Claude Code reported no models.'; }
+      if (empty) { empty.hidden = rows.length + other.length > 0; empty.textContent = models.length ? 'No Claude models match your search.' : 'Claude Code reported no models.'; }
       if (focusModel) Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(row => row.dataset.pickerModel === focusModel)?.focus({ preventScroll: true });
     }
     const effortHost = this.el('codex-picker-efforts');
@@ -845,4 +912,81 @@ export class ClaudeChat {
     this.renderControls();
     this.renderPicker();
   }
+}
+
+/** The Codex chat's side of the shared composer (see CodexChat). */
+export interface CodexComposerPeer {
+  yieldSurface(yielded: boolean): void;
+  setCrossProviderModels(source: CrossProviderModels | null): void;
+  crossProviderChanged(): void;
+  modelGroup(): ComposerModelGroup;
+  currentEffort(): string | null;
+  takeComposerDraft(): string;
+  receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }): void;
+  subscribeStateChange?(listener: () => void): () => void;
+}
+/** Provider setup's side: which provider owns the surface, and an explicit provider choice. */
+export interface ChatProviderSwitch {
+  chatSurface(): ComposerProvider;
+  subscribeChatSurface(listener: () => void): () => void;
+  requestProvider(next: ComposerProvider): boolean;
+}
+export interface ChatProviderLink {
+  /** Applies the current surface owner: Codex yields and Claude activates, or the reverse. Idempotent. */
+  sync(): void;
+  stop(): void;
+}
+const HANDOFF_MS = 120000;
+/**
+ * Links the Codex and Claude chats that share one composer: each model list shows both providers' models, and choosing
+ * the other provider's model requests that provider explicitly through provider setup. When the surface actually
+ * switches, the unsent composer text moves with it and the chosen model is selected with the current effort when the
+ * new provider supports it. A switch never sends a message or starts a turn.
+ */
+export function linkChatProviders(options: { codex: CodexComposerPeer; claude: ClaudeChat; provider: ChatProviderSwitch; enabled?: () => boolean }): ChatProviderLink {
+  const { codex, claude, provider } = options;
+  let pending: { target: ComposerProvider; model: string | null; effort: string | null; at: number } | null = null;
+  let current: ComposerProvider | null = null, stopped = false;
+  const removers: (() => void)[] = [];
+  const request = (target: ComposerProvider, model: string, effort: string | null) => {
+    if (stopped) return;
+    pending = { target, model: model || null, effort, at: Date.now() };
+    if (provider.chatSurface() === target) { sync(); return; }
+    if (!provider.requestProvider(target)) pending = null;
+  };
+  codex.setCrossProviderModels({
+    group: () => claude.modelGroup(),
+    choose: model => request('claude', model, codex.currentEffort()),
+    opened: () => { const loading = claude.loadModels(); codex.crossProviderChanged(); void loading.then(() => codex.crossProviderChanged(), () => {}); },
+  });
+  claude.setCrossProviderModels({ group: () => codex.modelGroup(), choose: model => request('codex', model, claude.currentEffort()) });
+  removers.push(claude.subscribeModels(() => codex.crossProviderChanged()));
+  if (codex.subscribeStateChange) removers.push(codex.subscribeStateChange(() => claude.crossProviderChanged()));
+  const sync = () => {
+    const live = !stopped && (options.enabled?.() ?? true);
+    const next: ComposerProvider = live && provider.chatSurface() === 'claude' ? 'claude' : 'codex';
+    const fresh = pending && Date.now() - pending.at <= HANDOFF_MS ? pending : null;
+    // Only a real switch toward the provider the user picked carries the draft and model; startup, resume and
+    // Settings changes keep each provider's own draft.
+    const carry = live && current !== null && current !== next && fresh?.target === next ? fresh : null;
+    if (carry || !fresh) pending = null;
+    try {
+      if (next === 'claude') {
+        const draft = carry ? codex.takeComposerDraft() : '';
+        codex.yieldSurface(true); claude.activate(); void claude.refresh();
+        if (carry) claude.receiveHandoff({ draft, model: carry.model, effort: carry.effort });
+      } else {
+        const draft = carry ? claude.takeComposerDraft() : '';
+        claude.deactivate(); codex.yieldSurface(false);
+        if (carry) codex.receiveHandoff({ draft, model: carry.model, effort: carry.effort });
+      }
+    } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
+    current = live ? next : null;
+  };
+  removers.push(provider.subscribeChatSurface(sync));
+  sync();
+  return {
+    sync() { stopped = false; sync(); },
+    stop() { stopped = true; pending = null; current = null; },
+  };
 }

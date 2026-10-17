@@ -636,7 +636,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
     assert.equal(route.request().method(), 'GET'); assert.equal(route.request().headers().authorization, 'Bearer ' + app.token);
     await route.fulfill({ json: { state: syntheticProviderState(directory) } });
   });
-  if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'asset-viewer', 'automatic-asset-previews', 'glb-preflight', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'playtest-panel', 'chat-tabs', 'chat-attachments', 'task-usage', 'task-usage-ui']) {
+  if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'asset-viewer', 'automatic-asset-previews', 'glb-preflight', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'playtest-panel', 'chat-tabs', 'chat-attachments', 'task-usage', 'task-usage-ui', 'claude-chat']) {
     await page.route('**/' + name + '.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/' + name + '.js'), 'utf8') }); });
   }
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
