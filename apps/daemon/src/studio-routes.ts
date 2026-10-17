@@ -38,6 +38,8 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       };
       const requireBound=(runId:string):void=>{if(!boundAllowed(runId))throw new ArcaneError('SCOPE','This evidence run belongs to another original native task or is no longer active.');};
       if (agent && ['/v1/studio/pairing', '/v1/studio/revoke', '/v1/studio/keys', '/v1/studio/keys/rotate', '/v1/studio/keys/revoke', '/v1/work/review', '/v1/product/mcp-token'].includes(url.pathname)) throw new ArcaneError('SCOPE', 'Agent bearer cannot grant Studio access, revoke human sessions or approve work. Use the human panel.');
+      // Live Studio output is shown to the person in the dock; it is not an agent read surface.
+      if (url.pathname === '/v1/studio/diagnostics' || url.pathname === '/v1/studio/diagnostics/clear') { if (!human) throw new ArcaneError('SCOPE', 'Studio diagnostics are available to the local launcher session only.'); }
       if (request.method === 'GET' && !plugin) {
         if (work && url.pathname === '/v1/work/runs') { send(200, { runs: human?work.runs():work.runsReadOnly().filter(run=>boundAllowed(run.id)) }); return true; }
         if (work && url.pathname.startsWith('/v1/work/runs/')) {
@@ -51,6 +53,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         }
         if (url.pathname === '/v1/studio/keys') { send(200, {keys:store.keys()}); return true; }
         if (url.pathname === '/v1/studio/sessions') { send(200, { sessions: store.sessions() }); return true; }
+        if (url.pathname === '/v1/studio/diagnostics' && !url.search) { send(200, { diagnostics: store.diagnostics() }); return true; }
         if (url.pathname === '/v1/studio/commands') { send(200, { commands: store.commands(url.searchParams.get('sessionId') ?? undefined) }); return true; }
         if (url.pathname.startsWith('/v1/studio/commands/')) { send(200, { command: store.command(textField(decodeURIComponent(url.pathname.slice('/v1/studio/commands/'.length)), 'command ID')) }); return true; }
         if (url.pathname === '/v1/product/events') { send(200, { events: store.events() }); return true; }
@@ -92,7 +95,11 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
           if(a.executingCommand!==undefined){
             const command=store.command(textField(object(a.executingCommand).commandId,'executing command ID')),proof=store.session(sessionId).proof!;
             send(200,{commands,progress:{commandId:command.id,leaseEpoch:command.leaseEpoch,observedAt:proof.observedAt,expiresAt:proof.expiresAt}});
-          }else send(200,{commands});
+          }else{
+            // Display-only diagnostics never change dispatch, and a malformed report never fails the poll.
+            if(a.diagnostics!==undefined)try{store.recordDiagnostics(sessionId,a.diagnostics);}catch{/* Dropped whole. */}
+            send(200,{commands});
+          }
         }
         else if (url.pathname === '/v1/plugin/result') { store.result(a); send(200, { accepted: true }); }
         else if (url.pathname === '/v1/plugin/disconnect') { store.revoke(sessionId); send(200, { revoked: true }); }
@@ -113,6 +120,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       else if (url.pathname === '/v1/studio/keys/rotate') send(200,store.rotateKey(a,Number(new URL(origin).port)));
       else if (url.pathname === '/v1/studio/keys/revoke') {store.revokeKey(textField(a.keyId,'key ID'));send(200,{revoked:true});}
       else if (url.pathname === '/v1/studio/pairing') send(200, store.createGrant(a));
+      else if (url.pathname === '/v1/studio/diagnostics/clear') { send(200, { cleared: store.clearDiagnostics(a.sessionId === undefined ? undefined : textField(a.sessionId, 'session ID')) }); }
       else if (url.pathname === '/v1/studio/revoke') { store.revoke(textField(a.sessionId, 'session ID')); send(200, { revoked: true }); }
       else if (url.pathname === '/v1/studio/commands') send(200, { command: await store.enqueueVerified(a, sourceVerifier, activationGuard) });
       else if (url.pathname === '/v1/studio/restore') send(200, { command: await store.restoreVerified(a, sourceVerifier, activationGuard) });

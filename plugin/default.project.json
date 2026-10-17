@@ -15,6 +15,7 @@
     "Sha256Stream": { "$path": "src/Sha256Stream.luau" },
       "AssetTransfer": { "$path": "src/AssetTransfer.luau" },
       "AssetMaterials": { "$path": "src/AssetMaterials.luau" },
-      "AssetUpload": { "$path": "src/AssetUpload.luau" }
+      "AssetUpload": { "$path": "src/AssetUpload.luau" },
+      "Diagnostics": { "$path": "src/Diagnostics.luau" }
   }
 }

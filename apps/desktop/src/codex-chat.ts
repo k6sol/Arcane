@@ -412,7 +412,7 @@ export class CodexChatApi {
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
 }
-export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string }
+export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState }
 export class CodexTranscript {
   connectionId=''; cursor=0; gaps=0; dropped=0; truncated=false; messages:ChatMessage[]=[];
   reset(id='') {this.connectionId=id;this.cursor=0;this.gaps=0;this.dropped=0;this.truncated=false;this.messages=[];}
@@ -424,6 +424,14 @@ export class CodexTranscript {
     for(const event of snapshot.events) {
       const seq=eventSequence(event);if(seq<=this.cursor)continue;
       this.gaps+=Math.max(0,seq-this.cursor-1);this.cursor=seq;
+      if(event.type==='item'&&event.itemType==='mcpToolCall'){
+        // Live tool calls report only their state; the saved history later replaces this line with the real result.
+        const key=event.threadId+'\0'+event.turnId+'\0'+event.itemId,toolState:ToolActivityState=event.status==='failed'?'failed':event.status==='completed'?'finished':'started';
+        const existing=this.messages.find(m=>m.role==='tool'&&m.key===key);
+        if(existing)existing.toolState=toolState;
+        else this.messages.push({key,role:'tool',threadId:event.threadId,scope:event.threadId+' · '+event.turnId+' · '+event.itemId,text:'',toolState});
+        continue;
+      }
       if(event.type!=='delta')continue;
       const key=event.threadId+'\0'+event.turnId+'\0'+event.itemId;
       let message=this.messages.find(m=>m.role==='codex'&&m.key===key);
@@ -516,6 +524,318 @@ export function composerPickerCheck(doc:Document,selected:boolean):SVGSVGElement
   const path=doc.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','m5 12 4 4L19 6');
   if(selected)icon.append(path);return icon;
 }
+
+// ---- Chat activity (both providers): plain-language tool lines, per-turn change cards and composer helpers. ----
+// Everything here is presentation only, built from the tool name, input and result each provider actually reports.
+// Text goes through textContent; raw details stay behind a collapsed "Details" disclosure.
+export type ToolActivityState='started'|'finished'|'failed';
+export interface ToolChange {
+  kind:'created'|'updated'|'script'|'enabled'|'disabled';
+  /** Plain-language line, e.g. Created Part "SpawnPlatform" in Workspace. */
+  text:string;
+  /** Mutation receipt (command id) that receipt_restore can revert. */
+  receipt:string;
+  /** Dotted Studio path (display only) for scripts and updated instances. */
+  path:string|null;
+}
+export interface ToolActivity { text:string; change:ToolChange|null }
+const activityRecord=(value:unknown):Record<string,unknown>|null=>value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:null;
+const activityText=(value:unknown,max=100):string|null=>typeof value==='string'&&value.trim()&&!/[\x00-\x1f\x7f]/.test(value)?value.trim().slice(0,max):null;
+/** Parses a bounded JSON tool detail; anything else is null. */
+export function parseToolDetail(value:unknown):unknown {
+  if(typeof value!=='string'||!value||value.length>65536)return null;
+  try{return JSON.parse(value) as unknown;}catch{return null;}
+}
+/** Display path of an opaque Studio reference: root plus its display-only path segments (Workspace.Lobby.Door). */
+export function studioRefPath(value:unknown):string|null {
+  const ref=activityRecord(value),root=activityText(ref?.root,64);
+  if(!ref||!root)return null;
+  const segments=Array.isArray(ref.pathSegments)?ref.pathSegments.slice(0,64).map(part=>activityText(part,100)).filter((part):part is string=>!!part):[];
+  return [root,...segments].join('.');
+}
+const STUDIO_METHOD_TOOLS:Record<string,string>={'scene.children':'scene_children','scene.inspect':'scene_inspect','scene.search':'scene_search','selection.read':'selection_read',
+  'script.read':'script_read','script.search':'script_search','script.update':'script_update','script.set_enabled':'script_set_enabled','scene.create':'scene_create',
+  'scene.update':'scene_update','scene.restore':'receipt_restore'};
+/** Arcane tool name without an MCP server prefix (mcp__arcane__scene_create -> scene_create). */
+export function arcaneToolName(name:string):string {
+  const short=/^mcp__[A-Za-z0-9_-]+?__(.+)$/.exec(name)?.[1]??name;
+  return short.slice(0,128);
+}
+const quoted=(value:string|null)=>value?'"'+value+'"':'';
+/** " (Size, Color)" for the changed properties of a scene_update, or ''. */
+const propertyList=(args:Record<string,unknown>|null)=>{
+  const keys=Object.keys(activityRecord(args?.properties)??{}).filter(key=>/^[A-Za-z]{1,32}$/.test(key)).slice(0,6);
+  return keys.length?' ('+keys.join(', ')+')':'';
+};
+/** Present-tense activity phrase for one Arcane tool call. Unknown tools keep their own name. */
+function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
+  const ref=studioRefPath(args?.ref),root=activityText(args?.root,64),query=activityText(args?.query,60);
+  switch(tool){
+    case 'sessions':return 'Checking the Studio connection';
+    case 'scene_children':return 'Reading '+(ref??root??'the Studio place');
+    case 'scene_inspect':return 'Inspecting '+(ref??'an instance');
+    case 'scene_search':return 'Searching '+(root??'Studio')+(query?' for '+quoted(query):'');
+    case 'selection_read':return 'Reading the Studio selection';
+    case 'script_read':return 'Reading script '+(ref??'');
+    case 'script_search':return 'Searching scripts'+(query?' for '+quoted(query):'');
+    case 'script_update':return 'Updating script '+(ref??'');
+    case 'script_set_enabled':return (args?.enabled===false?'Disabling':'Enabling')+' script '+(ref??'');
+    case 'scene_create':{
+      const kind=activityText(args?.className,64)??'instance',name=activityText(args?.name),parent=studioRefPath(args?.parent);
+      return 'Creating '+kind+(name?' '+quoted(name):'')+(parent?' in '+parent:'');
+    }
+    case 'scene_update':return 'Updating '+(ref??'an instance')+propertyList(args);
+    case 'receipt_status':return 'Checking a change receipt';
+    case 'receipt_restore':return 'Restoring an earlier change';
+    case 'playtest_request':return 'Starting a playtest';
+    case 'playtest_status':return 'Checking the playtest';
+    case 'playtest_cancel':return 'Stopping the playtest';
+    case 'skills_recommend':return 'Choosing the right skills';
+    case 'skills_list':return 'Listing skills';
+    case 'skills_get':return 'Reading skill guidance';
+  }
+  if(tool.startsWith('work_'))return 'Updating the task plan';
+  if(tool.startsWith('assets_'))return 'Working with assets';
+  return 'Using '+tool;
+}
+/**
+ * Describes one tool call from its real name, input and result. A change is reported only for a Studio mutation whose
+ * result carries a succeeded receipt; ambiguous or failed outcomes never produce a change.
+ */
+export function describeToolActivity(name:string,input:unknown,result:unknown,state:ToolActivityState):ToolActivity {
+  const tool=arcaneToolName(name),outcome=activityRecord(result),command=activityRecord(outcome?.command);
+  const args=activityRecord(input)??activityRecord(command?.args);
+  const phrase=toolPhrase(tool,args).trim();
+  const text=state==='started'?phrase+'…':phrase;
+  const receipt=activityText(outcome?.commandId,256);
+  if(state!=='finished'||!receipt||outcome?.state!=='succeeded'||!['scene_create','scene_update','script_update','script_set_enabled'].includes(tool))return {text,change:null};
+  const ref=studioRefPath(args?.ref);
+  if(tool==='scene_create'){
+    const kind=activityText(args?.className,64)??'instance',label=activityText(args?.name),parent=studioRefPath(args?.parent);
+    return {text,change:{kind:'created',text:'Created '+kind+(label?' '+quoted(label):'')+(parent?' in '+parent:''),receipt,path:parent&&label?parent+'.'+label:null}};
+  }
+  if(tool==='scene_update')return {text,change:{kind:'updated',text:'Updated '+(ref??'an instance')+propertyList(args),receipt,path:ref}};
+  if(tool==='script_update')return {text,change:{kind:'script',text:'Edited script '+(ref??''),receipt,path:ref}};
+  const enabled=args?.enabled!==false;
+  return {text,change:{kind:enabled?'enabled':'disabled',text:(enabled?'Enabled':'Disabled')+' script '+(ref??''),receipt,path:ref}};
+}
+/**
+ * Codex history keeps only a tool's result text. Arcane Studio results name their command (method and arguments), so a
+ * result that parses as one describes itself; anything else stays a generic line.
+ */
+export function readToolResultText(text:string):{name:string|null;input:unknown;result:unknown;state:ToolActivityState} {
+  const result=activityRecord(parseToolDetail(text)),command=activityRecord(result?.command),method=typeof command?.method==='string'?command.method:'';
+  const failed=!!result&&(!!activityRecord(result.error)||['failed','cancelled','needs_reconciliation'].includes(String(result.state)));
+  return {name:STUDIO_METHOD_TOOLS[method]??null,input:command?.args??null,result,state:failed?'failed':'finished'};
+}
+const STATE_WORDS:Record<ToolActivityState,string>={started:'Running',finished:'Done',failed:'Failed'};
+/**
+ * The activity line for a tool message: a state mark (red dot running, check finished, cross failed), the plain-language
+ * text in .message-text and, collapsed, the raw details. Returns the nodes to place inside article.codex-message.tool.
+ */
+export function renderToolActivity(doc:Document,activity:ToolActivity,state:ToolActivityState,details:string):HTMLElement[] {
+  const line=doc.createElement('div');line.className='tool-activity';line.dataset.toolState=state;
+  const mark=doc.createElement('span');mark.className='tool-activity-mark';mark.setAttribute('aria-hidden','true');mark.dataset.toolState=state;
+  const label=doc.createElement('span');label.className='message-text tool-activity-text';label.textContent=activity.text;
+  const status=doc.createElement('span');status.className='visually-hidden';status.textContent=' · '+STATE_WORDS[state];
+  line.append(mark,label,status);
+  const more=doc.createElement('details');more.className='message-details tool-details';
+  const summary=doc.createElement('summary');summary.textContent='Details';
+  const pre=doc.createElement('pre');pre.className='hint mono';pre.textContent=details;
+  more.append(summary,pre);
+  return [line,more];
+}
+/** Pretty raw detail text for the collapsed Details: JSON is indented, other text kept as is. */
+export function toolDetailText(parts:readonly [string,unknown][]):string {
+  return parts.filter(([,value])=>value!==null&&value!==undefined&&value!=='').map(([label,value])=>{
+    const parsed=typeof value==='string'?parseToolDetail(value)??value:value;
+    let body:string;try{body=typeof parsed==='string'?parsed:JSON.stringify(parsed,null,2);}catch{body=String(parsed);}
+    return label+': '+body;
+  }).join('\n');
+}
+const CHANGE_NOUNS:Record<ToolChange['kind'],[string,string]>={created:['created','created'],updated:['updated','updated'],script:['script edited','scripts edited'],enabled:['script enabled','scripts enabled'],disabled:['script disabled','scripts disabled']};
+/** Count summary for a change card, e.g. "2 created · 1 script edited". */
+export function changeSummary(changes:readonly ToolChange[]):string {
+  const counts=new Map<ToolChange['kind'],number>();for(const change of changes)counts.set(change.kind,(counts.get(change.kind)??0)+1);
+  return [...counts].map(([kind,count])=>count+' '+CHANGE_NOUNS[kind][count===1?0:1]).join(' · ');
+}
+/** The explicit request a Restore click writes into the composer. It is never sent automatically. */
+export function restoreRequestText(changes:readonly ToolChange[]):string {
+  const receipts=[...new Set(changes.map(change=>change.receipt))].reverse();
+  return 'Please restore the Studio changes from '+(receipts.length===1?'receipt ':'these receipts, newest first: ')+receipts.join(', ')+
+    '. Use receipt_restore for each one and tell me what was restored or why it could not be.';
+}
+/** Writes text into the shared composer for the user to review; nothing is sent. Existing draft text is kept above it. */
+export function prefillComposer(doc:Document,text:string):boolean {
+  const input=doc.getElementById?.('codex-composer') as HTMLTextAreaElement|null;
+  if(!input)return false;
+  const current=input.value.replace(/\s+$/,'');
+  input.value=current?current+'\n\n'+text:text;
+  input.dispatchEvent(new Event('input'));
+  try{input.focus({preventScroll:true});input.setSelectionRange?.(input.value.length,input.value.length);}catch{/* Focus is presentation only. */}
+  return true;
+}
+export interface ChangeCardOptions { copy?:(text:string)=>Promise<void> }
+const CHANGE_CARD_ROWS=8;
+/** One compact card per turn that changed the Studio place: counts, names and actions. Null when nothing changed. */
+export function renderChangeCard(doc:Document,changes:readonly ToolChange[],options:ChangeCardOptions={}):HTMLElement|null {
+  const unique=changes.filter((change,index)=>changes.findIndex(other=>other.receipt===change.receipt)===index);
+  if(!unique.length)return null;
+  const make=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string)=>{const node=doc.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
+  const card=make('section',undefined,'chat-change-card');card.setAttribute('aria-label','Studio changes in this reply');
+  const head=make('div',undefined,'chat-change-head');
+  head.append(make('strong','Studio changes'),make('span',changeSummary(unique),'chat-change-summary'));
+  const list=make('ul',undefined,'chat-change-list');
+  const status=make('p','','chat-change-status');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+  const copy=options.copy??(async (text:string)=>{const clipboard=doc.defaultView?.navigator?.clipboard;if(!clipboard)throw Error('clipboard');await clipboard.writeText(text);});
+  unique.slice(0,CHANGE_CARD_ROWS).forEach(change=>{
+    const row=make('li',undefined,'chat-change-row');row.dataset.changeKind=change.kind;
+    row.append(make('span',change.text,'chat-change-text'));
+    if((change.kind==='script'||change.kind==='enabled'||change.kind==='disabled')&&change.path){
+      const path=change.path,button=make('button','Copy path','quiet chat-change-copy');button.type='button';button.setAttribute('aria-label','Copy path '+path);
+      button.addEventListener('click',()=>{void copy(path).then(()=>{status.textContent='Copied '+path;},()=>{status.textContent='Could not copy. Path: '+path;});});
+      row.append(button);
+    }
+    list.append(row);
+  });
+  if(unique.length>CHANGE_CARD_ROWS)list.append(make('li','+'+(unique.length-CHANGE_CARD_ROWS)+' more','chat-change-row chat-change-more'));
+  const actions=make('div',undefined,'chat-change-actions');
+  const restore=make('button','Restore…','secondary chat-change-restore');restore.type='button';
+  restore.title='Write a restore request into the message box. Review it, then send it yourself.';
+  restore.addEventListener('click',()=>{if(prefillComposer(doc,restoreRequestText(unique)))status.textContent='A restore request is in the message box. Review it, then send it to restore these changes.';});
+  actions.append(restore);
+  card.append(head,list,actions,status);
+  return card;
+}
+
+// ---- Composer commands: "/" opens a small command menu, "@" offers @selection. Shared by both providers. ----
+export const COMPOSER_COMMANDS=Object.freeze([
+  {name:'/new',hint:'Start a new chat'},{name:'/clear-draft',hint:'Clear the message box'},
+  {name:'/model',hint:'Choose model and reasoning'},{name:'/help',hint:'Show composer tips'},
+] as const);
+export const COMPOSER_MENTIONS=Object.freeze([{name:'@selection',hint:'Refer to what is selected in Studio'}] as const);
+export const COMPOSER_TIPS=Object.freeze([
+  'Enter sends. Shift+Enter starts a new line.',
+  'Type / for commands: /new, /clear-draft, /model and /help.',
+  'Type @selection to refer to what is selected in Studio; the assistant reads it with selection_read.',
+  'While Claude is replying, press Enter to queue your next message. It is sent when the reply finishes.',
+  'Studio changes appear in a card after each reply. Restore writes a restore request you can review before sending.',
+]);
+type ComposerMenuItem={name:string;hint:string};
+class ComposerCommands {
+  private mode:'slash'|'mention'|'help'|null=null;
+  private items:ComposerMenuItem[]=[];
+  private index=0;
+  private dismissed:string|null=null;
+  private mention:{start:number;end:number}|null=null;
+  private readonly menu:HTMLElement;
+  constructor(private readonly doc:Document,private readonly input:HTMLTextAreaElement,form:HTMLElement){
+    this.menu=doc.createElement('div');this.menu.id='composer-command-menu';this.menu.className='composer-command-menu';this.menu.hidden=true;
+    form.append(this.menu);
+    this.attr('aria-autocomplete','list');this.attr('aria-controls','composer-command-menu');this.attr('aria-expanded','false');
+    // The menu is optional presentation: a failure here never reaches the chat controllers' own handlers.
+    const safe=<E,>(fn:(event:E)=>void)=>(event:E)=>{try{fn(event);}catch{/* presentation only */}};
+    input.addEventListener('input',safe(()=>this.update()));
+    input.addEventListener('keydown',safe((event:Event)=>this.key(event as KeyboardEvent)));
+    input.addEventListener('blur',safe(()=>{if(this.mode!=='help')this.close();}));
+  }
+  private attr(name:string,value:string|null):void {
+    try{if(value===null)this.input.removeAttribute?.(name);else this.input.setAttribute?.(name,value);}catch{/* presentation only */}
+  }
+  /** True while the command or mention list is offered; Enter then picks from it instead of sending. */
+  listOpen():boolean {return (this.mode==='slash'||this.mode==='mention')&&this.items.length>0;}
+  private update():void {
+    const value=this.input.value;
+    if(this.dismissed!==null&&value===this.dismissed)return;
+    this.dismissed=null;
+    const slash=/^\/([a-z-]*)$/i.exec(value);
+    if(slash){this.open('slash',COMPOSER_COMMANDS.filter(command=>command.name.startsWith('/'+slash[1]!.toLowerCase())));return;}
+    const caret=typeof this.input.selectionStart==='number'?this.input.selectionStart:value.length;
+    const at=/(^|\s)@([a-z]*)$/i.exec(value.slice(0,caret));
+    if(at){
+      const query=at[2]!.toLowerCase(),start=caret-at[2]!.length-1;
+      const items=COMPOSER_MENTIONS.filter(item=>item.name.startsWith('@'+query)&&item.name!=='@'+query);
+      this.mention={start,end:caret};this.open('mention',items);return;
+    }
+    this.close();
+  }
+  private open(mode:'slash'|'mention',items:readonly ComposerMenuItem[]):void {
+    if(!items.length){this.close();return;}
+    const same=this.mode===mode&&items.length===this.items.length&&items.every((item,i)=>item.name===this.items[i]?.name);
+    this.mode=mode;this.items=[...items];if(!same)this.index=0;this.index=Math.min(this.index,this.items.length-1);
+    this.render();
+  }
+  close():void {
+    if(this.mode===null&&this.menu.hidden)return; // Typing with the menu closed does no DOM work.
+    this.mode=null;this.items=[];this.mention=null;this.menu.hidden=true;this.menu.replaceChildren();
+    this.attr('aria-expanded','false');this.attr('aria-activedescendant',null);
+  }
+  private render():void {
+    const menu=this.menu;menu.replaceChildren();menu.hidden=false;
+    menu.setAttribute('role','listbox');menu.setAttribute('aria-label',this.mode==='mention'?'Mentions':'Commands');menu.dataset.mode=this.mode??'';
+    this.items.forEach((item,i)=>{
+      const option=this.doc.createElement('div');option.id='composer-command-option-'+i;option.className='composer-command-option';
+      option.setAttribute('role','option');option.setAttribute('aria-selected',String(i===this.index));
+      const name=this.doc.createElement('span');name.className='composer-command-name';name.textContent=item.name;
+      const hint=this.doc.createElement('span');hint.className='composer-command-hint';hint.textContent=item.hint;
+      option.append(name,hint);
+      option.addEventListener('pointerdown',event=>event.preventDefault());
+      option.addEventListener('click',()=>{this.index=i;this.choose();});
+      menu.append(option);
+    });
+    this.attr('aria-expanded','true');this.attr('aria-activedescendant','composer-command-option-'+this.index);
+  }
+  private key(event:KeyboardEvent):void {
+    if(event.isComposing||event.altKey||event.ctrlKey||event.metaKey)return;
+    if(this.mode==='help'){if(event.key==='Escape'){event.preventDefault();this.close();}return;}
+    if(!this.listOpen())return;
+    if(event.key==='ArrowDown'||event.key==='ArrowUp'){
+      event.preventDefault();const step=event.key==='ArrowDown'?1:-1;this.index=(this.index+step+this.items.length)%this.items.length;this.render();return;
+    }
+    if(event.key==='Escape'){event.preventDefault();this.dismissed=this.input.value;this.close();return;}
+    if((event.key==='Enter'&&!event.shiftKey)||event.key==='Tab'&&!event.shiftKey){event.preventDefault();this.choose();}
+  }
+  private setValue(value:string,caret=value.length):void {
+    this.input.value=value;
+    try{this.input.setSelectionRange?.(caret,caret);}catch{/* Caret placement is presentation only. */}
+    this.input.dispatchEvent(new Event('input'));
+  }
+  private choose():void {
+    const item=this.items[this.index];if(!item)return;
+    if(this.mode==='mention'&&this.mention){
+      const value=this.input.value,{start,end}=this.mention,insert=item.name+' ';
+      this.close();this.setValue(value.slice(0,start)+insert+value.slice(end),start+insert.length);return;
+    }
+    this.close();this.setValue('');
+    const button=(id:string)=>{const node=this.doc.getElementById(id) as HTMLButtonElement|null;if(node&&!node.disabled)node.click();return !!node&&!node.disabled;};
+    if(item.name==='/new'){button('workspace-new-chat');try{this.input.focus();}catch{/* presentation only */}}
+    else if(item.name==='/model')button('codex-model-trigger');
+    else if(item.name==='/help')this.help();
+  }
+  private help():void {
+    const menu=this.menu;menu.replaceChildren();menu.hidden=false;this.mode='help';
+    menu.setAttribute('role','note');menu.setAttribute('aria-label','Composer tips');menu.dataset.mode='help';
+    const title=this.doc.createElement('strong');title.textContent='Tips';
+    const list=this.doc.createElement('ul');
+    for(const tip of COMPOSER_TIPS){const row=this.doc.createElement('li');row.textContent=tip;list.append(row);}
+    const close=this.doc.createElement('p');close.className='hint';close.textContent='Press Esc or start typing to close.';
+    menu.append(title,list,close);
+    // Typing closes the tips (update() runs on every input).
+    this.attr('aria-expanded','false');this.attr('aria-activedescendant',null);
+  }
+}
+const composerCommands=new WeakMap<Document,ComposerCommands>();
+/** Installs the shared "/" and "@" composer menu once per document (both chat controllers call this). */
+export function installComposerCommands(doc:Document):void {
+  try{
+    if(!doc||composerCommands.has(doc))return;
+    const input=doc.getElementById('codex-composer') as HTMLTextAreaElement|null,form=doc.getElementById('codex-compose');
+    if(!input||!form)return;
+    composerCommands.set(doc,new ComposerCommands(doc,input,form));
+  }catch{/* The command menu is optional presentation. */}
+}
+/** True while the composer command/mention list is open: Enter picks from it and must not send. */
+export function composerMenuOpen(doc:Document):boolean {return composerCommands.get(doc)?.listOpen()??false;}
 export type ComposerProvider='codex'|'claude';
 /** One provider's section of the shared composer model list (presentation data only). */
 export interface ComposerModelGroup {
@@ -1548,8 +1868,11 @@ export class CodexChat {
     this.on('codex-revoke','click',()=>{const t=this.snapshot()?.thread;if(t)void this.dispatch('revoke-writes',{threadId:t.threadId});});
     this.on('codex-interrupt','click',()=>this.stopCurrentTask());
     this.on('codex-composer','input',()=>this.composerInput());
+    installComposerCommands(this.doc);
     this.on('codex-composer','keydown',event=>{
       const key=event as KeyboardEvent;
+      // While the "/" or "@" menu is open, Enter picks from it instead of sending.
+      if(event.defaultPrevented||composerMenuOpen(this.doc))return;
       if(key.key==='Enter'&&!key.shiftKey&&!key.altKey&&!key.ctrlKey&&!key.metaKey&&!key.isComposing&&key.keyCode!==229&&this.messageTargetReady()){
         event.preventDefault();void this.submitMessage();
       }
@@ -1778,11 +2101,27 @@ export class CodexChat {
     this.messageSignature=messageSignature;
     const messages=this.el('codex-messages'),bottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<80;messages.replaceChildren();
     if(!displayedMessages.length)messages.append(this.make('p',this.tabs?.active()?.kind==='draft'?'Local draft. Starting a conversation will not send your message.':this.tabs?.recording()?.recorded?'No public text entries in this saved recording.':'No public history has been loaded for this conversation.','empty'));
+    // Studio changes are summarised once per turn, after that turn's last message.
+    let turnChanges:ToolChange[]=[],turnKey:string|null=null;
+    const flushChanges=()=>{const card=renderChangeCard(this.doc,turnChanges);if(card)messages.append(card);turnChanges=[];};
     for(const message of displayedMessages){
-      const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');if(message.role==='tool')card.setAttribute('aria-label','Public tool output');card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text)):this.make('pre',message.text,'message-text'));
+      const turn=message.key.split('\0')[1]??null;
+      if(turn!==turnKey){flushChanges();turnKey=turn;}
+      const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');
+      if(message.role==='tool'){
+        // Plain-language activity line; the raw result stays in the collapsed Details.
+        card.setAttribute('aria-label','Tool activity');
+        const read=message.text?readToolResultText(message.text):null,state:ToolActivityState=message.toolState??read?.state??'finished';
+        const activity=read?.name?describeToolActivity(read.name,read.input,read.result,state):{text:message.text?'Tool output':state==='started'?'Using an Arcane tool…':'Used an Arcane tool',change:null};
+        if(activity.change)turnChanges.push(activity.change);
+        card.dataset.toolState=state;card.append(...renderToolActivity(this.doc,activity,state,this.api.safe(message.scope+(message.text?'\n'+message.text:''))));
+        messages.append(card);continue;
+      }
+      card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text)):this.make('pre',message.text,'message-text'));
       if(message.acknowledgement){const acknowledgement=message.acknowledgement==='Native acknowledgement: acknowledged'?'Accepted':message.acknowledgement==='Native acknowledgement: rejected'?'Not accepted':'Awaiting confirmation';card.append(this.make('p',acknowledgement,'message-acknowledgement'));}
       const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));card.append(metadata);messages.append(card);
     }
+    flushChanges();
     if(bottom)messages.scrollTop=messages.scrollHeight;
     }
     this.text('codex-events-note','Event sequence '+this.transcript.cursor+' · native dropped '+this.transcript.dropped+' · missing sequences '+this.transcript.gaps+(this.transcript.truncated?' · public display truncated; earlier text may be missing.':' · bounded public message stream.'));

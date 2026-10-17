@@ -207,16 +207,16 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const browserSource = await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), 'utf8');
   assert.match(browserSource, /from ['"]\.\/codex-chat\.js['"]/);
   const dynamicImports=[...browserSource.matchAll(/\bimport\s*\(([^)]+)\)/g)].map(match=>match[1]!.trim());
-  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./task-plan-boot.js'", "'./chat-tabs.js'", "'./chat-attachments.js'"],'Only fixed reviewed workflow, task status, chat and attachment modules may load dynamically.');
-  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|task-plan-boot|chat-tabs|chat-attachments)\.js\1\s*\)/g,'');
+  assert.deepEqual(dynamicImports,["'./workflow-panel.js'", "'./task-plan-boot.js'", "'./studio-diagnostics.js'", "'./chat-tabs.js'", "'./chat-attachments.js'"],'Only fixed reviewed workflow, task status, Studio output dock, chat and attachment modules may load dynamically.');
+  const withoutApprovedWorkflow=browserSource.replace(/\bimport\s*\(\s*(['"])\.\/(?:workflow-panel|task-plan-boot|studio-diagnostics|chat-tabs|chat-attachments)\.js\1\s*\)/g,'');
   assert.doesNotMatch(withoutApprovedWorkflow, /\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m);
   // Parse the emitted module without linking/evaluating it; prose/string payloads
   // containing `from '...'` are not runtime dependencies.
   const parsed=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:browserSource,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
   assert.ifError(parsed.error);assert.equal(parsed.status,0,parsed.stderr);
   const staticModules=JSON.parse(parsed.stdout) as string[];
-  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./claude-chat.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./native-handoff.js','./playtest-panel.js','./provider-setup.js','./studio-key-settings.js','./task-usage-ui.js','./workspace-shell.js']);
-  for(const [name,dependencies] of [['task-plan-boot',['./codex-task-plan.js']],['codex-task-plan',[]]] as const){
+  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./claude-chat.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./learning-panel.js','./native-handoff.js','./playtest-panel.js','./provider-setup.js','./setup-checklist.js','./studio-key-settings.js','./task-usage-ui.js','./workspace-shell.js']);
+  for(const [name,dependencies] of [['task-plan-boot',['./codex-task-plan.js']],['codex-task-plan',[]],['studio-diagnostics',[]]] as const){
     const source=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/'+name+'.js'),'utf8');
     assert.doesNotMatch(source,/\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m,name+' stays browser-only');
     const module=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:source,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
@@ -427,6 +427,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));
   assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
+  assets.set('/studio-diagnostics.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-diagnostics.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/playtest-panel.js'));
   const server = createServer((request, response) => { void (async () => {
@@ -636,7 +637,7 @@ test('real browser and daemon: human API keys, key connection and revocation, du
     assert.equal(route.request().method(), 'GET'); assert.equal(route.request().headers().authorization, 'Bearer ' + app.token);
     await route.fulfill({ json: { state: syntheticProviderState(directory) } });
   });
-  if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'asset-viewer', 'automatic-asset-previews', 'glb-preflight', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'playtest-panel', 'chat-tabs', 'chat-attachments', 'task-usage', 'task-usage-ui', 'claude-chat']) {
+  if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'asset-viewer', 'automatic-asset-previews', 'glb-preflight', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'playtest-panel', 'chat-tabs', 'chat-attachments', 'task-usage', 'task-usage-ui', 'claude-chat', 'setup-checklist', 'studio-diagnostics']) {
     await page.route('**/' + name + '.js', async (route: any) => { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR!, 'apps/desktop/src/' + name + '.js'), 'utf8') }); });
   }
   const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
@@ -770,6 +771,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   assets.set('/chat-attachments.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-attachments.js'));
   assets.set('/task-usage.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage.js'));
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
+  assets.set('/studio-diagnostics.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio-diagnostics.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/playtest-panel.js'));
   let origin = '';

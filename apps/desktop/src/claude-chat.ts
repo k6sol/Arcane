@@ -3,12 +3,16 @@
 // the same nodes as the Codex chat (tabs strip, Saved chats, #codex-messages transcript, composer and the composer
 // model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
 // the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
-import { composerPickerCheck, crossProviderRows, fillModelOptions, firstModelRow, modelListEntry, modelListMove, positionComposerPopover, prependProviderLogo, renderMessageText } from './codex-chat.js';
-import type { ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit } from './codex-chat.js';
+import {
+  composerMenuOpen, composerPickerCheck, crossProviderRows, describeToolActivity, fillModelOptions, firstModelRow, installComposerCommands, modelListEntry,
+  modelListMove, parseToolDetail, positionComposerPopover, prependProviderLogo, renderChangeCard, renderMessageText, renderToolActivity, toolDetailText,
+} from './codex-chat.js';
+import type { ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
-export interface ClaudeChatTool { name: string; status: ClaudeToolStatus }
+/** input/result are the engine's bounded display details (JSON or a short excerpt); older engines omit them. */
+export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?: string; result?: string }
 export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool }
 export interface ClaudeChatStatus {
   installed: boolean; signedIn: boolean; cliVersion: string | null; models: string[]; efforts: string[];
@@ -90,8 +94,10 @@ export function readClaudeChatMessage(value: unknown): ClaudeChatMessage | null 
   if (!message || typeof message.role !== 'string' || !ROLES.includes(message.role as ClaudeChatRole)) return null;
   const output: ClaudeChatMessage = { id: text(message.id, 256), role: message.role as ClaudeChatRole, text: text(message.text), at: text(message.at, 64) };
   const tool = record(message.tool);
-  if (tool && typeof tool.status === 'string' && TOOL_STATES.includes(tool.status as ClaudeToolStatus))
+  if (tool && typeof tool.status === 'string' && TOOL_STATES.includes(tool.status as ClaudeToolStatus)) {
     output.tool = { name: text(tool.name, 256) || 'Tool', status: tool.status as ClaudeToolStatus };
+    for (const key of ['input', 'result'] as const) if (typeof tool[key] === 'string' && (tool[key] as string).length <= 4096) output.tool[key] = tool[key] as string;
+  }
   return output;
 }
 function readConversations(value: unknown): ClaudeChatConversation[] {
@@ -124,6 +130,24 @@ export function formatClaudeUsage(value: unknown): string | null {
   if (cost !== null) parts.push('$' + cost.toFixed(4));
   return parts.length ? 'Done · ' + parts.join(' · ') : null;
 }
+/** Tokens reported by finished replies in one conversation during this app session (presentation only). */
+export interface ClaudeConversationUsage { inputTokens: number; outputTokens: number; costUsd: number | null; replies: number }
+/** Compact token count: 950, 12.3k, 1.2M. */
+export function compactTokens(value: number): string {
+  if (value < 1000) return String(Math.round(value));
+  if (value < 1e6) return (value / 1000).toFixed(value < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  return (value / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+/** The meter's accessible description and tooltip. */
+export function usageMeterText(usage: ClaudeConversationUsage): string {
+  const total = usage.inputTokens + usage.outputTokens, format = (n: number) => Math.round(n).toLocaleString('en-US');
+  return 'Tokens used in this conversation: ' + format(total) + ' (' + format(usage.inputTokens) + ' input, ' + format(usage.outputTokens) + ' output' +
+    (usage.costUsd !== null ? ', $' + usage.costUsd.toFixed(4) : '') + ') across ' + usage.replies + (usage.replies === 1 ? ' reply' : ' replies') +
+    ' since Arcane opened. The red arc is the output share.';
+}
+/** At most this many messages wait in the queue while a reply runs. */
+export const CLAUDE_CHAT_QUEUE_LIMIT = 5;
+export const CLAUDE_CHAT_QUEUE_RETURNED_TEXT = 'Queued messages were not sent because the reply did not finish. They are back in the message box.';
 
 const FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'] as const;
 const title = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
@@ -166,6 +190,9 @@ interface Turn {
 }
 interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string }
 type El = HTMLElement;
+/** Claude-only composer nodes created on first activation (studio.html stays provider-neutral). */
+const QUEUE_ID = 'claude-chat-queue', METER_ID = 'claude-usage-meter';
+const SVG_NS = 'http://www.w3.org/2000/svg', RING = 2 * Math.PI * 7;
 
 export class ClaudeChat {
   private readonly bridge: ClaudeChatBridge | null;
@@ -187,7 +214,13 @@ export class ClaudeChat {
   private started = false;
   private active = false;
   private removers: (() => void)[] = [];
-  private tools = new Map<string, { body: HTMLElement; name: string; text: string }>();
+  private tools = new Map<string, { article: HTMLElement; tool: ClaudeChatTool; text: string }>();
+  /** Studio changes reported by the visible turn's tools; shown as one card when the turn ends. */
+  private turnChanges: ToolChange[] = [];
+  /** Messages typed while a reply runs; sent one by one after each reply finishes successfully. */
+  private queue: { id: number; text: string; tabKey: string }[] = [];
+  private queueSeq = 0;
+  private usage = new Map<string, ClaudeConversationUsage>();
   private confirmingDelete = false;
   private deleting = new Set<string>();
   private pickerModels = false;
@@ -236,12 +269,15 @@ export class ClaudeChat {
       target.addEventListener(name, fn, capture); this.removers.push(() => target.removeEventListener(name, fn, capture));
     };
     const input = this.input();
-    listen(this.el('codex-compose'), 'submit', event => { event.preventDefault(); if (!this.turnOwnsActiveTab()) void this.send(); });
+    installComposerCommands(this.doc);
+    listen(this.el('codex-compose'), 'submit', event => { event.preventDefault(); this.submit(); });
     listen(this.el('codex-submit'), 'click', event => { if (this.turnOwnsActiveTab()) { event.preventDefault(); void this.stopTurn(); } });
     listen(input, 'keydown', event => {
       const key = event as KeyboardEvent;
       if (key.key !== 'Enter' || key.shiftKey || key.isComposing || key.altKey || key.ctrlKey || key.metaKey) return;
-      event.preventDefault(); void this.send();
+      // While the "/" or "@" menu is open, Enter picks from it instead of sending.
+      if (event.defaultPrevented || composerMenuOpen(this.doc)) return;
+      event.preventDefault(); this.submit();
     });
     listen(input, 'input', () => { const tab = this.activeTab(); if (tab && input) tab.draft = input.value; this.renderControls(); });
     // Model picker: the same popover and controls as Codex, backed by Claude Code's reported aliases and efforts.
@@ -319,7 +355,8 @@ export class ClaudeChat {
     const attach = this.el('workspace-add-context'); if (attach && this.restoreAttach !== null) attach.hidden = this.restoreAttach;
     this.restoreAttach = null;
     this.el('codex-messages')?.removeAttribute('aria-busy');
-    this.active = false; this.tools.clear(); this.messageCount = 0;
+    for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
+    this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = [];
     if (this.turn) { this.turn.bubble = null; }
   }
 
@@ -446,16 +483,66 @@ export class ClaudeChat {
     else { this.persistTabs(); this.render(); }
   }
 
-  async send(): Promise<void> {
+  /** Enter or Send: sends now, or queues the message while a reply is running. */
+  submit(): void {
+    if (this.turn) this.enqueue(); else void this.send();
+  }
+
+  /** Queues the composer text to send after the running reply finishes successfully. */
+  enqueue(): boolean {
+    const input = this.input(), tab = this.activeTab();
+    if (!this.active || !input || !tab || !this.turn || !this.ready()) return false;
+    const message = input.value.trim();
+    if (!message) return false;
+    if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return false; }
+    if (this.queue.length >= CLAUDE_CHAT_QUEUE_LIMIT) { this.notice = 'Up to ' + CLAUDE_CHAT_QUEUE_LIMIT + ' messages can wait. Remove one or wait for the reply.'; this.render(); return false; }
+    this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key });
+    input.value = ''; tab.draft = '';
+    this.notice = '';
+    this.render();
+    return true;
+  }
+  /** Queued messages (presentation and tests). */
+  queued(): readonly { id: number; text: string }[] { return this.queue.map(item => ({ id: item.id, text: item.text })); }
+  /** Removes one queued message without sending it. */
+  dequeue(id: number): void {
+    const before = this.queue.length;
+    this.queue = this.queue.filter(item => item.id !== id);
+    if (this.queue.length !== before) this.render();
+  }
+  /** The reply did not finish: every queued message goes back to its chat's draft. Nothing is sent. */
+  private returnQueue(): void {
+    if (!this.queue.length) return;
+    const input = this.input();
+    for (const item of this.queue.splice(0)) {
+      const tab = this.tabs.find(row => row.key === item.tabKey); if (!tab) continue;
+      const shown = this.active && tab.key === this.activeKey && input;
+      const current = (shown ? input!.value : tab.draft).replace(/\s+$/, '');
+      const next = current ? current + '\n\n' + item.text : item.text;
+      tab.draft = next; if (shown) input!.value = next;
+    }
+    this.notice = CLAUDE_CHAT_QUEUE_RETURNED_TEXT;
+  }
+  /** After a successful reply: sends the next queued message when its chat is the one shown; otherwise returns it. */
+  private drainQueue(): void {
+    const head = this.queue[0];
+    if (!head || this.turn) return;
+    if (!this.active || head.tabKey !== this.activeKey || !this.canSend()) { this.returnQueue(); this.render(); return; }
+    this.queue.shift();
+    void this.send(head.text);
+  }
+
+  /** Sends the composer text, or one queued message (which leaves the composer untouched). */
+  async send(queued?: string): Promise<void> {
     const bridge = this.bridge, input = this.input(), tab = this.activeTab();
     if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn) return;
-    const message = input.value.trim();
+    const message = (queued ?? input.value).trim();
     if (!message) return;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return; }
     const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
     const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message };
     this.buffered = []; this.notice = '';
-    input.value = ''; tab.draft = '';
+    if (queued === undefined) { input.value = ''; tab.draft = ''; }
     this.appendMessage({ id: '', role: 'user', text: message, at: new Date().toISOString() }, true);
     this.render();
     let reply: Record<string, unknown> | null, failure = 'Claude could not start this message. Try again.';
@@ -466,7 +553,9 @@ export class ClaudeChat {
       this.turn = null; this.buffered = [];
       const visible = this.active && epoch === this.viewEpoch;
       if (visible) this.appendMessage({ id: '', role: 'error', text: failure, at: '' }, true);
-      if (visible && !input.value) input.value = message; else if (!tab.draft) tab.draft = message;
+      if (queued !== undefined) this.queue.unshift({ id: ++this.queueSeq, text: message, tabKey: tab.key });
+      else if (visible && !input.value) input.value = message; else if (!tab.draft) tab.draft = message;
+      this.returnQueue();
       this.render(); return;
     }
     turn.turnId = turnId; turn.conversationId = nextConversation;
@@ -544,6 +633,8 @@ export class ClaudeChat {
       if (!messages) throw Error('history');
       this.loading = false; this.clearMessages();
       for (const item of messages) { const message = readClaudeChatMessage(item); if (message) this.appendMessage(message, false); }
+      // The last saved turn's changes; a turn still running in this chat shows its card when it finishes.
+      if (this.turn?.conversationId !== tab.conversationId) this.flushChanges();
       this.scrollToBottom();
     } catch (error) {
       if (epoch !== this.viewEpoch || !this.active) return;
@@ -622,9 +713,13 @@ export class ClaudeChat {
           const tab = this.tabs.find(row => row.key === turn.tabKey), input = this.input(), shown = this.active && tab?.key === this.activeKey;
           if (tab && !tab.draft.trim() && !(shown && input?.value.trim())) { tab.draft = turn.prompt; if (shown && input) input.value = turn.prompt; }
         }
+        if (visible) this.flushChanges();
         if (visible && !ok && !(turn.stopping && !error)) this.appendMessage({ id: '', role: 'error', text: error ?? 'Claude stopped before finishing.', at: '' }, true);
         this.notice = turn.stopping && !ok ? 'Stopped.' : formatClaudeUsage(event.usage) ?? (ok ? 'Done.' : '');
+        this.addUsage(turn.conversationId, event.usage);
         if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
+        // The queue continues only after a reply that finished; a failure, Stop or usage limit returns it to the draft.
+        if (ok) this.drainQueue(); else this.returnQueue();
         this.render();
         void this.reloadList().then(() => this.render());
         return;
@@ -632,20 +727,53 @@ export class ClaudeChat {
     }
   }
 
+  /** Accumulates a finished reply's reported tokens for its conversation's meter. */
+  private addUsage(conversationId: string | null, value: unknown): void {
+    const usage = record(value); if (!conversationId || !usage) return;
+    const input = finite(usage.inputTokens), output = finite(usage.outputTokens), cost = finite(usage.costUsd);
+    if (input === null && output === null) return;
+    const row = this.usage.get(conversationId) ?? { inputTokens: 0, outputTokens: 0, costUsd: null, replies: 0 };
+    row.inputTokens += input ?? 0; row.outputTokens += output ?? 0; row.replies++;
+    if (cost !== null) row.costUsd = (row.costUsd ?? 0) + cost;
+    this.usage.set(conversationId, row);
+  }
+  /** Token totals for a conversation reported during this app session; null before its first finished reply. */
+  conversationUsage(conversationId: string | null = this.activeConversation()): ClaudeConversationUsage | null {
+    const row = conversationId ? this.usage.get(conversationId) : undefined; return row ? { ...row } : null;
+  }
+  /** Shows the visible turn's Studio changes as one card after its messages. */
+  private flushChanges(): void {
+    const changes = this.turnChanges; this.turnChanges = [];
+    const box = this.el('codex-messages'); if (!box || !this.active || !changes.length) return;
+    const card = renderChangeCard(this.doc, changes); if (!card) return;
+    const near = this.nearBottom(); box.append(card); if (near) this.scrollToBottom();
+  }
+  private toolArticle(message: ClaudeChatMessage, tool: ClaudeChatTool, extra: string): HTMLElement {
+    const article = this.make('article', undefined, 'codex-message tool');
+    article.setAttribute('data-role', 'tool'); article.setAttribute('aria-label', 'Tool activity'); article.dataset.toolState = tool.status;
+    const activity = describeToolActivity(tool.name, parseToolDetail(tool.input), parseToolDetail(tool.result), tool.status);
+    if (activity.change && !this.turnChanges.some(change => change.receipt === activity.change!.receipt)) this.turnChanges.push(activity.change);
+    const scope = 'Claude · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : '');
+    article.append(...renderToolActivity(this.doc, activity, tool.status,
+      toolDetailText([['Tool', tool.name], ['Input', tool.input], ['Result', tool.result], ['Note', extra], ['Message', scope]])));
+    return article;
+  }
+
   /** Codex transcript markup: article.codex-message.{human|codex|tool} > pre.message-text + Message details. */
   private messageElement(message: ClaudeChatMessage): HTMLElement {
     const role = message.role === 'user' ? 'human' : message.role === 'assistant' ? 'codex' : 'tool';
-    const article = this.make('article', undefined, 'codex-message ' + role);
-    article.setAttribute('data-role', message.role);
-    article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : message.role === 'tool' ? 'Public tool output' : 'Error');
-    const body = this.make('pre', undefined, 'message-text');
     if (message.tool || message.role === 'tool') {
       const tool = message.tool ?? { name: message.text || 'Tool', status: 'finished' as const };
       const extra = message.tool && message.text && message.text !== message.tool.name ? message.text : '';
-      body.textContent = this.toolText(tool, extra);
-      if (message.id) this.tools.set(message.id, { body, name: tool.name, text: extra });
-      article.append(body);
-    } else article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text) : Object.assign(body, { textContent: message.text }));
+      const article = this.toolArticle(message, tool, extra);
+      if (message.id) this.tools.set(message.id, { article, tool, text: extra });
+      return article;
+    }
+    const article = this.make('article', undefined, 'codex-message ' + role);
+    article.setAttribute('data-role', message.role);
+    article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : 'Error');
+    const body = this.make('pre', undefined, 'message-text');
+    article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text) : Object.assign(body, { textContent: message.text }));
     if (message.role === 'error') article.append(this.make('p', 'Not completed', 'message-acknowledgement'));
     const details = this.make('details', undefined, 'message-details');
     details.append(this.make('summary', 'Message details'), this.make('pre', 'Claude · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : ''), 'hint mono'));
@@ -657,13 +785,17 @@ export class ClaudeChat {
     const body = article.querySelector<HTMLElement>(".message-text"), next = renderMessageText(this.doc, value);
     if (body) body.replaceWith(next); else article.prepend(next);
   }
-  private toolText(tool: ClaudeChatTool, extra: string): string {
-    return tool.name + (tool.status === 'started' ? ' · running' : tool.status === 'failed' ? ' · failed' : ' · done') + (extra ? '\n' + extra : '');
-  }
-
   private appendMessage(message: ClaudeChatMessage, scroll: boolean): HTMLElement {
     const known = message.id && message.tool ? this.tools.get(message.id) : undefined;
-    if (known) { known.body.textContent = this.toolText(message.tool!, known.text); return known.body; }
+    if (known) {
+      // Status update of a shown tool line: the started event's input is kept when the update omits it.
+      const tool: ClaudeChatTool = { ...message.tool!, ...(message.tool!.input === undefined && known.tool.input !== undefined ? { input: known.tool.input } : {}) };
+      const next = this.toolArticle(message, tool, known.text);
+      known.article.replaceWith(next); this.tools.set(message.id, { article: next, tool, text: known.text });
+      return next;
+    }
+    // A new user message starts a new turn: the previous turn's changes are summarised first.
+    if (message.role === 'user') this.flushChanges();
     const box = this.el('codex-messages');
     const element = this.messageElement(message);
     if (!box) return element;
@@ -675,7 +807,7 @@ export class ClaudeChat {
   }
 
   private clearMessages(): void {
-    this.tools.clear(); this.messageCount = 0;
+    this.tools.clear(); this.messageCount = 0; this.turnChanges = [];
     const box = this.el('codex-messages'); if (!box || !this.active) return;
     box.replaceChildren(this.make('p', this.loading ? 'Loading conversation…' : CLAUDE_CHAT_EMPTY_TEXT, 'empty'));
   }
@@ -933,7 +1065,12 @@ export class ClaudeChat {
     if (!this.state.installed) return this.state.message ?? 'Install Claude Code to chat with Claude.';
     if (!this.state.signedIn) return this.state.message ?? 'Sign in to Claude Code to chat with Claude.';
     if (!this.models().length || !this.efforts().length) return 'Claude Code reported no model or reasoning choices. Update Claude Code, then reopen the chat.';
-    if (this.turn) return this.turn.turnId === null ? 'Sending…' : this.turn.stopping ? 'Stopping…' : this.turnOwnsActiveTab() ? 'Claude is working…' : 'Claude is replying in another chat.';
+    if (this.turn && this.notice && this.turn.turnId !== null && !this.turn.stopping) return this.notice;
+    if (this.turn) {
+      const waiting = this.queue.filter(item => item.tabKey === this.activeKey).length;
+      const queued = waiting ? ' ' + waiting + (waiting === 1 ? ' message' : ' messages') + ' queued.' : ' Press Enter to queue your next message.';
+      return this.turn.turnId === null ? 'Sending…' : this.turn.stopping ? 'Stopping…' : (this.turnOwnsActiveTab() ? 'Claude is working…' : 'Claude is replying in another chat.') + queued;
+    }
     return this.notice || 'Continue in this conversation.';
   }
 
@@ -965,6 +1102,60 @@ export class ClaudeChat {
     this.renderSaved();
     this.renderControls();
     this.renderPicker();
+    this.renderQueue();
+    this.renderMeter();
+  }
+
+  /** Pending chips above the composer for messages queued in the shown chat; each can be removed. */
+  private renderQueue(): void {
+    let host = this.el(QUEUE_ID);
+    const form = this.el('codex-compose');
+    if (!host && form) {
+      host = this.make('div', undefined, 'composer-queue'); host.id = QUEUE_ID;
+      host.setAttribute('role', 'list'); host.setAttribute('aria-label', 'Queued messages');
+      form.prepend(host);
+    }
+    if (!host) return;
+    const items = this.queue.filter(item => item.tabKey === this.activeKey);
+    host.hidden = !this.active || !items.length;
+    const signature = JSON.stringify(items.map(item => item.id));
+    if (host.dataset.signature === signature) return;
+    host.dataset.signature = signature; host.replaceChildren();
+    items.forEach((item, index) => {
+      const chip = this.make('span', undefined, 'composer-queue-chip'); chip.setAttribute('role', 'listitem'); chip.title = item.text;
+      const preview = item.text.replace(/\s+/g, ' ');
+      chip.append(this.make('span', 'Queued ' + (index + 1), 'composer-queue-label'), this.make('span', preview.length > 60 ? preview.slice(0, 59) + '…' : preview, 'composer-queue-text'));
+      const remove = this.make('button', '×', 'composer-queue-remove'); remove.type = 'button';
+      remove.setAttribute('aria-label', 'Remove queued message ' + (index + 1) + ': ' + preview.slice(0, 80));
+      remove.addEventListener('click', () => { if (this.active) { this.dequeue(item.id); this.input()?.focus({ preventScroll: true }); } });
+      chip.append(remove); host!.append(chip);
+    });
+  }
+
+  /** Small ring + count of tokens this conversation used (from finished replies' usage), with a tooltip. */
+  private renderMeter(): void {
+    let meter = this.el(METER_ID);
+    const controls = this.el('codex-compose')?.querySelector?.<HTMLElement>('.composer-controls') ?? null;
+    if (!meter && controls) {
+      meter = this.make('span', undefined, 'claude-usage-meter'); meter.id = METER_ID; meter.setAttribute('role', 'img');
+      const ring = this.doc.createElementNS(SVG_NS, 'svg'); ring.setAttribute('viewBox', '0 0 18 18'); ring.setAttribute('aria-hidden', 'true'); ring.setAttribute('class', 'usage-ring');
+      for (const name of ['usage-ring-track', 'usage-ring-output']) {
+        const circle = this.doc.createElementNS(SVG_NS, 'circle'); circle.setAttribute('cx', '9'); circle.setAttribute('cy', '9'); circle.setAttribute('r', '7'); circle.setAttribute('class', name);
+        ring.append(circle);
+      }
+      meter.append(ring as unknown as HTMLElement, this.make('span', '', 'usage-meter-count'));
+      controls.prepend(meter);
+    }
+    if (!meter) return;
+    const usage = this.conversationUsage();
+    meter.hidden = !this.active || !usage;
+    if (!usage) return;
+    const total = usage.inputTokens + usage.outputTokens, label = usageMeterText(usage);
+    meter.setAttribute('aria-label', label); meter.title = label;
+    const count = meter.querySelector?.<HTMLElement>('.usage-meter-count'); if (count) count.textContent = compactTokens(total);
+    const arc = meter.querySelector?.('.usage-ring-output');
+    const share = total > 0 ? usage.outputTokens / total : 0;
+    arc?.setAttribute('stroke-dasharray', (Math.max(share, total ? 0.04 : 0) * RING).toFixed(2) + ' ' + RING.toFixed(2));
   }
 }
 

@@ -270,6 +270,8 @@ function Transport:exchange(desired: any): ()
 	local capabilities = table.clone(V.READ_METHODS)
 	for _, method in ipairs(V.WRITE_METHODS) do table.insert(capabilities, method) end
 	for _, method in ipairs(V.ASSET_STAGE_METHODS or {}) do table.insert(capabilities, method) end
+	-- Output diagnostics are advertised only when Main attached the bounded collector.
+	if self.diagnostics and type(self.diagnostics.CAPABILITY) == "string" then table.insert(capabilities, self.diagnostics.CAPABILITY) end
 	local isKey = desired.apiKey ~= nil
 	local payload: any = {
 		protocolVersion = V.PROTOCOL,
@@ -580,12 +582,20 @@ function Transport:tick(): number
 		return if self.blocked then Transport.POLL_SECONDS else 0
 	end
 	if self.blocked then return Transport.POLL_SECONDS end
-	local response = self:post(pair.url, ROUTES.poll, {sessionId = pair.sessionId, observation = observation}, pair.token)
+	local body: any = {sessionId = pair.sessionId, observation = observation}
+	-- Changed output diagnostics ride on the idle poll; a collector fault never blocks work.
+	local diagnostics, batch = self.diagnostics, nil
+	if diagnostics then
+		local taken, value = pcall(function(): any return diagnostics:take(function(item: any): string return V.encode(item, self.http) end) end)
+		if taken and type(value) == "table" and #value.entries > 0 then batch = value; body.diagnostics = V.array(value.entries) end
+	end
+	local response = self:post(pair.url, ROUTES.poll, body, pair.token)
 	-- A poll that returns after disconnect/re-pair can never dispatch old work.
 	if self.stopped or self.pair ~= pair or self.generation ~= pair.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
 	self:checkIdentity(pair)
 	V.fields(response, {"commands"}, "poll response")
 	local commands = V.list(response.commands, 1, "command queue")
+	if batch then pcall(function() diagnostics:ack(batch) end) end
 	if #commands == 1 then
 		self:dispatch(commands[1])
 		return 0 -- Post the receipt on the next tick without an idle sleep.

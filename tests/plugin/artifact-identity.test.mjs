@@ -43,7 +43,7 @@ ${identityCode}
 local expected = ${JSON.stringify(build.manifest.runtimeIdentity.sha256)}
 assert(loadedArtifactHash() == expected, "actual loaded source hierarchy must match the builder identity")
 local child = script.children[#script.children]
-local original = child.Source
+local original, originalName = child.Source, child.Name
 child.Source ..= "-- Changed child source.\\n"
 assert(loadedArtifactHash() ~= expected, "changing a child must change the identity even when Main stays identical")
 child.Source = utf8.char(0xFEFF) .. string.gsub(original, "\\n", "\\r\\n")
@@ -51,7 +51,7 @@ assert(loadedArtifactHash() == expected, "source normalization must agree across
 child.Source = original
 child.Name = "Unknown"
 assert(loadedArtifactHash() == nil, "same-count unknown module must fail closed")
-child.Name = "AssetUpload"
+child.Name = originalName
 child.children = {instance("Unexpected", "ModuleScript", "")}
 assert(loadedArtifactHash() == nil, "nested source cannot escape the inventory")
 child.children = {}

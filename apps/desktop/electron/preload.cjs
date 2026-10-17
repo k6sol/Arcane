@@ -213,6 +213,13 @@ const claudeChatMessage = value => {
     if (!value.tool || typeof value.tool !== 'object' || !claudeChatText(value.tool.name, 128) || !value.tool.name ||
         !['started', 'finished', 'failed'].includes(value.tool.status)) claudeChatUnavailable();
     out.tool = { name: value.tool.name, status: value.tool.status };
+    // Optional display-only details (bounded JSON or a short excerpt) for activity lines and change cards.
+    for (const key of ['input', 'result']) {
+      const detail = value.tool[key];
+      if (detail === undefined) continue;
+      if (!claudeChatText(detail, 4096)) claudeChatUnavailable();
+      out.tool[key] = detail;
+    }
   }
   return out;
 };
@@ -298,4 +305,35 @@ const claudeChat = Object.freeze({ version: 1,
     return () => { if (active) { active = false; ipcRenderer.removeListener('arcane:claude-chat-event', wrapped); } };
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat }));
+// Studio plugin install: zero-argument intents. Paths, hashes and the confirm dialog stay in the native host;
+// only a fixed state, the bundled version and one of the host's fixed messages come back.
+const STUDIO_PLUGIN_UNAVAILABLE = 'Studio plugin setup is unavailable.';
+const STUDIO_PLUGIN_MESSAGES = [STUDIO_PLUGIN_UNAVAILABLE, 'The Arcane Studio plugin is installed and current.',
+  'An older Arcane Studio plugin is installed. Update it to match this app.', 'The Arcane Studio plugin is not installed yet.',
+  'Arcane Studio plugin installed. Restart Roblox Studio to load it.', 'The Arcane Studio plugin is already current.',
+  'Plugin install cancelled. Nothing was changed.', 'Studio plugin setup is disabled in verification mode.',
+  'One-click plugin install is available on Windows.', 'The Roblox Studio Plugins folder could not be found.',
+  'The bundled Arcane plugin failed its integrity check. Reinstall Arcane, then try again.',
+  'Another plugin already uses the Arcane plugin file name. Remove or rename it, then try again.',
+  'A plugin install is already running.', 'The plugin folder changed during install. Nothing was overwritten; try again.'];
+const studioPluginInvoke = async (action, args) => {
+  if (args.length) throw new Error(STUDIO_PLUGIN_UNAVAILABLE);
+  let value;
+  try { value = await ipcRenderer.invoke('arcane:studio-plugin-' + action); }
+  catch (error) { const text = String(error?.message ?? ''); throw new Error(STUDIO_PLUGIN_MESSAGES.find(known => text.endsWith(known)) ?? STUDIO_PLUGIN_UNAVAILABLE); }
+  if (!value || typeof value !== 'object' || value.version !== 1 || !['installed', 'outdated', 'missing', 'unavailable'].includes(value.state) ||
+      !(value.pluginVersion === null || typeof value.pluginVersion === 'string' && /^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$/.test(value.pluginVersion)) ||
+      !STUDIO_PLUGIN_MESSAGES.includes(value.message) || (action === 'install' && typeof value.changed !== 'boolean')) throw new Error(STUDIO_PLUGIN_UNAVAILABLE);
+  return { version: 1, state: value.state, pluginVersion: value.pluginVersion, message: value.message, ...(action === 'install' ? { changed: value.changed } : {}) };
+};
+const studioPlugin = Object.freeze({ version: 1,
+  status: (...args) => studioPluginInvoke('status', args), install: (...args) => studioPluginInvoke('install', args),
+});
+// Open project: the host shows its own native folder picker and switch confirmation. Nothing else crosses.
+const workspaceProject = Object.freeze({ version: 1,
+  open: async (...args) => {
+    try { if (args.length) throw new Error(); const value = await ipcRenderer.invoke('arcane:project-open'); if (!value || value.requested !== true) throw new Error(); return { requested: true }; }
+    catch { throw new Error('The project picker is unavailable.'); }
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject }));

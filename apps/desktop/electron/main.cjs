@@ -26,6 +26,15 @@ let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
 let claudeChat;
+let studioPlugin;
+/** Exact main-frame workspace renderer for zero-argument native intents (plugin install, project picker). */
+function rendererEvent(event) {
+  const contents = window?.webContents, frame = event?.senderFrame;
+  try {
+    return !closing && !switching && !!contents && !contents.isDestroyed() && event.sender === contents && !!frame && frame === contents.mainFrame &&
+      policy.validOrigin(origin) && policy.navigationAllowed(origin, frame.url) && new URL(frame.url).href === frame.url;
+  } catch { return false; }
+}
 const CODE_VERIFICATION_WARNING = 'Arcane opened without Luau verification. The saved compiler is unavailable. Saved configuration was retained; choose an approved compiler in Tool > Configure Luau verification, then restart Arcane.';
 const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -404,6 +413,21 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       workspacePreferences.installIpc(ipcMain);
+      // One-click Studio plugin install/update: verified bundled artifact only, after a native confirm dialog.
+      studioPlugin = require('./plugin-install.cjs').createStudioPluginInstaller({ enabled: !smoke, productRoot: () => productRoot,
+        backupDirectory: () => userRoot ? join(userRoot, 'plugin-backups') : null,
+        confirm: async request => {
+          const owner = window; if (closing || switching || !owner || owner.isDestroyed()) return false;
+          const choice = await dialog.showMessageBox(owner, { type: 'question', title: request.title, message: request.message, detail: request.detail,
+            buttons: ['Cancel', request.confirmLabel], defaultId: 0, cancelId: 0, noLink: true });
+          return choice.response === 1 && !closing && !switching && window === owner;
+        } });
+      studioPlugin.installIpc(ipcMain, { trusted: rendererEvent });
+      // Setup checklist "Open project": the same native picker and confirm as File > Open project.
+      ipcMain.handle('arcane:project-open', async (event, ...args) => {
+        if (smoke || args.length || !rendererEvent(event)) throw new Error('The project picker is unavailable.');
+        void chooseProject(); return { requested: true };
+      });
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
         getHost: () => claudeChat ?? null,

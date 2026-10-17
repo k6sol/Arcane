@@ -25,6 +25,7 @@ const expectedSources = [
   ['AssetTransfer', 'ModuleScript', 'AssetTransfer.luau'],
   ['AssetMaterials', 'ModuleScript', 'AssetMaterials.luau'],
   ['AssetUpload', 'ModuleScript', 'AssetUpload.luau'],
+  ['Diagnostics', 'ModuleScript', 'Diagnostics.luau'],
 ];
 const files = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) => ({ filename, source: await readFile(path.join(sourceDir, filename), 'utf8') })));
 const byFile = Object.fromEntries(files.map(({ filename, source }) => [filename, source]));

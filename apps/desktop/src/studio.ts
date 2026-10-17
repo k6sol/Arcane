@@ -5,6 +5,7 @@ import { LearningPanel } from './learning-panel.js';
 import { CodexChat, CodexChatApi } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
+import { startSetupChecklist } from './setup-checklist.js';
 import { ClaudeChat, linkChatProviders } from './claude-chat.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
@@ -720,6 +721,20 @@ export class StudioWorkbench {
     this.projectListeners.add(listener);
     return () => { this.projectListeners.delete(listener); };
   }
+  // Setup checklist signal: a reported, non-revoked Studio session with a recent heartbeat. Read-only; null before the first session read.
+  private readonly studioListeners = new Set<() => void>();
+  private studioLive: boolean | null = null;
+  studioConnected(): boolean | null { return this.stopped ? null : this.studioLive; }
+  subscribeStudioChange(listener: () => void): () => void {
+    this.studioListeners.add(listener);
+    return () => { this.studioListeners.delete(listener); };
+  }
+  private observeStudioSessions(): void {
+    const live = this.sessions.some(session => !session.revokedAt && Date.now() - Date.parse(session.lastSeenAt) <= 30000);
+    if (live === this.studioLive) return;
+    this.studioLive = live;
+    for (const listener of [...this.studioListeners]) { try { listener(); } catch { /* Observers cannot interrupt refresh. */ } }
+  }
   private observeProjectPath(value: unknown, identity: unknown = null): void {
     const validPath = typeof value === 'string' && !!value.trim() && value.length <= 4096 && !/[\x00-\x1f]/.test(value);
     const projectId = validPath && typeof identity === 'string' && identity.length === 64 && /^[a-f0-9]{64}$/.test(identity) ? identity : null;
@@ -979,7 +994,7 @@ export class StudioWorkbench {
       if (!Array.isArray(sessionData.sessions)) throw new Error('The session endpoint returned an invalid payload.');
       this.sessions = sessionData.sessions;
       this.online = true;
-      this.renderSessions();
+      this.renderSessions(); this.observeStudioSessions();
       if (capturedSession && historyCurrent()) {
         const commandRead = reads[2]!;
         if (commandRead.status === 'rejected') throw commandRead.reason;
@@ -2148,6 +2163,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   });
   const learningPanel = new LearningPanel(document, token); learningPanel.start();
   const historyPanel = new CodexHistoryPanel(document, { getToken: () => token, getProjectPath: () => workbench.historyProjectPath() }); historyPanel.start();
+  // First-run setup checklist and the Settings plugin card: local status reads only, one-click fixes on explicit clicks.
+  let checklistStorage: Pick<Storage, 'getItem' | 'setItem'> | null = null;
+  try { checklistStorage = window.localStorage; } catch { checklistStorage = null; }
+  const setupChecklist = startSetupChecklist(document, { provider: providerSetup, workbench, storage: checklistStorage,
+    desktop: (window as unknown as { arcaneDesktop?: unknown }).arcaneDesktop });
+  window.addEventListener('pagehide', () => setupChecklist.stop());
+  window.addEventListener('pageshow', event => { if (event.persisted) setupChecklist.resume(); });
   let workflows: ReturnType<typeof startWorkflowPanel> | null = null;
   let workflowsStopped = false;
   const refreshWorkflowContext = () => { if (!workflowsStopped) void workflows?.resume(); };
@@ -2169,8 +2191,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       openReview:async(runId,isCurrent)=>{if(await workbench.openWorkRun(runId,isCurrent)&&isCurrent())workspaceShell.showRecordedWork();}});
     if(workflowsStopped)taskPlanCard.stop();
   }).catch(()=>{const mount=document.getElementById('codex-task-plan');if(mount)mount.textContent='Restart Arcane to load task progress.';});
-  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); taskPlanCard?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
-  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
+  // Live Studio error dock (studio-diagnostics.ts). Optional: a missing module never breaks the workspace.
+  let studioDiagnostics:{stop():void;resume():void}|null=null;
+  void import('./studio-diagnostics.js').then(module=>{studioDiagnostics=module.startStudioDiagnostics(document,{token:()=>token,showConversation:()=>workspaceShell.showConversation()});if(workflowsStopped)studioDiagnostics.stop();}).catch(()=>{});
+  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); studioDiagnostics?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,

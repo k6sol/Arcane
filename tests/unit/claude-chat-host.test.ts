@@ -440,3 +440,46 @@ test('preload forwards a usage limit only as the fixed engine message with a bou
   const renderer = await readFile(join(process.cwd(), 'apps/desktop/src/claude-chat.ts'), 'utf8');
   assert.ok(source.includes(JSON.stringify(message).slice(1, -1)) && renderer.includes(message), 'engine, preload and renderer share one fixed message');
 });
+
+test('tool events carry bounded display details: input and result JSON without script sources, persisted with the transcript', async t => {
+  const f = await fixture(t);
+  const ref = { instanceId: 'i1', sessionId: 's', root: 'ServerScriptService', pathSegments: ['Spawner'], className: 'Script' };
+  const source = 'print("spawn")\n'.repeat(50);
+  const outcome = { commandId: 'cmd-1', state: 'succeeded', terminal: true, command: { method: 'script.update', args: { ref, expectedSource: '', source }, result: null } };
+  const resultLine = (id: string, content: unknown, isError = false) => line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }] }, parent_tool_use_id: null, session_id: SESSION });
+  f.scripts.push(replay(init(),
+    assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__arcane__script_update', input: { sessionId: 's', ref, expectedSource: '', source } }]),
+    resultLine('toolu_1', [{ type: 'text', text: JSON.stringify(outcome) }]),
+    assistant([{ type: 'tool_use', id: 'toolu_2', name: 'mcp__arcane__scene_update', input: { big: 'x'.repeat(9000).split('').map((_, i) => i) } }]),
+    resultLine('toolu_2', 'Studio is not\u0007 in edit mode.\n' + CREDENTIAL, true), result()));
+  const reply = await f.host.send(turnInput('Update the spawner'));
+  await f.done(reply.turnId);
+  const tools = f.events.filter(e => e.type === 'tool').map(e => e.message.tool);
+  assert.deepEqual(JSON.parse(tools[0].input), { sessionId: 's', ref, expectedSource: '[0 characters]', source: '[' + source.length + ' characters]' }, 'sources become their length');
+  assert.equal(tools[0].result, undefined, 'a started tool has no result yet');
+  assert.deepEqual(JSON.parse(tools[1].result).command.args.source, '[' + source.length + ' characters]');
+  assert.equal(JSON.parse(tools[1].result).commandId, 'cmd-1'); assert.equal(tools[1].input, tools[0].input, 'the finished event keeps the input');
+  assert.equal(tools[2].input, undefined, 'oversized input is omitted, never cut');
+  assert.equal(tools[3].status, 'failed'); assert.equal(tools[3].result, undefined, 'a result that contains the scoped credential is never forwarded');
+  for (const tool of tools) for (const value of [tool.input, tool.result]) assert.ok(value === undefined || value.length <= 4096 && !value.includes(CREDENTIAL));
+  const history = await f.host.history(reply.conversationId);
+  assert.deepEqual(history.messages.filter((m: any) => m.tool).map((m: any) => m.tool), [tools[1], tools[3]], 'the transcript keeps the final details');
+  // A fresh host reads the same details back from disk.
+  const again = await fixture(t, { directory: f.state });
+  assert.deepEqual((await again.host.history(reply.conversationId)).messages.filter((m: any) => m.tool).map((m: any) => m.tool), [tools[1], tools[3]]);
+});
+
+test('preload forwards tool details only as bounded strings', async () => {
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any; const listeners: ((event: unknown, payload: unknown) => void)[] = [];
+  vm.runInNewContext(source, { require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on: (_channel: string, fn: any) => listeners.push(fn), removeListener() {}, invoke: async () => null } }) });
+  const seen: any[] = []; exposed.claudeChat.onEvent((event: unknown) => seen.push(event));
+  const send = (tool: Record<string, unknown>) => { seen.length = 0; listeners[0]!({}, { turnId: randomUUID(), conversationId: randomUUID(), type: 'tool',
+    message: { id: randomUUID(), role: 'tool', text: 'scene_create', at: '2026-10-17T00:00:00.000Z', tool: { name: 'scene_create', status: 'finished', ...tool } } }); return seen[0] ? JSON.parse(JSON.stringify(seen[0].message.tool)) : null; };
+  assert.deepEqual(send({ input: '{"name":"A"}', result: '{"commandId":"c"}', extra: 'dropped' }), { name: 'scene_create', status: 'finished', input: '{"name":"A"}', result: '{"commandId":"c"}' });
+  assert.deepEqual(send({}), { name: 'scene_create', status: 'finished' }, 'older engines send no details');
+  assert.equal(send({ input: 'x'.repeat(4097) }), null);
+  assert.equal(send({ result: { commandId: 'c' } }), null);
+});

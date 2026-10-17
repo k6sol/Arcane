@@ -1517,5 +1517,133 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
   .arcane-app .model-column .model-group-heading{border-color:CanvasText}
   .arcane-app .provider-logo{color:CanvasText}
 }
+/* ---- Setup checklist (first run) and Studio plugin card. Black glass, white text, red ticks; no transitions. ---- */
+.arcane-app .setup-checklist{width:min(560px,100%);margin:14px auto 0;padding:16px 18px 12px;border:1px solid var(--line);border-radius:var(--radius-lg);background:color-mix(in srgb,var(--panel) 86%,transparent);backdrop-filter:blur(14px);color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),var(--shadow-md)}
+.arcane-app .setup-checklist-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:6px}
+.arcane-app .setup-checklist-head h2{font-family:var(--font-display);font-size:16px;font-weight:600;letter-spacing:-.01em;color:var(--text);background:none;-webkit-text-fill-color:currentColor}
+.arcane-app .setup-checklist-progress{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.arcane-app .setup-checklist-items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.arcane-app .setup-checklist-item{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.arcane-app .setup-checklist-item:first-child{border-top:0}
+.arcane-app .setup-check{flex:0 0 22px;width:22px;height:22px;padding:2px;border-radius:50%;border:1.5px solid var(--text-secondary);fill:none;stroke:currentColor;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round;color:var(--text)}
+.arcane-app .setup-checklist-item[data-state=checking] .setup-check{border-style:dashed}
+.arcane-app .setup-checklist-item[data-state=done] .setup-check{background:#ff3340;border-color:#ff3340;color:#fff}
+.arcane-app .setup-checklist-text{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.arcane-app .setup-checklist-text strong{font-size:13px;font-weight:600;color:var(--text)}
+.arcane-app .setup-checklist-detail{font-size:12px;line-height:1.5;color:var(--text-secondary);overflow-wrap:anywhere}
+.arcane-app .setup-checklist-item .secondary{flex:0 0 auto;min-height:32px;padding:6px 12px;font-size:12px}
+.arcane-app .setup-checklist-foot{display:flex;justify-content:flex-end;gap:18px;margin-top:4px}
+.arcane-app .setup-checklist-foot .quiet{color:var(--text-secondary)}
+.arcane-app .setup-checklist .hint:empty{display:none}
+.arcane-app .workspace-stage .codex-messages:has(.codex-message)~.setup-checklist{display:none}
+/* Stays visible under the sign-in gate so the remaining steps are clear before signing in. */
+.arcane-app .workspace-stage.provider-required .conversation-scroll>#setup-checklist:not([hidden]):not(#provider-login-gate){display:block!important}
+@media(max-width:520px){.arcane-app .setup-checklist-item{flex-wrap:wrap}.arcane-app .setup-checklist-item .secondary{margin-left:34px}}
+@media (forced-colors:active){
+  .arcane-app .setup-checklist{border-color:CanvasText;background:Canvas;backdrop-filter:none;box-shadow:none}
+  .arcane-app .setup-check{border-color:CanvasText;color:CanvasText}
+  .arcane-app .setup-checklist-item[data-state=done] .setup-check{background:Highlight;border-color:Highlight;color:HighlightText;forced-color-adjust:none}
+}
+/* ---- End setup checklist ---- */
+/* ---- Studio output dock (studio-diagnostics.ts): topbar badge + expandable error list. Black glass, white text, Arcane red. ---- */
+.arcane-app .studio-diagnostics{position:relative;flex:0 0 auto}
+.arcane-app .studio-diagnostics[hidden]{display:none}
+.arcane-app .studio-diagnostics-badge{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 12px;border:1px solid var(--accent-line);border-radius:999px;background:var(--glass-strong,var(--raised));color:var(--text);font:600 12px/1 var(--font-ui);cursor:pointer}
+.arcane-app .studio-diagnostics-badge .icon{width:16px;height:16px;color:var(--accent-text)}
+.arcane-app .studio-diagnostics[data-severity=warning] .studio-diagnostics-badge{border-color:var(--warning-line)}
+.arcane-app .studio-diagnostics[data-severity=warning] .studio-diagnostics-badge .icon{color:var(--warning)}
+.arcane-app .studio-diagnostics-count{min-width:20px;padding:3px 6px;border-radius:999px;background:var(--action);color:var(--on-accent);text-align:center;font-variant-numeric:tabular-nums}
+.arcane-app .studio-diagnostics-badge:hover{background:var(--hover-strong)}
+.arcane-app .studio-diagnostics-badge:focus-visible,.arcane-app .studio-diagnostics-panel button:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.arcane-app .studio-diagnostics-panel{position:absolute;top:calc(100% + 8px);right:0;z-index:40;display:flex;flex-direction:column;gap:8px;width:min(460px,calc(100vw - 32px));max-height:min(520px,calc(100svh - 120px));padding:12px;border:1px solid var(--glass-line,var(--line-strong));border-radius:var(--radius-lg);background:var(--glass-solid,var(--panel));color:var(--text);box-shadow:var(--shadow-lg)}
+.arcane-app .studio-diagnostics-panel[hidden]{display:none}
+.arcane-app .studio-diagnostics-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.arcane-app .studio-diagnostics-header h2{margin:0;color:var(--text);font:600 14px/1.3 var(--font-ui)}
+.arcane-app .studio-diagnostics-clear{min-height:32px;padding:0 12px;font-size:12px}
+.arcane-app .studio-diagnostics-status{margin:0;color:var(--text-secondary);font-size:12px}
+.arcane-app .studio-diagnostics-status:empty{display:none}
+.arcane-app .studio-diagnostics-list{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;overflow:auto;list-style:none}
+.arcane-app .studio-diagnostic{display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius-sm);background:var(--sunken)}
+.arcane-app .studio-diagnostic[data-kind=warning]{border-left-color:var(--warning)}
+.arcane-app .studio-diagnostic-body{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.arcane-app .studio-diagnostic-kind{color:var(--accent-text);font:700 11px/1.2 var(--font-ui);letter-spacing:.04em;text-transform:uppercase}
+.arcane-app .studio-diagnostic[data-kind=warning] .studio-diagnostic-kind{color:var(--warning)}
+.arcane-app .studio-diagnostic-message{margin:0;color:var(--text);font:13px/1.4 var(--font-mono);overflow-wrap:anywhere;white-space:pre-wrap;max-height:7.2em;overflow:auto}
+.arcane-app .studio-diagnostic-meta,.arcane-app .studio-diagnostic-place{margin:0;color:var(--text-secondary);font-size:12px;overflow-wrap:anywhere}
+.arcane-app .studio-diagnostic-place{color:var(--muted)}
+.arcane-app .studio-diagnostic-fix{flex:0 0 auto;min-height:32px;padding:0 14px;border:1px solid transparent;border-radius:var(--radius-sm);background:var(--action);color:var(--on-accent);font:600 12px/1 var(--font-ui);cursor:pointer}
+.arcane-app .studio-diagnostic-fix:hover{background:var(--action-hover)}
+@media(max-width:700px){.arcane-app .studio-diagnostics-label{display:none}.arcane-app .studio-diagnostics-panel{position:fixed;top:64px;right:16px;left:16px;width:auto}}
+@media (forced-colors:active){
+  .arcane-app .studio-diagnostics-badge,.arcane-app .studio-diagnostics-panel,.arcane-app .studio-diagnostic{border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none}
+  .arcane-app .studio-diagnostic{border-left-color:Highlight}
+  .arcane-app .studio-diagnostics-count{background:Highlight;color:HighlightText;forced-color-adjust:none}
+  .arcane-app .studio-diagnostic-fix{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-app :is(.studio-diagnostics-badge,.studio-diagnostics-panel button):focus-visible{outline-color:Highlight}
+}
+/* ---- End Studio output dock ---- */
+/* ---- Chat activity: tool lines, change cards, queue chips, usage meter, composer command menu (codex-chat.ts / claude-chat.ts) ---- */
+.arcane-app .workspace-stage .codex-message.tool{padding:8px 14px 4px 12px}
+.arcane-app .tool-activity{display:flex;align-items:center;gap:9px;min-height:24px}
+.arcane-app .tool-activity .tool-activity-text{margin:0;font:13px/1.5 var(--font-ui);color:var(--text);overflow-wrap:anywhere;white-space:normal}
+.arcane-app .tool-activity-mark{position:relative;flex:0 0 14px;width:14px;height:14px;border-radius:50%;border:1px solid var(--line-strong)}
+.arcane-app .tool-activity-mark[data-tool-state=started]{border-color:var(--accent);background:radial-gradient(circle,var(--accent) 0 3.5px,transparent 4px)}
+.arcane-app .tool-activity-mark[data-tool-state=finished]{border-color:var(--text-secondary)}
+.arcane-app .tool-activity-mark[data-tool-state=finished]::after{content:"";position:absolute;left:4px;top:1.5px;width:3px;height:6px;border:solid var(--text);border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+.arcane-app .tool-activity-mark[data-tool-state=failed]{border-color:var(--danger);background:var(--danger-bg)}
+.arcane-app .tool-activity-mark[data-tool-state=failed]::before,.arcane-app .tool-activity-mark[data-tool-state=failed]::after{content:"";position:absolute;left:5.5px;top:2.5px;width:1.5px;height:7px;background:var(--danger);transform:rotate(45deg)}
+.arcane-app .tool-activity-mark[data-tool-state=failed]::after{transform:rotate(-45deg)}
+.arcane-app .workspace-stage .codex-message.tool[data-tool-state=failed]{border-left-color:var(--danger)}
+.arcane-app .workspace-stage .codex-message.tool .tool-details{margin-top:2px}
+.arcane-app .workspace-stage .codex-message.tool .tool-details pre{max-height:260px;overflow:auto;font:11.5px/1.6 var(--font-mono);color:var(--text-secondary)}
+.arcane-app .chat-change-card{margin:2px 0 18px 34px;padding:12px 14px;max-width:min(560px,100%);border:1px solid var(--line-strong);border-left:2px solid var(--accent);border-radius:12px;background:var(--glass-solid);color:var(--text)}
+.arcane-app .chat-change-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px}
+.arcane-app .chat-change-head strong{font-size:13px;font-weight:650}
+.arcane-app .chat-change-summary{font-size:12px;color:var(--text-secondary)}
+.arcane-app .chat-change-list{list-style:none;margin:8px 0;padding:0;display:grid;gap:4px}
+.arcane-app .chat-change-row{display:flex;align-items:center;justify-content:flex-start;gap:10px;font-size:13px;line-height:1.5;min-width:0}
+.arcane-app .chat-change-text{flex:1 1 auto;overflow-wrap:anywhere;min-width:0}
+.arcane-app .chat-change-row::before{content:"";flex:0 0 6px;height:6px;border-radius:50%;background:var(--accent);align-self:center;order:-1}
+.arcane-app .chat-change-more{color:var(--text-secondary)}
+.arcane-app .chat-change-copy{flex:0 0 auto;min-height:28px;padding:2px 8px;border:1px solid var(--line-strong);border-radius:7px;background:transparent;color:var(--text);font-size:12px;font-weight:500}
+.arcane-app .chat-change-actions{display:flex;gap:8px;flex-wrap:wrap}
+.arcane-app .chat-change-restore{min-height:32px;padding:5px 12px;font-size:12px;background:transparent;color:var(--text);border:1px solid var(--accent)}
+.arcane-app .chat-change-status{margin:6px 0 0;font-size:12px;color:var(--text-secondary)}
+.arcane-app .chat-change-status:empty{display:none}
+.arcane-app .workspace-stage .composer{position:relative}
+.arcane-app .composer-queue{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.arcane-app .composer-queue-chip{display:inline-flex;align-items:center;gap:7px;max-width:100%;min-height:30px;padding:2px 2px 2px 10px;border:1px dashed var(--accent-line);border-radius:999px;background:var(--accent-tint);color:var(--text);font-size:12px}
+.arcane-app .composer-queue-label{font-weight:650;color:var(--accent-text);white-space:nowrap}
+.arcane-app .composer-queue-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.arcane-app .composer-queue-remove{display:grid;place-items:center;width:26px;height:26px;padding:0;border-radius:50%;background:transparent;color:var(--text);border:1px solid transparent;font-size:15px;font-weight:500;line-height:1}
+.arcane-app .claude-usage-meter{grid-column:1 / span 2;justify-self:start;display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:0 8px;border:1px solid var(--line);border-radius:999px;color:var(--text-secondary);font:12px/1 var(--font-ui);font-variant-numeric:tabular-nums}
+.arcane-app .usage-ring{width:18px;height:18px;transform:rotate(-90deg)}
+.arcane-app .usage-ring circle{fill:none;stroke-width:3}
+.arcane-app .usage-ring-track{stroke:var(--text)}
+.arcane-app .usage-ring-output{stroke:var(--accent)}
+.arcane-app .composer-command-menu{position:absolute;left:12px;bottom:calc(100% + 6px);z-index:30;width:min(360px,calc(100% - 24px));padding:6px;border:1px solid var(--line-strong);border-radius:12px;background:var(--glass-solid);color:var(--text);box-shadow:var(--shadow-md)}
+.arcane-app .composer-command-option{display:flex;align-items:baseline;gap:10px;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px}
+.arcane-app .composer-command-option[aria-selected=true]{background:var(--accent-tint);box-shadow:inset 2px 0 var(--accent)}
+.arcane-app .composer-command-name{font-family:var(--font-mono);font-weight:600;color:var(--text)}
+.arcane-app .composer-command-hint{color:var(--text-secondary);font-size:12px}
+.arcane-app .composer-command-menu[data-mode=help]{padding:12px 14px}
+.arcane-app .composer-command-menu[data-mode=help] strong{font-size:13px}
+.arcane-app .composer-command-menu[data-mode=help] ul{margin:6px 0;padding-left:18px;font-size:12.5px;line-height:1.6;color:var(--text)}
+.arcane-app .composer-command-menu[data-mode=help] .hint{margin:4px 0 0}
+@media(hover:hover) and (pointer:fine){.arcane-app .composer-command-option:hover{background:var(--hover)}.arcane-app .chat-change-copy:hover,.arcane-app .composer-queue-remove:hover{border-color:var(--accent)}}
+@media(max-width:560px){.arcane-app .chat-change-card,.arcane-app .workspace-stage .codex-message.tool{margin-left:0}.arcane-app .chat-change-row{flex-wrap:wrap}}
+@media(forced-colors:active){
+  .arcane-app :is(.chat-change-card,.composer-command-menu,.composer-queue-chip,.claude-usage-meter){border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none}
+  .arcane-app .composer-command-option[aria-selected=true]{background:Highlight;color:HighlightText;forced-color-adjust:none}
+  .arcane-app .composer-command-option[aria-selected=true] :is(.composer-command-name,.composer-command-hint){color:HighlightText}
+  .arcane-app .tool-activity-mark{forced-color-adjust:none;border-color:CanvasText;background:Canvas}
+  .arcane-app .tool-activity-mark[data-tool-state=started]{background:radial-gradient(circle,Highlight 0 3.5px,Canvas 4px)}
+  .arcane-app .tool-activity-mark[data-tool-state=finished]::after{border-color:CanvasText}
+  .arcane-app .tool-activity-mark[data-tool-state=failed]::before,.arcane-app .tool-activity-mark[data-tool-state=failed]::after{background:CanvasText}
+  .arcane-app .chat-change-row::before{background:CanvasText;forced-color-adjust:none}
+  .arcane-app .usage-ring{forced-color-adjust:none}.arcane-app .usage-ring-track{stroke:CanvasText}.arcane-app .usage-ring-output{stroke:Highlight}
+  .arcane-app :is(.chat-change-copy,.chat-change-restore,.composer-queue-remove){border-color:ButtonText;color:ButtonText;background:ButtonFace}
+}
+/* ---- End chat activity ---- */
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

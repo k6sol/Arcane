@@ -75,7 +75,8 @@ const MESSAGES = Object.freeze({
 });
 const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text]);
 const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
-  '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown.';
+  '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown. ' +
+  'When the user writes @selection they mean the current Studio selection: read it with selection_read before acting on it.';
 const FALLBACK_INSTRUCTIONS = 'You are the Arcane Roblox development assistant. Use Arcane\'s advertised MCP tools. Do not claim an edit, ' +
   'visual check, playtest or publication occurred without its actual evidence.';
 
@@ -93,6 +94,33 @@ function plain(value, keys) {
   return out;
 }
 const isId = value => typeof value === 'string' && UUID.test(value);
+// Display-only tool details for the chat's activity lines and change cards: bounded JSON in which script sources and other
+// long strings are replaced by their length. A detail that does not fit is omitted, never cut mid-JSON.
+const TOOL_DETAIL_CHARS = 4096, TOOL_TEXT_CHARS = 1024, BULKY_FIELDS = new Set(['source', 'expectedSource']);
+const CONTROL_ALL = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu;
+function toolDetail(value, secret) {
+  try {
+    let nodes = 0;
+    const text = JSON.stringify(value, function (key, item) {
+      if (++nodes > 4000) throw Error('large');
+      if (typeof item === 'string' && (BULKY_FIELDS.has(key) || item.length > 512)) return '[' + item.length + ' characters]';
+      return item;
+    });
+    if (typeof text !== 'string' || text === '{}' || text.length > TOOL_DETAIL_CHARS || secret && text.includes(secret)) return null;
+    return text;
+  } catch { return null; }
+}
+/** A tool_result's text: a JSON result becomes bounded detail JSON; other text a short single-line excerpt. */
+function toolResultDetail(content, secret) {
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.slice(0, 64).filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('\n') : '';
+  if (!text || text.length > 4 * 1048576) return null;
+  try { return toolDetail(JSON.parse(text), secret); } catch { /* plain text */ }
+  const line = text.replace(CONTROL_ALL, ' ').replace(/\s+/g, ' ').trim().slice(0, TOOL_TEXT_CHARS);
+  return line && !(secret && line.includes(secret)) ? line : null;
+}
+/** name/status plus the optional bounded display details. */
+const toolCopy = t => ({ name: t.name, status: t.status, ...(typeof t.input === 'string' ? { input: t.input } : {}), ...(typeof t.result === 'string' ? { result: t.result } : {}) });
 const isoNow = now => new Date(now()).toISOString();
 /** UTF-8 byte bound without splitting a code point. */
 function bounded(text, maxBytes) {
@@ -177,9 +205,11 @@ function createStore({ fs, p, directory, now, limits }) {
       if (!isId(v.id) || !ROLES.includes(v.role) || typeof v.text !== 'string' || Buffer.byteLength(v.text) > limits.messageBytes || !ISO.test(v.at)) return null;
       const out = { id: v.id, role: v.role, text: v.text, at: v.at };
       if (keys.length === 5) {
-        const t = plain(v.tool, ['name', 'status']);
+        const raw = v.tool && typeof v.tool === 'object' ? v.tool : null;
+        const t = plain(v.tool, ['name', 'status', ...['input', 'result'].filter(key => raw && Object.hasOwn(raw, key))]);
         if (v.role !== 'tool' || typeof t.name !== 'string' || !t.name || t.name.length > limits.toolName || CONTROL.test(t.name) || !TOOL_STATES.includes(t.status)) return null;
-        out.tool = { name: t.name, status: t.status };
+        for (const key of ['input', 'result']) if (key in t && (typeof t[key] !== 'string' || t[key].length > TOOL_DETAIL_CHARS)) return null;
+        out.tool = toolCopy(t);
       }
       return out;
     } catch { return null; }
@@ -233,7 +263,7 @@ function createStore({ fs, p, directory, now, limits }) {
       try { await fs.unlink(transcriptPath(id)); } catch { /* absent */ }
       return true;
     }),
-    messages: id => serial(async () => { if (!(await load()).some(e => e.conversationId === id)) return null; return (await messagesOf(id)).map(m => ({ ...m, ...(m.tool ? { tool: { ...m.tool } } : {}) })); }),
+    messages: id => serial(async () => { if (!(await load()).some(e => e.conversationId === id)) return null; return (await messagesOf(id)).map(m => ({ ...m, ...(m.tool ? { tool: toolCopy(m.tool) } : {}) })); }),
     /** Append, or replace by id; skipped when the conversation was removed meanwhile. */
     put: (id, message) => serial(async () => {
       if (!(await load()).some(e => e.conversationId === id)) return false;
@@ -430,7 +460,7 @@ function createClaudeChat(options) {
     try { child.kill(); } catch { /* closed */ }
   }
   const message = (role, text, tool) => ({ id: randomUUID(), role, text: bounded(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
-  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.tool ? { tool: { name: m.tool.name, status: m.tool.status } } : {}) });
+  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.tool ? { tool: toolCopy(m.tool) } : {}) });
   const toolName = name => { const short = name.startsWith('mcp__' + MCP_SERVER + '__') ? name.slice(MCP_SERVER.length + 7) : name; return (short.replace(/[^A-Za-z0-9._:-]/g, '_') || 'tool').slice(0, limits.toolName); };
 
   async function send(input) {
@@ -572,7 +602,8 @@ function createClaudeChat(options) {
           void store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'message', message: publicMessage(m) });
         } else if (block?.type === 'tool_use' && typeof block.name === 'string' && typeof block.id === 'string' && block.id.length <= 256 && !turn.tools.has(block.id) && turn.tools.size < 4096) {
-          const name = toolName(block.name), m = message('tool', name, { name, status: 'started' });
+          const name = toolName(block.name), input = toolDetail(block.input, turn.credential?.env?.ARCANE_LOCAL_TOKEN);
+          const m = message('tool', name, { name, status: 'started', ...(input ? { input } : {}) });
           turn.tools.set(block.id, m);
           void store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'tool', message: publicMessage(m) });
@@ -582,8 +613,9 @@ function createClaudeChat(options) {
       for (const block of event.message.content.slice(0, 256)) {
         const m = block?.type === 'tool_result' ? turn.tools.get(block.tool_use_id) : undefined;
         if (!m || m.tool.status !== 'started') continue;
-        m.tool = { name: m.tool.name, status: block.is_error === true ? 'failed' : 'finished' };
-        void store.put(turn.conversationId, { ...m, tool: { ...m.tool } }).catch(() => {});
+        const result = toolResultDetail(block.content, turn.credential?.env?.ARCANE_LOCAL_TOKEN);
+        m.tool = { ...toolCopy(m.tool), status: block.is_error === true ? 'failed' : 'finished', ...(result ? { result } : {}) };
+        void store.put(turn.conversationId, { ...m, tool: toolCopy(m.tool) }).catch(() => {});
         emit({ ...base, type: 'tool', message: publicMessage(m) });
       }
     } else if (event.type === 'result') {

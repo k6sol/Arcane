@@ -11,7 +11,9 @@ import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model
 import {
   ClaudeChat, CLAUDE_CHAT_CHOICE_KEY, CLAUDE_CHAT_EMPTY_TEXT, CLAUDE_CHAT_NO_BRIDGE_TEXT, CLAUDE_CHAT_TABS_KEY,
   claudeEffortLabel, claudeModelLabel, claudeModelName, linkChatProviders, readClaudeChatStatus, readClaudeChatBridge,
+  CLAUDE_CHAT_QUEUE_RETURNED_TEXT, compactTokens, usageMeterText,
 } from '../../apps/desktop/src/claude-chat.js';
+import { changeSummary, CodexTranscript, describeToolActivity, readToolResultText, renderChangeCard, restoreRequestText } from '../../apps/desktop/src/codex-chat.js';
 
 // In-memory DOM and preload-bridge doubles only: no Electron, CLI, network, Studio or inference.
 // The fixture mirrors the shared chat surface ids from studio.html that both providers render into.
@@ -275,9 +277,10 @@ test('Enter sends; streamed deltas, messages, tools and usage render as Codex tr
   b.emit({ type: 'message', message: { id: 'a1', role: 'assistant', text: 'Sure, building it.', at: '' } });
   b.emit({ type: 'tool', message: { id: 't1', role: 'tool', text: 'Edit', at: '', tool: { name: 'Edit', status: 'started' } } });
   const tool = f.messages.querySelectorAll('.codex-message').at(-1)!;
-  assert.equal(tool.className, 'codex-message tool'); assert.equal(tool.querySelector('.message-text')!.textContent, 'Edit · running');
+  assert.equal(tool.className, 'codex-message tool'); assert.equal(tool.querySelector('.message-text')!.textContent, 'Using Edit…'); assert.equal(tool.dataset.toolState, 'started');
   b.emit({ type: 'tool', message: { id: 't1', role: 'tool', text: 'Edit', at: '', tool: { name: 'Edit', status: 'finished' } } });
-  assert.equal(f.messages.querySelectorAll('.tool').length, 1); assert.equal(tool.querySelector('.message-text')!.textContent, 'Edit · done');
+  const finished = f.messages.querySelectorAll('.codex-message').at(-1)!;
+  assert.equal(f.messages.querySelectorAll('.tool').length, 1); assert.equal(finished.querySelector('.message-text')!.textContent, 'Using Edit'); assert.equal(finished.dataset.toolState, 'finished');
   f.messages.scrollTop = 0; f.messages.scrollHeight = 5000; // user scrolled up: no forced scroll
   b.emit({ type: 'delta', text: 'Done.' });
   assert.equal(f.messages.scrollTop, 0);
@@ -395,7 +398,7 @@ test('model text is never parsed as HTML', async t => {
   for (const tag of ['IMG', 'SCRIPT', 'B']) assert.equal(tags.has(tag), false, tag + ' was not created');
   assert.equal(innerHtmlWrites, 0);
   assert.ok(f.bubbles()[0]!.text.includes('<img src=x onerror="alert(1)">'));
-  assert.ok(f.messages.textContent.includes('<b onmouseover=x> · running'));
+  assert.ok(f.messages.textContent.includes('Using <b onmouseover=x>…'), 'a hostile tool name stays text in its activity line');
   assert.equal(f.bubbles().at(-1)!.text, '<img src=y onerror=z>');
 });
 
@@ -1146,4 +1149,304 @@ test('codexUsageLimit reads exhaustion from the account report or a usage-limit 
   assert.deepEqual(codexUsageLimit(s, [turn('rejected', 'USAGE_LIMIT_EXCEEDED')]), { resetsAt: null });
   assert.equal(codexUsageLimit(s, [turn('rejected', 'USAGE_LIMIT_EXCEEDED'), turn('acknowledged', null)]), null, 'a later accepted turn clears it');
   assert.equal(codexUsageLimit(s, [turn('rejected', 'REMOTE_REJECTED')]), null);
+});
+
+// ---- Chat activity: plain-language tool lines, change cards, queue, usage meter and composer commands. ----
+const ws = (...segments: string[]) => ({ instanceId: 'i-' + segments.join('-'), sessionId: 's', root: segments[0], pathSegments: segments.slice(1), className: 'Folder' });
+const receipt = (commandId: string, method: string, args: Record<string, unknown>, state = 'succeeded') =>
+  JSON.stringify({ commandId, requestId: 'r', sessionId: 's', state, terminal: true, ambiguous: false, wait: 'terminal', command: { id: commandId, method, args, state, result: null } });
+
+test('tool names and inputs become plain-language activity lines with running, done and failed states', () => {
+  const line = (name: string, input: unknown, state: 'started' | 'finished' | 'failed' = 'started') => describeToolActivity(name, input, null, state).text;
+  assert.equal(line('scene_children', { sessionId: 's', root: 'Workspace' }), 'Reading Workspace…');
+  assert.equal(line('mcp__arcane__scene_create', { parent: ws('Workspace'), className: 'Part', name: 'SpawnPlatform' }), 'Creating Part "SpawnPlatform" in Workspace…');
+  assert.equal(line('script_update', { ref: ws('ServerScriptService', 'Spawner'), source: '[90 characters]' }), 'Updating script ServerScriptService.Spawner…');
+  assert.equal(line('playtest_request', { sessionId: 's' }), 'Starting a playtest…');
+  assert.equal(line('scene_update', { ref: ws('Workspace', 'Lobby', 'Door'), expected: {}, properties: { Color: {}, Size: {} } }, 'finished'), 'Updating Workspace.Lobby.Door (Color, Size)');
+  assert.equal(line('script_set_enabled', { ref: ws('ServerScriptService', 'Spawner'), enabled: true }, 'failed'), 'Enabling script ServerScriptService.Spawner');
+  assert.equal(line('selection_read', null), 'Reading the Studio selection…');
+  assert.equal(line('scene_search', { root: 'Workspace', query: 'Door' }), 'Searching Workspace for "Door"…');
+  assert.equal(line('receipt_restore', { commandId: 'c' }), 'Restoring an earlier change…');
+  assert.equal(line('work_progress', {}), 'Updating the task plan…');
+  assert.equal(line('mystery_tool', {}), 'Using mystery_tool…');
+  // Only a succeeded receipt is a change; ambiguous or failed outcomes never are.
+  const args = { parent: ws('Workspace'), className: 'Part', name: 'SpawnPlatform' };
+  assert.deepEqual(describeToolActivity('scene_create', args, JSON.parse(receipt('cmd-1', 'scene.create', args)), 'finished').change,
+    { kind: 'created', text: 'Created Part "SpawnPlatform" in Workspace', receipt: 'cmd-1', path: 'Workspace.SpawnPlatform' });
+  assert.equal(describeToolActivity('scene_create', args, JSON.parse(receipt('cmd-1', 'scene.create', args, 'needs_reconciliation')), 'finished').change, null);
+  assert.equal(describeToolActivity('scene_create', args, JSON.parse(receipt('cmd-1', 'scene.create', args)), 'failed').change, null);
+  assert.equal(describeToolActivity('scene_inspect', { ref: ws('Workspace') }, { commandId: 'x', state: 'succeeded' }, 'finished').change, null, 'reads are never changes');
+  // Codex history keeps only the result text; an Arcane Studio result names its own command.
+  const read = readToolResultText(receipt('cmd-9', 'script.update', { ref: ws('ServerScriptService', 'Spawner'), source: 'x', expectedSource: 'y' }));
+  assert.equal(read.name, 'script_update'); assert.equal(read.state, 'finished');
+  assert.equal(describeToolActivity(read.name!, read.input, read.result, read.state).change?.text, 'Edited script ServerScriptService.Spawner');
+  assert.equal(readToolResultText('{"error":{"code":"SESSION_OFFLINE","message":"x"}}').state, 'failed');
+  assert.equal(readToolResultText('plain output').name, null);
+});
+
+test('Codex: a live tool item shows a running line that settles in place', () => {
+  const transcript = new CodexTranscript(), base = { connectionId: 'c', lastEventSeq: 1, droppedEvents: 0 } as any;
+  transcript.consume({ ...base, events: [{ seq: 1, type: 'item', threadId: 't', turnId: 'v', itemId: 'm1', itemType: 'mcpToolCall', status: 'inProgress' }] });
+  assert.deepEqual(transcript.messages.map(m => [m.role, m.toolState, m.text]), [['tool', 'started', '']]);
+  transcript.consume({ ...base, lastEventSeq: 3, events: [{ seq: 3, type: 'item', threadId: 't', turnId: 'v', itemId: 'm1', itemType: 'mcpToolCall', status: 'completed' }] });
+  assert.deepEqual(transcript.messages.map(m => [m.role, m.toolState]), [['tool', 'finished']]);
+  transcript.consume({ ...base, lastEventSeq: 4, events: [{ seq: 4, type: 'item', threadId: 't', turnId: 'v', itemId: 'r', itemType: 'reasoning', status: null }] });
+  assert.equal(transcript.messages.length, 1, 'other private items stay hidden');
+});
+
+test('Claude: tool events render plain lines with collapsed details, and a turn that changed Studio ends with one change card', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  f.type('Add a spawn platform and a spawner'); key(f.input, 'Enter'); await tick();
+  const create = { sessionId: 's', parent: ws('Workspace'), className: 'Part', name: 'SpawnPlatform' };
+  const update = { sessionId: 's', ref: ws('ServerScriptService', 'Spawner'), expectedSource: '[0 characters]', source: '[120 characters]' };
+  const tool = (id: string, name: string, status: string, input?: unknown, result?: string) =>
+    b.emit({ type: 'tool', message: { id, role: 'tool', text: name, at: '', tool: { name, status, ...(input ? { input: JSON.stringify(input) } : {}), ...(result ? { result } : {}) } } });
+  tool('t1', 'scene_children', 'started', { sessionId: 's', root: 'Workspace' });
+  tool('t1', 'scene_children', 'finished', undefined, '{"parentRef":{}}');
+  tool('t2', 'scene_create', 'started', create);
+  const lines = () => f.messages.querySelectorAll('.tool').map(node => node.dataset.toolState + ' ' + node.querySelector('.message-text')!.textContent);
+  assert.deepEqual(lines(), ['finished Reading Workspace', 'started Creating Part "SpawnPlatform" in Workspace…']);
+  tool('t2', 'scene_create', 'finished', undefined, receipt('cmd-create', 'scene.create', create));
+  tool('t3', 'script_update', 'started', update);
+  tool('t3', 'script_update', 'finished', undefined, receipt('cmd-script', 'script.update', update));
+  tool('t4', 'scene_update', 'started', { ref: ws('Workspace', 'Door') });
+  tool('t4', 'scene_update', 'failed', undefined, 'Studio is not in edit mode.');
+  assert.deepEqual(lines(), ['finished Reading Workspace', 'finished Creating Part "SpawnPlatform" in Workspace', 'finished Updating script ServerScriptService.Spawner', 'failed Updating Workspace.Door']);
+  const details = f.messages.querySelectorAll('.tool')[1]!.querySelector('.tool-details')!;
+  assert.equal(details.open, false, 'raw details stay collapsed'); assert.match(details.textContent, /Details[\s\S]*"commandId": "cmd-create"/);
+  assert.equal(f.messages.querySelector('.chat-change-card'), null, 'the card waits for the end of the turn');
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  const card = f.messages.querySelector('.chat-change-card')!;
+  assert.equal(card.querySelector('.chat-change-summary')!.textContent, '1 created · 1 script edited');
+  assert.deepEqual(card.querySelectorAll('.chat-change-text').map(node => node.textContent), ['Created Part "SpawnPlatform" in Workspace', 'Edited script ServerScriptService.Spawner']);
+  assert.deepEqual(card.querySelectorAll('.chat-change-copy').map(node => node.getAttribute('aria-label')), ['Copy path ServerScriptService.Spawner']);
+  assert.equal(f.messages.children.at(-1), card, 'the card closes the turn');
+  // Restore writes an explicit request into the composer, keeps the draft above it, and never sends.
+  f.type('Draft first');
+  const sent = sends(b).length;
+  click(card.querySelector('.chat-change-restore')!); await tick();
+  assert.equal(sends(b).length, sent, 'Restore never sends');
+  assert.equal(f.input.value, 'Draft first\n\n' + restoreRequestText([{ kind: 'created', text: '', receipt: 'cmd-create', path: null }, { kind: 'script', text: '', receipt: 'cmd-script', path: null }]));
+  assert.match(f.input.value, /cmd-script, cmd-create\. Use receipt_restore/, 'newest first');
+  assert.match(card.querySelector('.chat-change-status')!.textContent, /Review it, then send/);
+  // History reload rebuilds the same lines and card from the saved tool details.
+  b.histories.set('conv-new', { conversationId: 'conv-new', messages: [
+    { id: 'u1', role: 'user', text: 'Add a spawn platform', at: '' },
+    { id: 't2', role: 'tool', text: 'scene_create', at: '', tool: { name: 'scene_create', status: 'finished', input: JSON.stringify(create), result: receipt('cmd-create', 'scene.create', create) } },
+    { id: 'a1', role: 'assistant', text: 'Done.', at: '' }, { id: 'u2', role: 'user', text: 'Thanks', at: '' }] });
+  f.input.value = ''; f.chat.newChat(); await f.chat.open('conv-new'); await tick();
+  assert.deepEqual(f.messages.children.map(node => node.className), ['codex-message human', 'codex-message tool', 'codex-message codex', 'chat-change-card', 'codex-message human']);
+});
+
+test('change cards: counts, copy path through the clipboard seam, and restore text naming every receipt', async () => {
+  const { doc } = surface(); const copied: string[] = [];
+  const changes = [{ kind: 'created' as const, text: 'Created Part "A" in Workspace', receipt: 'c1', path: 'Workspace.A' }, { kind: 'created' as const, text: 'Created Part "B" in Workspace', receipt: 'c2', path: 'Workspace.B' },
+    { kind: 'enabled' as const, text: 'Enabled script ServerScriptService.Spawner', receipt: 'c3', path: 'ServerScriptService.Spawner' }, { kind: 'created' as const, text: 'dup', receipt: 'c1', path: null }];
+  assert.equal(changeSummary(changes.slice(0, 3)), '2 created · 1 script enabled');
+  const card = renderChangeCard(doc as unknown as Document, changes, { copy: async text => { copied.push(text); } }) as unknown as Element;
+  assert.equal(card.querySelectorAll('.chat-change-row').length, 3, 'one row per receipt');
+  click(card.querySelector('.chat-change-copy')!); await tick();
+  assert.deepEqual(copied, ['ServerScriptService.Spawner']); assert.equal(card.querySelector('.chat-change-status')!.textContent, 'Copied ServerScriptService.Spawner');
+  assert.equal(renderChangeCard(doc as unknown as Document, []), null);
+  assert.match(restoreRequestText(changes), /^Please restore the Studio changes from these receipts, newest first: c3, c2, c1\. Use receipt_restore/);
+});
+
+test('Claude queue: Enter during a reply queues a removable chip; it sends after success and returns to the draft on failure, Stop or a usage limit', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const chips = () => f.el('claude-chat-queue').querySelectorAll('.composer-queue-chip').map(node => node.querySelector('.composer-queue-text')!.textContent);
+  f.type('First'); key(f.input, 'Enter'); await tick();
+  f.type('Second'); key(f.input, 'Enter'); f.type('Third'); key(f.input, 'Enter'); f.type('Dropped'); key(f.input, 'Enter');
+  assert.equal(sends(b).length, 1, 'nothing extra is sent while the reply runs');
+  assert.deepEqual(chips(), ['Second', 'Third', 'Dropped']); assert.equal(f.el('claude-chat-queue').hidden, false); assert.equal(f.input.value, '');
+  assert.match(f.notice.textContent, /3 messages queued/); assert.equal(f.submit.getAttribute('aria-label'), 'Stop task', 'Stop still works');
+  click(f.el('claude-chat-queue').querySelectorAll('.composer-queue-remove')[2]!);
+  assert.deepEqual(chips(), ['Second', 'Third']);
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['First', 'Second'], 'only the next message is sent');
+  assert.deepEqual(chips(), ['Third']); assert.deepEqual(f.bubbles().filter(row => row.role === 'user').map(row => row.text), ['First', 'Second']);
+  f.type('Unsent draft');
+  b.emit({ type: 'done', ok: false, error: 'Claude stopped before finishing.', usage: null }); await tick();
+  assert.equal(sends(b).length, 2, 'a failed reply never sends the queue');
+  assert.equal(f.input.value, 'Unsent draft\n\nThird'); assert.equal(f.el('claude-chat-queue').hidden, true);
+  assert.equal(f.notice.textContent, CLAUDE_CHAT_QUEUE_RETURNED_TEXT);
+  // Stop: the queue returns too.
+  f.type(''); f.type('Fourth'); key(f.input, 'Enter'); await tick(); f.type('Fifth'); key(f.input, 'Enter');
+  click(f.submit); await tick(); assert.equal(b.calls.filter(call => call[0] === 'stop').length, 1);
+  b.emit({ type: 'done', ok: false, error: null, usage: null }); await tick();
+  assert.equal(sends(b).length, 3); assert.equal(f.input.value, 'Fifth');
+  // Usage limit: the unanswered prompt and the queue both come back; nothing is resent.
+  f.type(''); f.type('Sixth'); key(f.input, 'Enter'); await tick(); f.type('Seventh'); key(f.input, 'Enter');
+  b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usageLimit: { resetsAt: null }, usage: null }); await tick();
+  assert.equal(sends(b).length, 4); assert.equal(f.input.value, 'Sixth\n\nSeventh');
+});
+
+test('Claude usage meter: tokens from finished replies accumulate per conversation with a ring, count and tooltip', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const meter = () => f.el('claude-usage-meter');
+  assert.equal(meter().hidden, true, 'no usage before a reply');
+  f.type('One'); key(f.input, 'Enter'); await tick();
+  b.emit({ type: 'done', ok: true, error: null, usage: { inputTokens: 3584, outputTokens: 400, costUsd: 0.01 } }); await tick();
+  assert.equal(meter().hidden, false); assert.equal(meter().querySelector('.usage-meter-count')!.textContent, '4k');
+  f.type('Two'); key(f.input, 'Enter'); await tick();
+  b.emit({ type: 'done', ok: true, error: null, usage: { inputTokens: 9000, outputTokens: 1000, costUsd: null } }); await tick();
+  assert.deepEqual(f.chat.conversationUsage(), { inputTokens: 12584, outputTokens: 1400, costUsd: 0.01, replies: 2 });
+  assert.equal(meter().querySelector('.usage-meter-count')!.textContent, '14k');
+  assert.equal(meter().getAttribute('aria-label'), usageMeterText({ inputTokens: 12584, outputTokens: 1400, costUsd: 0.01, replies: 2 }));
+  assert.match(meter().title, /^Tokens used in this conversation: 13,984 \(12,584 input, 1,400 output, \$0\.0100\) across 2 replies/);
+  f.chat.newChat(); assert.equal(meter().hidden, true, 'a new chat has its own meter');
+  f.chat.deactivate(); assert.equal(meter().hidden, true);
+  assert.deepEqual([950, 12345, 1_250_000].map(compactTokens), ['950', '12k', '1.3M']);
+});
+
+test('composer commands: "/" opens a keyboard menu (Esc closes, Enter runs without sending) and "@" inserts @selection', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const menu = () => f.el('composer-command-menu');
+  const options = () => menu().querySelectorAll('[role=option]').map(node => node.querySelector('.composer-command-name')!.textContent + (node.getAttribute('aria-selected') === 'true' ? '*' : ''));
+  f.type('/');
+  assert.equal(menu().hidden, false); assert.deepEqual(options(), ['/new*', '/clear-draft', '/model', '/help']);
+  assert.equal(f.input.getAttribute('aria-expanded'), 'true'); assert.equal(f.input.getAttribute('aria-activedescendant'), 'composer-command-option-0');
+  key(f.input, 'ArrowDown'); key(f.input, 'ArrowDown'); assert.deepEqual(options(), ['/new', '/clear-draft', '/model*', '/help']);
+  key(f.input, 'ArrowUp'); key(f.input, 'ArrowUp'); key(f.input, 'ArrowUp'); assert.deepEqual(options(), ['/new', '/clear-draft', '/model', '/help*'], 'arrows wrap');
+  const escape = key(f.input, 'Escape'); assert.equal(escape.defaultPrevented, true); assert.equal(menu().hidden, true); assert.equal(f.input.getAttribute('aria-expanded'), 'false');
+  // /model opens the picker; Enter is consumed by the menu and nothing is sent.
+  f.type('/mo'); assert.deepEqual(options(), ['/model*']);
+  const enter = key(f.input, 'Enter'); await tick();
+  assert.equal(enter.defaultPrevented, true); assert.deepEqual(sends(b), []); assert.equal(f.input.value, '');
+  assert.equal(f.el('codex-model-popover').hidden, false, '/model opens the model picker'); key(f.el('codex-model-popover'), 'Escape');
+  // /clear-draft by Tab; /new presses New chat; /help shows tips until Escape.
+  f.type('/clear'); key(f.input, 'Tab'); assert.equal(f.input.value, ''); assert.equal(menu().hidden, true);
+  let created = 0; f.el('workspace-new-chat').addEventListener('click', () => { created++; });
+  f.type('/new'); key(f.input, 'Enter'); assert.equal(created, 1); assert.deepEqual(sends(b), []);
+  f.type('/help'); key(f.input, 'Enter');
+  assert.equal(menu().hidden, false); assert.equal(menu().getAttribute('role'), 'note'); assert.match(menu().textContent, /Shift\+Enter[\s\S]*@selection[\s\S]*queue/);
+  key(f.input, 'Escape'); assert.equal(menu().hidden, true);
+  // Unknown commands close the menu so Enter sends normally.
+  f.type('/zzz'); assert.equal(menu().hidden, true);
+  // @ mentions: only @selection, inserted as a literal token the assistant resolves with selection_read.
+  f.type('Make @se'); assert.deepEqual(options(), ['@selection*']);
+  key(f.input, 'Enter'); assert.equal(f.input.value, 'Make @selection '); assert.equal(menu().hidden, true); assert.deepEqual(sends(b), []);
+  key(f.input, 'Enter'); await tick();
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['Make @selection'], 'with the menu closed Enter sends');
+});
+
+test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu', { skip: !browserModule, timeout: 60000 }, async t => {
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/chatux/shots');
+  await mkdir(shots, { recursive: true });
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
+    import {startProviderSetup} from '/provider-setup.js';
+    import {startWorkspaceShell} from '/workspace-shell.js';
+    import {ClaudeChat} from '/claude-chat.js';
+    const f = window.fx = { calls: [] };
+    const chat = new CodexChat(document, new CodexChatApi('${'a'.repeat(64)}'));
+    const native = Object.freeze({ version: 1, ...Object.fromEntries(['status','login','install','launch'].map(action => [action, async provider =>
+      ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.177', busy: false, message: null })])) });
+    const setup = startProviderSetup(document, { chat, nativeBridge: native });
+    const bridge = Object.freeze({ version: 1,
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet'], efforts: ['low', 'medium', 'high'], defaultModel: 'opus', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' }, message: null }),
+      list: async () => ({ conversations: [] }), history: async id => ({ conversationId: id, messages: [] }),
+      send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-spawn' }; },
+      stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
+    const claude = new ClaudeChat(document, { bridge, storage: null });
+    f.claude = claude;
+    setup.subscribeChatSurface(() => { if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); } else { claude.deactivate(); chat.yieldSurface(false); } });
+    startWorkspaceShell(document);
+    await chat.start(); f.ready = true;`;
+  const server = createServer((request, response) => { void (async () => {
+    const url = request.url?.split('?')[0] ?? '';
+    if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
+    if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
+    const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
+      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+    if (!file) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
+    response.end(await readFile(resolve(file)));
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
+  const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+  const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  t.after(() => browser.close());
+  for (const scheme of ['dark', 'light'] as const) {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, colorScheme: scheme }); page.setDefaultTimeout(8000);
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
+    await page.waitForFunction(() => (window as any).fx?.ready === true);
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
+    await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+    await page.evaluate(() => (window as any).fx.refreshed);
+    const composer = page.locator('#codex-composer');
+    await composer.fill('Add a spawn platform with a spawner script'); await composer.press('Enter');
+    await page.waitForFunction(() => (window as any).fx.calls.length === 1);
+    await page.evaluate(() => {
+      const fx = (window as any).fx, ref = (root: string, ...pathSegments: string[]) => ({ instanceId: 'i', sessionId: 's', root, pathSegments, className: 'Script' });
+      const ok = (commandId: string, method: string, args: unknown) => JSON.stringify({ commandId, state: 'succeeded', terminal: true, command: { method, args } });
+      const create = { parent: ref('Workspace'), className: 'Part', name: 'SpawnPlatform' }, script = { ref: ref('ServerScriptService', 'Spawner'), source: '[140 characters]' };
+      const tool = (id: string, name: string, status: string, input?: unknown, result?: string) => fx.emit({ turnId: 'turn-1', conversationId: 'conv-spawn', type: 'tool',
+        message: { id, role: 'tool', text: name, at: '', tool: { name, status, ...(input ? { input: JSON.stringify(input) } : {}), ...(result ? { result } : {}) } } });
+      tool('t1', 'scene_children', 'started', { root: 'Workspace' }); tool('t1', 'scene_children', 'finished', undefined, '{"nodes":[]}');
+      tool('t2', 'scene_create', 'started', create); tool('t2', 'scene_create', 'finished', undefined, ok('cmd-create-1', 'scene.create', create));
+      tool('t3', 'script_update', 'started', script); tool('t3', 'script_update', 'finished', undefined, ok('cmd-script-2', 'script.update', script));
+      tool('t4', 'scene_update', 'started', { ref: ref('Workspace', 'Lobby', 'Door'), properties: { Color: {} } }); tool('t4', 'scene_update', 'failed', undefined, 'Studio is not in edit mode.');
+      tool('t5', 'playtest_request', 'started', { sessionId: 's' });
+    });
+    await page.locator('#codex-messages .tool-activity').nth(4).waitFor();
+    assert.deepEqual(await page.locator('#codex-messages .tool-activity-text').allInnerTexts(),
+      ['Reading Workspace', 'Creating Part "SpawnPlatform" in Workspace', 'Updating script ServerScriptService.Spawner', 'Updating Workspace.Lobby.Door (Color)', 'Starting a playtest…']);
+    assert.equal(await page.locator('#codex-messages .tool-details[open]').count(), 0, 'no raw JSON by default');
+    // Queue two messages while the reply runs.
+    await composer.fill('Now make the platform glow'); await composer.press('Enter');
+    await composer.fill('Then add a checkpoint'); await composer.press('Enter');
+    assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Now make the platform glow', 'Then add a checkpoint']);
+    await page.locator('#codex-messages .tool-activity').nth(4).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: join(shots, 'activity-running-' + scheme + '.png') });
+    await page.evaluate(() => {
+      const fx = (window as any).fx;
+      fx.emit({ turnId: 'turn-1', conversationId: 'conv-spawn', type: 'tool', message: { id: 't5', role: 'tool', text: 'playtest_request', at: '', tool: { name: 'playtest_request', status: 'finished', result: '{"state":"needs_approval"}' } } });
+      fx.emit({ turnId: 'turn-1', conversationId: 'conv-spawn', type: 'message', message: { id: 'a1', role: 'assistant', text: 'Added SpawnPlatform and the Spawner script. The playtest is waiting for your approval.', at: '' } });
+      fx.emit({ turnId: 'turn-1', conversationId: 'conv-spawn', type: 'done', ok: true, error: null, usage: { inputTokens: 18234, outputTokens: 1620, costUsd: 0.0412 } });
+    });
+    await page.locator('#codex-messages .chat-change-card').waitFor();
+    await page.waitForFunction(() => (window as any).fx.calls.length === 2);
+    assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Now make the platform glow', 'the next queued message is sent after success');
+    assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Then add a checkpoint']);
+    assert.equal(await page.locator('#codex-messages .chat-change-summary').innerText(), '1 created · 1 script edited');
+    assert.equal(await page.locator('#claude-usage-meter').isVisible(), true);
+    assert.equal(await page.locator('#claude-usage-meter .usage-meter-count').innerText(), '20k');
+    await page.locator('#codex-messages .chat-change-card').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: join(shots, 'activity-change-card-' + scheme + '.png') });
+    await page.locator('#codex-messages .chat-change-restore').click();
+    assert.match(await composer.inputValue(), /^Please restore the Studio changes from these receipts, newest first: cmd-script-2, cmd-create-1\./);
+    assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 2, 'Restore never sends');
+    await page.screenshot({ path: join(shots, 'activity-restore-prefill-' + scheme + '.png') });
+    // Slash menu and @selection.
+    await composer.fill(''); await composer.pressSequentially('/');
+    await page.locator('#composer-command-menu [role=option]').first().waitFor();
+    assert.deepEqual(await page.locator('#composer-command-menu .composer-command-name').allInnerTexts(), ['/new', '/clear-draft', '/model', '/help']);
+    await composer.press('ArrowDown');
+    assert.equal(await page.locator('#composer-command-menu [aria-selected=true] .composer-command-name').innerText(), '/clear-draft');
+    await page.screenshot({ path: join(shots, 'composer-slash-menu-' + scheme + '.png') });
+    await composer.press('Escape'); assert.equal(await page.locator('#composer-command-menu').isVisible(), false);
+    await composer.fill(''); await composer.pressSequentially('/help'); await composer.press('Enter');
+    assert.equal(await page.locator('#composer-command-menu[data-mode=help]').isVisible(), true);
+    await page.screenshot({ path: join(shots, 'composer-help-' + scheme + '.png') });
+    await composer.press('Escape');
+    await composer.pressSequentially('Make @sel'); await page.locator('#composer-command-menu[data-mode=mention]').waitFor();
+    await page.screenshot({ path: join(shots, 'composer-mention-' + scheme + '.png') });
+    await composer.press('Enter'); assert.equal(await composer.inputValue(), 'Make @selection ');
+    await composer.fill(''); await composer.pressSequentially('/model'); await composer.press('Enter');
+    await page.locator('#codex-picker-summary').waitFor(); await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 2, 'commands never send');
+    // A failed reply returns the queue to the message box.
+    await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-2', conversationId: 'conv-spawn', type: 'done', ok: false, error: 'Claude stopped before finishing.', usage: null }));
+    await page.waitForFunction(() => (document.getElementById('codex-composer') as HTMLTextAreaElement).value.includes('Then add a checkpoint'));
+    assert.equal(await page.locator('#claude-chat-queue').isVisible(), false);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator('#codex-messages .chat-change-card').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: join(shots, 'activity-mobile-' + scheme + '.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, 'no horizontal scroll at phone width');
+    if (scheme === 'dark') { await page.emulateMedia({ forcedColors: 'active' }); await page.screenshot({ path: join(shots, 'activity-forced-colors.png') }); }
+    assert.deepEqual(errors, []);
+    await page.close();
+  }
 });

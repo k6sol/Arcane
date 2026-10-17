@@ -4,8 +4,9 @@
 local V = require(script.Validation)
 local Transport = require(script.Transport)
 local Sha256 = require(script.Sha256)
+local Diagnostics = require(script.Diagnostics)
 -- Identity covers the actual loaded hierarchy, independent of XML serialization.
-local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload"})
+local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload", "Diagnostics"})
 local function loadedArtifactHash(): string?
 	if typeof(script) ~= "Instance" or not script:IsA("Script") then return nil end
 	local ok, value = pcall(function(): string
@@ -264,6 +265,11 @@ end, artifactHash)
 -- Check deferred text edits before every worker cycle and after every yielding
 -- HTTP call, including status recovery that has not yet emitted a UI callback.
 transport.checkInput = invalidateInput
+-- Studio errors/warnings are kept only while this window is paired, and only
+-- reported on the authenticated poll. Missing engine signals leave it inert.
+local diagnostics = Diagnostics.new(game, function(): boolean return transport.pair ~= nil end)
+local diagnosticsReady, diagnosticsStarted = pcall(function(): boolean return diagnostics:start() end)
+if diagnosticsReady and diagnosticsStarted then transport.diagnostics = diagnostics end
 -- A deferred Text signal must also be caught inside an already dispatched
 -- editor callback. Keep the transport's original lifetime/lease checks intact.
 local guard = transport.guard
@@ -302,6 +308,7 @@ table.insert(connections, plugin.Unloading:Connect(function()
 	savedKey = nil
 	clearInput()
 	transport:stop()
+	diagnostics:stop()
 	for _, connection in ipairs(connections) do connection:Disconnect() end
 	widget:Destroy()
 	toolbar:Destroy()

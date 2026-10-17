@@ -39,6 +39,15 @@ export interface AssetUploadContextPin {
  * session unseen for longer than this is a dead Studio lifetime, not a substitute target. */
 export const STUDIO_SESSION_LIVE_MS = 60_000;
 export type ListedStudioSession = StudioSession & { live: boolean };
+/** Non-method capability: the plugin reports bounded Studio output errors/warnings on its poll. */
+export const STUDIO_DIAGNOSTICS_CAPABILITY = 'studio.diagnostics';
+/** In-memory only. Diagnostics are display data for the human dock, never command authority. */
+export const STUDIO_DIAGNOSTIC_LIMITS = Object.freeze({entries:100,perReport:10,reportBytes:96*1024,sessions:16,messageChars:2048,stackChars:2048,sourceChars:512,idChars:64,maxCount:1_000_000_000});
+export interface StudioDiagnostic {
+  id:string;kind:'error'|'warning';message:string;source:string|null;line:number|null;stack:string|null;
+  count:number;firstAt:string;lastAt:string;
+}
+export interface StudioDiagnosticGroup {sessionId:string;placeName:string;placeId:number;live:boolean;entries:StudioDiagnostic[]}
 export const STUDIO_STAGE_RUN_LIMITS = Object.freeze({packets:512,envelopeBytes:8*1024*1024,argumentBytes:256*1024,runs:64});
 export interface StageRunHandle {readonly kind:'studio-stage-run-handle'}
 export interface StageRunIntent {
@@ -190,6 +199,7 @@ export class StudioStore {
   #testReservations = new WeakMap<object,TestReservationRecord>();
   #testReservationRecords = new Map<string,TestReservationRecord>();
   #testCommandAdmissions = new WeakMap<object,TestCommandAdmission>();
+  #diagnostics = new Map<string,{placeName:string;placeId:number;entries:Map<string,StudioDiagnostic>}>();
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
@@ -320,7 +330,7 @@ export class StudioStore {
     const name = textField(identity.name, 'Studio name', 200); const pluginVersion = textField(identity.pluginVersion, 'plugin version', 80);
     for (const f of ['placeId', 'universeId']) if (typeof identity[f] !== 'number' || !Number.isSafeInteger(identity[f]) || (identity[f] as number) < 0) throw new ArcaneError('IDENTITY', 'Invalid place/universe identity.');
     if (!Array.isArray(a.capabilities) || a.capabilities.length > 20 || a.capabilities.some(c => typeof c !== 'string')) throw new ArcaneError('CAPABILITY', 'Invalid plugin capabilities.');
-    const capabilities = [...new Set(a.capabilities)].map(methodField);
+    const capabilities: string[] = [...new Set(a.capabilities)].map(c => c === STUDIO_DIAGNOSTICS_CAPABILITY ? c : methodField(c));
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM grants WHERE hash=?').get(hash(code)) as Row | undefined;
       if (!row || row.used || Number(row.expires) <= this.now()) throw new ArcaneError('PAIRING', 'Pairing code is invalid, expired or already used.');
@@ -1134,6 +1144,59 @@ export class StudioStore {
         c.state = 'dispatched'; this.saveCommand(c); this.event('command_dispatched', c.id, { sessionId }); return [c];
       }
     });
+  }
+  /** Bounded, idempotent upsert of the plugin's absolute counts. Malformed or unadvertised reports are
+   * dropped whole and never fail the poll that carried them. Returns the number of entries accepted. */
+  recordDiagnostics(sessionId: string, input: unknown): number {
+    const L = STUDIO_DIAGNOSTIC_LIMITS;
+    const s = this.session(sessionId);
+    if (!s.capabilities.includes(STUDIO_DIAGNOSTICS_CAPABILITY) || !Array.isArray(input) || input.length < 1 || input.length > L.perReport) return 0;
+    let serialized: string; try { serialized = JSON.stringify(input); } catch { return 0; }
+    if (Buffer.byteLength(serialized) > L.reportBytes) return 0;
+    const text = (value: unknown, max: number): string | null | undefined => {
+      if (value === undefined || value === null) return null;
+      if (typeof value !== 'string' || value.length < 1 || value.includes('\0')) return undefined;
+      return value.length > max ? value.slice(0, max) : value;
+    };
+    const parsed: Omit<StudioDiagnostic,'firstAt'|'lastAt'>[] = [];
+    for (const raw of input) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 0;
+      const r = raw as Record<string, unknown>;
+      if (Object.keys(r).some(k => !['id','kind','message','source','line','stack','count'].includes(k))) return 0;
+      const id = text(r.id, L.idChars), message = text(r.message, L.messageChars), source = text(r.source, L.sourceChars), stack = text(r.stack, L.stackChars);
+      if (!id || !/^[A-Za-z0-9_-]+$/.test(id) || !message || source === undefined || stack === undefined || (r.kind !== 'error' && r.kind !== 'warning')) return 0;
+      if (r.line !== undefined && r.line !== null && (!Number.isSafeInteger(r.line) || (r.line as number) < 1 || (r.line as number) > 1_000_000)) return 0;
+      if (!Number.isSafeInteger(r.count) || (r.count as number) < 1 || (r.count as number) > L.maxCount) return 0;
+      parsed.push({ id, kind: r.kind, message, source, stack, line: (r.line as number | undefined) ?? null, count: r.count as number });
+    }
+    let group = this.#diagnostics.get(sessionId);
+    if (!group) {
+      group = { placeName: s.name, placeId: s.placeId, entries: new Map() };
+      this.#diagnostics.set(sessionId, group);
+      while (this.#diagnostics.size > L.sessions) this.#diagnostics.delete(this.#diagnostics.keys().next().value!);
+    } else { this.#diagnostics.delete(sessionId); this.#diagnostics.set(sessionId, group); }
+    const at = this.iso();
+    for (const d of parsed) {
+      const prior = group.entries.get(d.id);
+      if (prior && d.count <= prior.count && prior.kind === d.kind && prior.message === d.message) continue; // Replayed report.
+      group.entries.delete(d.id);
+      group.entries.set(d.id, { ...d, count: prior ? Math.max(prior.count, d.count) : d.count, stack: d.stack ?? prior?.stack ?? null, firstAt: prior?.firstAt ?? at, lastAt: at });
+      while (group.entries.size > L.entries) group.entries.delete(group.entries.keys().next().value!);
+    }
+    return parsed.length;
+  }
+  /** Newest first, per session; read only by the human panel. */
+  diagnostics(): StudioDiagnosticGroup[] {
+    const groups: StudioDiagnosticGroup[] = [];
+    for (const [sessionId, group] of this.#diagnostics) {
+      let live = false; try { live = this.live(this.session(sessionId, false)); } catch { /* Unknown session stays listed as offline. */ }
+      groups.push({ sessionId, placeName: group.placeName, placeId: group.placeId, live, entries: [...group.entries.values()].reverse().map(e => ({ ...e })) });
+    }
+    return groups.reverse();
+  }
+  clearDiagnostics(sessionId?: string): number {
+    if (sessionId === undefined) { const n = this.#diagnostics.size; this.#diagnostics.clear(); return n; }
+    return this.#diagnostics.delete(sessionId) ? 1 : 0;
   }
   result(input: unknown): void {
     const a = object(input); const sessionId = textField(a.sessionId, 'session ID'); const commandId = textField(a.commandId, 'command ID');

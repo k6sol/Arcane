@@ -315,7 +315,11 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['claudeChat', 'codeVerification', 'nativeHandoff', 'platform', 'providerSetup', 'runtime', 'studioKeys', 'version', 'workspacePreferences']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['claudeChat', 'codeVerification', 'nativeHandoff', 'platform', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.equal(Object.isFrozen(exposed.studioPlugin), true);
+  assert.deepEqual(Object.keys(exposed.studioPlugin).sort(), ['install', 'status', 'version']);
+  assert.equal(Object.isFrozen(exposed.workspaceProject), true);
+  assert.deepEqual(Object.keys(exposed.workspaceProject).sort(), ['open', 'version']);
   assert.equal(Object.isFrozen(exposed.nativeHandoff), true);
   assert.deepEqual(Object.keys(exposed.nativeHandoff).sort(), ['launch', 'list', 'revoke', 'version']);
   assert.equal(exposed.runtime, 'desktop');
