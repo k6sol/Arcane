@@ -16,7 +16,7 @@ function deploymentManifest(source) {
   const files = source.files.filter(file => deploymentPath(file.path));
   return { ...source, fileCount: files.length, totalBytes: files.reduce((total, file) => total + file.bytes, 0), files };
 }
-const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs'];
+const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs'];
 const PRODUCTION_ROOTS = ['@modelcontextprotocol/sdk', 'zod'];
 const ELECTRON_FILES = new Set([
   'electron.exe', 'LICENSE', 'LICENSES.chromium.html', 'version',

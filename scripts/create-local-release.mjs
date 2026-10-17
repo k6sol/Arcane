@@ -29,6 +29,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/setup-checklist.ts', 'dist/apps/desktop/src/setup-checklist.js', 'dist/apps/desktop/src/setup-checklist.js.map',
   'apps/desktop/src/arcane-dialog.ts', 'dist/apps/desktop/src/arcane-dialog.js', 'dist/apps/desktop/src/arcane-dialog.js.map',
   'apps/desktop/src/plans.ts', 'dist/apps/desktop/src/plans.js', 'dist/apps/desktop/src/plans.js.map',
+  'apps/desktop/src/notifications.ts', 'dist/apps/desktop/src/notifications.js', 'dist/apps/desktop/src/notifications.js.map',
   'apps/desktop/src/workspace-shell.ts', 'dist/apps/desktop/src/workspace-shell.js',
   'dist/apps/desktop/src/workspace-shell.js.map', 'apps/desktop/src/asset-downloads.ts',
   'dist/apps/desktop/src/asset-downloads.js', 'dist/apps/desktop/src/asset-downloads.js.map',

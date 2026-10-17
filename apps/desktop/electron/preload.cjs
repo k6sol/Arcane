@@ -431,4 +431,48 @@ const projectPermissions = Object.freeze({ version: 1,
     } catch { throw new Error(PERMISSIONS_UNAVAILABLE); }
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions }));
+// Plans & credits checkout: one offer id out; the host owns the URL, allowlist and confirmation. Only fixed states and
+// the host's fixed messages come back (billing.cjs).
+const BILLING_UNAVAILABLE = 'Checkout is unavailable right now. Nothing was charged.';
+const BILLING_MESSAGES = ["Checkout isn't connected yet", 'Checkout is connected.', 'Checkout opened in your browser', 'Checkout cancelled. Nothing was charged.',
+  'That offer is unavailable. Nothing was charged.', 'A checkout question is already open.', BILLING_UNAVAILABLE];
+const BILLING_STATES = ['not-connected', 'ready', 'opened', 'cancelled', 'unknown-offer', 'busy', 'unavailable'];
+const billingReply = (value, withAccount) => {
+  if (!value || typeof value !== 'object' || value.version !== 1 || !BILLING_STATES.includes(value.state) || !BILLING_MESSAGES.includes(value.message) ||
+      (withAccount && value.account !== 'unavailable')) throw new Error(BILLING_UNAVAILABLE);
+  return { version: 1, state: value.state, message: value.message, ...(withAccount ? { account: 'unavailable' } : {}) };
+};
+const billing = Object.freeze({ version: 1,
+  status: async (...args) => {
+    try { if (args.length) throw new Error(); return billingReply(await ipcRenderer.invoke('arcane:billing-status'), true); }
+    catch { throw new Error(BILLING_UNAVAILABLE); }
+  },
+  openCheckout: async (...args) => {
+    try {
+      if (args.length !== 1 || typeof args[0] !== 'string' || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(args[0])) throw new Error();
+      return billingReply(await ipcRenderer.invoke('arcane:billing-checkout', args[0]), false);
+    } catch { throw new Error(BILLING_UNAVAILABLE); }
+  },
+});
+// Build-done notifications: a fixed kind, a short plain body and an opaque target id out; clicks return only the target.
+const NOTIFICATIONS_UNAVAILABLE = 'Notifications are unavailable.';
+const notificationTarget = value => typeof value === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(value);
+const notifications = Object.freeze({ version: 1,
+  notify: async (...args) => {
+    try {
+      const value = args[0];
+      if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 3 ||
+          !['finished', 'attention'].includes(value.kind) || typeof value.body !== 'string' || value.body.length > 480 || !notificationTarget(value.target)) throw new Error();
+      const out = await ipcRenderer.invoke('arcane:notification-show', { kind: value.kind, body: value.body, target: value.target });
+      return { shown: out?.shown === true };
+    } catch { throw new Error(NOTIFICATIONS_UNAVAILABLE); }
+  },
+  onActivate: listener => {
+    if (typeof listener !== 'function') throw new Error(NOTIFICATIONS_UNAVAILABLE);
+    const wrapped = (_event, payload) => { if (payload && notificationTarget(payload.target)) { try { listener({ target: payload.target }); } catch { /* renderer errors stay there */ } } };
+    ipcRenderer.on('arcane:notification-activate', wrapped);
+    let active = true;
+    return () => { if (active) { active = false; ipcRenderer.removeListener('arcane:notification-activate', wrapped); } };
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications }));

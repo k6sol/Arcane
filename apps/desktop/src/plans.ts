@@ -2,8 +2,9 @@
  * Plans & credits: the Settings page and the top-bar usage chip.
  *
  * Shows Arcane actions used this month (local, informational, never blocking), monthly plans, quick-buy action packs
- * and Arcane Credits. Every buy button goes through ONE checkout seam on the daemon. Until a billing service is
- * configured and verified the seam answers "not connected" and nothing is charged. Prices and copy come from
+ * and Arcane Credits. Every buy button goes through ONE checkout seam: in the desktop app the host bridge
+ * `arcaneDesktop.billing.openCheckout(offerId)` (apps/desktop/electron/billing.cjs); elsewhere the daemon route. Until a
+ * billing service is configured the seam answers "not connected" and nothing is charged. Prices and copy come from
  * packages/protocol/src/plans.ts via the daemon; this module never invents a price or a balance.
  */
 
@@ -100,7 +101,18 @@ export function checkoutUrlAllowed(url: unknown, origins: readonly string[]): ur
 }
 
 interface ClaudeBridge { onEvent(listener: (event: unknown) => void): () => void }
-interface BillingBridge { openCheckout(url: string): Promise<unknown> }
+/**
+ * Desktop checkout bridge (apps/desktop/electron/billing.cjs): the renderer names one offer id; the host builds the URL
+ * from trusted config, checks the allowlist, confirms in an Arcane dialog and opens the system browser. Fixed replies only.
+ */
+export interface BillingBridge { version?: number; status?(): Promise<unknown>; openCheckout(productId: string): Promise<unknown> }
+export type DesktopCheckoutState = 'not-connected' | 'ready' | 'opened' | 'cancelled' | 'unknown-offer' | 'busy' | 'unavailable';
+/** Reads a desktop bridge reply; anything unexpected is 'unavailable'. */
+export function readDesktopCheckout(value: unknown): DesktopCheckoutState {
+  const reply = obj(value);
+  const states: DesktopCheckoutState[] = ['not-connected', 'ready', 'opened', 'cancelled', 'unknown-offer', 'busy', 'unavailable'];
+  return reply && reply.version === 1 && states.includes(reply.state as DesktopCheckoutState) ? reply.state as DesktopCheckoutState : 'unavailable';
+}
 export interface PlansOptions {
   token: () => string;
   fetch?: typeof fetch;
@@ -209,20 +221,42 @@ export function startPlans(doc: Document, options: PlansOptions) {
       if (!response.ok) return;
       const state = readPlansState(await response.json());
       if (state) { current = state; render(state); }
+      // Desktop: the host bridge is the checkout authority, so its fixed state labels the page.
+      const bridge = options.desktop?.billing;
+      if (state && bridge && typeof bridge.status === 'function') {
+        const desktop = readDesktopCheckout(await bridge.status().catch(() => null)), label = el('plans-billing-state');
+        if (label) { label.textContent = desktop === 'ready' ? 'Checkout connected' : 'Checkout not connected'; label.className = 'status-text ' + (desktop === 'ready' ? 'ok' : 'neutral'); }
+      }
     } catch { /* Usage is informational; keep the last good view. */ }
     finally { pending = false; }
+  }
+
+  function desktopNotice(state: DesktopCheckoutState): void {
+    if (state === 'opened') notice('ready', 'Checkout opened in your browser', 'Finish there. Your balance updates after the billing service confirms payment.');
+    else if (state === 'cancelled') notice('info', 'Checkout cancelled', 'Nothing was charged.');
+    else if (state === 'unknown-offer') notice('error', 'That offer is unavailable', 'Refresh Plans & credits and try again. Nothing was charged.');
+    else if (state === 'busy') notice('info', 'A checkout question is already open', 'Answer it first. Nothing was charged.');
+    else if (state === 'not-connected' || state === 'ready') notice('info', NOT_CONNECTED_TITLE, NOT_CONNECTED_TEXT);
+    else notice('info', 'Checkout is unavailable right now', 'Nothing was charged. Try again in a moment.');
   }
 
   async function checkout(kind: Kind, id: string, button: HTMLButtonElement): Promise<void> {
     if (button.disabled) return;
     button.disabled = true; button.setAttribute('aria-busy', 'true');
+    const bridge = options.desktop?.billing;
+    if (bridge && typeof bridge.openCheckout === 'function') {
+      // Desktop: the host owns URL, allowlist and confirmation; only the offer id crosses.
+      try { desktopNotice(readDesktopCheckout(await bridge.openCheckout(id))); }
+      catch { desktopNotice('unavailable'); }
+      finally { button.disabled = false; button.removeAttribute('aria-busy'); }
+      return;
+    }
     try {
       const response = await doFetch('/v1/plans/checkout', { method: 'POST', headers: headers(true), body: JSON.stringify({ kind, id }) });
       const reply = obj(response.ok ? await response.json() : null);
       if (reply?.state === 'ready' && current && checkoutUrlAllowed(reply.url, current.billing.origins)) {
         const url = reply.url as string;
-        if (options.desktop?.billing?.openCheckout) { await options.desktop.billing.openCheckout(url); notice('ready', 'Checkout opened in your browser', 'Finish there. Your balance updates after the billing service confirms payment.'); }
-        else if (options.desktop?.runtime !== 'desktop' && options.open) { options.open(url); notice('ready', 'Checkout opened in a new tab', 'Finish there. Your balance updates after the billing service confirms payment.'); }
+        if (options.desktop?.runtime !== 'desktop' && options.open) { options.open(url); notice('ready', 'Checkout opened in a new tab', 'Finish there. Your balance updates after the billing service confirms payment.'); }
         else notice('info', 'Checkout can’t open here yet', 'This build has no safe way to open the checkout page. Nothing was charged.');
       } else if (reply?.state === 'unknown-offer') notice('error', 'That offer is unavailable', 'Refresh Plans & credits and try again. Nothing was charged.');
       else notice('info', NOT_CONNECTED_TITLE, NOT_CONNECTED_TEXT);

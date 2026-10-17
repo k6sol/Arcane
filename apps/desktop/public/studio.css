@@ -1897,5 +1897,10 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
   .arcane-app .permission-switch input[type=checkbox]::after{content:none}
 }
 /* ---- End in-app dialogs and Permissions ---- */
+/* ---- Notifications settings toggle (notifications.ts; owned block; keep before the reduced-motion reset; no transitions) ---- */
+.arcane-app .notification-settings .permission-switch{margin-top:8px}
+.arcane-app .notification-settings .permission-switch input[type=checkbox]:disabled + .permission-switch-text{color:var(--text-secondary)}
+.arcane-app .notification-settings #settings-notify-note:empty{display:none}
+/* ---- End Notifications settings toggle ---- */
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

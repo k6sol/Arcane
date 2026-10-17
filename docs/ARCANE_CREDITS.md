@@ -53,11 +53,26 @@ The billing service must expose:
 
 - **How Arcane builds the URL.** Arcane builds the checkout URL from trusted config and a known offer id, never from
   request text. It then checks the URL again in the renderer against the verified origin.
-- **How the URL opens.** It opens in the system browser through `window.arcaneDesktop.billing.openCheckout(url)`.
-  - This bridge is the only desktop host change still needed. Add it next to the existing provider-setup
-    `shell.openExternal` path.
-  - The host must accept one https string and re-check its origin against the same allowlist.
-  - Until the bridge exists, the desktop says "Checkout can't open here yet" and does nothing else.
+- **How the URL opens (desktop).** The Settings page calls `window.arcaneDesktop.billing.openCheckout(offerId)`.
+  The host (`apps/desktop/electron/billing.cjs`) takes only the offer id:
+  - It looks the offer up in the shipped `ARCANE_PLANS` and builds `<serviceUrl>/checkout?kind=…&offer=…` itself.
+  - It requires an https URL whose exact origin is in `billing.allowedOrigins` (no userinfo, port, IP literal or
+    localhost), and re-checks the origin right before opening.
+  - It asks in an Arcane in-app dialog ("Open checkout", Cancel is the default) and opens the system browser with
+    `shell.openExternal` only after the user confirms.
+  - Replies are fixed states and messages (`not-connected`, `opened`, `cancelled`, `unknown-offer`, `busy`,
+    `unavailable`). Unconfigured always answers "Checkout isn't connected yet" and opens nothing.
+  - `billing.status()` reports `ready` or `not-connected` and `account: 'unavailable'` (Arcane account sign-in is not
+    implemented yet; see below).
+- **Where the desktop reads the service URL.** Default: unset. Either
+  - a local file `<Arcane userData>/billing-service.json` (Windows: `%APPDATA%\Arcane\billing-service.json`), a plain
+    file of at most 4 KiB: `{"version":1,"serviceUrl":"https://billing.your-domain.example"}`, or
+  - `billing.serviceUrl` in `packages/protocol/src/plans.ts`.
+
+  The local file wins when present. In both cases the origin must also be listed in `billing.allowedOrigins` in
+  `plans.ts`, which ships with the app, so a local file alone cannot point checkout somewhere new. The desktop bridge
+  does not call `/v1/health`; the Settings page label follows `billing.status()`.
+- **Browser (non-desktop) pages** keep using `POST /v1/plans/checkout` and open the verified URL in a new tab.
 - **Balances.** Your service grants plans, packs and credits on its own side, after the processor confirms payment
   through its webhook. Arcane only reads balances back through the gateway (below).
 
@@ -113,7 +128,8 @@ Error statuses:
 ### Remaining wiring once the gateway exists
 
 1. Desktop host: an Arcane account sign-in flow, using a browser handoff like provider login, that stores the token
-   with `createEncryptedTokenVault` and `safeStorage`.
+   with `createEncryptedTokenVault` and `safeStorage`. Not implemented: `arcaneDesktop.billing.status()` always reports
+   `account: 'unavailable'` until it exists.
 2. Daemon: pass `gatewaySignedIn` to `plansRoutes` so the Settings page shows "Arcane Credits are ready".
 3. Chat: add the `arcane` provider to the model picker only when `gateway.showInModelPicker` is true. Stream turns
    through `streamChat`. Count each finished turn as an action, like the other providers.

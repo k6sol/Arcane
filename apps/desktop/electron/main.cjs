@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, Menu, dialog: nativeDialog, nativeTheme, ipcMain, safeStorage, clipboard } = require('electron');
+const { app, BrowserWindow, Menu, dialog: nativeDialog, nativeTheme, ipcMain, safeStorage, clipboard, shell, Notification } = require('electron');
 const { spawn } = require('node:child_process');
 const { join, resolve, basename } = require('node:path');
 const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
@@ -451,6 +451,15 @@ else {
       projectPermissions.installIpc(ipcMain, { trusted: rendererEvent });
       // Switching Claude tools to "ask" revokes this session's consent and its shared credential immediately.
       projectPermissions.subscribe(next => { if (!next.claudeTools) claudeChat?.revokeApproval?.(); });
+      // Plans & credits checkout: one offer id in; the host builds the URL from the shipped plans config and the local
+      // billing-service.json (billing.cjs), checks the exact https allowlist, confirms in an Arcane dialog, then opens the browser.
+      require('./billing.cjs').createBilling({ enabled: !smoke, dialog, shell, getWindow: () => closing || switching ? null : window,
+        configDirectory: () => userRoot ?? null,
+        loadPlans: async () => productRoot ? (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/plans.js')).href)).ARCANE_PLANS : null,
+      }).installIpc(ipcMain, { trusted: rendererEvent });
+      // Build-done notifications: fixed titles and a bounded body, only while the window is not focused; click focuses it.
+      require('./build-notifications.cjs').createBuildNotifications({ enabled: !smoke, Notification,
+        getWindow: () => closing || switching ? null : window }).installIpc(ipcMain, { trusted: rendererEvent });
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
         getHost: () => claudeChat ?? null,

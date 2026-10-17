@@ -315,7 +315,12 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['claudeChat', 'codeVerification', 'dialogs', 'nativeHandoff', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.equal(Object.isFrozen(exposed.billing), true);
+  assert.deepEqual(Object.keys(exposed.billing).sort(), ['openCheckout', 'status', 'version']);
+  assert.equal(exposed.billing.version, 1);
+  assert.equal(Object.isFrozen(exposed.notifications), true);
+  assert.deepEqual(Object.keys(exposed.notifications).sort(), ['notify', 'onActivate', 'version']);
   assert.equal(Object.isFrozen(exposed.dialogs), true);
   assert.deepEqual(Object.keys(exposed.dialogs).sort(), ['attach', 'reply', 'version']);
   assert.equal(Object.isFrozen(exposed.projectPermissions), true);
@@ -667,4 +672,92 @@ test('project permissions persist per project, default to auto-approve and accep
     const off = requireHost('project-permissions.cjs').createProjectPermissions({ getSession: () => session, enabled: false });
     await assert.rejects(off.save({ claudeTools: true }), /unavailable/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------- checkout bridge and build-done notifications
+test('main wires the checkout bridge and build notifications through the trusted renderer check', () => {
+  assert.match(mainSource, /require\('\.\/billing\.cjs'\)\.createBilling\(\{ enabled: !smoke, dialog, shell,/);
+  assert.match(mainSource, /dist\/packages\/protocol\/src\/plans\.js/);
+  assert.match(mainSource, /require\('\.\/build-notifications\.cjs'\)\.createBuildNotifications\(\{ enabled: !smoke, Notification,/);
+  assert.ok((mainSource.match(/\.installIpc\(ipcMain, \{ trusted: rendererEvent \}\)/g) ?? []).length >= 4);
+});
+
+test('checkout bridge: unconfigured never opens; configured opens only an allowlisted https URL after an in-app confirm', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'arcane-billing-'));
+  try {
+    const opened = [], asked = [], handlers = new Map();
+    let answer = 1;
+    const window = { isDestroyed: () => false };
+    const plans = { plans: [{ id: 'pro', name: 'Pro' }], packs: [{ id: 'pack-100', name: 'Top-up' }], credits: { offers: [{ id: 'credits-10', name: '$10 of credits' }] },
+      billing: { serviceUrl: '', allowedOrigins: ['https://billing.arcane.test'] } };
+    const make = (overrides = {}) => requireHost('billing.cjs').createBilling({ loadPlans: async () => plans, configDirectory: () => root, getWindow: () => window,
+      dialog: { showMessageBox: async (owner, options) => { assert.equal(owner, window); asked.push(options); return { response: answer }; } },
+      shell: { openExternal: async url => { opened.push(url); } }, ...overrides });
+    const billing = make();
+    billing.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } }, { trusted: event => event.ok === true });
+    assert.deepEqual({ ...await billing.status() }, { version: 1, state: 'not-connected', message: "Checkout isn't connected yet", account: 'unavailable' });
+    assert.deepEqual({ ...await billing.openCheckout('pro') }, { version: 1, state: 'not-connected', message: "Checkout isn't connected yet" });
+    assert.deepEqual(opened, []); assert.deepEqual(asked, [], 'no question while unconfigured');
+    // A local file may name a service only on an origin the shipped config allowlists.
+    for (const serviceUrl of ['http://billing.arcane.test', 'https://evil.test', 'https://user@billing.arcane.test', 'https://billing.arcane.test:8443', 'https://127.0.0.1']) {
+      await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, serviceUrl }));
+      assert.equal((await billing.openCheckout('pro')).state, 'not-connected', serviceUrl);
+    }
+    assert.deepEqual(opened, []);
+    await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, serviceUrl: 'https://billing.arcane.test/' }));
+    assert.equal((await billing.status()).state, 'ready');
+    assert.equal((await billing.openCheckout('nope')).state, 'unknown-offer');
+    assert.equal((await billing.openCheckout('../x')).state, 'unknown-offer');
+    answer = 0;
+    assert.equal((await billing.openCheckout('pro')).state, 'cancelled'); assert.deepEqual(opened, []);
+    assert.equal(asked.at(-1).buttons[asked.at(-1).cancelId], 'Cancel'); assert.equal(asked.at(-1).defaultId, 0);
+    answer = 1;
+    assert.deepEqual({ ...await billing.openCheckout('pack-100') }, { version: 1, state: 'opened', message: 'Checkout opened in your browser' });
+    assert.deepEqual(opened, ['https://billing.arcane.test/checkout?kind=pack&offer=pack-100']);
+    assert.match(asked.at(-1).message, /Top-up/);
+    // IPC: trusted sender and exactly one string.
+    await assert.rejects(handlers.get('arcane:billing-checkout')({ ok: false }, 'pro'), /unavailable/);
+    await assert.rejects(handlers.get('arcane:billing-checkout')({ ok: true }, { id: 'pro' }), /unavailable/);
+    await assert.rejects(handlers.get('arcane:billing-checkout')({ ok: true }, 'pro', 'extra'), /unavailable/);
+    assert.equal((await handlers.get('arcane:billing-checkout')({ ok: true }, 'credits-10')).state, 'opened');
+    assert.equal(opened.at(-1), 'https://billing.arcane.test/checkout?kind=credits&offer=credits-10');
+    // Disabled (smoke) and a failing browser stay fixed and quiet.
+    assert.equal((await make({ enabled: false }).openCheckout('pro')).state, 'not-connected');
+    assert.equal((await make({ shell: { openExternal: async () => { throw new Error('C:\\secret path'); } } }).openCheckout('pro')).message, 'Checkout is unavailable right now. Nothing was charged.');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('build notifications: fixed titles, bounded body, only when unfocused; click focuses and returns the target', async () => {
+  const shown = [], sent = [], handlers = new Map();
+  let focused = false, clock = 0;
+  class FakeNotification extends EventEmitter {
+    static isSupported() { return true; }
+    constructor(options) { super(); this.options = options; }
+    show() { shown.push(this); }
+  }
+  const window = { isDestroyed: () => false, isFocused: () => focused, isMinimized: () => true, restored: 0, focused: 0,
+    restore() { this.restored++; }, show() {}, focus() { this.focused++; }, webContents: { isDestroyed: () => false, send: (channel, value) => sent.push({ channel, value }) } };
+  const host = requireHost('build-notifications.cjs').createBuildNotifications({ Notification: FakeNotification, getWindow: () => window, now: () => clock });
+  host.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } }, { trusted: event => event.ok === true });
+  const show = handlers.get('arcane:notification-show');
+  assert.deepEqual(await show({ ok: true }, { kind: 'finished', body: 'Claude finished in “Castle”.', target: 'n1-abc' }), { shown: true });
+  assert.equal(shown[0].options.title, 'Arcane — Build finished'); assert.equal(shown[0].options.body, 'Claude finished in “Castle”.');
+  clock += 5000;
+  assert.deepEqual(await show({ ok: true }, { kind: 'attention', body: 'x'.repeat(300) + '\u202e', target: 'n2-abc' }), { shown: true });
+  assert.equal(shown[1].options.title, 'Arcane — Needs your attention'); assert.ok(shown[1].options.body.length <= 120);
+  assert.doesNotMatch(shown[1].options.body, /\u202e/);
+  clock += 100;
+  assert.deepEqual(await show({ ok: true }, { kind: 'finished', body: 'again', target: 'n3' }), { shown: false }, 'cooldown');
+  clock += 5000; focused = true;
+  assert.deepEqual(await show({ ok: true }, { kind: 'finished', body: 'focused', target: 'n4' }), { shown: false }, 'focused window');
+  for (const bad of [{ kind: 'other', body: '', target: 'n5' }, { kind: 'finished', body: '', target: 'bad target' }, { kind: 'finished', body: '', target: 'n6', title: 'x' }, null, 'finished'])
+    await assert.rejects(show({ ok: true }, bad), /unavailable/);
+  await assert.rejects(show({ ok: false }, { kind: 'finished', body: '', target: 'n7' }), /unavailable/);
+  shown[0].emit('click');
+  assert.equal(window.restored, 1); assert.equal(window.focused, 1);
+  assert.deepEqual(sent, [{ channel: 'arcane:notification-activate', value: { target: 'n1-abc' } }]);
+  const off = requireHost('build-notifications.cjs').createBuildNotifications({ Notification: FakeNotification, getWindow: () => window, enabled: false });
+  focused = false; assert.deepEqual(off.notify({ kind: 'finished', title: 'Arcane — Build finished', body: '', target: 'n8' }), { shown: false });
 });
