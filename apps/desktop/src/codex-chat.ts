@@ -270,6 +270,33 @@ export function codexRateLimitDisplay(snapshot:ChatSnapshot|null):{status:string
   });
   return{status:(live?'Last reported ':'Disconnected · last reported ')+observed+'. '+availability,rows};
 }
+/** Presentation-only usage-limit evidence for the composer notice; never authority to send, retry or switch. */
+export interface ProviderUsageLimit { resetsAt:number|null }
+/** Turn rejections that name a usage or rate limit (the native client's recorded error code). */
+const USAGE_LIMIT_CODES=/^(?:USAGE_LIMIT(?:_EXCEEDED|_REACHED)?|RATE_LIMIT(?:_EXCEEDED|_REACHED)|QUOTA_EXCEEDED|CREDITS_DEPLETED)$/;
+/**
+ * Whether the signed-in ChatGPT account reports it is out of included usage: the provider's own account verdict
+ * (ordinaryUsageAllowed false), a general bucket with a classified limit reason, a spending limit or a 100% window, or
+ * the latest turn start on this connection rejected with a usage-limit code. The reset time is the latest reported reset
+ * of the exhausted windows, or null when none was reported.
+ */
+export function codexUsageLimit(snapshot:ChatSnapshot|null|undefined,actions:readonly ChatActionRecord[]=[]):ProviderUsageLimit|null {
+  if(!snapshot||snapshot.account?.auth!=='subscription')return null;
+  const turn=actions.findLast(row=>row.action==='turn-start'&&row.connectionId===snapshot.connectionId&&row.state!=='pending');
+  const rejected=turn?.state==='rejected'&&!!turn.errorCode&&USAGE_LIMIT_CODES.test(turn.errorCode);
+  const report=snapshot.rateLimits;
+  let buckets:NonNullable<ChatSnapshot['rateLimits']>['buckets']=[];
+  if(report){
+    try{readRateLimits(report);}catch{return rejected?{resetsAt:null}:null;}
+    const full=(w:{usedPercent:number}|null)=>!!w&&w.usedPercent>=100;
+    const blocked=(b:typeof report.buckets[number])=>b.rateLimitReachedType!==null||b.spendControlReached===true||full(b.primary)||full(b.secondary);
+    buckets=report.ordinaryUsageAllowed===true?[]:report.ordinaryUsageAllowed===false?report.buckets:report.buckets.filter(b=>b.normalModelSlug===null&&blocked(b));
+    if(report.ordinaryUsageAllowed===false&&buckets.some(blocked))buckets=buckets.filter(blocked);
+  }
+  if(!buckets.length&&!rejected)return null;
+  const resets=buckets.flatMap(b=>[b.primary,b.secondary]).filter(w=>!!w&&w.usedPercent>=100&&w.resetsAt!==null).map(w=>w!.resetsAt!);
+  return{resetsAt:resets.length?Math.max(...resets):null};
+}
 export class CodexChatApi {
   readonly #token: string;
   constructor(token: string, private readonly transport: typeof fetch = fetch, private readonly deadline = 45000) { this.#token = token; }
@@ -659,6 +686,11 @@ export class CodexChat {
     const s=this.snapshot(),signedIn=!!this.state&&this.fresh&&!this.stopped&&s?.account?.auth==='subscription';
     const models=signedIn&&s?.connected&&s.ready?s.models.map(row=>({id:row.model,label:this.api.safe(row.displayName),title:this.api.safe(row.model)})):[];
     return {provider:'codex',label:'ChatGPT',available:signedIn,hint:signedIn?'Connect to choose a model':'Sign in to use',models};
+  }
+  /** Fresh evidence that the signed-in ChatGPT account is out of usage (presentation only; see codexUsageLimit). */
+  usageLimit():ProviderUsageLimit|null {
+    if(!this.state||!this.fresh||this.stopped)return null;
+    try{return codexUsageLimit(this.snapshot(),this.state.actions);}catch{return null;}
   }
   /** Effort of the visible Codex choice, carried to the other provider when the user switches from the model list. */
   currentEffort():string|null {return this.displaySelection()?.effort??(this.value('codex-effort')||null);}

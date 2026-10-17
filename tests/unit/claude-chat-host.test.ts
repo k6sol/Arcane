@@ -124,7 +124,7 @@ test('turn lifecycle: exact argv, stdin prompt, scoped env, streamed events, too
   const reply = await f.host.send(turnInput('Build a red door in the lobby please'));
   assert.ok(Object.isFrozen(reply)); assert.match(reply.turnId, /^[0-9a-f-]{36}$/); assert.match(reply.conversationId, /^[0-9a-f-]{36}$/);
   const done = await f.done(reply.turnId);
-  assert.deepEqual(done, { turnId: reply.turnId, conversationId: reply.conversationId, type: 'done', ok: true, error: null, usage: { inputTokens: 3584, outputTokens: 4, costUsd: 0.0119654 } });
+  assert.deepEqual(done, { turnId: reply.turnId, conversationId: reply.conversationId, type: 'done', ok: true, error: null, usage: { inputTokens: 3584, outputTokens: 4, costUsd: 0.0119654 }, usageLimit: null });
   const [run] = f.turns();
   assert.equal(run!.command, 'C:\\Users\\u\\.local\\bin\\claude.exe'); assert.equal(run!.options.cwd, f.project);
   assert.deepEqual(run!.args.slice(0, -2), ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
@@ -238,7 +238,10 @@ test('stderr and unsafe result text never reach events or transcripts; short pla
   assert.deepEqual([done.ok, done.error], [false, 'Claude Code could not finish this reply.']);
   f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Claude usage limit reached · resets 3pm' })));
   const b = await f.host.send(turnInput('go', a.conversationId));
-  assert.equal((await f.done(b.turnId)).error, 'Claude usage limit reached · resets 3pm');
+  assert.deepEqual([(await f.done(b.turnId)).error, (await f.done(b.turnId)).usageLimit], [chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: null }], 'a usage-limit sentence maps to the fixed message');
+  f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Credit balance is too low' })));
+  const c = await f.host.send(turnInput('go', a.conversationId));
+  assert.equal((await f.done(c.turnId)).error, 'Credit balance is too low', 'other short plain CLI errors still pass through');
   const files = await readdir(f.state, { recursive: true });
   const stored = (await Promise.all(files.filter(n => String(n).endsWith('.json')).map(n => readFile(join(f.state, String(n)), 'utf8')))).join('\n');
   for (const haystack of [JSON.stringify(f.events), stored]) { assert.ok(!haystack.includes(secret)); assert.ok(!haystack.includes(email)); assert.ok(!haystack.includes(CREDENTIAL)); }
@@ -348,4 +351,54 @@ test('broker prepareChat mints, seals and returns a non-enumerable credential ov
   assert.deepEqual((await broker.list()).handoffs.map((h: any) => h.state), ['revoked']);
   assert.deepEqual(await readdir(runtimeDirectory), [], 'owned config removed');
   assert.equal(await broker.releaseChat(randomUUID()), false);
+});
+
+test('usage and rate limits map to one fixed message with a bounded reset time; the raw text never crosses IPC', async t => {
+  const f = await fixture(t);
+  const raw = 'You have hit your limit · resets 3pm (America/New_York) https://claude.ai/upgrade ' + 'Q'.repeat(40);
+  const rejected = (resetsAt: unknown) => line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt, rateLimitType: 'five_hour' }, session_id: SESSION });
+  f.scripts.push(replay(init(), rejected(1792104000), result({ subtype: 'success', is_error: true, result: raw })));
+  const a = await f.host.send(turnInput('go'));
+  const done = await f.done(a.turnId);
+  assert.deepEqual([done.ok, done.error, done.usageLimit], [false, chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: 1792104000 }]);
+  // A rejected rate_limit_event alone (the CLI exits without a result) is still the usage limit; unsafe reset values are dropped.
+  f.scripts.push(child => { child.write(init()); child.write(rejected('soon; see https://example.invalid')); child.close(1); });
+  const b = await f.host.send(turnInput('go', a.conversationId));
+  assert.deepEqual([(await f.done(b.turnId)).error, (await f.done(b.turnId)).usageLimit], [chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: null }]);
+  // Legacy result sentence with an embedded epoch, and an HTTP 429 result.
+  f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Claude AI usage limit reached|1792107600' })));
+  const c = await f.host.send(turnInput('go', a.conversationId));
+  assert.deepEqual((await f.done(c.turnId)).usageLimit, { resetsAt: 1792107600 });
+  f.scripts.push(replay(init(), result({ subtype: 'error_during_execution', is_error: true, api_error_status: 429, result: 'API Error' })));
+  const d = await f.host.send(turnInput('go', a.conversationId));
+  assert.equal((await f.done(d.turnId)).error, chat.CLAUDE_CHAT_MESSAGES.usageLimit);
+  // A warning-level event followed by a completed reply is not a limit.
+  f.scripts.push(replay(init(), line({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', resetsAt: 1792104000 }, session_id: SESSION }), result()));
+  const e = await f.host.send(turnInput('go', a.conversationId));
+  assert.deepEqual([(await f.done(e.turnId)).ok, (await f.done(e.turnId)).usageLimit], [true, null]);
+  assert.equal(f.turns().length, 5, 'one spawn per explicit send: nothing is retried');
+  const files = await readdir(f.state, { recursive: true });
+  const stored = (await Promise.all(files.filter(n => String(n).endsWith('.json')).map(n => readFile(join(f.state, String(n)), 'utf8')))).join('\n');
+  for (const haystack of [JSON.stringify(f.events), stored]) { assert.ok(!haystack.includes('claude.ai/upgrade')); assert.ok(!haystack.includes('America/New_York')); }
+  assert.equal(chat.usageLimitResult({ type: 'result', subtype: 'success', is_error: false, result: 'usage limit reached' }), null);
+});
+
+test('preload forwards a usage limit only as the fixed engine message with a bounded reset time', async () => {
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any; const listeners: ((event: unknown, payload: unknown) => void)[] = [];
+  vm.runInNewContext(source, { require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on: (_channel: string, fn: any) => listeners.push(fn), removeListener() {}, invoke: async () => null } }) });
+  const seen: any[] = []; exposed.claudeChat.onEvent((event: unknown) => seen.push(event));
+  const base = { turnId: randomUUID(), conversationId: randomUUID(), type: 'done', ok: false, usage: null };
+  const send = (value: unknown) => { seen.length = 0; listeners[0]!({}, value); return seen[0] ? JSON.parse(JSON.stringify(seen[0])) : null; };
+  const message = chat.CLAUDE_CHAT_MESSAGES.usageLimit;
+  assert.deepEqual(send({ ...base, error: message, usageLimit: { resetsAt: 1792104000, extra: 'x' } }).usageLimit, { resetsAt: 1792104000 });
+  assert.deepEqual(send({ ...base, error: message, usageLimit: null }).usageLimit, null);
+  assert.equal(send({ ...base, error: 'Failed', usageLimit: undefined }).usageLimit, null, 'older events without the field still pass');
+  assert.equal(send({ ...base, error: 'see https://example.invalid', usageLimit: { resetsAt: null } }), null, 'a limit never carries another text');
+  assert.equal(send({ ...base, error: message, usageLimit: { resetsAt: 'soon' } }), null);
+  assert.equal(send({ ...base, ok: true, error: null, usageLimit: { resetsAt: null } }), null);
+  const renderer = await readFile(join(process.cwd(), 'apps/desktop/src/claude-chat.ts'), 'utf8');
+  assert.ok(source.includes(JSON.stringify(message).slice(1, -1)) && renderer.includes(message), 'engine, preload and renderer share one fixed message');
 });

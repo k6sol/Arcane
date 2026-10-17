@@ -4,7 +4,7 @@
 // model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
 // the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
 import { composerModelGroupHeading, composerPickerCheck, crossProviderRows, firstModelRow, orderModelGroups, positionComposerPopover, renderMessageText } from './codex-chat.js';
-import type { ComposerModelGroup, ComposerProvider, CrossProviderModels } from './codex-chat.js';
+import type { ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit } from './codex-chat.js';
 
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
@@ -38,6 +38,8 @@ export const CLAUDE_CHAT_TABS_KEY = 'arcane.claude-chat.tabs.v1';
 export const CLAUDE_CHAT_EMPTY_TEXT = 'New Claude chat. Your first message starts the conversation.';
 export const CLAUDE_CHAT_NO_BRIDGE_TEXT = 'Claude chat requires the Arcane desktop app.';
 export const CLAUDE_CHAT_TAB_LIMIT = 16;
+/** The engine's one fixed usage-limit message (claude-chat.cjs MESSAGES.usageLimit). */
+export const CLAUDE_CHAT_USAGE_LIMIT_TEXT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
 const MAX_TEXT = 1024 * 1024, MAX_INPUT = 100000, MAX_BUFFERED = 2000, DEFAULT_EFFORT = 'high';
 const SEND_PATH = 'M12 19V5m-6 6 6-6 6 6', STOP_PATH = 'M7 7h10v10H7Z';
 // Fixed, already-safe messages the preload bridge may reject with; anything else is replaced by a generic message.
@@ -95,6 +97,12 @@ function readConversations(value: unknown): ClaudeChatConversation[] {
 const time = (value: string) => { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : 0; };
 const sortConversations = (rows: ClaudeChatConversation[]) => rows.sort((a, b) => time(b.updatedAt) - time(a.updatedAt));
 const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+/** A done event's usage-limit evidence: the engine's structured field, or its fixed message. */
+function readUsageLimit(value: unknown, error: string | null): ProviderUsageLimit | null {
+  const limit = record(value), reset = limit?.resetsAt;
+  if (limit) return { resetsAt: typeof reset === 'number' && Number.isSafeInteger(reset) && reset >= 1e9 && reset < 1e11 ? reset : null };
+  return error === CLAUDE_CHAT_USAGE_LIMIT_TEXT ? { resetsAt: null } : null;
+}
 export function formatClaudeUsage(value: unknown): string | null {
   const usage = record(value); if (!usage) return null;
   const input = finite(usage.inputTokens), output = finite(usage.outputTokens), cost = finite(usage.costUsd);
@@ -133,7 +141,7 @@ export function claudeEffortLabel(effort: string): string { return EFFORT_LABELS
 
 interface Turn {
   turnId: string | null; conversationId: string | null; tabKey: string; stopping: boolean;
-  bubble: HTMLElement | null; text: string; echo: string | null;
+  bubble: HTMLElement | null; text: string; echo: string | null; prompt: string;
 }
 interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string }
 type El = HTMLElement;
@@ -168,6 +176,8 @@ export class ClaudeChat {
   private crossSignature = '';
   private pendingChoice: { model: string; effort: string | null } | null = null;
   private readonly modelListeners = new Set<() => void>();
+  private limit: ProviderUsageLimit | null = null;
+  private readonly usageListeners = new Set<() => void>();
 
   constructor(readonly doc: Document, options: ClaudeChatOptions = {}) {
     this.bridge = Object.hasOwn(options, 'bridge') ? readClaudeChatBridge({ arcaneDesktop: { claudeChat: options.bridge } }) : readClaudeChatBridge(doc?.defaultView);
@@ -332,6 +342,15 @@ export class ClaudeChat {
   loadModels(): Promise<void> { return this.state || !this.bridge ? Promise.resolve() : this.refresh(); }
   /** Status (models, efforts, sign-in) was read. */
   subscribeModels(listener: () => void): () => void { this.modelListeners.add(listener); return () => { this.modelListeners.delete(listener); }; }
+  /** The last Claude reply ended at the account's usage limit (cleared by the next completed reply). Presentation only. */
+  usageLimit(): ProviderUsageLimit | null { return this.limit ? { ...this.limit } : null; }
+  /** Usage-limit evidence changed. */
+  subscribeUsageLimit(listener: () => void): () => void { this.usageListeners.add(listener); return () => { this.usageListeners.delete(listener); }; }
+  private setUsageLimit(next: ProviderUsageLimit | null): void {
+    if (JSON.stringify(next) === JSON.stringify(this.limit)) return;
+    this.limit = next;
+    for (const listener of [...this.usageListeners]) { try { listener(); } catch { /* Observers cannot break the chat. */ } }
+  }
   /** Effort of the active Claude tab, carried to the other provider when the user switches from the model list. */
   currentEffort(): string | null { return this.activeTab()?.effort || null; }
   /** Moves the unsent composer text out of Claude for a provider switch; the Claude tab keeps an empty draft. */
@@ -413,7 +432,7 @@ export class ClaudeChat {
     if (!message) return;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for Claude. Shorten it to 100,000 characters.'; this.render(); return; }
     const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
-    const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message };
+    const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message };
     this.buffered = []; this.notice = '';
     input.value = ''; tab.draft = '';
     this.appendMessage({ id: '', role: 'user', text: message, at: new Date().toISOString() }, true);
@@ -573,10 +592,17 @@ export class ClaudeChat {
       }
       case 'done': {
         turn.bubble?.setAttribute('aria-busy', 'false');
-        const ok = event.ok === true, error = nullableText(event.error, 2048);
+        const ok = event.ok === true, error = nullableText(event.error, 2048), limited = ok ? null : readUsageLimit(event.usageLimit, error);
         this.turn = null;
+        // At the usage limit the unanswered message returns to an empty composer so it can move to the other provider.
+        // It is never resent automatically.
+        if (limited) {
+          const tab = this.tabs.find(row => row.key === turn.tabKey), input = this.input(), shown = this.active && tab?.key === this.activeKey;
+          if (tab && !tab.draft.trim() && !(shown && input?.value.trim())) { tab.draft = turn.prompt; if (shown && input) input.value = turn.prompt; }
+        }
         if (visible && !ok && !(turn.stopping && !error)) this.appendMessage({ id: '', role: 'error', text: error ?? 'Claude stopped before finishing.', at: '' }, true);
         this.notice = turn.stopping && !ok ? 'Stopped.' : formatClaudeUsage(event.usage) ?? (ok ? 'Done.' : '');
+        if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
         this.render();
         void this.reloadList().then(() => this.render());
         return;
@@ -924,6 +950,8 @@ export interface CodexComposerPeer {
   takeComposerDraft(): string;
   receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }): void;
   subscribeStateChange?(listener: () => void): () => void;
+  /** Fresh evidence that the signed-in ChatGPT account is out of usage (CodexChat.usageLimit). */
+  usageLimit?(): ProviderUsageLimit | null;
 }
 /** Provider setup's side: which provider owns the surface, and an explicit provider choice. */
 export interface ChatProviderSwitch {
@@ -937,6 +965,21 @@ export interface ChatProviderLink {
   stop(): void;
 }
 const HANDOFF_MS = 120000;
+const PROVIDER_NAMES: Record<ComposerProvider, string> = { codex: 'ChatGPT', claude: 'Claude' };
+/** Reported reset time in the viewer's locale: time only today, weekday and time otherwise. */
+export function formatUsageReset(resetsAt: number, now = Date.now()): string {
+  const at = new Date(resetsAt * 1000), today = new Date(now).toDateString() === at.toDateString();
+  return at.toLocaleString(undefined, today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+/** The composer notice sentence for one provider's usage limit. */
+export function usageLimitNoticeText(provider: ComposerProvider, limit: ProviderUsageLimit, now = Date.now()): string {
+  const name = PROVIDER_NAMES[provider];
+  if (limit.resetsAt === null) return name + ' usage limit reached.';
+  if (limit.resetsAt * 1000 <= now) return name + ' reported a usage limit; its reported reset time has passed.';
+  return name + ' usage limit reached \u2014 resets at ' + formatUsageReset(limit.resetsAt, now) + '.';
+}
+/** Ids of the inline usage-limit notice above the shared composer (studio.html). */
+export const USAGE_LIMIT_NOTICE_IDS = Object.freeze({ root: 'usage-limit-notice', message: 'usage-limit-message', action: 'usage-limit-action' });
 /**
  * Links the Codex and Claude chats that share one composer: each model list shows both providers' models, and choosing
  * the other provider's model requests that provider explicitly through provider setup. When the surface actually
@@ -982,11 +1025,60 @@ export function linkChatProviders(options: { codex: CodexComposerPeer; claude: C
       }
     } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
     current = live ? next : null;
+    renderNotice();
   };
+  // ---- Usage-limit notice: one inline notice above the composer for the provider that owns the surface. ----
+  // It offers the other provider in one click (the same explicit, draft-carrying switch as the model list) or its
+  // sign-in; it never retries, resends or switches by itself.
+  const doc = claude.doc;
+  let action: { kind: 'switch' | 'setup'; target: ComposerProvider } | null = null, claudeStatusRequested = false;
+  const node = (id: string) => { try { return doc?.getElementById?.(id) ?? null; } catch { return null; } };
+  const renderNotice = () => {
+    const root = node(USAGE_LIMIT_NOTICE_IDS.root), message = node(USAGE_LIMIT_NOTICE_IDS.message), button = node(USAGE_LIMIT_NOTICE_IDS.action) as HTMLButtonElement | null;
+    if (!root) return;
+    let text = '', next: typeof action = null, label = '';
+    try {
+      const live = !stopped && (options.enabled?.() ?? true), owner: ComposerProvider = live && current === 'claude' ? 'claude' : 'codex';
+      const limit = live ? owner === 'codex' ? codex.usageLimit?.() ?? null : claude.usageLimit() : null;
+      if (limit) {
+        text = usageLimitNoticeText(owner, limit);
+        if (owner === 'codex') {
+          const group = claude.modelGroup();
+          // Claude's sign-in is read once so the notice can offer the switch instead of the sign-in.
+          if (group && !group.available && !claudeStatusRequested) { claudeStatusRequested = true; void claude.loadModels().catch(() => {}); }
+          if (group?.available) { next = { kind: 'switch', target: 'claude' }; label = 'Switch to Claude'; text += ' Your draft moves with you.'; }
+          else if (claude.available()) { next = { kind: 'setup', target: 'claude' }; label = 'Sign in to Claude'; text += ' Your draft stays here.'; }
+        } else {
+          const group = codex.modelGroup(), codexLimited = !!codex.usageLimit?.();
+          if (group.available && !codexLimited) { next = { kind: 'switch', target: 'codex' }; label = 'Switch to ChatGPT'; text += ' Your draft moves with you.'; }
+          else text += codexLimited ? ' ChatGPT is also at its usage limit.' : ' Your draft stays here.';
+        }
+      }
+    } catch { text = ''; next = null; }
+    action = next;
+    root.hidden = !text; root.dataset.provider = text ? (current ?? 'codex') : '';
+    if (message && message.textContent !== text) message.textContent = text;
+    if (button) { button.hidden = !next; button.disabled = !next; if (button.textContent !== label) button.textContent = label; button.className = next?.kind === 'setup' ? 'secondary' : ''; }
+  };
+  const actionButton = node(USAGE_LIMIT_NOTICE_IDS.action);
+  if (actionButton) {
+    const press = () => {
+      const chosen = action; if (!chosen || stopped) return;
+      if (chosen.kind === 'switch') { request(chosen.target, '', chosen.target === 'claude' ? codex.currentEffort() : claude.currentEffort()); return; }
+      // Sign-in: choose Claude explicitly (so a later switch still carries the draft) and open provider setup.
+      request(chosen.target, '', null);
+      const Event = doc?.defaultView?.CustomEvent;
+      if (Event) doc.dispatchEvent(new Event('workspace:providersetup', { detail: { provider: chosen.target } }));
+    };
+    actionButton.addEventListener('click', press);
+    removers.push(() => actionButton.removeEventListener('click', press));
+  }
+  removers.push(claude.subscribeUsageLimit(renderNotice), claude.subscribeModels(renderNotice));
+  if (codex.subscribeStateChange) removers.push(codex.subscribeStateChange(renderNotice));
   removers.push(provider.subscribeChatSurface(sync));
   sync();
   return {
     sync() { stopped = false; sync(); },
-    stop() { stopped = true; pending = null; current = null; },
+    stop() { stopped = true; pending = null; current = null; renderNotice(); },
   };
 }

@@ -197,6 +197,8 @@ const workspacePreferences = Object.freeze({ version: 1,
 // In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
 const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.'];
+// The engine's one fixed usage-limit message (claude-chat.cjs MESSAGES.usageLimit); done events may carry it with a reset time.
+const CLAUDE_CHAT_USAGE_LIMIT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
 const claudeChatUnavailable = () => { throw new Error(CLAUDE_CHAT_ERRORS[0]); };
 const claudeChatId = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const claudeChatChoice = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
@@ -263,7 +265,12 @@ const claudeChatEvent = value => {
       const u = value.usage, number = n => Number.isSafeInteger(n) && n >= 0;
       if (typeof value.ok !== 'boolean' || !(value.error === null || claudeChatText(value.error, 512)) ||
           !(u === null || u && typeof u === 'object' && number(u.inputTokens) && number(u.outputTokens) && (u.costUsd === null || typeof u.costUsd === 'number' && Number.isFinite(u.costUsd) && u.costUsd >= 0))) return null;
-      return { ...base, type: 'done', ok: value.ok, error: value.error, usage: u === null ? null : { inputTokens: u.inputTokens, outputTokens: u.outputTokens, costUsd: u.costUsd } };
+      // A usage limit is only the fixed engine message plus an optional bounded reset time (Unix seconds).
+      const l = value.usageLimit ?? null;
+      if (!(l === null || value.ok === false && value.error === CLAUDE_CHAT_USAGE_LIMIT && l && typeof l === 'object' &&
+          (l.resetsAt === null || Number.isSafeInteger(l.resetsAt) && l.resetsAt >= 1e9 && l.resetsAt < 1e11))) return null;
+      return { ...base, type: 'done', ok: value.ok, error: value.error, usage: u === null ? null : { inputTokens: u.inputTokens, outputTokens: u.outputTokens, costUsd: u.costUsd },
+        usageLimit: l === null ? null : { resetsAt: l.resetsAt } };
     }
   } catch { return null; }
   return null;

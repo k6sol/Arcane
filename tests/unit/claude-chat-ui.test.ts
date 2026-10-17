@@ -85,7 +85,8 @@ function surface() {
   popover.hidden = true;
   const root = make('main', 'root', '', make('div', 'claude-chat-tabs', 'workspace-chat-tabs'), make('details', 'claude-saved-chats', 'chat-tabs-history'),
     make('button', 'workspace-new-chat'), make('span', 'claude-chat-status'), make('p', 'claude-chat-notice'), make('div', 'codex-messages', 'codex-messages'),
-    make('button', 'welcome-connect'), make('button', 'codex-conversation-start'), form, popover);
+    make('button', 'welcome-connect'), make('button', 'codex-conversation-start'),
+    make('div', 'usage-limit-notice', 'notice usage-limit-notice', make('p', 'usage-limit-message'), make('button', 'usage-limit-action')), form, popover);
   doc.register(root);
   const el = (id: string) => doc.getElementById(id)!;
   el('codex-messages').clientHeight = 300;
@@ -516,6 +517,7 @@ type Cross = import('../../apps/desktop/src/codex-chat.js').CrossProviderModels;
 function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unknown = fakeBridge().bridge) {
   const f = mount(bridge, memory(), false);
   const calls: unknown[][] = []; let source: Cross | null = null;
+  let codexLimit: { resetsAt: number | null } | null = null; const codexListeners = new Set<() => void>();
   let codexDraft = '', yielded = false;
   // Codex double: owns the shared composer while not yielded, exactly like CodexChat.yieldSurface.
   const codex = {
@@ -526,6 +528,8 @@ function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unk
     currentEffort: () => 'low',
     takeComposerDraft() { const value = f.input.value; f.input.value = ''; calls.push(['take', value]); return value; },
     receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }) { calls.push(['receive', handoff]); if (handoff.draft) f.input.value = handoff.draft; },
+    usageLimit: () => codexLimit,
+    subscribeStateChange(fn: () => void) { codexListeners.add(fn); return () => { codexListeners.delete(fn); }; },
   };
   let surface: 'codex' | 'claude' = initial; const listeners = new Set<() => void>(); const requests: string[] = [];
   const provider = { chatSurface: () => surface, subscribeChatSurface: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
@@ -539,7 +543,9 @@ function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unk
     Object.defineProperties(event, { key: { value }, isComposing: { value: false }, target: { value: target } });
     f.el('codex-model-popover').dispatchEvent(event); return f.doc.activeElement?.textContent;
   };
-  return { ...f, calls, requests, setSurface, link, layout, row, press, codexSource: () => source!, codexYielded: () => yielded };
+  const setCodexLimit = (value: { resetsAt: number | null } | null) => { codexLimit = value; for (const fn of [...codexListeners]) fn(); };
+  const usage = { root: f.el('usage-limit-notice'), message: f.el('usage-limit-message'), action: f.el('usage-limit-action') };
+  return { ...f, calls, requests, setSurface, link, layout, row, press, codexSource: () => source!, codexYielded: () => yielded, setCodexLimit, usage };
 }
 
 test('Claude mode: the model list shows ChatGPT and Claude sections; search filters both; same-provider choice is unchanged', async t => {
@@ -619,6 +625,83 @@ test('a signed-out provider section is one disabled row and keyboard navigation 
   const search = g.el('codex-model-search'); search.value = 'sol'; search.dispatchEvent(new Event('input'));
   g.press(search, 'Enter');
   assert.deepEqual(g.requests, ['codex'], 'Enter on a search that only matches ChatGPT switches provider explicitly');
+});
+
+// ---- Usage-limit notice: an exhausted provider offers the other one in one click; the draft moves, nothing is resent. ----
+const RESET = Math.floor(Date.now() / 1000) + 3 * 3600;
+test('ChatGPT out of usage: the notice offers Switch to Claude, keeps the draft and selects Claude without sending', async t => {
+  const b = fakeBridge(), f = linked('codex', chatgpt(), b.bridge); t.after(() => f.chat.stop());
+  assert.equal(f.usage.root.hidden, true, 'hidden while ChatGPT is not exhausted');
+  f.input.value = 'ok, make the spawn point higher and';
+  f.setCodexLimit({ resetsAt: RESET });
+  assert.equal(f.usage.root.hidden, false);
+  assert.match(f.usage.message.textContent, /^ChatGPT usage limit reached \u2014 resets at .+\./);
+  await tick(); await tick();
+  assert.deepEqual(b.calls.filter(call => call[0] === 'status').length, 1, 'Claude sign-in is read once for the notice');
+  assert.deepEqual([f.usage.action.textContent, f.usage.action.hidden, f.usage.action.disabled], ['Switch to Claude', false, false]);
+  assert.match(f.usage.message.textContent, /Your draft moves with you\.$/);
+  click(f.usage.action);
+  assert.deepEqual(f.requests, ['claude']); assert.equal(f.chat.isActive(), false, 'nothing switches until provider setup reports Claude');
+  f.setSurface('claude'); await tick();
+  assert.equal(f.chat.isActive(), true);
+  assert.equal(f.input.value, 'ok, make the spawn point higher and', 'the draft follows the switch');
+  assert.deepEqual(f.calls.filter(call => call[0] === 'take'), [['take', 'ok, make the spawn point higher and']]);
+  assert.equal(f.usage.root.hidden, true, 'the notice is hidden after switching');
+  assert.deepEqual(sends(b), [], 'switching never sends or retries');
+  f.setSurface('codex'); assert.equal(f.usage.root.hidden, false, 'back on the exhausted provider the notice returns');
+  f.setCodexLimit(null); assert.equal(f.usage.root.hidden, true, 'hidden once ChatGPT is no longer exhausted');
+  f.setCodexLimit({ resetsAt: null }); assert.match(f.usage.message.textContent, /^ChatGPT usage limit reached\. /);
+});
+
+test('ChatGPT out of usage with Claude signed out: the notice offers sign-in and keeps the draft in place', async t => {
+  const b = fakeBridge({ status: async () => ({ ...signedIn, signedIn: false, message: 'Claude Code is not signed in.' }) });
+  const f = linked('codex', chatgpt(), b.bridge); t.after(() => f.chat.stop());
+  f.input.value = 'keep me';
+  f.setCodexLimit({ resetsAt: null }); await tick(); await tick();
+  assert.deepEqual([f.usage.action.textContent, f.usage.action.hidden], ['Sign in to Claude', false]);
+  assert.match(f.usage.message.textContent, /Your draft stays here\.$/);
+  click(f.usage.action);
+  assert.deepEqual(f.requests, ['claude'], 'an explicit Claude choice that waits for sign-in');
+  assert.equal(f.chat.isActive(), false); assert.equal(f.input.value, 'keep me');
+  const none = linked('codex', chatgpt(), null); t.after(() => none.chat.stop());
+  none.setCodexLimit({ resetsAt: null });
+  assert.deepEqual([none.usage.root.hidden, none.usage.action.hidden], [false, true], 'without the desktop bridge only the notice shows');
+});
+
+test('Claude usage limit: the done event shows the mapped notice, restores the unanswered message and offers ChatGPT', async t => {
+  const b = fakeBridge(), f = linked('claude', chatgpt(), b.bridge); t.after(() => f.chat.stop());
+  await tick(); await tick();
+  f.type('Add a spawn pad'); key(f.input, 'Enter'); await tick(); await tick();
+  assert.equal(sends(b).length, 1); assert.equal(f.input.value, '');
+  b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null, usageLimit: { resetsAt: RESET } });
+  assert.equal(f.usage.root.hidden, false);
+  assert.match(f.usage.message.textContent, /^Claude usage limit reached \u2014 resets at .+\. Your draft moves with you\.$/);
+  assert.equal(f.input.value, 'Add a spawn pad', 'the unanswered message is back in the composer, not resent');
+  assert.equal(f.bubbles().at(-1)!.role, 'error');
+  assert.deepEqual([f.usage.action.textContent, f.usage.action.hidden], ['Switch to ChatGPT', false]);
+  f.setCodexLimit({ resetsAt: null });
+  assert.deepEqual([f.usage.action.hidden, /ChatGPT is also at its usage limit\.$/.test(f.usage.message.textContent)], [true, true], 'no switch to an exhausted ChatGPT');
+  f.setCodexLimit(null);
+  click(f.usage.action);
+  assert.deepEqual(f.requests, ['codex']);
+  f.setSurface('codex');
+  assert.deepEqual(f.calls.find(call => call[0] === 'receive'), ['receive', { draft: 'Add a spawn pad', model: null, effort: 'high' }]);
+  assert.equal(f.usage.root.hidden, true, 'hidden after switching');
+  assert.equal(sends(b).length, 1, 'no automatic resend');
+  // Back on Claude, a completed reply clears the limit.
+  f.setSurface('claude'); await tick();
+  assert.equal(f.usage.root.hidden, false);
+  f.type('again'); key(f.input, 'Enter'); await tick(); await tick();
+  b.emit({ type: 'done', ok: true, error: null, usage: null });
+  assert.equal(f.usage.root.hidden, true);
+  // The fixed message alone (older engine event) still maps; any other error does not.
+  f.type('third'); key(f.input, 'Enter'); await tick(); await tick();
+  b.emit({ type: 'done', ok: false, error: 'Claude Code could not finish this reply.', usage: null });
+  assert.equal(f.usage.root.hidden, true);
+  f.type('fourth'); key(f.input, 'Enter'); await tick(); await tick();
+  b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null });
+  assert.match(f.usage.message.textContent, /^Claude usage limit reached\. /);
+  f.link.stop(); assert.equal(f.usage.root.hidden, true, 'a stopped link shows no notice');
 });
 
 test('provider setup requestProvider is an explicit, persisted choice that still waits for a signed-in Claude status', async t => {
@@ -864,4 +947,122 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
   assert.equal(await page.locator('#provider-setup-provider').inputValue(), 'codex');
   await page.screenshot({ path: join(shots, 'after-switch-back-to-chatgpt.png') });
   assert.deepEqual(errors, []);
+});
+
+test('Edge: usage-limit notice offers the other provider in both directions and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/usage/shots');
+  await mkdir(shots, { recursive: true });
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat'];
+  const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
+    import {startProviderSetup} from '/provider-setup.js';
+    import {startWorkspaceShell} from '/workspace-shell.js';
+    import {ClaudeChat, linkChatProviders} from '/claude-chat.js';
+    const f = window.fx = { calls: [], listener: null };
+    const chat = new CodexChat(document, new CodexChatApi('${'a'.repeat(64)}'));
+    const native = Object.freeze({ version: 1, ...Object.fromEntries(['status','login','install','launch'].map(action => [action, async provider =>
+      ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.177', busy: false, message: null })])) });
+    const setup = startProviderSetup(document, { chat, nativeBridge: native });
+    const bridge = Object.freeze({ version: 1,
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null }),
+      list: async () => ({ conversations: [] }), history: async id => ({ conversationId: id, messages: [] }),
+      send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-1' }; },
+      stop: async () => true, remove: async () => true, onEvent: fn => { f.listener = fn; return () => {}; } });
+    const claude = new ClaudeChat(document, { bridge, storage: null });
+    f.emit = event => f.listener(event);
+    linkChatProviders({ codex: chat, claude, provider: setup });
+    startWorkspaceShell(document);
+    await chat.start(); f.ready = true;`;
+  const reset = Math.floor(Date.now() / 1000) + 2 * 3600;
+  let exhausted = true;
+  const state = () => {
+    const value = codexState() as unknown as { snapshot: Record<string, unknown> };
+    if (exhausted) value.snapshot.rateLimits = { source: 'account/rateLimits/updated', observedAt: Date.now(), ordinaryUsageAllowed: false, buckets: [{ limitId: 'codex', limitName: 'Codex', normalModelSlug: null,
+      primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: reset }, secondary: { usedPercent: 64, windowDurationMins: 10080, resetsAt: reset + 86400 }, credits: null, spendControlReached: null, rateLimitReachedType: 'rate_limit_reached' }] };
+    return value;
+  };
+  const server = createServer((request, response) => { void (async () => {
+    const url = request.url?.split('?')[0] ?? '';
+    if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: state() })); return; }
+    if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
+    const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
+      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+    if (!file) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
+    response.end(await readFile(resolve(file)));
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
+  const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+  const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  t.after(() => browser.close());
+  const errors: string[] = [];
+  const open = async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }); page.setDefaultTimeout(8000);
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
+    await page.waitForFunction(() => (window as any).fx?.ready === true);
+    await page.waitForFunction(() => document.getElementById('provider-login-gate')?.hidden === true);
+    return page;
+  };
+  // ChatGPT exhausted: the notice sits above the composer and offers Claude in one click.
+  const page = await open();
+  const draft = 'ok, make the spawn point higher and';
+  await page.locator('#codex-composer').fill(draft);
+  const notice = page.locator('#usage-limit-notice'), action = page.locator('#usage-limit-action');
+  await notice.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => document.getElementById('usage-limit-action')!.textContent === 'Switch to Claude');
+  assert.match(await page.locator('#usage-limit-message').innerText(), /^ChatGPT usage limit reached \u2014 resets at .+\. Your draft moves with you\.$/);
+  const above = await page.evaluate(() => document.getElementById('usage-limit-notice')!.getBoundingClientRect().bottom <= document.getElementById('codex-compose')!.getBoundingClientRect().top + 1);
+  assert.equal(above, true, 'the notice is above the composer');
+  await page.screenshot({ path: join(shots, 'usage-chatgpt-limit-notice.png') });
+  await action.click();
+  await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft, 'the draft carried across the switch');
+  await notice.waitFor({ state: 'hidden' });
+  assert.deepEqual(await page.evaluate(() => (window as any).fx.calls), [], 'switching never sends');
+  await page.screenshot({ path: join(shots, 'usage-after-switch-to-claude.png') });
+  await page.close();
+  // Claude at its limit while ChatGPT has usage: the same notice offers ChatGPT.
+  exhausted = false;
+  const second = await open();
+  await second.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
+  await second.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+  await second.waitForFunction(() => !(document.getElementById('codex-composer') as HTMLTextAreaElement).disabled);
+  await second.locator('#codex-composer').fill('Add a spawn pad'); await second.locator('#codex-composer').press('Enter');
+  await second.waitForFunction(() => (window as any).fx.calls.length === 1);
+  await second.evaluate(at => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-1', type: 'done', ok: false,
+    error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null, usageLimit: { resetsAt: at } }), reset);
+  await second.locator('#usage-limit-notice').waitFor({ state: 'visible' });
+  assert.equal(await second.locator('#usage-limit-action').innerText(), 'Switch to ChatGPT');
+  assert.match(await second.locator('#usage-limit-message').innerText(), /^Claude usage limit reached \u2014 resets at /);
+  assert.equal(await second.locator('#codex-composer').inputValue(), 'Add a spawn pad');
+  await second.screenshot({ path: join(shots, 'usage-claude-limit-notice.png') });
+  await second.locator('#usage-limit-action').click();
+  await second.waitForFunction(() => document.getElementById('claude-chat-tabs')!.hidden);
+  assert.equal(await second.locator('#codex-composer').inputValue(), 'Add a spawn pad');
+  await second.locator('#usage-limit-notice').waitFor({ state: 'hidden' });
+  assert.equal(await second.evaluate(() => (window as any).fx.calls.length), 1, 'no automatic resend');
+  await second.screenshot({ path: join(shots, 'usage-after-switch-to-chatgpt.png') });
+  assert.deepEqual(errors, []);
+});
+
+test('codexUsageLimit reads exhaustion from the account report or a usage-limit turn rejection only', async () => {
+  const { codexUsageLimit } = await import('../../apps/desktop/src/codex-chat.js');
+  const window = (usedPercent: number, resetsAt: number | null) => ({ usedPercent, windowDurationMins: 300, resetsAt });
+  const bucket = (extra: Record<string, unknown> = {}) => ({ limitId: 'codex', limitName: 'Codex', normalModelSlug: null, primary: window(40, 1792104000), secondary: null,
+    credits: null, spendControlReached: null, rateLimitReachedType: null, ...extra });
+  const snap = (rateLimits: unknown, auth = 'subscription') => ({ ...codexState().snapshot!, account: { auth, plan: 'fixture', requiresOpenaiAuth: true }, ...(rateLimits ? { rateLimits } : {}) }) as any;
+  const report = (ordinaryUsageAllowed: boolean | null, buckets: unknown[]) => ({ source: 'account/rateLimits/read', observedAt: Date.now(), ordinaryUsageAllowed, buckets });
+  assert.equal(codexUsageLimit(snap(null)), null);
+  assert.equal(codexUsageLimit(snap(report(true, [bucket()]))), null);
+  assert.equal(codexUsageLimit(snap(report(null, [bucket()]))), null);
+  assert.deepEqual(codexUsageLimit(snap(report(false, [bucket({ primary: window(100, 1792104000), secondary: window(100, 1792190400) })]))), { resetsAt: 1792190400 });
+  assert.deepEqual(codexUsageLimit(snap(report(false, [bucket()]))), { resetsAt: null }, 'blocked without a full window: reset unknown');
+  assert.deepEqual(codexUsageLimit(snap(report(null, [bucket({ rateLimitReachedType: 'rate_limit_reached', primary: window(100, 1792104000) })]))), { resetsAt: 1792104000 });
+  assert.equal(codexUsageLimit(snap(report(null, [bucket({ normalModelSlug: 'gpt-6.1-spark', primary: window(100, 1792104000) })]))), null, 'one model-specific bucket is not the account');
+  assert.equal(codexUsageLimit(snap(report(false, [bucket()]), 'apiKey')), null, 'only the signed-in subscription account');
+  const s = snap(null), turn = (state: string, errorCode: string | null) => ({ requestId: randomUUID(), action: 'turn-start', connectionId: s.connectionId, state, errorCode }) as any;
+  assert.deepEqual(codexUsageLimit(s, [turn('rejected', 'USAGE_LIMIT_EXCEEDED')]), { resetsAt: null });
+  assert.equal(codexUsageLimit(s, [turn('rejected', 'USAGE_LIMIT_EXCEEDED'), turn('acknowledged', null)]), null, 'a later accepted turn clears it');
+  assert.equal(codexUsageLimit(s, [turn('rejected', 'REMOTE_REJECTED')]), null);
 });

@@ -50,6 +50,7 @@ const MESSAGES = Object.freeze({
   failed: 'Claude Code could not finish this reply.',
   output: 'Claude Code produced more output than Arcane accepts. The reply was stopped.',
   closed: 'The workspace closed, so the reply was stopped.',
+  usageLimit: 'Claude usage limit reached. This message was not answered; try again after the limit resets.',
 });
 const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text]);
 const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
@@ -106,6 +107,20 @@ function safeResultText(value) {
   return text.replace(/\s+/g, ' ');
 }
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+/** Unix seconds inside a sane window; anything else is an unreported reset time. */
+const resetSeconds = value => {
+  const n = typeof value === 'string' && /^\d{10}$/.test(value) ? Number(value) : value;
+  return Number.isSafeInteger(n) && n >= 1e9 && n < 1e11 ? n : null;
+};
+// Usage/rate-limit outcomes are recognised from the CLI's own result; their raw text is never forwarded.
+const LIMIT_TEXT = /\b(?:usage|rate) limit\b|\bhit your (?:usage )?limit\b|\blimit reached\b|\bout of (?:extra )?usage\b/i;
+/** Fixed usage-limit classification of a stream-json error result; null when it is not a usage/rate limit. */
+function usageLimitResult(event) {
+  if (!event || event.type !== 'result' || event.is_error !== true && event.subtype === 'success') return null;
+  const text = typeof event.result === 'string' ? event.result.slice(0, 2000) : '';
+  if (event.api_error_status !== 429 && !LIMIT_TEXT.test(text)) return null;
+  return { resetsAt: resetSeconds(/\|(\d{10})\b/.exec(text)?.[1]) };
+}
 
 /** Per-project transcript store: owned directory, atomic writes, fixed bounds, one serial write queue. */
 function createStore({ fs, p, directory, now, limits }) {
@@ -404,7 +419,7 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false };
+      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     try {
       const at = isoNow(now);
@@ -421,7 +436,7 @@ function createClaudeChat(options) {
     return Object.freeze({ turnId: turn.turnId, conversationId });
   }
 
-  async function finish(turn, ok, error, usage = null) {
+  async function finish(turn, ok, error, usage = null, limit = null) {
     if (turn.finished) return; turn.finished = true;
     clearTimeout(turn.timer); releaseCredential(turn.credential); turn.credential = null;
     if (!ok) statusCache = null; // the next turn re-reads native sign-in status
@@ -430,7 +445,8 @@ function createClaudeChat(options) {
       await store.update(turn.conversationId, { updatedAt: isoNow(now), ...(turn.sessionId ? { sessionId: turn.sessionId } : {}) });
     } catch { /* the done event still reports the outcome */ }
     turns.delete(turn.turnId); if (byConversation.get(turn.conversationId) === turn) byConversation.delete(turn.conversationId);
-    emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage });
+    emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage,
+      usageLimit: ok || !limit ? null : { resetsAt: limit.resetsAt } });
   }
 
   async function runTurn(turn, text) {
@@ -491,6 +507,9 @@ function createClaudeChat(options) {
         if (turn.timedOut) return void finish(turn, false, MESSAGES.timeout, r?.usage ?? null);
         if (turn.overflow) return void finish(turn, false, MESSAGES.output, r?.usage ?? null);
         if (r && !r.isError) return void finish(turn, true, null, r.usage);
+        // A usage/rate limit (an error result or a rejected rate_limit_event) becomes one fixed message.
+        const limit = r?.limit ?? turn.limit;
+        if (limit) return void finish(turn, false, MESSAGES.usageLimit, r?.usage ?? null, limit);
         if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
         void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
       });
@@ -505,7 +524,13 @@ function createClaudeChat(options) {
       turn.sessionId = event.session_id;
       void store.update(turn.conversationId, { sessionId: turn.sessionId }).catch(() => {});
     }
+    if (event.type === 'rate_limit_event') {
+      const info = event.rate_limit_info;
+      if (info && typeof info === 'object' && info.status === 'rejected') turn.limit = { resetsAt: resetSeconds(info.resetsAt) };
+      return;
+    }
     if (event.parent_tool_use_id !== null && event.parent_tool_use_id !== undefined) return; // subagent traffic
+    if (event.type === 'assistant' && event.error === 'rate_limit' && !turn.limit) turn.limit = { resetsAt: null };
     if (event.type === 'stream_event') {
       const e = event.event;
       if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text)
@@ -534,7 +559,9 @@ function createClaudeChat(options) {
     } else if (event.type === 'result') {
       const u = event.usage && typeof event.usage === 'object' ? event.usage : null;
       const cost = typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0 ? event.total_cost_usd : null;
+      const limit = usageLimitResult(event);
       turn.result = { isError: event.is_error === true || event.subtype !== 'success', text: event.result,
+        limit: limit ? { resetsAt: limit.resetsAt ?? turn.limit?.resetsAt ?? null } : null,
         usage: u ? { inputTokens: count(u.input_tokens) + count(u.cache_creation_input_tokens) + count(u.cache_read_input_tokens), outputTokens: count(u.output_tokens), costUsd: cost } : null };
     }
   }
@@ -606,4 +633,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, safeResultText, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
