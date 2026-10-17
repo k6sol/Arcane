@@ -318,7 +318,7 @@ test('real Luau executes validation, mutation, restoration and transport failure
   try {
     const prelude = await readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8');
     const modules = [];
-    for (const module of ['Validation', 'Registry', 'Properties', 'Sha256Stream', 'AssetMesh', 'AssetTransfer', 'TestProof', 'Operations', 'Transport']) {
+    for (const module of ['Validation', 'Registry', 'Properties', 'Sha256Stream', 'AssetMesh', 'AssetTransfer', 'AssetPlacement', 'TestProof', 'Operations', 'Transport']) {
       const source = (await readFile(path.join(repository, `plugin/src/${module}.luau`), 'utf8'))
         .replace(/require\(script\.Parent\.(\w+)\)/g, '$1');
       modules.push(`local ${module} = (function()\n${source}\nend)()\n`);

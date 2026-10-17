@@ -14,6 +14,7 @@ import {scenarioPlanSchema,SCENARIO_LIMITS} from '../../../packages/studio-test-
 import {createStudioTestCaptureStore} from './studio-test-captures.js';
 import {scenarioSubjectDigest,scenarioSubjectProgram} from './studio-test-subjects.js';
 import {captureEditViewport,viewportRequestSchema,VIEWPORT_LIMITS} from '../../../packages/studio-test-controller/src/viewport.js';
+import {createNativeAssetRequests} from './studio-native-assets.js';
 import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled} from '../../../packages/protocol/src/chat-task-playtest.js';
 
 const id=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), hash=z.string().regex(/^[a-f0-9]{64}$/);
@@ -90,7 +91,7 @@ export async function createStudioTestService(options:Options){
     })();return j.closing;
   };
   const prepare=async(input:unknown,actor:string):Promise<StudioTestView>=>{
-    if(closed||preparing||viewing||current&&(current.reserved||current.view.state==='needs_approval'||current.view.state==='running')||ledger.unresolved())rejected('BUSY');
+    if(closed||preparing||viewing||nativeAssets.active()||current&&(current.reserved||current.view.state==='needs_approval'||current.view.state==='running')||ledger.unresolved())rejected('BUSY');
     if(!id.safeParse(actor).success)rejected('HUMAN_AUTH_REQUIRED');
     const origin=options.taskPort?.capture(actor)??null;if(origin)options.taskPort!.assert(origin);
     const a=request.parse(input),session=eligible(a.sessionId),p=session.proof;
@@ -176,7 +177,7 @@ export async function createStudioTestService(options:Options){
   const viewport=async(input:unknown,actor:string)=>{
     if(!id.safeParse(actor).success)rejected('HUMAN_AUTH_REQUIRED');
     const now=Date.now();while(viewportTimes.length&&now-viewportTimes[0]!>600_000)viewportTimes.shift();
-    if(closed||preparing||viewing||current?.view.state==='running'||current?.reserved||viewportTimes.length>=VIEWPORT_RATE.captures)rejected('BUSY');
+    if(closed||preparing||viewing||nativeAssets.active()||current?.view.state==='running'||current?.reserved||viewportTimes.length>=VIEWPORT_RATE.captures)rejected('BUSY');
     const a=viewportRequestSchema.parse(input),session=eligible(a.sessionId),p=session.proof;
     if(!p||!p.connected||p.pluginArtifactHash!==options.pluginArtifactHash||Date.parse(p.expiresAt)<=Date.now())rejected('STALE_PROOF');
     if(p.mode!=='Edit')throw new StudioTestError('MODE_MISMATCH');
@@ -197,12 +198,15 @@ export async function createStudioTestService(options:Options){
         return digest({scope,nativeStudioId,clientLifetimeId:proof.clientLifetimeId,playEpoch:proof.playEpoch,markerName:proof.markerName});
       };
       const image=await captureEditViewport({client:native.client,nativeStudioId,captureId:'ArcaneViewport_'+randomUUID().replaceAll('-',''),maxDimension:a.maxDimension,
-        ...(a.camera?{camera:a.camera}:{}),verifyBinding,decodeMode:decodeTestMode,...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{})},AbortSignal.timeout(VIEWPORT_RATE.deadlineMs));
+        ...(a.camera?{camera:a.camera}:{}),...(a.sheet?{sheet:a.sheet}:{}),verifyBinding,decodeMode:decodeTestMode,...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{})},AbortSignal.timeout(VIEWPORT_RATE.deadlineMs));
       return {viewport:{sessionId:session.id,nativeStudioId,mode:'Edit' as const,mimeType:'image/png' as const,width:image.width,height:image.height,
         originalWidth:image.originalWidth,originalHeight:image.originalHeight,downscaled:image.downscaled,bytes:image.bytes,sha256:image.sha256,camera:image.camera,evidence:native.evidence},
         data:image.png.toString('base64')};
     }finally{viewing=false;if(connection)await connection.close().catch(()=>{});}
   };
+  /** Native asset search/insert/generation: same exact-session Edit binding as the viewport. */
+  const nativeAssets=createNativeAssetRequests({store:options.store,pluginArtifactHash:options.pluginArtifactHash,connect:options.connect??(()=>connectNativeTest()),
+    ...(options.fixtureScheduler?{fixtureScheduler:options.fixtureScheduler}:{}),eligible,identity,busy:()=>closed||preparing||viewing||current?.view.state==='running'||!!current?.reserved});
   return Object.freeze({
     async cancelExact(jobId:string,origin:StudioTestTaskOrigin){const j=jobs.get(jobId);if(!j||j.origin!==origin)rejected('HUMAN_AUTH_REQUIRED');j.cancelled=true;if(j.view.state==='needs_approval')j.view.state='cancelled';const review=j.control.requests.status();if(review.runId&&review.phase!=='done')await j.control.requests.stop({runId:review.runId});await closeJob(j);const final=j.control.requests.status();if(j.reserved||final.runId!==null&&final.cleanup!=='complete'||final.scenario?.inputRelease==='unknown')rejected('FENCED');},
     async revalidateExact(jobId:string,origin:StudioTestTaskOrigin,reportDigest:string):Promise<'current'|'changed'|'unobserved'>{const j=jobs.get(jobId);if(!j||j.origin!==origin||j.reportDigest!==reportDigest||!j.revalidate)rejected('HUMAN_AUTH_REQUIRED');if(j.reserved||j.control.requests.status().cleanup!=='complete')return 'unobserved';return j.revalidate(AbortSignal.timeout(15000));},
@@ -210,6 +214,7 @@ export async function createStudioTestService(options:Options){
       prepare,status:(jobId:string,actor:string)=>view(owned(jobId,actor)),
       list:(actor:string)=>[...jobs.values()].filter(j=>actor==='human'||j.view.actor===actor).map(view),
       viewport,
+      nativeAssets:Object.freeze({search:nativeAssets.search,insert:nativeAssets.insert,generate:nativeAssets.generate,job:nativeAssets.job}),
       async capture(jobId:string,actor:string){const j=owned(jobId,actor),image=j.control.requests.status().scenario?.capture;if(!image)rejected('INVALID_REQUEST');return {image,bytes:await captures.read(image)};},
       async cancel(jobId:string,actor:string){
         const j=owned(jobId,actor);j.cancelled=true;
@@ -246,4 +251,4 @@ export async function createStudioTestService(options:Options){
 }
 type CreatedStudioTestService=Awaited<ReturnType<typeof createStudioTestService>>;
 /** Capture is an optional extension for older trusted host/test integrations. */
-export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'>>};
+export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>>};

@@ -6,8 +6,9 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_EFFECTS_CAPABILITY, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs, sceneBuildInstanceCount } from '../../core/src/studio-policy.js';
+import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
@@ -329,8 +330,8 @@ export class StudioStore {
     const clientSessionId = textField(identity.clientSessionId, 'client session', 100);
     const name = textField(identity.name, 'Studio name', 200); const pluginVersion = textField(identity.pluginVersion, 'plugin version', 80);
     for (const f of ['placeId', 'universeId']) if (typeof identity[f] !== 'number' || !Number.isSafeInteger(identity[f]) || (identity[f] as number) < 0) throw new ArcaneError('IDENTITY', 'Invalid place/universe identity.');
-    if (!Array.isArray(a.capabilities) || a.capabilities.length > 20 || a.capabilities.some(c => typeof c !== 'string')) throw new ArcaneError('CAPABILITY', 'Invalid plugin capabilities.');
-    const capabilities: string[] = [...new Set(a.capabilities)].map(c => c === STUDIO_DIAGNOSTICS_CAPABILITY ? c : methodField(c));
+    if (!Array.isArray(a.capabilities) || a.capabilities.length > 32 || a.capabilities.some(c => typeof c !== 'string')) throw new ArcaneError('CAPABILITY', 'Invalid plugin capabilities.');
+    const capabilities: string[] = [...new Set(a.capabilities)].map(c => c === STUDIO_DIAGNOSTICS_CAPABILITY || c === STUDIO_EFFECTS_CAPABILITY ? c : methodField(c));
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM grants WHERE hash=?').get(hash(code)) as Row | undefined;
       if (!row || row.used || Number(row.expires) <= this.now()) throw new ArcaneError('PAIRING', 'Pairing code is invalid, expired or already used.');
@@ -1242,8 +1243,13 @@ export class StudioStore {
         if (c.method === 'scene.update' && (!nativePropertiesMatch(object(c.args.properties) as Record<string, Json>, after.properties, r.className as string) || canonical(object(mutation.before).properties) !== canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
         if (c.method === 'script.set_enabled' && (!sameReceiptRef(mutation.ref,c.args.ref) || canonical(mutation.before) !== canonical({ source:c.args.expectedSource,enabled:c.args.expectedEnabled }) || canonical(after) !== canonical({source:c.args.expectedSource,enabled:c.args.enabled}))) throw new ArcaneError('RECEIPT', 'Execution-state receipt does not match the exact source/state baseline.');
         if (c.method === 'scene.create' && mutation.before !== null) throw new ArcaneError('RECEIPT', 'Creation receipt must have a null baseline.');
-        if (c.method === 'scene.build' && (mutation.before !== null || after.count !== sceneBuildInstanceCount(c.args)
+        // Clone items copy a template's whole subtree, so a build with clones creates at least the planned count.
+        const cloned = c.method === 'scene.build' && (c.args.items as {kind?:unknown}[]).some(item => item.kind === 'clone');
+        if (c.method === 'scene.build' && (mutation.before !== null || (cloned
+          ? !Number.isInteger(after.count) || (after.count as number) < sceneBuildInstanceCount(c.args) || (after.count as number) > SCENE_BUILD_LIMITS.instances
+          : after.count !== sceneBuildInstanceCount(c.args))
           || r.className !== object(c.args.container).className)) throw new ArcaneError('RECEIPT', 'Build receipt does not match the exact requested hierarchy.');
+        if (isAssetMethod(c.method)) validateAssetReceipt(c.method, c.args, mutation);
       }
       c.state = completedState === 'failed' && result && typeof result === 'object' && !Array.isArray(result) && result.partial === true ? 'needs_reconciliation' : completedState;
       c.result = result; c.error = error; c.finishedAt = this.iso(); this.saveCommand(c);

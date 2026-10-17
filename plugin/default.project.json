@@ -16,6 +16,7 @@
       "AssetTransfer": { "$path": "src/AssetTransfer.luau" },
       "AssetMaterials": { "$path": "src/AssetMaterials.luau" },
       "AssetUpload": { "$path": "src/AssetUpload.luau" },
-      "Diagnostics": { "$path": "src/Diagnostics.luau" }
+      "Diagnostics": { "$path": "src/Diagnostics.luau" },
+      "AssetPlacement": { "$path": "src/AssetPlacement.luau" }
   }
 }

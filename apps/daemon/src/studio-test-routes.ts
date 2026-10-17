@@ -23,6 +23,7 @@ export interface StudioTestRouteService {
     cancel(...args: Parameters<StudioTestService['requests']['cancel']>): Promise<unknown>;
     capture?: NonNullable<StudioTestService['requests']['capture']>;
     viewport?: NonNullable<StudioTestService['requests']['viewport']>;
+    nativeAssets?: NonNullable<StudioTestService['requests']['nativeAssets']>;
   };
   humanControl: { approve(...args: Parameters<StudioTestService['humanControl']['approve']>): Promise<unknown> };
   lifecycle: { close(...args: Parameters<StudioTestService['lifecycle']['close']>): Promise<void> };
@@ -36,9 +37,18 @@ export const STUDIO_TEST_HTTP_LIMITS = Object.freeze({ bodyBytes: 16 * 1024, res
 /** The viewport endpoint returns one bounded base64 PNG and needs a native round trip. */
 export const STUDIO_VIEWPORT_HTTP_LIMITS = Object.freeze({ responseBytes: 960 * 1024, deadlineMs: 25_000 });
 const PREFIX = '/v1/playtests';
+/** Native Studio asset tools (search, insert, generate, job): bounded JSON, longer native round trips. */
+const NATIVE_ASSET_PREFIX = '/v1/studio-native';
+const NATIVE_ASSET_ROUTES = new Map([
+  [NATIVE_ASSET_PREFIX + '/asset-search', { kind: 'search', keys: ['sessionId', 'nativeStudioId', 'query', 'category', 'page', 'pageSize', 'verifiedOnly'], required: ['sessionId', 'query'] }],
+  [NATIVE_ASSET_PREFIX + '/asset-insert', { kind: 'insert', keys: ['sessionId', 'nativeStudioId', 'assetId', 'category', 'watch'], required: ['sessionId', 'assetId', 'watch'] }],
+  [NATIVE_ASSET_PREFIX + '/asset-generate', { kind: 'generate', keys: ['sessionId', 'nativeStudioId', 'kind', 'prompt', 'size', 'maxTriangles', 'baseMaterial', 'pattern', 'target', 'watch'], required: ['sessionId', 'kind', 'prompt'] }],
+  [NATIVE_ASSET_PREFIX + '/asset-job', { kind: 'job', keys: ['jobId'], required: ['jobId'] }],
+] as const);
+export const STUDIO_NATIVE_ASSET_HTTP_LIMITS = Object.freeze({ deadlineMs: 32_000 });
 const ID = /^[A-Za-z0-9_-]{1,128}(?![\s\S])/;
 const DIGEST = /^[a-f0-9]{64}(?![\s\S])/;
-const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST'], [PREFIX + '/viewport', 'POST']]);
+const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST'], [PREFIX + '/viewport', 'POST'], ...[...NATIVE_ASSET_ROUTES.keys()].map(path => [path, 'POST'] as [string, string])]);
 const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   AUTH: [401, 'An authenticated local caller is required.'],
   HOST: [403, 'The exact configured loopback host is required.'],
@@ -79,6 +89,21 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   VIEWPORT_INVALID: [424, 'Native Studio returned an unusable viewport image; nothing was changed.'],
   VIEWPORT_FAILED: [424, 'The viewport capture failed; nothing was changed.'],
   VIEWPORT_CAMERA_UNKNOWN: [409, 'The Studio camera could not be confirmed restored after a framed capture; check the Edit camera.'],
+  // Native asset refusals: fixed host messages; native response text is never relayed.
+  NATIVE_ASSET_TOOL_UNSUPPORTED: [422, 'This Roblox Studio does not advertise the reviewed asset tool shape; nothing was searched, inserted or generated. Update Roblox Studio and enable its built-in MCP server.'],
+  NATIVE_ASSET_INVALID: [424, 'Roblox Studio returned an asset response Arcane cannot read; nothing further was done.'],
+  NATIVE_ASSET_FAILED: [424, 'The Roblox Studio asset operation failed; nothing further was done.'],
+  NATIVE_ASSET_UNKNOWN: [409, 'The Roblox Studio operation may have applied but could not be confirmed. Inspect the scene (scene_search or studio_viewport_capture) before trying again.'],
+  NATIVE_SIGN_IN: [424, 'Roblox Studio refused the request: sign in to Studio with an account that can use the Creator Store and AI generation, then retry once.'],
+  NATIVE_QUOTA: [429, 'Roblox Studio refused the request because a usage limit was reached. Wait before retrying, or reuse already inserted assets.'],
+  NATIVE_UNAVAILABLE: [424, 'This Roblox Studio session cannot use the requested built-in tool (feature disabled, terms not accepted, or account/place not eligible). Enable the Studio Assistant features, or search assets instead of generating.'],
+  NATIVE_REJECTED: [424, 'Roblox Studio rejected this request (for example a moderated prompt or unsupported parameters). Rephrase plainly or choose a searched asset.'],
+  ASSET_INSERT_REFUSED: [424, 'Roblox Studio refused the insertion (the asset may be private, paid, removed or not insertable). Nothing was adopted; choose another free result.'],
+  ASSET_NOT_SEARCHED: [409, 'Only free assets returned by studio_asset_search for this session in the last 30 minutes can be inserted. Search first.'],
+  ASSET_WATCH_REQUIRED: [409, 'Insertion needs a fresh Arcane plugin watch for this session; use studio_asset_insert or studio_asset_generate, which arm it automatically.'],
+  ASSET_JOB_NOT_FOUND: [404, 'The generation job is unknown, expired or owned by another caller.'],
+  NATIVE_PLACE_DENIED: [403, 'Native Studio asset tools work only for the exact paired, unpublished, write-granted place in Edit mode.'],
+  RATE_LIMITED: [429, 'The native asset budget for the last 10 minutes is used up. Reuse inserted templates with scene_build clone items instead of inserting or generating again.'],
 };
 /** Fences only this route raises; a service error reusing one of these names is not that fence. */
 const ROUTE_ONLY = new Set(['AUTH', 'HOST', 'ORIGIN', 'SCOPE', 'METHOD', 'QUERY', 'CONTENT_TYPE', 'BODY_LIMIT', 'BODY', 'BODY_TIMEOUT', 'RESPONSE_LIMIT']);
@@ -103,6 +128,20 @@ function prepareRefusal(error: unknown): unknown {
   if (code !== undefined && SCENARIO_POLICY.has(code)) return new RouteError('SCENARIO_DENIED');
   if (code !== undefined && Object.hasOwn(ERRORS, code) && !ROUTE_ONLY.has(code)) return error;
   return new RouteError('PREPARE_FAILED');
+}
+/** Native asset refusals. Only fixed host codes cross the route; an unconfirmed native effect stays unknown. */
+function nativeAssetRefusal(error: unknown): unknown {
+  if (error instanceof RouteError) return error;
+  if (error instanceof Error && error.name === 'ZodError') return new RouteError('INVALID_REQUEST');
+  const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+  if (code === 'EFFECT_UNKNOWN') return new RouteError('NATIVE_ASSET_UNKNOWN');
+  if (code === 'PLACE_DENIED') return new RouteError('NATIVE_PLACE_DENIED');
+  if (code === 'UNSUPPORTED_TOOL') return new RouteError('NATIVE_ASSET_TOOL_UNSUPPORTED');
+  if (code === 'BAD_NATIVE_RESPONSE') return new RouteError('NATIVE_ASSET_INVALID');
+  if (code === 'SESSION') return new RouteError('SESSION_NOT_FOUND');
+  if (code === 'REVOKED') return new RouteError('SESSION_REVOKED');
+  if (code !== undefined && Object.hasOwn(ERRORS, code) && !ROUTE_ONLY.has(code)) return new RouteError(code);
+  return new RouteError('NATIVE_ASSET_FAILED');
 }
 /** Viewport capture is read-only: refusals are definite, except an unconfirmed camera restore. */
 function viewportRefusal(error: unknown): unknown {
@@ -247,11 +286,12 @@ async function readJson(request: IncomingMessage, signal: AbortSignal): Promise<
  */
 export function studioTestRoutes(service: StudioTestRouteService, resolveActor: StudioTestActorResolver) {
   return async (request: IncomingMessage, response: ServerResponse, url: URL, origin: string): Promise<boolean> => {
-    if (url.pathname !== PREFIX && !url.pathname.startsWith(PREFIX + '/')) return false;
+    if (url.pathname !== PREFIX && !url.pathname.startsWith(PREFIX + '/') && !url.pathname.startsWith(NATIVE_ASSET_PREFIX + '/')) return false;
     const authorization = request.headers.authorization;
     const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
     let expired = false, disconnected = false, readingBody = false;
     const viewing = url.pathname === PREFIX + '/viewport';
+    const nativeAsset = NATIVE_ASSET_ROUTES.get(url.pathname);
     const controller = new AbortController();
     const send = (status: number, payload: unknown) => {
       if (response.destroyed || response.writableEnded || response.headersSent) return;
@@ -300,7 +340,7 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           expired = true; controller.abort(); reject(new RouteError(readingBody ? 'BODY_TIMEOUT' : 'TIMEOUT'));
-        }, viewing ? STUDIO_VIEWPORT_HTTP_LIMITS.deadlineMs : STUDIO_TEST_HTTP_LIMITS.deadlineMs);
+        }, viewing ? STUDIO_VIEWPORT_HTTP_LIMITS.deadlineMs : nativeAsset ? STUDIO_NATIVE_ASSET_HTTP_LIMITS.deadlineMs : STUDIO_TEST_HTTP_LIMITS.deadlineMs);
         onClose = () => { disconnected = true; controller.abort(); reject(new RouteError('SCOPE')); };
         response.once('close', onClose);
       });
@@ -322,6 +362,14 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
         readingBody = true;
         const value = await readJson(request, controller.signal);
         readingBody = false; guard();
+        if (nativeAsset) {
+          if (!service.requests.nativeAssets) fail('UNAVAILABLE');
+          const input = record(value, nativeAsset.keys, nativeAsset.required);
+          let result: unknown;
+          try { result = await service.requests.nativeAssets[nativeAsset.kind](input, initial.id); } catch (error) { throw nativeAssetRefusal(error); }
+          guard();
+          return result;
+        }
         if (viewing) {
           if (!service.requests.viewport) fail('UNAVAILABLE');
           const input = record(value, ['sessionId', 'nativeStudioId', 'maxDimension', 'camera'], ['sessionId']);

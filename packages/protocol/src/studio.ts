@@ -19,14 +19,23 @@ export interface StudioContinuityProof {
   mode: 'Edit' | 'Play'; playEpoch: number; continuitySupported: boolean;
   connected: boolean; observedAt: string; expiresAt: string;
 }
-export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context'] as const;
-export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.build', 'environment.apply'] as const;
+export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context', 'scene.asset_watch'] as const;
+export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.build', 'environment.apply', 'scene.place_asset', 'scene.apply_material'] as const;
+/** Native asset adoption (plugin side). scene.asset_watch arms a one-shot Workspace insertion watch;
+ * scene.place_asset adopts exactly one natively inserted/generated instance, strips scripts by default,
+ * fits, grounds, anchors and parents it under one receipt; scene.apply_material applies a generated
+ * MaterialVariant to bounded parts under one receipt. scene.build clone items copy a script-free template. */
+export const ASSET_PLACE_LIMITS = Object.freeze({ descendants: 5000, templateDescendants: 2000, templates: 16, materialTargets: 64, watchSeconds: 600, arrivalSeconds: 10 });
 /** One atomic hierarchy per scene.build command: one undo recording and one receipt.
  * instances counts every created Instance, including the root, placement Models and welds. */
 export const SCENE_BUILD_LIMITS = Object.freeze({ items: 2000, prototypes: 32, prototypeParts: 64, instances: 4000, keys: 32 });
 /** environment.apply: bounded terrain fills plus Lighting/effect settings in one undo recording.
  * Terrain is undone with Studio Undo; receipts record the prior lighting values. */
 export const ENVIRONMENT_LIMITS = Object.freeze({ terrainShapes: 128, extent: 2048, volume: 400_000_000 });
+/** Non-method plugin capability: effects classes in scene.create/scene.build, environment presets,
+ * Lighting.Technology, Terrain.Decoration, MaterialVariants and scene.inspect bounds. Older plugins never advertise it. */
+export const STUDIO_EFFECTS_CAPABILITY = 'scene.effects' as const;
+export const EFFECT_LIMITS = Object.freeze({ properties: 32, keypoints: 20, materials: 8 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
 export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
@@ -85,7 +94,7 @@ export interface StudioUploadContextObservation extends StudioImportContextObser
     | {status: 'unavailable'; id: null; provenance: 'StudioService:GetUserId'};
 }
 export interface MutationReceipt {
-  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply'; ref: InstanceRef;
+  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply' | 'scene.place_asset' | 'scene.apply_material'; ref: InstanceRef;
   before: Record<string, Json> | null; after: Record<string, Json>;
 }
 export interface PluginPairInput { code: string; protocolVersion: 1; identity: StudioIdentity; capabilities: string[] }

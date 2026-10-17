@@ -7,27 +7,25 @@ license: MIT
 # Photoreal finish: light, mood, materials, scale
 
 ## Rules first
-- Apply one mood preset in ONE `environment_apply` call (lighting + atmosphere + bloom + colorCorrection + sunRays). Never leave default Lighting on a finished scene.
-- Arcane cannot set these. Tell the user once, in one line each, to set them in the Properties window:
-  - Lighting.Technology = Future (point-light shadows, specular).
-  - Workspace.Terrain.Decoration = true (animated grass blades; Grass material only, not LeafyGrass).
-  - MaterialService.Use2022Materials = true; MaterialVariants are added in the Material Manager.
-- Build geometry with `scene_build` (one batch per layer) and terrain with `environment_apply`. Use DepthOfField only through a client script: `scene_create` a LocalScript under StarterPlayer.StarterPlayerScripts, `script_update` it to create a `DepthOfFieldEffect` under the Camera, and keep it disabled until activated.
+- One `environment_apply` call sets the look: `preset` (one word) + `technology: "Future"` + `terrainDecoration: true` when the ground uses Grass. The host expands the preset to exact Lighting, Atmosphere, Bloom, ColorCorrection and SunRays values; add only the section fields you want to change. Never leave default Lighting on a finished scene.
+- That call is one undo step, verified and rolled back as a whole. If Studio refuses a setting the error names the manual step (for example Lighting.Technology = Future or Terrain Decoration = true in the Properties window); tell the user that one line and continue.
+- MaterialService.Use2022Materials stays a manual Properties-window setting; mention it once if materials look flat.
+- Realism comes from real assets: `studio_asset_search` free (preferably verified) Creator Store models for organic and complex objects, `studio_asset_insert` them (scripts stripped) and clone with `scene_build` templates. Primitives only for exact-dimension architecture. Never buy or publish.
+- Build geometry with `scene_build` (one batch per layer) and terrain with `environment_apply`. DepthOfField only through a client script: `scene_create` a LocalScript under StarterPlayer.StarterPlayerScripts, `script_update` it to create a `DepthOfFieldEffect` under the Camera, keep it disabled until activated.
 - When Atmosphere exists, FogStart/FogEnd are ignored. Use Atmosphere Density and Haze for distance fog.
-- Verify with `studio_viewport_capture`: one eye-level shot (camera 5 studs high looking down the main path) and one overview. Fix floating objects, plastic-looking surfaces, repetition and blown highlights before reporting.
+- Verify with `studio_viewport_capture`: `frame {ref: main subject, views: ["three_quarter","low_angle"]}` (one sheet) plus one eye-level camera down the main path. Fix floating objects, plastic surfaces, repetition and blown highlights before reporting.
 
-## Mood presets (environment_apply values; colours are 0..1 RGB)
-| Mood | lighting | atmosphere | bloom Intensity/Size/Threshold | colorCorrection | sunRays Intensity/Spread |
-|---|---|---|---|---|---|
-| Clear day | ClockTime 13, Brightness 3, ExposureCompensation 0, Ambient [0.05,0.05,0.06], OutdoorAmbient [0.5,0.5,0.52], ShadowSoftness 0.15 | Density 0.25, Offset 0.25, Color [0.78,0.84,0.9], Decay [0.55,0.62,0.7], Glare 0.2, Haze 1 | 0.3/24/1.6 | Contrast 0.06, Saturation 0.05 | 0.05/0.6 |
-| Golden hour | ClockTime 17.6, Brightness 2.5, ExposureCompensation 0.2, Ambient [0.08,0.06,0.05], OutdoorAmbient [0.55,0.45,0.38], ColorShift_Top [1,0.78,0.5], ShadowSoftness 0.25 | Density 0.32, Offset 0.15, Color [0.95,0.78,0.6], Decay [0.9,0.55,0.35], Glare 0.6, Haze 1.8 | 0.6/30/1.2 | Brightness 0.02, Contrast 0.1, Saturation 0.12, TintColor [1,0.95,0.88] | 0.12/0.8 |
-| Foggy forest | ClockTime 9.5, Brightness 1.6, Ambient [0.1,0.11,0.12], OutdoorAmbient [0.42,0.46,0.48], ShadowSoftness 0.6 | Density 0.55, Offset 0.05, Color [0.72,0.78,0.8], Decay [0.55,0.62,0.6], Glare 0, Haze 3 | 0.35/24/1.6 | Contrast 0.05, Saturation -0.15, TintColor [0.93,0.98,1] | 0.04/0.5 |
-| Night | ClockTime 0, Brightness 1, ExposureCompensation 0.3, Ambient [0.04,0.05,0.08], OutdoorAmbient [0.18,0.22,0.32], ColorShift_Top [0.6,0.7,1], ShadowSoftness 0.3 | Density 0.35, Offset 0.1, Color [0.35,0.42,0.6], Decay [0.2,0.25,0.4], Glare 0, Haze 1 | 0.8/28/0.9 | Contrast 0.12, Saturation -0.25, TintColor [0.85,0.9,1] | 0/0 |
-| Horror | ClockTime 0.5, Brightness 0.4, ExposureCompensation -0.3, Ambient [0.02,0.02,0.025], OutdoorAmbient [0.08,0.08,0.1], ShadowSoftness 0.1 | Density 0.6, Offset 0, Color [0.25,0.27,0.28], Decay [0.12,0.12,0.14], Glare 0, Haze 2.5 | 0.4/20/1.4 | Brightness -0.05, Contrast 0.25, Saturation -0.45, TintColor [0.9,1,0.95] | 0/0 |
-| Sci-fi | ClockTime 21, Brightness 1.2, Ambient [0.05,0.06,0.1], OutdoorAmbient [0.2,0.24,0.35], ColorShift_Top [0.6,0.8,1], ShadowSoftness 0.15 | Density 0.3, Offset 0.2, Color [0.45,0.55,0.75], Decay [0.25,0.2,0.45], Glare 0.3, Haze 1.2 | 1/32/0.95 | Contrast 0.15, Saturation 0.1, TintColor [0.9,0.97,1] | 0.05/0.4 |
+## Mood presets (`preset` values; tune per field after)
+| Mood | preset | Key traits | Tune with |
+|---|---|---|---|
+| Clear day | clear_day | ClockTime 13, Brightness 3, light haze, neutral grade | atmosphere Haze, colorCorrection Saturation |
+| Golden hour | golden_hour | ClockTime 17.6, warm ColorShift_Top, Glare and Haze, warm TintColor | lighting ClockTime 17-18, sunRays Intensity |
+| Foggy forest | foggy_forest | ClockTime 9.5, Density 0.55, Haze 3, desaturated, EnvironmentSpecularScale 0.6 | atmosphere Density 0.4-0.7 |
+| Night | night | ClockTime 0, cool OutdoorAmbient, ExposureCompensation 0.3, strong bloom | lighting OutdoorAmbient, bloom Threshold |
+| Horror | horror | ClockTime 0.5, Brightness 0.4, Contrast 0.25, Saturation -0.45, EnvironmentDiffuseScale 0.3 | atmosphere Decay, ShadowSoftness |
+| Sci-fi | sci_fi | ClockTime 21, cyan ColorShift_Top, Bloom 1/32/0.95 | colorCorrection TintColor |
 
-All presets: EnvironmentDiffuseScale 1, EnvironmentSpecularScale 1, GlobalShadows true (Foggy forest: specular 0.6; Horror: diffuse 0.3).
-- Night and horror are carried by practical lights: warm PointLights (ffb46b, Brightness 2-3) and, for horror, a player flashlight SpotLight (Angle 45, Range 40, Brightness 3, Shadows true) plus 1-3 flickering sources. Light recipes: `arcane-vfx`.
+- Night and horror are carried by practical lights: warm PointLights (ffb46b, Brightness 2-3) and, for horror, a player flashlight SpotLight (Angle 45, Range 40, Brightness 3, Shadows true) plus 1-3 flickering sources. Light and particle recipes (created directly): `arcane-vfx`.
 - Foggy forest adds low ground mist (the vfx Smoke preset with Size 0:4 1:12, Speed 0.3-0.6, near the ground).
 - Sci-fi surfaces: Metal, DiamondPlate, Glass; Neon trims 4fd8ff or ff3df0 on at most 5% of visible surface.
 - DepthOfField: gameplay FarIntensity 0.15, FocusDistance 40, InFocusRadius 60, NearIntensity 0; cinematic FarIntensity 0.4, FocusDistance 20, InFocusRadius 15. Expose an off switch in settings.
@@ -36,8 +34,10 @@ All presets: EnvironmentDiffuseScale 1, EnvironmentSpecularScale 1, GlobalShadow
 - Use textured materials (Concrete, Brick, WoodPlanks, Slate, Cobblestone, Plaster, Metal) over SmoothPlastic; SmoothPlastic only for painted manufactured items.
 - Colour range 0.08-0.92 per channel, saturation under 70% except emissive. No pure white or black.
 - Reflectance 0 on most parts, at most 0.2; Glass Transparency 0.3-0.5.
-- MaterialVariant (user-created in Material Manager): StudsPerTile 8-16 for walls and floors, 20-40 for ground; name the BaseMaterial it overrides.
-- SurfaceAppearance (MeshParts from the asset pipeline only): ColorMap + NormalMap (OpenGL, +Y) + RoughnessMap + MetalnessMap; 1024 px for hero props, 512 px otherwise; roughness never pure 0 or 1; metalness 0 or 1.
+- MaterialVariant directly: `environment_apply` `materials: [{name, baseMaterial, studsPerTile, override: true, ColorMap, NormalMap, RoughnessMap, MetalnessMap}]`. Maps are a user-given or existing rbxassetid, or a built-in rbxasset://textures path. `override` restyles every part and terrain of that base material. StudsPerTile 8-16 for walls and floors, 20-40 for ground.
+- `studio_asset_generate` kind material creates a MaterialVariant from baseMaterial + prompt and applies it to parts with a receipt; kind texture retextures an inserted MeshPart.
+- Decal/Texture (direct, `scene_create`/`scene_build` fx) for signs, grime and stains: Texture StudsPerTileU/V matches the surface; Transparency 0.2-0.6 for dirt.
+- SurfaceAppearance maps are not settable by plugins: only on MeshParts from the asset pipeline or set by the user. ColorMap + NormalMap (OpenGL, +Y) + RoughnessMap + MetalnessMap; roughness never pure 0 or 1; metalness 0 or 1.
 
 ## Real-world scale (avatar 5.5 studs, 1 stud ~ 0.3 m)
 Door 4 x 7.5; floor-to-floor 12-14; stair riser 0.75-1 with tread 1.5-2; railing 3.5; table 2.7; chair seat 1.6; counter 3; window sill 3; road lane 12-14; sidewalk 8; street lamp 16-18; car 6 x 5 x 14; realistic tree 25-40 tall with a 1.5-3 trunk.

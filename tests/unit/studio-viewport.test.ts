@@ -298,3 +298,59 @@ test('viewport MCP tool: advertised read tool returns image content plus a small
   const mismatched = CallToolResultSchema.parse(await mcp.callTool({ name: 'studio_viewport_capture', arguments: { sessionId: 'paired-fixture' } }));
   assert.equal(mismatched.isError, true); assert.match(JSON.stringify(mismatched.content), /PROTOCOL/);
 });
+
+test('viewport capture: a multi-view sheet captures 2–4 framed views, restores the camera once and stays within the image bounds', async t => {
+  const { state, client } = await nativeFixture(t);
+  const sheet: { position: [number, number, number]; lookAt: [number, number, number] }[] = [{ position: [40, 20, -40], lookAt: [0, 0, 0] }, { position: [0, 60, -5], lookAt: [0, 0, 0] }, { position: [0, 8, -50], lookAt: [0, 0, 0] }];
+  const image = await capture(client, { sheet });
+  assert.equal(image.views, 3); assert.equal(image.camera, 'restored');
+  assert.ok(image.width <= 768 && image.height <= 768 && image.bytes <= VIEWPORT_LIMITS.outputBytes);
+  const shots = state.calls.filter(call => call.name === 'screen_capture');
+  assert.deepEqual(shots.map(call => call.args.camera_position), sheet.map(camera => camera.position));
+  assert.equal(new Set(shots.map(call => call.args.capture_id)).size, 3, 'distinct capture ids');
+  assert.deepEqual(state.calls.map(call => call.name), ['get_studio_state', 'execute_luau', 'screen_capture', 'screen_capture', 'screen_capture',
+    'execute_luau', 'execute_luau', 'execute_luau', 'get_studio_state']);
+  await assert.rejects(capture(client, { sheet: [sheet[0]!] }));
+  await assert.rejects(capture(client, { camera: sheet[0]!, sheet }));
+});
+
+test('viewport MCP tool: frame {ref, views} reads plugin bounds and sends computed cameras as one sheet', async t => {
+  const png = boundViewportPng(gradient(64, 64), 256).png, bodies: Record<string, unknown>[] = [];
+  const ref = { instanceId: 'opaque-tower', sessionId: 'paired-fixture', root: 'Workspace', pathSegments: ['Tower'], className: 'Model' };
+  let bounds: unknown = { center: [0, 20, 0], size: [10, 40, 10], space: 'world-aabb' };
+  const daemon = createServer((request, response) => {
+    const chunks: Buffer[] = []; request.on('data', chunk => chunks.push(chunk));
+    request.once('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')); bodies.push({ url: request.url, ...body });
+      const now = new Date().toISOString();
+      const reply = request.url === '/v1/studio/commands' ? { command: { protocolVersion: 1, id: 'cmd-1', requestId: body.requestId, sessionId: body.sessionId, clientSessionId: 'life',
+        method: body.method, args: body.args, allowedRoots: ['Workspace'], allowWrites: true, leaseEpoch: 1, expiresAt: now, state: 'succeeded', createdAt: now, finishedAt: now,
+        result: { ref, name: 'Tower', className: 'Model', childCount: 3, properties: { Name: 'Tower' }, bounds }, error: null } } : viewportRecord(png, body.sessionId);
+      const json = JSON.stringify(reply); response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(json) }); response.end(json);
+    });
+  });
+  await new Promise<void>(resolve => daemon.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => { daemon.closeAllConnections(); daemon.close(() => resolve()); }));
+  const client = new DaemonClient({ url: 'http://127.0.0.1:' + (daemon.address() as { port: number }).port, token: 'fixture-viewport-token' });
+  const server = createMcpServer({ client, projectRoot: process.cwd() });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: 'fixture-viewport-frame', version: 'fixture-only' }, { capabilities: {} });
+  await server.connect(serverTransport); await mcp.connect(clientTransport);
+  t.after(async () => { await mcp.close(); await server.close(); });
+  const result = CallToolResultSchema.parse(await mcp.callTool({ name: 'studio_viewport_capture', arguments: { sessionId: 'paired-fixture', frame: { ref, views: ['front', 'top', 'low_angle'] } } }));
+  assert.notEqual(result.isError, true, JSON.stringify(result.content));
+  assert.deepEqual(bodies[0], { url: '/v1/studio/commands', sessionId: 'paired-fixture', requestId: bodies[0]!.requestId, method: 'scene.inspect', args: { ref, bounds: true } });
+  const sent = bodies[1]!.sheet as { position: number[]; lookAt: number[] }[];
+  assert.equal(bodies[1]!.url, '/v1/playtests/viewport'); assert.equal(sent.length, 3); assert.equal(bodies[1]!.camera, undefined);
+  assert.deepEqual(sent[0]!.lookAt, [0, 20, 0]); assert.ok(sent[1]!.position[1]! > 40 && sent[2]!.position[1]! < 20);
+  const summary = JSON.parse((result.content.find(item => item.type === 'text') as { text: string }).text);
+  assert.deepEqual(summary.framing.views, ['front', 'top', 'low_angle']);
+  const single = CallToolResultSchema.parse(await mcp.callTool({ name: 'studio_viewport_capture', arguments: { sessionId: 'paired-fixture', frame: { ref } } }));
+  assert.notEqual(single.isError, true); assert.ok(bodies[3]!.camera && !bodies[3]!.sheet, 'one view sends a single camera');
+  bounds = undefined;
+  const old = CallToolResultSchema.parse(await mcp.callTool({ name: 'studio_viewport_capture', arguments: { sessionId: 'paired-fixture', frame: { ref } } }));
+  assert.equal(old.isError, true); assert.match(JSON.stringify(old.content), /PLUGIN_UPDATE_REQUIRED/);
+  const both = CallToolResultSchema.parse(await mcp.callTool({ name: 'studio_viewport_capture', arguments: { sessionId: 'paired-fixture', frame: { ref }, camera: { position: [9, 9, 9], lookAt: [0, 0, 0] } } }));
+  assert.equal(both.isError, true);
+  assert.equal(CallToolResultSchema.parse(await mcp.callTool({ name: 'studio_viewport_capture', arguments: { sessionId: 'paired-fixture', frame: { ref, views: ['front'] } } })).isError, true);
+});

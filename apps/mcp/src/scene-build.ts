@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import type { Json } from '../../../packages/protocol/src/studio.js';
-import { SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS } from '../../../packages/protocol/src/studio.js';
-import { BUILD_GROUP_CLASSES, BUILD_PART_CLASSES, ENVIRONMENT_PROPERTIES, MATERIALS, SHAPES, TERRAIN_MATERIALS, TERRAIN_SHAPES, validateProperties } from '../../../packages/core/src/studio-policy.js';
+import { SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, ASSET_PLACE_LIMITS } from '../../../packages/protocol/src/studio.js';
+import { BUILD_GROUP_CLASSES, BUILD_PART_CLASSES, ENVIRONMENT_PROPERTIES, MATERIALS, SHAPES, TERRAIN_MATERIALS, TERRAIN_SHAPES, validateProperties,
+  EFFECT_CLASSES, EFFECT_PROPERTIES, EFFECT_HOSTS, ENVIRONMENT_PRESET_NAMES, LIGHTING_TECHNOLOGIES, VARIANT_MAPS, isEffectClass, validateEffectProperties,
+  type EffectClass, type EffectKind } from '../../../packages/core/src/studio-policy.js';
+import { EFFECT_LIMITS } from '../../../packages/protocol/src/studio.js';
 import { BridgeError } from './daemon-client.js';
-import { id } from './schemas.js';
+import { id, ref } from './schemas.js';
 
 /** Compact model-facing build input. It is compiled locally into the strict scene.build wire
  * form (explicit prototypes and placements), so a forest is one short call, not hundreds. */
@@ -21,7 +24,48 @@ export const compactProps = z.strictObject({
   Material: z.enum(MATERIALS).optional(), Shape: z.enum(SHAPES).optional(), Anchored: z.boolean().optional(), CanCollide: z.boolean().optional(),
   CastShadow: z.boolean().optional(), Transparency: unit.optional(), Reflectance: unit.optional(),
 }).describe('Part properties. Vectors as [x,y,z]; Color as [r,g,b] or "#rrggbb". Anchored defaults true.');
-const buildClass = z.enum([...BUILD_GROUP_CLASSES, ...BUILD_PART_CLASSES]);
+const buildClass = z.enum([...BUILD_GROUP_CLASSES, ...BUILD_PART_CLASSES, ...EFFECT_CLASSES]);
+/** Compact effect properties; compileEffectProps converts them to the tagged wire form. */
+export const effectProps = z.record(z.string().regex(/^[A-Za-z0-9_]{1,40}$/), z.unknown())
+  .describe('Effect props by class (see tool description). Colors [r,g,b]/"#hex"; NumberSequence as a number, evenly spaced numbers or [[t,v,env?],...]; ColorSequence as a color, evenly spaced colors or [[t,"#hex"],...]; NumberRange as n or [min,max]; Vector2/3 arrays; enums by name; Texture "rbxassetid://123" or "rbxasset://textures/..."; Attachment0/1 = key of an earlier Attachment item.');
+/** One-line per-class property list for tool descriptions. */
+export function effectCatalog(): string {
+  return EFFECT_CLASSES.map(className => `${className}(${Object.keys(EFFECT_PROPERTIES[className]).join(',')})`).join('; ');
+}
+function spread<T>(values: T[]): [number, T][] { return values.map((value, index) => [Number((index / (values.length - 1)).toFixed(4)), value]); }
+function rgb(value: unknown, label: string): number[] {
+  const color = tagged('Color3', value) as { type?: string; value?: unknown };
+  if (!color || color.type !== 'Color3' || !Array.isArray(color.value)) throw new BridgeError('INPUT', `${label}: use [r,g,b] 0..1 or "#rrggbb".`);
+  return color.value as number[];
+}
+/** Converts compact effect values to tagged wire values, then runs the shared policy validator. */
+export function compileEffectProps(className: EffectClass, input: Record<string, unknown>, attachment: (value: unknown, label: string) => Json): Record<string, Json> {
+  const out: Record<string, Json> = {};
+  for (const [k, raw] of Object.entries(input)) {
+    if (raw === undefined) continue;
+    const spec = (EFFECT_PROPERTIES[className] as Record<string, EffectKind>)[k], label = `${className}.${k}`;
+    if (!spec || !Object.hasOwn(EFFECT_PROPERTIES[className], k)) throw new BridgeError('INPUT', `${label} is not an allowed effect property. Allowed: ${Object.keys(EFFECT_PROPERTIES[className]).join(', ')}.`);
+    const isTagged = raw !== null && typeof raw === 'object' && !Array.isArray(raw) && 'type' in raw;
+    if (spec === 'attachment') { out[k] = attachment(raw, label); continue; }
+    if (isTagged || spec === 'boolean' || spec === 'content' || (Array.isArray(spec) && (spec[0] === 'enum' || spec[0] === 'number' || spec[0] === 'integer'))) { out[k] = raw as Json; continue; }
+    if (spec === 'color') { out[k] = { type: 'Color3', value: rgb(raw, label) }; continue; }
+    if (spec === 'colorSequence') {
+      const list = Array.isArray(raw) && raw.length >= 2 && (typeof raw[0] === 'string' || Array.isArray(raw[0])) ? raw : [raw, raw];
+      const points = list.every(p => Array.isArray(p) && (p.length === 2 || p.length === 4))
+        ? list.map(p => { const point = p as unknown[]; return [point[0] as number, ...(point.length === 2 ? rgb(point[1], label) : point.slice(1) as number[])]; })
+        : spread(list).map(([t, c]) => [t, ...rgb(c, label)]);
+      out[k] = { type: 'ColorSequence', value: points as Json }; continue;
+    }
+    const kind = spec[0];
+    if (kind === 'vector3') { out[k] = { type: 'Vector3', value: raw as Json }; continue; }
+    if (kind === 'vector2') { out[k] = { type: 'Vector2', value: raw as Json }; continue; }
+    if (kind === 'range') { out[k] = { type: 'NumberRange', value: (typeof raw === 'number' ? [raw, raw] : raw) as Json }; continue; }
+    const list = typeof raw === 'number' ? [raw, raw] : raw;
+    out[k] = { type: 'NumberSequence', value: (Array.isArray(list) && list.every(p => typeof p === 'number') ? spread(list as number[]).map(([t, v]) => [t, v]) : list) as Json };
+  }
+  try { return validateEffectProperties(out, className, () => undefined); }
+  catch (error) { throw new BridgeError('INPUT', (error as Error).message); }
+}
 const range = z.tuple([n, n]);
 const tint = z.tuple([z.number().min(0).max(2), z.number().min(0).max(2), z.number().min(0).max(2)]);
 
@@ -34,11 +78,14 @@ export const sceneBuildShape = {
       tint: z.boolean().default(true).describe('Whether placement tint multiplies this part Color.') })).min(1).max(SCENE_BUILD_LIMITS.prototypeParts),
     weld: z.boolean().default(false).describe('WeldConstraint every part to the first (only useful when unanchored).'),
   })).optional().describe('Reusable multi-part templates (trees, rocks, lamps). Part Position/Orientation are relative to the placement origin at ground level; Size scales with placement scale.'),
+  templates: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), ref).optional()
+    .refine(value => !value || Object.keys(value).length <= ASSET_PLACE_LIMITS.templates, `At most ${ASSET_PLACE_LIMITS.templates} templates.`)
+    .describe('Existing script-free Model/BasePart refs (e.g. an asset adopted by studio_asset_insert into a hidden Folder) placed by name with "use" like a prototype: each placement is a full copy, scaled and yawed about its bottom pivot (tint does not apply).'),
   items: z.array(z.strictObject({
     key: key.optional().describe('Local id; returned with a real ref, and usable as "in" for later items.'),
-    in: key.optional().describe('Key of an earlier Model/Folder item; default is the build root.'),
-    name: name.optional(), className: buildClass.optional().describe('Model/Folder group, or a part class (default Part when props are given).'),
-    props: compactProps.optional(), use: z.string().optional().describe('Prototype name to place.'),
+    in: key.optional().describe('Key of an earlier Model/Folder item (effects: also a part or Attachment item); default is the build root.'),
+    name: name.optional(), className: buildClass.optional().describe('Model/Folder group, a part class (default Part when props are given), or an effect class with fx.'),
+    props: compactProps.optional(), fx: effectProps.optional(), use: z.string().optional().describe('Prototype name to place.'),
     at: v3.optional(), yaw: z.number().min(-360).max(360).optional(), scale: z.number().min(0.1).max(20).optional(), tint: tint.optional(),
     ground: z.boolean().optional().describe('Drop the placement onto the surface below (terrain or parts).'),
   })).max(SCENE_BUILD_LIMITS.items).default([]),
@@ -112,11 +159,20 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
     return { name: protoName, weld: proto.weld, parts: proto.parts.map(part => ({ className: part.className, name: part.name,
       properties: props(part.props, input.defaults, part.className), tint: part.tint })) };
   });
+  const templateNames = Object.keys(input.templates ?? {});
+  for (const name of templateNames) if (protoNames.includes(name)) throw new BridgeError('INPUT', `"${name}" is both a prototype and a template; rename one.`);
   const protoIndex = (useName: string) => {
     const index = protoNames.indexOf(useName);
-    if (index < 0) throw new BridgeError('INPUT', `Unknown prototype "${useName}". Declare it under prototypes.`);
-    return index + 1;
+    if (index >= 0) return index + 1;
+    const template = templateNames.indexOf(useName);
+    if (template < 0) throw new BridgeError('INPUT', `Unknown prototype or template "${useName}". Declare it under prototypes or templates.`);
+    return -(template + 1);
   };
+  /** One wire item for a prototype placement or a template clone (negative index). */
+  const placeItem = (use: number, fields: { name: string; parent: number; at: number[]; yaw: number; scale: number; tint: Json; ground?: boolean | undefined }, extra: Record<string, Json> = {}): Json => use > 0
+    ? { kind: 'place', template: use, name: fields.name, parent: fields.parent, at: fields.at, yaw: fields.yaw, scale: fields.scale, tint: fields.tint, ...(fields.ground ? { ground: true } : {}), ...extra }
+    : { kind: 'clone', template: -use, name: fields.name, parent: fields.parent, at: fields.at, yaw: fields.yaw, scale: fields.scale, ...(fields.ground ? { ground: true } : {}), ...extra };
+  const useName = (use: number) => use > 0 ? protoNames[use - 1]! : templateNames[-use - 1]!;
   const items: Json[] = [], groups = new Map<string, number>(), keys = new Set<string>();
   const occupancy = new Occupancy();
   const parentOf = (inKey: string | undefined) => {
@@ -125,14 +181,31 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
     if (index === undefined) throw new BridgeError('INPUT', `"in":"${inKey}" must name an earlier Model/Folder item key.`);
     return index;
   };
+  const hosts = new Map<string, { index: number; kind: 'part' | 'attachment' }>();
   for (const item of input.items) {
-    const parent = parentOf(item.in);
+    const effect = item.className !== undefined && isEffectClass(item.className) ? item.className : null;
+    const parent = effect ? 0 : parentOf(item.in);
     const extra: Record<string, Json> = item.key ? { key: item.key } : {};
     if (item.key) { if (keys.has(item.key)) throw new BridgeError('INPUT', `Duplicate key "${item.key}".`); keys.add(item.key); }
+    if (effect) {
+      if (!item.name || item.props || item.use !== undefined) throw new BridgeError('INPUT', 'An effect item needs a name and fx (not props/use).');
+      const group = item.in === undefined ? 0 : groups.get(item.in);
+      const host = group !== undefined ? { index: group, kind: 'group' as const } : hosts.get(item.in!);
+      if (!host) throw new BridgeError('INPUT', `"in":"${item.in}" must name an earlier group, part or Attachment item key.`);
+      if (!EFFECT_HOSTS[effect].includes(host.kind)) throw new BridgeError('INPUT', `${effect} must be inside a ${EFFECT_HOSTS[effect].join(' or ')} item.`);
+      const properties = compileEffectProps(effect, item.fx ?? {}, (value, label) => {
+        const target = typeof value === 'string' ? hosts.get(value) : undefined;
+        if (!target || target.kind !== 'attachment') throw new BridgeError('INPUT', `${label} must be the key of an earlier Attachment item.`);
+        return { type: 'Ref', item: target.index };
+      });
+      items.push({ kind: 'effect', className: effect, name: item.name, parent: host.index, properties, ...extra });
+      if (item.key && effect === 'Attachment') hosts.set(item.key, { index: items.length, kind: 'attachment' });
+      continue;
+    }
+    if (item.fx) throw new BridgeError('INPUT', 'fx applies only to effect classes.');
     if (item.use !== undefined) {
       if (!item.at) throw new BridgeError('INPUT', 'A placement ("use") needs "at".');
-      items.push({ kind: 'place', template: protoIndex(item.use), name: item.name ?? item.use, parent, at: item.at, yaw: item.yaw ?? 0,
-        scale: item.scale ?? 1, tint: item.tint ?? null, ...(item.ground ? { ground: true } : {}), ...extra });
+      items.push(placeItem(protoIndex(item.use), { name: item.name ?? item.use, parent, at: item.at, yaw: item.yaw ?? 0, scale: item.scale ?? 1, tint: item.tint ?? null, ground: item.ground }, extra));
       occupancy.add(item.at[0], item.at[2], 1);
     } else if (item.className === 'Model' || item.className === 'Folder') {
       if (!item.name) throw new BridgeError('INPUT', 'A group needs a name.');
@@ -142,6 +215,7 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
       const className = item.className ?? 'Part';
       if (!item.name) throw new BridgeError('INPUT', 'A part needs a name.');
       items.push({ kind: 'part', className, name: item.name, parent, properties: props(item.props, input.defaults, className), ...extra });
+      if (item.key) hosts.set(item.key, { index: items.length, kind: 'part' });
     }
   }
   const report: CompiledBuild['scatter'] = [];
@@ -180,15 +254,16 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
       occupancy.add(x, z, r);
       const use = uses[Math.floor(random() * uses.length)]!;
       const t = spec.tint ? spec.tint.min.map((low, i) => round(low + random() * (spec.tint!.max[i]! - low), 3)) : null;
-      items.push({ kind: 'place', template: use, name: spec.name ?? protoNames[use - 1]!, parent, at: [round(x, 2), round(cy, 2), round(z, 2)],
-        yaw: round(ymin + random() * (ymax - ymin), 1), scale: round(scale, 3), tint: t, ...(spec.ground ? { ground: true } : {}) });
+      items.push(placeItem(use, { name: spec.name ?? useName(use), parent, at: [round(x, 2), round(cy, 2), round(z, 2)],
+        yaw: round(ymin + random() * (ymax - ymin), 1), scale: round(scale, 3), tint: t, ground: spec.ground }));
       placed++;
     }
     report.push({ requested: spec.count, placed });
   }
   if (!items.length) throw new BridgeError('INPUT', 'Add at least one item or scatter.');
   if (items.length > SCENE_BUILD_LIMITS.items) throw new BridgeError('BODY_LIMIT', `A build may contain at most ${SCENE_BUILD_LIMITS.items} items; split it into a few builds.`);
-  const args: Record<string, Json> = { parent, container: { className: input.container, name: input.name }, prototypes, items };
+  const args: Record<string, Json> = { parent, container: { className: input.container, name: input.name }, prototypes, items,
+    ...(templateNames.length ? { templates: templateNames.map(name => input.templates![name] as unknown as Json) } : {}) };
   let instances = 1;
   for (const item of items as { kind: string; template?: number }[]) {
     if (item.kind !== 'place') { instances++; continue; }
@@ -210,6 +285,14 @@ export const environmentShape = {
     height: z.number().min(1).max(ENVIRONMENT_LIMITS.extent).optional().describe('Cylinder height.'), orientation: v3.optional(),
   })).min(1).max(ENVIRONMENT_LIMITS.terrainShapes).optional().describe('Ordered Terrain fills (later shapes overwrite earlier ones).'),
   ...Object.fromEntries(Object.entries(ENVIRONMENT_PROPERTIES).map(([section, spec]) => [section, sectionSchema(spec).optional()])),
+  preset: z.enum(ENVIRONMENT_PRESET_NAMES as [string, ...string[]]).optional().describe('One-word look expanded host-side to exact lighting/atmosphere/bloom/colorCorrection/sunRays values; explicit section values override.'),
+  technology: z.enum(LIGHTING_TECHNOLOGIES).optional().describe('Lighting.Technology (Future for photoreal). If Studio refuses, the error names the Properties-window step.'),
+  terrainDecoration: z.boolean().optional().describe('Workspace.Terrain.Decoration (animated grass on Grass terrain).'),
+  materials: z.array(z.strictObject({
+    name: z.string().regex(/^[A-Za-z0-9_ -]{1,50}$/), baseMaterial: z.enum(MATERIALS), studsPerTile: z.number().min(0.1).max(1000).optional(),
+    override: z.boolean().optional().describe('Make it the MaterialService override for baseMaterial (all parts/terrain of that material).'),
+    ...Object.fromEntries(VARIANT_MAPS.map(map => [map, z.string().max(200).optional()])),
+  })).min(1).max(EFFECT_LIMITS.materials).optional().describe('MaterialVariants created under MaterialService; maps are rbxassetid://<digits> or rbxasset://textures/... only.'),
 } as Record<string, z.ZodTypeAny>;
 
 export function compileEnvironment(input: Record<string, unknown>): Record<string, Json> {
@@ -232,6 +315,9 @@ export function compileEnvironment(input: Record<string, unknown>): Record<strin
     out[section] = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined)
       .map(([k, v]) => [k, spec[k] === 'color' ? (tagged('Color3', v) as { value: number[] }).value : v as Json]));
   }
+  for (const extra of ['preset', 'technology', 'terrainDecoration'] as const) if (input[extra] !== undefined) out[extra] = input[extra] as Json;
+  if (input.materials) out.materials = (input.materials as Record<string, unknown>[]).map(variant =>
+    Object.fromEntries(Object.entries(variant).filter(([, v]) => v !== undefined)) as Json);
   if (!Object.keys(out).length) throw new BridgeError('INPUT', 'Choose terrain shapes or lighting/effect settings.');
   return out;
 }

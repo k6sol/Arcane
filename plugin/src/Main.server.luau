@@ -6,7 +6,7 @@ local Transport = require(script.Transport)
 local Sha256 = require(script.Sha256)
 local Diagnostics = require(script.Diagnostics)
 -- Identity covers the actual loaded hierarchy, independent of XML serialization.
-local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload", "Diagnostics"})
+local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload", "Diagnostics", "AssetPlacement"})
 local function loadedArtifactHash(): string?
 	if typeof(script) ~= "Instance" or not script:IsA("Script") then return nil end
 	local ok, value = pcall(function(): string

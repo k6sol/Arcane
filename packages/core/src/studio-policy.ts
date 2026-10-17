@@ -1,5 +1,6 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS } from '../../protocol/src/studio.js';
+import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt', 'Marble', 'Granite', 'Limestone', 'Sandstone', 'Basalt', 'Pebble', 'LeafyGrass', 'Mud', 'Snow', 'Ice', 'Pavement', 'Plaster', 'DiamondPlate', 'CorrodedMetal', 'Foil'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -91,7 +92,8 @@ export function sceneBuildInstanceCount(args: Record<string, Json>): number {
 /** Strict wire contract for one atomic hierarchy. The MCP tool compiles compact
  * templates/scatter into this form; the plugin re-validates and performs the same placement math. */
 function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Record<string, Json> {
-  keys(a, ['parent', 'container', 'prototypes', 'items']); ref(a.parent, session);
+  keys(a, ['parent', 'container', 'prototypes', 'items', 'templates']); ref(a.parent, session);
+  const templates = validateBuildTemplates(a.templates, session);
   const rootSpec = object(a.container, 'build container'); keys(rootSpec, ['className', 'name']);
   if (!BUILD_GROUP_CLASSES.includes(rootSpec.className as typeof BUILD_GROUP_CLASSES[number])) throw new ArcaneError('CLASS', 'The build root must be a Model or Folder.');
   textField(rootSpec.name, 'build root name', 100);
@@ -122,14 +124,15 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
     const item = object(raw, 'build item');
     const parent = item.parent;
     if (!Number.isInteger(parent) || (parent as number) < 0 || (parent as number) > index) throw new ArcaneError('INPUT', 'Item parent must be 0 (the build root) or an earlier group item index.');
-    if ((parent as number) > 0 && kinds[(parent as number) - 1] !== 'group') throw new ArcaneError('INPUT', 'Only group items can contain other items.');
+    if ((parent as number) > 0 && kinds[(parent as number) - 1] !== 'group' && item.kind !== 'effect') throw new ArcaneError('INPUT', 'Only group items can contain other items.');
     if (item.key !== undefined) {
       if (typeof item.key !== 'string' || !BUILD_KEY.test(item.key) || seenKeys.has(item.key)) throw new ArcaneError('INPUT', 'Item keys must be unique [A-Za-z0-9_-]{1,64}.');
       seenKeys.add(item.key);
       if (seenKeys.size > SCENE_BUILD_LIMITS.keys) throw new ArcaneError('INPUT', `At most ${SCENE_BUILD_LIMITS.keys} keyed items return references.`);
     }
     textField(item.name, 'item name', 100);
-    kinds.push(String(item.kind));
+    kinds.push(item.kind === 'effect' ? 'effect:' + String(item.className) : String(item.kind));
+    if (item.kind === 'effect') return validateBuildEffect(item, kinds, session);
     if (item.kind === 'group') {
       keys(item, ['kind', 'className', 'name', 'parent', 'key']);
       if (!BUILD_GROUP_CLASSES.includes(item.className as typeof BUILD_GROUP_CLASSES[number])) throw new ArcaneError('CLASS', 'Group items must be Model or Folder.');
@@ -140,6 +143,7 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
       if (!BUILD_PART_CLASSES.includes(item.className as typeof BUILD_PART_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported build part class.');
       return { ...item, properties: engineProperties(buildPartProperties(item.properties, item.className as string)) } as Json;
     }
+    if (item.kind === 'clone') return validateBuildClone(item, templates.length);
     if (item.kind !== 'place') throw new ArcaneError('INPUT', 'Item kind must be group, part or place.');
     keys(item, ['kind', 'template', 'name', 'parent', 'at', 'yaw', 'scale', 'tint', 'ground', 'key']);
     if (item.ground !== undefined && typeof item.ground !== 'boolean') throw new ArcaneError('INPUT', 'Placement ground must be a boolean.');
@@ -156,6 +160,7 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
     return item as Json;
   });
   const result: Record<string, Json> = { parent: a.parent as Json, container: { className: rootSpec.className, name: rootSpec.name } as Json, prototypes: normalizedPrototypes, items: normalizedItems };
+  if (templates.length) result.templates = templates;
   if (sceneBuildInstanceCount(result) > SCENE_BUILD_LIMITS.instances) throw new ArcaneError('BODY_LIMIT', `A build may create at most ${SCENE_BUILD_LIMITS.instances} instances; split it into a few builds.`);
   return result;
 }
@@ -167,7 +172,200 @@ function buildPartProperties(value: unknown, className: string): Record<string, 
   return properties;
 }
 
-export const TERRAIN_MATERIALS = ['Air', 'Grass', 'LeafyGrass', 'Ground', 'Mud', 'Rock', 'Slate', 'Sand', 'Sandstone', 'Limestone', 'Basalt', 'Granite', 'Pebble',
+// ---- Effects classes (scene.create / scene.build). The plugin re-validates this exact table (Properties.luau). ----
+export type EffectKind = readonly ['number' | 'integer' | 'vector3' | 'vector2' | 'range' | 'sequence', number, number]
+  | readonly ['enum', string, readonly string[]] | 'boolean' | 'color' | 'colorSequence' | 'content' | 'attachment';
+const NORMAL_IDS = ['Top', 'Bottom', 'Left', 'Right', 'Front', 'Back'] as const;
+const LIGHT = { Brightness: ['number', 0, 40], Range: ['number', 0, 60], Color: 'color', Shadows: 'boolean', Enabled: 'boolean' } as const;
+const FACED_LIGHT = { ...LIGHT, Angle: ['number', 0, 180], Face: ['enum', 'NormalId', NORMAL_IDS] } as const;
+const GLOW = { LightEmission: ['number', 0, 1], LightInfluence: ['number', 0, 1], Brightness: ['number', 0, 20] } as const;
+const TEXTURE_MODE = ['enum', 'TextureMode', ['Stretch', 'Wrap', 'Static']] as const;
+const DECAL = { Texture: 'content', Face: ['enum', 'NormalId', NORMAL_IDS], Color3: 'color', Transparency: ['number', 0, 1] } as const;
+/** Fixed effects allowlist: class -> property -> kind. Ranges are inclusive bounds. */
+export const EFFECT_PROPERTIES = Object.freeze({
+  Attachment: { Position: ['vector3', -2048, 2048], Orientation: ['vector3', -360, 360] },
+  ParticleEmitter: { Enabled: 'boolean', Rate: ['number', 0, 500], Lifetime: ['range', 0, 20], Speed: ['range', 0, 500], SpreadAngle: ['vector2', -360, 360],
+    Acceleration: ['vector3', -500, 500], Drag: ['number', 0, 50], Size: ['sequence', 0, 100], Transparency: ['sequence', 0, 1], Squash: ['sequence', -3, 3],
+    Color: 'colorSequence', Rotation: ['range', -360, 360], RotSpeed: ['range', -1000, 1000],
+    Orientation: ['enum', 'ParticleOrientation', ['FacingCamera', 'FacingCameraWorldUp', 'VelocityParallel', 'VelocityPerpendicular']],
+    EmissionDirection: ['enum', 'NormalId', NORMAL_IDS], Shape: ['enum', 'ParticleEmitterShape', ['Box', 'Sphere', 'Cylinder', 'Disc']],
+    ShapeStyle: ['enum', 'ParticleEmitterShapeStyle', ['Volume', 'Surface']], ShapeInOut: ['enum', 'ParticleEmitterShapeInOut', ['Outward', 'Inward', 'InAndOut']],
+    LockedToPart: 'boolean', ZOffset: ['number', -50, 50], TimeScale: ['number', 0, 1], Texture: 'content', ...GLOW },
+  Beam: { Attachment0: 'attachment', Attachment1: 'attachment', Color: 'colorSequence', Transparency: ['sequence', 0, 1], Width0: ['number', 0, 100], Width1: ['number', 0, 100],
+    CurveSize0: ['number', -100, 100], CurveSize1: ['number', -100, 100], Segments: ['integer', 1, 100], FaceCamera: 'boolean', Enabled: 'boolean',
+    Texture: 'content', TextureMode: TEXTURE_MODE, TextureLength: ['number', 0.01, 100], TextureSpeed: ['number', -100, 100], ZOffset: ['number', -50, 50], ...GLOW },
+  Trail: { Attachment0: 'attachment', Attachment1: 'attachment', Color: 'colorSequence', Transparency: ['sequence', 0, 1], WidthScale: ['sequence', 0, 10],
+    Lifetime: ['number', 0.01, 20], MinLength: ['number', 0, 100], MaxLength: ['number', 0, 1000], FaceCamera: 'boolean', Enabled: 'boolean',
+    Texture: 'content', TextureMode: TEXTURE_MODE, TextureLength: ['number', 0.01, 100], ...GLOW },
+  PointLight: LIGHT, SpotLight: FACED_LIGHT, SurfaceLight: FACED_LIGHT,
+  Highlight: { FillColor: 'color', OutlineColor: 'color', FillTransparency: ['number', 0, 1], OutlineTransparency: ['number', 0, 1],
+    DepthMode: ['enum', 'HighlightDepthMode', ['AlwaysOnTop', 'Occluded']], Enabled: 'boolean' },
+  Fire: { Size: ['number', 2, 30], Heat: ['number', -25, 25], Color: 'color', SecondaryColor: 'color', Enabled: 'boolean', TimeScale: ['number', 0, 1] },
+  Smoke: { Size: ['number', 0.1, 100], Opacity: ['number', 0, 1], RiseVelocity: ['number', -25, 25], Color: 'color', Enabled: 'boolean', TimeScale: ['number', 0, 1] },
+  Sparkles: { SparkleColor: 'color', Enabled: 'boolean', TimeScale: ['number', 0, 1] },
+  Decal: DECAL,
+  Texture: { ...DECAL, StudsPerTileU: ['number', 0.01, 1000], StudsPerTileV: ['number', 0.01, 1000], OffsetStudsU: ['number', -1000, 1000], OffsetStudsV: ['number', -1000, 1000] },
+} as const satisfies Record<string, Record<string, EffectKind>>);
+export type EffectClass = keyof typeof EFFECT_PROPERTIES;
+export const EFFECT_CLASSES = Object.keys(EFFECT_PROPERTIES) as EffectClass[];
+/** Where each effect may live: a BasePart, an Attachment, or a Model/Folder (or Workspace root). */
+export type EffectHost = 'part' | 'attachment' | 'group';
+export const EFFECT_HOSTS: Readonly<Record<EffectClass, readonly EffectHost[]>> = Object.freeze({
+  Attachment: ['part'], ParticleEmitter: ['part', 'attachment'], PointLight: ['part', 'attachment'], SpotLight: ['part', 'attachment'], SurfaceLight: ['part'],
+  Fire: ['part', 'attachment'], Smoke: ['part', 'attachment'], Sparkles: ['part', 'attachment'], Decal: ['part'], Texture: ['part'],
+  Beam: ['part', 'group'], Trail: ['part', 'group'], Highlight: ['part', 'group'],
+});
+export const isEffectClass = (value: unknown): value is EffectClass => typeof value === 'string' && Object.hasOwn(EFFECT_PROPERTIES, value);
+export function hostKind(className: string, isRoot = false): EffectHost | null {
+  if ((BASE_PART_CLASSES as readonly string[]).includes(className)) return 'part';
+  if (className === 'Attachment') return 'attachment';
+  return className === 'Model' || className === 'Folder' || (isRoot && className === 'Workspace') ? 'group' : null;
+}
+/** Content ids are only numeric rbxassetid or built-in rbxasset://textures paths. Never URLs or other schemes. */
+export const CONTENT_ID = /^(?:rbxassetid:\/\/[1-9][0-9]{0,18}|rbxasset:\/\/textures\/(?![\s\S]*\.\.)[A-Za-z0-9_\-/.]{1,160}\.(?:png|jpg|jpeg|dds|tga))$/;
+export function contentId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !CONTENT_ID.test(value)) throw new ArcaneError('PROPERTY', `${label} must be rbxassetid://<digits> or a built-in rbxasset://textures/... path.`);
+  return value;
+}
+function tag(value: unknown, type: string, label: string): unknown[] {
+  const tagged = object(value, label); keys(tagged, ['type', 'value']);
+  if (tagged.type !== type || !Array.isArray(tagged.value)) throw new ArcaneError('PROPERTY', `${label} must be a tagged ${type}.`);
+  return tagged.value;
+}
+function keypoints(value: unknown, width: number, label: string): number[][] {
+  if (!Array.isArray(value) || value.length < 2 || value.length > EFFECT_LIMITS.keypoints) throw new ArcaneError('PROPERTY', `${label} needs 2..${EFFECT_LIMITS.keypoints} keypoints.`);
+  let last = -1;
+  return value.map((raw, index) => {
+    if (!Array.isArray(raw) || raw.length < 2 || raw.length > width || raw.some(n => typeof n !== 'number' || !Number.isFinite(n))) throw new ArcaneError('PROPERTY', `${label} keypoints are numeric arrays.`);
+    const time = raw[0] as number;
+    if (time < 0 || time > 1 || time <= last || (index === 0 && time !== 0) || (index === value.length - 1 && time !== 1)) throw new ArcaneError('PROPERTY', `${label} keypoint times must rise from 0 to 1.`);
+    last = time; return raw as number[];
+  });
+}
+/** Validates one effect property; `attachment` checks a Ref tag in its build/create context. */
+export function validateEffectProperty(className: EffectClass, key: string, v: unknown, attachment: (tagged: Record<string, unknown>) => void): void {
+  const spec = (EFFECT_PROPERTIES[className] as Record<string, EffectKind>)[key];
+  const label = `${className}.${key}`;
+  if (!spec || !Object.hasOwn(EFFECT_PROPERTIES[className], key)) throw new ArcaneError('PROPERTY', `${label} is not writable by the safe bridge.`);
+  if (spec === 'boolean') { if (typeof v !== 'boolean') throw new ArcaneError('PROPERTY', `${label} must be a boolean.`); return; }
+  if (spec === 'content') { contentId(v, label); return; }
+  if (spec === 'color') { const c = tag(v, 'Color3', label); if (c.length !== 3) throw new ArcaneError('PROPERTY', `${label} needs three channels.`); triple(c, 0, 1, label); return; }
+  if (spec === 'attachment') { const t = object(v, label); if (t.type !== 'Ref') throw new ArcaneError('PROPERTY', `${label} must be a Ref to an Attachment.`); attachment(t); return; }
+  if (spec === 'colorSequence') {
+    for (const point of keypoints(tag(v, 'ColorSequence', label), 4, label)) { if (point.length !== 4) throw new ArcaneError('PROPERTY', `${label} keypoints are [time,r,g,b].`); triple(point.slice(1), 0, 1, label); }
+    return;
+  }
+  if (spec[0] === 'enum') { if (typeof v !== 'string' || !spec[2].includes(v)) throw new ArcaneError('PROPERTY', `${label} must be one of ${spec[2].join(', ')}.`); return; }
+  const [kind, low, high] = spec;
+  if (kind === 'number' || kind === 'integer') { finiteIn(v, low, high, label); if (kind === 'integer' && !Number.isInteger(v)) throw new ArcaneError('PROPERTY', `${label} must be an integer.`); return; }
+  if (kind === 'vector3') { const value = tag(v, 'Vector3', label); if (value.length !== 3) throw new ArcaneError('PROPERTY', `${label} needs three numbers.`); triple(value, low, high, label); return; }
+  if (kind === 'vector2') { const value = tag(v, 'Vector2', label); if (value.length !== 2) throw new ArcaneError('PROPERTY', `${label} needs two numbers.`); value.forEach(n => finiteIn(n, low, high, label)); return; }
+  if (kind === 'range') {
+    const value = tag(v, 'NumberRange', label);
+    if (value.length !== 2) throw new ArcaneError('PROPERTY', `${label} needs [min,max].`);
+    const [min, max] = value.map(n => finiteIn(n, low, high, label)) as [number, number];
+    if (min > max) throw new ArcaneError('PROPERTY', `${label} min must not exceed max.`);
+    return;
+  }
+  for (const point of keypoints(tag(v, 'NumberSequence', label), 3, label)) {
+    finiteIn(point[1], low, high, label);
+    if (point.length === 3) finiteIn(point[2], 0, (high - low) / 2, `${label} envelope`);
+  }
+}
+export function validateEffectProperties(value: unknown, className: EffectClass, attachment: (tagged: Record<string, unknown>) => void): Record<string, Json> {
+  const properties = jsonObject(value ?? {});
+  if (Object.keys(properties).length > EFFECT_LIMITS.properties) throw new ArcaneError('INPUT', 'Too many effect properties.');
+  if (Object.hasOwn(properties, 'Name')) throw new ArcaneError('PROPERTY', 'Use the name field.');
+  for (const [key, v] of Object.entries(properties)) validateEffectProperty(className, key, v, attachment);
+  return properties;
+}
+/** scene.build effect item: parent is the root/group, a part item or an Attachment effect item;
+ * Attachment0/1 are {type:'Ref', item:n} naming an EARLIER Attachment effect item of the same build. */
+function validateBuildEffect(item: Record<string, unknown>, kinds: string[], session: StudioSession): Json {
+  requireEffects(session, 'effects classes');
+  keys(item, ['kind', 'className', 'name', 'parent', 'properties', 'key']);
+  if (!isEffectClass(item.className)) throw new ArcaneError('CLASS', 'Unsupported effect class.');
+  const className = item.className, parent = item.parent as number, self = kinds.length;
+  const host: EffectHost | null = parent === 0 ? 'group' : kinds[parent - 1] === 'effect:Attachment' ? 'attachment'
+    : kinds[parent - 1] === 'part' ? 'part' : kinds[parent - 1] === 'group' ? 'group' : null;
+  if (!host || !EFFECT_HOSTS[className].includes(host)) throw new ArcaneError('INPUT', `${className} must be inside a ${EFFECT_HOSTS[className].join(' or ')} item.`);
+  const properties = validateEffectProperties(item.properties, className, t => {
+    keys(t, ['type', 'item']);
+    if (!Number.isInteger(t.item) || (t.item as number) < 1 || (t.item as number) >= self || kinds[(t.item as number) - 1] !== 'effect:Attachment') throw new ArcaneError('INPUT', 'Attachment refs must name an earlier Attachment item of this build.');
+  });
+  return { ...item, properties } as Json;
+}
+function requireEffects(session: StudioSession, feature: string): void {
+  if (!session.capabilities.includes(STUDIO_EFFECTS_CAPABILITY)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates ${feature}. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
+}
+
+/** Named looks expanded host-side to exact environment.apply values; explicit sections override per property. */
+export const ENVIRONMENT_PRESETS = Object.freeze({
+  clear_day: {
+    lighting: { ClockTime: 13, Brightness: 3, ExposureCompensation: 0, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 1, ShadowSoftness: 0.15, Ambient: [0.05,0.05,0.06], OutdoorAmbient: [0.5,0.5,0.52], ColorShift_Top: [0,0,0], GlobalShadows: true },
+    atmosphere: { Density: 0.25, Offset: 0.25, Haze: 1, Glare: 0.2, Color: [0.78,0.84,0.9], Decay: [0.55,0.62,0.7] },
+    bloom: { Intensity: 0.3, Size: 24, Threshold: 1.6 },
+    colorCorrection: { Brightness: 0, Contrast: 0.06, Saturation: 0.05, TintColor: [1,1,1] },
+    sunRays: { Intensity: 0.05, Spread: 0.6 },
+  },
+  golden_hour: {
+    lighting: { ClockTime: 17.6, Brightness: 2.5, ExposureCompensation: 0.2, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 1, ShadowSoftness: 0.25, Ambient: [0.08,0.06,0.05], OutdoorAmbient: [0.55,0.45,0.38], ColorShift_Top: [1,0.78,0.5], GlobalShadows: true },
+    atmosphere: { Density: 0.32, Offset: 0.15, Haze: 1.8, Glare: 0.6, Color: [0.95,0.78,0.6], Decay: [0.9,0.55,0.35] },
+    bloom: { Intensity: 0.6, Size: 30, Threshold: 1.2 },
+    colorCorrection: { Brightness: 0.02, Contrast: 0.1, Saturation: 0.12, TintColor: [1,0.95,0.88] },
+    sunRays: { Intensity: 0.12, Spread: 0.8 },
+  },
+  foggy_forest: {
+    lighting: { ClockTime: 9.5, Brightness: 1.6, ExposureCompensation: 0, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 0.6, ShadowSoftness: 0.6, Ambient: [0.1,0.11,0.12], OutdoorAmbient: [0.42,0.46,0.48], ColorShift_Top: [0,0,0], GlobalShadows: true },
+    atmosphere: { Density: 0.55, Offset: 0.05, Haze: 3, Glare: 0, Color: [0.72,0.78,0.8], Decay: [0.55,0.62,0.6] },
+    bloom: { Intensity: 0.35, Size: 24, Threshold: 1.6 },
+    colorCorrection: { Brightness: 0, Contrast: 0.05, Saturation: -0.15, TintColor: [0.93,0.98,1] },
+    sunRays: { Intensity: 0.04, Spread: 0.5 },
+  },
+  night: {
+    lighting: { ClockTime: 0, Brightness: 1, ExposureCompensation: 0.3, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 1, ShadowSoftness: 0.3, Ambient: [0.04,0.05,0.08], OutdoorAmbient: [0.18,0.22,0.32], ColorShift_Top: [0.6,0.7,1], GlobalShadows: true },
+    atmosphere: { Density: 0.35, Offset: 0.1, Haze: 1, Glare: 0, Color: [0.35,0.42,0.6], Decay: [0.2,0.25,0.4] },
+    bloom: { Intensity: 0.8, Size: 28, Threshold: 0.9 },
+    colorCorrection: { Brightness: 0, Contrast: 0.12, Saturation: -0.25, TintColor: [0.85,0.9,1] },
+    sunRays: { Intensity: 0, Spread: 0 },
+  },
+  horror: {
+    lighting: { ClockTime: 0.5, Brightness: 0.4, ExposureCompensation: -0.3, EnvironmentDiffuseScale: 0.3, EnvironmentSpecularScale: 1, ShadowSoftness: 0.1, Ambient: [0.02,0.02,0.025], OutdoorAmbient: [0.08,0.08,0.1], ColorShift_Top: [0,0,0], GlobalShadows: true },
+    atmosphere: { Density: 0.6, Offset: 0, Haze: 2.5, Glare: 0, Color: [0.25,0.27,0.28], Decay: [0.12,0.12,0.14] },
+    bloom: { Intensity: 0.4, Size: 20, Threshold: 1.4 },
+    colorCorrection: { Brightness: -0.05, Contrast: 0.25, Saturation: -0.45, TintColor: [0.9,1,0.95] },
+    sunRays: { Intensity: 0, Spread: 0 },
+  },
+  sci_fi: {
+    lighting: { ClockTime: 21, Brightness: 1.2, ExposureCompensation: 0, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 1, ShadowSoftness: 0.15, Ambient: [0.05,0.06,0.1], OutdoorAmbient: [0.2,0.24,0.35], ColorShift_Top: [0.6,0.8,1], GlobalShadows: true },
+    atmosphere: { Density: 0.3, Offset: 0.2, Haze: 1.2, Glare: 0.3, Color: [0.45,0.55,0.75], Decay: [0.25,0.2,0.45] },
+    bloom: { Intensity: 1, Size: 32, Threshold: 0.95 },
+    colorCorrection: { Brightness: 0, Contrast: 0.15, Saturation: 0.1, TintColor: [0.9,0.97,1] },
+    sunRays: { Intensity: 0.05, Spread: 0.4 },
+  },
+} as const);
+export type EnvironmentPreset = keyof typeof ENVIRONMENT_PRESETS;
+export const ENVIRONMENT_PRESET_NAMES = Object.keys(ENVIRONMENT_PRESETS) as EnvironmentPreset[];
+export const LIGHTING_TECHNOLOGIES = ['Future', 'ShadowMap', 'Voxel', 'Compatibility'] as const;
+/** MaterialVariant base materials (the same physical part materials, never Air/Water). */
+export const VARIANT_MAPS = ['ColorMap', 'NormalMap', 'RoughnessMap', 'MetalnessMap'] as const;
+function validateMaterials(value: unknown): Json[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > EFFECT_LIMITS.materials) throw new ArcaneError('INPUT', `Use 1..${EFFECT_LIMITS.materials} material variants.`);
+  const names = new Set<string>();
+  return value.map(raw => {
+    const variant = object(raw, 'material variant'); keys(variant, ['name', 'baseMaterial', 'studsPerTile', 'override', ...VARIANT_MAPS]);
+    const name = textField(variant.name, 'material variant name', 50);
+    if (!/^[A-Za-z0-9_ -]{1,50}$/.test(name) || names.has(name)) throw new ArcaneError('INPUT', 'Material variant names are unique [A-Za-z0-9_ -]{1,50}.');
+    names.add(name);
+    if (!MATERIALS.includes(variant.baseMaterial as typeof MATERIALS[number])) throw new ArcaneError('PROPERTY', 'Unsupported material variant base material.');
+    if (variant.studsPerTile !== undefined) finiteIn(variant.studsPerTile, 0.1, 1000, 'studsPerTile');
+    if (variant.override !== undefined && typeof variant.override !== 'boolean') throw new ArcaneError('INPUT', 'override must be a boolean.');
+    for (const map of VARIANT_MAPS) if (variant[map] !== undefined) contentId(variant[map], map);
+    return variant as Json;
+  });
+}
+
+export const TERRAIN_MATERIALS =['Air', 'Grass', 'LeafyGrass', 'Ground', 'Mud', 'Rock', 'Slate', 'Sand', 'Sandstone', 'Limestone', 'Basalt', 'Granite', 'Pebble',
   'Snow', 'Ice', 'Glacier', 'Salt', 'Cobblestone', 'Asphalt', 'Concrete', 'Brick', 'WoodPlanks', 'CrackedLava', 'Water'] as const;
 export const TERRAIN_SHAPES = ['Block', 'Ball', 'Cylinder', 'Wedge'] as const;
 /** Fixed Lighting/effect allowlist: numeric [low, high], 'color' (0..1 RGB) or 'boolean'. */
@@ -180,9 +378,36 @@ export const ENVIRONMENT_PROPERTIES = Object.freeze({
   sunRays: { Intensity: [0, 1], Spread: [0, 1] },
 } as const);
 export type EnvironmentSection = keyof typeof ENVIRONMENT_PROPERTIES;
-function validateEnvironment(a: Record<string, Json>, session: StudioSession): Record<string, Json> {
+const ENVIRONMENT_EXTRAS = ['preset', 'technology', 'terrainDecoration', 'materials'] as const;
+/** Expands a named preset into exact section values (explicit section values win) and checks the
+ * effects-capability extras. The plugin never receives a preset name. */
+function expandEnvironment(input: Record<string, Json>, session: StudioSession): Record<string, Json> {
+  if (!ENVIRONMENT_EXTRAS.some(key => input[key] !== undefined)) return input;
+  requireEffects(session, 'environment presets, Lighting.Technology, Terrain decoration and material variants');
+  const { preset, ...a } = input;
+  if (preset !== undefined) {
+    if (typeof preset !== 'string' || !Object.hasOwn(ENVIRONMENT_PRESETS, preset)) throw new ArcaneError('INPUT', `preset must be one of ${ENVIRONMENT_PRESET_NAMES.join(', ')}.`);
+    for (const [section, values] of Object.entries(ENVIRONMENT_PRESETS[preset as EnvironmentPreset]))
+      a[section] = { ...structuredClone(values) as Record<string, Json>, ...(a[section] === undefined ? {} : object(a[section], section) as Record<string, Json>) };
+  }
+  if (a.technology !== undefined) {
+    if (!LIGHTING_TECHNOLOGIES.includes(a.technology as typeof LIGHTING_TECHNOLOGIES[number])) throw new ArcaneError('PROPERTY', `technology must be ${LIGHTING_TECHNOLOGIES.join(', ')}.`);
+    if (!session.allowedRoots.includes('Lighting')) throw new ArcaneError('SCOPE', 'Lighting.Technology requires the Lighting grant.');
+  }
+  if (a.terrainDecoration !== undefined) {
+    if (typeof a.terrainDecoration !== 'boolean') throw new ArcaneError('INPUT', 'terrainDecoration must be a boolean.');
+    if (!session.allowedRoots.includes('Workspace')) throw new ArcaneError('SCOPE', 'Terrain decoration requires the Workspace grant.');
+  }
+  if (a.materials !== undefined) {
+    if (!session.allowedRoots.includes('Workspace')) throw new ArcaneError('SCOPE', 'Material variants require the Workspace grant.');
+    a.materials = validateMaterials(a.materials);
+  }
+  return a;
+}
+function validateEnvironment(input: Record<string, Json>, session: StudioSession): Record<string, Json> {
   const sections = Object.keys(ENVIRONMENT_PROPERTIES) as EnvironmentSection[];
-  keys(a, ['terrain', ...sections]);
+  keys(input, ['terrain', ...sections, ...ENVIRONMENT_EXTRAS]);
+  const a = expandEnvironment(input, session);
   if (!Object.keys(a).length) throw new ArcaneError('INPUT', 'Choose terrain shapes or lighting/effect settings.');
   if (a.terrain !== undefined) {
     if (!session.allowedRoots.includes('Workspace')) throw new ArcaneError('SCOPE', 'Terrain requires the Workspace grant.');
@@ -234,6 +459,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   const a = jsonObject(value);
   if (isWrite(method) && !session.allowWrites) throw new ArcaneError('READ_ONLY', 'This Studio pairing is read-only. Create an explicit writable pairing to edit.');
   if (!session.capabilities.includes(method)) {
+    if (isAssetMethod(method)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates native asset placement. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
     if (method === 'scene.build' || method === 'environment.apply') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates batch building and environment tools. Update the Studio plugin from Arcane, restart Studio and connect again; until then use scene_create. No command was queued.`);
     throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
   }
@@ -293,7 +519,11 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       break;
     }
     case 'selection.read': keys(a, []); break;
-    case 'scene.inspect': case 'script.read': keys(a, ['ref']); ref(a.ref, session); break;
+    case 'scene.inspect':
+      keys(a, ['ref', 'bounds']); ref(a.ref, session);
+      if (a.bounds !== undefined) { if (a.bounds !== true) throw new ArcaneError('INPUT', 'bounds must be true when present.'); requireEffects(session, 'framed viewport bounds'); }
+      break;
+    case 'script.read': keys(a, ['ref']); ref(a.ref, session); break;
     case 'script.update': keys(a, ['ref', 'expectedSource', 'source']); ref(a.ref, session); source(a.expectedSource); source(a.source); break;
     case 'script.set_enabled': {
       keys(a, ['ref', 'expectedSource', 'expectedEnabled', 'enabled']);
@@ -305,11 +535,22 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       break;
     }
     case 'scene.create': {
-      keys(a, ['parent', 'className', 'name', 'properties']); ref(a.parent, session); textField(a.name, 'instance name', 100);
+      keys(a, ['parent', 'className', 'name', 'properties']); const parent = ref(a.parent, session); textField(a.name, 'instance name', 100);
+      if (isEffectClass(a.className)) {
+        requireEffects(session, 'effects classes');
+        const host = hostKind(parent.className, parent.pathSegments.length === 0);
+        if (!host || !EFFECT_HOSTS[a.className].includes(host)) throw new ArcaneError('CLASS', `${a.className} must be created inside a ${EFFECT_HOSTS[a.className].join(' or ')}.`);
+        a.properties = validateEffectProperties(a.properties, a.className, t => {
+          keys(t, ['type', 'ref']); const r = ref(t.ref, session);
+          if (r.className !== 'Attachment') throw new ArcaneError('PROPERTY', 'Attachment refs must name an Attachment in this session.');
+        });
+        break;
+      }
       if (!SAFE_CREATE_CLASSES.includes(a.className as typeof SAFE_CREATE_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported creation class.');
       a.properties = engineProperties(validateProperties(a.properties ?? {}, a.className as string, false)); break;
     }
     case 'scene.build': return validateSceneBuild(a, session);
+    case 'scene.asset_watch': case 'scene.place_asset': case 'scene.apply_material': return validateAssetCommand(method, a, session);
     case 'environment.apply': return validateEnvironment(a, session);
     case 'scene.update': {
       keys(a, ['ref', 'expected', 'properties']); const r = ref(a.ref, session);

@@ -732,6 +732,10 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
     case 'scene_update':return 'Updating '+(ref??'an instance')+propertyList(args);
     case 'scene_build':{const parent=studioRefPath(args?.parent);return 'Building a scene'+(parent?' in '+parent:'');}
     case 'environment_apply':return 'Shaping terrain and lighting';
+    case 'studio_viewport_capture':return 'Looking at the scene';
+    case 'studio_asset_search':{const query=activityText(args?.query,60);return 'Searching the Creator Store'+(query?' for '+quoted(query):'');}
+    case 'studio_asset_insert':return 'Placing a Creator Store asset';
+    case 'studio_asset_generate':return 'Generating '+(activityText(args?.kind,20)??'an asset');
     case 'receipt_status':return 'Checking a change receipt';
     case 'receipt_restore':return 'Restoring an earlier change';
     case 'playtest_request':return 'Starting a playtest';
@@ -772,6 +776,10 @@ function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupIn
     case 'scene_update':return make(['Updating','Updated'],['instance','instances'],parentPath(ref));
     case 'scene_build':return make(['Building','Built'],['scene','scenes'],studioRefPath(args?.parent));
     case 'environment_apply':return make(['Shaping','Shaped'],['environment','environments'],null);
+    case 'studio_viewport_capture':return make(['Capturing','Captured'],['view','views'],null);
+    case 'studio_asset_search':return make(['Searching','Searched'],['asset search','asset searches'],null);
+    case 'studio_asset_insert':return make(['Placing','Placed'],['asset','assets'],null);
+    case 'studio_asset_generate':return make(['Generating','Generated'],['asset','assets'],null);
     case 'scene_inspect':return make(['Inspecting','Inspected'],['instance','instances'],parentPath(ref));
     case 'scene_children':return make(['Reading','Read'],['container','containers'],null);
     case 'scene_search':return make(['Running','Ran'],['search','searches'],activityText(args?.root,64));

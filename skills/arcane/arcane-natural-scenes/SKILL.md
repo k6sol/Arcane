@@ -14,11 +14,12 @@ license: MIT
    - Patches: Ground or Mud near the clearing.
    - Path: overlapping Cylinders/Blocks in Ground, Pebble or Cobblestone.
    - If terrain is unavailable, overlap 5+ irregular Grass/Ground slabs at varied heights and yaw.
-3. `scene_build` once per layer (trees, undergrowth, rocks). Use `prototypes` + `scatter` with `ground:true`.
-4. `environment_apply` lighting, atmosphere and effects.
-5. Check the receipt: counts and scatter placed vs requested. Fix only real gaps.
+3. Real assets first. `studio_asset_search` each kind ("realistic pine tree", "mossy boulder", "fern"), prefer verified free models in one style, then `studio_asset_insert` one per kind into a hidden template Folder (ServerStorage if granted) with maxSize at real scale. Scripts are stripped. Check one with `studio_viewport_capture`.
+4. `scene_build` once per layer (trees, undergrowth, rocks): `templates` (the inserted refs) + `scatter` with `ground:true` clones them. Build the part archetypes below only when no suitable asset exists; use `studio_asset_generate` kind mesh for a single hero object.
+5. `environment_apply` lighting, atmosphere and effects.
+6. Check the receipt: counts and scatter placed vs requested. Fix only real gaps.
 
-## Tree archetypes: use 3-4, each a multi-part prototype
+## Tree archetypes (fallback when no asset fits): use 3-4, each a multi-part prototype
 - Trunks: Wood, CanCollide true. Foliage: CanCollide false; small leaves CastShadow false. Everything Anchored.
 - Disc or column: Part Shape Cylinder with Size [length, d, d] and Orientation [0,0,90] (vertical axis).
 - **Pine (12-16 parts)**
@@ -61,7 +62,7 @@ Set scatter variation:
 - Group each layer in its own Model: Trees, Undergrowth, Rocks.
 
 ## Lighting (one environment_apply)
-Other moods (golden hour, fog, night, horror) and photoreal materials: `arcane-photoreal`. Fireflies, falling leaves, waterfalls: `arcane-vfx`.
+Shortcut: `preset: "clear_day"` or `"foggy_forest"`, plus `terrainDecoration: true` on Grass ground, then override fields. Other moods and photoreal materials: `arcane-photoreal`. Fireflies, falling leaves, waterfalls (created directly): `arcane-vfx`.
 - lighting:
   - ClockTime 14.5-16, Brightness 2-3.
   - Ambient [0.27,0.29,0.3], OutdoorAmbient [0.5,0.52,0.5].

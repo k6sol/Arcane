@@ -5,13 +5,15 @@ import type { Json } from '../../../packages/protocol/src/studio.js';
 import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
 import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, sceneBuildDescription, environmentDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
-import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput } from './scene-build.js';
-import { validateProperties } from '../../../packages/core/src/studio-policy.js';
+import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput, compileEffectProps, effectCatalog, effectProps } from './scene-build.js';
+import { validateProperties, EFFECT_CLASSES, isEffectClass, ENVIRONMENT_PRESET_NAMES } from '../../../packages/core/src/studio-policy.js';
+import { instanceRef } from '../../../packages/protocol/src/studio.js';
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
 import { nativeAdoptGlbInput, assetInput, assetJobId, assetHistoryInput, nativeAssetHistoryInput, nativeAssetJobId } from './asset-schemas.js';
 import { scenarioPlanSchema } from '../../../packages/studio-test-controller/src/scenario.js';
 import { registerViewportTool } from './viewport-tool.js';
+import { registerNativeAssetTools } from './native-asset-tools.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -78,9 +80,17 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   register('script_set_enabled', 'Write: activate or disable a Script/LocalScript using its exact current source and enabled baseline from script_read. New scripts start disabled. Enabling (including restoring a previously disabled script) requires the trusted host pinned Luau syntax compiler and matching persisted/editor source; empty, invalid or unsaved source is refused. Syntax verification is not a playtest. Requires exact paired write scope and edit mode; returns a recoverable receipt. Never auto-retry on timeout.',
     z.strictObject({ ...target, ref, expectedSource: source, expectedEnabled: z.boolean(), enabled: z.boolean() }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.set_enabled', args, { timeoutMs, signal }));
-  register('scene_create', sceneCreateDescription(),
-    z.strictObject({ ...target, parent: ref, className: createClass, name: id.max(100), properties: properties.omit({ Name: true }).optional() }), { ...WRITE, destructiveHint: false },
-    ({ sessionId, timeoutMs, ...args }, signal) => {
+  register('scene_create', sceneCreateDescription() + ` Effects (plugin with scene.effects; parent a part, Attachment or Model per class): set className to an effect class and pass fx (no properties): ${effectCatalog()}. Beam/Trail Attachment0/1 take Attachment refs from this session.`,
+    z.strictObject({ ...target, parent: ref, className: z.enum([...createClass.options, ...EFFECT_CLASSES]), name: id.max(100), properties: properties.omit({ Name: true }).optional(), fx: effectProps.optional() }), { ...WRITE, destructiveHint: false },
+    ({ sessionId, timeoutMs, fx, ...args }, signal) => {
+      if (isEffectClass(args.className)) {
+        if (args.properties) throw new BridgeError('INPUT', 'Effect classes take fx, not properties.');
+        const compiled = compileEffectProps(args.className, fx ?? {}, (value, label) => {
+          try { return { type: 'Ref', ref: instanceRef(value) as unknown as Json }; } catch { throw new BridgeError('INPUT', `${label} must be an Attachment ref from this session.`); }
+        });
+        return client.execute(sessionId, 'scene.create', { ...args, properties: compiled } as Record<string, Json>, { timeoutMs, signal });
+      }
+      if (fx) throw new BridgeError('INPUT', 'fx applies only to effect classes.');
       validateProperties(args.properties ?? {}, args.className, false);
       return client.execute(sessionId, 'scene.create', args as Record<string, Json>, { timeoutMs, signal });
     });
@@ -91,7 +101,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       if (!keys.length || Object.keys(args.expected).length !== keys.length || keys.some(key => !Object.hasOwn(args.expected, key))) throw new BridgeError('INPUT', 'expected must cover exactly every changed property, and properties must be nonempty.');
       return client.execute(sessionId, 'scene.update', args as Record<string, Json>, { timeoutMs, signal });
     });
-  register('scene_build', sceneBuildDescription(),
+  register('scene_build', sceneBuildDescription() + ' Effects in the same atomic build: items with an effect className, name, in (group, part or Attachment key) and fx; Beam/Trail Attachment0/1 name earlier Attachment item keys. Classes and fx keys are listed on scene_create. Every effect value is verified before the root is parented.',
     z.strictObject({ ...target, parent: ref, ...sceneBuildShape }), { ...WRITE, destructiveHint: false },
     async ({ sessionId, timeoutMs, parent, ...input }, signal) => {
       const compiled = compileSceneBuild(input as SceneBuildInput, parent as Json);
@@ -100,7 +110,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       const command = outcome.command ? { ...outcome.command, args: { compiled: true, items: (compiled.args.items as Json[]).length, instances: compiled.instances } } : null;
       return { ...outcome, command, plannedInstances: compiled.instances, ...(compiled.scatter.length ? { scatter: compiled.scatter } : {}) };
     });
-  register('environment_apply', environmentDescription(),
+  register('environment_apply', environmentDescription() + ` Also (plugin with scene.effects): preset ${ENVIRONMENT_PRESET_NAMES.join('/')} expands host-side to exact values (explicit sections override); technology Future/ShadowMap/Voxel/Compatibility; terrainDecoration; materials (MaterialVariants with built-in or numeric asset maps, optional base-material override). A setting Studio refuses rolls everything back and names the Properties-window step.`,
     z.strictObject({ ...target, ...environmentShape }), WRITE,
     ({ sessionId, timeoutMs, ...input }, signal) => client.execute(sessionId, 'environment.apply', compileEnvironment(input), { timeoutMs, signal }));
   register('receipt_status', 'Read: look up an existing immutable command/receipt by commandId, including queued, dispatched, failed or needs_reconciliation states. This does not enqueue or replay work; use after an ambiguous timeout.',
@@ -159,6 +169,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     z.strictObject({ jobId: scopedAssetJobId, timeoutMs }), READ,
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
   registerViewportTool(server, client);
+  registerNativeAssetTools(server, client);
   if (client.assetAudience === 'native-session') {
     register('assets_adopt_glb','Write: adopt an existing owned project-relative GLB into a managed immutable chat asset for interactive preview. Requires the exact native project/conversation capture and explicit asset admission. Validates actual bounded GLB bytes, embedded image budgets and direct ordinary-file containment before copying; no links, URLs, Python/scripts or caller authority fields. Uses explicit adopted provenance, never bundled-Blender evidence. Engine import/upload remains unavailable pending safe conversion. The returned job acknowledgement is not engine acceptance. Inspect assets_jobs after ambiguity; never auto-retry.'+assetScope,
       nativeAdoptGlbInput, { ...WRITE,destructiveHint:false },

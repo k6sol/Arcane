@@ -39,7 +39,7 @@ const TOOL_ACCESS = {
   playtest_request:false,playtest_status:true,playtest_cancel:false,
   skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
   work_progress: false, work_submit: false, assets_probe: true, assets_jobs: true, assets_start: false, assets_cancel: false, assets_manifest: true,
-  studio_viewport_capture: true,
+  studio_viewport_capture: true, studio_asset_search: true, studio_asset_insert: false, studio_asset_generate: false,
 };
 const EDITOR_SOURCE = '--!strict\nreturn "café 🧩"\n';
 type Behavior = 'normal' | 'timeout' | 'lost-ack' | 'redirect' | 'invalid' | 'oversize' | 'wrong-session' | 'failed' | 'reconciliation' | 'forbidden' | 'poll-failure' | 'hang-enqueue' | 'server-error';

@@ -225,6 +225,17 @@ export class DaemonClient {
     } finally { deadline.dispose(); }
   }
 
+  /** Native Studio asset tools (search/insert/generate/job). A 4xx is a definite daemon refusal with a
+   * fixed message; any other failure after sending leaves the native effect unknown. Never retried here. */
+  async nativeAsset<T>(kind: 'search' | 'insert' | 'generate' | 'job', body: object, schema: z.ZodType<T>, options: WaitOptions = {}): Promise<T> {
+    const deadline = this.deadline(options);
+    try {
+      const parsed = schema.safeParse(await this.http('/v1/studio-native/asset-' + kind, deadline.signal, body));
+      if (!parsed.success) throw new BridgeError('PROTOCOL', 'Daemon returned an invalid native asset record.');
+      return parsed.data;
+    } finally { deadline.dispose(); }
+  }
+
   async workRuns(options: WaitOptions = {}): Promise<{ runs: WorkRun[] }> {
     return this.readRecord('/v1/work/runs', z.object({ runs: z.array(workRun).max(100) }), options);
   }

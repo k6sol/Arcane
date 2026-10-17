@@ -63,6 +63,15 @@ test('managed task instructions keep builds fast, token-lean, natural and DataSt
  assert.ok(ARCANE_TASK_INSTRUCTIONS.length<5200,'instructions stay concise');
 });
 
+test('native Studio asset tools are required build tools with asset-first instructions',()=>{
+ for(const name of ['studio_asset_search','studio_asset_insert','studio_asset_generate']){
+  assert.ok(ARCANE_TOOL_NAMES.includes(name as never),name);assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes(name as never),name);
+  assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES.filter(item=>item!==name)),[name]);
+ }
+ assert.equal(new Set(ARCANE_TOOL_NAMES).size,ARCANE_TOOL_NAMES.length,'no name collisions with the assets_* pipeline');
+ assert.match(ARCANE_TASK_INSTRUCTIONS,/studio_asset_search first[^.]*studio_asset_insert[^.]*scene_build templates[^.]*studio_asset_generate only when nothing suitable exists/);
+});
+
 test('the read-only viewport tool is a required build tool and the instructions bound visual checks',()=>{
  assert.ok(ARCANE_TOOL_NAMES.includes('studio_viewport_capture'));
  assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes('studio_viewport_capture'));

@@ -4,6 +4,7 @@ local LegacyProperties = require(script.Parent.Properties)
 local P = V.geometryProperties(LegacyProperties)
 local Registry = require(script.Parent.Registry)
 local AssetTransfer = require(script.Parent.AssetTransfer)
+local AssetPlacement = require(script.Parent.AssetPlacement)
 local Operations = {}
 Operations.__index = Operations
 type Operations = any
@@ -533,8 +534,45 @@ function Operations:setEnabled(command: any, args: any, guard: () -> ()): any
 	end)
 end
 
+-- Effects classes: decode everything (including Attachment refs resolved by the Registry), allocate
+-- detached, assign and verify every value, then parent once inside one undo recording.
+function Operations:createEffect(command: any, args: any, guard: () -> ()): any
+	local parent = self.registry:resolve(args.parent)
+	local className = args.className
+	local name = V.string(args.name, "name", 100)
+	local host = LegacyProperties.hostKind(parent)
+	if not host or not table.find(LegacyProperties.EFFECT_HOSTS[className], host) then V.fail("CLASS", className .. " must be created inside a " .. table.concat(LegacyProperties.EFFECT_HOSTS[className], " or ") .. ".") end
+	if self.registry.count >= V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
+	local decoded = LegacyProperties.decodeEffects(className, if args.properties == nil then {} else args.properties, function(tag: any, label: string): any
+		V.fields(tag, {"type", "ref"}, label)
+		local target = self.registry:resolve(tag.ref)
+		if not target:IsA("Attachment") then V.fail("PROPERTY", label .. " must name an Attachment.") end
+		return target
+	end)
+	return self:record(command, guard, function(progress: any): any
+		guard()
+		self.registry:resolve(args.parent)
+		local instance = Instance.new(className)
+		local prepared, prepareError = pcall(function()
+			instance.Name = name
+			LegacyProperties.applyEffect(instance, className, decoded)
+			guard()
+		end)
+		if not prepared then instance:Destroy(); error(prepareError, 0) end
+		progress.touched = true
+		instance.Parent = parent
+		local ref = self.registry:ref(instance)
+		progress.ref = ref
+		local snapshot = P.snapshot(instance)
+		self.registry.owned[instance] = {parent = parent, properties = V.immutable(snapshot),
+			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance))}
+		return {ref = ref, mutation = {kind = "scene.create", ref = ref, before = V.NULL, after = {properties = snapshot}}}
+	end)
+end
+
 function Operations:create(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"parent", "className", "name", "properties"}, "create arguments")
+	if type(args.className) == "string" and LegacyProperties.EFFECT_SPECS[args.className] then return self:createEffect(command, args, guard) end
 	local parent = self.registry:resolve(args.parent)
 	if type(args.className) ~= "string" or not table.find(P.CLASSES, args.className) then V.fail("CLASS", "Class is not creatable.") end
 	local name = V.string(args.name, "name", 100)
@@ -595,6 +633,22 @@ function Operations:buildProperties(className: string, properties: any): {[strin
 	return decoded
 end
 
+-- One scene.build effect item. Attachment refs become plan markers that must name an EARLIER
+-- Attachment item of this build; they bind to the detached Instances before the root is parented.
+function Operations:planEffect(item: any, index: number, name: string, into: number, host: string, effectHosts: {[number]: any}): any
+	V.fields(item, {"kind", "className", "name", "parent", "properties", "key"}, "effect item")
+	local className = item.className
+	if type(className) ~= "string" or not LegacyProperties.EFFECT_SPECS[className] then V.fail("CLASS", "Unsupported effect class.") end
+	if not table.find(LegacyProperties.EFFECT_HOSTS[className], host) then V.fail("INPUT", className .. " must be inside a " .. table.concat(LegacyProperties.EFFECT_HOSTS[className], " or ") .. " item.") end
+	local decoded = LegacyProperties.decodeEffects(className, if item.properties == nil then {} else item.properties, function(tag: any, label: string): any
+		V.fields(tag, {"type", "item"}, label)
+		local target = effectHosts[V.integer(tag.item, 1, math.max(1, index - 1), label)]
+		if not target or target.kind ~= "attachment" then V.fail("INPUT", "Attachment refs must name an earlier Attachment item of this build.") end
+		return table.freeze({planIndex = target.plan})
+	end)
+	return {className = className, name = name, parent = into, effect = decoded}
+end
+
 local function buildTriple(value: any, low: number, high: number, label: string): {number}
 	local list = V.list(value, 3, label)
 	if #list ~= 3 then V.fail("INPUT", label .. " needs three numbers.") end
@@ -605,9 +659,11 @@ end
 -- One atomic hierarchy: decode and plan everything, allocate detached, verify every
 -- property, then parent the root once inside a single undo recording.
 function Operations:build(command: any, args: any, guard: () -> ()): any
-	V.fields(args, {"parent", "container", "prototypes", "items"}, "build arguments")
+	V.fields(args, {"parent", "container", "prototypes", "items", "templates"}, "build arguments")
 	local L = V.BUILD_LIMITS
 	local parent = self.registry:resolve(args.parent)
+	local templates = if args.templates == nil then {} else AssetPlacement.buildTemplates(self, args.templates)
+	local cloneExtra = 0 -- template descendants copied by clone items
 	local rootSpec = V.fields(args.container, {"className", "name"}, "build container")
 	if rootSpec.className ~= "Model" and rootSpec.className ~= "Folder" then V.fail("CLASS", "The build root must be a Model or Folder.") end
 	local plan: {any} = {{className = rootSpec.className, name = V.string(rootSpec.name, "name", 100), parent = 0}}
@@ -634,12 +690,14 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 	local items = V.list(args.items, L.items, "build items")
 	if #items == 0 then V.fail("INPUT", "A build needs at least one item.") end
 	local containers: {[number]: number} = {}
+	local effectHosts: {[number]: any} = {} -- part items and Attachment effect items: {plan, kind}
 	local keyed: {any} = {}
 	local keys: {[string]: boolean} = {}
 	for index, raw in ipairs(items) do
 		local item = V.object(raw, "build item")
 		local parentIndex = V.integer(item.parent, 0, index - 1, "item parent")
 		local into = if parentIndex == 0 then 1 else containers[parentIndex]
+		if not into and item.kind == "effect" and effectHosts[parentIndex] then into = effectHosts[parentIndex].plan end
 		if not into then V.fail("INPUT", "Only group items can contain other items.") end
 		local name = V.string(item.name, "item name", 100)
 		local created: number
@@ -652,6 +710,10 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			V.fields(item, {"kind", "className", "name", "parent", "properties", "key"}, "part item")
 			if type(item.className) ~= "string" or not table.find(V.BUILD_PART_CLASSES, item.className) then V.fail("CLASS", "Unsupported build part class.") end
 			created = add({className = item.className, name = name, parent = into, properties = self:buildProperties(item.className, item.properties)})
+			effectHosts[index] = {plan = created, kind = "part"}
+		elseif item.kind == "effect" then
+			created = add(self:planEffect(item, index, name, into, if parentIndex == 0 or containers[parentIndex] then "group" else effectHosts[parentIndex].kind, effectHosts))
+			if item.className == "Attachment" then effectHosts[index] = {plan = created, kind = "attachment"} end
 		elseif item.kind == "place" then
 			V.fields(item, {"kind", "template", "name", "parent", "at", "yaw", "scale", "tint", "ground", "key"}, "placement")
 			local proto = prototypes[V.integer(item.template, 1, math.max(1, #prototypes), "prototype index")]
@@ -696,8 +758,12 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 				elseif proto.weld then add({className = "WeldConstraint", name = "Weld", parent = partIndex, part0 = first, part1 = partIndex}) end
 			end
 			if not single then plan[created].primary = first end
+		elseif item.kind == "clone" then
+			created = add(AssetPlacement.planClone(self, item, name, into, templates))
+			cloneExtra += plan[created].extra
+			if #plan + cloneExtra > L.instances then V.fail("BODY_LIMIT", "A build may create at most " .. L.instances .. " instances, counting cloned template contents.") end
 		else
-			V.fail("INPUT", "Item kind must be group, part or place.")
+			V.fail("INPUT", "Item kind must be group, part, effect, place or clone.")
 		end
 		if item.key ~= nil then
 			local key = V.string(item.key, "item key", 64)
@@ -714,7 +780,7 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 		local instances: {any} = table.create(#plan)
 		local prepared, prepareError = pcall(function()
 			for index, entry in ipairs(plan) do
-				local instance = Instance.new(entry.className)
+				local instance = if entry.clone then AssetPlacement.instantiate(entry) else Instance.new(entry.className)
 				instances[index] = instance
 				instance.Name = entry.name
 				local properties = entry.properties
@@ -729,6 +795,9 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 							V.fail("VERIFY", "Built property differs from the requested value: " .. entry.name .. "." .. key)
 						end
 					end
+				end
+				if entry.effect then
+					LegacyProperties.applyEffect(instance, entry.className, entry.effect, function(marker: any): any return instances[marker.planIndex] end)
 				end
 				if entry.part0 then
 					instance.Part0, instance.Part1 = instances[entry.part0], instances[entry.part1]
@@ -761,8 +830,8 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 		self.registry.owned[root] = {parent = parent, build = {instances = instances, parents = parents, snapshots = snapshots, children = children}}
 		local refs = {}
 		for _, entry in ipairs(keyed) do refs[entry.key] = self.registry:ref(instances[entry.index]) end
-		return {ref = ref, refs = refs, created = {count = #instances, classes = classes},
-			mutation = {kind = "scene.build", ref = ref, before = V.NULL, after = {count = #instances, classes = classes}}}
+		return {ref = ref, refs = refs, created = {count = #instances + cloneExtra, classes = classes},
+			mutation = {kind = "scene.build", ref = ref, before = V.NULL, after = {count = #instances + cloneExtra, classes = classes}}}
 	end)
 end
 
@@ -797,8 +866,108 @@ end
 
 -- Bounded terrain fills plus fixed Lighting/effect settings in one undo recording.
 -- Lighting changes are verified and reverted on failure before any terrain write.
+local TECHNOLOGIES = table.freeze({"Future", "ShadowMap", "Voxel", "Compatibility"})
+local VARIANT_MAPS = table.freeze({"ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap"})
+local function setVerified(target: any, property: string, value: any): boolean
+	local ok, matches = pcall(function(): boolean
+		target[property] = value
+		local actual = target[property]
+		if type(value) == "number" then return type(actual) == "number" and math.abs(actual - value) <= 0.001 end
+		return actual == value
+	end)
+	return ok and matches
+end
+
+-- Effects-capability environment extras: Lighting.Technology, Terrain.Decoration and MaterialVariants.
+-- Everything is decoded before the recording; Studio settings it refuses fail with a precise manual step.
+function Operations:environmentExtras(args: any): any
+	local extras: any = {any = false}
+	if args.technology ~= nil then
+		extras.lighting = self.registry:root("Lighting")
+		extras.technology = V.enum(args.technology, TECHNOLOGIES, Enum.Technology, "Lighting.Technology")
+		extras.any, extras.subject = true, extras.lighting
+	end
+	if args.terrainDecoration ~= nil then
+		local workspace = self.registry:root("Workspace")
+		for _, child in ipairs(workspace:GetChildren()) do if child.ClassName == "Terrain" then extras.terrain = child end end
+		if not extras.terrain then V.fail("TERRAIN", "Workspace has no Terrain object.") end
+		extras.decoration = V.boolean(args.terrainDecoration, "terrainDecoration")
+		extras.any, extras.subject = true, extras.subject or extras.terrain
+	end
+	if args.materials ~= nil then
+		extras.subject = extras.subject or self.registry:root("Workspace")
+		local service = self.gameModel:GetService("MaterialService")
+		local names: {[string]: boolean} = {}
+		extras.materialService, extras.materials, extras.any = service, {}, true
+		for _, raw in ipairs(V.list(args.materials, 8, "material variants")) do
+			local spec = V.fields(raw, {"name", "baseMaterial", "studsPerTile", "override", "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap"}, "material variant")
+			local name = V.string(spec.name, "material variant name", 50)
+			if not string.match(name, "^[%w_ %-]+$") or names[name] then V.fail("INPUT", "Material variant names are unique [A-Za-z0-9_ -].") end
+			names[name] = true
+			for _, child in ipairs(service:GetChildren()) do
+				if child.Name == name then V.fail("CONFLICT", "MaterialService already has " .. name .. "; choose another variant name.") end
+			end
+			local values: {[string]: any} = {BaseMaterial = V.enum(spec.baseMaterial, LegacyProperties.MATERIALS, Enum.Material, "baseMaterial")}
+			if spec.studsPerTile ~= nil then values.StudsPerTile = V.number(spec.studsPerTile, 0.1, 1000, "studsPerTile") end
+			for _, map in ipairs(VARIANT_MAPS) do
+				if spec[map] ~= nil then values[map] = LegacyProperties.contentId(spec[map], "MaterialVariant." .. map) end
+			end
+			table.insert(extras.materials, {name = name, values = values, override = spec.override ~= nil and V.boolean(spec.override, "override")})
+		end
+		if #extras.materials == 0 then V.fail("INPUT", "Choose at least one material variant.") end
+	end
+	return extras
+end
+
+-- Runs inside environment()'s rollback pcall: every successful write registers its revert first.
+function Operations:applyEnvironmentExtras(extras: any, reverts: {any}, before: any, after: any): ()
+	local function setting(target: any, property: string, value: any, manual: string): ()
+		local readable, prior = pcall(function(): any return target[property] end)
+		if not readable then V.fail("STUDIO_SETTING", "Studio did not let the plugin read " .. manual) end
+		-- A refused write changed nothing; only a performed write registers its revert.
+		if not pcall(function() target[property] = value end) then V.fail("STUDIO_SETTING", "Studio did not let the plugin set " .. manual) end
+		table.insert(reverts, {target = target, name = property, value = prior})
+		local readback, actual = pcall(function(): any return target[property] end)
+		if not readback or actual ~= value then V.fail("STUDIO_SETTING", "Studio did not keep the plugin's value for " .. manual) end
+		before[property == "Technology" and "technology" or "terrainDecoration"] = if typeof(prior) == "EnumItem" then prior.Name else prior
+	end
+	if extras.technology then
+		setting(extras.lighting, "Technology", extras.technology, "Lighting.Technology. In Studio select Lighting in the Explorer and set Technology to "
+			.. extras.technology.Name .. " in the Properties window. No environment change was kept.")
+		after.technology = extras.technology.Name
+	end
+	if extras.decoration ~= nil then
+		setting(extras.terrain, "Decoration", extras.decoration, "Terrain.Decoration. In Studio select Workspace > Terrain and set Decoration in the Properties window. No environment change was kept.")
+		after.terrainDecoration = extras.decoration
+	end
+	if extras.materials then
+		local service, names = extras.materialService, V.array({})
+		for _, spec in ipairs(extras.materials) do
+			local variant = Instance.new("MaterialVariant")
+			table.insert(reverts, {fn = function() variant:Destroy() end})
+			variant.Name = spec.name
+			for _, property in ipairs({"BaseMaterial", "StudsPerTile", "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap"}) do
+				local value = spec.values[property]
+				if value ~= nil and not setVerified(variant, property, value) then
+					V.fail("STUDIO_SETTING", "Studio did not let the plugin set MaterialVariant." .. property .. ". Create the variant under MaterialService in Studio instead. No environment change was kept.")
+				end
+			end
+			variant.Parent = service
+			if spec.override then
+				local base = spec.values.BaseMaterial
+				local prior = service:GetBaseMaterialOverride(base)
+				table.insert(reverts, {fn = function() service:SetBaseMaterialOverride(base, prior) end})
+				service:SetBaseMaterialOverride(base, spec.name)
+				if service:GetBaseMaterialOverride(base) ~= spec.name then V.fail("VERIFY", "MaterialService did not take the " .. spec.name .. " override.") end
+			end
+			table.insert(names, spec.name)
+		end
+		before.materials, after.materials = "created", names
+	end
+end
+
 function Operations:environment(command: any, args: any, guard: () -> ()): any
-	local allowed = {"terrain"}
+	local allowed = {"terrain", "technology", "terrainDecoration", "materials"}
 	for _, section in ipairs(ENVIRONMENT_SECTIONS) do table.insert(allowed, section.key) end
 	V.fields(args, allowed, "environment arguments")
 	local fills: {any} = {}
@@ -859,8 +1028,9 @@ function Operations:environment(command: any, args: any, guard: () -> ()): any
 			table.insert(changes, {key = section.key, className = section.className, target = target, values = decoded})
 		end
 	end
-	if #fills == 0 and #changes == 0 then V.fail("INPUT", "Choose terrain shapes or lighting/effect settings.") end
-	local subject = lighting or terrain
+	local extras = self:environmentExtras(args)
+	if #fills == 0 and #changes == 0 and not extras.any then V.fail("INPUT", "Choose terrain shapes or lighting/effect settings.") end
+	local subject = lighting or terrain or extras.subject
 	return self:record(command, guard, function(progress: any): any
 		guard()
 		local created: {any} = {}
@@ -889,11 +1059,15 @@ function Operations:environment(command: any, args: any, guard: () -> ()): any
 				end
 				after[change.key] = applied
 			end
+			if extras.any then self:applyEnvironmentExtras(extras, reverts, before, after) end
 			guard()
 		end)
 		if not ok then
 			local reverted = pcall(function()
-				for index = #reverts, 1, -1 do reverts[index].target[reverts[index].name] = reverts[index].value end
+				for index = #reverts, 1, -1 do
+					local revert = reverts[index]
+					if revert.fn then revert.fn() else revert.target[revert.name] = revert.value end
+				end
 			end)
 			for _, instance in ipairs(created) do pcall(function() instance:Destroy() end) end
 			if not reverted then progress.touched = true end
@@ -915,6 +1089,45 @@ function Operations:environment(command: any, args: any, guard: () -> ()): any
 		after.terrainShapes = #fills
 		return {ref = ref, mutation = {kind = "environment.apply", ref = ref, before = before, after = after}}
 	end)
+end
+
+-- Read-only world-space axis-aligned bounds for viewport framing. Oriented part boxes are
+-- expanded through their rotation; folders/services visit at most 5000 descendants.
+function Operations:bounds(instance: any): any
+	local low, high = {math.huge, math.huge, math.huge}, {-math.huge, -math.huge, -math.huge}
+	local function box(cframe: any, size: any): ()
+		local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cframe:GetComponents()
+		local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
+		local center = {x, y, z}
+		local extent = {math.abs(r00) * hx + math.abs(r01) * hy + math.abs(r02) * hz,
+			math.abs(r10) * hx + math.abs(r11) * hy + math.abs(r12) * hz, math.abs(r20) * hx + math.abs(r21) * hy + math.abs(r22) * hz}
+		for axis = 1, 3 do
+			low[axis] = math.min(low[axis], center[axis] - extent[axis])
+			high[axis] = math.max(high[axis], center[axis] + extent[axis])
+		end
+	end
+	if instance:IsA("Attachment") then
+		local p = instance.WorldPosition
+		box(CFrame.new(p.X, p.Y, p.Z), Vector3.new(1, 1, 1))
+	elseif instance:IsA("BasePart") then
+		box(instance.CFrame, instance.Size)
+	elseif instance:IsA("Model") then
+		local ok, cframe, size = pcall(function(): (any, any) return instance:GetBoundingBox() end)
+		if not ok then V.fail("BOUNDS", "The Model has no physical parts to frame.") end
+		box(cframe, size)
+	else
+		local queue, head = {instance}, 1
+		while head <= #queue and head <= 5000 do
+			local item = queue[head]
+			head += 1
+			if item ~= instance and item:IsA("BasePart") then box(item.CFrame, item.Size) end
+			for _, child in ipairs(item:GetChildren()) do if #queue < 5000 then table.insert(queue, child) end end
+		end
+	end
+	if low[1] == math.huge then V.fail("BOUNDS", "The instance has no physical parts to frame.") end
+	for axis = 1, 3 do V.number(low[axis], -100000, 100000, "bounds"); V.number(high[axis], -100000, 100000, "bounds") end
+	return {center = V.array({(low[1] + high[1]) / 2, (low[2] + high[2]) / 2, (low[3] + high[3]) / 2}),
+		size = V.array({high[1] - low[1], high[2] - low[2], high[3] - low[3]}), space = "world-aabb"}
 end
 
 function Operations:restore(command: any, args: any, guard: () -> ()): any
@@ -973,6 +1186,8 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 		self:updateSource(command, {ref = original.ref, expectedSource = original.after.source, source = original.before.source}, guard)
 	elseif original.kind == "script.set_enabled" then
 		self:setEnabled(command, {ref = original.ref, expectedSource = original.after.source, expectedEnabled = original.after.enabled, enabled = original.before.enabled}, guard)
+	elseif original.kind == "scene.place_asset" or original.kind == "scene.apply_material" then
+		AssetPlacement.restore(self, command, original, instance, guard)
 	else V.fail("RECEIPT", "Unsupported mutation receipt.") end
 	self.restored[receiptId] = true
 	return {restored = true, ref = original.ref}
@@ -991,10 +1206,14 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "script.search" then result = self:searchScripts(args, guard)
 	elseif method == "scene.inspect" then
-		V.fields(args, {"ref"}, "inspect arguments")
+		V.fields(args, {"ref", "bounds"}, "inspect arguments")
 		local instance = self.registry:resolve(args.ref)
 		local node = self.registry:node(instance)
 		node.properties = P.snapshot(instance)
+		if args.bounds ~= nil then
+			if args.bounds ~= true then V.fail("INPUT", "bounds must be true when present.") end
+			node.bounds = self:bounds(instance)
+		end
 		result = node
 	elseif method == "selection.read" then
 		V.fields(args, {}, "selection arguments")
@@ -1018,6 +1237,9 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "script.update" then result = self:updateSource(command, args, guard)
 	elseif method == "script.set_enabled" then result = self:setEnabled(command, args, guard)
 	elseif method == "scene.restore" then result = self:restore(command, args, guard)
+	elseif method == "scene.asset_watch" then V.fields(args, {}, "watch arguments"); result = AssetPlacement.watch(self)
+	elseif method == "scene.place_asset" then result = AssetPlacement.place(self, command, args, guard)
+	elseif method == "scene.apply_material" then result = AssetPlacement.applyMaterial(self, command, args, guard)
 	else V.fail("METHOD", "Unsupported Studio method.") end
 	if not table.find(V.WRITE_METHODS, method) then guard() end
 	if #V.encode(result, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Result exceeds 512 KiB.") end

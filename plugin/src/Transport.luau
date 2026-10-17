@@ -270,6 +270,7 @@ function Transport:exchange(desired: any): ()
 	local capabilities = table.clone(V.READ_METHODS)
 	for _, method in ipairs(V.WRITE_METHODS) do table.insert(capabilities, method) end
 	for _, method in ipairs(V.ASSET_STAGE_METHODS or {}) do table.insert(capabilities, method) end
+	for _, feature in ipairs(V.FEATURE_CAPABILITIES or {}) do table.insert(capabilities, feature) end
 	-- Output diagnostics are advertised only when Main attached the bounded collector.
 	if self.diagnostics and type(self.diagnostics.CAPABILITY) == "string" then table.insert(capabilities, self.diagnostics.CAPABILITY) end
 	local isKey = desired.apiKey ~= nil

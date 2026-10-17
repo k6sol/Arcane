@@ -63,6 +63,7 @@ license: MIT
 - Never let foliage intersect the plinth or stair.
 
 ## Finish
+- Keep exact-dimension structure (plinths, columns, stairs, spawn) as primitive parts. Dress it with real assets: `studio_asset_search` + `studio_asset_insert` for props (lamps, statues, vases, benches, ivy); `studio_asset_generate` kind mesh for a carved hero ornament and kind material for bespoke stone applied to the parts. Check with `studio_viewport_capture`.
 - Realistic scale, weathering and lighting moods: `arcane-photoreal`. Torches, lamps and glow: `arcane-vfx`.
 
 ## Verify

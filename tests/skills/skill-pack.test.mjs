@@ -240,7 +240,9 @@ test('VFX skill gives exact emitter presets, verified built-in textures and runt
   const vfx = await readSkill('arcane-vfx');
   for (const text of ['scene_build', 'script_update', 'script_set_enabled', 'playtest_request', 'Never invent rbxassetid', 'Fire core', 'Embers', 'Smoke',
     'Impact sparks', 'Magic aura', 'Waterfall sheet', 'Waterfall mist', 'Dust motes', 'Fireflies', 'Falling leaves', 'LightEmission', 'Spread', 'Drag',
-    'NumberSequenceKeypoint', 'ColorSequenceKeypoint', 'Beam', 'Trail', 'PointLight', 'SpotLight', 'Highlight', 'Emit(', 'arcane-photoreal']) assert.ok(vfx.includes(text), text);
+    'NumberSequence', 'ColorSequence', 'Attachment0', 'fx', 'creates effect instances directly', 'scene_create', 'frame {ref, views}',
+    'Beam', 'Trail', 'PointLight', 'SpotLight', 'Highlight', 'Emit(', 'arcane-photoreal']) assert.ok(vfx.includes(text), text);
+  assert.doesNotMatch(vfx, /cannot create|builds them from script|Arcane builds parts, not effect/i, 'effects are no longer script-built');
   for (const name of ['fire_main.dds', 'smoke_main.dds', 'sparkles_main.dds', 'fire_sparks_main.dds', 'SquareParticle.png']) assert.ok(vfx.includes(name), name);
   for (const skill of (await loadRegistry(ROOT)).skills) {
     for (const item of [skill, ...skill.references]) {
@@ -256,7 +258,9 @@ test('photoreal skill encodes mood presets with exact environment_apply fields, 
   for (const mood of ['Clear day', 'Golden hour', 'Foggy forest', 'Night', 'Horror', 'Sci-fi']) assert.ok(text.includes(`| ${mood} |`), mood);
   for (const field of ['ClockTime', 'ExposureCompensation', 'OutdoorAmbient', 'ColorShift_Top', 'ShadowSoftness', 'EnvironmentDiffuseScale', 'EnvironmentSpecularScale',
     'Density', 'Haze', 'Decay', 'TintColor', 'Technology = Future', 'Decoration = true', 'MaterialVariant', 'SurfaceAppearance', 'DepthOfFieldEffect',
-    'FogStart/FogEnd are ignored', 'avatar 5.5 studs', 'Door 4 x 7.5', 'No identical neighbours', 'studio_viewport_capture', 'environment_apply']) assert.ok(text.includes(field), field);
+    'FogStart/FogEnd are ignored', 'avatar 5.5 studs', 'Door 4 x 7.5', 'No identical neighbours', 'studio_viewport_capture', 'environment_apply',
+    'preset', 'technology: "Future"', 'terrainDecoration: true', 'materials: [', 'clear_day', 'golden_hour', 'foggy_forest', 'night', 'horror', 'sci_fi']) assert.ok(text.includes(field), field);
+  assert.doesNotMatch(text, /Arcane cannot set/, 'Technology, Decoration and MaterialVariants are direct');
   assert.doesNotMatch(text, /\bExposure \d/);
 });
 

@@ -345,7 +345,8 @@ do
 		V.fields(body, {"apiKey", "protocolVersion", "identity", "capabilities"}, "connect payload")
 		check(body.apiKey == key and body.code == nil and body.url == nil, "key-only wire contract")
 		check(body.identity.clientSessionId == client.clientSessionId and body.protocolVersion == 1, "connect identity and protocol")
-		check(#body.capabilities == #V.READ_METHODS + #V.WRITE_METHODS + #V.ASSET_STAGE_METHODS, "explicit method capabilities")
+		check(#body.capabilities == #V.READ_METHODS + #V.WRITE_METHODS + #V.ASSET_STAGE_METHODS + #V.FEATURE_CAPABILITIES, "explicit method and feature capabilities")
+		check(table.find(body.capabilities, "scene.effects") ~= nil, "effects feature capability advertised")
 		for _, method in ipairs(V.ASSET_STAGE_METHODS) do
 			check(table.find(body.capabilities, method) ~= nil and not table.find(V.READ_METHODS, method) and not table.find(V.WRITE_METHODS, method), "host-only staging capability stays separate")
 		end
