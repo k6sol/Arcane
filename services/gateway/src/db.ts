@@ -1,3 +1,4 @@
+import {ACCOUNT_SCHEMA} from './account-store.ts';
 /**
  * SQLite storage (node:sqlite) with forward-only migrations tracked in PRAGMA user_version.
  * Every balance change happens inside one IMMEDIATE transaction so concurrent requests cannot double-spend.
@@ -34,6 +35,7 @@ export const MIGRATIONS: string[] = [
    CREATE TABLE idempotency (account_id TEXT NOT NULL, route TEXT NOT NULL, key TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL,
      created_at INTEGER NOT NULL, PRIMARY KEY (account_id, route, key));
    CREATE TABLE audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, account_id TEXT, event TEXT NOT NULL, detail TEXT NOT NULL);`,
+  ACCOUNT_SCHEMA,
 ];
 
 export type Row = Record<string, unknown>;

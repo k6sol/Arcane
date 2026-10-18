@@ -1,3 +1,4 @@
+import {readAccountsConfig,type AccountsConfig} from './account-config.ts';
 /**
  * Gateway configuration. Everything comes from the environment; nothing secret lives in code.
  * `loadConfig(env)` validates once at startup and throws a readable error on a bad value.
@@ -19,6 +20,7 @@ export interface ModelEntry {
   maxOutputTokens: number;
 }
 export interface GatewayConfig {
+  accounts: AccountsConfig | null;
   production: boolean;
   host: string; port: number; trustProxy: boolean;
   publicUrl: string; publicOrigin: string;
@@ -131,6 +133,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (stripeKey && !/^(sk|rk)_(test|live)_[A-Za-z0-9]{8,}$/.test(stripeKey)) fail('STRIPE_SECRET_KEY');
   if (stripeKey && !production && stripeKey.includes('_live_')) fail('live payment keys require NODE_ENV=production');
   const config: GatewayConfig = {
+    accounts: readAccountsConfig(env),
     production,
     host: env.HOST || '0.0.0.0',
     port: int(env, 'PORT', 8787, 1, 65535),
