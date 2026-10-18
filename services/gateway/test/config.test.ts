@@ -38,3 +38,11 @@ test('migrations are forward-only and idempotent', () => {
   assert.throws(() => migrate(db), /newer/);
   db.close();
 });
+
+test('production requires managed identity and exact account origin', () => {
+  const production = { ...base, NODE_ENV: 'production', STRIPE_SECRET_KEY: 'sk_test_reference0000', STRIPE_WEBHOOK_SECRET: 'whsec_test_reference_secret_value' };
+  assert.throws(() => loadConfig(production), /managed accounts are required/);
+  const managed = { ...production, SUPABASE_URL: 'https://project.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_' + 'p'.repeat(24), ACCOUNTS_SESSION_KEY: Buffer.alloc(32, 42).toString('base64url') };
+  assert.ok(loadConfig(managed).accounts);
+  assert.throws(() => loadConfig({ ...managed, PUBLIC_URL: base.PUBLIC_URL + '/app' }), /exact origin/);
+});

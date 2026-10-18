@@ -3,8 +3,10 @@
 One small service that does what the Arcane desktop app expects from your infrastructure:
 
 - **Billing.** Hosted checkout for plans, action packs and credits. A verified payment webhook grants each purchase once.
-- **Accounts.** Device-code sign-in confirmed by an emailed link. The app gets an opaque bearer token. Only keyed hashes
-  are stored.
+- **Accounts.** Verified email/password, Google or Apple sign-in through Supabase Auth; optional authenticator
+  two-step verification; persistent encrypted browser sessions and device-code approval for the app.
+- **Administration.** A server-authorized owner panel for account status, balances, recent activity and member session
+  revocation. Owner access requires an authenticator and a recent second-factor check.
 - **Model gateway.** Streams chat from upstream model providers with your server-side API keys. Tokens are metered to
   credits with your price table and markup. A request the balance can't cover is refused.
 
@@ -16,12 +18,16 @@ the TypeScript sources directly. The API contract is in [`docs/ARCANE_CREDITS.md
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/v1/health` | none | `{"service":"arcane-billing","version":1,"gateway":true}` |
-| GET | `/checkout?kind=&offer=` | none | Checkout page (email of the account to credit) |
-| POST | `/v1/checkout` | form (same origin) or bearer JSON | Create a Checkout Session from the server price map, then `303` or `{id,url}` |
+| GET | `/account` | browser session | Registration, login, security settings, device approval and billing |
+| GET | `/admin` | owner + recent MFA | Account administration |
+| GET | `/checkout?kind=&offer=` | browser | Continue in the authenticated account page |
+| POST | `/v1/account/checkout` | browser session + CSRF + enrolled MFA | Hosted Checkout for the signed-in account |
+| POST | `/v1/account/billing-portal` | browser session + CSRF + enrolled MFA | Own subscription and invoices |
+| POST | `/v1/checkout` | managed bearer JSON | Create a Checkout Session from the server price map |
 | POST | `/v1/stripe/webhook` | processor signature | Verify, then grant idempotently |
 | POST | `/v1/auth/device` | none | Start sign-in: `deviceCode`, `userCode`, `verificationUrl` |
-| GET/POST | `/v1/auth/verify` | browser | Enter code and email; a link is emailed |
-| GET/POST | `/v1/auth/confirm` | browser | Approve from the emailed link |
+| GET | `/v1/auth/verify?user_code=` | browser | Continue in `/account` to approve the app's code |
+| POST | `/v1/account/approve-device` | browser session + CSRF + enrolled MFA | Approve only the signed-in account |
 | POST | `/v1/auth/token` | none | Poll with `deviceCode`; returns the bearer token once |
 | POST | `/v1/auth/logout` | bearer | Revoke the token |
 | GET | `/v1/balance` | bearer | `{credits, actionsRemaining, plan, renewsAt}` |
@@ -37,6 +43,11 @@ the TypeScript sources directly. The API contract is in [`docs/ARCANE_CREDITS.md
   - live payment keys outside production;
   - printing sign-in links (`MAIL_MODE=log`) in production;
   - mock models in production.
+  - production without managed authentication or an exact public origin.
+- **Managed sessions and MFA.** The browser receives an HttpOnly cookie, never provider access or refresh tokens.
+  AES-256-GCM protects session payloads and managed identity email fields. Session IDs are stored as keyed hashes.
+  An enrolled authenticator is enforced on the server; owner administration requires a check within 15 minutes.
+  See [the account security model](../../docs/build/ACCOUNT_SECURITY.md) for storage, session and verification boundaries.
 - **Tokens.** Bearer tokens (`arc_` + 256 random bits), device codes and sign-in links are stored only as
   HMAC-SHA256 hashes keyed with `AUTH_SECRET`. Links are single use, expire in 15 minutes, and approve only through a
   POST button that shows the code again. Device codes expire in 10 minutes, and polling is throttled (`slow_down`).
@@ -76,15 +87,24 @@ Copy `.env.example` and fill it in. Never commit the filled-in file. The keys yo
 | --- | --- |
 | `PUBLIC_URL` | The https URL people reach the gateway at |
 | `AUTH_SECRET` | 32+ random characters |
+| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | Exact Auth project origin and publishable key; never a service-role key |
+| `ACCOUNTS_SESSION_KEY` | Separate 32 random bytes encoded as base64url; preserve across deployments |
+| `ADMIN_BOOTSTRAP_EMAIL` | Private verified owner email; one-time owner bootstrap after authenticator verification |
+| `ACCOUNT_SOCIAL_PROVIDERS` | Registered `google,apple` providers; empty for email/password only |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Your payment processor's API key and webhook signing secret |
 | `STRIPE_PRICE_<OFFER>` | One price id per offer id in `packages/protocol/src/plans.ts`. Plans need recurring monthly prices. Packs and credits need one-time prices. |
 | `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` | Server-side upstream keys, under terms that allow relaying access |
 | `MODELS_JSON` | The models you offer: `id`, `label`, `provider` (`anthropic` or `openai`), `upstream` model id, `inputPerMTok`, `outputPerMTok` (credits per 1M tokens before markup), `maxOutputTokens` |
 | `MARKUP_BPS`, `ACTION_CREDIT_ALLOWANCE` | Markup (`12000` = +20 %), and how much usage one plan/pack action covers in one turn |
-| `MAIL_MODE=webhook`, `MAIL_WEBHOOK_URL` | Where sign-in emails go: JSON `{from,to,subject,text}`, signed with `MAIL_WEBHOOK_SECRET` |
+| Supabase email configuration | Production SMTP and required email confirmation; `MAIL_MODE=off` with managed accounts |
 
 With the default offers, 1 credit is worth 1 cent (`credits-10` grants 1000). Set `inputPerMTok` and `outputPerMTok`
 from your provider's current price sheet, in the same unit.
+
+Set Supabase's site URL to `PUBLIC_URL`, allow the `/account/callback` URL and its flow query parameter, enable TOTP,
+and register Google and Apple before listing them in `ACCOUNT_SOCIAL_PROVIDERS`. Open `/account`, sign in with the
+private owner email, and verify an authenticator to enable `/admin`. Store keys and the owner email in the host's
+secret manager or an ignored local environment file. Keep the database and both encryption/hash keys across updates.
 
 ## Run locally (test mode)
 
@@ -107,8 +127,9 @@ Test-mode payments:
 3. Set `STRIPE_SECRET_KEY=sk_test_…`.
 4. Forward webhooks to your local server with the processor's CLI (`stripe listen --forward-to
    localhost:8787/v1/stripe/webhook`), and set `STRIPE_WEBHOOK_SECRET` to the `whsec_…` it prints.
-5. Open `http://127.0.0.1:8787/checkout?kind=credits&offer=credits-10` and pay with a test card.
-6. Sign in with the same email. `GET /v1/balance` then shows the credits.
+5. With managed accounts configured, open `/account`, sign in and choose a configured test offer.
+6. Complete hosted Checkout with a test card and verify its signed webhook before checking the balance in Arcane.
+   Creating a Checkout Session alone does not grant credit.
 
 ## Deploy (any container host)
 
@@ -140,7 +161,9 @@ src/main.ts` under a process supervisor.
    ```
 
    Settings > Plans & credits then shows "Checkout connected" and **Connect Arcane account**.
-6. Go live: switch to live keys and live price ids, and set `placeholderPrices: false` once real prices are entered.
+6. Validate real-domain email verification, password recovery, Google/Apple callbacks, authenticator checks, device
+   approval, administration, payment webhooks and the customer portal in test mode. Approve actual prices before
+   switching to live keys and live price IDs or setting `placeholderPrices: false`.
 
 The reference runs as a **single instance**. Rate limits and concurrency caps are in memory, and SQLite is a local
 file. To scale out, move those limits and the database to shared stores.
@@ -149,5 +172,5 @@ Not covered by the reference:
 
 - Refunds and chargebacks: handle them in the processor dashboard and adjust balances by hand. The `grants` table shows
   what each purchase gave.
-- Email delivery: bring your own mail service behind `MAIL_WEBHOOK_URL`.
+- Email delivery and authenticated account recovery: configure and test them with Supabase before launch.
 - Taxes and invoices: configure them in the processor.

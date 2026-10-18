@@ -33,6 +33,19 @@ export function signWebhookPayload(rawBody: string | Buffer, secret: string, tim
 
 export interface CheckoutSessionResult { id: string; url: string }
 
+/** Customer selection is server-owned; browsers cannot name another customer's billing portal. */
+export async function createCustomerPortalSession(config: GatewayConfig, customerId: string | null, doFetch: typeof fetch = globalThis.fetch): Promise<{url:string}> {
+  if(!customerId||!/^cus_[A-Za-z0-9]+$/.test(customerId))throw new Error('No billing customer is available.');
+  if(!config.stripe.secretKey)throw new Error('Billing is not configured.');
+  const response=await doFetch(config.stripe.apiBase+'/v1/billing_portal/sessions',{method:'POST',redirect:'error',signal:AbortSignal.timeout(15000),
+    headers:{Authorization:'Bearer '+config.stripe.secretKey,'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({customer:customerId,return_url:config.publicOrigin+'/account'}).toString()});
+  const text=await response.text();if(!response.ok||Buffer.byteLength(text)>65536)throw new Error('Billing portal is unavailable.');
+  const value=JSON.parse(text) as Record<string,unknown>,url=new URL(String(value.url));
+  if(url.protocol!=='https:'||url.hostname!=='billing.stripe.com'||url.port||url.username||url.password)throw new Error('Billing portal response could not be verified.');
+  return {url:url.href};
+}
+
 /** Creates a hosted Checkout Session for one catalog offer. Prices come only from the server-side catalog. */
 export async function createCheckoutSession(config: GatewayConfig, offer: CatalogOffer, account: { id: string; email: string; customer_id: string | null },
   idempotencyKey: string, doFetch: typeof fetch = globalThis.fetch): Promise<CheckoutSessionResult> {
@@ -59,6 +72,8 @@ export async function createCheckoutSession(config: GatewayConfig, offer: Catalo
   const text = (await response.text()).slice(0, 65536);
   if (!response.ok) throw new Error('Checkout session request failed (' + response.status + ').');
   const value = JSON.parse(text) as Record<string, unknown>;
-  if (typeof value.id !== 'string' || typeof value.url !== 'string' || !value.url.startsWith('https://')) throw new Error('Checkout session reply was not understood.');
+  if (typeof value.id !== 'string' || !/^cs_[A-Za-z0-9_]{1,128}$/.test(value.id) || typeof value.url !== 'string') throw new Error('Checkout session reply was not understood.');
+  const checkout=new URL(value.url);
+  if(checkout.protocol!=='https:'||checkout.hostname!=='checkout.stripe.com'||checkout.port||checkout.username||checkout.password)throw new Error('Checkout destination could not be verified.');
   return { id: value.id, url: value.url };
 }

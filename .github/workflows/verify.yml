@@ -64,6 +64,12 @@ jobs:
       - name: Test complete unit inventory shard 2 of 2
         if: matrix.suite == 'unit-2'
         run: node --test --test-concurrency=1 --test-shard=2/2 dist/tests/unit/*.test.js
+      - name: Type-check account and billing service
+        if: matrix.suite == 'release'
+        run: node node_modules/typescript/bin/tsc -p services/gateway/tsconfig.json
+      - name: Test account and billing service
+        if: matrix.suite == 'release'
+        run: node --test --test-concurrency=1 services/gateway/test/*.test.ts
       - name: Test offline skill contracts
         if: matrix.suite == 'release'
         run: node --test tests/skills/*.test.mjs
@@ -85,6 +91,8 @@ jobs:
           if (-not $edgeExecutable) { throw 'Microsoft Edge is required for desktop key control verification.' }
           $env:ARCANE_UI_BROWSER_EXE = $edgeExecutable
           node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js dist/tests/unit/welcome-tour.test.js dist/tests/unit/mesh-keep-ui.test.js dist/tests/unit/desktop-update-ui.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 services/gateway/test/account-routes.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build deterministic Studio plugin
         if: matrix.suite == 'release'

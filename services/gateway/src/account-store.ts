@@ -18,8 +18,8 @@ CREATE TABLE account_bootstrap (singleton INTEGER PRIMARY KEY CHECK(singleton=1)
 export interface BrowserSession {
   hash: string; version: number; subject: string | null; expiresAt: number;
   data: {csrf:string;createdAt:number;accessToken?:string;refreshToken?:string;
-    flow?:{nonce:string;verifier:string;provider:'google'|'apple'};
-    recovery?:boolean};
+    flow?:{nonce:string;verifier:string;provider:'google'|'apple'|'signup'|'recovery'};
+    recovery?:boolean;mfaAt?:number;deviceCode?:string;checkoutOffer?:string};
 }
 export class AccountStorageError extends Error { constructor(){super('Account session is unavailable. Reload and try again.');} }
 
@@ -29,18 +29,19 @@ export class AccountStore {
   hash(kind:string,value:string):string{return createHmac('sha256',this.key).update(kind+'\0'+value).digest('hex');}
   seal(kind:string,id:string,value:unknown):string {
     const bytes=Buffer.from(JSON.stringify(value));if(bytes.length>32768)throw new AccountStorageError();
-    const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',this.key,iv);cipher.setAAD(Buffer.from('arcane-account-v1\0'+kind+'\0'+id));
-    const encrypted=Buffer.concat([cipher.update(bytes),cipher.final()]);return 'v1.'+Buffer.concat([iv,cipher.getAuthTag(),encrypted]).toString('base64url');
+    const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',this.key,iv);cipher.setAAD(Buffer.from('arcane-account-v1\0'+this.config.providerUrl+'\0'+kind+'\0'+id));
+    const encrypted=Buffer.concat([cipher.update(bytes),cipher.final()]);return 'v2.'+Buffer.concat([iv,cipher.getAuthTag(),encrypted]).toString('base64url');
   }
   open<T>(kind:string,id:string,value:string):T {
     try{
-      if(typeof value!=='string'||value.length>45000||!/^v1\.[A-Za-z0-9_-]+$/.test(value))throw new AccountStorageError();
+      if(typeof value!=='string'||value.length>45000||!/^v2\.[A-Za-z0-9_-]+$/.test(value))throw new AccountStorageError();
       const bytes=Buffer.from(value.slice(3),'base64url');if(bytes.length<29)throw new AccountStorageError();
-      const cipher=createDecipheriv('aes-256-gcm',this.key,bytes.subarray(0,12));cipher.setAuthTag(bytes.subarray(12,28));cipher.setAAD(Buffer.from('arcane-account-v1\0'+kind+'\0'+id));
+      const cipher=createDecipheriv('aes-256-gcm',this.key,bytes.subarray(0,12));cipher.setAuthTag(bytes.subarray(12,28));cipher.setAAD(Buffer.from('arcane-account-v1\0'+this.config.providerUrl+'\0'+kind+'\0'+id));
       return JSON.parse(Buffer.concat([cipher.update(bytes.subarray(28)),cipher.final()]).toString('utf8')) as T;
     }catch{throw new AccountStorageError();}
   }
   create(now:number,data?:BrowserSession['data'],subject:string|null=null):{cookie:string;session:BrowserSession} {
+    if(Number(this.db.prepare('SELECT count(*) AS n FROM account_browser_sessions').get()!.n)>=50000)throw new AccountStorageError();
     const cookie=randomBytes(32).toString('base64url'),hash=this.hash('browser',cookie);
     const session:BrowserSession={hash,version:1,subject,expiresAt:now+(subject?30*86400000:15*60000),data:data??{csrf:randomBytes(32).toString('base64url'),createdAt:now}};
     this.db.prepare('INSERT INTO account_browser_sessions (hash,subject,payload,version,expires_at,updated_at) VALUES (?,?,?,?,?,?)')

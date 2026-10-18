@@ -23,4 +23,5 @@ test('encrypted account data cannot be transplanted, modified or opened with ano
  assert.deepEqual(store.open('email','account-one',sealed),{email:'private@example.com'});
  for(const [kind,id,value]of [['email','account-two',sealed],['browser','account-one',sealed],['email','account-one',sealed.slice(0,-8)+'AAAAAAAA']])assert.throws(()=>store.open(kind,id,value),AccountStorageError);
  assert.throws(()=>new AccountStore(db,readAccountsConfig(env())!).open('email','account-one',sealed),AccountStorageError);
+ assert.throws(()=>new AccountStore(db,{...store.config,providerUrl:'https://other.supabase.co'}).open('email','account-one',sealed),AccountStorageError);
 });

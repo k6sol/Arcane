@@ -1,3 +1,4 @@
+import {AccountStore} from './account-store.ts';
 /**
  * Account sign-in: device code + email magic link.
  *
@@ -122,9 +123,15 @@ export function pollToken(db: DatabaseSync, config: GatewayConfig, deviceCode: u
     const tooSoon = row.last_poll_at !== null && now - Number(row.last_poll_at) < (POLL_INTERVAL_S * 1000) - 500;
     db.prepare('UPDATE device_requests SET last_poll_at = ? WHERE id = ?').run(now, id);
     if (row.status !== 'approved') return { error: tooSoon ? 'slow_down' as const : 'authorization_pending' as const };
+    let managed: Row | undefined;
+    if(config.accounts){
+      managed=db.prepare('SELECT d.subject,d.aal,i.disabled,i.mfa_required FROM account_device_approvals d JOIN account_identities i ON i.subject=d.subject AND i.account_id=? WHERE d.device_id=? AND d.approved_at>?').get(String(row.account_id),id,now-5*60000) as Row | undefined;
+      if(!managed||managed.disabled||managed.mfa_required&&managed.aal!=='aal2')return {error:'invalid_grant' as const};
+    }
     const token = 'arc_' + opaque();
     db.prepare("UPDATE device_requests SET status = 'consumed' WHERE id = ?").run(id);
     db.prepare('INSERT INTO tokens (hash, account_id, created_at) VALUES (?, ?, ?)').run(keyedHash(config, 'token', token), row.account_id as string, now);
+    if(managed)db.prepare('INSERT INTO account_token_access(hash,subject,aal,expires_at) VALUES(?,?,?,?)').run(keyedHash(config,'token',token),String(managed.subject),String(managed.aal),now+30*86400000);
     audit(db, row.account_id as string, 'auth.token_issued', {});
     return { token, accountId: row.account_id as string };
   });
@@ -138,7 +145,14 @@ export function authenticate(db: DatabaseSync, config: GatewayConfig, header: st
   const row = db.prepare('SELECT account_id, last_used_at FROM tokens WHERE hash = ? AND revoked_at IS NULL').get(hash) as Row | undefined;
   if (!row) return null;
   if (row.last_used_at === null || now - Number(row.last_used_at) > 60_000) db.prepare('UPDATE tokens SET last_used_at = ? WHERE hash = ?').run(now, hash);
-  return getAccount(db, row.account_id as string);
+  const account=getAccount(db,row.account_id as string);if(!account)return null;
+  if(config.accounts){
+    const managed=db.prepare('SELECT i.email_cipher,i.disabled,i.mfa_required,t.aal FROM account_token_access t JOIN account_identities i ON i.subject=t.subject AND i.account_id=? WHERE t.hash=? AND t.expires_at>?').get(account.id,hash,now) as Row | undefined;
+    if(!managed||managed.disabled||managed.mfa_required&&managed.aal!=='aal2')return null;
+    const email=new AccountStore(db,config.accounts).open<{email:string}>('email',account.id,String(managed.email_cipher)).email;
+    return {...account,email};
+  }
+  return account;
 }
 
 export function revoke(db: DatabaseSync, config: GatewayConfig, header: string | undefined, now = Date.now()): boolean {

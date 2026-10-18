@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { signWebhookPayload, verifyWebhookSignature, SignatureError } from '../src/stripe.ts';
+import { signWebhookPayload, verifyWebhookSignature, SignatureError, createCheckoutSession, createCustomerPortalSession } from '../src/stripe.ts';
+import { testConfig } from './helpers.ts';
 import { bearer, formPost, postJson, signIn, startHarness, WEBHOOK_SECRET, type Harness } from './helpers.ts';
 
 const accountId = (h: Harness, email = 'maker@example.com') => (h.db.prepare('SELECT id FROM accounts WHERE email = ?').get(email) as { id: string }).id;
@@ -10,6 +11,16 @@ function deliver(h: Harness, event: unknown, options: { secret?: string; at?: nu
     headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signWebhookPayload(raw, options.secret ?? WEBHOOK_SECRET, options.at ?? Math.floor(h.clock.now / 1000)) } });
 }
 const completed = (eventId: string, session: Record<string, unknown>) => ({ id: eventId, type: 'checkout.session.completed', data: { object: { payment_status: 'paid', mode: 'payment', ...session } } });
+
+test('payment destinations must be the exact hosted processor origins', async () => {
+  const config = testConfig(), offer = config.catalog.find(value => value.id === 'pro')!;
+  for (const url of ['https://checkout.stripe.com.evil.example/pay', 'https://evil.example/pay', 'http://checkout.stripe.com/pay', 'https://user@checkout.stripe.com/pay']) {
+    const reply = (async () => Response.json({ id: 'cs_test_fixture', url })) as typeof fetch;
+    await assert.rejects(createCheckoutSession(config, offer, { id: 'acct_fixture', email: 'member@example.com', customer_id: null }, 'fixture-key', reply), /destination/);
+  }
+  const forgedPortal = (async () => Response.json({ url: 'https://billing.stripe.com.evil.example/session' })) as typeof fetch;
+  await assert.rejects(createCustomerPortalSession(config, 'cus_Fixture', forgedPortal), /could not be verified/);
+});
 
 test('checkout creates a processor session from the server-side price map (mocked processor)', async () => {
   const h = await startHarness();

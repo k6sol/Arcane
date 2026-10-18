@@ -1,3 +1,4 @@
+import {createAccountRoutes} from './account-routes.ts';
 /**
  * Arcane gateway HTTP server (node:http, no framework). Routes are documented in docs/ARCANE_CREDITS.md.
  */
@@ -18,6 +19,7 @@ export interface GatewayDeps {
   config: GatewayConfig; db: DatabaseSync; upstream: UpstreamStreamer; sendMail: MailSender;
   /** Fetch used for payment processor calls (injected in tests). */
   fetch?: typeof fetch;
+  accountFetch?: typeof fetch;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -129,6 +131,9 @@ export function createGateway(deps: GatewayDeps) {
     });
     return { status: 200, body };
   }
+
+  const accountRoutes=createAccountRoutes({config,db,now,providerFetch:deps.accountFetch,paymentFetch:deps.fetch,checkout:startCheckout});
+
 
   function checkoutPage(res: ServerResponse, url: URL): void {
     const offer = findOffer(config, url.searchParams.get('offer'));
@@ -255,6 +260,7 @@ export function createGateway(deps: GatewayDeps) {
     baseHeaders(res);
     if (cors(req, res)) return;
     const url = new URL(req.url ?? '/', config.publicOrigin);
+    if(accountRoutes&&await accountRoutes(req,res,url))return;
     const key = (req.method ?? 'GET') + ' ' + url.pathname;
     switch (key) {
       case 'GET /v1/health': return json(res, 200, { service: 'arcane-billing', version: 1, gateway: true });

@@ -168,6 +168,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
   };
   if (production && (!config.stripe.secretKey || config.stripe.webhookSecret.length < 16)) fail('STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are required in production');
+  if(production&&!config.accounts)fail('managed accounts are required in production');
+  if(config.accounts&&config.publicUrl!==config.publicOrigin)fail('PUBLIC_URL must be an exact origin for account sessions');
   return config;
 }
 
