@@ -80,7 +80,7 @@ test('scatter is natural: spacing, clearing and keep-out respected, never rings'
 test('daemon validation refuses malformed builds and oversize hierarchies', () => {
   const ok = compileSceneBuild(forestInput(10), ROOT_REF as unknown as Json).args;
   const bad = (patch: (args: any) => void) => { const args = structuredClone(ok) as any; patch(args); return () => validateCommandArgs('scene.build', args, session()); };
-  assert.throws(bad(a => { a.container.className = 'Part'; }), /Model or Folder/);
+  assert.throws(bad(a => { a.container.className = 'Part'; }), /Model, Folder or ScreenGui/);
   assert.throws(bad(a => { a.items[2].parent = 5; }), /parent/);
   assert.throws(bad(a => { a.items[2].scale = 100; }), /scale/);
   assert.throws(bad(a => { a.items[2].template = 9; }), /prototype/);

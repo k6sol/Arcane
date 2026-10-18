@@ -233,6 +233,9 @@ local unfitted = placeArgs(again.watch, {expectName = "ArcaneAsset_" .. again.wa
 unfitted.maxSize = nil
 local second, secondId = run("scene.place_asset", unfitted)
 check(second.keptScripts == 3 and second.removedScripts.count == 0 and second.grounded == false and second.scale == 1, "allowScripts keeps and reports scripts")
+for _, item in ipairs(ops.registry:resolve(second.ref):GetDescendants()) do
+  if item:IsA("BaseScript") then check(item.Disabled == true, "kept scripts land disabled") end
+end
 local secondRoot = ops.registry:resolve(second.ref)
 secondRoot:PivotTo(CFrame.new(1, 2, 3))
 refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = secondId, mutation = second.mutation}) end)
@@ -254,7 +257,24 @@ local folder = Instance.new("Folder"); folder.Name = "OnlyScripts"
 local lone = Instance.new("Script"); lone.Parent = folder
 folder.Parent = workspace
 refuses("ASSET", function() return run("scene.place_asset", placeArgs(scriptOnly.watch)) end)
-check(folder.Parent == workspace and lone.Parent == folder, "non-physical asset untouched")
+check(folder.Parent == workspace and lone.Parent == nil, "refused insert stays for inspection but its scripts are removed")
+-- A script dropped next to the asset (outside it) is never left behind enabled.
+local sibling = run("scene.asset_watch", {})
+local siblingTree = insertTree("ArcaneAsset_" .. sibling.watch)
+local loose = Instance.new("Script"); loose.Name = "Loose"; loose.Parent = workspace
+refuses("AMBIGUOUS", function() return run("scene.place_asset", placeArgs(sibling.watch, {expectName = "ArcaneAsset_" .. sibling.watch})) end)
+check(loose.Parent == nil and siblingTree.Parent == workspace, "sibling script removed; nothing adopted")
+for _, item in ipairs(siblingTree:GetDescendants()) do check(not item:IsA("LuaSourceContainer"), "refused asset scripts removed") end
+-- Package links are stripped on adoption (an auto-updating package could restore scripts).
+local packaged = run("scene.asset_watch", {})
+local packagedTree = insertTree("ArcaneAsset_" .. packaged.watch)
+local link = Instance.new("PackageLink"); link.Parent = packagedTree
+local adopted = run("scene.place_asset", placeArgs(packaged.watch, {expectName = "ArcaneAsset_" .. packaged.watch, name = "Packaged"}))
+check(link.Parent == nil and adopted.removedScripts.count == 3, "package link stripped")
+-- A clone copy is re-checked at instantiation, so a script added after planning never lands.
+local tampered = Instance.new("Model"); part("Body", Vector3.new(0, 1, 0), Vector3.new(1, 1, 1), tampered)
+local late = Instance.new("Script"); late.Parent = tampered
+refuses("SCRIPT", function() return AssetPlacement.instantiate({clone = tampered, scale = 1, at = {0, 0, 0}, yaw = 0}) end)
 
 -- 6. Generated MaterialVariant applied with a receipt and restored.
 local service = game:GetService("MaterialService")
@@ -267,6 +287,37 @@ local reverted = run("scene.restore", {receiptCommandId = appliedId, mutation = 
 check(reverted.restored and wall.Material == Enum.Material.Plastic and wall.MaterialVariant == "", "material restore reverts")
 refuses("MATERIAL", function() return run("scene.apply_material", {refs = V.array({ops.registry:ref(wall)}), material = "Slate", variant = "Missing_Variant"}) end)
 refuses("MATERIAL", function() return run("scene.apply_material", {refs = V.array({ops.registry:ref(wall)}), material = "Brick", variant = "Arcane_MossyStone_ab12"}) end)
+-- 7. editable-<digest>: the retained procedural reconstruction is materialized detached, then adopted.
+local digest = string.rep("ab", 32)
+local materialized, released = 0, 0
+local function procedural(): any
+  local model = Instance.new("Model")
+  part("SM_oak_bark", Vector3.new(0, 18, 0), Vector3.new(4, 36, 4), model)
+  part("SM_oak_leaves", Vector3.new(0, 30, 0), Vector3.new(30, 20, 30), model)
+  return model
+end
+ops.materializeReconstruction = function(_self: any, source: string, _guard: any): (any, () -> ())
+  check(source == digest, "plugin receives only the transfer digest")
+  materialized += 1
+  return procedural(), function() released += 1 end
+end
+local editableCommits = fixture.committed
+local oak = run("scene.place_asset", placeArgs("editable-" .. digest, {name = "OakTemplate", maxSize = V.array({20, 20, 20})}))
+local oakRoot = ops.registry:resolve(oak.ref)
+check(materialized == 1 and released == 1 and fixture.committed == editableCommits + 1, "materialized once, one undo recording, placement confirmed")
+check(oakRoot.Name == "OakTemplate" and oakRoot.Parent == templates and oak.mutation.kind == "scene.place_asset" and oak.mutation.after.descendants == 2, "detached model adopted with a receipt")
+local _, oakSize = oakRoot:GetBoundingBox()
+check(math.abs(oakSize.Y - 20) < 1e-3, "fit applies to materialized meshes")
+local restoredOak = run("scene.restore", {receiptCommandId = "asset-" .. serial, mutation = oak.mutation})
+check(restoredOak.restored and oakRoot.Parent == nil, "procedural placement restores like any adoption")
+local leaked: any = nil
+ops.materializeReconstruction = function(_self: any, _source: string, _guard: any): (any, () -> ())
+  leaked = Instance.new("Model") -- no BaseParts: adoption refuses before any parenting
+  return leaked, function() released += 1 end
+end
+refuses("ASSET", function() return run("scene.place_asset", placeArgs("editable-" .. digest)) end)
+check(leaked ~= nil and leaked.Parent == nil and released == 1, "failed adoption never confirms placement and leaves nothing parented")
+refuses("WATCH", function() return run("scene.place_asset", placeArgs("editable-XYZ")) end)
 print("Arcane asset placement checks passed: " .. count)
 `;
 

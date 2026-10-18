@@ -14,6 +14,9 @@ export const NATIVE_ASSET_LIMITS = Object.freeze({
   meshExtent: 256, minTriangles: 500, maxTriangles: 20_000, responseBytes: 64 * 1024, jobWaitSeconds: 15,
 });
 export const NATIVE_ASSET_CATEGORIES = ['Model', 'MeshPart'] as const;
+/** Searchable categories. Audio results are ids for Sound.SoundId only; they are never inserted. */
+export const NATIVE_SEARCH_CATEGORIES = [...NATIVE_ASSET_CATEGORIES, 'Audio'] as const;
+export type NativeSearchCategory = typeof NATIVE_SEARCH_CATEGORIES[number];
 export const GENERATION_KINDS = ['mesh', 'material', 'texture'] as const;
 export const GENERATED_BASE_MATERIALS = ['Plastic', 'SmoothPlastic', 'Wood', 'WoodPlanks', 'Marble', 'Basalt', 'Slate', 'CrackedLava', 'Concrete', 'Limestone',
   'Granite', 'Pavement', 'Brick', 'Pebble', 'Cobblestone', 'Rock', 'Sandstone', 'CorrodedMetal', 'DiamondPlate', 'Foil', 'Metal', 'Grass', 'LeafyGrass', 'Sand',
@@ -26,7 +29,7 @@ const extent = z.number().finite().min(0.5).max(NATIVE_ASSET_LIMITS.meshExtent);
 const segment = z.string().regex(/^[A-Za-z0-9_]{1,100}$/);
 export const nativeAssetSearchSchema = z.strictObject({
   sessionId: identifier, nativeStudioId: identifier.optional(), query: line(NATIVE_ASSET_LIMITS.queryChars),
-  category: z.enum(NATIVE_ASSET_CATEGORIES).default('Model'), page: z.number().int().min(1).max(NATIVE_ASSET_LIMITS.pages).default(1),
+  category: z.enum(NATIVE_SEARCH_CATEGORIES).default('Model'), page: z.number().int().min(1).max(NATIVE_ASSET_LIMITS.pages).default(1),
   pageSize: z.number().int().min(1).max(NATIVE_ASSET_LIMITS.pageSize).default(8), verifiedOnly: z.boolean().default(false),
 });
 export const nativeAssetInsertSchema = z.strictObject({
@@ -50,7 +53,9 @@ export type NativeAssetInsertRequest = z.output<typeof nativeAssetInsertSchema>;
 export type NativeAssetGenerateRequest = z.output<typeof nativeAssetGenerateSchema>;
 
 export interface NativeAssetResult { id: string; name: string; creator: string | null; type: string | null; verifiedCreator: boolean | null;
-  price: 'free' | 'unknown'; thumbnailId: string | null; thumbnailUrl: string | null; source: string | null }
+  price: 'free' | 'unknown'; thumbnailId: string | null; thumbnailUrl: string | null; source: string | null;
+  /** Audio only, when the native result carries it: length in seconds. */
+  durationSeconds?: number }
 export type JobState = 'running' | 'completed' | 'failed';
 /** Fixed, actionable refusal reasons. Native text is classified, never relayed. */
 export type NativeRefusal = 'sign_in' | 'quota' | 'unavailable' | 'rejected';
@@ -65,7 +70,7 @@ export class NativeAssetRefusal extends Error {
 type Field = 'string' | 'number' | 'boolean' | 'object' | 'array';
 const SPECS: Readonly<Record<NativeAssetTool, { required: string[]; send: Record<string, Field>; enums?: Record<string, readonly string[]>; readOnly?: boolean }>> = Object.freeze({
   search_asset: { required: ['studio_id'], send: { studio_id: 'string', query: 'string', assetType: 'string', priceFilter: 'string', maxResults: 'number', verifiedCreatorsOnly: 'boolean' },
-    enums: { assetType: NATIVE_ASSET_CATEGORIES, priceFilter: ['free'] }, readOnly: true },
+    enums: { assetType: NATIVE_SEARCH_CATEGORIES, priceFilter: ['free'] }, readOnly: true },
   insert_asset: { required: ['assetId', 'studio_id'], send: { studio_id: 'string', assetId: 'string', assetName: 'string', assetType: 'string' }, enums: { assetType: NATIVE_ASSET_CATEGORIES } },
   generate_mesh: { required: ['textPrompt', 'studio_id'], send: { studio_id: 'string', textPrompt: 'string', size: 'object', maxTriangles: 'number', async: 'boolean' } },
   generate_material: { required: ['materialPattern', 'materialId', 'baseMaterial', 'materialDescription', 'studio_id'],
@@ -128,9 +133,14 @@ function firstArray(value: unknown, depth = 0): unknown[] | null {
   }
   return null;
 }
-const ASSET_TYPE_IDS: Record<string, string> = { 4: 'Mesh', 10: 'Model', 40: 'MeshPart' };
-/** Decode free search results. Paid results (price above zero or isFree false) are dropped. */
-export function decodeAssetSearch(text: string, limit: number): { results: NativeAssetResult[]; returned: number } {
+const ASSET_TYPE_IDS: Record<string, string> = { 3: 'Audio', 4: 'Mesh', 10: 'Model', 40: 'MeshPart' };
+function seconds(value: unknown): number | undefined {
+  const number = typeof value === 'string' && value.trim().length > 0 && value.length <= 12 ? Number(value) : value;
+  return typeof number === 'number' && Number.isFinite(number) && number > 0 && number <= 86_400 ? Math.round(number * 100) / 100 : undefined;
+}
+/** Decode free search results. Paid results (price above zero or isFree false) are dropped; with audio, results
+ * explicitly marked unlicensed or not public are dropped too, and a duration is kept when provided. */
+export function decodeAssetSearch(text: string, limit: number, audio = false): { results: NativeAssetResult[]; returned: number } {
   const items = firstArray(parseLoose(text));
   if (!items) fail('BAD_NATIVE_RESPONSE');
   const results: NativeAssetResult[] = [], seen = new Set<string>();
@@ -142,6 +152,8 @@ export function decodeAssetSearch(text: string, limit: number): { results: Nativ
     const price = [item.price, item.priceInRobux, item.priceCents, record(item.product)?.price].find(value => typeof value === 'number');
     const isFree = typeof item.isFree === 'boolean' ? item.isFree : typeof item.free === 'boolean' ? item.free : undefined;
     if ((typeof price === 'number' && price > 0) || isFree === false) continue;
+    if (audio && [item.isLicensed, item.licensed, item.isPublic, item.public, item.isPublicDomain, record(item.audio)?.isPublic].some(value => value === false)) continue;
+    const durationSeconds = audio ? seconds(item.duration ?? item.audioDuration ?? item.durationSeconds ?? item.length ?? record(item.audio)?.duration ?? asset?.duration) : undefined;
     const rawType = item.assetType ?? item.type ?? item.AssetType ?? asset?.assetTypeId;
     const type = typeof rawType === 'number' ? ASSET_TYPE_IDS[rawType] ?? null : clean(rawType, 32);
     const thumbnail = item.thumbnailUrl ?? item.thumbnailURL ?? item.thumbnail;
@@ -153,7 +165,7 @@ export function decodeAssetSearch(text: string, limit: number): { results: Nativ
       creator: clean(item.creatorName ?? creatorRecord?.name ?? creatorRecord?.Name ?? (typeof item.creator === 'string' ? item.creator : undefined), NATIVE_ASSET_LIMITS.creatorChars),
       type, verifiedCreator: verified ?? null, price: price === 0 || isFree === true ? 'free' : 'unknown',
       thumbnailId: digits(item.thumbnailAssetId ?? item.thumbnailId ?? (url ? undefined : thumbnail)), thumbnailUrl: url,
-      source: source && ['user', 'group', 'universe', 'creator_store'].includes(source) ? source : null });
+      source: source && ['user', 'group', 'universe', 'creator_store'].includes(source) ? source : null, ...(durationSeconds !== undefined ? { durationSeconds } : {}) });
     if (results.length >= limit) break;
   }
   return { results, returned: items.length };
@@ -250,7 +262,7 @@ export async function searchNativeAssets(context: NativeAssetContext, request: N
   const call = await callNativeAssetTool(context, 'search_asset', { query: request.query, assetType: request.category, priceFilter: 'free', maxResults: wanted,
     ...(request.verifiedOnly ? { verifiedCreatorsOnly: true } : {}) }, signal, { mutation: false, timeoutMs: 15_000 });
   if (call.outcome !== 'ok') throw new NativeAssetRefusal(NATIVE_REFUSAL_CODES[classifyRefusal(call.text)]);
-  const decoded = decodeAssetSearch(call.text, wanted);
+  const decoded = decodeAssetSearch(call.text, wanted, request.category === 'Audio');
   return { results: decoded.results.slice((request.page - 1) * request.pageSize, wanted), hasMore: decoded.returned >= wanted && request.page < NATIVE_ASSET_LIMITS.pages };
 }
 

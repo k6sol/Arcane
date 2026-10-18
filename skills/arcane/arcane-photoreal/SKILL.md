@@ -10,8 +10,8 @@ license: MIT
 - One `environment_apply` call sets the look: `preset` (one word) + `technology: "Future"` + `terrainDecoration: true` when the ground uses Grass. The host expands the preset to exact Lighting, Atmosphere, Bloom, ColorCorrection and SunRays values; add only the section fields you want to change. Never leave default Lighting on a finished scene.
 - That call is one undo step, verified and rolled back as a whole. If Studio refuses a setting the error names the manual step (for example Lighting.Technology = Future or Terrain Decoration = true in the Properties window); tell the user that one line and continue.
 - MaterialService.Use2022Materials stays a manual Properties-window setting; mention it once if materials look flat.
-- Realism comes from real assets: `studio_asset_search` free (preferably verified) Creator Store models for organic and complex objects, `studio_asset_insert` them (scripts stripped) and clone with `scene_build` templates. Primitives only for exact-dimension architecture. Never buy or publish.
-- Build geometry with `scene_build` (one batch per layer) and terrain with `environment_apply`. DepthOfField only through a client script: `scene_create` a LocalScript under StarterPlayer.StarterPlayerScripts, `script_update` it to create a `DepthOfFieldEffect` under the Camera, keep it disabled until activated.
+- Realism comes from real assets: `studio_asset_search` free (preferably verified) Creator Store models for organic and complex objects, `studio_asset_insert` one per kind (scripts stripped) and clone with `scene_build` templates; else `studio_asset_generate`; else `assets_procedural` (review with `assets_preview`; session-only MeshParts that vanish in Play until the user uploads them); primitives for exact-dimension architecture. Never buy or publish.
+- Order: `terrain_generate` first (seeded landforms, a `flatten` clearing under the focal structure, river/path polylines, snowLine for peaks), then assets or procedural meshes, then `scene_build` geometry (one batch per layer); `environment_apply` sets the look. DepthOfField only through a client script: `scene_create` a LocalScript under StarterPlayer.StarterPlayerScripts, `script_update` it to create a `DepthOfFieldEffect` under the Camera, then enable it with `script_read` + `script_set_enabled`.
 - When Atmosphere exists, FogStart/FogEnd are ignored. Use Atmosphere Density and Haze for distance fog.
 - Verify with `studio_viewport_capture`: `frame {ref: main subject, views: ["three_quarter","low_angle"]}` (one sheet) plus one eye-level camera down the main path. Fix floating objects, plastic surfaces, repetition and blown highlights before reporting.
 
@@ -50,3 +50,4 @@ Door 4 x 7.5; floor-to-floor 12-14; stair riser 0.75-1 with tread 1.5-2; railing
 - Break long straight edges with trim, chamfer wedges and broken or missing pieces every 12-20 studs.
 - One dominant key light. Practical lights are warmer (ffb46b-ffd2a1) than the cool sky fill.
 - Natural layouts and forests: `arcane-natural-scenes`; detailed architecture: `arcane-architectural-features`.
+- Realistic sound (ambience, reverb, music): `arcane-audio`.

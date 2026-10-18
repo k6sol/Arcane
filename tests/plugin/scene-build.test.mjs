@@ -60,6 +60,12 @@ end
 for index, name in ipairs({"Air", "Water", "Glacier", "Salt", "CrackedLava"}) do
   materials[name] = table.freeze({Name = name, Value = 100 + index, EnumType = materials, _enumItem = true})
 end
+-- Cooperative build slices: a counting frame yield that can simulate a lease lost while yielded.
+fixture.yields = 0
+task.wait = function(): ()
+  fixture.yields += 1
+  if fixture.failAfterYields and fixture.yields >= fixture.failAfterYields then error({code = "LEASE", message = "Command lease has expired."}, 0) end
+end
 `;
 
 async function runLuau(checks, marker) {
@@ -125,10 +131,13 @@ workspace._properties.Raycast = function(_self: any, origin: any, direction: any
   return {Position = Vector3.new(origin.X, 3, origin.Z)}
 end
 local ops = Operations.new({sessionId = "scene-build-session", allowedRoots = {"Workspace", "Lighting"}}, game, http)
+-- Zero slice budget: a deterministic frame yield every SLICE_CHECK built instances.
+ops.sliceSeconds = 0
+local guards = 0
 local function run(method: string, args: any): (any, string)
   serial += 1
   local id = "build-" .. serial
-  return ops:execute({id = id, method = method, args = args}, function() end), id
+  return ops:execute({id = id, method = method, args = args}, function() guards += 1 end), id
 end
 local function refuses(code: string, callback: () -> any): any
   local ok, err = pcall(callback)
@@ -144,8 +153,10 @@ local baseline = #workspace:GetChildren()
 
 -- 1. A 200-tree forest is one command, one undo recording, one receipt.
 local committed, created = fixture.committed, #fixture.created
+fixture.yields, guards = 0, 0
 local result, buildId = run("scene.build", forest())
 check(fixture.committed == committed + 1, "exactly one ChangeHistory recording")
+check(fixture.yields == math.floor((2 + 200 * 8) / Operations.SLICE_CHECK) and guards >= fixture.yields, "detached construction yields every slice and re-guards after each yield")
 check(result.created.count == 1 + 1 + 200 * 8 and result.mutation.after.count == result.created.count, "receipt counts root, group and 200 x (model + 7 parts)")
 check(result.created.classes.Model == 202 and result.created.classes.Part == 200 * 6 and result.created.classes.WedgePart == 200, "class histogram")
 check(#fixture.created - created == result.created.count, "allocations match the receipt exactly")
@@ -185,11 +196,33 @@ local okFailure, failure = pcall(function() return run("scene.build", forest()) 
 check(not okFailure and type(failure) == "string" and string.find(failure, "injected allocation failure", 1, true) ~= nil, "mid-batch engine failure surfaces")
 fixture.failAllocationAt = nil
 check(#workspace:GetChildren() == before, "nothing parented after a mid-batch failure")
-check(fixture.cancelled == cancelled + 1 and fixture.committed == commits, "undo recording cancelled, not committed")
+check(fixture.cancelled == cancelled and fixture.committed == commits, "construction fails before any undo recording opens")
 local orphans = 0
 for index = mark + 1, #fixture.created do if fixture.created[index]:IsDescendantOf(workspace) then orphans += 1 end end
 check(orphans == 0, "no partial instance reached Workspace")
 check(fixture.allocations >= 1500, "failure happened deep in the batch")
+local leaked = 0
+for index = mark + 1, #fixture.created do if not fixture.created[index]._destroyed then leaked += 1 end end
+check(leaked == 0, "every detached allocation destroyed")
+
+-- 3b. A lease lost while yielded between slices: nothing parented, nothing recorded, all destroyed.
+mark, cancelled, commits = #fixture.created, fixture.cancelled, fixture.committed
+fixture.yields, fixture.failAfterYields = 0, 10
+refuses("LEASE", function() return run("scene.build", forest()) end)
+fixture.failAfterYields = nil
+leaked = 0
+for index = mark + 1, #fixture.created do if not fixture.created[index]._destroyed then leaked += 1 end end
+check(#workspace:GetChildren() == before and leaked == 0 and #fixture.created - mark >= 10 * Operations.SLICE_CHECK, "lease lost mid-construction destroys the detached tree")
+check(fixture.cancelled == cancelled and fixture.committed == commits, "lease lost mid-construction records nothing")
+
+-- 3c. ChangeHistory refusing the recording after construction: detached tree destroyed, nothing parented.
+mark = #fixture.created
+fixture.failBegin = true
+refuses("HISTORY", function() return run("scene.build", forest()) end)
+fixture.failBegin = nil
+leaked = 0
+for index = mark + 1, #fixture.created do if not fixture.created[index]._destroyed then leaked += 1 end end
+check(#workspace:GetChildren() == before and leaked == 0, "refused recording destroys the detached tree")
 
 -- 4. Verification failure (engine coercion) is also atomic.
 local bad = forest()

@@ -20,7 +20,7 @@ const path = boundedText(4096);
 const artifactName = id.max(96).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).refine(value => !value.includes('..'));
 const runtime = z.object({ executable: path, version: id, pythonVersion: id, background: z.boolean(),
   capabilities: z.object({ glbExport: z.boolean(), glbImport: z.boolean(), fbxExport: z.boolean(), fbxImport: z.boolean(), cycles: z.boolean() }) });
-const template = z.enum(['hero-prop', 'environment-kit', 'custom-assembly']);
+const template = z.enum(['hero-prop', 'environment-kit', 'custom-assembly', 'procedural']);
 
 export const assetInput = z.strictObject({
   template, name: assetSlug, seed: z.number().int().min(0).max(2147483647).optional(),
@@ -28,6 +28,8 @@ export const assetInput = z.strictObject({
   triangleBudget: z.number().int().min(100).max(50000).optional(),
   renderResolution: z.number().int().min(128).max(1024).optional(), renderSamples: z.number().int().min(4).max(64).optional(),
   recipe: assemblyRecipe.optional(),
+  // Typed by assets_procedural; shared normalization (normalizeProcedural) bounds every field.
+  procedural: z.record(z.string(), z.unknown()).optional(),
 });
 export type SafeAssetInput = z.output<typeof assetInput>;
 export const nativeAdoptGlbInput=z.strictObject({name:assetSlug,path:z.string().min(1).max(4096)}).superRefine((value,context)=>{
@@ -45,8 +47,9 @@ export function safeAssetInput(input: SafeAssetInput): AssetInput {
 }
 
 // Custom response dimensions/color are derived by shared preflight, rather than caller overrides.
-const requestShape = assetInput.omit({ sizeMeters: true, color: true, recipe: true }).required().extend({
+const requestShape = assetInput.omit({ sizeMeters: true, color: true, recipe: true, procedural: true }).required().extend({
   schemaVersion: z.literal(1), sizeMeters: boundedVector(0.01, 40), color: boundedVector(0, 1), recipe: assemblyRecipe.optional(),
+  procedural: z.record(z.string(), z.unknown()).optional(),
 });
 export const assetRequest: z.ZodType<AssetRequest> = requestShape.transform((value, context) => {
   try {

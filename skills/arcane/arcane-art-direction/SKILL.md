@@ -9,7 +9,7 @@ license: MIT
 ## Create a usable style contract
 Identify visual era, shape language, palette, scale, materials, UI typography, lighting and detail hierarchy. Use a small reference set with source/rights recorded. Distinguish copying a reference's construction principles from copying protected assets or branding.
 
-Define hero versus background detail and target-device budgets. Classic studs, stylized low-poly, realistic and bright social worlds are different valid choices; do not impose Hunted's horror look on them. Existing coherent assets remain unless the user asks for redesign.
+Define hero versus background detail and target-device budgets. Classic studs, stylized low-poly, realistic and bright social worlds are different valid choices; do not impose one look on another. Existing coherent assets remain unless the user asks for redesign.
 
 Compare primary forms and proportions before texture polish. Separate a source render, a model viewer and an actual Studio image; only the latter validates engine appearance. Use consistent cameras and lighting for revision comparisons.
 

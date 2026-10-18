@@ -1,5 +1,7 @@
 # Composer model picker
 
+> **Current behavior (18 October 2026):** the picker now has two columns, ChatGPT and Claude, in one shared chat. ChatGPT rows still come only from the live reported catalogue. Claude rows list the CLI's model aliases. Choosing a model from the other column switches provider in the same chat, and Ctrl+Shift+M opens the picker. The sections below record the original ChatGPT-only picker and its evidence.
+
 Arcane opens with one conversation column. The compact Codex model/effort button in the composer opens a nonmodal popover using the existing black/red palette and typography. Its rows come exclusively from the validated live `snapshot.models` catalogue: reported display name, exact model value, and that model's reported efforts. There are no bundled model names, provider aliases, entitlement badges, or subscription-access claims.
 
 ## Selection authority
@@ -50,4 +52,4 @@ Compile using `explicitProjectConfig` from `scripts/compile-product.mjs` with a 
 
 All fixtures are synthetic: no installed Codex/Claude CLI, authentication, Studio, AV, Git, or automatic provider discovery is used. Browser and HTTP tests require permission for the headless temporary browser profile and the loopback fixture server if the execution sandbox blocks them. Existing chat, asset-permission, history, and workspace regression fixtures are run separately against the same private output.
 
-Verified on 2026-10-13 in `runtime/composer-picker-proof-y9LONq`: [147-file private compile](../../runtime/composer-picker-proof-y9LONq/compile.log) passed; [picker tests](../../runtime/composer-picker-proof-y9LONq/picker-tests.log) passed 7/7, including five real Edge fixture tests; [existing regressions](../../runtime/composer-picker-proof-y9LONq/regression-tests.log) passed 85 with five optional browser fixtures skipped. The three viewport screenshots in that private directory were visually inspected. Root `dist` was not used as output.
+Verified on 2026-10-13 in `runtime/composer-picker-proof-y9LONq`: 147-file private compile (`runtime/composer-picker-proof-y9LONq/compile.log`, local evidence, not committed) passed; picker tests (`runtime/composer-picker-proof-y9LONq/picker-tests.log`, local evidence, not committed) passed 7/7, including five real Edge fixture tests; existing regressions (`runtime/composer-picker-proof-y9LONq/regression-tests.log`, local evidence, not committed) passed 85 with five optional browser fixtures skipped. The three viewport screenshots in that private directory were visually inspected. Root `dist` was not used as output.

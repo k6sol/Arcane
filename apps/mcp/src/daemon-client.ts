@@ -16,6 +16,7 @@ import {nativeStudioReconstructionResponse,parseNativeStudioReconstructionStatus
 import { playtestJobResponse, playtestListResponse, playtestPreparedResponse, playtestRequestInput, type PlaytestRequest } from './playtest-schemas.js';
 import { viewportCaptureInput, viewportCaptureResponse, type ViewportCaptureInput } from './viewport-tool.js';
 
+const ASSET_PREVIEW_BYTES = 8 * 1024 * 1024;
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
 const WAIT_LIMIT = 60_000;
@@ -379,6 +380,30 @@ export class DaemonClient {
       const value=await this.http('/v1/assets/native/studio-reconstruction-status?jobId='+encodeURIComponent(jobId),deadline.signal,undefined,false,true);
       try{return parseNativeStudioReconstructionStatusResponse(value,jobId);}catch{throw new BridgeError('PROTOCOL','Daemon returned invalid historical reconstruction evidence.');}
     }finally{deadline.dispose();}
+  }
+
+  /** Read one of the two manifest-approved review PNGs (preview-hero/preview-side) as bytes. */
+  async assetsPreview(jobId: string, path: 'preview-hero.png' | 'preview-side.png', options: WaitOptions = {}): Promise<Buffer> {
+    (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);
+    if (path !== 'preview-hero.png' && path !== 'preview-side.png') throw new BridgeError('INPUT', 'Choose preview-hero.png or preview-side.png.');
+    const deadline = this.deadline(options);
+    try {
+      const route = (this.assetAudience === 'native-session' ? '/v1/assets/native/preview' : '/v1/assets/preview') + '?jobId=' + encodeURIComponent(jobId) + '&path=' + encodeURIComponent(path);
+      let response: Response;
+      try { response = await fetch(this.url + route, { headers: { Authorization: `Bearer ${this.#token}`, Accept: 'image/png, application/json' }, redirect: 'error', signal: deadline.signal }); }
+      catch { throw new BridgeError(deadline.signal.aborted ? 'WAIT_ABORTED' : 'DAEMON_UNREACHABLE', 'The asset preview could not be read from the local daemon.'); }
+      if (Number(response.headers.get('content-length') ?? 0) > ASSET_PREVIEW_BYTES) { await response.body?.cancel(); throw new BridgeError('RESPONSE_LIMIT', 'Preview exceeds its byte bound; use a lower renderResolution.'); }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > ASSET_PREVIEW_BYTES) throw new BridgeError('RESPONSE_LIMIT', 'Preview exceeds its byte bound; use a lower renderResolution.');
+      if (!response.ok) {
+        let detail: { error?: unknown; message?: unknown } = {};
+        try { detail = JSON.parse(bytes.toString('utf8')) as typeof detail; } catch { /* fixed message below */ }
+        throw new BridgeError(typeof detail.error === 'string' && /^[A-Z_]{1,64}$/.test(detail.error) ? detail.error : 'DAEMON_HTTP',
+          typeof detail.message === 'string' ? this.redact(detail.message.slice(0, 2048)) : `The local daemon refused the preview (HTTP ${response.status}).`, response.status >= 400 && response.status < 500);
+      }
+      if (response.headers.get('content-type') !== 'image/png' || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new BridgeError('PROTOCOL', 'Daemon preview is not a PNG.');
+      return bytes;
+    } finally { deadline.dispose(); }
   }
 
   private async readRecord<T>(path: string, schema: z.ZodType<T>, options: WaitOptions): Promise<T> {

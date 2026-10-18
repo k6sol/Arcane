@@ -384,7 +384,7 @@ export class ChatTabs {
       for (const [index,row] of this.rows.entries()) {
         const wrap=this.doc.createElement('span');wrap.setAttribute('role','presentation');wrap.className='chat-tab';
         const button=this.doc.createElement('button');button.type='button';button.setAttribute('role','tab');button.dataset.chatKey=row.key;
-        button.textContent=this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);
+        button.textContent=this.rowLabel(row,index);
         prependProviderLogo(this.doc,button,'codex'); // Codex tabs belong to ChatGPT.
         button.title=this.safe(row.kind==='draft'?'Unsent local draft':row.threadId!);
         button.setAttribute('aria-selected',String(row.key===this.activeKey));button.setAttribute('aria-controls','codex-messages');button.tabIndex=row.key===this.activeKey?0:-1;
@@ -398,17 +398,24 @@ export class ChatTabs {
         if(create)create.disabled=!this.newChatAllowed&&!alternate;
       }
     }
-    const savedSignature=JSON.stringify([this.catalogueRevision,blocked]);
+    const savedSignature=JSON.stringify([this.catalogueRevision,blocked,this.presentationRevision,this.activeKey,alternate]);
     if (this.savedMenu&&savedSignature!==this.savedSignature) {
-      this.savedSignature=savedSignature;
-      this.savedMenu.replaceChildren();const summary=this.doc.createElement('summary');summary.textContent='Saved chats';this.savedMenu.append(summary);
+      this.savedSignature=savedSignature;const menu=this.savedMenu,focus=chatSwitchFocus(this.doc,menu);
+      const active=this.rows.findIndex(row=>row.key===this.activeKey);
+      menu.replaceChildren(chatSwitchSummary(this.doc,active<0?'Saved chats':this.rowLabel(this.rows[active]!,active),'codex'));
+      // Narrow widths hide the tab strip; this sheet then lists the open chats and New chat above Saved chats.
+      menu.append(chatSwitchOpenSection(this.doc,menu,this.rows.map((row,index)=>({key:row.key,label:this.rowLabel(row,index),current:row.key===this.activeKey,
+        selectDisabled:blocked&&row.key!==this.activeKey,closeDisabled:blocked&&row.key===this.activeKey})),{
+        select:key=>void this.callbacks.select(key),close:key=>void this.callbacks.close(key),newChat:()=>this.requestNewChat(),newDisabled:!this.newChatAllowed&&!alternate}));
       for(const saved of this.catalogue) {
         const button=this.doc.createElement('button');button.type='button';button.textContent=this.safe(saved.threadId);button.disabled=blocked;
         button.addEventListener('click',()=>void this.callbacks.openSaved(saved.threadId));this.savedMenu.append(button);
       }
       if(!this.catalogue.length){const empty=this.doc.createElement('p');empty.textContent='No saved native chats.';this.savedMenu.append(empty);}
+      restoreChatSwitchFocus(menu,focus);
     }
   }
+  private rowLabel(row:Tab,index:number):string{return this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);}
   private alternateNewChat(): boolean { try { return this.options.alternateNewChat?.active()===true; } catch { return false; } }
   private requestNewChat(): void {
     if (!this.mounted) return;
@@ -420,6 +427,52 @@ export class ChatTabs {
     void this.callbacks.newChat();
   }
   stop(): void {this.newChatAllowed=false;this.persist();for(const fn of this.cleanup.splice(0))fn();this.savedMenu?.remove();this.savedMenu=null;this.mounted=false;this.signature='';this.savedSignature='';}
+}
+
+/** One open chat in the narrow chat switcher (both providers). Presentation only. */
+export interface ChatSwitchRow { key:string; label:string; current:boolean; selectDisabled:boolean; closeDisabled:boolean }
+export interface ChatSwitchActions { select(key:string):void; close(key:string):void; newChat():void; newDisabled:boolean }
+/** Saved chats summary. Wide layouts show "Saved chats"; on narrow layouts studio.css shows the current chat instead, so the
+ * summary becomes the chat switcher and the accessible name still starts with the visible title. */
+export function chatSwitchSummary(doc:Document,current:string,provider:'codex'|'claude'):HTMLElement {
+  const summary=doc.createElement('summary');
+  const name=doc.createElement('span');name.className='chat-switch-current';name.textContent=current;prependProviderLogo(doc,name,provider);
+  const label=doc.createElement('span');label.className='chat-switch-label';label.textContent='Saved chats';
+  summary.append(name,label);return summary;
+}
+/** Open chats and New chat, listed in the Saved chats sheet; studio.css shows this group only on narrow layouts, where the tab strip is hidden. */
+export function chatSwitchOpenSection(doc:Document,menu:HTMLDetailsElement,rows:readonly ChatSwitchRow[],actions:ChatSwitchActions):HTMLElement {
+  const section=doc.createElement('div');section.className='chat-switch-open';section.setAttribute('role','group');section.setAttribute('aria-label','Open chats');
+  const heading=doc.createElement('p');heading.className='chat-switch-heading';heading.textContent='Open chats';heading.setAttribute('aria-hidden','true');section.append(heading);
+  for(const row of rows){
+    const line=doc.createElement('div');line.className='chat-switch-row';
+    const open=doc.createElement('button');open.type='button';open.className='chat-switch-select';open.textContent=row.label;open.dataset.openChat=row.key;
+    open.setAttribute('aria-current',String(row.current));open.disabled=row.selectDisabled;
+    open.addEventListener('click',()=>{menu.open=false;if(!row.current)actions.select(row.key);});
+    const close=doc.createElement('button');close.type='button';close.className='chat-switch-close';close.textContent='×';close.dataset.closeChat=row.key;
+    close.setAttribute('aria-label','Close '+row.label);close.title='Close '+row.label;close.disabled=row.closeDisabled;
+    close.addEventListener('click',()=>actions.close(row.key));
+    line.append(open,close);section.append(line);
+  }
+  const create=doc.createElement('button');create.type='button';create.className='chat-switch-new';create.textContent='New chat';create.disabled=actions.newDisabled;
+  create.addEventListener('click',()=>{menu.open=false;actions.newChat();});
+  const saved=doc.createElement('p');saved.className='chat-switch-heading';saved.textContent='Saved chats';saved.setAttribute('aria-hidden','true');
+  section.append(create,saved);return section;
+}
+/** Which control inside a rebuilt Saved chats menu had focus, so a re-render never drops keyboard focus to the page. */
+export function chatSwitchFocus(doc:Document,menu:HTMLElement):((node:HTMLElement)=>boolean)|null {
+  const node=doc.activeElement as HTMLElement|null;
+  if(!node||typeof node.closest!=='function'||node.closest('details')!==menu)return null;
+  if(node.tagName==='SUMMARY')return candidate=>candidate.tagName==='SUMMARY';
+  const data=node.dataset??{};
+  for(const key of ['openChat','closeChat','conversationId'] as const){const value=data[key];if(value)return candidate=>candidate.dataset?.[key]===value;}
+  const name=node.className;return name?candidate=>candidate.tagName===node.tagName&&candidate.className===name:candidate=>candidate.tagName==='SUMMARY';
+}
+export function restoreChatSwitchFocus(menu:HTMLDetailsElement,match:((node:HTMLElement)=>boolean)|null):void {
+  if(!match||typeof menu.querySelectorAll!=='function')return;
+  const nodes=Array.from(menu.querySelectorAll<HTMLElement>('summary,button'));
+  const target=(menu.open?nodes.find(node=>match(node)&&!(node as HTMLButtonElement).disabled):null)??nodes.find(node=>node.tagName==='SUMMARY');
+  try{target?.focus({preventScroll:true});}catch{/* Focus is presentation only. */}
 }
 
 export interface WorkspacePreferencesBridge {

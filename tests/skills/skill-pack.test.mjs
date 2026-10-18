@@ -215,7 +215,7 @@ test('quarantined entries cannot be loaded through experimental opt-in', async t
 test('scene recipes are prescriptive: terrain ground, natural Poisson placement, anti-ring rule and batch tools', async () => {
   const read = async id => (await readContained(ROOT, `skills/arcane/${id}/SKILL.md`)).text;
   const nature = await read('arcane-natural-scenes'), architecture = await read('arcane-architectural-features'), world = await read('arcane-world-building');
-  for (const text of ['environment_apply', 'terrain', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
+  for (const text of ['environment_apply', 'terrain', 'terrain_generate', '`flatten` the clearing', '`river`', '`path`', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
     'Pine', 'Oak', 'Birch', 'tint', 'scale [0.75,1.25]', 'CastShadow false', 'ClockTime', 'atmosphere', '800-2500']) assert.ok(nature.includes(text), text);
   for (const text of ['scene_build', 'Fluting', 'capital', 'spiral stair', 'SpawnLocation', 'Never rotate it', 'flush', 'Marble', 'Slate', 'Limestone', 'scene_update'])
     assert.ok(architecture.includes(text), text);
@@ -258,7 +258,7 @@ test('photoreal skill encodes mood presets with exact environment_apply fields, 
   for (const mood of ['Clear day', 'Golden hour', 'Foggy forest', 'Night', 'Horror', 'Sci-fi']) assert.ok(text.includes(`| ${mood} |`), mood);
   for (const field of ['ClockTime', 'ExposureCompensation', 'OutdoorAmbient', 'ColorShift_Top', 'ShadowSoftness', 'EnvironmentDiffuseScale', 'EnvironmentSpecularScale',
     'Density', 'Haze', 'Decay', 'TintColor', 'Technology = Future', 'Decoration = true', 'MaterialVariant', 'SurfaceAppearance', 'DepthOfFieldEffect',
-    'FogStart/FogEnd are ignored', 'avatar 5.5 studs', 'Door 4 x 7.5', 'No identical neighbours', 'studio_viewport_capture', 'environment_apply',
+    'FogStart/FogEnd are ignored', 'avatar 5.5 studs', 'Door 4 x 7.5', 'No identical neighbours', 'studio_viewport_capture', 'environment_apply', 'terrain_generate` first',
     'preset', 'technology: "Future"', 'terrainDecoration: true', 'materials: [', 'clear_day', 'golden_hour', 'foggy_forest', 'night', 'horror', 'sci_fi']) assert.ok(text.includes(field), field);
   assert.doesNotMatch(text, /Arcane cannot set/, 'Technology, Decoration and MaterialVariants are direct');
   assert.doesNotMatch(text, /\bExposure \d/);
@@ -269,6 +269,9 @@ test('interface skill is a design system with tokens, responsive rules, accessib
   for (const rule of ['UICorner', 'UIStroke', 'UIGradient', 'UIPadding', 'UIListLayout', 'UIGridLayout', 'UIAspectRatioConstraint', 'UIScale', 'UISizeConstraint',
     'UITextSizeConstraint', 'BuilderSans', 'Activated', '44 px', '4.5:1', 'ResetOnSpawn false', 'CoreUISafeInsets', 'script_set_enabled', 'click-gui', 'arcane-interface:recipes'])
     assert.ok(text.includes(rule), rule);
+  for (const rule of ['scene_build', 'container: "ScreenGui"', 'scene.gui', 'prototypes', 'use` + `ui` overrides', 'script_update', 'cannot show a ScreenGui in Edit mode', 'SurfaceGui'])
+    assert.ok(text.includes(rule), rule);
+  assert.doesNotMatch(text, /cannot create GuiObjects|built at runtime by code/, 'GUI trees are built directly, not by scripts');
   const pack = await packSkills(['arcane-interface'], { root: ROOT, allowExperimental: true, references: ['arcane-interface:recipes'] });
   for (const recipe of ['## Main menu', '## HUD with health and stamina', '## Shop', '## Inventory grid', '## Notifications', '## Loading screen', '## Settings panel'])
     assert.ok(pack.context.includes(recipe), recipe);
@@ -284,6 +287,20 @@ test('scripting, security and systems skills are prescriptive and cross-linked i
   for (const recipe of ['## Checkpoints', '## Round loop', '## Leaderstats', '## Doors and keys', '## NPC dialogue', '## Pathfinding NPC', 'scene_build',
     'assert-player-attribute', 'arcane-rounds', 'arcane-npc', 'arcane-datastore-safety', 'ComputeAsync', 'leaderstats']) assert.ok(systems.includes(recipe), recipe);
   for (const id of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-world-building']) assert.ok((await readSkill(id)).includes('arcane-photoreal'), id);
+});
+
+test('characters skill covers rigs, verifiable default animations, pathfinding, states, dialogue and authority, and is cross-linked', async () => {
+  const text = await readSkill('arcane-characters'), systems = await readSkill('arcane-gameplay-systems');
+  for (const rule of ['CreateHumanoidModelFromDescription', 'HumanoidDescription', 'HumanoidRigType.R15', 'scene.characters', 'studio_asset_search', 'R15 rig',
+    'AnimationController', 'Animator', 'LoadAnimation', 'Never invent animation ids', 'character.Animate', 'TweenService', 'PathfindingService', 'AgentRadius',
+    'ComputeAsync', 'PathStatus.Success', 'PathWaypointAction.Jump', 'MoveToFinished', 'path.Blocked', 'Stuck detection', '| Idle |', '| Patrol |', '| Chase |',
+    '| Flee |', 'ProximityPrompt', 'scene_build', 'arcane-interface', 'SetNetworkOwner(nil)', 'server decides', 'script_set_enabled', 'playtest_request',
+    'assert-player-attribute', 'arcane-gameplay-systems', 'arcane-npc']) assert.ok(text.includes(rule), rule);
+  // Only the standard Animate defaults are named, never as a ready-made asset URL.
+  for (const [, id] of text.matchAll(/\b(\d{6,})\b/g)) assert.ok(['507766666', '507777826', '507767714', '507765000', '507767968', '507765644'].includes(id), id);
+  assert.ok(systems.includes('arcane-characters'));
+  const registry = await loadRegistry(ROOT), entry = registry.skills.find(skill => skill.id === 'arcane-characters');
+  for (const keyword of ['npc', 'character', 'enemy', 'animation', 'rig', 'pathfinding', 'ai']) assert.ok(entry.keywords.includes(keyword), keyword);
 });
 
 test('skill entrypoints stay lean enough for the default router budget', async () => {

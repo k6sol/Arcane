@@ -5,6 +5,7 @@ local P = V.geometryProperties(LegacyProperties)
 local Registry = require(script.Parent.Registry)
 local AssetTransfer = require(script.Parent.AssetTransfer)
 local AssetPlacement = require(script.Parent.AssetPlacement)
+local TerrainGen = require(script.Parent.TerrainGen)
 local Operations = {}
 Operations.__index = Operations
 type Operations = any
@@ -22,7 +23,33 @@ function Operations.new(pair: any, gameModel: any, http: any, assetProgress: (()
 		gameModel = gameModel, assetTransfers = {}, assetProgress = assetProgress,
 		http = http, editor = gameModel:GetService("ScriptEditorService"),
 		history = gameModel:GetService("ChangeHistoryService"), selection = gameModel:GetService("Selection"),
-		collection = gameModel:GetService("CollectionService"), mutations = {}, restored = {}}, Operations)
+		collection = gameModel:GetService("CollectionService"), mutations = {}, restored = {},
+		sliceSeconds = Operations.SLICE_SECONDS, slices = 0}, Operations)
+end
+
+-- Cooperative slicing for long CPU/engine loops (detached scene.build construction, terrain
+-- field and chunk preparation). Every SLICE_CHECK steps the clock is read; once SLICE_SECONDS of
+-- work has run since the last resume (a step may weigh more, e.g. a terrain row), yield one
+-- frame so Studio keeps drawing, then re-run the command guard (session, lease expiry, Edit mode) before doing anything else. Small commands
+-- never yield. The guard after a yield is the only way work resumes, so a lost lease, a
+-- disconnect or entering Play stops the command at the next slice boundary.
+Operations.SLICE_SECONDS = 0.02
+Operations.SLICE_CHECK = 32
+function Operations:slicer(guard: () -> ()): (number?) -> ()
+	local started, steps = os.clock(), 0
+	-- weight 0 forces a yield now (a terrain chunk boundary) and restarts the budget.
+	return function(weight: number?): ()
+		if weight ~= 0 then
+			steps += math.max(1, weight or 1)
+			if steps < Operations.SLICE_CHECK then return end
+			steps = 0
+			if os.clock() - started < self.sliceSeconds then return end
+		end
+		task.wait()
+		self.slices += 1
+		guard()
+		started = os.clock()
+	end
 end
 
 -- Internal intake is also reached by the fixed host-owned asset.stage_packet
@@ -174,7 +201,7 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	end
 	current()
 	owners.consumed[runId] = true; owners.count += 1 -- BEFORE resolving/allocating an engine service.
-	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, target = owned.target, continuity = owned.continuity}
+	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, target = owned.target, continuity = owned.continuity, service = nil}
 	owners.resources[identity.digest] = owner
 	owned.guard = function(): ()
 		current()
@@ -186,7 +213,8 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		owned.guard()
 		local entries = owned.receiver:reconstruct(service)
 		-- No guard/yield between receiving ownership and registering EVERY mesh.
-		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false} end
+		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false, object = entry.object, material = entry.material} end
+		owner.service = service -- Retained for materialization; never re-acquired elsewhere.
 		owned.guard()
 		local summary = {}
 		for _, entry in ipairs(entries) do
@@ -212,6 +240,75 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	-- only in-progress transfers count toward the two-transfer bound.
 	if self.assetTransfers[identity.digest] == owned then self.assetTransfers[identity.digest] = nil end
 	return output
+end
+
+-- Materialization of ONE retained reconstruction into a detached Model of MeshParts.
+-- Reached only through scene.place_asset with an "editable-<transfer digest>" source,
+-- so the result is adopted by AssetPlacement (fit, ground, pivot, anchor, parent) under
+-- one undo recording and receipt. No upload, publication or asset ID is created: the
+-- MeshParts reference the in-memory EditableMeshes owned by this plugin lifetime.
+-- API (create.roblox.com AssetService.CreateMeshPartAsync, checked 2026-10-18): meshContent = Content.fromObject(editableMesh).
+local STUDS_PER_METER = 1 / 0.28
+local PART_MATERIALS = table.freeze({bark = "Wood", leaves = "Grass", rock = "Slate", stone = "Marble", foliage = "Grass"})
+local function srgb(linear: number): number
+	local c = math.clamp(if linear == linear then linear else 0, 0, 1)
+	return if c <= 0.0031308 then c * 12.92 else 1.055 * c ^ (1 / 2.4) - 0.055
+end
+function Operations:materializeReconstruction(digest: string, guard: () -> ()): (any, () -> ())
+	if #digest ~= 64 or not string.match(digest, "^[0-9a-f]+$") then V.fail("WATCH", "Expected an editable-<transfer digest> source.") end
+	local owners = assetOwners[self]
+	local owner = owners and owners.resources[digest]
+	if not owner or not owner.finished or owner.retired or owner.service == nil or #owner.meshes == 0 then
+		V.fail("WATCH", "No reconstructed meshes are retained for this transfer in this plugin session; run assets_reconstruct_studio_import first (same Studio session).")
+	end
+	if owner.materializing or (owner.placed and owner.placed.Parent ~= nil) then
+		V.fail("STATE", "This reconstruction is already placed; clone it with scene_build templates or restore its receipt first.")
+	end
+	local current = self:assetTargetGuard(owner.target, guard)
+	current()
+	owner.materializing = true
+	local model = Instance.new("Model")
+	local ok, err = pcall(function()
+		for index, resource in ipairs(owner.meshes) do
+			current()
+			if owner.retired or resource.disposed or resource.mesh == nil then V.fail("STATE", "Retained meshes were released before placement.") end
+			local object = resource.object
+			if type(object) ~= "table" or type(object.worldBounds) ~= "table" then V.fail("STATE", "Retained mesh metadata is incomplete.") end
+			local collision = object.role == "collision"
+			local part = owner.service:CreateMeshPartAsync(Content.fromObject(resource.mesh), {
+				CollisionFidelity = if collision then Enum.CollisionFidelity.Hull else Enum.CollisionFidelity.Box,
+				RenderFidelity = Enum.RenderFidelity.Precise})
+			current()
+			if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
+			part.Parent = model
+			local low, high = object.worldBounds.min, object.worldBounds.max
+			local size = {}
+			for axis = 1, 3 do size[axis] = math.max(0.05, (high[axis] - low[axis]) * STUDS_PER_METER) end
+			part.Size = Vector3.new(size[1], size[2], size[3])
+			part.CFrame = CFrame.new((low[1] + high[1]) / 2 * STUDS_PER_METER, (low[2] + high[2]) / 2 * STUDS_PER_METER, (low[3] + high[3]) / 2 * STUDS_PER_METER)
+			local name = if type(object.name) == "string" then string.sub(object.name, 1, 100) else "Part" .. index
+			part.Name = name
+			if collision then
+				part.Transparency, part.CanCollide, part.CastShadow, part.CanQuery = 1, true, false, false
+			else
+				part.CanCollide = false
+				local key = string.match(name, "_([%a]+)$")
+				local material = key and PART_MATERIALS[string.lower(key)]
+				if material then part.Material = (Enum.Material :: any)[material] end
+				local color = resource.material and resource.material.baseColor
+				if type(color) == "table" then part.Color = Color3.new(srgb(color[1]), srgb(color[2]), srgb(color[3])) end
+			end
+		end
+		current()
+	end)
+	owner.materializing = false
+	if not ok then
+		pcall(function() model:Destroy() end)
+		error(err, 0)
+	end
+	model.Name = "ArcaneProcedural"
+	-- AssetPlacement calls this once the adopted Model is parented.
+	return model, function() owner.placed = model end
 end
 
 function Operations:source(instance: any): string
@@ -541,12 +638,13 @@ function Operations:createEffect(command: any, args: any, guard: () -> ()): any
 	local className = args.className
 	local name = V.string(args.name, "name", 100)
 	local host = LegacyProperties.hostKind(parent)
-	if not host or not table.find(LegacyProperties.EFFECT_HOSTS[className], host) then V.fail("CLASS", className .. " must be created inside a " .. table.concat(LegacyProperties.EFFECT_HOSTS[className], " or ") .. ".") end
+	if not host or not table.find(LegacyProperties.hostsOf(className), host) then V.fail("CLASS", className .. " must be created inside a " .. table.concat(LegacyProperties.hostsOf(className), " or ") .. ".") end
 	if self.registry.count >= V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
-	local decoded = LegacyProperties.decodeEffects(className, if args.properties == nil then {} else args.properties, function(tag: any, label: string): any
+	local decoded = LegacyProperties.decodeEffects(className, if args.properties == nil then {} else args.properties, function(tag: any, label: string, kind: string): any
 		V.fields(tag, {"type", "ref"}, label)
 		local target = self.registry:resolve(tag.ref)
-		if not target:IsA("Attachment") then V.fail("PROPERTY", label .. " must name an Attachment.") end
+		local wanted = LegacyProperties.REF_CLASSES[kind]
+		if not target:IsA(wanted) then V.fail("PROPERTY", label .. " must name a " .. wanted .. ".") end
 		return target
 	end)
 	return self:record(command, guard, function(progress: any): any
@@ -572,7 +670,7 @@ end
 
 function Operations:create(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"parent", "className", "name", "properties"}, "create arguments")
-	if type(args.className) == "string" and LegacyProperties.EFFECT_SPECS[args.className] then return self:createEffect(command, args, guard) end
+	if LegacyProperties.specsOf(args.className) then return self:createEffect(command, args, guard) end
 	local parent = self.registry:resolve(args.parent)
 	if type(args.className) ~= "string" or not table.find(P.CLASSES, args.className) then V.fail("CLASS", "Class is not creatable.") end
 	local name = V.string(args.name, "name", 100)
@@ -640,10 +738,10 @@ function Operations:planEffect(item: any, index: number, name: string, into: num
 	local className = item.className
 	if type(className) ~= "string" or not LegacyProperties.EFFECT_SPECS[className] then V.fail("CLASS", "Unsupported effect class.") end
 	if not table.find(LegacyProperties.EFFECT_HOSTS[className], host) then V.fail("INPUT", className .. " must be inside a " .. table.concat(LegacyProperties.EFFECT_HOSTS[className], " or ") .. " item.") end
-	local decoded = LegacyProperties.decodeEffects(className, if item.properties == nil then {} else item.properties, function(tag: any, label: string): any
+	local decoded = LegacyProperties.decodeEffects(className, if item.properties == nil then {} else item.properties, function(tag: any, label: string, kind: string): any
 		V.fields(tag, {"type", "item"}, label)
 		local target = effectHosts[V.integer(tag.item, 1, math.max(1, index - 1), label)]
-		if not target or target.kind ~= "attachment" then V.fail("INPUT", "Attachment refs must name an earlier Attachment item of this build.") end
+		if not target or target.kind ~= kind then V.fail("INPUT", LegacyProperties.REF_CLASSES[kind] .. " refs must name an earlier " .. LegacyProperties.REF_CLASSES[kind] .. " item of this build.") end
 		return table.freeze({planIndex = target.plan})
 	end)
 	return {className = className, name = name, parent = into, effect = decoded}
@@ -664,9 +762,24 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 	local parent = self.registry:resolve(args.parent)
 	local templates = if args.templates == nil then {} else AssetPlacement.buildTemplates(self, args.templates)
 	local cloneExtra = 0 -- template descendants copied by clone items
-	local rootSpec = V.fields(args.container, {"className", "name"}, "build container")
-	if rootSpec.className ~= "Model" and rootSpec.className ~= "Folder" then V.fail("CLASS", "The build root must be a Model or Folder.") end
-	local plan: {any} = {{className = rootSpec.className, name = V.string(rootSpec.name, "name", 100), parent = 0}}
+	local rootSpec = V.fields(args.container, {"className", "name", "properties"}, "build container")
+	-- A ScreenGui root builds a whole screen UI atomically under StarterGui (or a Model/Folder template holder).
+	local guiRoot = rootSpec.className == "ScreenGui"
+	if not guiRoot and rootSpec.className ~= "Model" and rootSpec.className ~= "Folder" then V.fail("CLASS", "The build root must be a Model, Folder or ScreenGui.") end
+	local GUI_HOSTS = LegacyProperties.GUI_HOSTS
+	local function noRefs(): any return V.fail("PROPERTY", "GUI classes take no references.") end
+	local function guiProperties(className: string, values: any): {[string]: any}
+		return LegacyProperties.decodeEffects(className, if values == nil then {} else values, noRefs)
+	end
+	local rootEffect: any = nil
+	if guiRoot then
+		local host = LegacyProperties.hostKind(parent)
+		if not host or not table.find(GUI_HOSTS.ScreenGui, host) then V.fail("CLASS", "A ScreenGui build root must be built in StarterGui or a Model/Folder.") end
+		rootEffect = guiProperties("ScreenGui", rootSpec.properties)
+	elseif rootSpec.properties ~= nil then
+		V.fail("INPUT", "Only a ScreenGui build root takes properties.")
+	end
+	local plan: {any} = {{className = rootSpec.className, name = V.string(rootSpec.name, "name", 100), parent = 0, effect = rootEffect}}
 	local function add(entry: any): number
 		table.insert(plan, entry)
 		if #plan > L.instances then V.fail("BODY_LIMIT", "A build may create at most " .. L.instances .. " instances.") end
@@ -675,6 +788,28 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 	local prototypes: {any} = {}
 	local rawPrototypes = if args.prototypes == nil then V.array({}) else args.prototypes
 	for _, raw in ipairs(V.list(rawPrototypes, L.prototypes, "prototypes")) do
+		if V.object(raw, "prototype").gui ~= nil then
+			-- GUI prototype: element 1 is the root (parent 0); later elements name an earlier hosting element.
+			local guiProto = V.fields(raw, {"name", "gui"}, "GUI prototype")
+			V.string(guiProto.name, "prototype name", 100)
+			local elements: {any} = {}
+			for index, rawElement in ipairs(V.list(guiProto.gui, L.prototypeParts, "GUI prototype elements")) do
+				local element = V.fields(rawElement, {"className", "name", "parent", "properties"}, "prototype element")
+				local className = element.className
+				if type(className) ~= "string" or not LegacyProperties.GUI_SPECS[className] then V.fail("CLASS", "Unsupported GUI prototype class.") end
+				local parentIndex = if element.parent == nil then 0 else V.integer(element.parent, 0, index - 1, "element parent")
+				if (index == 1) ~= (parentIndex == 0) then V.fail("INPUT", "The first element is the prototype root (parent 0); later elements name an earlier element.") end
+				if index > 1 then
+					local host = LegacyProperties.GUI_HOST_CLASSES[elements[parentIndex].className]
+					if not host or not table.find(GUI_HOSTS[className], host) then V.fail("INPUT", className .. " cannot be inside " .. elements[parentIndex].className .. ".") end
+				end
+				table.insert(elements, {className = className, name = V.string(element.name, "element name", 100), parent = parentIndex,
+					effect = guiProperties(className, element.properties)})
+			end
+			if #elements == 0 then V.fail("INPUT", "A GUI prototype needs at least one element.") end
+			table.insert(prototypes, {gui = elements})
+			continue
+		end
 		local proto = V.fields(raw, {"name", "weld", "parts"}, "prototype")
 		V.string(proto.name, "prototype name", 100)
 		local parts: {any} = {}
@@ -697,11 +832,43 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 		local item = V.object(raw, "build item")
 		local parentIndex = V.integer(item.parent, 0, index - 1, "item parent")
 		local into = if parentIndex == 0 then 1 else containers[parentIndex]
-		if not into and item.kind == "effect" and effectHosts[parentIndex] then into = effectHosts[parentIndex].plan end
+		local nested = item.kind == "effect" or item.kind == "gui" or item.kind == "stamp"
+		if not into and nested and effectHosts[parentIndex] then into = effectHosts[parentIndex].plan end
 		if not into then V.fail("INPUT", "Only group items can contain other items.") end
+		if guiRoot and parentIndex == 0 and item.kind ~= "gui" and item.kind ~= "stamp" then V.fail("INPUT", "A ScreenGui build root holds only gui and stamp items.") end
+		local hostOf = if parentIndex == 0 then (if guiRoot then "layer" else "group") elseif containers[parentIndex] then "group" else effectHosts[parentIndex].kind
 		local name = V.string(item.name, "item name", 100)
 		local created: number
-		if item.kind == "group" then
+		if item.kind == "gui" then
+			V.fields(item, {"kind", "className", "name", "parent", "properties", "key"}, "gui item")
+			local className = item.className
+			if type(className) ~= "string" or not LegacyProperties.GUI_SPECS[className] then V.fail("CLASS", "Unsupported GUI class.") end
+			if not table.find(GUI_HOSTS[className], hostOf) then V.fail("INPUT", className .. " must be inside a " .. table.concat(GUI_HOSTS[className], " or ") .. " item.") end
+			created = add({className = className, name = name, parent = into, effect = guiProperties(className, item.properties)})
+			local provides = LegacyProperties.GUI_HOST_CLASSES[className]
+			if provides then effectHosts[index] = {plan = created, kind = provides} end
+		elseif item.kind == "stamp" then
+			-- One copy of a GUI prototype; properties override the prototype root's own properties.
+			V.fields(item, {"kind", "template", "name", "parent", "properties", "key"}, "stamp item")
+			local proto = prototypes[V.integer(item.template, 1, math.max(1, #prototypes), "prototype index")]
+			if not proto or not proto.gui then V.fail("INPUT", "A stamp names an unknown GUI prototype.") end
+			local root = proto.gui[1]
+			if not table.find(GUI_HOSTS[root.className], hostOf) then V.fail("INPUT", root.className .. " must be inside a " .. table.concat(GUI_HOSTS[root.className], " or ") .. " item.") end
+			local merged, count = table.clone(root.effect), 0
+			for key, value in pairs(guiProperties(root.className, item.properties)) do merged[key] = value end
+			for _ in pairs(merged) do count += 1 end
+			if count > LegacyProperties.EFFECT_LIMITS.properties then V.fail("INPUT", "Too many properties on the stamped prototype root.") end
+			LegacyProperties.crossCheck(root.className, merged)
+			local planned: {number} = {}
+			for elementIndex, element in ipairs(proto.gui) do
+				local first = elementIndex == 1
+				planned[elementIndex] = add({className = element.className, name = if first then name else element.name,
+					parent = if first then into else planned[element.parent], effect = if first then merged else element.effect})
+			end
+			created = planned[1]
+			local provides = LegacyProperties.GUI_HOST_CLASSES[root.className]
+			if provides then effectHosts[index] = {plan = created, kind = provides} end
+		elseif item.kind == "group" then
 			V.fields(item, {"kind", "className", "name", "parent", "key"}, "group item")
 			if item.className ~= "Model" and item.className ~= "Folder" then V.fail("CLASS", "Group items must be Model or Folder.") end
 			created = add({className = item.className, name = name, parent = into})
@@ -712,12 +879,14 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			created = add({className = item.className, name = name, parent = into, properties = self:buildProperties(item.className, item.properties)})
 			effectHosts[index] = {plan = created, kind = "part"}
 		elseif item.kind == "effect" then
-			created = add(self:planEffect(item, index, name, into, if parentIndex == 0 or containers[parentIndex] then "group" else effectHosts[parentIndex].kind, effectHosts))
-			if item.className == "Attachment" then effectHosts[index] = {plan = created, kind = "attachment"} end
+			created = add(self:planEffect(item, index, name, into, hostOf, effectHosts))
+			local provides = LegacyProperties.EFFECT_HOST_CLASSES[item.className]
+			if provides then effectHosts[index] = {plan = created, kind = provides} end
 		elseif item.kind == "place" then
 			V.fields(item, {"kind", "template", "name", "parent", "at", "yaw", "scale", "tint", "ground", "key"}, "placement")
 			local proto = prototypes[V.integer(item.template, 1, math.max(1, #prototypes), "prototype index")]
 			if not proto then V.fail("INPUT", "Placement names an unknown prototype.") end
+			if proto.gui then V.fail("INPUT", "GUI prototypes are stamped (kind stamp), not placed.") end
 			local at = table.clone(buildTriple(item.at, -100000, 100000, "placement position"))
 			if item.ground ~= nil and V.boolean(item.ground, "placement ground") then
 				-- Read-only probe of existing terrain/parts; nothing from this build is parented yet.
@@ -738,13 +907,13 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 				local size = properties.Size
 				if size then
 					local x, y, z = size.X * scale, size.Y * scale, size.Z * scale
-					for _, n in ipairs({x, y, z}) do if n < 0.05 or n > 2048 then V.fail("PROPERTY", "A scaled prototype part must stay 0.05..2048 studs.") end end
+					if math.min(x, y, z) < 0.05 or math.max(x, y, z) > 2048 then V.fail("PROPERTY", "A scaled prototype part must stay 0.05..2048 studs.") end
 					properties.Size = Vector3.new(x, y, z)
 				end
 				local rel = properties.Position or Vector3.new(0, 0, 0)
 				local rx, ry, rz = rel.X * scale, rel.Y * scale, rel.Z * scale
 				local px, py, pz = at[1] + rx * c + rz * s, at[2] + ry, at[3] - rx * s + rz * c
-				for _, n in ipairs({px, py, pz}) do if math.abs(n) > 100000 then V.fail("PROPERTY", "A placed part must stay within 100000 studs.") end end
+				if math.max(math.abs(px), math.abs(py), math.abs(pz)) > 100000 then V.fail("PROPERTY", "A placed part must stay within 100000 studs.") end
 				properties.Position = Vector3.new(px, py, pz)
 				local o = properties.Orientation or Vector3.new(0, 0, 0)
 				properties.Orientation = Vector3.new(o.X, (o.Y + yaw + 180) % 360 - 180, o.Z)
@@ -763,7 +932,7 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			cloneExtra += plan[created].extra
 			if #plan + cloneExtra > L.instances then V.fail("BODY_LIMIT", "A build may create at most " .. L.instances .. " instances, counting cloned template contents.") end
 		else
-			V.fail("INPUT", "Item kind must be group, part, effect, place or clone.")
+			V.fail("INPUT", "Item kind must be group, part, effect, gui, stamp, place or clone.")
 		end
 		if item.key ~= nil then
 			local key = V.string(item.key, "item key", 64)
@@ -774,65 +943,95 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 		end
 	end
 	if self.registry.count + #keyed + 1 > V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
-	return self:record(command, guard, function(progress: any): any
-		guard()
-		self.registry:resolve(args.parent)
-		local instances: {any} = table.create(#plan)
-		local prepared, prepareError = pcall(function()
-			for index, entry in ipairs(plan) do
-				local instance = if entry.clone then AssetPlacement.instantiate(entry) else Instance.new(entry.className)
-				instances[index] = instance
-				instance.Name = entry.name
-				local properties = entry.properties
-				if properties then
-					for _, key in ipairs(BUILD_ORDER) do
-						local value = properties[key]
-						if value ~= nil then instance[key] = value end
-					end
-					for _, key in ipairs(BUILD_ORDER) do
-						local value = properties[key]
-						if value ~= nil and not P.assignedMatches(instance, key, value) then
+	-- Detached construction runs BEFORE the undo recording opens: nothing here is in the place,
+	-- so cooperative yields cannot leak a concurrent user edit into Arcane's undo step, and a
+	-- guard after every yield re-checks session, lease and Edit mode before any further work.
+	guard()
+	local instances: {any} = table.create(#plan)
+	local snapshots: {any} = table.create(#plan)
+	local fieldsByClass: {[string]: {string}} = {}
+	local slice = self:slicer(guard)
+	local function resolveMarker(marker: any): any return instances[marker.planIndex] end
+	local prepared, prepareError = pcall(function()
+		for index, entry in ipairs(plan) do
+			local instance = if entry.clone then AssetPlacement.instantiate(entry) else Instance.new(entry.className)
+			instances[index] = instance
+			instance.Name = entry.name
+			local properties = entry.properties
+			if properties then
+				for _, key in ipairs(BUILD_ORDER) do
+					local value = properties[key]
+					if value ~= nil then instance[key] = value end
+				end
+			end
+			if entry.effect then LegacyProperties.applyEffect(instance, entry.className, entry.effect, resolveMarker) end
+			if entry.part0 then
+				local part0, part1 = instances[entry.part0], instances[entry.part1]
+				instance.Part0, instance.Part1 = part0, part1
+				if instance.Part0 ~= part0 or instance.Part1 ~= part1 then V.fail("VERIFY", "Weld did not bind its parts.") end
+			end
+			if index > 1 then instance.Parent = instances[entry.parent] end
+			-- One read per snapshot field. Every requested property is verified from that same
+			-- read (exactly as P.assignedMatches would), and the reads become the restore snapshot.
+			local fields = fieldsByClass[entry.className]
+			if not fields then fields = P.snapshotFields(instance); fieldsByClass[entry.className] = fields end
+			local snapshot: {[string]: any} = {}
+			for _, field in ipairs(fields) do snapshot[field] = instance[field] end
+			if properties then
+				for _, key in ipairs(BUILD_ORDER) do
+					local value = properties[key]
+					if value ~= nil then
+						local actual = snapshot[key]
+						if actual == nil then actual = instance[key] end
+						if not P.readMatches(instance, key, value, actual) then
 							V.fail("VERIFY", "Built property differs from the requested value: " .. entry.name .. "." .. key)
 						end
 					end
 				end
-				if entry.effect then
-					LegacyProperties.applyEffect(instance, entry.className, entry.effect, function(marker: any): any return instances[marker.planIndex] end)
-				end
-				if entry.part0 then
-					instance.Part0, instance.Part1 = instances[entry.part0], instances[entry.part1]
-					if instance.Part0 ~= instances[entry.part0] or instance.Part1 ~= instances[entry.part1] then V.fail("VERIFY", "Weld did not bind its parts.") end
-				end
-				if index > 1 then instance.Parent = instances[entry.parent] end
 			end
-			for index, entry in ipairs(plan) do
-				if entry.primary then instances[index].PrimaryPart = instances[entry.primary] end
-			end
-			guard()
-		end)
-		if not prepared then
-			-- Nothing was parented into the place; discard every detached allocation.
-			for index = #instances, 1, -1 do pcall(function() instances[index]:Destroy() end) end
-			error(prepareError, 0)
+			snapshots[index] = table.freeze(snapshot)
+			slice()
 		end
-		local root = instances[1]
-		progress.touched = true
-		root.Parent = parent
-		local ref = self.registry:ref(root)
-		progress.ref = ref
-		local snapshots, parents, children, classes = table.create(#instances), table.create(#instances), table.create(#instances), {}
-		for index, instance in ipairs(instances) do
-			snapshots[index] = V.immutable(P.snapshot(instance))
-			parents[index] = instance.Parent
-			children[index] = #instance:GetChildren()
-			classes[instance.ClassName] = (classes[instance.ClassName] or 0) + 1
+		for index, entry in ipairs(plan) do
+			if entry.primary then instances[index].PrimaryPart = instances[entry.primary] end
 		end
-		self.registry.owned[root] = {parent = parent, build = {instances = instances, parents = parents, snapshots = snapshots, children = children}}
-		local refs = {}
-		for _, entry in ipairs(keyed) do refs[entry.key] = self.registry:ref(instances[entry.index]) end
-		return {ref = ref, refs = refs, created = {count = #instances + cloneExtra, classes = classes},
-			mutation = {kind = "scene.build", ref = ref, before = V.NULL, after = {count = #instances + cloneExtra, classes = classes}}}
+		guard()
 	end)
+	local function discard(): ()
+		-- Nothing was parented into the place; discard every detached allocation.
+		for index = #instances, 1, -1 do pcall(function() instances[index]:Destroy() end) end
+	end
+	if not prepared then discard(); error(prepareError, 0) end
+	local root, parented = instances[1], false
+	-- The recording covers exactly one place change: parenting the verified root. No yield inside.
+	local recorded, receipt = pcall(function(): any
+		return self:record(command, guard, function(progress: any): any
+			guard()
+			if self.registry:resolve(args.parent) ~= parent then V.fail("CONFLICT", "The build parent changed during construction.") end
+			progress.touched = true
+			root.Parent = parent
+			parented = true
+			local ref = self.registry:ref(root)
+			progress.ref = ref
+			local parents, children, classes = table.create(#instances), table.create(#instances), {}
+			for index, instance in ipairs(instances) do
+				local entry = plan[index]
+				parents[index] = if index == 1 then parent else instances[entry.parent]
+				children[index] = #instance:GetChildren()
+				classes[entry.className] = (classes[entry.className] or 0) + 1
+			end
+			self.registry.owned[root] = {parent = parent, build = {instances = instances, parents = parents, snapshots = snapshots, children = children}}
+			local refs = {}
+			for _, entry in ipairs(keyed) do refs[entry.key] = self.registry:ref(instances[entry.index]) end
+			return {ref = ref, refs = refs, created = {count = #instances + cloneExtra, classes = classes},
+				mutation = {kind = "scene.build", ref = ref, before = V.NULL, after = {count = #instances + cloneExtra, classes = classes}}}
+		end)
+	end)
+	if not recorded then
+		if not parented then discard() end
+		error(receipt, 0)
+	end
+	return receipt
 end
 
 local TERRAIN_MATERIALS = table.freeze({"Air", "Grass", "LeafyGrass", "Ground", "Mud", "Rock", "Slate", "Sand", "Sandstone", "Limestone", "Basalt", "Granite", "Pebble",
@@ -878,7 +1077,14 @@ local function setVerified(target: any, property: string, value: any): boolean
 	return ok and matches
 end
 
--- Effects-capability environment extras: Lighting.Technology, Terrain.Decoration and MaterialVariants.
+-- SoundService world-audio settings (environment.apply soundService); mirrored in studio-policy.ts SOUND_SERVICE_PROPERTIES.
+local SOUND_SERVICE_PROPERTIES = table.freeze({
+	AmbientReverb = {"enum", "ReverbType", {"NoReverb", "GenericReverb", "PaddedCell", "Room", "Bathroom", "LivingRoom", "StoneRoom", "Auditorium", "ConcertHall",
+		"Cave", "Arena", "Hangar", "CarpetedHallway", "Hallway", "StoneCorridor", "Alley", "Forest", "City", "Mountains", "Quarry", "Plain", "ParkingLot", "SewerPipe", "UnderWater"}},
+	DistanceFactor = {0.1, 100}, DopplerScale = {0, 10}, RolloffScale = {0, 10},
+})
+
+-- Effects-capability environment extras: Lighting.Technology, Terrain.Decoration, MaterialVariants and SoundService settings.
 -- Everything is decoded before the recording; Studio settings it refuses fail with a precise manual step.
 function Operations:environmentExtras(args: any): any
 	local extras: any = {any = false}
@@ -915,6 +1121,21 @@ function Operations:environmentExtras(args: any): any
 			table.insert(extras.materials, {name = name, values = values, override = spec.override ~= nil and V.boolean(spec.override, "override")})
 		end
 		if #extras.materials == 0 then V.fail("INPUT", "Choose at least one material variant.") end
+	end
+	if args.soundService ~= nil then
+		extras.subject = extras.subject or self.registry:root("Workspace")
+		local names: {string} = {}
+		for name in pairs(SOUND_SERVICE_PROPERTIES) do table.insert(names, name) end
+		local values = V.fields(args.soundService, names, "soundService")
+		local decoded: {[string]: any} = {}
+		local count = 0
+		for name, value in pairs(values) do
+			local spec = SOUND_SERVICE_PROPERTIES[name]
+			decoded[name] = if spec[1] == "enum" then V.enum(value, spec[3], Enum[spec[2]], "SoundService." .. name) else V.number(value, spec[1], spec[2], "SoundService." .. name)
+			count += 1
+		end
+		if count == 0 then V.fail("INPUT", "Set at least one soundService property.") end
+		extras.soundService, extras.soundValues, extras.any = self.gameModel:GetService("SoundService"), decoded, true
 	end
 	return extras
 end
@@ -964,10 +1185,31 @@ function Operations:applyEnvironmentExtras(extras: any, reverts: {any}, before: 
 		end
 		before.materials, after.materials = "created", names
 	end
+	if extras.soundValues then
+		local service, prior, applied = extras.soundService, {}, {}
+		local names: {string} = {}
+		for name in pairs(extras.soundValues) do table.insert(names, name) end
+		table.sort(names)
+		for _, name in ipairs(names) do
+			local value = extras.soundValues[name]
+			local readable, old = pcall(function(): any return service[name] end)
+			if not readable then V.fail("STUDIO_SETTING", "Studio did not let the plugin read SoundService." .. name .. ". No environment change was kept.") end
+			if not pcall(function() service[name] = value end) then
+				V.fail("STUDIO_SETTING", "Studio did not let the plugin set SoundService." .. name .. ". In Studio select SoundService in the Explorer and set it in the Properties window. No environment change was kept.")
+			end
+			table.insert(reverts, {target = service, name = name, value = old})
+			local readback, actual = pcall(function(): any return service[name] end)
+			local matches = readback and (if type(value) == "number" then type(actual) == "number" and math.abs(actual - value) <= 0.001 else actual == value)
+			if not matches then V.fail("VERIFY", "SoundService." .. name .. " did not take the requested value.") end
+			prior[name] = if typeof(old) == "EnumItem" then old.Name else old
+			applied[name] = if typeof(value) == "EnumItem" then value.Name else value
+		end
+		before.soundService, after.soundService = prior, applied
+	end
 end
 
 function Operations:environment(command: any, args: any, guard: () -> ()): any
-	local allowed = {"terrain", "technology", "terrainDecoration", "materials"}
+	local allowed = {"terrain", "technology", "terrainDecoration", "materials", "soundService"}
 	for _, section in ipairs(ENVIRONMENT_SECTIONS) do table.insert(allowed, section.key) end
 	V.fields(args, allowed, "environment arguments")
 	local fills: {any} = {}
@@ -1091,6 +1333,41 @@ function Operations:environment(command: any, args: any, guard: () -> ()): any
 	end)
 end
 
+-- terrain.generate: validate and compute the whole field before recording, then WriteVoxels in
+-- bounded chunks, yielding between chunks. One undo recording; reverted with Studio Undo.
+function Operations:terrainGenerate(command: any, args: any, guard: () -> ()): any
+	local plan = TerrainGen.plan(args)
+	local terrain: any = nil
+	for _, child in ipairs(self.registry:root("Workspace"):GetChildren()) do if child.ClassName == "Terrain" then terrain = child end end
+	if not terrain then V.fail("TERRAIN", "Workspace has no Terrain object.") end
+	local names = table.clone(TerrainGen.MATERIALS)
+	table.insert(names, "Air"); table.insert(names, "Water")
+	local enums: {[string]: any} = {}
+	local function resolve(name: string): any
+		local item = enums[name]
+		if item == nil then item = V.enum(name, names, Enum.Material, "terrain material"); enums[name] = item end
+		return item
+	end
+	resolve("Air"); resolve("Water"); resolve(plan.deep)
+	-- Field synthesis is pure CPU before the recording opens; it yields between rows when long.
+	guard()
+	local slice = self:slicer(guard)
+	local field = TerrainGen.field(plan, slice)
+	for _, name in ipairs(field.materials) do if enums[name] == nil then resolve(name) end end
+	return self:record(command, guard, function(progress: any): any
+		guard()
+		local chunks = TerrainGen.write(plan, field, {resolve = resolve,
+			write = function(low: {number}, high: {number}, materials: any, occupancies: any): ()
+				progress.touched = true
+				terrain:WriteVoxels(Region3.new(Vector3.new(low[1], low[2], low[3]), Vector3.new(high[1], high[2], high[3])), 4, materials, occupancies)
+			end,
+			yield = function(): () slice(0) end, slice = slice})
+		local ref = self.registry:ref(terrain)
+		progress.ref = ref
+		return {ref = ref, mutation = {kind = "terrain.generate", ref = ref, before = V.NULL, after = TerrainGen.summary(plan, field, chunks)}}
+	end)
+end
+
 -- Read-only world-space axis-aligned bounds for viewport framing. Oriented part boxes are
 -- expanded through their rotation; folders/services visit at most 5000 descendants.
 function Operations:bounds(instance: any): any
@@ -1165,8 +1442,9 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 		local function matches(): boolean
 			if not build or instance.Parent ~= owned.parent then return false end
 			for index, item in ipairs(build.instances) do
-				if item.Parent ~= build.parents[index] or #item:GetChildren() ~= build.children[index]
-					or not V.equal(P.snapshot(item), build.snapshots[index]) then return false end
+				if item.Parent ~= build.parents[index] or #item:GetChildren() ~= build.children[index] then return false end
+				-- Snapshots hold the engine values read once at build time (same fields as P.snapshot).
+				for field, value in pairs(build.snapshots[index]) do if item[field] ~= value then return false end end
 			end
 			return true
 		end
@@ -1233,6 +1511,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "scene.create" then result = self:create(command, args, guard)
 	elseif method == "scene.build" then result = self:build(command, args, guard)
 	elseif method == "environment.apply" then result = self:environment(command, args, guard)
+	elseif method == "terrain.generate" then result = self:terrainGenerate(command, args, guard)
 	elseif method == "scene.update" then result = self:updateProperties(command, args, guard)
 	elseif method == "script.update" then result = self:updateSource(command, args, guard)
 	elseif method == "script.set_enabled" then result = self:setEnabled(command, args, guard)

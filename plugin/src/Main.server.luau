@@ -6,7 +6,7 @@ local Transport = require(script.Transport)
 local Sha256 = require(script.Sha256)
 local Diagnostics = require(script.Diagnostics)
 -- Identity covers the actual loaded hierarchy, independent of XML serialization.
-local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload", "Diagnostics", "AssetPlacement"})
+local ARTIFACT_MODULES = table.freeze({"Types", "Validation", "Registry", "Properties", "Operations", "Transport", "TestProof", "Sha256", "AssetMesh", "Sha256Stream", "AssetTransfer", "AssetMaterials", "AssetUpload", "Diagnostics", "AssetPlacement", "TerrainGen"})
 local function loadedArtifactHash(): string?
 	if typeof(script) ~= "Instance" or not script:IsA("Script") then return nil end
 	local ok, value = pcall(function(): string
@@ -195,11 +195,33 @@ local inputPadding = Instance.new("UIPadding")
 inputPadding.PaddingLeft, inputPadding.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
 inputPadding.Parent = keyInput
 keyInput.PlaceholderColor3 = colors.muted
-local hint = "Arcane API key"
+local DEFAULT_HINT = "Arcane code or API key"
+local hint = DEFAULT_HINT
 local keyFailed = false
 local inputText = keyInput.Text
+-- Two-sided pairing (docs/studio-pairing.md): the user types the 6-digit code Arcane shows and clicks Connect.
+-- Nothing is looked up before that click. Arcane must prove the code before the plugin trusts it, and the
+-- connection finishes only after the user clicks Approve in Arcane. The code is never kept or saved here.
+local pairingStage: string? = nil
+local liveNow = false
 local function refreshHint(): ()
-	keyInput.PlaceholderText = hint
+	keyInput.PlaceholderText = if pairingStage == "approval" then "Click Approve in Arcane" else hint
+end
+local function buttonText(): string
+	if liveNow and not keyFailed then return "Connected" end
+	if pairingStage == "approval" then return "Approve in Arcane..." end
+	if pairingStage == "connecting" then return "Checking Arcane..." end
+	return if keyFailed then "Failed" elseif savedKey then "Reconnect" else "Connect"
+end
+local function arcaneCode(text: string): boolean
+	return string.match(text, "^%s*%d%d%d[%s%-]?%d%d%d%s*$") ~= nil
+end
+-- Takes the typed Arcane code out of the field. It is not a key: never kept, saved or shown again.
+local function takeCode(): string
+	local typed = keyInput.Text
+	inputText = "" -- Programmatic cleanup is not a new user edit.
+	keyInput.Text = ""
+	return typed
 end
 local function clearInput(): ()
 	inputText = "" -- Programmatic cleanup is not a new user edit.
@@ -233,7 +255,7 @@ local transport: any
 local function invalidateInput(): boolean
 	if keyInput.Text == inputText then return false end
 	inputText = keyInput.Text
-	keyFailed, hint = false, "Arcane API key"
+	keyFailed, hint, pairingStage = false, DEFAULT_HINT, nil
 	if savedKey ~= nil then
 		savedKey = nil
 		local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
@@ -257,14 +279,41 @@ transport = Transport.new(game, function(status: any)
 		and (status.state == "connected" or status.state == "executing")
 	-- Cached history never establishes a current session or green status.
 	connectButton.BackgroundColor3 = if live and not keyFailed then colors.green else colors.red
-	connectButton.Text = if keyFailed then "Failed" elseif live then "Connected" elseif savedKey then "Reconnect" else "Connect"
+	liveNow = live
+	connectButton.Text = buttonText()
 	if live then rememberState(true)
 	else rememberState(false) end
 	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
 end, artifactHash)
+-- The pairing proofs (HMAC) use the same bounded SHA-256 module that verifies this artifact.
+transport.sha256 = Sha256
 -- Check deferred text edits before every worker cycle and after every yielding
 -- HTTP call, including status recovery that has not yet emitted a UI callback.
 transport.checkInput = invalidateInput
+-- Progress of a code attempt the Connect click started: waiting for Approve in Arcane, or why it stopped.
+transport.onPairing = function(stage: any, detail: any): ()
+	if stage == "approval" then pairingStage = "approval"
+	elseif stage == "failed" then
+		pairingStage, keyFailed = nil, true
+		hint = if type(detail) == "string" and detail ~= "" then string.sub(detail, 1, 160) else DEFAULT_HINT
+		stroke.Color = colors.red
+	end
+	refreshHint()
+	connectButton.Text = buttonText()
+end
+-- A successful claim returns this daemon's local key once. Save it exactly like an entered key so
+-- Studio and Arcane restarts reconnect through the existing saved-key recovery.
+transport.onPaired = function(apiKey: any): ()
+	local valid = pcall(function() V.keyOrigin(apiKey) end)
+	if not valid then return end
+	keyFailed, hint, pairingStage = false, DEFAULT_HINT, nil
+	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, apiKey) end)
+	savedKey, storageFailed = apiKey, not stored
+	inputText = apiKey -- Programmatic fill is not a new user edit.
+	keyInput.Text = apiKey
+	refreshHint()
+	rememberState(false, true)
+end
 -- Studio errors/warnings are kept only while this window is paired, and only
 -- reported on the authenticated poll. Missing engine signals leave it inert.
 local diagnostics = Diagnostics.new(game, function(): boolean return transport.pair ~= nil end)
@@ -286,6 +335,26 @@ table.insert(connections, keyInput:GetPropertyChangedSignal("Text"):Connect(func
 end))
 table.insert(connections, connectButton.Activated:Connect(function()
 	invalidateInput()
+	if keyInput.Text == "" then
+		-- Nothing typed: no network, no fallback to a deleted saved key. The code comes from Arcane.
+		keyFailed, hint, pairingStage = true, "Enter the 6-digit code shown in Arcane", nil
+		refreshHint()
+		connectButton.Text = buttonText()
+		return
+	end
+	if arcaneCode(keyInput.Text) then
+		-- The code shown in Arcane: this click is the only thing that starts a pairing attempt. The field is
+		-- cleared at once, so the code is never saved or shown again.
+		local typed = takeCode()
+		keyFailed, hint = false, DEFAULT_HINT
+		local started = pcall(function() transport:requestArcaneCode(typed) end)
+		typed = ""
+		pairingStage = if started then "connecting" else nil
+		if not started then keyFailed = true; stroke.Color = colors.red end
+		refreshHint()
+		connectButton.Text = buttonText()
+		return
+	end
 	local entered = keyInput.Text -- Deleting the field never falls back to an old key.
 	local valid = pcall(function() V.keyOrigin(entered) end)
 	if not valid then
@@ -294,7 +363,7 @@ table.insert(connections, connectButton.Activated:Connect(function()
 		transport:requestDisconnect()
 		return
 	end
-	keyFailed, hint = false, "Arcane API key"
+	keyFailed, hint = false, DEFAULT_HINT
 	local value = entered :: string
 	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, value) end)
 	savedKey, storageFailed = value, not stored
@@ -306,6 +375,7 @@ table.insert(connections, connectButton.Activated:Connect(function()
 end))
 table.insert(connections, plugin.Unloading:Connect(function()
 	savedKey = nil
+	pairingStage = nil
 	clearInput()
 	transport:stop()
 	diagnostics:stop()

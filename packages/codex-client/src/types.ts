@@ -25,6 +25,8 @@ export interface NativeAssetHooks {
 }
 export interface ConnectOptions {
   command: string; cwd: string; use: LocalUse; limits?: LimitOptions; arcaneMcp?: ArcaneMcpLaunchProfile; nativeAssetHooks?: NativeAssetHooks;
+  /** Host callback: text appended after the fixed task instructions on each Arcane thread start/resume (project memory). */
+  projectInstructions?: (cwd: string) => Promise<string> | string;
 }
 export interface HumanAction { initiatedBy: 'human' }
 /** Host-only continuation token. Session object identity, not this JSON shape,
@@ -81,11 +83,20 @@ export interface NativeTokenUsage {
   continuity: 'reported' | 'uncertain';
 }
 export interface TokenUsageReport extends NativeTokenUsage { threadId: string; turnId: string; seq: number }
+/** Display-only Studio reference: root plus display path segments. */
+export interface McpToolCallRef { root: string; pathSegments: string[] }
+/** Allowlisted, bounded display arguments of an Arcane tool call (never sources, values or credentials). */
+export interface McpToolCallArgs {
+  ref?: McpToolCallRef; parent?: McpToolCallRef; root?: string; query?: string; name?: string; className?: string; kind?: string;
+  enabled?: boolean; properties?: Record<string, true>;
+}
+/** Public identity of a live native MCP tool call item; args only for the Arcane server. */
+export interface McpToolCallSummary { server: string; tool: string; args: McpToolCallArgs | null }
 export type SessionEventValue =
   | { type: 'thread'; threadId: string }
   | { type: 'turn'; threadId: string; turnId: string; status: string; durationMs?: number }
   | { type: 'delta'; threadId: string; turnId: string; itemId: string; text: string }
-  | { type: 'item'; threadId: string; turnId: string; itemId: string; itemType: string; status: string | null }
+  | { type: 'item'; threadId: string; turnId: string; itemId: string; itemType: string; status: string | null; tool?: McpToolCallSummary }
   | { type: 'approval'; handle: string; threadId: string; turnId: string }
   | { type: 'approval-cleared'; handle: string }
   | { type: 'account-changed' }

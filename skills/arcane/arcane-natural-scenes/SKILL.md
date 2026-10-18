@@ -8,16 +8,17 @@ license: MIT
 
 ## Process (aim for 4-6 write calls in total)
 1. Plan once: focal point, clearing radius (18-30 studs around a landmark), a 6-10 stud path to it, dense and sparse zones, and a budget of 800-2500 parts.
-2. `environment_apply` terrain. Never use a flat Part disc as ground.
-   - Base: a Block 2-4 studs thick in Grass, larger than the forest.
-   - Hills: 6-15 Balls of radius 20-60, sunk so only 4-12 studs show, mixing LeafyGrass and Grass.
-   - Patches: Ground or Mud near the clearing.
-   - Path: overlapping Cylinders/Blocks in Ground, Pebble or Cobblestone.
-   - If terrain is unavailable, overlap 5+ irregular Grass/Ground slabs at varied heights and yaw.
-3. Real assets first. `studio_asset_search` each kind ("realistic pine tree", "mossy boulder", "fern"), prefer verified free models in one style, then `studio_asset_insert` one per kind into a hidden template Folder (ServerStorage if granted) with maxSize at real scale. Scripts are stripped. Check one with `studio_viewport_capture`.
-4. `scene_build` once per layer (trees, undergrowth, rocks): `templates` (the inserted refs) + `scatter` with `ground:true` clones them. Build the part archetypes below only when no suitable asset exists; use `studio_asset_generate` kind mesh for a single hero object.
-5. `environment_apply` lighting, atmosphere and effects.
-6. Check the receipt: counts and scatter placed vs requested. Fix only real gaps.
+2. `terrain_generate` the ground first, one call. Never use a flat Part disc as ground.
+   - Region larger than the scene, baseHeight 20-40, fixed seed; fbm amplitude 6-20, ridged 40-120 for mountains at the edges.
+   - `flatten` the clearing under each focal structure (radius + 4, blend 16-30) so it sits level.
+   - `path`: 3-8 points in gentle bends, width 6-10, ending at the clearing. `river`: 4-12 points along low ground, width 12-40, depth 6-12, never through the clearing.
+   - Default materials: Sand shores, Mud banks, Rock cliffs, Grass; snowLine for peaks.
+   - Extras or an older plugin: `environment_apply` terrain fills.
+3. Real assets first. `studio_asset_search` each kind ("realistic pine tree", "mossy boulder", "fern"), prefer verified free models in one style and light ones (a clone template holds at most 2000 instances), then `studio_asset_insert` one per kind into a template Folder (ServerStorage if granted) with maxSize at real scale. Scripts are stripped.
+4. No fitting asset: `studio_asset_generate` kind mesh for one hero object; else `assets_procedural` (tree, rock, foliage; check `assets_preview`, then prepare, stage, reconstruct and `assets_place_studio_import` one copy), whose meshes last only this Studio session and vanish in Play until the user uploads them (say so); else the part archetypes below.
+5. `scene_build` once per layer (trees, undergrowth, rocks): `templates` (the inserted refs) + `scatter` with `ground:true` clones them. One build creates at most 4000 instances including clone contents; split big layers.
+6. `environment_apply` lighting, atmosphere and effects.
+7. Check the receipt (counts, scatter placed vs requested), then one `studio_viewport_capture` of the scene, which also checks the inserted assets through their clones. Fix only real gaps.
 
 ## Tree archetypes (fallback when no asset fits): use 3-4, each a multi-part prototype
 - Trunks: Wood, CanCollide true. Foliage: CanCollide false; small leaves CastShadow false. Everything Anchored.
@@ -47,8 +48,7 @@ Set scatter variation:
 - Fern: 4-6 thin WedgeParts (0.1 x 1.5 x 0.4), yaw steps of 60-72 degrees, tilted 30-45 degrees.
 - Grass tuft: 3 crossed thin Blocks (0.1 x 1 x 0.15), CanCollide false, CastShadow false.
 - Mossy rock cluster: 2-4 rotated Blocks/Balls in Slate/Rock greys (#6b6e70, #7d807a) with a thin green moss cap.
-- Fallen log: a horizontal cylinder plus 1-2 stubs.
-- Flower: a thin stem plus 2-3 tiny coloured Balls in SmoothPlastic.
+- Fallen log: a horizontal cylinder; flower: a stem plus 2-3 tiny Balls.
 
 ## Placement rules
 - Use `scatter` only for natural layouts.
@@ -57,24 +57,14 @@ Set scatter variation:
   - minSpacing 7-10 studs.
   - clusters 6-12 for groves.
   - clearing inner = clearing radius, outer = inner + 25-40, so density ramps up.
-- Use `avoid` circles to keep the path clear.
+- Use `avoid` circles to keep the path and river clear; `ground:true` lands items on the generated surface.
 - Order: trees, then bushes/rocks (minSpacing 2-4), then tufts (minSpacing 1-1.5). The shared occupancy keeps later layers out of trunks.
 - Group each layer in its own Model: Trees, Undergrowth, Rocks.
 
 ## Lighting (one environment_apply)
-Shortcut: `preset: "clear_day"` or `"foggy_forest"`, plus `terrainDecoration: true` on Grass ground, then override fields. Other moods and photoreal materials: `arcane-photoreal`. Fireflies, falling leaves, waterfalls (created directly): `arcane-vfx`.
-- lighting:
-  - ClockTime 14.5-16, Brightness 2-3.
-  - Ambient [0.27,0.29,0.3], OutdoorAmbient [0.5,0.52,0.5].
-  - EnvironmentDiffuseScale 0.6, EnvironmentSpecularScale 0.5, ShadowSoftness 0.3.
-- atmosphere:
-  - Density 0.3, Offset 0.25, Haze 1.5-2.5, Glare 0.2.
-  - Color [0.78,0.82,0.85], Decay [0.45,0.5,0.45].
-- bloom: Intensity 0.3, Size 24, Threshold 1.5.
-- colorCorrection: Contrast 0.08, Saturation 0.08, Brightness 0.02.
-- sunRays: Intensity 0.06, Spread 0.6.
+`preset: "clear_day"` or `"foggy_forest"`, plus `terrainDecoration: true` on Grass ground, then override only what differs. Warm afternoon forest: lighting ClockTime 14.5-16, ShadowSoftness 0.3; atmosphere Density 0.3, Haze 1.5-2.5, Decay [0.45,0.5,0.45]. Other moods and photoreal materials: `arcane-photoreal`. Fireflies, falling leaves, waterfalls (created directly): `arcane-vfx`. Wind, birds and water ambience: `arcane-audio`.
 
 ## Budget
 - Total: 800-2500 parts.
 - If over budget, cut tufts first, never tree detail.
-- Do not re-read the whole forest after building. The receipt counts are the evidence; inspect one keyed ref if needed.
+- Do not re-read the forest after building; receipt counts and one capture are the evidence.

@@ -9,7 +9,7 @@ license: MIT
 ## Turn the brief into a small dependency graph
 Identify the requested outcome, existing project state, target devices, style and constraints. Establish observable acceptance and a scoped vertical slice. Distinguish reference/mockup, implementation, engine integration and verified gameplay.
 
-Assign domain work only where it changes decisions. Load relevant skills progressively; do not invoke every skill or spawn agents by default. Parallel analysis/assets may help, but live Studio mutation has one owner and dependent changes need coordinated review.
+Assign domain work only where it changes decisions. Load relevant skills progressively; do not invoke every skill or spawn agents by default. Live Studio mutation has one owner; apply dependent changes in order and finish the whole requested slice in one task rather than stopping after each step.
 
 Put uncertainty early: prove risky imports, data ownership or novel mechanics before generating a room full of finished assets. Keep code, source models, mappings and tests associated with the same logical version.
 

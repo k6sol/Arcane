@@ -11,7 +11,7 @@ The human explicitly authorized **one** small native Sol 6.1 Ultra turn in a dis
 - Native history read returned `complete`, no gaps/truncation, and the public response: “The Arcane work_runs tool returned 0 work runs.” The actual tool result, not that sentence alone, establishes successful MCP use.
 - All owned services closed. Bundle manifest SHA before and after: `2f235e8f4ad1a0aa87992f689a71a812f18102fb01882a6309280bc736d7e8b3`.
 
-[Immutable observation report](../../runtime/verification/native-one-turn-mkdhgr/verification.json). [Single-use runner](../../runtime/verification/check-codex-one-turn-20261013.mjs). Durable native action receipts are retained alongside that report; failed/unknown starts are never automatically replayed.
+Immutable observation report (`runtime/verification/native-one-turn-mkdhgr/verification.json`, local evidence, not committed). Single-use runner (`runtime/verification/check-codex-one-turn-20261013.mjs`, local evidence, not committed). Durable native action receipts are retained alongside that report; failed/unknown starts are never automatically replayed.
 
 ## Scope and remaining work
 

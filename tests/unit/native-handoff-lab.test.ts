@@ -134,7 +134,7 @@ test('human handoff control on the actual lab: exact project, one-time begin, an
   for (const reply of [listed, spent]) tokenFree(reply.text, credential);
 });
 
-test('pending handoffs do not authenticate; sealed handoffs work unbound tasks only and never review, grant, assets, codex or handoff control', async t => {
+test('pending handoffs do not authenticate; sealed handoffs work unbound tasks only and never review, grant, asset control, codex or handoff control', async t => {
   const f = await fixture(t), started = await f.begin(), credential = started.body.credential as string;
   assert.equal((await f.call(credential, '/v1/work/runs')).status, 401, 'pending');
   await f.seal(started.body.handoff.handoffId);
@@ -146,10 +146,12 @@ test('pending handoffs do not authenticate; sealed handoffs work unbound tasks o
   assert.equal(data(await agent('work_submit', { taskId, leaseToken: claim.leaseToken, evidence: [{ path: 'reports/impl.txt', note: 'file' }] })).task.state, 'needs_review');
   const pid = await f.projectId();
   for (const [path, body] of [['/v1/work/review', { taskId, approved: true, note: 'self' }], ['/v1/product/mcp-token', {}], ['/v1/studio/keys', undefined], ['/v1/studio/pairing', {}],
-    ['/v1/studio/revoke', {}], ['/v1/codex/state', undefined], ['/v1/codex/action', { requestId: randomUUID(), connectionId: null, action: 'connect' }], ['/v1/assets/jobs', undefined],
-    ['/v1/native-handoffs', undefined], ['/v1/native-handoffs/begin', { requestId: randomUUID(), projectId: pid }]] as const) {
+    ['/v1/studio/revoke', {}], ['/v1/codex/state', undefined], ['/v1/codex/action', { requestId: randomUUID(), connectionId: null, action: 'connect' }],
+    ['/v1/assets/history-status', undefined], ['/v1/assets/conversation-jobs', undefined], ['/v1/assets/native/jobs', undefined], ['/v1/native-handoffs', undefined], ['/v1/native-handoffs/begin', { requestId: randomUUID(), projectId: pid }]] as const) {
     const reply = await f.call(credential, path, body, false); assert.ok(reply.status >= 400, path + ' -> ' + reply.status); tokenFree(reply.text, credential);
   }
+  // Like the workbench agent token, the handoff reads generic local asset history (the in-app chat's assets_* tools).
+  assert.equal((await f.call(credential, '/v1/assets/jobs')).status, 200);
   assert.equal((await f.human('/v1/work/review', { taskId, approved: true, note: 'Human inspected' })).status, 200);
   assert.equal(f.studio.commands().length, 0, 'no Studio command'); assert.equal(f.studio.sessions().length, 0, 'no Studio grant'); assert.equal(f.assets.jobs().length, 0, 'no asset job');
 });

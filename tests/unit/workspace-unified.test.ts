@@ -397,16 +397,24 @@ test('markup has one composer, closed advanced settings, live review notices and
   const drawerTag = html.match(/<dialog\b[^>]*\bid="settings-drawer"[^>]*>/)?.[0];
   assert.ok(drawerTag); assert.match(drawerTag, /aria-labelledby="settings-drawer-heading"/); assert.doesNotMatch(drawerTag, /\bopen\b/);
   const sections = [...html.matchAll(/<section\b[^>]*\bdata-settings-section(?:\s|>)[^>]*>/g)].map(match => match[0]);
-  assert.equal(sections.length, 5);
-  const ids = ['workspace-settings', 'settings-connections', 'settings-tools', 'settings-plans', 'settings-advanced'];
+  assert.equal(sections.length, 7);
+  const ids = ['workspace-settings', 'settings-guide', 'settings-connections', 'settings-tools', 'settings-memory', 'settings-plans', 'settings-advanced'];
   for (const [index, id] of ids.entries()) {
     assert.match(sections[index]!, new RegExp('id="' + id + '"'));
     assert.doesNotMatch(sections[index]!, /\bopen\b/);
     assert.equal(/\bhidden\b/.test(sections[index]!), index !== 0);
   }
   assert.deepEqual([...html.matchAll(/data-settings-section-target="([^"]+)"[^>]*>([^<]+)<\/button>/g)].map(match => [match[1], match[2]]),
-    ids.map((id, index) => [id, ['General', 'Connections', 'Tools', 'Plans &amp; credits', 'Advanced'][index]]));
+    ids.map((id, index) => [id, ['General', 'Guide', 'Connections', 'Tools', 'Project memory', 'Plans &amp; credits', 'Advanced'][index]]));
   assert.doesNotMatch(html, /<details\b[^>]*\bid="workspace-settings"|class="settings-index"/);
+  // The Guide: one anchored card per topic, built from existing settings classes only.
+  const guide = html.slice(html.indexOf('<section id="settings-guide"'), html.indexOf('<section id="settings-connections"'));
+  assert.deepEqual([...guide.matchAll(/<section id="(guide-[a-z]+)" class="settings-card"[^>]*><h3 id="\1-heading">([^<]+)<\/h3>/g)].map(match => [match[1], match[2]]),
+    [['guide-start', 'Getting started'], ['guide-ask', 'What you can ask for'], ['guide-tips', 'Tips for great results'], ['guide-safety', 'Permissions &amp; safety'],
+      ['guide-costs', 'Costs &amp; plans'], ['guide-shortcuts', 'Shortcuts and commands']]);
+  for (const text of ['Install plugin', 'Pair Studio', 'Terrain &amp; lighting', 'Visual effects', 'Scripting', 'GUI', 'Gameplay systems', 'Creator Store', 'AI meshes',
+    '@selection', 'Playtest', 'viewport', 'Auto-approve', 'receipt', 'Restore', 'tokens', 'Arcane action', 'Shift</kbd>+<kbd>Enter']) assert.ok(guide.includes(text), text);
+  assert.doesNotMatch(guide, /\bstyle=|<button|<script|class="guide/);
   const settingsAt = html.indexOf('id="workspace-settings"');
   for (const id of ['codex-unknown', 'codex-approval-section']) assert.ok(html.indexOf('id="' + id + '"') < settingsAt);
   assert.match(html, /id="asset-previews" class="asset-previews"><\/div>/);

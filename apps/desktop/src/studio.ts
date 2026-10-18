@@ -2,10 +2,11 @@ import type { startWorkflowPanel, WorkflowPanelOptions } from './workflow-panel.
 import { CodexHistoryPanel } from './codex-history.js';
 import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
-import { CodexChat, CodexChatApi } from './codex-chat.js';
+import { CodexChat, CodexChatApi, setProjectMemorySaver } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
 import { startSetupChecklist } from './setup-checklist.js';
+import { startStarterGallery } from './starter-gallery.js';
 import { ClaudeChat, linkChatProviders } from './claude-chat.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
@@ -15,7 +16,7 @@ import { AssetViewerPanel } from './asset-viewer.js';
 import { AutomaticAssetPreviews } from './automatic-asset-previews.js';
 import { startPlaytestPanel } from './playtest-panel.js';
 import { startPlaytestToggle } from './playtest-toggle.js';
-import { StudioKeySettings, trustedKeyAction } from './studio-key-settings.js';
+import { StudioKeySettings, StudioPairing, trustedKeyAction } from './studio-key-settings.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
 import type { AssetInput, AssetProbe } from '../../../packages/asset-pipeline/src/types.js';
@@ -279,12 +280,13 @@ function readAssetJob(value: unknown): AssetJobRecord {
       ||request.path.split('/').some(s=>!s||s==='.'||s==='..')||typeof request.sourceSha256!=='string'||!/^[a-f0-9]{64}$/.test(request.sourceSha256)
       ||typeof request.sourceBytes!=='number'||!Number.isSafeInteger(request.sourceBytes)||request.sourceBytes<1||request.sourceBytes>64*1024*1024) throw new Error('Invalid adopted GLB request.');
   } else {
-  const request = assetFields(r.request, ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples'], ['recipe']);
-  if (request.schemaVersion !== 1 || !['hero-prop', 'environment-kit', 'custom-assembly'].includes(String(request.template))) throw new Error('Invalid recorded asset request.');
-  const { schemaVersion: _schema, recipe, ...parameters } = request;
-  prepareAssetInput({ ...parameters, ...(request.template === 'custom-assembly' ? { template: 'hero-prop', sizeMeters: [1, 1, 1] } : {}) });
+  const request = assetFields(r.request, ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples'], ['recipe', 'procedural']);
+  if (request.schemaVersion !== 1 || !['hero-prop', 'environment-kit', 'custom-assembly', 'procedural'].includes(String(request.template))) throw new Error('Invalid recorded asset request.');
+  const { schemaVersion: _schema, recipe, procedural, ...parameters } = request;
+  if (request.template === 'procedural' ? !record(procedural) || recipe !== undefined : procedural !== undefined) throw new Error('Invalid recorded procedural asset.');
+  if (request.template !== 'procedural') prepareAssetInput({ ...parameters, ...(request.template === 'custom-assembly' ? { template: 'hero-prop', sizeMeters: [1, 1, 1] } : {}) });
   if (request.template === 'custom-assembly' && (!Array.isArray(request.sizeMeters) || request.sizeMeters.length !== 3 || request.sizeMeters.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0.01 || value > 40))) throw new Error('Invalid recorded custom asset dimensions.');
-  if (request.template === 'custom-assembly' ? !record(recipe) : recipe !== undefined) throw new Error('Invalid recorded asset recipe.');
+  if (request.template === 'custom-assembly' ? !record(recipe) : recipe !== undefined && request.template !== 'procedural') throw new Error('Invalid recorded asset recipe.');
   }
   for (const event of r.events) {
     const e = assetFields(event, ['jobId', 'at', 'stage', 'state']);
@@ -712,6 +714,9 @@ export class StudioWorkbench {
   private canonicalProjectPath = '';
   private canonicalProjectId: string | null = null;
   private productMetadataEpoch = 0;
+  /** True once the daemon has reported any Studio session (live or retained) for this project. */
+  hasStudioSessions(): boolean { return this.sessions.length > 0; }
+
   getCurrentProduct(): Readonly<{ projectId: string; projectPath: string }> | null {
     return !this.stopped && this.canonicalProjectId
       ? Object.freeze({ projectId: this.canonicalProjectId, projectPath: this.canonicalProjectPath }) : null;
@@ -2169,10 +2174,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // First-run setup checklist and the Settings plugin card: local status reads only, one-click fixes on explicit clicks.
   let checklistStorage: Pick<Storage, 'getItem' | 'setItem'> | null = null;
   try { checklistStorage = window.localStorage; } catch { checklistStorage = null; }
+  // One-click Studio pairing: a trusted click opens a short-lived code; the plugin claims it with one click.
+  const studioPairing = new StudioPairing(document, window.location.origin, token);
   const setupChecklist = startSetupChecklist(document, { provider: providerSetup, workbench, storage: checklistStorage,
-    desktop: (window as unknown as { arcaneDesktop?: unknown }).arcaneDesktop });
-  window.addEventListener('pagehide', () => setupChecklist.stop());
-  window.addEventListener('pageshow', event => { if (event.persisted) setupChecklist.resume(); });
+    desktop: (window as unknown as { arcaneDesktop?: unknown }).arcaneDesktop, pairing: studioPairing });
+  window.addEventListener('pagehide', () => { setupChecklist.stop(); studioPairing.stop(); });
+  // Quick-start gallery on the empty chat: a click only fills the composer for review.
+  startStarterGallery(document);
+  window.addEventListener('pageshow', event => { if (event.persisted) { setupChecklist.resume(); studioPairing.resume(); } });
   let workflows: ReturnType<typeof startWorkflowPanel> | null = null;
   let workflowsStopped = false;
   const refreshWorkflowContext = () => { if (!workflowsStopped) void workflows?.resume(); };
@@ -2204,9 +2213,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('pageshow',event=>{if(event.persisted)arcaneDialogs?.resume();});
   // Plans & credits: local Arcane actions usage and the checkout seam that stays disabled until configured.
   void import('./plans.js').then(module=>{const plans=module.startPlans(document,{token:()=>token,desktop:(window as unknown as {arcaneDesktop?:import('./plans.js').PlansOptions['desktop']}).arcaneDesktop??null,open:url=>{window.open(url,'_blank','noopener,noreferrer');}});window.addEventListener('pagehide',()=>plans.stop());window.addEventListener('pageshow',event=>{if(event.persisted)plans.resume();});}).catch(()=>{});
+  // Project memory (Settings › Project memory): ARCANE.md that both providers read; chat "Save to project memory" buttons append through it.
+  void import('./project-memory.js').then(module=>{const memory=module.startProjectMemory(document,{token:()=>token});setProjectMemorySaver(note=>memory.append(note));window.addEventListener('pagehide',()=>{memory.stop();setProjectMemorySaver(null);});window.addEventListener('pageshow',event=>{if(event.persisted){memory.resume();setProjectMemorySaver(note=>memory.append(note));}});}).catch(()=>{});
+  // Script sync (Settings › Project memory): opt-in mirror of granted Studio scripts into the project src folder.
+  void import('./script-sync.js').then(module=>{const sync=module.startScriptSync(document,{token:()=>token});window.addEventListener('pagehide',()=>sync.stop());window.addEventListener('pageshow',event=>{if(event.persisted)sync.resume();});}).catch(()=>{});
   // Build-done notifications: one native notification when a chat turn ends while Arcane is in the background.
   void import('./notifications.js').then(module=>{const start=()=>module.startBuildNotifications(document,{desktop:(window as unknown as {arcaneDesktop?:import('./notifications.js').BuildNotificationOptions['desktop']}).arcaneDesktop??null,storage:checklistStorage});let notices=start();window.addEventListener('pagehide',()=>notices.stop());window.addEventListener('pageshow',event=>{if(event.persisted){notices.stop();notices=start();}});}).catch(()=>{});
-  void import('./studio-diagnostics.js').then(module=>{studioDiagnostics=module.startStudioDiagnostics(document,{token:()=>token,showConversation:()=>workspaceShell.showConversation()});if(workflowsStopped)studioDiagnostics.stop();}).catch(()=>{});
+  void import('./studio-diagnostics.js').then(module=>{studioDiagnostics=module.startStudioDiagnostics(document,{token:()=>token,active:()=>workbench.hasStudioSessions(),showConversation:()=>workspaceShell.showConversation()});if(workflowsStopped)studioDiagnostics.stop();}).catch(()=>{});
   window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); studioDiagnostics?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {

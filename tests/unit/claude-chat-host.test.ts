@@ -167,7 +167,7 @@ test('turn lifecycle: exact argv, stdin prompt, scoped env, streamed events, too
   const [run] = f.turns();
   assert.equal(run!.command, 'C:\\Users\\u\\.local\\bin\\claude.exe'); assert.equal(run!.options.cwd, f.project);
   assert.deepEqual(run!.args.slice(0, -2), ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-    '--mcp-config', join(f.root, 'arcane.mcp.json'), '--strict-mcp-config', '--model', 'sonnet', '--effort', 'high', '--permission-mode', 'default',
+    '--mcp-config', join(f.root, 'arcane.mcp.json'), '--strict-mcp-config', '--setting-sources', 'user', '--model', 'sonnet', '--effort', 'high', '--permission-mode', 'default',
     '--tools', '', '--allowedTools', 'mcp__arcane']);
   assert.equal(run!.args.at(-2), '--append-system-prompt'); assert.match(run!.args.at(-1)!, /Arcane desktop chat[\s\S]*ARCANE TASK INSTRUCTIONS FIXTURE/);
   assert.ok(!run!.args.includes('--resume')); assert.ok(!run!.args.some(a => a.includes(CREDENTIAL)));
@@ -281,6 +281,10 @@ test('stderr and unsafe result text never reach events or transcripts; short pla
   f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Credit balance is too low' })));
   const c = await f.host.send(turnInput('go', a.conversationId));
   assert.equal((await f.done(c.turnId)).error, 'Credit balance is too low', 'other short plain CLI errors still pass through');
+  // Reply text that echoes the project credential (e.g. a tool result repeated by the model) is never shown or stored.
+  f.scripts.push(replay(init(), delta('tok ' + CREDENTIAL), assistant([{ type: 'text', text: 'tok ' + CREDENTIAL }]), result()));
+  const d = await f.host.send(turnInput('go', a.conversationId));
+  await f.done(d.turnId);
   const files = await readdir(f.state, { recursive: true });
   const stored = (await Promise.all(files.filter(n => String(n).endsWith('.json')).map(n => readFile(join(f.state, String(n)), 'utf8')))).join('\n');
   for (const haystack of [JSON.stringify(f.events), stored]) { assert.ok(!haystack.includes(secret)); assert.ok(!haystack.includes(email)); assert.ok(!haystack.includes(CREDENTIAL)); }
@@ -679,4 +683,35 @@ test('credential renewal: a credential that cannot cover a full reply is replace
   const d = await fresh.host.send(turnInput('two', c.conversationId)); await fresh.done(d.turnId);
   assert.equal(fresh.prepared.length, 1, 'a fresh credential is reused while it still covers a full reply'); assert.equal(fresh.released.length, 0);
   assert.ok(chat.CLAUDE_CHAT_LIMITS.turnTimeoutMs - chat.CLAUDE_CHAT_LIMITS.credentialReuseMs > chat.CLAUDE_CHAT_LIMITS.credentialMarginMs);
+});
+
+test('the appended system prompt is identical on every turn; the Playtest switch rides on the user message', async t => {
+  const f = await fixture(t);
+  f.scripts.push(replay(init(), result()), replay(init(), result()), replay(init(), result()));
+  const first = await f.host.send({ ...turnInput('Build a hut'), playtest: true }); await f.done(first.turnId);
+  const second = await f.host.send({ ...turnInput('Now a fence', first.conversationId), playtest: false }); await f.done(second.turnId);
+  const third = await f.host.send(turnInput('And a gate', first.conversationId)); await f.done(third.turnId);
+  // A byte-identical system prompt keeps Claude Code's cached prefix (system prompt and tools) reusable across turns.
+  const prompts = f.turns().map(run => run.args[run.args.indexOf('--append-system-prompt') + 1]);
+  assert.equal(prompts.length, 3); assert.equal(new Set(prompts).size, 1, 'one cacheable system prompt');
+  assert.doesNotMatch(prompts[0]!, /Playtest is|\d{4}-\d{2}-\d{2}T\d{2}:/);
+  assert.deepEqual(f.turns().map(run => run.child.input), ['Build a hut' + chat.playtestNote(true), 'Now a fence' + chat.playtestNote(false), 'And a gate']);
+  // Project memory guidance always follows the static instructions; ARCANE.md changes the prompt only when the file changes.
+  assert.ok(prompts[0]!.endsWith(chat.projectMemorySection('')), 'memory section comes last');
+  assert.ok(prompts[0]!.indexOf('ARCANE TASK INSTRUCTIONS FIXTURE') < prompts[0]!.indexOf('arcane-memory'));
+  await writeFile(join(f.project, 'ARCANE.md'), '# Style\r\nLow-poly, warm palette.\n');
+  f.scripts.push(replay(init(), result()), replay(init(), result()));
+  const fourth = await f.host.send(turnInput('A well', first.conversationId)); await f.done(fourth.turnId);
+  const fifth = await f.host.send(turnInput('A bucket', first.conversationId)); await f.done(fifth.turnId);
+  const later = f.turns().slice(3).map(run => run.args[run.args.indexOf('--append-system-prompt') + 1]);
+  assert.equal(later[0], later[1], 'unchanged memory keeps one cacheable prompt');
+  assert.equal(later[0], prompts[0]!.slice(0, prompts[0]!.length - chat.projectMemorySection('').length) + chat.projectMemorySection('# Style\nLow-poly, warm palette.'));
+  assert.match(later[0]!, /<project-memory>\n# Style\nLow-poly, warm palette\.\n<\/project-memory>$/);
+  // Managed task instructions that already describe @selection and the choice/plan blocks are not repeated by the preamble.
+  const managed = chat.appendedSystemPrompt('Rules. Use one fenced block in language arcane-choices when the user must decide.');
+  assert.equal(managed.match(/arcane-choices/g).length, 1);
+  assert.match(managed, /^You are running inside the Arcane desktop chat[^\n]*concise Markdown\.\n\nRules\./);
+  const fallback = chat.appendedSystemPrompt('ARCANE TASK INSTRUCTIONS FIXTURE');
+  assert.match(fallback, /selection_read[\s\S]*arcane-choices[\s\S]*arcane-plan[\s\S]*FIXTURE$/, 'other instructions keep the full preamble');
+  assert.match(fallback, /an explicit build request needs no plan approval/, 'the fallback never makes every build wait for plan approval');
 });

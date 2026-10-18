@@ -1,6 +1,8 @@
 'use strict';
 
-// Main-process host for Arcane-styled in-app dialogs. It keeps Electron's `dialog.showMessageBox(owner, options)` shape so
+// Main-process host for Arcane-styled in-app notices. With `decisions` set (main.cjs), every question offering more than
+// one button is delegated to the trusted decision window instead, so the workspace renderer only ever shows one-button
+// informational notices and can never answer an approval. It keeps Electron's `dialog.showMessageBox(owner, options)` shape so
 // every existing host (Claude chat consent, provider setup, plugin install, project switch, Luau verification) is unchanged:
 // when the trusted main window's renderer has attached, the question is sent over IPC and rendered in the workspace as a
 // focused modal; the renderer answers with the request id and one button index, which is validated here (exact id, exact
@@ -71,6 +73,10 @@ function createInAppDialogs(options) {
   async function showMessageBox(owner, maybeOptions) {
     const hasOwner = maybeOptions !== undefined;
     const config = hasOwner ? maybeOptions : owner;
+    // A decision (more than one button) never reaches the workspace renderer, which also renders model output: it is
+    // asked in the main-process-owned trusted window instead (trusted-dialog.cjs), whatever the renderer state.
+    if (typeof options.decisions === 'function' && config && typeof config === 'object' && Array.isArray(config.buttons) && config.buttons.length > 1)
+      return hasOwner ? options.decisions(owner, config) : options.decisions(config);
     const window = hasOwner ? liveWindow(owner) : null;
     const request = window ? requestOf(config, randomUUID()) : null;
     if (!window || !request || queued >= LIMITS.queued) return hasOwner ? native().showMessageBox(owner, config) : native().showMessageBox(config);

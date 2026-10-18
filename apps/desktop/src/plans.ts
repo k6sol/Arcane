@@ -105,13 +105,30 @@ interface ClaudeBridge { onEvent(listener: (event: unknown) => void): () => void
  * Desktop checkout bridge (apps/desktop/electron/billing.cjs): the renderer names one offer id; the host builds the URL
  * from trusted config, checks the allowlist, confirms in an Arcane dialog and opens the system browser. Fixed replies only.
  */
-export interface BillingBridge { version?: number; status?(): Promise<unknown>; openCheckout(productId: string): Promise<unknown> }
+export interface BillingBridge {
+  version?: number; status?(): Promise<unknown>; openCheckout(productId: string): Promise<unknown>;
+  /** Connect Arcane account (gateway sign-in). The host owns the URL, the code dialog and the encrypted token. */
+  connectAccount?(): Promise<unknown>; disconnectAccount?(): Promise<unknown>;
+}
 export type DesktopCheckoutState = 'not-connected' | 'ready' | 'opened' | 'cancelled' | 'unknown-offer' | 'busy' | 'unavailable';
 /** Reads a desktop bridge reply; anything unexpected is 'unavailable'. */
 export function readDesktopCheckout(value: unknown): DesktopCheckoutState {
   const reply = obj(value);
   const states: DesktopCheckoutState[] = ['not-connected', 'ready', 'opened', 'cancelled', 'unknown-offer', 'busy', 'unavailable'];
   return reply && reply.version === 1 && states.includes(reply.state as DesktopCheckoutState) ? reply.state as DesktopCheckoutState : 'unavailable';
+}
+export type DesktopAccountState = 'unavailable' | 'signed-out' | 'signing-in' | 'signed-in';
+/** The `account` field of `billing.status()`; anything unexpected is 'unavailable' (no account controls shown). */
+export function readDesktopAccount(value: unknown): DesktopAccountState {
+  const reply = obj(value);
+  const states: DesktopAccountState[] = ['unavailable', 'signed-out', 'signing-in', 'signed-in'];
+  return reply && reply.version === 1 && states.includes(reply.account as DesktopAccountState) ? reply.account as DesktopAccountState : 'unavailable';
+}
+export type DesktopAccountReply = 'not-connected' | 'opened' | 'cancelled' | 'busy' | 'signed-in' | 'signed-out' | 'unavailable';
+export function readDesktopAccountReply(value: unknown): DesktopAccountReply {
+  const reply = obj(value);
+  const states: DesktopAccountReply[] = ['not-connected', 'opened', 'cancelled', 'busy', 'signed-in', 'signed-out', 'unavailable'];
+  return reply && reply.version === 1 && states.includes(reply.state as DesktopAccountReply) ? reply.state as DesktopAccountReply : 'unavailable';
 }
 export interface PlansOptions {
   token: () => string;
@@ -224,11 +241,60 @@ export function startPlans(doc: Document, options: PlansOptions) {
       // Desktop: the host bridge is the checkout authority, so its fixed state labels the page.
       const bridge = options.desktop?.billing;
       if (state && bridge && typeof bridge.status === 'function') {
-        const desktop = readDesktopCheckout(await bridge.status().catch(() => null)), label = el('plans-billing-state');
+        const reply = await bridge.status().catch(() => null);
+        const desktop = readDesktopCheckout(reply), label = el('plans-billing-state');
         if (label) { label.textContent = desktop === 'ready' ? 'Checkout connected' : 'Checkout not connected'; label.className = 'status-text ' + (desktop === 'ready' ? 'ok' : 'neutral'); }
+        renderAccount(readDesktopAccount(reply));
       }
     } catch { /* Usage is informational; keep the last good view. */ }
     finally { pending = false; }
+  }
+
+  // ---- Connect Arcane account (desktop host bridge only; hidden while the host reports 'unavailable') -------------
+  let accountBusy = false, accountTimer: number | null = null;
+  function renderAccount(account: DesktopAccountState): void {
+    const gateway = el('plans-gateway-state'), bridge = options.desktop?.billing;
+    if (!gateway || !bridge || typeof bridge.connectAccount !== 'function' || typeof bridge.disconnectAccount !== 'function') return;
+    let box = el('plans-account');
+    if (!box) { box = make('div', 'plans-account'); box.id = 'plans-account'; box.setAttribute('aria-live', 'polite'); gateway.after(box); }
+    box.hidden = account === 'unavailable'; box.dataset.state = account;
+    if (account === 'unavailable') { box.replaceChildren(); return; }
+    if (account === 'signed-in') { gateway.textContent = 'Your Arcane account is connected.'; gateway.dataset.state = 'ready'; }
+    const text = account === 'signed-in' ? 'Signed in to your Arcane account on this device.'
+      : account === 'signing-in' ? 'Finish signing in in your browser. This updates on its own.' : 'Sign in to use Arcane Credits and your plan in Arcane.';
+    const button = make('button', account === 'signed-out' ? 'plans-buy plans-buy-primary' : 'plans-buy',
+      account === 'signed-in' ? 'Disconnect' : account === 'signing-in' ? 'Waiting for sign-in' : 'Connect Arcane account');
+    button.type = 'button'; button.disabled = account === 'signing-in' || accountBusy;
+    button.addEventListener('click', () => { void (account === 'signed-in' ? disconnectAccount(button) : connectAccount(button)); });
+    box.replaceChildren(make('span', 'plans-account-text', text), button);
+    if (accountTimer !== null) { view?.clearTimeout(accountTimer); accountTimer = null; }
+    if (account === 'signing-in' && view) accountTimer = view.setTimeout(() => { accountTimer = null; void refresh(); }, 3000);
+  }
+  async function connectAccount(button: HTMLButtonElement): Promise<void> {
+    const bridge = options.desktop?.billing;
+    if (accountBusy || !bridge?.connectAccount) return;
+    accountBusy = true; button.disabled = true; button.setAttribute('aria-busy', 'true');
+    let state: DesktopAccountReply = 'unavailable';
+    try { state = readDesktopAccountReply(await bridge.connectAccount()); } catch { state = 'unavailable'; }
+    finally { accountBusy = false; button.removeAttribute('aria-busy'); }
+    if (state === 'opened') notice('ready', 'Finish signing in in your browser', 'Check that the page shows the same code, enter your email, then approve the link we send you.');
+    else if (state === 'signed-in') notice('ready', 'Your Arcane account is connected', 'Credits and plan balances come from your Arcane account.');
+    else if (state === 'cancelled') notice('info', 'Sign-in cancelled', 'Nothing changed.');
+    else if (state === 'busy') notice('info', 'A sign-in is already in progress', 'Finish it in your browser first.');
+    else if (state === 'not-connected') notice('info', "Arcane Credits aren't connected yet", 'Connect an Arcane gateway first. The setup steps are in docs/ARCANE_CREDITS.md.');
+    else notice('info', 'Sign-in is unavailable right now', 'Try again in a moment.');
+    await refresh();
+  }
+  async function disconnectAccount(button: HTMLButtonElement): Promise<void> {
+    const bridge = options.desktop?.billing;
+    if (accountBusy || !bridge?.disconnectAccount) return;
+    accountBusy = true; button.disabled = true;
+    let state: DesktopAccountReply = 'unavailable';
+    try { state = readDesktopAccountReply(await bridge.disconnectAccount()); } catch { state = 'unavailable'; }
+    finally { accountBusy = false; }
+    if (state === 'signed-out') notice('info', 'Your Arcane account is disconnected', 'Arcane forgot the sign-in on this device.');
+    else notice('info', 'Could not disconnect right now', 'Try again in a moment.');
+    await refresh();
   }
 
   function desktopNotice(state: DesktopCheckoutState): void {
@@ -283,7 +349,10 @@ export function startPlans(doc: Document, options: PlansOptions) {
   for (const control of Array.from(doc.querySelectorAll<HTMLElement>('[data-settings-section-target="' + PLANS_SECTION_ID + '"]'))) control.addEventListener('click', () => { void refresh(); });
   el('plans-refresh')?.addEventListener('click', () => { void refresh(); });
 
-  function stop(): void { if (timer !== null) view?.clearInterval(timer); timer = null; unsubscribe?.(); unsubscribe = null; }
+  function stop(): void {
+    if (timer !== null) view?.clearInterval(timer); timer = null; unsubscribe?.(); unsubscribe = null;
+    if (accountTimer !== null) view?.clearTimeout(accountTimer); accountTimer = null;
+  }
   function resume(): void {
     stop();
     try { unsubscribe = options.desktop?.claudeChat?.onEvent(reportClaudeTurn) ?? null; } catch { unsubscribe = null; }

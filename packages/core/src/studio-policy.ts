@@ -1,6 +1,7 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY } from '../../protocol/src/studio.js';
+import { validateTerrainGenerate } from './terrain-policy.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt', 'Marble', 'Granite', 'Limestone', 'Sandstone', 'Basalt', 'Pebble', 'LeafyGrass', 'Mud', 'Snow', 'Ice', 'Pavement', 'Plaster', 'DiamondPlate', 'CorrodedMetal', 'Foil'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -80,9 +81,10 @@ function tagged(properties: Record<string, Json>, key: string): number[] | undef
 }
 /** Counts every Instance a validated scene.build creates (root, groups, parts, placement Models and welds). */
 export function sceneBuildInstanceCount(args: Record<string, Json>): number {
-  const prototypes = (args.prototypes ?? []) as { parts: unknown[]; weld: boolean }[];
+  const prototypes = (args.prototypes ?? []) as { parts: unknown[]; weld: boolean; gui?: unknown[] }[];
   let count = 1;
   for (const item of args.items as { kind: string; template?: number }[]) {
+    if (item.kind === 'stamp') { count += prototypes[(item.template as number) - 1]!.gui!.length; continue; }
     if (item.kind !== 'place') { count++; continue; }
     const proto = prototypes[(item.template as number) - 1]!, parts = proto.parts.length;
     count += parts === 1 ? 1 : 1 + parts + (proto.weld ? parts - 1 : 0);
@@ -92,16 +94,31 @@ export function sceneBuildInstanceCount(args: Record<string, Json>): number {
 /** Strict wire contract for one atomic hierarchy. The MCP tool compiles compact
  * templates/scatter into this form; the plugin re-validates and performs the same placement math. */
 function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Record<string, Json> {
-  keys(a, ['parent', 'container', 'prototypes', 'items', 'templates']); ref(a.parent, session);
+  keys(a, ['parent', 'container', 'prototypes', 'items', 'templates']); const parentRef = ref(a.parent, session);
   const templates = validateBuildTemplates(a.templates, session);
-  const rootSpec = object(a.container, 'build container'); keys(rootSpec, ['className', 'name']);
-  if (!BUILD_GROUP_CLASSES.includes(rootSpec.className as typeof BUILD_GROUP_CLASSES[number])) throw new ArcaneError('CLASS', 'The build root must be a Model or Folder.');
+  const rootSpec = object(a.container, 'build container'); keys(rootSpec, ['className', 'name', 'properties']);
+  // A ScreenGui root builds a whole screen UI atomically under StarterGui (or a Model/Folder template holder).
+  const guiRoot = rootSpec.className === 'ScreenGui';
+  if (!guiRoot && !BUILD_GROUP_CLASSES.includes(rootSpec.className as typeof BUILD_GROUP_CLASSES[number])) throw new ArcaneError('CLASS', 'The build root must be a Model, Folder or ScreenGui.');
   textField(rootSpec.name, 'build root name', 100);
+  const container: Record<string, Json> = { className: rootSpec.className as string, name: rootSpec.name as string };
+  if (guiRoot) {
+    requireGui(session);
+    const host = hostKind(parentRef.className, parentRef.pathSegments.length === 0);
+    if (!host || !GUI_HOSTS.ScreenGui.includes(host as GuiHost)) throw hostError('ScreenGui');
+    if (rootSpec.properties !== undefined) container.properties = validateGuiProperties(rootSpec.properties, 'ScreenGui');
+  } else if (rootSpec.properties !== undefined) throw new ArcaneError('INPUT', 'Only a ScreenGui build root takes properties.');
   const prototypes = a.prototypes === undefined ? [] : a.prototypes;
   if (!Array.isArray(prototypes) || prototypes.length > SCENE_BUILD_LIMITS.prototypes) throw new ArcaneError('INPUT', `Use at most ${SCENE_BUILD_LIMITS.prototypes} prototypes.`);
   const protoParts: { size: number[]; position: number[] }[][] = [];
   const normalizedPrototypes = prototypes.map(value => {
-    const proto = object(value, 'prototype'); keys(proto, ['name', 'weld', 'parts']); textField(proto.name, 'prototype name', 100);
+    const proto = object(value, 'prototype');
+    if (proto.gui !== undefined) {
+      requireGui(session); keys(proto, ['name', 'gui']); textField(proto.name, 'prototype name', 100);
+      protoParts.push([]);
+      return { name: proto.name, gui: validateGuiPrototype(proto.gui) } as Json;
+    }
+    keys(proto, ['name', 'weld', 'parts']); textField(proto.name, 'prototype name', 100);
     if (typeof proto.weld !== 'boolean') throw new ArcaneError('INPUT', 'Prototype weld must be a boolean.');
     if (!Array.isArray(proto.parts) || proto.parts.length < 1 || proto.parts.length > SCENE_BUILD_LIMITS.prototypeParts) throw new ArcaneError('INPUT', `A prototype needs 1..${SCENE_BUILD_LIMITS.prototypeParts} parts.`);
     const geometry: { size: number[]; position: number[] }[] = [];
@@ -124,13 +141,26 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
     const item = object(raw, 'build item');
     const parent = item.parent;
     if (!Number.isInteger(parent) || (parent as number) < 0 || (parent as number) > index) throw new ArcaneError('INPUT', 'Item parent must be 0 (the build root) or an earlier group item index.');
-    if ((parent as number) > 0 && kinds[(parent as number) - 1] !== 'group' && item.kind !== 'effect') throw new ArcaneError('INPUT', 'Only group items can contain other items.');
+    const nested = item.kind === 'effect' || item.kind === 'gui' || item.kind === 'stamp';
+    if ((parent as number) > 0 && kinds[(parent as number) - 1] !== 'group' && !nested) throw new ArcaneError('INPUT', 'Only group items can contain other items.');
+    if (guiRoot && parent === 0 && item.kind !== 'gui' && item.kind !== 'stamp') throw new ArcaneError('INPUT', 'A ScreenGui build root holds only gui and stamp items.');
     if (item.key !== undefined) {
       if (typeof item.key !== 'string' || !BUILD_KEY.test(item.key) || seenKeys.has(item.key)) throw new ArcaneError('INPUT', 'Item keys must be unique [A-Za-z0-9_-]{1,64}.');
       seenKeys.add(item.key);
       if (seenKeys.size > SCENE_BUILD_LIMITS.keys) throw new ArcaneError('INPUT', `At most ${SCENE_BUILD_LIMITS.keys} keyed items return references.`);
     }
     textField(item.name, 'item name', 100);
+    if (item.kind === 'gui' || item.kind === 'stamp') {
+      // Host of the parent: the root (ScreenGui = layer), a group, a part, an Attachment or an earlier GUI host item.
+      const parentKind = parent === 0 ? (guiRoot ? 'gui:ScreenGui' : 'group') : kinds[(parent as number) - 1]!;
+      const tagged = /^(?:gui|stamp|effect):(.+)$/.exec(parentKind)?.[1];
+      const host: EffectHost | null = parentKind === 'group' || parentKind === 'part' ? parentKind
+        : tagged ? (Object.hasOwn(GUI_HOST_CLASSES, tagged) ? GUI_HOST_CLASSES[tagged]! : parentKind.startsWith('effect:') && tagged === 'Attachment' ? 'attachment' : null) : null;
+      const result = item.kind === 'gui' ? validateBuildGui(item, host, session) : validateBuildStamp(item, host, normalizedPrototypes);
+      const rootClass = item.kind === 'gui' ? String(item.className) : (normalizedPrototypes[(item.template as number) - 1] as { gui: { className: string }[] }).gui[0]!.className;
+      kinds.push('gui:' + rootClass);
+      return result;
+    }
     kinds.push(item.kind === 'effect' ? 'effect:' + String(item.className) : String(item.kind));
     if (item.kind === 'effect') return validateBuildEffect(item, kinds, session);
     if (item.kind === 'group') {
@@ -144,10 +174,11 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
       return { ...item, properties: engineProperties(buildPartProperties(item.properties, item.className as string)) } as Json;
     }
     if (item.kind === 'clone') return validateBuildClone(item, templates.length);
-    if (item.kind !== 'place') throw new ArcaneError('INPUT', 'Item kind must be group, part or place.');
+    if (item.kind !== 'place') throw new ArcaneError('INPUT', 'Item kind must be group, part, effect, gui, stamp, place or clone.');
     keys(item, ['kind', 'template', 'name', 'parent', 'at', 'yaw', 'scale', 'tint', 'ground', 'key']);
     if (item.ground !== undefined && typeof item.ground !== 'boolean') throw new ArcaneError('INPUT', 'Placement ground must be a boolean.');
     if (!Number.isInteger(item.template) || (item.template as number) < 1 || (item.template as number) > normalizedPrototypes.length) throw new ArcaneError('INPUT', 'Placement names an unknown prototype index.');
+    if ((normalizedPrototypes[(item.template as number) - 1] as { gui?: unknown }).gui) throw new ArcaneError('INPUT', 'GUI prototypes are stamped (kind stamp), not placed.');
     const at = triple(item.at, -100000, 100000, 'Placement position');
     finiteIn(item.yaw, -360, 360, 'Placement yaw');
     const scale = finiteIn(item.scale, 0.1, 20, 'Placement scale');
@@ -159,7 +190,7 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
     }
     return item as Json;
   });
-  const result: Record<string, Json> = { parent: a.parent as Json, container: { className: rootSpec.className, name: rootSpec.name } as Json, prototypes: normalizedPrototypes, items: normalizedItems };
+  const result: Record<string, Json> = { parent: a.parent as Json, container, prototypes: normalizedPrototypes, items: normalizedItems };
   if (templates.length) result.templates = templates;
   if (sceneBuildInstanceCount(result) > SCENE_BUILD_LIMITS.instances) throw new ArcaneError('BODY_LIMIT', `A build may create at most ${SCENE_BUILD_LIMITS.instances} instances; split it into a few builds.`);
   return result;
@@ -174,7 +205,12 @@ function buildPartProperties(value: unknown, className: string): Record<string, 
 
 // ---- Effects classes (scene.create / scene.build). The plugin re-validates this exact table (Properties.luau). ----
 export type EffectKind = readonly ['number' | 'integer' | 'vector3' | 'vector2' | 'range' | 'sequence', number, number]
-  | readonly ['enum', string, readonly string[]] | 'boolean' | 'color' | 'colorSequence' | 'content' | 'attachment';
+  | readonly ['enum', string, readonly string[]] | 'boolean' | 'color' | 'colorSequence' | 'content' | 'audio' | EffectRefKind
+  | 'udim2' | 'udim' | 'text' | 'font';
+/** Ref-valued effect properties and the class each Ref must name. */
+export type EffectRefKind = 'attachment' | 'soundGroup';
+export const EFFECT_REF_CLASSES: Readonly<Record<EffectRefKind, string>> = Object.freeze({ attachment: 'Attachment', soundGroup: 'SoundGroup' });
+const isRefKind = (spec: EffectKind): spec is EffectRefKind => spec === 'attachment' || spec === 'soundGroup';
 const NORMAL_IDS = ['Top', 'Bottom', 'Left', 'Right', 'Front', 'Back'] as const;
 const LIGHT = { Brightness: ['number', 0, 40], Range: ['number', 0, 60], Color: 'color', Shadows: 'boolean', Enabled: 'boolean' } as const;
 const FACED_LIGHT = { ...LIGHT, Angle: ['number', 0, 180], Face: ['enum', 'NormalId', NORMAL_IDS] } as const;
@@ -205,26 +241,66 @@ export const EFFECT_PROPERTIES = Object.freeze({
   Sparkles: { SparkleColor: 'color', Enabled: 'boolean', TimeScale: ['number', 0, 1] },
   Decal: DECAL,
   Texture: { ...DECAL, StudsPerTileU: ['number', 0.01, 1000], StudsPerTileV: ['number', 0.01, 1000], OffsetStudsU: ['number', -1000, 1000], OffsetStudsV: ['number', -1000, 1000] },
+  // Audio. SoundId is rbxassetid://<digits> only (never invented); SoundGroup is a Ref to a SoundGroup of the same build/session.
+  Sound: { SoundId: 'audio', Volume: ['number', 0, 10], PlaybackSpeed: ['number', 0.1, 4], Looped: 'boolean', Playing: 'boolean',
+    RollOffMode: ['enum', 'RollOffMode', ['Inverse', 'Linear', 'LinearSquare', 'InverseTapered']], RollOffMinDistance: ['number', 0, 10000],
+    RollOffMaxDistance: ['number', 0, 10000], SoundGroup: 'soundGroup', TimePosition: ['number', 0, 3600] },
+  SoundGroup: { Volume: ['number', 0, 10] },
+  ReverbSoundEffect: { Enabled: 'boolean', DecayTime: ['number', 0.1, 20], Density: ['number', 0, 1], Diffusion: ['number', 0, 1], DryLevel: ['number', -80, 20], WetLevel: ['number', -80, 20] },
+  EqualizerSoundEffect: { Enabled: 'boolean', HighGain: ['number', -80, 10], MidGain: ['number', -80, 10], LowGain: ['number', -80, 10] },
+  EchoSoundEffect: { Enabled: 'boolean', Delay: ['number', 0.01, 5], Feedback: ['number', 0, 1], DryLevel: ['number', -80, 10], WetLevel: ['number', -80, 10] },
+  ChorusSoundEffect: { Enabled: 'boolean', Depth: ['number', 0, 1], Mix: ['number', 0, 1], Rate: ['number', 0, 20] },
+  CompressorSoundEffect: { Enabled: 'boolean', Threshold: ['number', -60, 0], Ratio: ['number', 1, 50], Attack: ['number', 0.001, 1], Release: ['number', 0.01, 5], GainMakeup: ['number', 0, 30] },
+  DistortionSoundEffect: { Enabled: 'boolean', Level: ['number', 0, 1] },
+  // Characters (scene.characters). Data and containers only: no rig parts, joints, animation ids or code. A Humanoid lives in a Model;
+  // a HumanoidDescription in a Humanoid or Model/Folder is applied by a server Script (ApplyDescription / CreateHumanoidModelFromDescription);
+  // an Animator goes in a Humanoid or an AnimationController (non-humanoid creatures). MaxHealth is assigned before Health.
+  Humanoid: { WalkSpeed: ['number', 0, 100], JumpPower: ['number', 0, 200], UseJumpPower: 'boolean', DisplayName: 'text', MaxHealth: ['number', 1, 100000],
+    Health: ['number', 0, 100000], HipHeight: ['number', 0, 50], AutoRotate: 'boolean', RigType: ['enum', 'HumanoidRigType', ['R6', 'R15']],
+    DisplayDistanceType: ['enum', 'HumanoidDisplayDistanceType', ['Viewer', 'Subject', 'None']] },
+  HumanoidDescription: { HeadColor: 'color', TorsoColor: 'color', LeftArmColor: 'color', RightArmColor: 'color', LeftLegColor: 'color', RightLegColor: 'color',
+    HeightScale: ['number', 0.5, 2], WidthScale: ['number', 0.5, 2], DepthScale: ['number', 0.5, 2], HeadScale: ['number', 0.5, 2],
+    BodyTypeScale: ['number', 0, 1], ProportionScale: ['number', 0, 1] },
+  AnimationController: {},
+  Animator: {},
 } as const satisfies Record<string, Record<string, EffectKind>>);
 export type EffectClass = keyof typeof EFFECT_PROPERTIES;
 export const EFFECT_CLASSES = Object.keys(EFFECT_PROPERTIES) as EffectClass[];
-/** Where each effect may live: a BasePart, an Attachment, or a Model/Folder (or Workspace root). */
-export type EffectHost = 'part' | 'attachment' | 'group';
+/** Where each effect may live: a BasePart, an Attachment, a Model/Folder (or Workspace root), a Sound or a SoundGroup.
+ * A Sound in a part/Attachment is positional; one in a Model/Folder plays everywhere (music, ambience beds). */
+export type EffectHost = 'part' | 'attachment' | 'group' | 'sound' | 'soundGroup' | 'humanoid' | 'animationController' | GuiHost;
+const SOUND_EFFECT_HOSTS = ['sound', 'soundGroup'] as const;
 export const EFFECT_HOSTS: Readonly<Record<EffectClass, readonly EffectHost[]>> = Object.freeze({
   Attachment: ['part'], ParticleEmitter: ['part', 'attachment'], PointLight: ['part', 'attachment'], SpotLight: ['part', 'attachment'], SurfaceLight: ['part'],
   Fire: ['part', 'attachment'], Smoke: ['part', 'attachment'], Sparkles: ['part', 'attachment'], Decal: ['part'], Texture: ['part'],
   Beam: ['part', 'group'], Trail: ['part', 'group'], Highlight: ['part', 'group'],
+  Sound: ['part', 'attachment', 'group'], SoundGroup: ['group'], ReverbSoundEffect: SOUND_EFFECT_HOSTS, EqualizerSoundEffect: SOUND_EFFECT_HOSTS,
+  EchoSoundEffect: SOUND_EFFECT_HOSTS, ChorusSoundEffect: SOUND_EFFECT_HOSTS, CompressorSoundEffect: SOUND_EFFECT_HOSTS, DistortionSoundEffect: SOUND_EFFECT_HOSTS,
+  Humanoid: ['group'], HumanoidDescription: ['humanoid', 'group'], AnimationController: ['group'], Animator: ['humanoid', 'animationController'],
 });
+/** Character classes additionally need the scene.characters plugin capability. */
+export const CHARACTER_CLASSES: readonly EffectClass[] = Object.freeze(['Humanoid', 'HumanoidDescription', 'AnimationController', 'Animator'] as const);
+/** Effect classes that can themselves host other effect items in a build (and the host kind they provide). */
+export const EFFECT_HOST_CLASSES: Readonly<Record<string, EffectHost>> = Object.freeze({ Attachment: 'attachment', Sound: 'sound', SoundGroup: 'soundGroup',
+  Humanoid: 'humanoid', AnimationController: 'animationController' });
 export const isEffectClass = (value: unknown): value is EffectClass => typeof value === 'string' && Object.hasOwn(EFFECT_PROPERTIES, value);
 export function hostKind(className: string, isRoot = false): EffectHost | null {
   if ((BASE_PART_CLASSES as readonly string[]).includes(className)) return 'part';
-  if (className === 'Attachment') return 'attachment';
+  if (Object.hasOwn(EFFECT_HOST_CLASSES, className)) return EFFECT_HOST_CLASSES[className]!;
+  if (Object.hasOwn(GUI_HOST_CLASSES, className)) return GUI_HOST_CLASSES[className]!;
+  if (isRoot && className === 'StarterGui') return 'starterGui';
   return className === 'Model' || className === 'Folder' || (isRoot && className === 'Workspace') ? 'group' : null;
 }
 /** Content ids are only numeric rbxassetid or built-in rbxasset://textures paths. Never URLs or other schemes. */
 export const CONTENT_ID = /^(?:rbxassetid:\/\/[1-9][0-9]{0,18}|rbxasset:\/\/textures\/(?![\s\S]*\.\.)[A-Za-z0-9_\-/.]{1,160}\.(?:png|jpg|jpeg|dds|tga))$/;
 export function contentId(value: unknown, label: string): string {
   if (typeof value !== 'string' || !CONTENT_ID.test(value)) throw new ArcaneError('PROPERTY', `${label} must be rbxassetid://<digits> or a built-in rbxasset://textures/... path.`);
+  return value;
+}
+/** Audio ids are only numeric rbxassetid (one the user gave or asset search returned). Never URLs or paths. */
+export const AUDIO_ID = /^rbxassetid:\/\/[1-9][0-9]{0,18}$/;
+export function audioId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !AUDIO_ID.test(value)) throw new ArcaneError('PROPERTY', `${label} must be rbxassetid://<digits> (an id the user gave or asset search returned).`);
   return value;
 }
 function tag(value: unknown, type: string, label: string): unknown[] {
@@ -242,15 +318,38 @@ function keypoints(value: unknown, width: number, label: string): number[][] {
     last = time; return raw as number[];
   });
 }
-/** Validates one effect property; `attachment` checks a Ref tag in its build/create context. */
-export function validateEffectProperty(className: EffectClass, key: string, v: unknown, attachment: (tagged: Record<string, unknown>) => void): void {
-  const spec = (EFFECT_PROPERTIES[className] as Record<string, EffectKind>)[key];
+/** Validates one effect property; `resolveRef` checks a Ref tag (Attachment or SoundGroup) in its build/create context. */
+export function validateEffectProperty(className: EffectClass | GuiClass, key: string, v: unknown, resolveRef: (tagged: Record<string, unknown>, kind: EffectRefKind) => void): void {
+  const table = specTable(className);
+  const spec = table[key];
   const label = `${className}.${key}`;
-  if (!spec || !Object.hasOwn(EFFECT_PROPERTIES[className], key)) throw new ArcaneError('PROPERTY', `${label} is not writable by the safe bridge.`);
+  if (!spec || !Object.hasOwn(table, key)) throw new ArcaneError('PROPERTY', `${label} is not writable by the safe bridge.`);
   if (spec === 'boolean') { if (typeof v !== 'boolean') throw new ArcaneError('PROPERTY', `${label} must be a boolean.`); return; }
+  if (spec === 'text') { guiText(v, label); return; }
+  if (spec === 'udim2' || spec === 'udim') {
+    const value = tag(v, spec === 'udim2' ? 'UDim2' : 'UDim', label);
+    if (value.length !== (spec === 'udim2' ? 4 : 2)) throw new ArcaneError('PROPERTY', `${label} needs ${spec === 'udim2' ? '[xScale,xOffset,yScale,yOffset]' : '[scale,offset]'}.`);
+    value.forEach((n, index) => {
+      if (index % 2 === 0) finiteIn(n, -GUI_LIMITS.udimScale, GUI_LIMITS.udimScale, `${label} scale`);
+      else if (!Number.isInteger(finiteIn(n, -GUI_LIMITS.udimOffset, GUI_LIMITS.udimOffset, `${label} offset`))) throw new ArcaneError('PROPERTY', `${label} offsets are whole pixels.`);
+    });
+    return;
+  }
+  if (spec === 'font') {
+    const face = object(v, label); keys(face, ['type', 'family', 'weight', 'style']);
+    if (face.type !== 'Font' || !FONT_FAMILIES.includes(face.family as typeof FONT_FAMILIES[number])) throw new ArcaneError('PROPERTY', `${label} must be {type:'Font', family} with a built-in family: ${FONT_FAMILIES.join(', ')}.`);
+    if (face.weight !== undefined && !FONT_WEIGHTS.includes(face.weight as typeof FONT_WEIGHTS[number])) throw new ArcaneError('PROPERTY', `${label} weight must be one of ${FONT_WEIGHTS.join(', ')}.`);
+    if (face.style !== undefined && face.style !== 'Normal' && face.style !== 'Italic') throw new ArcaneError('PROPERTY', `${label} style must be Normal or Italic.`);
+    return;
+  }
   if (spec === 'content') { contentId(v, label); return; }
+  if (spec === 'audio') { audioId(v, label); return; }
   if (spec === 'color') { const c = tag(v, 'Color3', label); if (c.length !== 3) throw new ArcaneError('PROPERTY', `${label} needs three channels.`); triple(c, 0, 1, label); return; }
-  if (spec === 'attachment') { const t = object(v, label); if (t.type !== 'Ref') throw new ArcaneError('PROPERTY', `${label} must be a Ref to an Attachment.`); attachment(t); return; }
+  if (isRefKind(spec)) {
+    const t = object(v, label), wanted = EFFECT_REF_CLASSES[spec];
+    if (t.type !== 'Ref') throw new ArcaneError('PROPERTY', `${label} must be a Ref to ${wanted === 'Attachment' ? 'an' : 'a'} ${wanted}.`);
+    resolveRef(t, spec); return;
+  }
   if (spec === 'colorSequence') {
     for (const point of keypoints(tag(v, 'ColorSequence', label), 4, label)) { if (point.length !== 4) throw new ArcaneError('PROPERTY', `${label} keypoints are [time,r,g,b].`); triple(point.slice(1), 0, 1, label); }
     return;
@@ -272,31 +371,181 @@ export function validateEffectProperty(className: EffectClass, key: string, v: u
     if (point.length === 3) finiteIn(point[2], 0, (high - low) / 2, `${label} envelope`);
   }
 }
-export function validateEffectProperties(value: unknown, className: EffectClass, attachment: (tagged: Record<string, unknown>) => void): Record<string, Json> {
+export function validateEffectProperties(value: unknown, className: EffectClass | GuiClass, resolveRef: (tagged: Record<string, unknown>, kind: EffectRefKind) => void): Record<string, Json> {
   const properties = jsonObject(value ?? {});
   if (Object.keys(properties).length > EFFECT_LIMITS.properties) throw new ArcaneError('INPUT', 'Too many effect properties.');
   if (Object.hasOwn(properties, 'Name')) throw new ArcaneError('PROPERTY', 'Use the name field.');
-  for (const [key, v] of Object.entries(properties)) validateEffectProperty(className, key, v, attachment);
+  for (const [key, v] of Object.entries(properties)) validateEffectProperty(className, key, v, resolveRef);
+  const min = properties.RollOffMinDistance, max = properties.RollOffMaxDistance;
+  if (typeof min === 'number' && typeof max === 'number' && min > max) throw new ArcaneError('PROPERTY', `${className}.RollOffMinDistance must not exceed RollOffMaxDistance.`);
+  if (typeof properties.Health === 'number' && typeof properties.MaxHealth === 'number' && properties.Health > properties.MaxHealth) throw new ArcaneError('PROPERTY', `${className}.Health must not exceed MaxHealth.`);
+  // GUI cross-field rules (mirrored in Properties.luau): one font source; minimums never above maximums.
+  if (Object.hasOwn(properties, 'Font') && Object.hasOwn(properties, 'FontFace')) throw new ArcaneError('PROPERTY', `${className}: set Font or FontFace, not both.`);
+  const minText = properties.MinTextSize, maxText = properties.MaxTextSize;
+  if (typeof minText === 'number' && typeof maxText === 'number' && minText > maxText) throw new ArcaneError('PROPERTY', `${className}.MinTextSize must not exceed MaxTextSize.`);
+  const minSize = (properties.MinSize as { value?: number[] } | undefined)?.value, maxSize = (properties.MaxSize as { value?: number[] } | undefined)?.value;
+  if (minSize && maxSize && (minSize[0]! > maxSize[0]! || minSize[1]! > maxSize[1]!)) throw new ArcaneError('PROPERTY', `${className}.MinSize must not exceed MaxSize.`);
   return properties;
 }
-/** scene.build effect item: parent is the root/group, a part item or an Attachment effect item;
- * Attachment0/1 are {type:'Ref', item:n} naming an EARLIER Attachment effect item of the same build. */
+/** GUI classes take no Ref-valued properties. */
+export function validateGuiProperties(value: unknown, className: GuiClass): Record<string, Json> {
+  return validateEffectProperties(value, className, () => { throw new ArcaneError('PROPERTY', `${className} takes no references.`); });
+}
+/** scene.build effect item: parent is the root/group, a part item or an Attachment/Sound/SoundGroup effect item;
+ * Attachment0/1 (SoundGroup) are {type:'Ref', item:n} naming an EARLIER Attachment (SoundGroup) effect item of the same build. */
 function validateBuildEffect(item: Record<string, unknown>, kinds: string[], session: StudioSession): Json {
   requireEffects(session, 'effects classes');
   keys(item, ['kind', 'className', 'name', 'parent', 'properties', 'key']);
   if (!isEffectClass(item.className)) throw new ArcaneError('CLASS', 'Unsupported effect class.');
+  requireCharacters(session, item.className);
   const className = item.className, parent = item.parent as number, self = kinds.length;
-  const host: EffectHost | null = parent === 0 ? 'group' : kinds[parent - 1] === 'effect:Attachment' ? 'attachment'
-    : kinds[parent - 1] === 'part' ? 'part' : kinds[parent - 1] === 'group' ? 'group' : null;
+  const parentKind = parent === 0 ? 'group' : kinds[parent - 1] ?? '';
+  const host: EffectHost | null = parentKind === 'part' || parentKind === 'group' ? parentKind
+    : parentKind.startsWith('effect:') && Object.hasOwn(EFFECT_HOST_CLASSES, parentKind.slice(7)) ? EFFECT_HOST_CLASSES[parentKind.slice(7)]! : null;
   if (!host || !EFFECT_HOSTS[className].includes(host)) throw new ArcaneError('INPUT', `${className} must be inside a ${EFFECT_HOSTS[className].join(' or ')} item.`);
-  const properties = validateEffectProperties(item.properties, className, t => {
+  const properties = validateEffectProperties(item.properties, className, (t, kind) => {
     keys(t, ['type', 'item']);
-    if (!Number.isInteger(t.item) || (t.item as number) < 1 || (t.item as number) >= self || kinds[(t.item as number) - 1] !== 'effect:Attachment') throw new ArcaneError('INPUT', 'Attachment refs must name an earlier Attachment item of this build.');
+    const wanted = EFFECT_REF_CLASSES[kind];
+    if (!Number.isInteger(t.item) || (t.item as number) < 1 || (t.item as number) >= self || kinds[(t.item as number) - 1] !== 'effect:' + wanted) throw new ArcaneError('INPUT', `${wanted} refs must name an earlier ${wanted} item of this build.`);
   });
   return { ...item, properties } as Json;
 }
-function requireEffects(session: StudioSession, feature: string): void {
-  if (!session.capabilities.includes(STUDIO_EFFECTS_CAPABILITY)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates ${feature}. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
+function requireEffects(session: StudioSession, feature: string, capability: string = STUDIO_EFFECTS_CAPABILITY): void {
+  if (!session.capabilities.includes(capability)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates ${feature}. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
+}
+const requireGui = (session: StudioSession) => requireEffects(session, 'direct GUI building', STUDIO_GUI_CAPABILITY);
+const requireCharacters = (session: StudioSession, className: EffectClass) => {
+  if (CHARACTER_CLASSES.includes(className)) requireEffects(session, 'character classes (Humanoid, HumanoidDescription, AnimationController, Animator)', STUDIO_CHARACTERS_CAPABILITY);
+};
+
+// ---- GUI classes (scene.create / scene.build). Same typed-spec machinery as effects; Properties.luau mirrors this exact table. ----
+/** Built-in font families only (rbxasset://fonts/families/<Family>.json). Never uploaded or URL fonts. */
+export const FONT_FAMILIES = ['BuilderSans', 'SourceSansPro', 'GothamSSm', 'Montserrat', 'Roboto', 'RobotoMono', 'RobotoCondensed', 'Arial', 'Oswald', 'FredokaOne',
+  'Bangers', 'Creepster', 'DenkOne', 'Fondamento', 'GrenzeGotisch', 'IndieFlower', 'JosefinSans', 'Jura', 'Kalam', 'LuckiestGuy', 'Merriweather', 'Michroma',
+  'Nunito', 'PatrickHand', 'PermanentMarker', 'PressStart2P', 'Sarpanch', 'SpecialElite', 'TitilliumWeb', 'Ubuntu', 'AmaticSC'] as const;
+export const FONT_WEIGHTS = ['Thin', 'ExtraLight', 'Light', 'Regular', 'Medium', 'SemiBold', 'Bold', 'ExtraBold', 'Heavy'] as const;
+/** Legacy Enum.Font names (built-in). */
+export const FONT_NAMES = ['SourceSans', 'SourceSansBold', 'SourceSansSemibold', 'SourceSansLight', 'SourceSansItalic', 'Gotham', 'GothamMedium', 'GothamBold', 'GothamBlack',
+  'BuilderSans', 'BuilderSansMedium', 'BuilderSansBold', 'BuilderSansExtraBold', 'Arial', 'ArialBold', 'Roboto', 'RobotoMono', 'RobotoCondensed',
+  'Oswald', 'FredokaOne', 'Bangers', 'Creepster', 'DenkOne', 'Fondamento', 'GrenzeGotisch', 'IndieFlower', 'JosefinSans', 'Jura', 'Kalam', 'LuckiestGuy', 'Merriweather',
+  'Michroma', 'Nunito', 'PatrickHand', 'PermanentMarker', 'Sarpanch', 'SpecialElite', 'TitilliumWeb', 'Ubuntu', 'AmaticSC', 'Code', 'Arcade', 'SciFi', 'Cartoon', 'Fantasy', 'Antique'] as const;
+/** Bounded single-line display text: no control characters (C0, DEL, C1) and well-formed UTF-16. */
+export function guiText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > GUI_LIMITS.textBytes || /[\x00-\x1f\x7f-\x9f]/.test(value)
+    || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)) throw new ArcaneError('PROPERTY', `${label} must be text of at most ${GUI_LIMITS.textBytes} UTF-8 bytes without control characters.`);
+  return value;
+}
+const UNIT = ['number', 0, 1] as const;
+const AUTOMATIC_SIZE = ['enum', 'AutomaticSize', ['None', 'X', 'Y', 'XY']] as const;
+const GUI_OBJECT = { Size: 'udim2', Position: 'udim2', AnchorPoint: ['vector2', 0, 1], BackgroundColor3: 'color', BackgroundTransparency: UNIT, BorderSizePixel: ['integer', 0, 100],
+  Visible: 'boolean', ZIndex: ['integer', -1000, 1000], LayoutOrder: ['integer', -1000000, 1000000], AutomaticSize: AUTOMATIC_SIZE, ClipsDescendants: 'boolean',
+  Rotation: ['number', -360, 360], Active: 'boolean', Selectable: 'boolean' } as const;
+const GUI_TEXT = { Text: 'text', TextColor3: 'color', TextSize: ['integer', 1, 100], TextScaled: 'boolean', TextWrapped: 'boolean',
+  TextXAlignment: ['enum', 'TextXAlignment', ['Left', 'Center', 'Right']], TextYAlignment: ['enum', 'TextYAlignment', ['Top', 'Center', 'Bottom']],
+  TextTransparency: UNIT, TextStrokeColor3: 'color', TextStrokeTransparency: UNIT, Font: ['enum', 'Font', FONT_NAMES], FontFace: 'font',
+  TextTruncate: ['enum', 'TextTruncate', ['None', 'AtEnd']], LineHeight: ['number', 0.5, 3] } as const;
+const GUI_IMAGE = { Image: 'content', ImageColor3: 'color', ImageTransparency: UNIT, ScaleType: ['enum', 'ScaleType', ['Stretch', 'Slice', 'Tile', 'Fit', 'Crop']], TileSize: 'udim2' } as const;
+const GUI_LAYER = { Enabled: 'boolean', ResetOnSpawn: 'boolean', ZIndexBehavior: ['enum', 'ZIndexBehavior', ['Global', 'Sibling']] } as const;
+const GUI_WORLD = { AlwaysOnTop: 'boolean', MaxDistance: ['number', 0, 100000], LightInfluence: UNIT, Brightness: ['number', 0, 20], ClipsDescendants: 'boolean' } as const;
+const GUI_LAYOUT = { FillDirection: ['enum', 'FillDirection', ['Horizontal', 'Vertical']], HorizontalAlignment: ['enum', 'HorizontalAlignment', ['Left', 'Center', 'Right']],
+  VerticalAlignment: ['enum', 'VerticalAlignment', ['Top', 'Center', 'Bottom']], SortOrder: ['enum', 'SortOrder', ['LayoutOrder', 'Name']] } as const;
+/** Fixed GUI allowlist: class -> property -> kind. UDim2 = [xScale,xOffset,yScale,yOffset], UDim = [scale,offset] (offsets whole pixels). */
+export const GUI_PROPERTIES = Object.freeze({
+  ScreenGui: { ...GUI_LAYER, IgnoreGuiInset: 'boolean', DisplayOrder: ['integer', -1000, 1000], ScreenInsets: ['enum', 'ScreenInsets', ['None', 'DeviceSafeInsets', 'CoreUISafeInsets', 'TopbarSafeInsets']] },
+  SurfaceGui: { ...GUI_LAYER, ...GUI_WORLD, Face: ['enum', 'NormalId', NORMAL_IDS], SizingMode: ['enum', 'SurfaceGuiSizingMode', ['FixedSize', 'PixelsPerStud']],
+    PixelsPerStud: ['number', 1, 500], CanvasSize: ['vector2', 1, 8192] },
+  BillboardGui: { ...GUI_LAYER, ...GUI_WORLD, Size: 'udim2', StudsOffset: ['vector3', -1000, 1000], StudsOffsetWorldSpace: ['vector3', -1000, 1000] },
+  Frame: GUI_OBJECT,
+  CanvasGroup: { ...GUI_OBJECT, GroupTransparency: UNIT, GroupColor3: 'color' },
+  ScrollingFrame: { ...GUI_OBJECT, CanvasSize: 'udim2', ScrollBarThickness: ['integer', 0, 50], ScrollingDirection: ['enum', 'ScrollingDirection', ['X', 'Y', 'XY']],
+    AutomaticCanvasSize: AUTOMATIC_SIZE, ScrollBarImageColor3: 'color', ScrollBarImageTransparency: UNIT, ScrollingEnabled: 'boolean',
+    VerticalScrollBarInset: ['enum', 'ScrollBarInset', ['None', 'ScrollBar', 'Always']] },
+  TextLabel: { ...GUI_OBJECT, ...GUI_TEXT },
+  TextButton: { ...GUI_OBJECT, ...GUI_TEXT, AutoButtonColor: 'boolean' },
+  TextBox: { ...GUI_OBJECT, ...GUI_TEXT, PlaceholderText: 'text', PlaceholderColor3: 'color', ClearTextOnFocus: 'boolean', TextEditable: 'boolean', MultiLine: 'boolean' },
+  ImageLabel: { ...GUI_OBJECT, ...GUI_IMAGE },
+  ImageButton: { ...GUI_OBJECT, ...GUI_IMAGE, AutoButtonColor: 'boolean', HoverImage: 'content', PressedImage: 'content' },
+  ViewportFrame: { ...GUI_OBJECT, Ambient: 'color', LightColor: 'color', ImageColor3: 'color', ImageTransparency: UNIT },
+  UICorner: { CornerRadius: 'udim' },
+  UIStroke: { Color: 'color', Thickness: ['number', 0, 50], Transparency: UNIT, ApplyStrokeMode: ['enum', 'ApplyStrokeMode', ['Contextual', 'Border']],
+    LineJoinMode: ['enum', 'LineJoinMode', ['Round', 'Bevel', 'Miter']], Enabled: 'boolean' },
+  UIGradient: { Color: 'colorSequence', Transparency: ['sequence', 0, 1], Rotation: ['number', -360, 360], Offset: ['vector2', -1, 1], Enabled: 'boolean' },
+  UIPadding: { PaddingTop: 'udim', PaddingBottom: 'udim', PaddingLeft: 'udim', PaddingRight: 'udim' },
+  UIListLayout: { ...GUI_LAYOUT, Padding: 'udim' },
+  UIGridLayout: { ...GUI_LAYOUT, CellSize: 'udim2', CellPadding: 'udim2', StartCorner: ['enum', 'StartCorner', ['TopLeft', 'TopRight', 'BottomLeft', 'BottomRight']],
+    FillDirectionMaxCells: ['integer', 0, 100] },
+  UIAspectRatioConstraint: { AspectRatio: ['number', 0.01, 100], AspectType: ['enum', 'AspectType', ['FitWithinMaxSize', 'ScaleWithParentSize']],
+    DominantAxis: ['enum', 'DominantAxis', ['Width', 'Height']] },
+  UISizeConstraint: { MinSize: ['vector2', 0, 100000], MaxSize: ['vector2', 0, 100000] },
+  UITextSizeConstraint: { MinTextSize: ['integer', 1, 100], MaxTextSize: ['integer', 1, 100] },
+  UIScale: { Scale: ['number', 0.01, 20] },
+} as const satisfies Record<string, Record<string, EffectKind>>);
+export type GuiClass = keyof typeof GUI_PROPERTIES;
+export const GUI_CLASSES = Object.keys(GUI_PROPERTIES) as GuiClass[];
+export const isGuiClass = (value: unknown): value is GuiClass => typeof value === 'string' && Object.hasOwn(GUI_PROPERTIES, value);
+/** Where GUI lives: the StarterGui root, a Model/Folder (template holder), a part/Attachment (world GUIs),
+ * a ScreenGui/SurfaceGui/BillboardGui ('layer') or a GuiObject ('guiObject'). */
+export type GuiHost = 'starterGui' | 'group' | 'part' | 'attachment' | 'layer' | 'guiObject';
+const GUI_ELEMENT_HOSTS = ['layer', 'guiObject'] as const, GUI_MODIFIER_HOSTS = ['guiObject'] as const;
+export const GUI_HOSTS: Readonly<Record<GuiClass, readonly GuiHost[]>> = Object.freeze({
+  ScreenGui: ['starterGui', 'group'], SurfaceGui: ['part'], BillboardGui: ['part', 'attachment'],
+  Frame: GUI_ELEMENT_HOSTS, CanvasGroup: GUI_ELEMENT_HOSTS, ScrollingFrame: GUI_ELEMENT_HOSTS, TextLabel: GUI_ELEMENT_HOSTS, TextButton: GUI_ELEMENT_HOSTS,
+  TextBox: GUI_ELEMENT_HOSTS, ImageLabel: GUI_ELEMENT_HOSTS, ImageButton: GUI_ELEMENT_HOSTS, ViewportFrame: GUI_ELEMENT_HOSTS,
+  UICorner: GUI_MODIFIER_HOSTS, UIStroke: GUI_MODIFIER_HOSTS, UIGradient: GUI_MODIFIER_HOSTS, UIPadding: GUI_MODIFIER_HOSTS,
+  UIAspectRatioConstraint: GUI_MODIFIER_HOSTS, UISizeConstraint: GUI_MODIFIER_HOSTS, UITextSizeConstraint: GUI_MODIFIER_HOSTS,
+  UIListLayout: GUI_ELEMENT_HOSTS, UIGridLayout: GUI_ELEMENT_HOSTS, UIScale: GUI_ELEMENT_HOSTS,
+});
+/** GUI classes that host other GUI items, and the host kind they provide. */
+export const GUI_HOST_CLASSES: Readonly<Record<string, 'layer' | 'guiObject'>> = Object.freeze({
+  ScreenGui: 'layer', SurfaceGui: 'layer', BillboardGui: 'layer',
+  Frame: 'guiObject', CanvasGroup: 'guiObject', ScrollingFrame: 'guiObject', TextLabel: 'guiObject', TextButton: 'guiObject', TextBox: 'guiObject',
+  ImageLabel: 'guiObject', ImageButton: 'guiObject', ViewportFrame: 'guiObject',
+});
+function specTable(className: string): Record<string, EffectKind> {
+  if (Object.hasOwn(EFFECT_PROPERTIES, className)) return EFFECT_PROPERTIES[className as EffectClass] as Record<string, EffectKind>;
+  if (Object.hasOwn(GUI_PROPERTIES, className)) return GUI_PROPERTIES[className as GuiClass] as Record<string, EffectKind>;
+  throw new ArcaneError('CLASS', 'Unsupported effect or GUI class.');
+}
+function hostError(className: GuiClass): ArcaneError {
+  return new ArcaneError('CLASS', `${className} must be inside ${GUI_HOSTS[className].map(host => ({ starterGui: 'StarterGui', group: 'a Model/Folder', part: 'a part', attachment: 'an Attachment',
+    layer: 'a ScreenGui/SurfaceGui/BillboardGui', guiObject: 'a GuiObject (Frame, TextButton, ...)' })[host]).join(' or ')}.`);
+}
+/** One GUI prototype: element 1 is the root (parent 0); later elements name an earlier element (1-based) that hosts them. */
+function validateGuiPrototype(value: unknown): Json[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > SCENE_BUILD_LIMITS.prototypeParts) throw new ArcaneError('INPUT', `A GUI prototype needs 1..${SCENE_BUILD_LIMITS.prototypeParts} elements.`);
+  const classes: GuiClass[] = [];
+  return value.map((raw, index) => {
+    const element = object(raw, 'prototype element'); keys(element, ['className', 'name', 'parent', 'properties']);
+    if (!isGuiClass(element.className)) throw new ArcaneError('CLASS', 'Unsupported GUI prototype class.');
+    textField(element.name, 'element name', 100);
+    const parent = element.parent ?? 0;
+    if (index === 0 ? parent !== 0 : !Number.isInteger(parent) || (parent as number) < 1 || (parent as number) > index) throw new ArcaneError('INPUT', 'The first element is the prototype root (parent 0); later elements name an earlier element (1-based).');
+    if (index > 0) {
+      const host = GUI_HOST_CLASSES[classes[(parent as number) - 1]!];
+      if (!host || !GUI_HOSTS[element.className].includes(host)) throw hostError(element.className);
+    }
+    classes.push(element.className);
+    return { className: element.className, name: element.name as string, parent: parent as number, properties: validateGuiProperties(element.properties, element.className) };
+  });
+}
+/** scene.build gui item: className + properties inside the root, a group, a part, an Attachment or an earlier GUI host item. */
+function validateBuildGui(item: Record<string, unknown>, host: EffectHost | null, session: StudioSession): Json {
+  requireGui(session);
+  keys(item, ['kind', 'className', 'name', 'parent', 'properties', 'key']);
+  if (!isGuiClass(item.className)) throw new ArcaneError('CLASS', 'Unsupported GUI class.');
+  if (!host || !(GUI_HOSTS[item.className] as readonly string[]).includes(host)) throw hostError(item.className);
+  return { ...item, properties: validateGuiProperties(item.properties, item.className) } as Json;
+}
+/** scene.build stamp item: one copy of a GUI prototype; properties override the prototype root's own properties. */
+function validateBuildStamp(item: Record<string, unknown>, host: EffectHost | null, prototypes: Json[]): Json {
+  keys(item, ['kind', 'template', 'name', 'parent', 'properties', 'key']);
+  const proto = Number.isInteger(item.template) ? prototypes[(item.template as number) - 1] as { gui?: { className: GuiClass; properties: Record<string, Json> }[] } | undefined : undefined;
+  if (!proto || !proto.gui) throw new ArcaneError('INPUT', 'A stamp names an unknown GUI prototype index.');
+  const root = proto.gui[0]!;
+  if (!host || !(GUI_HOSTS[root.className] as readonly string[]).includes(host)) throw hostError(root.className);
+  const properties = validateGuiProperties(item.properties, root.className);
+  validateGuiProperties({ ...root.properties, ...properties }, root.className);
+  return { ...item, properties } as Json;
 }
 
 /** Named looks expanded host-side to exact environment.apply values; explicit sections override per property. */
@@ -378,7 +627,20 @@ export const ENVIRONMENT_PROPERTIES = Object.freeze({
   sunRays: { Intensity: [0, 1], Spread: [0, 1] },
 } as const);
 export type EnvironmentSection = keyof typeof ENVIRONMENT_PROPERTIES;
-const ENVIRONMENT_EXTRAS = ['preset', 'technology', 'terrainDecoration', 'materials'] as const;
+const ENVIRONMENT_EXTRAS = ['preset', 'technology', 'terrainDecoration', 'materials', 'soundService'] as const;
+/** SoundService world-audio settings (environment.apply soundService). The plugin re-validates this table (Operations.luau). */
+export const REVERB_TYPES = ['NoReverb', 'GenericReverb', 'PaddedCell', 'Room', 'Bathroom', 'LivingRoom', 'StoneRoom', 'Auditorium', 'ConcertHall', 'Cave', 'Arena',
+  'Hangar', 'CarpetedHallway', 'Hallway', 'StoneCorridor', 'Alley', 'Forest', 'City', 'Mountains', 'Quarry', 'Plain', 'ParkingLot', 'SewerPipe', 'UnderWater'] as const;
+export const SOUND_SERVICE_PROPERTIES = Object.freeze({ AmbientReverb: REVERB_TYPES, DistanceFactor: [0.1, 100], DopplerScale: [0, 10], RolloffScale: [0, 10] } as const);
+function validateSoundService(value: unknown): Record<string, Json> {
+  const values = object(value, 'soundService'); keys(values, Object.keys(SOUND_SERVICE_PROPERTIES));
+  if (!Object.keys(values).length) throw new ArcaneError('INPUT', 'Set at least one soundService property.');
+  for (const [key, v] of Object.entries(values)) {
+    if (key === 'AmbientReverb') { if (!REVERB_TYPES.includes(v as typeof REVERB_TYPES[number])) throw new ArcaneError('PROPERTY', `AmbientReverb must be one of ${REVERB_TYPES.join(', ')}.`); }
+    else { const [low, high] = SOUND_SERVICE_PROPERTIES[key as 'DistanceFactor']; finiteIn(v, low, high, key); }
+  }
+  return values as Record<string, Json>;
+}
 /** Expands a named preset into exact section values (explicit section values win) and checks the
  * effects-capability extras. The plugin never receives a preset name. */
 function expandEnvironment(input: Record<string, Json>, session: StudioSession): Record<string, Json> {
@@ -401,6 +663,10 @@ function expandEnvironment(input: Record<string, Json>, session: StudioSession):
   if (a.materials !== undefined) {
     if (!session.allowedRoots.includes('Workspace')) throw new ArcaneError('SCOPE', 'Material variants require the Workspace grant.');
     a.materials = validateMaterials(a.materials);
+  }
+  if (a.soundService !== undefined) {
+    if (!session.allowedRoots.includes('Workspace')) throw new ArcaneError('SCOPE', 'SoundService settings require the Workspace grant.');
+    a.soundService = validateSoundService(a.soundService);
   }
   return a;
 }
@@ -460,6 +726,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   if (isWrite(method) && !session.allowWrites) throw new ArcaneError('READ_ONLY', 'This Studio pairing is read-only. Create an explicit writable pairing to edit.');
   if (!session.capabilities.includes(method)) {
     if (isAssetMethod(method)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates native asset placement. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
+    if (method === 'terrain.generate') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates procedural terrain. Update the Studio plugin from Arcane, restart Studio and connect again; until then use environment_apply terrain fills. No command was queued.`);
     if (method === 'scene.build' || method === 'environment.apply') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates batch building and environment tools. Update the Studio plugin from Arcane, restart Studio and connect again; until then use scene_create. No command was queued.`);
     throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
   }
@@ -538,12 +805,20 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       keys(a, ['parent', 'className', 'name', 'properties']); const parent = ref(a.parent, session); textField(a.name, 'instance name', 100);
       if (isEffectClass(a.className)) {
         requireEffects(session, 'effects classes');
+        requireCharacters(session, a.className);
         const host = hostKind(parent.className, parent.pathSegments.length === 0);
         if (!host || !EFFECT_HOSTS[a.className].includes(host)) throw new ArcaneError('CLASS', `${a.className} must be created inside a ${EFFECT_HOSTS[a.className].join(' or ')}.`);
-        a.properties = validateEffectProperties(a.properties, a.className, t => {
-          keys(t, ['type', 'ref']); const r = ref(t.ref, session);
-          if (r.className !== 'Attachment') throw new ArcaneError('PROPERTY', 'Attachment refs must name an Attachment in this session.');
+        a.properties = validateEffectProperties(a.properties, a.className, (t, kind) => {
+          keys(t, ['type', 'ref']); const r = ref(t.ref, session), wanted = EFFECT_REF_CLASSES[kind];
+          if (r.className !== wanted) throw new ArcaneError('PROPERTY', `${wanted} refs must name ${wanted === 'Attachment' ? 'an' : 'a'} ${wanted} in this session.`);
         });
+        break;
+      }
+      if (isGuiClass(a.className)) {
+        requireGui(session);
+        const host = hostKind(parent.className, parent.pathSegments.length === 0);
+        if (!host || !(GUI_HOSTS[a.className] as readonly string[]).includes(host)) throw hostError(a.className);
+        a.properties = validateGuiProperties(a.properties, a.className);
         break;
       }
       if (!SAFE_CREATE_CLASSES.includes(a.className as typeof SAFE_CREATE_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported creation class.');
@@ -552,6 +827,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
     case 'scene.build': return validateSceneBuild(a, session);
     case 'scene.asset_watch': case 'scene.place_asset': case 'scene.apply_material': return validateAssetCommand(method, a, session);
     case 'environment.apply': return validateEnvironment(a, session);
+    case 'terrain.generate': return validateTerrainGenerate(a, session);
     case 'scene.update': {
       keys(a, ['ref', 'expected', 'properties']); const r = ref(a.ref, session);
       const p = validateProperties(a.properties, r.className, r.pathSegments.length > 0);

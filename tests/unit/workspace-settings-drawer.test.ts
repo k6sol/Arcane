@@ -235,7 +235,7 @@ test('visible sidebar tool contexts and exact settings section navigation preser
     assert.equal(await drawer.locator('[data-settings-section-target]:visible').count(), 0);
     assert.equal(await page.locator('#settings-search-empty').isVisible(), true);
     await page.locator('#settings-search').fill('');
-    assert.equal(await drawer.locator('[data-settings-section-target]:visible').count(), 5, 'General, Connections, Tools, Plans & credits and Advanced');
+    assert.equal(await drawer.locator('[data-settings-section-target]:visible').count(), 7, 'General, Guide, Connections, Tools, Project memory, Plans & credits and Advanced');
     await page.keyboard.press('Escape'); await drawer.waitFor({ state: 'hidden' });
     await page.evaluate(() => { document.getElementById('shell-notice')!.textContent = 'Fixture notice'; });
     assert.equal(await page.locator('#shell-notice').isVisible(), true);

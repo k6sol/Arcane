@@ -1,0 +1,37 @@
+/* Trusted Arcane decision window (trusted-dialog.html). A small inlined copy of the workspace tokens (studio.css):
+   black surfaces, white text, the Arcane red for the primary action and focus. */
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI",system-ui,Arial,sans-serif;
+  --font-display:"Segoe UI Variable Display","Segoe UI",system-ui,Arial,sans-serif;
+  --radius-sm:8px;--radius-lg:12px;
+  --bg:#080808;--panel:#0d0d0f;--raised:#18181b;--hover:#1c1c20;--hover-strong:#27272c;
+  --line:rgba(255,255,255,.08);--line-strong:rgba(255,255,255,.14);
+  --text:#f5f5f5;--text-secondary:#b8b8bd;--muted:#8d8d94;
+  --accent:#ff3340;--accent-deep:#c8102e;--accent-tint:rgba(255,51,64,.12);--accent-line:rgba(255,51,64,.38);
+  --action:#d4152b;--action-hover:#e01b2c;--on-accent:#ffffff;--focus-ring:#ff3340;
+  --warning:#f0b85a;--danger:#ff7a82;
+  color-scheme:dark;font-family:var(--font-ui);font-size:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--panel);color:var(--text);overflow:hidden;user-select:none}
+body{border:1px solid var(--line-strong);border-top:3px solid var(--accent);min-height:100vh}
+.trusted-dialog{display:flex;flex-direction:column;outline:none}
+.trusted-dialog[hidden]{display:none}
+.trusted-dialog-head{display:flex;align-items:center;gap:10px;padding:16px 20px 8px;-webkit-app-region:drag}
+.trusted-dialog-mark{width:10px;height:10px;border-radius:2px;background:var(--accent);flex:none;transform:rotate(45deg)}
+.trusted-dialog[data-type=warning] .trusted-dialog-mark{background:var(--warning)}
+.trusted-dialog[data-type=error] .trusted-dialog-mark{background:var(--danger)}
+.trusted-dialog-title{margin:0;font:600 16px/1.3 var(--font-display);flex:1;min-width:0;overflow-wrap:anywhere}
+.trusted-dialog-badge{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);border:1px solid var(--line-strong);border-radius:999px;padding:2px 8px}
+.trusted-dialog-body{padding:4px 20px 8px;max-height:460px;overflow:auto;user-select:text}
+.trusted-dialog-message{margin:0 0 8px;font-size:14px;line-height:1.45;color:var(--text)}
+.trusted-dialog-detail{margin:0 0 8px;font-size:13px;line-height:1.45;color:var(--text-secondary);white-space:pre-wrap;overflow-wrap:anywhere}
+.trusted-dialog-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding:12px 20px 16px;border-top:1px solid var(--line)}
+.trusted-dialog-button{font:500 13px/1 var(--font-ui);min-height:32px;padding:8px 14px;border-radius:var(--radius-sm);border:1px solid var(--line-strong);background:var(--raised);color:var(--text);cursor:pointer}
+.trusted-dialog-button:hover{background:var(--hover-strong)}
+.trusted-dialog-button.trusted-dialog-primary{background:var(--action);border-color:var(--action);color:var(--on-accent)}
+.trusted-dialog-button.trusted-dialog-primary:hover{background:var(--action-hover)}
+.trusted-dialog-button:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.trusted-dialog-button:disabled{cursor:not-allowed;opacity:.6}
+::-webkit-scrollbar{width:10px}::-webkit-scrollbar-thumb{background:#2c2c31;border-radius:8px}
+@media (prefers-reduced-motion:no-preference){.trusted-dialog-button{transition:background-color .12s cubic-bezier(.2,0,0,1)}}

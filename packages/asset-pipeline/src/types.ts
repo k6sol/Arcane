@@ -1,7 +1,13 @@
 export class AssetError extends Error {
   constructor(public readonly code: string, message: string) { super(message); this.name = 'AssetError'; }
 }
-export type AssetTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly';
+export type AssetTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' | 'procedural';
+/** Typed parameters for the bundled Blender generators (see procedural.ts). */
+export type ProceduralSpec =
+  | { kind: 'tree'; species: 'pine' | 'oak' | 'birch' | 'palm'; height: number; trunkTaper: number; branchLevels: number; leafDensity: number; trunkRadius: number | null; secondaryColor: Vec3 }
+  | { kind: 'rock'; size: Vec3; roughness: number }
+  | { kind: 'column'; radius: number; height: number; flutes: number; base: 'none' | 'plinth' | 'attic'; capital: 'none' | 'doric' | 'ionic' | 'corinthian' }
+  | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number };
 export interface AssetInput {
   template: AssetTemplate;
   name: string;
@@ -12,8 +18,9 @@ export interface AssetInput {
   renderResolution?: number | undefined;
   renderSamples?: number | undefined;
   recipe?: AssemblyRecipe | undefined;
+  procedural?: unknown;
 }
-export interface AssetRequest extends Required<{ [K in keyof Omit<AssetInput, 'recipe'>]: Exclude<AssetInput[K], undefined> }> { schemaVersion: 1; recipe?: AssemblyRecipe }
+export interface AssetRequest extends Required<{ [K in keyof Omit<AssetInput, 'recipe' | 'procedural'>]: Exclude<AssetInput[K], undefined> }> { schemaVersion: 1; recipe?: AssemblyRecipe; procedural?: ProceduralSpec }
 export interface RuntimeEvidence {
   executable: string;
   version: string;

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { PLUGIN_SOURCES, renderPlugin } from '../../scripts/build-plugin.mjs';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -177,6 +178,14 @@ local connectCount, disconnectCount, pollCount, statusCount = 0, 0, 0, 0
 local expectKey = key
 http.RequestAsync = function(_self: any, request: any): any
   fixture.requests += 1
+  -- One-click pairing lookup: a credential-free read of the fixed loopback port. It is still a
+  -- network request, so it counts toward fixture.requests and the no-idle-probe invariant.
+  if string.find(request.Url, "/v1/pairing/discover", 1, true) then
+    assert(request.Url == "http://127.0.0.1:45870/v1/pairing/discover" and request.Headers.Authorization == nil, "discovery is a fixed, credential-free loopback read")
+    fixture.discoveryProbes = (fixture.discoveryProbes or 0) + 1
+    if fixture.pairingOffer then return fixture.pairingOffer(request) end
+    return {StatusCode = 404, Success = false, Body = '{"error":"NO_OFFER"}'}
+  end
   if fixture.uiHttpHook then return fixture.uiHttpHook(request) end
   if string.find(request.Url, "/v1/plugin/status", 1, true) then
     statusCount += 1
@@ -213,6 +222,7 @@ local function idleMount(): ()
   assert(fixture.widget.Enabled and fixture.button.active, "toolbar reopens the popup without connecting")
   cycle(); cycle()
   assert(fixture.requests == 0 and #fixture.setCalls == 0 and #fixture.workers == 1, "idle worker and toolbar do not probe or autoconnect")
+  assert(fixture.discoveryProbes == nil and client.codePairing == nil, "idle worker and toolbar never look up a pairing offer")
 end
 local function clickConnect(): ()
   local submitted = keyInput.Text
@@ -382,7 +392,7 @@ unload()
 test('generated Luau bundle compiles and executes cold Main, reconnects, cached factories and the extended logic suite', { skip: !runtime || !compile }, async () => {
   await runLuauFixture({ core: true, checks: `
 assert(fixture.toolbar.name == "Arcane" and fixture.widget.Title == "Arcane", "original Main initializes widget")
-assert(keyInput.Text == "" and keyInput.PlaceholderText == "Arcane API key" and control.Text == "Connect", "cold start offers only Connect")
+assert(keyInput.Text == "" and keyInput.PlaceholderText == "Arcane code or API key" and control.Text == "Connect", "cold start offers only Connect")
 assert(#fixture.getCalls == 2, "mount reads exactly the two owned keys")
 idleMount()
 enter(key)
@@ -419,13 +429,155 @@ http.RequestAsync = function(_self: any, request: any): any fixture.requests += 
 ` });
 });
 
+// Two-sided pairing must never touch the network before an explicit Connect click with the Arcane code
+// (docs/studio-pairing.md), must refuse a daemon that cannot prove the code, and must wait for Approve in Arcane.
+const pairTicket = 'arcane_pair_v1_45871_' + 'c'.repeat(48);
+const katNonce = '0123456789abcdef0123456789abcdef';
+const kat = role => createHmac('sha256', '123456').update('arcane-pair-v2|' + role + '|' + pairTicket + '|' + katNonce).digest('hex');
+const pairingFixture = `
+local pairTicket = "${pairTicket}"
+local claims, challenges, approved = 0, 0, false
+local v = __arcaneRequire("Validation")
+-- Known-answer check of the plugin HMAC against Node's createHmac (the daemon's implementation).
+assert(client:pairingProof("123456", "arcane", pairTicket, "${katNonce}") == "${kat('arcane')}", "plugin HMAC matches the daemon (arcane role)")
+assert(client:pairingProof("123456", "plugin", pairTicket, "${katNonce}") == "${kat('plugin')}", "plugin HMAC matches the daemon (plugin role)")
+local function offerReply(request: any): any
+  assert(request.Method == "POST" and request.Headers.Origin == nil, "lookup is a plain loopback POST")
+  return {StatusCode = 200, Success = true, Body = v.encode({protocolVersion = 1, port = 45871, ticket = pairTicket, expiresAt = "2099-01-01T00:00:00.000Z"}, http)}
+end
+local seenNonce = nil
+local function pairingDaemon(code: string): (any) -> any
+  return function(request: any): any
+    local payload = v.decode(request.Body, http)
+    if string.find(request.Url, "/v1/plugin/pairing/challenge", 1, true) then
+      challenges += 1
+      assert(request.Url == "http://127.0.0.1:45871/v1/plugin/pairing/challenge" and request.Headers.Authorization == nil, "challenge targets the offer's daemon without a bearer")
+      assert(payload.ticket == pairTicket and type(payload.clientNonce) == "string" and string.match(payload.clientNonce, "^%x+$") and #payload.clientNonce == 32
+        and payload.proof == nil and payload.code == nil, "the challenge carries only the ticket and a fresh nonce, nothing derived from the code")
+      seenNonce = payload.clientNonce
+      return {StatusCode = 200, Success = true, Body = v.encode({protocolVersion = 1, proof = client:pairingProof(code, "arcane", pairTicket, payload.clientNonce)}, http)}
+    end
+    if string.find(request.Url, "/v1/plugin/pairing/claim", 1, true) then
+      claims += 1
+      assert(request.Url == "http://127.0.0.1:45871/v1/plugin/pairing/claim" and request.Headers.Authorization == nil, "claim targets the offer's daemon without a bearer")
+      assert(payload.ticket == pairTicket and payload.clientNonce == seenNonce and payload.proof == client:pairingProof("123456", "plugin", pairTicket, seenNonce)
+        and payload.apiKey == nil and payload.code == nil and payload.identity ~= nil, "claim proves the code over the same nonce and never sends the code")
+      if not approved then return {StatusCode = 200, Success = true, Body = v.encode({state = "awaiting-approval", expiresAt = "2099-01-01T00:00:00.000Z"}, http)} end
+      return {StatusCode = 200, Success = true, Body = v.encode({sessionId = "pair-session", token = "ui-token", protocolVersion = 1,
+        allowedRoots = v.array({"Workspace"}), allowWrites = false, apiKey = key}, http)}
+    end
+    assert(request.Headers.Authorization == "Bearer ui-token" and string.find(request.Url, "/v1/plugin/poll", 1, true), "only the paired session polls")
+    return {StatusCode = 200, Success = true, Body = '{"commands":[]}'}
+  end
+end
+local function typeCode(value: string): ()
+  enter(value)
+  control.Activated:Fire()
+end
+`;
+
+for (const format of ['source', 'generated']) {
+  test(`${format} pairing: idle mount with a pending offer makes zero requests; toolbar and widget never look it up`, { skip: !runtime || !compile }, async () => {
+    await runLuauFixture({ format, checks: pairingFixture + `
+fixture.pairingOffer = offerReply
+idleMount()
+for _ = 1, 6 do cycle() end
+fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):Fire()
+fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):Fire()
+for _ = 1, 6 do cycle() end
+assert(fixture.requests == 0 and fixture.discoveryProbes == nil and #fixture.setCalls == 0, "no network or settings write before an explicit Connect click")
+assert(control.Text == "Connect" and keyInput.PlaceholderText == "Arcane code or API key", "the field asks for the Arcane code or a key")
+control.Activated:Fire(); for _ = 1, 3 do cycle() end
+assert(fixture.requests == 0 and fixture.discoveryProbes == nil and client.codePairing == nil and control.Text == "Failed"
+  and keyInput.PlaceholderText == "Enter the 6-digit code shown in Arcane", "an empty Connect click asks for the code and makes no request")
+unload()
+` });
+  });
+
+  test(`${format} pairing: the typed Arcane code, Arcane's proof first, then Approve in Arcane, end to end`, { skip: !runtime || !compile }, async () => {
+    await runLuauFixture({ format, checks: pairingFixture + `
+fixture.pairingOffer = offerReply
+idleMount()
+fixture.uiHttpHook = pairingDaemon("123456")
+typeCode("123 456")
+assert(fixture.requests == 0 and client.codePairing ~= nil and keyInput.Text == "" and control.Text == "Checking Arcane...", "the click only queues one attempt and clears the code from the field")
+assert(#fixture.setCalls == 0, "the code is never saved")
+cycle()
+assert(fixture.discoveryProbes == 1 and challenges == 0 and claims == 0, "one discovery read first")
+cycle()
+assert(challenges == 1 and claims == 0 and client.codePairing == nil and client.desiredPair ~= nil, "Arcane proved the code before any claim")
+cycle()
+assert(claims == 1 and client.pair == nil and control.Text == "Approve in Arcane..." and keyInput.PlaceholderText == "Click Approve in Arcane", "the plugin waits for Approve in Arcane")
+cycle(); cycle()
+assert(claims == 3 and client.pair == nil and fixture.discoveryProbes == 1 and challenges == 1, "only the same claim repeats while waiting; no new lookup or challenge")
+approved = true
+cycle()
+assert(claims == 4 and client.pair.sessionId == "pair-session", "after Approve the claim opens the session")
+assert(fixture.pluginSettings[keySetting] == key and keyInput.Text == key and control.Text == "Connected", "the paired key is saved like an entered key")
+cycle()
+assert(claims == 4 and fixture.discoveryProbes == 1, "a used ticket is never replayed")
+storageBoundaries(); noSecretText()
+for _, instance in ipairs(fixture.created) do if type(instance.Text) == "string" then assert(not string.find(instance.Text, pairTicket, 1, true), "the ticket never reaches the UI") end end
+fixture.uiHttpHook = nil
+unload()
+` });
+  });
+
+  test(`${format} pairing: a squatter on the discovery port cannot prove the code, so the plugin refuses it`, { skip: !runtime || !compile }, async () => {
+    await runLuauFixture({ format, checks: pairingFixture + `
+fixture.pairingOffer = offerReply
+idleMount()
+-- The impostor never saw Arcane's code, so its proof is for some other code.
+fixture.uiHttpHook = pairingDaemon("000000")
+typeCode("123456")
+cycle(); cycle()
+assert(fixture.discoveryProbes == 1 and challenges == 1, "one lookup and one challenge")
+for _ = 1, 4 do cycle() end
+assert(claims == 0 and client.pair == nil and client.desiredPair == nil and client.codePairing == nil, "no claim is ever sent to a daemon that failed the proof")
+assert(control.Text == "Failed" and string.find(keyInput.PlaceholderText, "does not match the Arcane window", 1, true) and #fixture.setCalls == 0, "visible refusal and nothing saved")
+assert(fixture.discoveryProbes == 1 and challenges == 1, "no retries on idle cycles")
+fixture.uiHttpHook = nil
+unload()
+` });
+  });
+
+  test(`${format} pairing: no waiting offer or a denied approval ends the attempt without retries; the API key still works`, { skip: !runtime || !compile }, async () => {
+    await runLuauFixture({ format, checks: pairingFixture + `
+idleMount()
+typeCode("654321"); cycle()
+assert(fixture.discoveryProbes == 1 and fixture.requests == 1 and client.desiredPair == nil and client.pair == nil, "one lookup and no connection")
+assert(control.Text == "Failed" and string.find(keyInput.PlaceholderText, "Arcane is not waiting", 1, true) and control.BackgroundColor3 ~= green, "visible guidance when Arcane is not waiting")
+for _ = 1, 4 do cycle() end
+assert(fixture.discoveryProbes == 1 and #fixture.setCalls == 0, "a failed lookup never retries on idle cycles")
+fixture.pairingOffer = offerReply
+local daemon = pairingDaemon("123456")
+fixture.uiHttpHook = function(request: any): any
+  if string.find(request.Url, "/v1/plugin/pairing/claim", 1, true) and claims >= 1 then claims += 1; return {StatusCode = 400, Success = false, Body = '{"error":"PAIRING"}'} end
+  return daemon(request)
+end
+typeCode("123456"); cycle(); cycle(); cycle()
+assert(claims == 1 and control.Text == "Approve in Arcane...", "waiting for approval")
+cycle()
+assert(claims == 2 and client.desiredPair == nil and client.pair == nil and control.Text == "Failed", "Deny in Arcane ends the attempt")
+for _ = 1, 4 do cycle() end
+assert(claims == 2, "a refused claim is never repeated")
+fixture.uiHttpHook = nil
+enter(key)
+assert(control.Text == "Connect", "typing a key resets the pairing guidance")
+clickConnect(); ack()
+assert(connectCount == 1, "the API key fallback still connects")
+unload()
+` });
+  });
+}
+
 test('any valid saved key queues status recovery regardless of transient connected history and remains red until ACK', { skip: !runtime || !compile }, async t => {
   for (const connected of [true, false]) await t.test('cached connected=' + connected, async () => {
     await runLuauFixture({
       setup: `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = ${connected}}`,
       checks: `
-assert(keyInput.Text == key and keyInput.PlaceholderText == "Arcane API key" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
+assert(keyInput.Text == key and keyInput.PlaceholderText == "Arcane code or API key" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
 assert(control.BackgroundColor3 == Color3.fromRGB(255, 51, 64), "cached true or false is red until current ACK")
 assert(#fixture.getCalls == 2, "reload reads exactly the two owned keys")
   assert(client.recovery ~= nil and client.desiredPair == nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == ${connected ? 1 : 0}, "saved key queues status recovery and clears cached connected state")
@@ -458,7 +610,7 @@ test('malformed saved keys and connection records are ignored without probes, sa
       setup: `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = ${keyValue}
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = ${stateValue}`,
       checks: `
-assert(keyInput.Text == "" and keyInput.PlaceholderText == "Arcane API key" and control.Text == "Connect", "malformed settings cannot prefill a credential or advertise a connection")
+assert(keyInput.Text == "" and keyInput.PlaceholderText == "Arcane code or API key" and control.Text == "Connect", "malformed settings cannot prefill a credential or advertise a connection")
 idleMount()
 enter("arbitrary-unsubmitted-user-text"); control.Activated:Fire()
 assert(keyInput.Text == "" and client.desiredPair == nil and fixture.requests == 0, "invalid explicit input is cleared and never dispatched")
@@ -527,7 +679,7 @@ assert(fixture.requests == requests and #fixture.setCalls == writes and control.
 storageBoundaries(); noSecretText()
 fixture.uiHttpHook = nil; expectKey = otherKey
 enter(otherKey)
-assert(control.Text == "Connect" and keyInput.Text == otherKey and keyInput.PlaceholderText == "Arcane API key" and control.BackgroundColor3 ~= green, "typing resets Failed to Connect without claiming ACK")
+assert(control.Text == "Connect" and keyInput.Text == otherKey and keyInput.PlaceholderText == "Arcane code or API key" and control.BackgroundColor3 ~= green, "typing resets Failed to Connect without claiming ACK")
 assert(fixture.pluginSettings[keySetting] == "", "typing alone never saves the new key")
 clickConnect()
 assert(fixture.pluginSettings[keySetting] == otherKey and ${saved ? 'fixture.pluginSettings[lastSetting].connected == false' : 'fixture.pluginSettings[lastSetting] == nil'}, "explicit replacement saves before ACK without claiming connected history")
@@ -605,7 +757,7 @@ fixture.uiHttpHook = function(_request: any): any
   ${failure === 'timeout' ? 'error("network fault unrelated-session-secret")' : 'return {StatusCode = 500, Success = false, Body = ""}'}
 end
 cycle()
-assert(client.pair == nil and client.desiredPair == nil and control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane API key" and keyInput.Text == key, "uncertain exchange retains visible saved-key reconnect UI")
+assert(client.pair == nil and client.desiredPair == nil and control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane code or API key" and keyInput.Text == key, "uncertain exchange retains visible saved-key reconnect UI")
 assert(fixture.pluginSettings[keySetting] == key and fixture.statuses[#fixture.statuses].state == "disconnected", "uncertainty retains the saved key and is not KEY_REJECTED")
 local requests = fixture.requests; cycle(); cycle()
 assert(fixture.requests == requests + 2 and client.pair == nil, "uncertain exchange only retries read-only status while unavailable")
@@ -622,7 +774,7 @@ fixture.uiHttpHook = function(request: any): any
 end
 cycle()
 assert(pair.token == nil and client.pair == nil and fixture.statuses[#fixture.statuses].state == "disconnected", "poll 401/403 remains REVOKED and clears only the session bearer")
-assert(control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane API key" and keyInput.Text == key and fixture.pluginSettings[keySetting] == key and fixture.pluginSettings[lastSetting].connected == false, "poll revocation retains the saved human key and never displays Failed")
+assert(control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane code or API key" and keyInput.Text == key and fixture.pluginSettings[keySetting] == key and fixture.pluginSettings[lastSetting].connected == false, "poll revocation retains the saved human key and never displays Failed")
 fixture.uiHttpHook = nil
 ack()
 assert(statusCount == 1 and connectCount == 2 and #fixture.workers == 1, "revoked poll reads status and reconnects through the original worker")
@@ -641,7 +793,7 @@ fixture.getSettingFaults = {["${setting}"] = "settings fault unrelated-provider-
       checks: `
 ${setting === LOCAL_KEY_SETTING ? 'idleMount()' : 'assert(client.recovery ~= nil and fixture.requests == 0, "failed health read still queues recovery from the independently valid key")'}; noSecretText()
 assert(control.BackgroundColor3 ~= green, "failed settings reads never authenticate a credential")
-${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "Arcane API key", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "Arcane API key" and keyInput.Text == key, "status read failure does not discard an independently valid local key")'}
+${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "Arcane code or API key", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "Arcane code or API key" and keyInput.Text == key, "status read failure does not discard an independently valid local key")'}
 enter(key); clickConnect(); ack(); unload()
 `,
     });

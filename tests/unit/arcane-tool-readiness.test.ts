@@ -23,6 +23,9 @@ test('native task instructions require automatic choice and evidence, not invent
  for(const text of ['skills_recommend','scene_create','scene_update','script_update','user should not choose','exact session/root/edit-mode','mutation receipts'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text));
  assert.ok(!ARCANE_TASK_INSTRUCTIONS.includes('approvalPolicy=never'));
 });
+test('shared instructions resolve the composer @selection mention with selection_read for both providers',()=>{
+ assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('@selection means the current Studio selection; read it with selection_read.'));
+});
 test('managed task instructions state the host-verified inventory and require tool search before reporting build tools missing',()=>{
  for(const text of ['This managed host verified before the turn','scene_create, scene_update and script_update','tool search','instead of reporting them missing or applying nothing',
    'If search is unavailable or fails, report that actual boundary and never fabricate a call'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text),text);
@@ -35,15 +38,18 @@ test('managed task instructions describe the optional arcane-choices and arcane-
  // The described shapes, filled in, are exactly what the shared renderer turns into buttons.
  assert.deepEqual(parseChoiceBlock('arcane-choices',JSON.stringify({question:'Which door?',options:['Wood','Glass']})),{kind:'choices',question:'Which door?',options:['Wood','Glass']});
  assert.deepEqual(parseChoiceBlock('arcane-plan',JSON.stringify({steps:['Build the frame','Add the hinge']})),{kind:'plan',steps:['Build the frame','Add the hinge']});
+ // An option is sent verbatim when clicked: CLI slash/shell commands and invisible text never become buttons.
+ for(const bad of ['/clear',' /some-command','!rm -rf .','Wood​','Glass\u{e0041}'])
+  assert.equal(parseChoiceBlock('arcane-choices',JSON.stringify({question:'Which door?',options:['Wood',bad]})),null,JSON.stringify(bad));
  assert.ok(ARCANE_TASK_INSTRUCTIONS.indexOf('arcane-choices')>ARCANE_TASK_INSTRUCTIONS.indexOf('Do not claim an edit'),'existing evidence guarantees come first');
 });
 
 test('native asset readiness requires adoption, preparation, staging, detached reconstruction and historical status',()=>{
  assert.equal(Object.isFrozen(ARCANE_TOOL_NAMES),true);
  assert.equal(Object.isFrozen(ARCANE_NATIVE_TOOL_NAMES),true);
- assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status']);
+ assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status','assets_place_studio_import']);
  assert.equal(new Set(ARCANE_NATIVE_TOOL_NAMES).size,ARCANE_NATIVE_TOOL_NAMES.length);
- assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status']);
+ assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status','assets_place_studio_import']);
  assert.deepEqual(missingArcaneTools(ARCANE_NATIVE_TOOL_NAMES,true),[]);
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES)]));
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_NATIVE_TOOL_NAMES)],true));

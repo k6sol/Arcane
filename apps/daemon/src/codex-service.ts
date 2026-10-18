@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { connectCodexClient, connectCodexProposalWorker, CodexClientError, type CodexClient, type Snapshot, type ArcaneMcpLaunchProfile, type NativeAssetHooks } from '../../../packages/codex-client/src/index.js';
 import type { NativeAssetRegistry, NativeAssetIncarnation } from './native-asset-authority.js';
 import { locateNativeCli } from '../../../packages/model-adapters/src/process.js';
+import { projectMemorySection, readProjectMemory } from '../../../packages/core/src/project-memory.js';
 import { HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, redactNativeHistoryText, type NativeHistoryResult } from '../../../packages/codex-client/src/history.js';
 import { ChatTaskCoordinator, ChatTaskProposalError, type ChatTaskProposalFactory } from './chat-task-coordinator.js';
 import type { ChatTaskProposalRecord } from '../../../packages/storage/src/chat-task-store.js';
@@ -197,7 +198,9 @@ export function createCodexService(options: CodexServiceOptions) {
     if (options.connect) return options.connect(nativeAssetHooks);
     const command = await locateNativeCli('codex');
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
-    return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}) });
+    return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}),
+      // Project memory (ARCANE.md) is read fresh per thread start/resume and follows the fixed task instructions.
+      projectInstructions: async (cwd: string) => projectMemorySection((await readProjectMemory(cwd)).text) });
   };
   const proposalFactory: ChatTaskProposalFactory | null = options.proposalWorker ?? (options.connect ? null : async input => {
     const command = await locateNativeCli('codex');

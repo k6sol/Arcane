@@ -6,8 +6,10 @@
 //   claudeTools    Claude chat uses Arcane's project tools without a consent question each time the project opens.
 //   codexAutoApprove  Codex edits and in-scope tool requests that Arcane's approval policy already marks safe are accepted
 //                  automatically (hard fences stay: see apps/desktop/src/codex-chat.ts autoApprovalVerdict).
+// Turning a switch ON from the renderer is confirmed first in the trusted decision window (confirmEnable, main.cjs).
 // Turning a switch off takes effect immediately (the owner revokes the live Claude credential). Unknown or damaged records
-// fall back to the defaults and are rewritten only on the next explicit save. Import and construction have no side effects.
+// (present but unreadable, linked, oversized or invalid) fail closed with both switches OFF, so damage never turns
+// automatic approval back on; they are rewritten only on the next explicit save. A missing record means the defaults. Import and construction have no side effects.
 const nativeFs = require('node:fs/promises');
 const nativePath = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -16,6 +18,7 @@ const { types } = require('node:util');
 const FILE = 'agent-permissions.json';
 const MAX_BYTES = 4096;
 const DEFAULTS = Object.freeze({ claudeTools: true, codexAutoApprove: true });
+const CLOSED = Object.freeze({ claudeTools: false, codexAutoApprove: false });
 const KEYS = Object.freeze(Object.keys(DEFAULTS));
 const UNAVAILABLE = 'Project permissions are unavailable.';
 
@@ -42,8 +45,8 @@ function createProjectPermissions(options) {
   async function readFrom(stateRoot) {
     const file = p.join(stateRoot, FILE);
     let stat; try { stat = await fs.lstat(file); } catch (error) { if (error?.code === 'ENOENT') return DEFAULTS; throw error; }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BYTES) return DEFAULTS;
-    try { return settingsOf(JSON.parse(await fs.readFile(file, 'utf8'))) ?? DEFAULTS; } catch { return DEFAULTS; }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BYTES) return CLOSED;
+    try { return settingsOf(JSON.parse(await fs.readFile(file, 'utf8'))) ?? CLOSED; } catch { return CLOSED; }
   }
   /** Current settings for the open project (defaults when nothing was saved); never throws. */
   function read() {
@@ -51,7 +54,7 @@ function createProjectPermissions(options) {
       const session = scope();
       if (!enabled || !session) return DEFAULTS;
       if (cache && cache.epoch === session.epoch) return cache.settings;
-      let settings; try { settings = await readFrom(session.stateRoot); } catch { settings = DEFAULTS; }
+      let settings; try { settings = await readFrom(session.stateRoot); } catch { settings = CLOSED; }
       cache = { epoch: session.epoch, settings };
       return settings;
     });
@@ -65,7 +68,7 @@ function createProjectPermissions(options) {
       const keys = Reflect.ownKeys(patch);
       if (!keys.length || keys.some(key => typeof key !== 'string' || !KEYS.includes(key))) throw new Error(UNAVAILABLE);
       for (const key of keys) { const field = Object.getOwnPropertyDescriptor(patch, key); if (!field || !Object.hasOwn(field, 'value') || typeof field.value !== 'boolean') throw new Error(UNAVAILABLE); }
-      let current; try { current = cache && cache.epoch === session.epoch ? cache.settings : await readFrom(session.stateRoot); } catch { current = DEFAULTS; }
+      let current; try { current = cache && cache.epoch === session.epoch ? cache.settings : await readFrom(session.stateRoot); } catch { current = CLOSED; }
       const previous = current;
       const next = Object.freeze({ ...current, ...Object.fromEntries(keys.map(key => [key, patch[key]])) });
       const file = p.join(session.stateRoot, FILE), temporary = file + '.' + randomUUID() + '.tmp';
@@ -81,7 +84,7 @@ function createProjectPermissions(options) {
   /** Owner hook (main process only): called after each successful save with (next, previous). */
   function subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
   /** Renderer IPC: the trusted main window only; exact shapes in and out. */
-  function installIpc(ipcMain, { trusted }) {
+  function installIpc(ipcMain, { trusted, confirmEnable }) {
     ipcMain.handle('arcane:project-permissions-read', async (event, ...args) => {
       try {
         if (args.length || !trusted(event)) throw 0;
@@ -92,7 +95,14 @@ function createProjectPermissions(options) {
     ipcMain.handle('arcane:project-permissions-save', async (event, ...args) => {
       try {
         if (args.length !== 1 || !trusted(event)) throw 0;
-        return { saved: true, settings: { ...(await save(args[0])) } };
+        const patch = args[0];
+        // Turning a switch ON grants authority: the owner asks in its trusted decision window (never the renderer) first.
+        if (typeof confirmEnable === 'function' && patch && typeof patch === 'object' && !types.isProxy(patch) && Object.getPrototypeOf(patch) === Object.prototype) {
+          const current = await read();
+          const enabling = KEYS.filter(key => Object.hasOwn(patch, key) && patch[key] === true && current[key] !== true);
+          if (enabling.length && (await confirmEnable(enabling)) !== true) return { saved: false, settings: { ...(await read()) } };
+        }
+        return { saved: true, settings: { ...(await save(patch)) } };
       } catch { throw new Error(UNAVAILABLE); }
     });
   }

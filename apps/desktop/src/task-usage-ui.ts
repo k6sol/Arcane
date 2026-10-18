@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
-import type { CodexChat } from './codex-chat.js';
+import type { CodexChat, ReplyUsageInput } from './codex-chat.js';
 import { WORKSPACE_COMPACT_EVENT, WORKSPACE_COMPACT_RESTORE_EVENT } from './workspace-shell.js';
-import { COST_CURRENCIES, TaskUsageTracker, compactTokenCount, costLocale, currencyForLocale, formatUsageCost, readCostPreferences, type CostDisplayPreferences, type TaskUsageCostDisplay } from './task-usage.js';
+import { COST_CURRENCIES, TaskUsageTracker, USAGE_PRICES_AS_OF, compactTokenCount, costLocale, currencyForLocale, estimateUsageUsd, formatUsageCost, readCostPreferences, type CostDisplayPreferences, type TaskUsageCostDisplay } from './task-usage.js';
 
 export interface TaskUsageFooterOptions {
   now?: () => number;
@@ -12,14 +12,16 @@ export interface TaskUsageFooterOptions {
 /** Read-only presentation. No requests, provider selection, grants or billing. */
 export function startTaskUsageFooter(
   doc: Document,
-  source: Pick<CodexChat, 'currentStateView' | 'subscribeStateChange'>,
+  source: Pick<CodexChat, 'currentStateView' | 'subscribeStateChange'> & Partial<Pick<CodexChat, 'setReplyUsage' | 'replyUsageChanged'>>,
   options: TaskUsageFooterOptions = {},
 ) {
   const stopDisplay = startDisplayPreferences(doc);
   const field = doc.getElementById('codex-task-usage');
   if (!field) return { stop() {}, resume() {}, cleanup() { stopDisplay(); } };
   const tracker = new TaskUsageTracker(options.now);
-  const offPreferences = onCostPreferences(doc, () => render());
+  // Per-reply usage lines in the ChatGPT transcript, matching the Claude chat's.
+  source.setReplyUsage?.(usage => codexReplyUsageView(usage, costDisplay(doc)));
+  const offPreferences = onCostPreferences(doc, () => { render(); source.replyUsageChanged?.(); });
   const schedule = options.schedule ?? ((callback, milliseconds) => {
     const timer = setTimeout(callback, milliseconds);
     return () => clearTimeout(timer);
@@ -60,7 +62,7 @@ export function startTaskUsageFooter(
   return {
     stop() { stopped = true; clearTimer(); tracker.clear(); removeStateListener?.(); removeStateListener = null; hide(); },
     resume() { if (disposed) return; stopped = false; subscribe(); render(); },
-    cleanup() { offPreferences(); stopDisplay(); disposed = true; stopped = true; clearTimer(); tracker.clear(); removeStateListener?.(); removeStateListener = null; hide(); },
+    cleanup() { offPreferences(); stopDisplay(); source.setReplyUsage?.(null); disposed = true; stopped = true; clearTimer(); tracker.clear(); removeStateListener?.(); removeStateListener = null; hide(); },
   };
 }
 
@@ -99,6 +101,15 @@ export function onCostPreferences(doc: Document, listener: () => void): () => vo
 export function replyUsageText(tokens: number, usd: number | null, display: TaskUsageCostDisplay): string {
   const count = Math.round(tokens), label = compactTokenCount(count) + (count === 1 ? ' token' : ' tokens');
   return usd !== null && display.preferences.show ? label + ' (' + formatUsageCost(usd, display.preferences, display.locale) + ')' : label;
+}
+/** A finished ChatGPT reply's usage line and tooltip: tokens, and the price-table estimate when the model is known. */
+export function codexReplyUsageView(usage: ReplyUsageInput, display: TaskUsageCostDisplay): { text: string; title: string } {
+  const usd = usage.model ? estimateUsageUsd(usage.model, usage) : null, format = (n: number) => Math.round(n).toLocaleString('en-US');
+  const counts = format(usage.tokens) + ' tokens (' + format(usage.inputTokens) + ' input, ' + format(usage.cachedInputTokens) + ' of them cached, ' + format(usage.outputTokens) + ' output).';
+  const title = usd === null || !display.preferences.show ? counts + (usd === null ? ' No cost estimate is available for this model.' : '')
+    : counts + ' ' + formatUsageCost(usd, display.preferences, display.locale) + ' is estimated from Arcane\'s price table (' + USAGE_PRICES_AS_OF + '). Your ChatGPT plan is not charged per token.' +
+      (display.preferences.currency !== 'USD' && display.preferences.rate !== null ? ' Converted at your rate of ' + display.preferences.rate + ' ' + display.preferences.currency + ' per USD.' : '');
+  return { text: replyUsageText(usage.tokens, usd, display), title };
 }
 
 /** Binds the Settings > General > Display cost controls (#cost-show, #cost-currency, #cost-rate). Returns cleanup. */

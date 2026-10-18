@@ -1,8 +1,10 @@
 /**
  * Arcane Credits provider seam: model access through a hosted Arcane gateway.
  *
- * DISABLED until both are true: packages/protocol/src/plans.ts has an https `gateway.url` whose origin is allowlisted,
- * and a signed-in Arcane account token is present in the encrypted credential vault. While disabled, the provider is
+ * DISABLED until both are true: a gateway URL is configured (`gateway.url` in packages/protocol/src/plans.ts, or the
+ * user's local `gatewayUrl` passed in as `localUrl`) on an https origin listed in `gateway.allowedOrigins`, and a
+ * signed-in Arcane account token is present in the encrypted credential vault (desktop: Settings > Plans & credits >
+ * Connect Arcane account, apps/desktop/electron/billing.cjs). While disabled, the provider is
  * hidden from the model picker and no network call is made. Arcane never calls a model vendor directly and never
  * ships vendor keys: the hosted gateway (operated by the Arcane owner under their own provider terms) does that.
  * The expected gateway API is documented in docs/ARCANE_CREDITS.md.
@@ -17,7 +19,7 @@ export interface GatewayStatus { provider: typeof ARCANE_PROVIDER_ID; state: Gat
 export interface GatewayBalance { credits: number; actionsRemaining: number | null; plan: string | null; renewsAt: string | null }
 export interface GatewayUsage { period: string; creditsUsed: number; actionsUsed: number }
 export interface GatewayModel { id: string; label: string }
-export interface GatewayChatRequest { model: string; messages: { role: 'user' | 'assistant' | 'system'; content: string }[]; conversationId?: string }
+export interface GatewayChatRequest { model: string; messages: { role: 'user' | 'assistant' | 'system'; content: string }[]; conversationId?: string; turnId?: string }
 export type GatewayChunk = { type: 'delta'; text: string } | { type: 'done'; creditsUsed: number | null } | { type: 'error'; message: string };
 
 /** Encrypted at-rest storage for the Arcane account token (same pattern as the Studio key vault: host-supplied OS encryption). */
@@ -46,8 +48,13 @@ const MAX_JSON_BYTES = 64 * 1024, MAX_STREAM_BYTES = 4 * 1024 * 1024, TIMEOUT_MS
 const finite = (value: unknown, min = 0) => typeof value === 'number' && Number.isFinite(value) && value >= min;
 const text = (value: unknown, max: number) => typeof value === 'string' && value.length <= max && !/[\u0000-\u0008\u000b-\u001f]/.test(value);
 
-export function gatewayStatus(config: PlansConfig, signedIn: boolean): GatewayStatus {
-  if (!serviceBase(config.gateway)) return { provider: ARCANE_PROVIDER_ID, state: 'disabled', showInModelPicker: false, message: 'Arcane Credits are not connected yet.' };
+/** Effective gateway base: a user-configured local URL wins, but only on an origin the shipped config allowlists. */
+export function gatewayBase(config: PlansConfig, localUrl?: string | null): string | null {
+  return serviceBase({ url: localUrl || config.gateway.url, allowedOrigins: config.gateway.allowedOrigins });
+}
+
+export function gatewayStatus(config: PlansConfig, signedIn: boolean, localUrl?: string | null): GatewayStatus {
+  if (!gatewayBase(config, localUrl)) return { provider: ARCANE_PROVIDER_ID, state: 'disabled', showInModelPicker: false, message: 'Arcane Credits are not connected yet.' };
   if (!signedIn) return { provider: ARCANE_PROVIDER_ID, state: 'signed-out', showInModelPicker: false, message: 'Sign in to your Arcane account to use credits.' };
   return { provider: ARCANE_PROVIDER_ID, state: 'ready', showInModelPicker: true, message: 'Arcane Credits are ready.' };
 }
@@ -63,12 +70,12 @@ async function readBounded(response: Response, max: number): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export interface ArcaneGatewayOptions { config: PlansConfig; vault: ArcaneCredentialVault | null; fetch?: typeof fetch }
+export interface ArcaneGatewayOptions { config: PlansConfig; vault: ArcaneCredentialVault | null; fetch?: typeof fetch; localUrl?: string | null }
 
 export function createArcaneGateway(options: ArcaneGatewayOptions): ArcaneGatewayProvider {
   const doFetch = options.fetch ?? globalThis.fetch;
   const ready = async (): Promise<{ base: string; token: string }> => {
-    const base = serviceBase(options.config.gateway);
+    const base = gatewayBase(options.config, options.localUrl);
     if (!base) throw new GatewayUnavailable();
     const token = await options.vault?.read() ?? null;
     if (!token || !TOKEN.test(token)) throw new GatewayUnavailable('Sign in to your Arcane account to use credits.');
@@ -81,7 +88,7 @@ export function createArcaneGateway(options: ArcaneGatewayOptions): ArcaneGatewa
     const timeout = AbortSignal.timeout(TIMEOUT_MS);
     const response = await doFetch(url, { ...init, redirect: 'error', credentials: 'omit', signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       headers: { Accept: 'application/json', Authorization: 'Bearer ' + token, ...(init.body ? { 'Content-Type': 'application/json' } : {}) } });
-    if (!response.ok) throw new GatewayUnavailable(response.status === 401 ? 'Your Arcane sign-in expired. Sign in again.' : response.status === 402 ? 'You are out of Arcane Credits.' : 'The Arcane gateway is unavailable.');
+    if (!response.ok) throw new GatewayUnavailable(response.status === 401 ? 'Your Arcane sign-in expired. Sign in again.' : response.status === 402 ? 'You are out of Arcane Credits.' : response.status === 429 ? 'Too many Arcane requests right now. Try again in a minute.' : 'The Arcane gateway is unavailable.');
     return response;
   };
   const json = async (path: string): Promise<Record<string, unknown>> => {
@@ -91,7 +98,7 @@ export function createArcaneGateway(options: ArcaneGatewayOptions): ArcaneGatewa
   };
   return {
     id: ARCANE_PROVIDER_ID,
-    async status() { return gatewayStatus(options.config, !!(await options.vault?.read().catch(() => null))); },
+    async status() { return gatewayStatus(options.config, !!(await options.vault?.read().catch(() => null)), options.localUrl); },
     async balance() {
       const value = await json('/v1/balance');
       if (!finite(value.credits) || !(value.actionsRemaining === null || finite(value.actionsRemaining)) ||
@@ -114,10 +121,10 @@ export function createArcaneGateway(options: ArcaneGatewayOptions): ArcaneGatewa
       });
     },
     async *streamChat(request, signal) {
-      if (!text(request.model, 96) || !Array.isArray(request.messages) || request.messages.length < 1 || request.messages.length > 200 ||
+      if (!text(request.model, 96) || (request.turnId !== undefined && !(text(request.turnId, 128) && /^[A-Za-z0-9._:-]+$/.test(request.turnId))) || !Array.isArray(request.messages) || request.messages.length < 1 || request.messages.length > 200 ||
           request.messages.some(message => !['user', 'assistant', 'system'].includes(message.role) || !text(message.content, 200000)))
         throw new GatewayUnavailable('That chat request cannot be sent.');
-      const response = await call('/v1/chat/stream', { method: 'POST', body: JSON.stringify({ model: request.model, messages: request.messages, ...(request.conversationId ? { conversationId: request.conversationId } : {}) }) }, signal);
+      const response = await call('/v1/chat/stream', { method: 'POST', body: JSON.stringify({ model: request.model, messages: request.messages, ...(request.conversationId ? { conversationId: request.conversationId } : {}), ...(request.turnId ? { turnId: request.turnId } : {}) }) }, signal);
       if (!response.body) throw new GatewayUnavailable();
       const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '', bytes = 0;
       for (;;) {

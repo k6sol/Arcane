@@ -21,9 +21,10 @@ const create = (className: string, properties: Record<string, Json>, parent = re
 test('effects allowlist: every class has properties and the plugin mirrors the same class list', async () => {
   const { readFileSync } = await import('node:fs');
   const plugin = readFileSync('plugin/src/Properties.luau', 'utf8');
-  assert.equal(EFFECT_CLASSES.length, 13);
+  assert.equal(EFFECT_CLASSES.length, 25);
   for (const className of EFFECT_CLASSES) {
-    assert.ok(Object.keys(EFFECT_PROPERTIES[className]).length > 0);
+    // AnimationController and Animator are pure containers (studio-characters.test.ts); every other class has properties.
+    assert.ok(Object.keys(EFFECT_PROPERTIES[className]).length > 0 || className === 'AnimationController' || className === 'Animator', className);
     assert.match(plugin, new RegExp(`\\b${className} = `), className);
   }
   assert.equal(EFFECT_CLASSES.includes('SurfaceAppearance' as never), false, 'SurfaceAppearance maps are not plugin-settable; it stays manual');
@@ -104,6 +105,64 @@ test('MCP compact effects compile to the tagged wire form that the policy accept
   assert.throws(() => bad({ Texture: 'https://x/y.png' }), /rbxassetid/);
   assert.throws(() => bad({ Wobble: 1 }), /not an allowed effect property/);
   assert.throws(() => compileEffectProps('Fire', { Heat: 99 }, () => null), /Fire.Heat/);
+});
+
+test('audio: Sound/SoundGroup/sound effects with rbxassetid-only SoundIds, bounded roll-off, SoundGroup refs and SoundService settings', () => {
+  for (const className of ['Sound', 'SoundGroup', 'ReverbSoundEffect', 'EqualizerSoundEffect', 'EchoSoundEffect', 'ChorusSoundEffect', 'CompressorSoundEffect', 'DistortionSoundEffect'])
+    assert.ok(EFFECT_CLASSES.includes(className as never), className);
+  const water = { SoundId: 'rbxassetid://123456', Volume: 0.5, Looped: true, Playing: false, RollOffMode: 'InverseTapered', RollOffMinDistance: 10, RollOffMaxDistance: 90, TimePosition: 0, PlaybackSpeed: 1 };
+  assert.deepEqual(create('Sound', water).properties, water);
+  assert.ok(create('Sound', { Volume: 1 }, ref('Attachment')));
+  assert.ok(create('Sound', { Volume: 0.4 }, ref('Model')));
+  assert.ok(create('Sound', { SoundGroup: { type: 'Ref', ref: ref('SoundGroup') as unknown as Json } }));
+  assert.ok(create('ReverbSoundEffect', { DecayTime: 3.5, WetLevel: -4 }, ref('SoundGroup')));
+  assert.ok(create('EqualizerSoundEffect', { LowGain: 3 }, ref('Sound')));
+  assert.throws(() => create('ReverbSoundEffect', { DecayTime: 2 }), { code: 'CLASS' });
+  assert.throws(() => create('SoundGroup', {}, ref('Part')), { code: 'CLASS' });
+  assert.throws(() => create('Sound', {}, ref('SoundGroup')), { code: 'CLASS' });
+  assert.throws(() => create('Sound', { SoundGroup: { type: 'Ref', ref: ref('Attachment') as unknown as Json } }), /SoundGroup refs must name a SoundGroup/);
+  assert.throws(() => create('Sound', { Volume: 1 }, ref('Part'), session(false)), { code: 'PLUGIN_UPDATE_REQUIRED' });
+  for (const bad of ['http://example.com/a.ogg', 'https://www.roblox.com/asset/?id=1', 'rbxasset://sounds/action_jump.mp3', 'rbxasset://textures/a.png', 'rbxassetid://0',
+    'rbxassetid://12a', '12345', 'rbxassetid://12345678901234567890', ''])
+    assert.throws(() => create('Sound', { SoundId: bad }), { code: 'PROPERTY' }, bad);
+  for (const bad of [{ Volume: 11 }, { PlaybackSpeed: 0 }, { RollOffMaxDistance: 20000 }, { RollOffMode: 'Exponential' }, { RollOffMinDistance: 50, RollOffMaxDistance: 10 }, { Looped: 'yes' }, { Pitch: 1 }])
+    assert.throws(() => create('Sound', bad as Record<string, Json>), { code: /PROPERTY|INPUT/ }, JSON.stringify(bad));
+  const items: Json[] = [
+    { kind: 'effect', className: 'SoundGroup', name: 'Ambience', parent: 0, properties: { Volume: 0.6 } },
+    { kind: 'effect', className: 'ReverbSoundEffect', name: 'Cave', parent: 1, properties: { DecayTime: 3 } },
+    { kind: 'part', className: 'Part', name: 'River', parent: 0, properties: {} },
+    { kind: 'effect', className: 'Sound', name: 'Water', parent: 3, properties: { SoundId: 'rbxassetid://5', SoundGroup: { type: 'Ref', item: 1 } } },
+    { kind: 'effect', className: 'CompressorSoundEffect', name: 'Glue', parent: 4, properties: { Threshold: -18, Ratio: 3 } },
+  ];
+  const args = { parent: ref('Workspace', true) as unknown as Json, container: { className: 'Folder', name: 'Audio' }, items };
+  assert.equal(sceneBuildInstanceCount(validateCommandArgs('scene.build', args, session())), 6);
+  const patch = (index: number, change: Record<string, Json>) => ({ ...args, items: items.map((item, i) => i === index ? { ...(item as object), ...change } : item) as Json[] });
+  assert.throws(() => validateCommandArgs('scene.build', patch(3, { properties: { SoundGroup: { type: 'Ref', item: 3 } } }), session()), /earlier SoundGroup/);
+  assert.throws(() => validateCommandArgs('scene.build', patch(4, { className: 'ReverbSoundEffect', parent: 3, properties: { DecayTime: 2 } }), session()), /ReverbSoundEffect must be inside a sound or soundGroup/);
+  assert.throws(() => validateCommandArgs('scene.build', patch(4, { className: 'SoundGroup', parent: 3, properties: {} }), session()), /SoundGroup must be inside a group/);
+  // MCP compact form: SoundGroup by key, SoundId passed through, never invented.
+  const compiled = compileSceneBuild(z.strictObject(sceneBuildShape).parse({ name: 'Audio', items: [
+    { key: 'Bus', className: 'SoundGroup', name: 'Ambience', fx: { Volume: 0.6 } },
+    { key: 'Bank', name: 'Bank', props: { Size: [1, 1, 1], Position: [0, 1, 0], Transparency: 1 } },
+    { key: 'Water', in: 'Bank', className: 'Sound', name: 'Water', fx: { SoundId: 'rbxassetid://77', SoundGroup: 'Bus', Looped: true, RollOffMode: 'InverseTapered' } },
+    { in: 'Water', className: 'EqualizerSoundEffect', name: 'EQ', fx: { LowGain: 3 } },
+  ] }) as SceneBuildInput, ref('Workspace', true) as unknown as Json);
+  const compiledItems = compiled.args.items as Record<string, Json>[];
+  assert.deepEqual((compiledItems[2]!.properties as Record<string, Json>).SoundGroup, { type: 'Ref', item: 1 });
+  assert.equal(compiledItems[3]!.parent, 3);
+  assert.ok(validateCommandArgs('scene.build', compiled.args, session()));
+  assert.throws(() => compileEffectProps('Sound', { SoundId: 'https://cdn.example/a.mp3' }, () => null), /rbxassetid/);
+  assert.throws(() => compileSceneBuild(z.strictObject(sceneBuildShape).parse({ name: 'X', items: [{ key: 'P', name: 'P', props: {} },
+    { in: 'P', className: 'Sound', name: 'S', fx: { SoundGroup: 'P' } }] }) as SceneBuildInput, null), /earlier SoundGroup/);
+  // SoundService via environment_apply: bounded, Workspace grant, capability-gated.
+  const env = validateCommandArgs('environment.apply', compileEnvironment({ soundService: { AmbientReverb: 'Forest', DistanceFactor: 3.33, RolloffScale: 1, DopplerScale: undefined } }), session());
+  assert.deepEqual(env.soundService, { AmbientReverb: 'Forest', DistanceFactor: 3.33, RolloffScale: 1 });
+  assert.throws(() => validateCommandArgs('environment.apply', { soundService: { AmbientReverb: 'Bathtub' } }, session()), { code: 'PROPERTY' });
+  assert.throws(() => validateCommandArgs('environment.apply', { soundService: { DistanceFactor: 500 } }, session()), { code: /PROPERTY|INPUT/ });
+  assert.throws(() => validateCommandArgs('environment.apply', { soundService: { Volume: 1 } }, session()), { code: 'INPUT' });
+  assert.throws(() => validateCommandArgs('environment.apply', { soundService: {} }, session()), /at least one soundService/);
+  assert.throws(() => validateCommandArgs('environment.apply', { soundService: { RolloffScale: 1 } }, session(true, ['Lighting'])), { code: 'SCOPE' });
+  assert.throws(() => validateCommandArgs('environment.apply', { soundService: { RolloffScale: 1 } }, session(false)), { code: 'PLUGIN_UPDATE_REQUIRED' });
 });
 
 test('environment presets expand host-side to exact values; explicit values override; extras are capability-gated', () => {

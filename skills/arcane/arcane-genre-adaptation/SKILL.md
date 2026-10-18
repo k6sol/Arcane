@@ -11,7 +11,7 @@ Read the chosen profile in [genre profiles](references/genres.md), not the entir
 
 Apply the profile's player decision, failure/retry cadence, multiplayer structure and slice test. Keep art direction and monetization separate. A genre label is not a complete design, and a coat of themed textures does not make duplicated minigames feel different.
 
-Inspect any existing game first; preserve mechanics and references chosen by the user. Avoid importing Hunted's bus, hunter, three lives or analog-TV identity into unrelated projects. Conversely, do not flatten a deliberately physical game into generic GUI tasks merely because the tooling makes that easier.
+Inspect any existing game first; preserve mechanics and references chosen by the user. Do not carry one project's signature mechanics or identity into unrelated projects. Conversely, do not flatten a deliberately physical game into generic GUI tasks merely because the tooling makes that easier.
 
 ## Verification
 Produce one representative playable slice, with clear goal/action/feedback and the profile-specific test. Use real player observations for pacing and fun. Verify assumptions with gameplay and budget data before scaling content or adding more modes.

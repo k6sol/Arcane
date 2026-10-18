@@ -21,7 +21,7 @@ node --test tests/release/provider-setup-ipc.test.mjs
 
 The retained final run used the TAP reporter with Node v24.21.0: **21 passed, 0 failed, 0 cancelled, 0 skipped**. Source hashes were unchanged across the run.
 
-- [Run manifest](../../runtime/verification/provider-setup-ipc-5c0d1f1c-49b6-4748-b292-232bef81a461/verification.json)
-- [Complete TAP output](../../runtime/verification/provider-setup-ipc-5c0d1f1c-49b6-4748-b292-232bef81a461/node-test.tap)
+- Run manifest (`runtime/verification/provider-setup-ipc-5c0d1f1c-49b6-4748-b292-232bef81a461/verification.json`, local evidence, not committed)
+- Complete TAP output (`runtime/verification/provider-setup-ipc-5c0d1f1c-49b6-4748-b292-232bef81a461/node-test.tap`, local evidence, not committed)
 
 These are bounded component checks. No credential files, network, native provider, inference, real login, installation, or Studio operation was used. Actual Electron IPC transport and native UI/provider acceptance remain outside this suite.

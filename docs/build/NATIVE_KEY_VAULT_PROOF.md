@@ -8,7 +8,7 @@ Arcane application or Settings UI.
 
 The authoritative evidence directory is
 `runtime/verification/native-vault-proof-20261013/run-8094a260-4709-4cea-a584-8993a99bb163/`.
-[runner.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-vault-proof-20261013/run-8094a260-4709-4cea-a584-8993a99bb163/runner.json)
+runner.json (`runtime/verification/native-vault-proof-20261013/run-8094a260-4709-4cea-a584-8993a99bb163/runner.json`, local evidence, not committed)
 records `passed: true`, three successful process exits, unchanged source hashes,
 plaintext scan results, and the final terminal acknowledgement.
 

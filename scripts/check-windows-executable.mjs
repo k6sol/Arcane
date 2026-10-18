@@ -6,6 +6,19 @@ import { createHash } from 'node:crypto';
 import policy from '../apps/desktop/electron/policy.cjs';
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+// Every smoke check main.cjs checkSmoke must report as true; a missing key fails verification.
+export const REQUIRED_SMOKE_CHECKS = Object.freeze([
+  'taskStatusModules', 'ownDaemonReady', 'productStateReadable', 'projectMemoryOffByDefault', 'projectMemoryScoped', 'studioIdle', 'noCommands',
+  'isolatedRenderer', 'sameOriginCsp', 'requiredUi', 'noHorizontalOverflow', 'genuineEmptyPreview', 'desktopIdentity',
+  'desktopVerificationSetupMounted', 'studioKeyVaultBridgeMounted', 'workspacePreferencesDisabledAndEmpty', 'localChatDraftSwitching',
+  'taskUsageHiddenWithoutTask', 'localChatIntentsStartNoNativeLifecycle', 'optionalCodeVerificationFailureContained', 'externalNavigationRejected',
+  'nativeLifecycleNotStarted', 'conversationOnlyDefault', 'providerSetupMounted', 'nativeHandoffMounted',
+  'claudeChatBridgeDisabledInSmoke', 'studioPluginBridgeDisabledInSmoke', 'workspaceProjectBridgeDisabledInSmoke', 'inAppDialogsBridgeMounted',
+  'projectPermissionsBridgeDisabledInSmoke', 'billingBridgeNotConnectedInSmoke', 'notificationsBridgeSilentInSmoke',
+  'bundledStudioPluginVerified', 'bundledPlansConfigValid', 'bundledChatInstructionsLoadable', 'trustedDecisionDialogsBundled', 'nativeAssetPermissionMounted', 'shutdownClean',
+]);
+export const smokeChecksComplete = checks => !!checks && typeof checks === 'object' &&
+  REQUIRED_SMOKE_CHECKS.every(name => checks[name] === true) && Object.values(checks).every(value => value === true);
 /** Trusted host only. No shell, retries, detached children or public command strings. */
 export async function runBoundedChild(command, args, options = {}) {
   const { deadlineMs = 60000, maxOutputBytes = 65536, env = process.env, cwd, ipc = false, onMessage } = options;
@@ -120,8 +133,7 @@ export async function checkWindowsExecutable(directory) {
     const raw = await readFile(reportFile); if (raw.length > 32768) throw new Error('Oversized executable report.');
     const report = JSON.parse(raw.toString('utf8'));
     if (report.schemaVersion !== 1 || report.kind !== 'arcane-windows-executable-smoke' || report.inferenceStarted !== false ||
-        report.studioOperations !== 0 || !report.checks || Object.keys(report.checks).length < 15 ||
-        Object.values(report.checks).some(value => value !== true)) throw new Error('Incomplete executable verification.');
+        report.studioOperations !== 0 || !smokeChecksComplete(report.checks)) throw new Error('Incomplete executable verification.');
     phase = 'parent-loss'; await progress('running');
     const lossRoot = join(reportDirectory,'parent-loss'); await mkdir(lossRoot);
     const lossProject = join(lossRoot,'project'); await mkdir(lossProject);

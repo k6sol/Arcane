@@ -66,6 +66,8 @@ export interface StudioDiagnosticsOptions {
   /** Brings the conversation into view before the composer is prefilled. */
   showConversation?: () => void;
   intervalMs?: number;
+  /** Polls only while this is true (for example, once a Studio session exists); a skipped poll sends no request. */
+  active?: () => boolean;
   schedule?: (callback: () => void, milliseconds: number) => () => void;
   formatTime?: (iso: string) => string;
 }
@@ -176,7 +178,8 @@ export function startStudioDiagnostics(doc: Document, options: StudioDiagnostics
   };
   const loop = () => {
     cancelTimer = null; if (stopped) return;
-    void refresh().finally(() => { if (!stopped && !cancelTimer) cancelTimer = schedule(loop, interval); });
+    let wanted = true; try { wanted = options.active?.() ?? true; } catch { wanted = false; }
+    void (wanted ? refresh() : Promise.resolve()).finally(() => { if (!stopped && !cancelTimer) cancelTimer = schedule(loop, interval); });
   };
   toggle.addEventListener('click', () => { setOpen(!open()); render(); });
   clear.addEventListener('click', async () => {

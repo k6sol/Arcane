@@ -30,7 +30,7 @@ test('pending credentials never authenticate; one host seal admits exactly the e
   assert.equal(Date.parse(receipt.expiresAt) - Date.parse(receipt.createdAt), NATIVE_HANDOFF_LIMITS.lifetimeMs, 'default 30 minutes');
   const sealed = registry.seal(receipt.lease); assert.equal(sealed.state, 'sealed'); assert.ok(sealed.sealedAt);
   const auth = registry.recognize(receipt.credential)!;
-  assert.deepEqual({ ...auth, scopes: [...auth.scopes] }, { handoffId: receipt.handoffId, audience: 'external-handoff', scopes: ['work-coordination', 'studio-granted-commands'],
+  assert.deepEqual({ ...auth, scopes: [...auth.scopes] }, { handoffId: receipt.handoffId, audience: 'external-handoff', scopes: ['work-coordination', 'studio-granted-commands', 'fixed-template-assets'],
     projectId: receipt.projectId, expiresAt: receipt.expiresAt });
   assert.ok(Object.isFrozen(auth) && Object.isFrozen(auth.scopes));
   assert.throws(() => registry.seal(receipt.lease), code('STATE'), 'duplicate seal');
@@ -117,7 +117,7 @@ test('invalid, proxy and accessor envelopes are refused without traps; recogniti
   assert.equal(traps, 0); assert.equal(getters, 0);
   assert.throws(() => registry.transitionProject(42), code('INPUT'));
   const receipt = registry.begin(); registry.seal(receipt.lease); const auth = registry.recognize(receipt.credential)! as unknown as Record<string, unknown>;
-  assert.deepEqual([...(auth.scopes as string[])], ['work-coordination', 'studio-granted-commands']);
+  assert.deepEqual([...(auth.scopes as string[])], ['work-coordination', 'studio-granted-commands', 'fixed-template-assets']);
   for (const key of ['asset', 'assets', 'review', 'grant', 'revoke', 'login', 'taskId', 'runId', 'credential', 'token', 'lease']) assert.ok(!(key in auth), 'no ' + key + ' authority');
   assert.notStrictEqual(registry.recognize(receipt.credential), registry.recognize(receipt.credential), 'each recognition is a fresh detached read of the live registry');
 });

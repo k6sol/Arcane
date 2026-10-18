@@ -1,0 +1,13 @@
+{
+  "name": "arcane-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference Arcane credits, plans and model gateway.",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

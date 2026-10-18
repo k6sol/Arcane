@@ -11,6 +11,7 @@ import { CodexClientError, validateNativeAssetHooks, type Account, type Approval
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
 import type { NativeTaskContinuation, ManagedTaskStart, NativeIncorporationChain, NativeIncorporationPermit } from './types.js';
+import { summarizeMcpToolCall } from './tool-call.js';
 import { snapshotReferenceImages, type ReferenceImage } from './reference-images.js';
 import { parseNativeRateLimits, mergeNativeRateLimitUpdate, type NativeRateLimits } from './rate-limits.js';
 
@@ -185,6 +186,10 @@ function readHistoryProcess(spec: InternalProcess, bounds: Limits, scope: CodexH
 }
 
 /** Internal construction seam. The public index exposes only the installed-CLI factory. */
+/** Host callback returning text appended after the fixed task instructions (project memory). Never imports host modules. */
+export type ProjectInstructions = (cwd: string) => Promise<string> | string;
+const PROJECT_INSTRUCTIONS_MAX_CHARS = 64 * 1024;
+
 export class CodexSession {
   #connectionId = randomUUID();
   #historyRead: ReturnType<typeof readHistoryProcess> | null = null;
@@ -232,7 +237,10 @@ export class CodexSession {
   #nativeAssetHooks: NativeAssetHooks | undefined;
   #assetIntent: { operation: Operation; scope: NativeAssetIntent } | null = null;
   #assetsRetired = false;
-  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only'|'proposal' = 'native-config', hooks?: NativeAssetHooks, private readonly proposalOwner?:()=>void) {
+  readonly #projectInstructions: ProjectInstructions | undefined;
+  constructor(spec: InternalProcess, private readonly bounds: Limits, private readonly provenance: Snapshot['provenance'], private readonly mcpPolicy: 'native-config'|'arcane-only'|'proposal' = 'native-config', hooks?: NativeAssetHooks, private readonly proposalOwner?:()=>void, projectInstructions?: ProjectInstructions) {
+    if (projectInstructions !== undefined && typeof projectInstructions !== 'function') fail('ARGUMENTS', 'Project instructions must be a host callback.');
+    this.#projectInstructions = projectInstructions;
     if(mcpPolicy==='proposal'&&typeof proposalOwner!=='function')fail('PARENT_SCOPE','Proposal workers require an original-task owner.');
     if (hooks !== undefined) {
       this.#nativeAssetHooks = validateNativeAssetHooks(hooks);
@@ -594,6 +602,8 @@ export class CodexSession {
     const references=action.references;
     if(references?.length){const model=this.#models.find(m=>m.model===thread.selection.model);
       if(!model||model.inputModalities&&!model.inputModalities.includes('image'))fail('IMAGE_UNSUPPORTED','The selected native model does not advertise image input.');}
+    // The pinned TurnStartParams has no per-turn developer note, so per-turn UI state (the Playtest switch) is never
+    // appended to the user's text; it applies only as host-side automatic approval of playtest requests.
     const params={threadId:thread.threadId,input:[{type:'text',text,text_elements:[]},...(references?.map(image=>({type:'image',url:image.dataUrl}))??[])],
       cwd:this.#cwd,model:thread.selection.model,effort:thread.selection.effort,approvalPolicy:this.mcpPolicy==='proposal'?'never':'on-request',approvalsReviewer:'user',
       sandboxPolicy:allowWorkspaceWrites||thread.writeGranted
@@ -802,6 +812,14 @@ export class CodexSession {
     } catch (error) { this.#models = []; throw error; }
     finally { this.#catalogueLoading = false; }
   }
+  /** Bounded host text appended after the task instructions. A failing or malformed callback adds nothing. */
+  async #readProjectInstructions(): Promise<string> {
+    if (!this.#projectInstructions) return '';
+    try {
+      const text = await this.#projectInstructions(this.#cwd);
+      return typeof text === 'string' && text.length <= PROJECT_INSTRUCTIONS_MAX_CHARS ? text : '';
+    } catch { return ''; }
+  }
   async #openThread(id: string | null): Promise<ThreadState> {
     if(this.mcpPolicy==='proposal'&&id!==null)fail('PROPOSAL_READ_ONLY','Proposal workers always start a fresh thread.');
     this.#ensureSubscription();
@@ -814,13 +832,15 @@ export class CodexSession {
     const operation = this.#newOperation(id === null ? 'thread/start' : 'thread/resume', id, null);
     this.#threadOperation = operation;
     try {
+      // Host-supplied project memory (ARCANE.md) follows the unchanged task instructions; read fresh per thread.
+      const projectNotes = this.mcpPolicy === 'arcane-only' ? await this.#readProjectInstructions() : '';
       const result = await this.#requestOperation(operation, {
         // Lifecycle resume needs identity/settings and live status, not a copy
         // of every historic inline image. Explicit history reads stay bounded.
         ...(id === null ? {} : { threadId: id, excludeTurns: true }), model: pair.model, modelProvider: 'openai',
         cwd: this.#cwd, approvalPolicy: this.mcpPolicy==='proposal'?'never':'on-request', approvalsReviewer: 'user', sandbox: 'read-only',
         ...(this.mcpPolicy==='proposal'?{developerInstructions:'Return a bounded code or review proposal from the supplied context. Do not edit files, run commands, access Studio, request permissions, or delegate work. The parent task owns implementation and verification. Your response is a proposal, not evidence of acceptance.'}:{}),
-        ...(this.mcpPolicy==='arcane-only' ? { developerInstructions: ARCANE_TASK_INSTRUCTIONS } : {}),
+        ...(this.mcpPolicy==='arcane-only' ? { developerInstructions: ARCANE_TASK_INSTRUCTIONS + projectNotes } : {}),
       });
       this.#decodeAcknowledgement(() => {
         const resultObject = object(result);
@@ -1100,7 +1120,9 @@ export class CodexSession {
         for (const pending of [...this.#approvals.values()]) if (pending.value.itemId === itemId && pending.value.turnId === turnId) this.#removeApproval(pending, null);
         this.#fileProposals.delete(itemId);
       }
-      this.#event({ type: 'item', threadId: thread.threadId, turnId, itemId: str(item.id), itemType: str(item.type, 64), status: optionalText(item.status, 64) });
+      // Live MCP calls carry only an allowlisted, bounded identity (server, tool, display args) for activity lines.
+      const tool = item.type === 'mcpToolCall' ? summarizeMcpToolCall(item) : null;
+      this.#event({ type: 'item', threadId: thread.threadId, turnId, itemId: str(item.id), itemType: str(item.type, 64), status: optionalText(item.status, 64), ...(tool ? { tool } : {}) });
     } else if (method === 'error') {
       this.#event({ type: 'error', threadId: thread.threadId, turnId, code: 'TURN_ERROR' });
     }

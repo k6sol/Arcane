@@ -137,3 +137,42 @@ ops.assetTransfers[string.rep('d',64)]=nil;ops.assetTransfers[string.rep('c',64)
 ops:retireAssetContinuity({sessionId=target.sessionId,mode='Play',playEpoch=1})
 assert(destroyed==8)
 `,true));
+const meshParts=`
+local made={}
+local env=getfenv(Operations.materializeReconstruction)
+local function inst(class) local t={ClassName=class};function t:IsA(c) return c==class end;function t:Destroy() t.destroyed=true end;return t end
+env.Instance={new=function(c) return inst(c) end}
+env.Content={fromObject=function(o) return {object=o} end}
+env.Enum={CollisionFidelity={Hull='Hull',Box='Box'},RenderFidelity={Precise='Precise'},Material={Wood='Wood',Grass='Grass',Slate='Slate',Marble='Marble'}}
+env.Color3={new=function(r,g,b) return {r,g,b} end}
+env.CFrame={new=function(x,y,z) return {x,y,z} end}
+function service:CreateMeshPartAsync(content,options) local p=inst('MeshPart');p.content=content;p.options=options;made[#made+1]=p;return p end
+`;
+test('retained reconstruction becomes MeshParts once, from the exact owned meshes, with no upload',options,t=>run(t,setup+meshParts+`
+stage();local input=args()
+rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'WATCH')
+ops:reconstructAsset(input,guard);local lookups=#requested
+local model,confirm=ops:materializeReconstruction(expected.digest,guard)
+assert(#made==8 and model.ClassName=='Model' and model.Name=='ArcaneProcedural' and #requested==lookups,'no second service acquisition')
+for index,p in ipairs(made) do
+ assert(p.content.object==resources[index] and resources[index].destroyed==0,'MeshPart references the owned EditableMesh')
+ assert(p.Parent==model and type(p.Size)=='table' and p.Size[2]>0 and type(p.CFrame)=='table')
+ if p.Transparency==1 then assert(p.CanCollide==true and p.options.CollisionFidelity=='Hull') else assert(p.CanCollide==false and p.options.CollisionFidelity=='Box') end
+end
+confirm();model.Parent={}
+rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'STATE')
+model.Parent=nil;local again=ops:materializeReconstruction(expected.digest,guard);assert(#made==16 and again~=model,'restored placement may be placed again')
+rejects(function() ops:materializeReconstruction(string.rep('f',64),guard) end,'WATCH')
+creatorId=124;rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'SCOPE');creatorId=123
+ops:retireAssetContinuity({sessionId=target.sessionId,mode='Play',playEpoch=1})
+rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'WATCH');assert(#made==16)
+`,true));
+test('engine failure while materializing releases the partial model and allows a later attempt',options,t=>run(t,setup+meshParts+`
+stage();ops:reconstructAsset(args(),guard)
+local create=service.CreateMeshPartAsync
+function service:CreateMeshPartAsync(content,options) if #made==3 then error({code='ENGINE',message='fixture refusal'}) end return create(self,content,options) end
+local ok,e=pcall(function() return ops:materializeReconstruction(expected.digest,guard) end)
+assert(not ok and e.code=='ENGINE' and #made==3)
+service.CreateMeshPartAsync=create
+local model=ops:materializeReconstruction(expected.digest,guard);assert(model and #made==11)
+`,true));

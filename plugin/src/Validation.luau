@@ -12,12 +12,13 @@ Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
 Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context", "scene.asset_watch"})
-Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.build", "environment.apply", "scene.place_asset", "scene.apply_material"})
+Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.build", "environment.apply", "scene.place_asset", "scene.apply_material", "terrain.generate"})
 Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
 Validation.BUILD_PART_CLASSES = table.freeze({"Part", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reconstruct"})
--- Non-method feature capabilities (effects classes, environment extras, inspect bounds).
-Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects"})
+-- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
+-- character classes: Humanoid, HumanoidDescription, AnimationController, Animator).
+Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.characters", "asset.mesh_parts"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -164,6 +165,25 @@ function Validation.geometryProperties(legacy: any): any
 		end
 		return legacy.assignedMatches(instance, name, requested)
 	end
+	-- Verification against a value already read back once (scene.build reads each snapshot
+	-- field exactly once and verifies from it). An Orientation read back bit-identical to the
+	-- request is the same rotation; anything else falls back to the full rotation-matrix check.
+	function codec.readMatches(instance: any, name: string, requested: any, actual: any): boolean
+		if name == "Orientation" then return actual == requested or codec.assignedMatches(instance, name, requested) end
+		return legacy.readMatches(name, requested, actual)
+	end
+	-- The property names snapshot() reads for an instance of this class (no names list).
+	-- Depends only on the class, so a build computes it once per class.
+	function codec.snapshotFields(instance: any): {string}
+		local selected: {string} = {"Name"}
+		if instance:IsA("BasePart") then
+			selected = table.clone(codec.PART_FIELDS)
+			table.insert(selected, "Name")
+			if instance:IsA("Part") then table.insert(selected, "Shape") end
+		end
+		if instance:IsA("BaseScript") then table.insert(selected, "Disabled") end
+		return table.freeze(selected)
+	end
 	return table.freeze(codec)
 end
 
@@ -238,12 +258,16 @@ function Validation.encode(value: any, http: any): string
 		if item == nil or item == Validation.NULL then return "null" end
 		local kind = type(item)
 		if kind == "string" then
+			-- Printable ASCII without quote, backslash or slash needs no escaping: skip the engine call.
+			if not string.find(item, "[^ -~]") and not string.find(item, '["/\\]') then return '"' .. item .. '"' end
 			if utf8.len(item) == nil then Validation.fail("INPUT", "Invalid UTF-8.") end
 			return http:JSONEncode(item)
 		end
 		if kind == "boolean" then return if item then "true" else "false" end
 		if kind == "number" then
 			Validation.number(item, -math.huge, math.huge, "JSON number")
+			-- Safe integers print exactly as decimal digits; other numbers keep the engine encoder.
+			if item % 1 == 0 and math.abs(item) < 9007199254740992 and not (item == 0 and 1 / item < 0) then return string.format("%d", item) end
 			return http:JSONEncode(item)
 		end
 		if kind ~= "table" then Validation.fail("INPUT", "Non-JSON value.") end
@@ -258,7 +282,7 @@ function Validation.encode(value: any, http: any): string
 		local keys: {string} = {}
 		for key in pairs(item) do table.insert(keys, key) end
 		table.sort(keys)
-		for _, key in ipairs(keys) do table.insert(pieces, http:JSONEncode(key) .. ":" .. encode(item[key], depth + 1)) end
+		for _, key in ipairs(keys) do table.insert(pieces, encode(key, depth + 1) .. ":" .. encode(item[key], depth + 1)) end
 		return "{" .. table.concat(pieces, ",") .. "}"
 	end
 	return encode(value, 0)
@@ -272,29 +296,42 @@ function Validation.decode(text: string, http: any): any
 	local cursor, length = 1, #text
 	local function invalid(): never Validation.fail("PROTOCOL", "Malformed daemon JSON.") end
 	local function whitespace(): ()
-		while cursor <= length and string.find(" \t\r\n", string.sub(text, cursor, cursor), 1, true) do cursor += 1 end
+		while true do
+			local byte = string.byte(text, cursor)
+			if byte ~= 32 and byte ~= 9 and byte ~= 13 and byte ~= 10 then return end
+			cursor += 1
+		end
 	end
+	-- Jumps between quote, backslash and control bytes instead of stepping every byte. A string
+	-- with no escape is the raw slice: the whole text already passed utf8.len, and a slice
+	-- between two ASCII quotes stays valid UTF-8, so the engine unescaper is only needed (and
+	-- only called) for strings that contain an escape.
 	local function quoted(): string
 		local start = cursor
 		cursor += 1
-		while cursor <= length do
-			local byte = string.byte(text, cursor)
+		local escaped = false
+		while true do
+			local at = string.find(text, '[%c"\\]', cursor)
+			if not at then return invalid() end
+			local byte = string.byte(text, at)
 			if byte == 34 then
-				cursor += 1
-				local ok, value = pcall(function() return http:JSONDecode(string.sub(text, start, cursor - 1)) end)
+				cursor = at + 1
+				if not escaped then return string.sub(text, start + 1, at - 1) end
+				local ok, value = pcall(function() return http:JSONDecode(string.sub(text, start, at)) end)
 				if not ok or type(value) ~= "string" or utf8.len(value) == nil then invalid() end
 				return value
 			elseif byte == 92 then
-				cursor += 1
-				local escape = string.sub(text, cursor, cursor)
+				escaped = true
+				local escape = string.sub(text, at + 1, at + 1)
 				if escape == "u" then
-					if not string.match(string.sub(text, cursor + 1, cursor + 4), "^%x%x%x%x$") then invalid() end
-					cursor += 4
-				elseif escape == "" or not string.find('"\\/bfnrt', escape, 1, true) then invalid() end
-			elseif byte < 32 then invalid() end
-			cursor += 1
+					if not string.match(string.sub(text, at + 2, at + 5), "^%x%x%x%x$") then invalid() end
+					cursor = at + 6
+				elseif escape == "" or not string.find('"\\/bfnrt', escape, 1, true) then invalid()
+				else cursor = at + 2 end
+			elseif byte == 127 then
+				cursor = at + 1 -- DEL is a legal unescaped JSON string byte.
+			else invalid() end
 		end
-		return invalid()
 	end
 	local parse: (number) -> any
 	parse = function(depth: number): any

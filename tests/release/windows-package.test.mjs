@@ -89,7 +89,7 @@ async function fixture(t) {
   await write('toolchains/electron/dist/electron.exe', pe());
   await write('toolchains/electron/dist/version', '44.7.0');
   await write('toolchains/electron/dist/resources/default_app.asar', 'Never package the default application.');
-  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
+  for (const file of ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
   await write('apps/desktop/electron/icon.png', png);
   await write('apps/desktop/electron/node-LICENSE.txt', fixtureLicense);
   const nodeExecutable = join(root, 'toolchains/node/node.exe');
@@ -182,7 +182,7 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
   assert.ok(data.files.some(file => file.path === 'resources/app/studio-key-vault.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/workspace-preferences.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/provider-login.cjs'));
-  for (const name of ['native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs']) assert.ok(data.files.some(file => file.path === 'resources/app/' + name));
+  for (const name of ['native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js']) assert.ok(data.files.some(file => file.path === 'resources/app/' + name));
   for (const path of REQUIRED_MANAGED_LUAU_FILES) assert.ok(data.files.some(file => file.path === 'resources/product/' + path), path);
   assert.equal(hash(await readFile(join(result.directory, 'resources/product/' + MANAGED_LUAU_FILES[0]))), MANAGED_LUAU_SHA256);
   assert.ok(data.files.some(file => file.path === 'resources/product/dist/apps/desktop/src/studio-key-settings.js'));

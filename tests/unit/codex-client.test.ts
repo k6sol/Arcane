@@ -4,12 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promis
 import { createHash } from 'node:crypto';
 import { join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { connectCodexClient, CODEX_LIMITS } from '../../packages/codex-client/src/index.js';
+import { connectCodexClient, CODEX_LIMITS, MCP_TOOL_SUMMARY_LIMITS, summarizeMcpToolCall } from '../../packages/codex-client/src/index.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile.js';
 import { ARCANE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
+import { PROJECT_MEMORY_GUIDANCE, projectMemorySection, readProjectMemory } from '../../packages/core/src/project-memory.js';
 import {arcaneIsolationOverrides,arcaneThreadIsIsolated} from '../../packages/codex-client/src/mcp-isolation.js';
 import type { Approval, ArcaneMcpLaunchProfile, LimitOptions, SessionEventValue } from '../../packages/codex-client/src/types.js';
 import {referencePng,referenceInput} from '../../packages/codex-client/testing/reference-fixture.js';
@@ -38,7 +39,7 @@ async function fixture(t: test.TestContext, mode = 'normal', overrides: LimitOpt
   const session = new CodexSession({
     command: process.execPath, args: [join(ROOT,'packages','codex-client','fixtures','protocol.mjs'),mode,audit,...planned.args],
     cwd: ROOT, env: planned.env,
-  }, testBounds, 'spawned-node-fixture',mcpPolicy);
+  }, testBounds, 'spawned-node-fixture',mcpPolicy,undefined,undefined,mcpPolicy==='arcane-only'?async (cwd:string)=>projectMemorySection((await readProjectMemory(cwd)).text):undefined);
   t.after(async () => {
     await session.close();
     const child = relative(TEMP,dir);
@@ -72,6 +73,16 @@ test('actual native peer receives original inline PNG with text; echoed media st
   assert.deepEqual(sent.input,[{type:'text',text:INPUT.text,text_elements:[]},{type:'image',url:references[0]!.dataUrl}]);
   assert.deepEqual(f.session.snapshot().models[0]!.inputModalities,['text','image']);assert.equal(f.session.snapshot().models[0]!.inputModalitiesSource,'reported');
   assert.ok(!JSON.stringify(f.session.snapshot()).includes('data:image/'));
+});
+test('turn/start sends the user text unchanged: the pinned protocol has no per-turn developer note for the Playtest switch',async t=>{
+  // TurnStartParams carries no developer/collaboration instructions, so the composer's Playtest switch reaches ChatGPT only
+  // through automatic approval of its playtest requests (playtest-panel.ts), never as text added to the user's message.
+  const pinned=await readFile(resolve('packages/codex-client/.protocol/v2/TurnStartParams.ts'),'utf8');
+  assert.doesNotMatch(pinned,/developerInstructions|collaborationMode|instructions\??:/);
+  const f=await open(t,'image-input');await f.session.startTurn(INPUT);
+  const sent=inputs(await f.receipts()).find(message=>message.method==='turn/start')!.params!;
+  assert.deepEqual(sent.input,[{type:'text',text:INPUT.text,text_elements:[]}]);
+  assert.deepEqual(Object.keys(sent).sort(),['approvalPolicy','approvalsReviewer','cwd','effort','input','model','sandboxPolicy','threadId']);
 });
 test('native catalogue image denial is not replaced by an assumed capability',async t=>{
   const f=await open(t,'image-text-only');await assert.rejects(()=>f.session.startTurn({...INPUT,references:[referenceInput()]}),code('IMAGE_UNSUPPORTED'));
@@ -846,6 +857,52 @@ test('identical consecutive deltas retain distinct monotonic public sequences an
   assert.equal(session.snapshot().droppedEvents,0);
 });
 
+test('live MCP tool items expose only a bounded, allowlisted Arcane identity',async t=>{
+  const {session}=await open(t,'mcp-tool-items');
+  await session.startTurn(INPUT);
+  await until(()=>session.snapshot().events.filter(event=>event.type==='item').length===5);
+  const items=session.snapshot().events.flatMap(event=>event.type==='item'?[event]:[]);
+  const serialized=JSON.stringify(session.snapshot());
+  for(const secret of ['FIXTURE_SECRET','FIXTURESECRET','print(','instanceId','xxxxxxxxxx','qqqqqqqqqq'])assert.ok(!serialized.includes(secret),secret);
+  const create={server:'arcane',tool:'scene_create',args:{parent:{root:'Workspace',pathSegments:['Forest']},className:'Part',name:'Tree',properties:{Size:true,Color:true}}};
+  assert.deepEqual(items.map(event=>[event.itemId,event.itemType,event.status,event.tool??null]),[
+    ['fixture-mcp-1','mcpToolCall','inProgress',create],
+    ['fixture-mcp-1','mcpToolCall','completed',create],
+    ['fixture-mcp-2','mcpToolCall','inProgress',{server:'other',tool:'scene_create',args:null}],
+    ['fixture-mcp-3','mcpToolCall','inProgress',null],
+    ['fixture-mcp-4','mcpToolCall','inProgress',{server:'arcane',tool:'script_update',args:{ref:{root:'ServerScriptService',pathSegments:['Main']}}}],
+  ]);
+  for(const event of items)assert.ok(Buffer.byteLength(JSON.stringify(event))<4096);
+});
+
+test('MCP tool summaries refuse getters, oversize and non-plain arguments',()=>{
+  let invoked=false;
+  const args=Object.defineProperty({className:'Part'},'name',{enumerable:true,get(){invoked=true;return 'Tree';}});
+  assert.deepEqual(summarizeMcpToolCall({server:'arcane',tool:'scene_create',arguments:args}),{server:'arcane',tool:'scene_create',args:{className:'Part'}});
+  assert.equal(invoked,false);
+  assert.deepEqual(summarizeMcpToolCall({server:'arcane',tool:'scene_create',arguments:'{"name":"x"}'}),{server:'arcane',tool:'scene_create',args:null});
+  assert.deepEqual(summarizeMcpToolCall({server:'arcane',tool:'scene_create',arguments:{ref:{root:'Workspace',pathSegments:Array(17).fill('a')}}})?.args,{ref:{root:'Workspace',pathSegments:[]}});
+  assert.deepEqual(summarizeMcpToolCall({server:'arcane',tool:'scene_search',arguments:{query:'Bearer abcdefghijk',root:'Workspace'}})?.args,{root:'Workspace'});
+  const many=summarizeMcpToolCall({server:'arcane',tool:'scene_update',arguments:{properties:Object.fromEntries(Array.from({length:20},(_,i)=>['P'+'a'.repeat(i),'FIXTURE_SECRET']))}});
+  assert.equal(Object.keys(many?.args?.properties??{}).length,MCP_TOOL_SUMMARY_LIMITS.maxProperties);
+  assert.ok(!JSON.stringify(many).includes('FIXTURE_SECRET'));
+  for(const item of [{server:'arc ane',tool:'x'},{server:'arcane',tool:''},{server:'arcane',tool:'t'.repeat(129)},{server:'a'.repeat(65),tool:'x'},{server:'arcane'}])assert.equal(summarizeMcpToolCall(item as Record<string,unknown>),null);
+});
+
+test('MCP tool summaries read compact slash-joined ref paths with the same bounds and redaction',()=>{
+  const ref=(value:Record<string,unknown>)=>summarizeMcpToolCall({server:'arcane',tool:'scene_update',arguments:{ref:{instanceId:'i1',className:'Part',...value}}})?.args?.ref;
+  assert.deepEqual(ref({root:'Workspace',path:'Village/Hut/Door'}),{root:'Workspace',pathSegments:['Village','Hut','Door']});
+  assert.deepEqual(ref({root:'Workspace',path:''}),{root:'Workspace',pathSegments:[]});
+  assert.deepEqual(ref({root:'Workspace',pathSegments:['Village','Hut']}),{root:'Workspace',pathSegments:['Village','Hut']},'full refs still work');
+  assert.deepEqual(summarizeMcpToolCall({server:'arcane',tool:'scene_create',arguments:{parent:{root:'Workspace',path:'Village'}}})?.args,{parent:{root:'Workspace',pathSegments:['Village']}});
+  // Same bounds and redaction as pathSegments: too many segments, an oversize or credential-shaped segment, an empty segment
+  // or an ambiguous ref keeps the root only; a non-string path is ignored.
+  for(const value of [{path:Array(MCP_TOOL_SUMMARY_LIMITS.maxSegments+1).fill('a').join('/')},{path:'Village/'+'x'.repeat(MCP_TOOL_SUMMARY_LIMITS.maxText+1)},
+    {path:'Village/Bearer abcdefghijk'},{path:'Village//Hut'},{path:'Village\nHut'},{path:'x'.repeat(5000)},{path:'Village',pathSegments:['Village']},{path:42}])
+    assert.deepEqual(ref({root:'Workspace',...value}),{root:'Workspace',pathSegments:[]},JSON.stringify(value).slice(0,80));
+  assert.equal(ref({path:'Village'}),undefined,'a ref without a root is dropped');
+});
+
 test('ring count overflow retains sequence gaps and exact dropped count',async t=>{
   const {session}=await open(t,'identical-deltas',{maxEvents:2});
   await session.startTurn(INPUT);
@@ -1052,7 +1109,8 @@ test('Arcane-only child overrides disable inherited tools with literal safe dott
 
 test('Arcane-only native thread is configured only after the actual scoped MCP inventory passes',async t=>{
  const {session,receipts}=await fixture(t,'normal',{},true,undefined,'arcane-only');assert.equal(session.snapshot().mcpIsolation,'arcane-only-pending');session.selectModel({...HUMAN,...PAIR});await session.startThread(HUMAN);assert.equal(session.snapshot().thread?.configured,true);assert.equal(session.snapshot().mcpIsolation,'arcane-only-verified');
- const calls=inputs(await receipts()); assert.equal(calls.find(m=>m.method==='thread/start')!.params!.developerInstructions,ARCANE_TASK_INSTRUCTIONS);assert.equal(calls.filter(m=>m.method==='mcpServerStatus/list').length,1);assert.equal(calls.find(m=>m.method==='mcpServerStatus/list')!.params!.threadId,THREAD);assert.equal(calls.filter(m=>m.method==='turn/start').length,0);
+ const calls=inputs(await receipts()); // The pinned task instructions stay first and unchanged; project memory guidance (and ARCANE.md, when present) follows.
+ const developer=String(calls.find(m=>m.method==='thread/start')!.params!.developerInstructions);assert.equal(developer,ARCANE_TASK_INSTRUCTIONS+projectMemorySection((await readProjectMemory(ROOT)).text));assert.ok(developer.startsWith(ARCANE_TASK_INSTRUCTIONS+'\n\n'+PROJECT_MEMORY_GUIDANCE));assert.equal(calls.filter(m=>m.method==='mcpServerStatus/list').length,1);assert.equal(calls.find(m=>m.method==='mcpServerStatus/list')!.params!.threadId,THREAD);assert.equal(calls.filter(m=>m.method==='turn/start').length,0);
 });
 for (const opening of ['start', 'resume'] as const) test('Arcane-only thread ' + opening + ' refuses a missing source-search tool before model work', async t => {
   const { session, receipts } = await fixture(t, 'missing-script-search', {}, true, undefined, 'arcane-only');

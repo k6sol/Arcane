@@ -7,10 +7,50 @@ Transport.__index = Transport
 Transport.POLL_SECONDS = 2
 Transport.MAX_BACKOFF_SECONDS = 30
 Transport.MAX_RECOVERY_ATTEMPTS = 8
+-- Two-sided Studio pairing (docs/studio-pairing.md): only after the user types the 6-digit code shown in Arcane
+-- and clicks Connect does the single worker ask this fixed loopback port, once, for the waiting offer's ticket.
+-- Nothing is requested on load, while idle or from the toolbar. The discovery answer never carries the code:
+-- the daemon must first prove it knows the typed code (HMAC over a fresh plugin nonce), so a process squatting
+-- this port cannot pass as Arcane; only then does the plugin prove the code, and Arcane issues the key only
+-- after the user clicks Approve there for this place.
+Transport.DISCOVERY_URL = "http://127.0.0.1:45870"
 -- Status is a read-only POST so the exact key never enters a URL. The daemon
 -- must authenticate that key and inspect this exact client/identity without
 -- creating a session, renewing a lease, dispatching work or returning a bearer.
-local ROUTES = table.freeze({connect = "/v1/plugin/connect", status = "/v1/plugin/status", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect"})
+local ROUTES = table.freeze({connect = "/v1/plugin/connect", status = "/v1/plugin/status", pair = "/v1/plugin/pair", poll = "/v1/plugin/poll", result = "/v1/plugin/result", disconnect = "/v1/plugin/disconnect",
+	discover = "/v1/pairing/discover", challenge = "/v1/plugin/pairing/challenge", claim = "/v1/plugin/pairing/claim"})
+local PAIRING_REJECTED = "This Arcane pairing offer expired or was already used. Click Connect Studio in Arcane again."
+local PAIRING_NOT_WAITING = "Arcane is not waiting for Studio. Click Connect Studio in Arcane, then enter its code here."
+local PAIRING_NOT_ARCANE = "That code does not match the Arcane window that answered. Check the code shown in Arcane and try again."
+local PAIRING_APPROVAL_SECONDS = 600
+
+local function hexBytes(hex: string): string
+	return (string.gsub(hex, "%x%x", function(pair: string): string return string.char(tonumber(pair, 16) :: number) end))
+end
+-- HMAC-SHA256 (RFC 2104) over the plugin's own bounded SHA-256 (Main attaches it as transport.sha256).
+-- The key is the short code typed by the user.
+local function hmac(Sha256: (string) -> string, key: string, message: string): string
+	if #key > 64 then key = hexBytes(Sha256(key)) end
+	key ..= string.rep("\0", 64 - #key)
+	local inner, outer = table.create(64), table.create(64)
+	for i = 1, 64 do
+		local byte = string.byte(key, i)
+		inner[i] = string.char(bit32.bxor(byte, 0x36))
+		outer[i] = string.char(bit32.bxor(byte, 0x5c))
+	end
+	return Sha256(table.concat(outer) .. hexBytes(Sha256(table.concat(inner) .. message)))
+end
+local function sameText(a: string, b: string): boolean
+	if #a ~= #b then return false end
+	local diff = 0
+	for i = 1, #a do diff = bit32.bor(diff, bit32.bxor(string.byte(a, i), string.byte(b, i))) end
+	return diff == 0
+end
+-- Role-separated proofs; the daemon computes the same (packages/storage/src/studio-store.ts studioPairingProof).
+function Transport:pairingProof(code: string, role: string, ticket: string, clientNonce: string): string
+	if type(self.sha256) ~= "function" then V.fail("PAIRING", "Studio pairing is unavailable in this plugin build.") end
+	return hmac(self.sha256, code, "arcane-pair-v2|" .. role .. "|" .. ticket .. "|" .. clientNonce)
+end
 local IDENTITY_CHANGED = "Place identity changed; this session is fenced. Inspect receipts and explicitly connect again."
 local ASSET_CLEANUP_FAILED = "Owned asset staging resources could not all be released. Inspect staging resources before reloading the plugin."
 type Transport = any
@@ -24,7 +64,9 @@ function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: stri
 		pair = nil, desiredPair = nil, disconnectRequested = false, stopped = false,
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
 		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil,
-		recovery = nil, checkInput = nil, assetCleanupFailed = false}, Transport)
+		recovery = nil, checkInput = nil, assetCleanupFailed = false,
+		codePairing = nil, onPairing = nil, onPaired = nil,
+		sizedArgs = setmetatable({}, {__mode = "k"})}, Transport)
 end
 
 function Transport:isEdit(): boolean
@@ -95,8 +137,18 @@ end
 
 function Transport:forgetDesired(): ()
 	local desired = self.desiredPair
-	if desired then desired.code = nil; desired.apiKey = nil end
+	if desired then desired.code = nil; desired.apiKey = nil; desired.ticket = nil; desired.proof = nil end
 	self.desiredPair = nil
+end
+
+function Transport:forgetPairing(): ()
+	local pairing = self.codePairing
+	if pairing then pairing.code = nil; pairing.ticket = nil; pairing.proof = nil end
+	self.codePairing = nil
+end
+
+function Transport:pairingUpdate(stage: string, detail: string): ()
+	if self.onPairing and not self.stopped then pcall(self.onPairing, stage, detail) end
 end
 
 function Transport:forgetRecovery(): ()
@@ -136,8 +188,79 @@ function Transport:requestConnect(apiKey: any, automatic: boolean?): ()
 		needsStatus = automatic == true, attempts = 0, sessionId = nil, fence = nil}
 	self.recovery = intent
 	if not automatic then self.desiredPair = {url = origin, apiKey = apiKey, generation = self.generation} end
+	self:forgetPairing()
 	self.disconnectRequested = true
 	self:status("connecting", "Connecting to the Arcane workbench.")
+end
+
+-- Explicit user action only: the Connect click with the code typed from Arcane. The code stays in memory
+-- for this one attempt and never reaches plugin settings or any request.
+function Transport:requestArcaneCode(code: any): ()
+	if self.stopped then return end
+	self:checkAssetCleanup()
+	local digits = (string.gsub(V.string(code, "Arcane code", 16), "[%s%-]", ""))
+	if not string.match(digits, "^%d%d%d%d%d%d$") then V.fail("PAIRING", "Enter the 6-digit code shown in Arcane.") end
+	if not self:isEdit() then V.fail("PLAY", "Stop playtesting before connecting.") end
+	self.generation += 1
+	self:forgetDesired()
+	self:forgetRecovery()
+	self:forgetPairing()
+	self.codePairing = {code = digits, generation = self.generation, stage = "discover"}
+	self.disconnectRequested = true
+	self:status("connecting", "Looking for Arcane.")
+end
+
+-- Worker steps 1 and 2: one credential-free discovery read, then Arcane must prove the typed code over a fresh
+-- nonce before the plugin reveals anything derived from it. A wrong proof ends the attempt (squatter or typo).
+function Transport:advancePairing(): number
+	local pairing = self.codePairing
+	if not pairing or self.stopped or pairing.generation ~= self.generation then self:forgetPairing(); return Transport.POLL_SECONDS end
+	local stage = pairing.stage
+	local ok, err = pcall(function()
+		if stage == "discover" then
+			local result = self:post(Transport.DISCOVERY_URL, ROUTES.discover, {protocolVersion = V.PROTOCOL}, nil)
+			local valid, parsed = pcall(function(): any
+				V.fields(result, {"protocolVersion", "port", "ticket", "expiresAt"}, "pairing offer")
+				if result.protocolVersion ~= V.PROTOCOL then V.fail("PROTOCOL", "Unsupported pairing offer.") end
+				local port = V.integer(result.port, 1, 65535, "pairing port")
+				local ticket = V.string(result.ticket, "pairing ticket", 100)
+				local ticketPort, secret = string.match(ticket, "^arcane_pair_v1_([1-9][0-9]*)_([0-9a-f]+)$")
+				if tonumber(ticketPort) ~= port or not secret or #secret ~= 48 then V.fail("PAIRING", "Invalid pairing ticket.") end
+				V.string(result.expiresAt, "pairing expiry", 64)
+				return {url = V.url("http://127.0.0.1:" .. tostring(port)), ticket = ticket}
+			end)
+			if not valid then V.fail("PAIRING", PAIRING_NOT_WAITING) end
+			if self.codePairing ~= pairing or pairing.generation ~= self.generation then return end
+			pairing.url, pairing.ticket = parsed.url, parsed.ticket
+			-- A fresh 128-bit nonce for this attempt (two random GUIDs through SHA-256).
+			pairing.clientNonce = string.sub(self.sha256(self.http:GenerateGUID(false) .. "|" .. self.http:GenerateGUID(false)), 1, 32)
+			pairing.stage = "challenge"
+		elseif stage == "challenge" then
+			local result = self:post(pairing.url, ROUTES.challenge, {protocolVersion = V.PROTOCOL, ticket = pairing.ticket, clientNonce = pairing.clientNonce}, nil)
+			if self.codePairing ~= pairing or pairing.generation ~= self.generation then return end
+			local valid = pcall(function() V.fields(result, {"protocolVersion", "proof"}, "pairing challenge") end)
+			local expected = self:pairingProof(pairing.code, "arcane", pairing.ticket, pairing.clientNonce)
+			if not valid or result.protocolVersion ~= V.PROTOCOL or type(result.proof) ~= "string" or not sameText(result.proof, expected) then
+				V.fail("NOT_ARCANE", PAIRING_NOT_ARCANE)
+			end
+			-- Arcane proved the code. Only now is a plugin proof derived; the code itself is dropped.
+			local proof = self:pairingProof(pairing.code, "plugin", pairing.ticket, pairing.clientNonce)
+			self.codePairing = nil
+			pairing.code = nil
+			self.desiredPair = {url = pairing.url, ticket = pairing.ticket, clientNonce = pairing.clientNonce, proof = proof,
+				generation = pairing.generation, deadline = os.clock() + PAIRING_APPROVAL_SECONDS}
+			pairing.ticket = nil
+		end
+	end)
+	if ok then return 0 end
+	if self.codePairing == pairing or (self.codePairing == nil and self.desiredPair == nil and pairing.generation == self.generation) then
+		self:forgetPairing()
+		local message = if type(err) == "table" and err.code == "NOT_ARCANE" then PAIRING_NOT_ARCANE
+			elseif stage == "discover" then PAIRING_NOT_WAITING else V.safeError(err)
+		self:pairingUpdate("failed", message)
+		self:status("disconnected", message)
+	end
+	return Transport.POLL_SECONDS
 end
 
 -- Compatibility entry point for legacy fixtures; never exposed by Main.
@@ -160,6 +283,7 @@ function Transport:requestDisconnect(): ()
 	self.generation += 1
 	self:forgetDesired()
 	self:forgetRecovery()
+	self:forgetPairing()
 	self.disconnectRequested = true
 	self:status("disconnecting", "Local writes are fenced; disconnecting from the daemon.")
 end
@@ -172,6 +296,7 @@ function Transport:stop(): ()
 	self.stopped = true
 	self:forgetDesired()
 	self:forgetRecovery()
+	self:forgetPairing()
 	self:dropIdentityFence()
 	if self.testProof then self.testProof:stop() end
 	if self.pair then self.pair.token = nil end
@@ -187,7 +312,8 @@ end
 
 function Transport:post(url: string, route: string, payload: any, token: string?): any
 	V.url(url)
-	if not table.find({ROUTES.connect, ROUTES.status, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect}, route) then V.fail("URL", "Unsupported plugin route.") end
+	if not table.find({ROUTES.connect, ROUTES.status, ROUTES.pair, ROUTES.poll, ROUTES.result, ROUTES.disconnect, ROUTES.discover, ROUTES.challenge, ROUTES.claim}, route) then V.fail("URL", "Unsupported plugin route.") end
+	if (route == ROUTES.discover) ~= (url == Transport.DISCOVERY_URL) then V.fail("URL", "Pairing discovery uses only its fixed loopback endpoint.") end
 	if self.inFlight then V.fail("FLIGHT", "Another HTTP request is in flight.") end
 	if route == ROUTES.poll then self:checkIdentity(self.pair) end
 	local headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" }
@@ -211,6 +337,9 @@ function Transport:post(url: string, route: string, payload: any, token: string?
 	if not response.Success and type(response.Body) == "string" and #response.Body <= 8192 then
 		local decoded, errorBody = pcall(function() return V.decode(response.Body, self.http) end)
 		if decoded and type(errorBody) == "table" then errorCode = errorBody.error end
+	end
+	if (route == ROUTES.claim or route == ROUTES.challenge) and not response.Success and response.StatusCode ~= 408 and response.StatusCode ~= 429 and response.StatusCode < 500 then
+		V.fail("PAIRING", PAIRING_REJECTED)
 	end
 	if response.StatusCode == 401 or response.StatusCode == 403 then
 		if route == ROUTES.status and errorCode ~= "KEY_REJECTED" then
@@ -265,7 +394,7 @@ function Transport:clearSession(keepIdentity: boolean?): ()
 end
 
 function Transport:exchange(desired: any): ()
-	if self.stopped or desired.generation ~= self.generation then desired.code = nil; desired.apiKey = nil; return end
+	if self.stopped or desired.generation ~= self.generation then desired.code = nil; desired.apiKey = nil; desired.ticket = nil; desired.proof = nil; return end
 	self:checkAssetCleanup()
 	local capabilities = table.clone(V.READ_METHODS)
 	for _, method in ipairs(V.WRITE_METHODS) do table.insert(capabilities, method) end
@@ -274,24 +403,48 @@ function Transport:exchange(desired: any): ()
 	-- Output diagnostics are advertised only when Main attached the bounded collector.
 	if self.diagnostics and type(self.diagnostics.CAPABILITY) == "string" then table.insert(capabilities, self.diagnostics.CAPABILITY) end
 	local isKey = desired.apiKey ~= nil
+	local isTicket = not isKey and desired.ticket ~= nil
 	local payload: any = {
 		protocolVersion = V.PROTOCOL,
 		identity = {clientSessionId = self.clientSessionId, placeId = self.gameModel.PlaceId,
 			universeId = self.gameModel.GameId, name = V.string(self.gameModel.Name, "place name", 200), pluginVersion = V.VERSION},
 		capabilities = V.array(capabilities),
 	}
-	if isKey then payload.apiKey = desired.apiKey else payload.code = desired.code end
+	if isKey then payload.apiKey = desired.apiKey elseif isTicket then
+		payload.ticket, payload.clientNonce, payload.proof = desired.ticket, desired.clientNonce, desired.proof
+	else payload.code = desired.code end
+	local ticket, proof = desired.ticket, desired.proof
+	if isTicket and os.clock() > (desired.deadline or 0) then V.fail("PAIRING", "Arcane approval timed out. Click Connect Studio in Arcane again.") end
 	local intent = self.recovery
-	local fence = if intent and intent.fence then intent.fence else self:watchIdentity(payload.identity)
+	-- A repeated claim keeps the identity pinned by its first attempt (the daemon compares it exactly).
+	local fence = if intent and intent.fence then intent.fence
+		elseif desired.fence and self.identityFence == desired.fence then desired.fence else self:watchIdentity(payload.identity)
+	desired.fence = fence
 	if intent then intent.fence = fence; intent.needsStatus = true end
 	if not self:observeIdentity(fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
 	-- Recovery keeps the original identity pin, never recaptures another place.
 	payload.identity = fence.identity
-	desired.apiKey, desired.code = nil, nil
-	local ok, result = pcall(function() return self:post(desired.url, if isKey then ROUTES.connect else ROUTES.pair, payload, nil) end)
-	payload.apiKey, payload.code = nil, nil
-	if not ok then error(result, 0) end
-	V.fields(result, {"sessionId", "token", "protocolVersion", "allowedRoots", "allowWrites"}, "pair result")
+	desired.apiKey, desired.code, desired.ticket, desired.proof = nil, nil, nil, nil
+	local ok, result = pcall(function() return self:post(desired.url, if isKey then ROUTES.connect elseif isTicket then ROUTES.claim else ROUTES.pair, payload, nil) end)
+	payload.apiKey, payload.code, payload.ticket, payload.proof = nil, nil, nil, nil
+	if not ok then ticket, proof = nil, nil; error(result, 0) end
+	if isTicket and type(result) == "table" and result.state == "awaiting-approval" then
+		V.fields(result, {"state", "expiresAt"}, "pairing approval")
+		-- Arcane shows this place and waits for the user's Approve there. Ask again on the next idle cycle.
+		if self.stopped or desired.generation ~= self.generation or self.desiredPair then ticket, proof = nil, nil; return end
+		desired.ticket, desired.proof = ticket, proof
+		ticket, proof = nil, nil
+		self.desiredPair = desired
+		self:pairingUpdate("approval", "Approve this Studio in Arcane to finish connecting.")
+		self:status("connecting", "Waiting for you to click Approve in Arcane.")
+		return
+	end
+	ticket, proof = nil, nil
+	V.fields(result, if isTicket then {"sessionId", "token", "protocolVersion", "allowedRoots", "allowWrites", "apiKey"} else {"sessionId", "token", "protocolVersion", "allowedRoots", "allowWrites"}, "pair result")
+	-- A claim returns this daemon's long-lived key once. It must target the exact claimed endpoint.
+	local pairedKey = if isTicket then result.apiKey else nil
+	result.apiKey = nil
+	if isTicket and (pairedKey == nil or V.keyOrigin(pairedKey) ~= desired.url) then V.fail("PROTOCOL", "Pairing returned a key for another endpoint.") end
 	if result.protocolVersion ~= V.PROTOCOL then V.fail("PROTOCOL", "Unsupported daemon protocol.") end
 	V.string(result.sessionId, "session ID", 256)
 	V.string(result.token, "session token", 4096)
@@ -306,6 +459,14 @@ function Transport:exchange(desired: any): ()
 	self.failures = 0
 	if self.generation ~= desired.generation then self.disconnectRequested = true; return end
 	if intent and self.recovery == intent then intent.sessionId = result.sessionId; intent.needsStatus = false; intent.attempts = 0 end
+	if pairedKey then
+		-- From here the paired key behaves exactly like an entered key: Main saves it in plugin settings,
+		-- and loss of this session uses the existing status-first recovery.
+		self.recovery = {url = desired.url, apiKey = pairedKey, generation = desired.generation,
+			needsStatus = false, attempts = 0, sessionId = result.sessionId, fence = fence}
+		if self.onPaired then pcall(self.onPaired, pairedKey) end
+		pairedKey = nil
+	end
 	self:checkIdentity(result) -- Before resolving any roots in the current engine.
 	self.operations = Operations.new(result, self.gameModel, self.http, function(): () self:assetProgress() end)
 	local editor = self.operations.editor
@@ -350,7 +511,13 @@ function Transport:envelope(command: any): ()
 		and not table.find(V.ASSET_STAGE_METHODS or {}, command.method) then V.fail("METHOD", "Unsupported Studio method.") end
 	V.string(command.expiresAt, "command expiry", 64)
 	V.object(command.args, "arguments")
-	if #V.encode(command.args, self.http) > V.ARGUMENT_BYTES then V.fail("BODY_LIMIT", "Arguments exceed 256 KiB.") end
+	-- The 256 KiB bound is measured once per decoded args table (weakly keyed). guard() runs this
+	-- envelope again before and after every engine step and slice; re-encoding up to 256 KiB of
+	-- JSON there was the dominant per-guard cost. Every other envelope check still re-runs.
+	if not self.sizedArgs[command.args] then
+		if #V.encode(command.args, self.http) > V.ARGUMENT_BYTES then V.fail("BODY_LIMIT", "Arguments exceed 256 KiB.") end
+		self.sizedArgs[command.args] = true
+	end
 end
 
 function Transport:guard(command: any, pair: any): ()
@@ -530,8 +697,9 @@ function Transport:tick(): number
 		end
 		self:clearSession()
 		self.disconnectRequested = false
-		if not self.desiredPair then self:status("disconnected", "Disconnected. Enter your Arcane API key and click Connect.") end
+		if not self.desiredPair and not self.codePairing then self:status("disconnected", "Disconnected. Enter your Arcane API key and click Connect.") end
 	end
+	if self.codePairing then return self:advancePairing() end
 	if self.assetCleanupFailed then return Transport.MAX_BACKOFF_SECONDS end
 	if self.desiredPair then
 		local desired = self.desiredPair
@@ -540,6 +708,11 @@ function Transport:tick(): number
 		-- never by replaying this handshake.
 		local ok, err = pcall(function() self:exchange(desired) end)
 		desired.code, desired.apiKey = nil, nil
+		if not ok and desired.clientNonce ~= nil then
+			-- A claim is never repeated after an error: the attempt ends here.
+			desired.ticket, desired.proof = nil, nil
+			if desired.generation == self.generation then self:pairingUpdate("failed", V.safeError(err)) end
+		end
 		if not ok and desired.generation == self.generation then
 			if type(err) == "table" and err.code == "KEY_REJECTED" then
 				self:clearSession()

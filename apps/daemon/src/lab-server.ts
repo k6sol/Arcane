@@ -32,6 +32,8 @@ import {createStudioTestService, type StudioTestService, type NativeTestConnecti
 import {studioTestRoutes, STUDIO_TEST_HTTP_LIMITS, type StudioTestActorResolver, type StudioTestRouteService} from './studio-test-routes.js';
 import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
 import { plansRoutes } from './plans-routes.js';
+import { projectMemoryRoutes } from './project-memory-routes.js';
+import { scriptSyncRoutes } from './script-sync-routes.js';
 import { ActionsLedger } from './actions-ledger.js';
 
 const unavailableTestMessages = {
@@ -146,6 +148,10 @@ export async function createConnectionLab(options: Options) {
   }) : null);
   const nativeChat = codex ? codexRoutes(codex, {workflowModels:true}) : null;
   // Arcane actions metering and Plans & credits (informational; never blocks work, never charges).
+  // Project memory: ARCANE.md in this project folder, read and written by the human desktop only.
+  const projectMemory = options.studioStore ? projectMemoryRoutes({ projectPath: options.projectPath ?? options.cwd }) : null;
+  // Script sync (opt-in per project): mirrors granted Studio scripts into <project>/src and applies file edits back. Human desktop only.
+  const scriptSync = options.studioStore ? scriptSyncRoutes({ projectPath: options.projectPath ?? options.cwd, stateDirectory: options.stateDirectory, studio: options.studioStore }) : null;
   const plans = options.studioStore ? plansRoutes({ ledger: new ActionsLedger(join(options.stateDirectory, 'arcane-actions')),
     codexState: () => codex?.state(), studioEvents: () => options.studioStore?.events(100) ?? [] }) : null;
   // Quiesce every retained task before other services publish terminal evidence.
@@ -242,7 +248,7 @@ export async function createConnectionLab(options: Options) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
     fenceTasks();
-    handoffs?.close(); nativeAssetRegistry?.close();
+    handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
@@ -295,6 +301,8 @@ export async function createConnectionLab(options: Options) {
           ['/automatic-asset-previews.js', [join(options.cwd, 'dist/apps/desktop/src/automatic-asset-previews.js'), 'text/javascript']],
           ['/playtest-panel.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-panel.js'), 'text/javascript']],
           ['/playtest-toggle.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-toggle.js'), 'text/javascript']],
+          ['/starter-gallery.js', [join(options.cwd, 'dist/apps/desktop/src/starter-gallery.js'), 'text/javascript']],
+          ['/starter-prompts.js', [join(options.cwd, 'dist/apps/desktop/src/starter-prompts.js'), 'text/javascript']],
           ['/glb-preflight.js', [join(options.cwd, 'dist/apps/desktop/src/glb-preflight.js'), 'text/javascript']],
           ['/asset-viewer-runtime.mjs', [join(options.cwd, 'apps/desktop/public/asset-viewer-runtime.mjs'), 'text/javascript']],
           ...[
@@ -308,6 +316,9 @@ export async function createConnectionLab(options: Options) {
           ['/setup-checklist.js',[join(options.cwd,'dist/apps/desktop/src/setup-checklist.js'),'text/javascript']],
           ['/plans.js',[join(options.cwd,'dist/apps/desktop/src/plans.js'),'text/javascript']],
           ['/notifications.js',[join(options.cwd,'dist/apps/desktop/src/notifications.js'),'text/javascript']],
+          ['/project-memory.js',[join(options.cwd,'dist/apps/desktop/src/project-memory.js'),'text/javascript']],
+          ['/script-sync.js',[join(options.cwd,'dist/apps/desktop/src/script-sync.js'),'text/javascript']],
+          ['/script-diff.js',[join(options.cwd,'dist/apps/desktop/src/script-diff.js'),'text/javascript']],
           ['/native-handoff.js',[join(options.cwd,'dist/apps/desktop/src/native-handoff.js'),'text/javascript']],
           ['/studio-key-settings.js',[join(options.cwd,'dist/apps/desktop/src/studio-key-settings.js'),'text/javascript']],
           ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
@@ -322,6 +333,8 @@ export async function createConnectionLab(options: Options) {
         response.end(data); return;
       }
       if(plans&&await plans.handle(request,response,url,token,origin))return;
+      if(projectMemory&&await projectMemory.handle(request,response,url,token,origin))return;
+      if(scriptSync&&await scriptSync.handle(request,response,url,token,origin))return;
       if(testApi&&await testApi(request,response,url,origin))return;
       if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;
@@ -329,7 +342,9 @@ export async function createConnectionLab(options: Options) {
       if (nativeChat && await nativeChat(request,response,url,token,origin,agentToken)) return;
       if (native && await native(request,response,url,token,origin)) return;
       if (scopedAssets && await scopedAssets(request,response,url,origin)) return;
-      if (assets && await assets(request, response, url, token, origin, agentToken)) return;
+      // A sealed handoff (in-app Claude chat) is admitted only on its allowlisted generic asset routes;
+      // native-hook bearers stay on /v1/assets/native via scopedAssets.
+      if (assets && await assets(request, response, url, token, origin, handoffs?.agentToken(request,origin) || agentToken)) return;
       if (bridge && await bridge(request, response, url, token, origin)) return;
       const supplied = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
       if (Buffer.byteLength(supplied) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) {
@@ -364,7 +379,7 @@ export async function createConnectionLab(options: Options) {
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
     fenceTasks();
-    handoffs?.close(); nativeAssetRegistry?.close();
+    handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
@@ -380,7 +395,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose();
+      shuttingDown = true; const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))

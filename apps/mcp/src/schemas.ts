@@ -10,9 +10,9 @@ export const root = z.enum(ROOTS);
 export const ref = z.strictObject({
   instanceId: id, sessionId: id, root,
   pathSegments: z.array(z.string().max(256)).max(64), className: id,
-}).describe('Opaque reference returned by this paired Studio session. Paths are display-only; never invent references.');
+}).describe('Opaque ref returned by this session, passed back unchanged; never invent one.');
 export const timeoutMs = z.number().int().min(100).max(60_000).default(30_000)
-  .describe('Total enqueue and polling deadline. Expiry does not cancel or undo a Studio command.');
+  .describe('Wait limit (ms); expiry does not cancel or undo the command.');
 export const target = { sessionId: id, timeoutMs };
 export const source = z.string().max(100 * 1024).refine(value => !value.includes('\0') && Buffer.byteLength(value, 'utf8') <= 100 * 1024,
   'Source must be NUL-free and at most 100 KiB UTF-8.');

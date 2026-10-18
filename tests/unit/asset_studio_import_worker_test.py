@@ -58,8 +58,8 @@ class ProducerContract(unittest.TestCase):
                        and any(alias.name == "sys" and alias.asname in (None, "sys") for alias in node.names)]
         self.assertTrue(any(node.lineno < setting.lineno for node in sys_imports))
         local_imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
-                         and node.module in {"audit", "assembly"}]
-        self.assertEqual({node.module for node in local_imports}, {"audit", "assembly"})
+                         and node.module in {"audit", "assembly", "procedural"}]
+        self.assertEqual({node.module for node in local_imports}, {"audit", "assembly", "procedural"})
         for node in local_imports:
             self.assertLess(setting.end_lineno, node.lineno, "Disable bytecode before each local import")
         isolated = {"sys": SimpleNamespace(dont_write_bytecode=False)}

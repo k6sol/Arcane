@@ -8,7 +8,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { assertReviewedAssetTool, classifyJobState, classifyRefusal, decodeAssetSearch, decodeJobId, insertOutcome, insertNativeAsset, searchNativeAssets,
-  startNativeGeneration, waitNativeJob, nativeAssetGenerateSchema, nativeAssetSearchSchema, generatedMaterialName, NATIVE_ASSET_TOOLS, type NativeAssetContext } from '../../packages/studio-test-controller/src/native-assets.js';
+  startNativeGeneration, waitNativeJob, nativeAssetGenerateSchema, nativeAssetSearchSchema, nativeAssetInsertSchema, generatedMaterialName, NATIVE_ASSET_TOOLS, type NativeAssetContext } from '../../packages/studio-test-controller/src/native-assets.js';
 import type { Scheduler } from '../../packages/studio-test-controller/src/contracts.js';
 import { decodeTestMode } from '../../apps/daemon/src/studio-test-decoders.js';
 import { createStudioTestService, type NativeTestConnection } from '../../apps/daemon/src/studio-test-service.js';
@@ -123,6 +123,23 @@ test('native asset decoding: free results only, sanitised names, allowlisted thu
   assert.equal(insertOutcome('Insert timed out; it probably succeeded, verify in Explorer', false), 'unconfirmed');
   assert.equal(insertOutcome('Asset is not available', true), 'refused');
   assert.equal(insertOutcome('Inserted', false), 'acknowledged');
+});
+
+test('native audio search: category Audio is search-only, free and licensed results with duration when provided', () => {
+  const reply = JSON.stringify({ results: [
+    { id: 501, name: 'Forest Birds Loop', assetType: 3, price: 0, duration: 62.456 },
+    { id: 502, name: 'Paid Rain', price: 25, duration: 30 },
+    { id: 503, name: 'Private Wind', isPublic: false, duration: 40 },
+    { id: 504, name: 'Unlicensed Track', isLicensed: false },
+    { id: 505, name: 'River', audioDuration: '18.5' },
+    { id: 506, name: 'Odd Duration', duration: -3 },
+  ] });
+  const audio = decodeAssetSearch(reply, 10, true).results;
+  assert.deepEqual(audio.map(result => result.id), ['501', '505', '506'], 'paid, private and unlicensed audio is dropped');
+  assert.deepEqual([audio[0]!.type, audio[0]!.durationSeconds, audio[1]!.durationSeconds, audio[2]!.durationSeconds], ['Audio', 62.46, 18.5, undefined]);
+  assert.equal(Object.hasOwn(decodeAssetSearch(reply, 10).results[0]!, 'durationSeconds'), false, 'non-audio searches never carry durations');
+  assert.equal(nativeAssetSearchSchema.parse({ sessionId: 's1', query: 'forest birds', category: 'Audio' }).category, 'Audio');
+  assert.throws(() => nativeAssetInsertSchema.parse({ sessionId: 's1', assetId: '501', category: 'Audio', watch: 'w' }), 'audio ids are never inserted');
 });
 
 test('native asset calls: exact reviewed arguments inside an Edit-mode binding bracket', async t => {
@@ -427,7 +444,7 @@ test('MCP: asset tools are registered with bounded schemas; insert arms a watch,
 test('instructions: realistic requests search assets first, clone templates, generate only when needed and verify inserts', () => {
   assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_search first for organic or complex objects/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_insert one free, preferably verified asset[^.]*scripts are stripped[^.]*scene_build templates/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_generate only when nothing suitable exists; primitive parts only for exact-dimension architecture/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_generate only when nothing suitable exists; else assets_procedural[^;]*; primitive parts only for exact-dimension architecture/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /Never buy or publish assets, and check every insert with studio_viewport_capture/);
   for (const skill of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-photoreal', 'arcane-world-building']) {
     const body = readFileSync(join(process.cwd(), 'skills/arcane', skill, 'SKILL.md'), 'utf8');

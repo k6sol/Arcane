@@ -68,7 +68,7 @@ test('project boundaries flush outgoing text and switching back restores exact p
 test('selection-only catalogue changes preserve tab/menu nodes; ownership loss and blocking render immediately',t=>{
   const f=fixture(t),s=state();s.nativeThreads=[{provider:'codex',projectPath:project,threadId:'owned',sessionId:'session-a',selection:{model:'fixture-model',effort:'low'}}];
   f.tabs.sync(s);const native=f.tabs.ensureSaved('owned')!;f.tabs.activate(native.key);f.tabs.mount();f.tabs.render(false);
-  const button=f.doc.mount.children[0]!.children[0],menu=f.doc.created.find(node=>node.children[0]?.textContent==='Saved chats')!;
+  const button=f.doc.mount.children[0]!.children[0],menu=f.doc.created.find(node=>node.className==='chat-tabs-history')!;
   const rebuilds=f.doc.mount.rebuilds,menuRebuilds=menu.rebuilds;
   s.nativeThreads[0]!.selection!.effort='high';f.tabs.sync(s);f.tabs.render(false);
   assert.equal(f.doc.mount.rebuilds,rebuilds);assert.equal(menu.rebuilds,menuRebuilds);assert.equal(f.tabs.active()!.selection!.effort,'high');

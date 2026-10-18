@@ -426,8 +426,9 @@ const projectPermissions = Object.freeze({ version: 1,
       const keys = Reflect.ownKeys(value);
       if (!keys.length || keys.some(key => !['claudeTools', 'codexAutoApprove'].includes(key) || typeof value[key] !== 'boolean')) throw new Error();
       const out = await ipcRenderer.invoke('arcane:project-permissions-save', Object.fromEntries(keys.map(key => [key, value[key]])));
-      if (!out || out.saved !== true) throw new Error();
-      return { saved: true, settings: permissionSettings(out.settings) };
+      // saved:false means the host's trusted confirmation for turning a switch on was declined; nothing changed.
+      if (!out || typeof out.saved !== 'boolean') throw new Error();
+      return { saved: out.saved, settings: permissionSettings(out.settings) };
     } catch { throw new Error(PERMISSIONS_UNAVAILABLE); }
   },
 });
@@ -437,10 +438,20 @@ const BILLING_UNAVAILABLE = 'Checkout is unavailable right now. Nothing was char
 const BILLING_MESSAGES = ["Checkout isn't connected yet", 'Checkout is connected.', 'Checkout opened in your browser', 'Checkout cancelled. Nothing was charged.',
   'That offer is unavailable. Nothing was charged.', 'A checkout question is already open.', BILLING_UNAVAILABLE];
 const BILLING_STATES = ['not-connected', 'ready', 'opened', 'cancelled', 'unknown-offer', 'busy', 'unavailable'];
+// Arcane account (gateway sign-in): no arguments out; fixed states and messages back. The token never reaches here.
+const BILLING_ACCOUNT_STATES = ['unavailable', 'signed-out', 'signing-in', 'signed-in'];
+const ACCOUNT_UNAVAILABLE = 'Arcane account sign-in is unavailable right now.';
+const ACCOUNT_MESSAGES = ["Arcane Credits aren't connected yet", 'Finish signing in in your browser', 'Sign-in cancelled.', 'A sign-in is already in progress.',
+  'Your Arcane account is connected.', 'Your Arcane account is disconnected.', ACCOUNT_UNAVAILABLE];
+const ACCOUNT_STATES = ['not-connected', 'opened', 'cancelled', 'busy', 'signed-in', 'signed-out', 'unavailable'];
 const billingReply = (value, withAccount) => {
   if (!value || typeof value !== 'object' || value.version !== 1 || !BILLING_STATES.includes(value.state) || !BILLING_MESSAGES.includes(value.message) ||
-      (withAccount && value.account !== 'unavailable')) throw new Error(BILLING_UNAVAILABLE);
-  return { version: 1, state: value.state, message: value.message, ...(withAccount ? { account: 'unavailable' } : {}) };
+      (withAccount && !BILLING_ACCOUNT_STATES.includes(value.account))) throw new Error(BILLING_UNAVAILABLE);
+  return { version: 1, state: value.state, message: value.message, ...(withAccount ? { account: value.account } : {}) };
+};
+const accountReply = value => {
+  if (!value || typeof value !== 'object' || value.version !== 1 || !ACCOUNT_STATES.includes(value.state) || !ACCOUNT_MESSAGES.includes(value.message)) throw new Error(ACCOUNT_UNAVAILABLE);
+  return { version: 1, state: value.state, message: value.message };
 };
 const billing = Object.freeze({ version: 1,
   status: async (...args) => {
@@ -452,6 +463,14 @@ const billing = Object.freeze({ version: 1,
       if (args.length !== 1 || typeof args[0] !== 'string' || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(args[0])) throw new Error();
       return billingReply(await ipcRenderer.invoke('arcane:billing-checkout', args[0]), false);
     } catch { throw new Error(BILLING_UNAVAILABLE); }
+  },
+  connectAccount: async (...args) => {
+    try { if (args.length) throw new Error(); return accountReply(await ipcRenderer.invoke('arcane:billing-account-connect')); }
+    catch { throw new Error(ACCOUNT_UNAVAILABLE); }
+  },
+  disconnectAccount: async (...args) => {
+    try { if (args.length) throw new Error(); return accountReply(await ipcRenderer.invoke('arcane:billing-account-disconnect')); }
+    catch { throw new Error(ACCOUNT_UNAVAILABLE); }
   },
 });
 // Build-done notifications: a fixed kind, a short plain body and an opaque target id out; clicks return only the target.

@@ -1,4 +1,5 @@
-"""Deterministic static starter assets. Fixed templates only; no arbitrary Python input.
+"""Deterministic static starter assets. Fixed templates and bundled parameterised
+procedural generators (procedural.py) only; no arbitrary Python input.
 
 Generation runs only in a new job directory. Audit mode opens our saved scene with
 autoexec disabled and writes nothing. This process is supervised, not sandboxed.
@@ -379,6 +380,9 @@ def main():
     sockets = []
     if request["template"] == "custom-assembly":
         main_objects, lods, collision, sockets = build_assembly(request, material, collection, select)
+    elif request["template"] == "procedural":
+        from procedural import build as build_procedural
+        main_objects, lods, collision, sockets = build_procedural(request, material, collection, select, box)
     else:
         mats = [material("MAT_Body", request["color"], 0.15, 0.42),
                 material("MAT_Frame", (0.12, 0.15, 0.18), 0.8, 0.3),
@@ -397,6 +401,9 @@ def main():
     for obj in lods + collision:
         obj.hide_render = True
     camera, target, span = lookdev(main_objects, request)
+    if request["template"] == "procedural":
+        # Large organic assets: keep albedo readable under the span-scaled preview lights.
+        scene.view_settings.exposure = -1.4
     renders = []
     for name, offset in [("preview-hero.png", (2.6, -3.5, 2.3)), ("preview-side.png", (-4.0, 0, 0.5))]:
         camera.location = target + Vector(offset) * span

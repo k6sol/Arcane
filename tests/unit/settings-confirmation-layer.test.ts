@@ -55,6 +55,9 @@ async function fixture(t: TestContext) {
   const bootstrap = `
     import { CodexChat, CodexChatApi } from '/codex-chat.js';
     import { startWorkspaceShell } from '/workspace-shell.js';
+    // The production page starts behind the sign-in gate; provider setup (not loaded here) lifts it after sign-in.
+    document.getElementById('workspace-stage')?.classList.remove('provider-required');
+    document.getElementById('provider-login-gate')?.setAttribute('hidden', '');
     const shell = startWorkspaceShell(document);
     const chat = new CodexChat(document, new CodexChatApi(${JSON.stringify(TOKEN)}));
     await chat.start();

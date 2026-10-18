@@ -2,7 +2,7 @@
 import type { CodexAction, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
 import type { RequestedModel } from '../../../packages/core/src/workflow-recipes.js';
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
-import type { Approval, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
+import type { Approval, McpToolCallArgs, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsController } from './chat-tabs.js';
 import type { ChatAttachmentsController } from './chat-attachments.js';
 
@@ -65,6 +65,18 @@ function readUsage(value:unknown,report=false):void {
   if(counters.some(key=>last[key]!>total[key]!)||last.cacheWriteInputTokens!==undefined&&total.cacheWriteInputTokens!==undefined&&last.cacheWriteInputTokens>total.cacheWriteInputTokens||!(value.modelContextWindow===null||count(value.modelContextWindow,1_000_000_000))||report&&(!text(value.threadId)||!text(value.turnId)||!integer(value.seq)||value.seq===0))throw new Error('Invalid native usage scope or totals.');
 }
 const duration=(v:unknown)=>integer(v)&&(v as number)<=31_536_000_000;
+const TOOL_ARG_TEXT:Record<string,number>={root:64,query:100,name:100,className:64,kind:100};
+/** Exact allowlisted live tool identity (server, tool, display-only args); anything else rejects the snapshot. */
+function readToolCall(value:unknown):void {
+  if(!dataObject(value,['server','tool','args'])||!text(value.server,64)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.server)||!text(value.tool,128)||!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.tool))throw new Error('Invalid live tool identity.');
+  const args=value.args;if(args===null)return;
+  if(value.server!=='arcane'||!dataObject(args)||!Object.keys(args).length||utf8(JSON.stringify(args))>2048)throw new Error('Invalid live tool arguments.');
+  const ref=(r:unknown)=>dataObject(r,['root','pathSegments'])&&text(r.root,64)&&Array.isArray(r.pathSegments)&&r.pathSegments.length<=16&&r.pathSegments.every(part=>text(part,100));
+  for(const [key,item] of Object.entries(args)){
+    const ok=key==='ref'||key==='parent'?ref(item):key==='enabled'?typeof item==='boolean':key==='properties'?dataObject(item)&&Object.keys(item).length>0&&Object.keys(item).length<=6&&Object.entries(item).every(([name,flag])=>/^[A-Za-z]{1,32}$/.test(name)&&flag===true):Object.hasOwn(TOOL_ARG_TEXT,key)&&text(item,TOOL_ARG_TEXT[key]);
+    if(!ok)throw new Error('Invalid live tool arguments.');
+  }
+}
 
 export function eventSequence(event: ChatEvent): number {
   const value = event.seq;
@@ -114,6 +126,7 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
       if(!dataObject(event,['type','seq','threadId','turnId','usage'])||!text(event.threadId)||!text(event.turnId))throw new Error('Invalid native usage event scope.');
       readUsage(event.usage);
     }
+    if(Object.hasOwn(event,'tool')&&(event.type!=='item'||event.itemType!=='mcpToolCall'||(readToolCall(event.tool),false)))throw new Error('Invalid live tool event.');
     if(Object.hasOwn(event,'durationMs')&&(event.type!=='turn'||!duration(event.durationMs)))throw new Error('Invalid native turn duration.');
     if(event.type==='turn'&&(!dataObject(event,['type','seq','threadId','turnId','status',...(Object.hasOwn(event,'durationMs')?['durationMs']:[])])||!text(event.threadId)||!text(event.turnId)||!text(event.status,64)))throw new Error('Invalid exact native turn event.');
   }
@@ -356,6 +369,28 @@ export class CodexChatApi {
     }catch(error){throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Task plan unavailable.'),false);}
     finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
+  /** Human-only display read of one succeeded script edit's recorded before/after source. It never changes Studio. */
+  async scriptChange(commandId:string,signal?:AbortSignal):Promise<ScriptChangeSources>{
+    if(!/^[A-Za-z0-9_-]{1,128}$/.test(commandId)||!/^[a-f0-9]{64}$/.test(this.#token))throw new CodexHttpError('Choose one recorded script edit.',false);
+    const controller=new AbortController(),abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
+    const timer=setTimeout(abort,this.deadline);
+    try{
+      const transport=this.transport;
+      const response=await transport('/v1/studio/script-diff/'+encodeURIComponent(commandId),{method:'GET',headers:{Authorization:'Bearer '+this.#token},
+        signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'});
+      if(response.status!==200||!/^application\/json(?:;|$)/i.test(response.headers.get('content-type')??''))throw new Error('This script change is not available.');
+      const reader=response.body?.getReader();if(!reader)throw new Error('Script change response has no body.');
+      const chunks:Uint8Array[]=[];let length=0;
+      try{for(;;){const part=await reader.read();if(part.done)break;
+        length+=part.value.byteLength;if(length>SCRIPT_CHANGE_BYTES){await reader.cancel();throw new Error('Script change response exceeded its bound.');}chunks.push(part.value);
+      }}finally{reader.releaseLock();}
+      const bytes=new Uint8Array(length);let at=0;for(const chunk of chunks){bytes.set(chunk,at);at+=chunk.byteLength;}
+      const change=readScriptChange(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as unknown,commandId);
+      if(!change)throw new Error('Script change response was not recognized.');
+      return change;
+    }catch(error){throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Script change unavailable.'),false);}
+    finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
+  }
   /** One human-activated request. Its request ID is never regenerated or resent here. */
   async proposalStart(input:TaskProposalStart,signal?:AbortSignal):Promise<TaskProposalReceipt> {
     const value=await this.request('/v1/codex/action',input as unknown as ChatAction,signal);
@@ -412,10 +447,30 @@ export class CodexChatApi {
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
 }
-export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState }
+export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall }
+/** Live Arcane tool identity from the native item event: tool name plus allowlisted display arguments. Presentation only. */
+export interface LiveToolCall { name:string; input:McpToolCallArgs|null }
+type TurnCounts={inputTokens:number;cachedInputTokens:number;outputTokens:number};
+/** One turn's token counts from native usage reports: the thread total before its first request, and the latest total. */
+export interface TurnUsageRow { baseline:TurnCounts; latest:TurnCounts }
+/** Input for a finished reply's usage line (the same '12k tokens (~$0.31)' line the Claude chat shows). */
+export interface ReplyUsageInput extends TurnCounts { model:string|null; tokens:number }
+export type ReplyUsageFormat=(usage:ReplyUsageInput)=>{text:string;title:string}|null;
+/** The turn's own tokens (latest total minus its baseline); null when the reports went backwards or are empty. */
+export function turnReplyUsage(row:TurnUsageRow|undefined,model:string|null):ReplyUsageInput|null {
+  if(!row)return null;
+  const input=row.latest.inputTokens-row.baseline.inputTokens,cached=row.latest.cachedInputTokens-row.baseline.cachedInputTokens,output=row.latest.outputTokens-row.baseline.outputTokens;
+  if(input<0||cached<0||output<0||input+output===0)return null;
+  return {model,tokens:input+output,inputTokens:input,cachedInputTokens:Math.min(cached,input),outputTokens:output};
+}
+const TURN_USAGE_ROWS=256,TERMINAL_TURNS=new Set(['completed','failed','interrupted']);
+const turnCounts=(v:TurnCounts):TurnCounts=>({inputTokens:v.inputTokens,cachedInputTokens:v.cachedInputTokens,outputTokens:v.outputTokens});
+const bounded=<T>(set:Map<string,T>|Set<string>)=>{while(set.size>TURN_USAGE_ROWS)set.delete(set.keys().next().value!);};
 export class CodexTranscript {
   connectionId=''; cursor=0; gaps=0; dropped=0; truncated=false; messages:ChatMessage[]=[];
-  reset(id='') {this.connectionId=id;this.cursor=0;this.gaps=0;this.dropped=0;this.truncated=false;this.messages=[];}
+  /** Per-turn token usage and finished turns, keyed thread\0turn. Presentation only. */
+  turnUsage=new Map<string,TurnUsageRow>(); finishedTurns=new Set<string>();
+  reset(id='') {this.connectionId=id;this.cursor=0;this.gaps=0;this.dropped=0;this.truncated=false;this.messages=[];this.turnUsage.clear();this.finishedTurns.clear();}
   rebind(id:string) {this.connectionId=id;this.cursor=0;this.gaps=0;this.dropped=0;}
   consume(snapshot:ChatSnapshot) {
     if(snapshot.connectionId!==this.connectionId)this.reset(snapshot.connectionId);
@@ -425,13 +480,22 @@ export class CodexTranscript {
       const seq=eventSequence(event);if(seq<=this.cursor)continue;
       this.gaps+=Math.max(0,seq-this.cursor-1);this.cursor=seq;
       if(event.type==='item'&&event.itemType==='mcpToolCall'){
-        // Live tool calls report only their state; the saved history later replaces this line with the real result.
+        // Live tool calls report their state and, for Arcane, the tool name and display arguments, so the line reads the
+        // same as the Claude chat while it runs; the saved history later adds the real result.
         const key=event.threadId+'\0'+event.turnId+'\0'+event.itemId,toolState:ToolActivityState=event.status==='failed'?'failed':event.status==='completed'?'finished':'started';
+        const toolCall:LiveToolCall|undefined=event.tool?.server==='arcane'?{name:event.tool.tool,input:event.tool.args}:undefined;
         const existing=this.messages.find(m=>m.role==='tool'&&m.key===key);
-        if(existing)existing.toolState=toolState;
-        else this.messages.push({key,role:'tool',threadId:event.threadId,scope:event.threadId+' · '+event.turnId+' · '+event.itemId,text:'',toolState});
+        if(existing){existing.toolState=toolState;if(toolCall)existing.toolCall=toolCall;}
+        else this.messages.push({key,role:'tool',threadId:event.threadId,scope:event.threadId+' · '+event.turnId+' · '+event.itemId,text:'',toolState,...(toolCall?{toolCall}:{})});
         continue;
       }
+      if(event.type==='usage'){
+        const key=event.threadId+'\0'+event.turnId,{total,last}=event.usage,row=this.turnUsage.get(key);
+        if(row)row.latest=turnCounts(total);
+        else{this.turnUsage.set(key,{baseline:{inputTokens:total.inputTokens-last.inputTokens,cachedInputTokens:total.cachedInputTokens-last.cachedInputTokens,outputTokens:total.outputTokens-last.outputTokens},latest:turnCounts(total)});bounded(this.turnUsage);}
+        continue;
+      }
+      if(event.type==='turn'){if(TERMINAL_TURNS.has(event.status)){this.finishedTurns.add(event.threadId+'\0'+event.turnId);bounded(this.finishedTurns);}continue;}
       if(event.type!=='delta')continue;
       const key=event.threadId+'\0'+event.turnId+'\0'+event.itemId;
       let message=this.messages.find(m=>m.role==='codex'&&m.key===key);
@@ -466,6 +530,8 @@ export function approvalEligible(state:ChatState|null,a:Approval):boolean {
 // requests keep the normal review card. Revoke, interrupt and disconnect stay one click away; every accept is the same
 // recorded native approval action as a manual one.
 const SENSITIVE_PATH=/(^|\/)(\.git|\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.docker)(\/|$)|(^|\/)\.env($|\.)|(^|\/)(\.npmrc|\.pypirc|\.netrc|\.git-credentials|id_rsa|id_ed25519|id_ecdsa)$|\.(pem|key|pfx|p12|keystore)$|secret|credential|password|token/i;
+/** Files that steer later agent runs or tooling (persistent prompt injection, hooks, tasks): always a human review. */
+const AGENT_CONFIG_PATH=/(^|\/)(ARCANE\.md|AGENTS\.md|CLAUDE\.md|\.mcp\.json)$|(^|\/)\.(claude|codex|vscode|arcane|github|husky)(\/|$)/i;
 const COMMAND_FENCES:readonly (readonly [RegExp,string])[]=[
   [/\b(rm|rmdir|del|erase|rd|remove-item|shred|mkfs|diskpart|truncate|clear-content|clear-recyclebin)\b|(^|[;&|]\s*)format\b|\bdd\s+if=/i,'deletes or overwrites data'],
   [/\bgit\s+(reset|clean|checkout|restore|rebase|stash|filter-branch|filter-repo|gc|prune|update-ref|reflog)\b|\bgit\s+branch\s+-[dD]\b|\bgit\s+tag\s+-d\b/i,'rewrites version history'],
@@ -475,7 +541,17 @@ const COMMAND_FENCES:readonly (readonly [RegExp,string])[]=[
   [/\$env:|%[A-Za-z_][A-Za-z0-9_]*%|\$HOME\b|\$\{|(^|[\s"'=])~(?=[\\/\s]|$)|\benv:|\b(printenv|get-credential|cmdkey|vaultcmd|convertfrom-securestring|keychain)\b|\.ssh\b|\.aws\b|\.git-credentials|\.npmrc|\.netrc|(^|[\s\\/"'])\.env\b|\b(secret|credential|password|passwd|token)s?\b/i,'reads environment variables or credentials'],
   [/\b(shutdown|reboot|restart-computer|stop-computer|reg|regedit|bcdedit|netsh|icacls|takeown|attrib|chmod|chown|sudo|runas|setx|schtasks|crontab|set-executionpolicy|taskkill|stop-process|kill|pkill|killall)\b|\bnet\s+(user|localgroup|share|use)\b|\bsc(\.exe)?\s+(delete|stop|config|create)\b/i,'changes the system or other processes'],
   [/\b(iex|invoke-expression|eval|frombase64string)\b|-enc(odedcommand)?\b|base64\s+(-d|--decode)|\|\s*(sh|bash|zsh|pwsh|powershell|cmd)\b|`|\$\(/i,'runs hidden or generated code'],
+  // Obfuscation and indirection the fences above cannot see through (cmd carets and %VAR:~x,y% slices, PowerShell's
+  // abbreviated -e/-ec/-en… encoded command, dynamic `& (...)` / `.('…')` calls, .NET static calls, inline interpreter code).
+  [/[A-Za-z]\^[A-Za-z]|%[^%\s]+%|![A-Za-z_][A-Za-z0-9_]*!|\b(powershell|pwsh)(\.exe)?\b[^|;&]*\s[-/]e(c|n[a-z]*)?\b|(^|[\s;|&({])[&.]\s*[('"$]|\[[A-Za-z_][\w.]*\]\s*::|\b(new-object|add-type|start-process|saps|invoke-item|mshta|rundll32|regsvr32|certutil|bitsadmin|msiexec|wscript|cscript)\b|\b(node|deno|bun|python3?|py|ruby|perl|php)(\.exe)?\s+(?:-{1,2}[\w-]+\s+)*(-e|--eval|-p|--print|-c|-r|eval)\b/i,'runs hidden or generated code'],
+  [/\b(ri|rp|clear-item|cli|robocopy)\b|\s-delete\b/i,'deletes or overwrites data'],
+  [/\b(ping|nslookup|resolve-dnsname|test-netconnection|tnc|test-connection)\b/i,'uses the network'],
+  // Links and junctions let later in-workspace edits land outside it; version-control internals (hooks) run code later.
+  [/\b(mklink|fsutil|ln)\b|\b(symboliclink|junction|hardlink)\b/i,'creates links that could reach outside the workspace'],
+  [/(^|[\s"'=\\/.])\.(git|claude|codex|vscode|arcane|github|husky)(?=[\\/]|$|[\s"';|&])|\b(ARCANE|AGENTS|CLAUDE)\.md\b|\.mcp\.json\b|\bgit\s+(config|-c)\b/i,'touches version-control internals, project memory or agent settings'],
 ];
+/** PowerShell treats en/em dashes and curly quotes like their ASCII forms; fold them so the fences see the same text. */
+const foldPunctuation=(text:string)=>text.replace(/[‐-―−]/g,'-').replace(/[‘-‛]/g,"'").replace(/[“-‟]/g,'"');
 /** One leading shell wrapper (`powershell -Command "…"`, `bash -lc '…'`, `cmd /c …`) is unwrapped so the real command is checked. */
 function innerCommand(command:string):string {
   const m=/^\s*(?:"[^"]*[\\/])?(?:[A-Za-z]:[\\/][^"\s]*[\\/])?(?:powershell|pwsh|cmd|bash|sh|zsh)(?:\.exe)?"?\s+(?:-NoLogo\s+|-NoProfile\s+|-NonInteractive\s+)*(?:-Command|-c|-lc|\/c|\/s\s+\/c)\s+([\s\S]+)$/i.exec(command);
@@ -503,11 +579,12 @@ export function autoApprovalVerdict(state:ChatState|null,a:Approval):AutoApprova
     const changes=a.changes??[];
     if(changes.some(c=>c.kind==='delete'))return {accept:false,reason:'it deletes files'};
     if(changes.some(c=>SENSITIVE_PATH.test(c.path.replaceAll('\\','/'))||c.movePath!==null&&SENSITIVE_PATH.test(c.movePath.replaceAll('\\','/'))))return {accept:false,reason:'it touches version-control or credential files'};
+    if(changes.some(c=>AGENT_CONFIG_PATH.test(c.path.replaceAll('\\','/'))||c.movePath!==null&&AGENT_CONFIG_PATH.test(c.movePath.replaceAll('\\','/'))))return {accept:false,reason:'it changes project memory, agent or tool settings'};
     return {accept:true,reason:changes.length===1?'edit '+changes[0]!.path:'edit '+changes.length+' files'};
   }
   const command=a.command??'';
   if(!command.trim()||command.length>2000||/[\r\n]/.test(command))return {accept:false,reason:'the command is too long to check'};
-  const inner=innerCommand(command);
+  const inner=innerCommand(foldPunctuation(command));
   for(const [pattern,reason] of COMMAND_FENCES)if(pattern.test(inner))return {accept:false,reason:'it '+reason};
   if(commandEscapesRoot(inner,root))return {accept:false,reason:'it reaches outside the workspace'};
   return {accept:true,reason:'run '+(inner.length>80?inner.slice(0,79)+'…':inner)};
@@ -548,30 +625,290 @@ export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger
   const height = popover.getBoundingClientRect().height;
   popover.style.top = Math.max(topEdge, Math.min(useAbove ? rect.top - gap - height : rect.bottom + gap, bottomEdge - height)) + 'px';
 }
+// ---- Rich assistant text: a small, bounded markdown subset rendered as DOM nodes with textContent only. Headings (#–####),
+// **bold**, *italic*, ~~struck~~, `code`, bullet and numbered lists (two levels), > quotes, rules and GFM pipe tables.
+// Links never navigate: the link text is shown with its address beside it. Every scan is linear (indexOf with failure
+// memos, no backtracking patterns) and oversized text falls back to plain paragraphs. While a reply streams, an unfinished
+// span or table (no closing ** yet, no separator row yet) simply stays literal text until the closing part arrives.
+export const MARKDOWN_LIMITS=Object.freeze({chars:200_000,inline:20_000,depth:4,columns:12,rows:100,url:2048});
+type MdInline={t:'text';v:string}|{t:'code';v:string}|{t:'strong';c:MdInline[]}|{t:'em';c:MdInline[]}|{t:'del';c:MdInline[]}|{t:'link';c:MdInline[];url:string};
+type MdList={t:'list';ordered:boolean;start:number;items:{text:string;sub:MdList|null}[]};
+type MdBlock={t:'p';text:string}|{t:'h';level:number;text:string}|{t:'hr'}|{t:'quote';blocks:MdBlock[]}|MdList
+  |{t:'table';align:string[];head:string[];rows:string[][]};
+const MD_PUNCT='!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~';
+const mdSpace=(c:string|undefined)=>c===undefined||c===' '||c==='\t'||c==='\n';
+const mdWord=(c:string|undefined)=>c!==undefined&&/[\p{L}\p{N}]/u.test(c);
+const mdRun=(s:string,i:number,c:string)=>{let j=i;while(s[j]===c)j++;return j-i;};
+/** Inline spans. Each opener searches forward once; a failed search is remembered so later openers of that kind stay literal. */
+export function parseInline(s:string,depth=0,links=true):MdInline[] {
+  if(s.length>MARKDOWN_LIMITS.inline||depth>=MARKDOWN_LIMITS.depth)return s?[{t:'text',v:s}]:[];
+  const out:MdInline[]=[],failed=new Set<string>();let buf='',i=0,close=-2,paren=-2;
+  const flush=()=>{if(buf){out.push({t:'text',v:buf});buf='';}};
+  while(i<s.length){
+    const c=s[i]!;
+    if(c==='\\'&&i+1<s.length&&MD_PUNCT.includes(s[i+1]!)){buf+=s[i+1];i+=2;continue;}
+    if(c==='`'){
+      const k=mdRun(s,i,'`');let end=-1;
+      if(!failed.has('`'+k))for(let j=i+k;;){const p=s.indexOf('`',j);if(p<0)break;const m=mdRun(s,p,'`');if(m===k){end=p;break;}j=p+m;}
+      if(end<0){failed.add('`'+k);buf+=s.slice(i,i+k);i+=k;continue;}
+      let code=s.slice(i+k,end);if(code.length>1&&code[0]===' '&&code.at(-1)===' '&&code.trim())code=code.slice(1,-1);
+      flush();out.push({t:'code',v:code});i=end+k;continue;
+    }
+    if(c==='*'||c==='_'||c==='~'){
+      const r=mdRun(s,i,c),size=c==='~'||r>=2?2:1,delim=c.repeat(size),literal=c==='~'?r:size;
+      const opens=!(c==='~'&&r<2)&&!failed.has(delim)&&!mdSpace(s[i+size])&&!(c==='_'&&mdWord(s[i-1]));
+      let end=-1;
+      if(opens)for(let j=i+size;;){
+        const p=s.indexOf(delim,j);if(p<0)break;
+        const m=mdRun(s,p,c);
+        // A single * or _ never closes on part of a longer run (the ** of a nested bold span).
+        if(size===1&&m>1){j=p+m;continue;}
+        if(p>i+size&&!mdSpace(s[p-1])&&!(c==='_'&&mdWord(s[p+size]))){end=p;break;}
+        j=p+1;
+      }
+      if(end<0){if(opens)failed.add(delim);buf+=s.slice(i,i+literal);i+=literal;continue;}
+      flush();out.push({t:c==='~'?'del':size===2?'strong':'em',c:parseInline(s.slice(i+size,end),depth+1,links)});i=end+size;continue;
+    }
+    if(c==='['&&links&&!failed.has(']')){
+      if(close<=i)close=s.indexOf(']',i+1);
+      if(close<0){failed.add(']');buf+=c;i++;continue;}
+      const label=s.slice(i+1,close);
+      if(s[close+1]==='('&&!label.includes('[')&&label.trim()&&!failed.has(')')){
+        if(paren<=close+1)paren=s.indexOf(')',close+2);
+        if(paren<0)failed.add(')');
+        else{
+          const url=s.slice(close+2,paren).trim().split(/[ \t]/)[0]!;
+          if(url&&url.length<=MARKDOWN_LIMITS.url&&!url.includes('\n')){flush();out.push({t:'link',c:parseInline(label,depth+1,false),url});i=paren+1;continue;}
+        }
+      }
+    }
+    buf+=c;i++;
+  }
+  flush();return out;
+}
+const mdRule=(line:string)=>{const t=line.replace(/[ \t]/g,'');return t.length>=3&&(t[0]==='-'||t[0]==='*'||t[0]==='_')&&mdRun(t,0,t[0])===t.length&&/^ {0,3}\S/.test(line);};
+const mdItem=(line:string)=>{
+  const m=/^([ \t]{0,16})([-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$/.exec(line);if(!m)return null;
+  const ordered=/\d/.test(m[2]!);
+  return {indent:m[1]!.replace(/\t/g,'    ').length,ordered,start:ordered?Number.parseInt(m[2]!,10):1,text:(m[3]??'').trim()};
+};
+const mdHeading=(line:string)=>{
+  const m=/^ {0,3}(#{1,4})[ \t]+(.*)$/.exec(line);if(!m)return null;
+  let text=m[2]!.trim(),k=text.length;while(k>0&&text[k-1]==='#')k--;
+  if(k<text.length&&(k===0||mdSpace(text[k-1])))text=text.slice(0,k).trim();
+  return text?{level:m[1]!.length,text}:null;
+};
+const mdQuote=(line:string)=>/^ {0,3}>/.test(line);
+/** Table cells: outer pipes dropped, split on unescaped pipes (an escaped pipe stays for the inline pass to unescape). */
+function mdCells(line:string):string[] {
+  let t=line.trim();if(t.startsWith('|'))t=t.slice(1);if(t.endsWith('|')&&!t.endsWith('\\|'))t=t.slice(0,-1);
+  const cells:string[]=[];let start=0;
+  for(let i=0;i<t.length;i++){if(t[i]==='\\'){i++;continue;}if(t[i]==='|'){cells.push(t.slice(start,i).trim());start=i+1;}}
+  cells.push(t.slice(start).trim());return cells;
+}
+function mdTableStart(lines:string[],i:number):string[]|null {
+  const head=lines[i]!,sep=lines[i+1];if(!head.includes('|')||sep===undefined||!sep.includes('-')||sep.length>4096)return null;
+  const align=mdCells(sep);if(align.length>MARKDOWN_LIMITS.columns||!align.every(cell=>/^:?-+:?$/.test(cell)))return null;
+  return mdCells(head).length===align.length?align.map(cell=>cell.endsWith(':')?cell.startsWith(':')?'center':'right':cell.startsWith(':')?'left':''):null;
+}
+const mdStarts=(lines:string[],i:number,depth:number)=>{const line=lines[i]!;return mdHeading(line)!==null||mdRule(line)||(depth<2&&mdQuote(line))||mdItem(line)!==null||mdTableStart(lines,i)!==null;};
+/** Block structure, line by line. Paragraph lines keep their line breaks; a list may be loose (blank lines between items). */
+function parseBlocks(lines:string[],depth=0):MdBlock[] {
+  const blocks:MdBlock[]=[];let para:string[]=[],i=0;
+  const flush=()=>{if(para.length)blocks.push({t:'p',text:para.join('\n')});para=[];};
+  while(i<lines.length){
+    const line=lines[i]!;
+    if(!line.trim()){flush();i++;continue;}
+    const heading=mdHeading(line);
+    if(heading){flush();blocks.push({t:'h',...heading});i++;continue;}
+    if(mdRule(line)){flush();blocks.push({t:'hr'});i++;continue;}
+    if(depth<2&&mdQuote(line)){
+      flush();const inner:string[]=[];
+      while(i<lines.length&&mdQuote(lines[i]!)){inner.push(lines[i]!.replace(/^ {0,3}> ?/,''));i++;}
+      blocks.push({t:'quote',blocks:parseBlocks(inner,depth+1)});continue;
+    }
+    const align=mdTableStart(lines,i);
+    if(align){
+      flush();const head=mdCells(line),rows:string[][]=[];i+=2;
+      while(i<lines.length&&rows.length<MARKDOWN_LIMITS.rows&&lines[i]!.includes('|')&&lines[i]!.trim()){
+        const cells=mdCells(lines[i]!);rows.push(head.map((_,index)=>cells[index]??''));i++;
+      }
+      blocks.push({t:'table',align,head,rows});continue;
+    }
+    const first=mdItem(line);
+    if(first){
+      flush();let list:MdList={t:'list',ordered:first.ordered,start:first.start,items:[]},last:{text:string}|null=null;
+      while(i<lines.length){
+        const row=lines[i]!;
+        if(!row.trim()){
+          let next=i+1;while(next<lines.length&&!lines[next]!.trim())next++;
+          if(next<lines.length&&!mdRule(lines[next]!)&&mdItem(lines[next]!)){i=next;continue;}
+          break;
+        }
+        const item=mdRule(row)?null:mdItem(row);
+        if(item&&item.indent>=first.indent+2&&list.items.length){
+          // Second level; anything deeper joins the second level too.
+          const parent=list.items.at(-1)!;parent.sub??={t:'list',ordered:item.ordered,start:item.start,items:[]};
+          parent.sub.items.push({text:item.text,sub:null});last=parent.sub.items.at(-1)!;i++;continue;
+        }
+        if(item){
+          if(item.ordered!==list.ordered){blocks.push(list);list={t:'list',ordered:item.ordered,start:item.start,items:[]};}
+          list.items.push({text:item.text,sub:null});last=list.items.at(-1)!;i++;continue;
+        }
+        if(!last||mdStarts(lines,i,depth))break;
+        last.text+=(last.text?'\n':'')+row.trim();i++;
+      }
+      blocks.push(list);continue;
+    }
+    para.push(line.trim());i++;
+  }
+  flush();return blocks;
+}
+function mdText(doc:Document,parent:HTMLElement,value:string):void {
+  if(typeof doc.createTextNode==='function')parent.append(doc.createTextNode(value));
+  else{const span=doc.createElement('span');span.textContent=value;parent.append(span);}
+}
+const mdLabel=(spans:MdInline[]):string=>spans.map(span=>span.t==='text'||span.t==='code'?span.v:mdLabel(span.c)).join('');
+function renderInline(doc:Document,parent:HTMLElement,spans:MdInline[]):void {
+  if(spans.length===1&&spans[0]!.t==='text'){parent.textContent=spans[0]!.v;return;}
+  for(const span of spans){
+    if(span.t==='text'){mdText(doc,parent,span.v);continue;}
+    if(span.t==='code'){const code=doc.createElement('code');code.textContent=span.v;parent.append(code);continue;}
+    if(span.t==='link'){
+      // Never a navigable anchor: the text, with the address in its tooltip and beside it.
+      const link=doc.createElement('span');link.className='md-link';link.setAttribute('title',span.url);renderInline(doc,link,span.c);parent.append(link);
+      if(mdLabel(span.c).trim()!==span.url){const url=doc.createElement('span');url.className='md-link-url';url.textContent=' ('+span.url+')';parent.append(url);}
+      continue;
+    }
+    const element=doc.createElement(span.t==='strong'?'strong':span.t==='em'?'em':'del');renderInline(doc,element,span.c);parent.append(element);
+  }
+}
+function renderBlocks(doc:Document,parent:HTMLElement,blocks:MdBlock[],inline:(text:string)=>MdInline[]):void {
+  for(const block of blocks){
+    if(block.t==='p'){const p=doc.createElement('p');renderInline(doc,p,inline(block.text));parent.append(p);continue;}
+    if(block.t==='h'){const h=doc.createElement('h'+(block.level+2));h.className='md-heading';renderInline(doc,h,inline(block.text));parent.append(h);continue;}
+    if(block.t==='hr'){parent.append(doc.createElement('hr'));continue;}
+    if(block.t==='quote'){const quote=doc.createElement('blockquote');renderBlocks(doc,quote,block.blocks,inline);parent.append(quote);continue;}
+    if(block.t==='list'){
+      const list=doc.createElement(block.ordered?'ol':'ul');if(block.ordered&&block.start!==1)list.setAttribute('start',String(block.start));
+      for(const item of block.items){
+        const li=doc.createElement('li');
+        if(item.sub){const text=doc.createElement('span');renderInline(doc,text,inline(item.text));li.append(text);renderBlocks(doc,li,[item.sub],inline);}
+        else renderInline(doc,li,inline(item.text));
+        list.append(li);
+      }
+      parent.append(list);continue;
+    }
+    const wrap=doc.createElement('div');wrap.className='md-table';wrap.setAttribute('role','region');wrap.setAttribute('aria-label','Table');wrap.tabIndex=0;
+    const table=doc.createElement('table'),thead=doc.createElement('thead'),head=doc.createElement('tr');
+    const cell=(tag:'th'|'td',value:string,index:number)=>{
+      const element=doc.createElement(tag);if(tag==='th')element.setAttribute('scope','col');
+      if(block.align[index])element.dataset.align=block.align[index];renderInline(doc,element,inline(value));return element;
+    };
+    block.head.forEach((value,index)=>head.append(cell('th',value,index)));thead.append(head);table.append(thead);
+    if(block.rows.length){const tbody=doc.createElement('tbody');for(const row of block.rows){const tr=doc.createElement('tr');row.forEach((value,index)=>tr.append(cell('td',value,index)));tbody.append(tr);}table.append(tbody);}
+    wrap.append(table);parent.append(wrap);
+  }
+}
+/** Markdown text (no ``` fences) as blocks; null when it is plain prose that reads the same without formatting, or too large. */
+function markdownBlocks(value:string):{blocks:MdBlock[];inline:(text:string)=>MdInline[]}|null {
+  if(value.length>MARKDOWN_LIMITS.chars)return null;
+  const cache=new Map<string,MdInline[]>(),inline=(text:string)=>{let spans=cache.get(text);if(!spans){spans=parseInline(text);cache.set(text,spans);}return spans;};
+  const blocks=parseBlocks(value.replace(/\r\n?/g,'\n').split('\n'));
+  const plain=blocks.every(block=>{if(block.t!=='p')return false;const spans=inline(block.text);return !spans.length||spans.length===1&&spans[0]!.t==='text'&&spans[0]!.v===block.text;});
+  return plain?null:{blocks,inline};
+}
 /**
- * Shared assistant text rendering for both providers. Plain text stays one pre.message-text. Text with ``` fences becomes
- * div.message-text.claude-message-body holding <p> paragraphs and <pre><code> blocks. DOM nodes and textContent only.
+ * Shared assistant text rendering for both providers. Plain prose stays one pre.message-text. Markdown or ``` fences become
+ * div.message-text.claude-message-body holding paragraphs, headings, lists, quotes, tables and <pre><code> blocks.
+ * DOM nodes and textContent only.
  */
 export function renderMessageText(doc:Document,value:string,options:ChoiceBlockOptions={}):HTMLElement {
-  if(!value.includes('```')){const pre=doc.createElement('pre');pre.className='message-text';pre.textContent=value;return pre;}
-  const box=doc.createElement('div');box.className='message-text claude-message-body';box.dataset.format='rich';
+  const rich=()=>{const box=doc.createElement('div');box.className='message-text claude-message-body';box.dataset.format='rich';return box;};
+  if(!value.includes('```')){
+    const markdown=markdownBlocks(value);
+    if(!markdown){const pre=doc.createElement('pre');pre.className='message-text';pre.textContent=value;return pre;}
+    const box=rich();renderBlocks(doc,box,markdown.blocks,markdown.inline);return box;
+  }
+  const box=rich();
   value.split('```').forEach((part,index,parts)=>{
     if(index%2===1){
       // A complete arcane-choices / arcane-plan fence becomes buttons; anything that does not validate stays a code block.
       const marker=/^(arcane-(?:choices|plan))[ \t]*(?:\r?\n|(?=\{))/.exec(part);
       const block=marker&&index<parts.length-1?parseChoiceBlock(marker[1]!,part.slice(marker[0].length)):null;
       if(block){box.append(renderChoiceBlock(doc,block,options));return;}
+      // A complete arcane-memory fence is a suggested project-memory note: shown as text with an explicit save button.
+      const memory=/^arcane-memory[ \t]*\r?\n/.exec(part);
+      const note=memory&&index<parts.length-1?parseMemoryBlock(part.slice(memory[0].length)):null;
+      if(note!==null){box.append(renderMemoryBlock(doc,note));return;}
       let code=part,language='';const newline=code.indexOf('\n');
       if(newline>=0&&/^[A-Za-z0-9_+#.-]{0,32}$/.test(code.slice(0,newline).trim())){language=code.slice(0,newline).trim();code=code.slice(newline+1);}
       const pre=doc.createElement('pre'),element=doc.createElement('code');element.textContent=code.replace(/\n$/,'');
       if(language)element.setAttribute('data-language',language);pre.append(element);box.append(pre);return;
     }
+    const markdown=markdownBlocks(part);
+    if(markdown){renderBlocks(doc,box,markdown.blocks,markdown.inline);return;}
     for(const paragraph of part.split(/\n[ \t]*\n/)){
       const trimmed=paragraph.replace(/^\n+|\n+$/g,'');if(!trimmed.trim())continue;
       const p=doc.createElement('p');p.textContent=trimmed;box.append(p);
     }
   });
   return box;
+}
+/**
+ * Streaming update of an assistant body (both providers). Renders `value` exactly as renderMessageText would, then keeps
+ * every leading top-level block that is unchanged and replaces only the changed tail (normally the one block still being
+ * written), so finished paragraphs, code and tables are never rebuilt, re-laid out or re-announced. Returns `current` when
+ * it was patched in place, otherwise the fresh element for the caller to put in its place. Choice blocks are always
+ * replaced so their buttons follow the latest options. DOM nodes and textContent only.
+ */
+export function patchMessageText(doc:Document,current:HTMLElement|null,value:string,options:ChoiceBlockOptions={}):HTMLElement {
+  const next=renderMessageText(doc,value,options);
+  if(!current||typeof current.isEqualNode!=='function'||current.tagName!==next.tagName||current.className!==next.className||current.dataset?.format!==next.dataset?.format)return next;
+  if(next.tagName==='PRE'){if(current.textContent!==value)current.textContent=value;return current;}
+  const old=Array.from(current.childNodes),fresh=Array.from(next.childNodes);
+  let same=0;
+  while(same<old.length&&same<fresh.length&&!(old[same] as Element).matches?.('.chat-choices')&&old[same]!.isEqualNode(fresh[same]!))same++;
+  for(const node of old.slice(same))(node as ChildNode).remove();
+  if(same<fresh.length)current.append(...fresh.slice(same));
+  return current;
+}
+// ---- Long transcripts (both providers): the last turns render at once; older turns wait behind one "Show earlier
+// messages" button and render in full, in place, when asked for. The hidden part grows in steps so a new turn does not
+// move the window on every reply.
+export const TRANSCRIPT_WINDOW=Object.freeze({turns:50,step:25});
+/** Index of the first message to render, given the index where each turn starts (ascending). 0 renders everything. */
+export function transcriptWindowStart(turnStarts:readonly number[]):number {
+  const extra=turnStarts.length-TRANSCRIPT_WINDOW.turns;
+  if(extra<TRANSCRIPT_WINDOW.step)return 0;
+  return turnStarts[Math.floor(extra/TRANSCRIPT_WINDOW.step)*TRANSCRIPT_WINDOW.step]??0;
+}
+export function renderEarlierButton(doc:Document,hidden:number,show:()=>void):HTMLButtonElement {
+  const button=doc.createElement('button');button.type='button';button.className='quiet chat-earlier';
+  button.textContent='Show '+hidden+' earlier messages';
+  button.setAttribute('aria-label','Show '+hidden+' earlier messages in this conversation');
+  button.addEventListener('click',show);return button;
+}
+/**
+ * Puts revealed earlier messages where the button was, keeps the message that was on screen in place and moves focus to
+ * the first revealed message, so keyboard and screen-reader users continue from the start of what was added.
+ */
+export function revealEarlier(container:HTMLElement,insert:()=>void):void {
+  const anchor=container.querySelector<HTMLElement>('.codex-message'),top=anchor?.getBoundingClientRect?.().top??0;
+  insert();
+  // Whichever element scrolls the transcript moves by exactly the height that was added above the anchor.
+  const shift=(anchor?.isConnected?anchor.getBoundingClientRect?.().top??top:top)-top;
+  if(shift){const scroller=scrollParent(container);if(scroller)scroller.scrollTop+=shift;}
+  const first=container.querySelector<HTMLElement>('.codex-message');
+  if(first){first.tabIndex=-1;first.focus?.({preventScroll:true});}
+}
+function scrollParent(node:HTMLElement):HTMLElement|null {
+  const view=node.ownerDocument?.defaultView;
+  for(let element:HTMLElement|null=node;element;element=element.parentElement){
+    const overflow=view?.getComputedStyle?.(element).overflowY??'';
+    if(/auto|scroll|overlay/.test(overflow)&&element.scrollHeight>element.clientHeight)return element;
+  }
+  return (node.ownerDocument?.scrollingElement as HTMLElement|null)??null;
 }
 // ---- Interactive choices (both providers): an assistant reply may end with a small fenced JSON block that asks the user to
 // pick an option (```arcane-choices {"question":"…","options":["…"]}```) or to approve a plan (```arcane-plan {"steps":["…"]}```).
@@ -582,10 +919,19 @@ export type ChoiceBlock={kind:'choices';question:string;options:string[]}|{kind:
 export interface ChoiceBlockOptions {
   /** Sends `answer` as the user's next message; returns true when it was sent or queued. Absent: the block is display-only. */
   choose?:(answer:string)=>boolean;
+  /**
+   * Rendered from saved history (a reloaded transcript): the block is always inert — buttons disabled, no click handlers —
+   * and never sends anything, even with `choose`. `answer` is the user's next message after it when already known.
+   */
+  restored?:boolean;
+  answer?:string|null;
 }
 /** The message an "Approve plan" click sends, and the text "Change plan" writes into the message box (never sent). */
 export const PLAN_APPROVE_TEXT='I approve the plan. Go ahead.', PLAN_CHANGE_TEXT='Please change the plan: ';
-const choiceText=(value:unknown,max:number):string|null=>typeof value==='string'&&value.length<=max&&!/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/u.test(value)&&value.trim()?value.trim():null;
+// A clicked option is sent verbatim as the next message, so one starting with '/' or '!' (a CLI slash or shell command) or
+// carrying invisible characters is never offered as a button.
+const choiceText=(value:unknown,max:number):string|null=>typeof value==='string'&&value.length<=max&&!/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/u.test(value)
+  &&!/[­؜᠎​‌‎‏⁠-⁯︀-️﻿]|[\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/u.test(value)&&value.trim()&&!/^[/!]/.test(value.trim())?value.trim():null;
 const exactKeys=(value:unknown,keys:readonly string[]):value is Record<string,unknown>=>{
   if(!value||typeof value!=='object'||Array.isArray(value)||Object.getPrototypeOf(value)!==Object.prototype)return false;
   const own=Object.keys(value);return own.length===keys.length&&keys.every(key=>own.includes(key));
@@ -614,15 +960,34 @@ function closeChoiceBlock(box:HTMLElement,state:'answered'|'closed'):void {
   box.dataset.state=state;
   for(const button of Array.from(box.querySelectorAll<HTMLButtonElement>('button')))button.disabled=true;
 }
-/** A later user message answers or supersedes every open choice block above it. */
-export function closeChoiceBlocks(root:{querySelectorAll?:(selector:string)=>ArrayLike<Element>|Iterable<Element>}|null):void {
-  for(const box of Array.from(root?.querySelectorAll?.('.chat-choices')??[]) as HTMLElement[])if(box.dataset.state==='open')closeChoiceBlock(box,'closed');
+/**
+ * Shows on an inert (saved-history) block which answer was given: the button whose label equals the user's next message
+ * (or the plan approval text) is marked "Chosen"; another message reads "Answered earlier"; none yet reads "No longer active".
+ */
+function markChoiceAnswer(box:HTMLElement,answer:string|null|undefined):void {
+  const status=box.querySelector<HTMLElement>('.chat-choices-status'),said=typeof answer==='string'?answer.trim():'';
+  const buttons=Array.from(box.querySelectorAll<HTMLButtonElement>('button'));
+  const label=box.dataset.kind==='plan'
+    ?(said===PLAN_APPROVE_TEXT?'Approve plan':said.startsWith(PLAN_CHANGE_TEXT.trim())?'Change plan':null)
+    :buttons.find(node=>(node.textContent??'').trim().toLocaleLowerCase()===said.toLocaleLowerCase())?.textContent??null;
+  const chosen=said&&label?buttons.find(node=>node.textContent===label)??null:null;
+  for(const node of buttons){node.disabled=true;if(node===chosen)node.dataset.chosen='true';else delete node.dataset.chosen;node.setAttribute('aria-pressed',node===chosen?'true':'false');}
+  box.dataset.answer=chosen?'chosen':said?'answered':'none';
+  if(status)status.textContent=chosen?'Chosen: '+(box.dataset.kind==='plan'?(label==='Approve plan'?'plan approved':'plan change requested'):label):said?'Answered earlier':'No longer active';
+}
+/** A later user message answers or supersedes every open choice block above it; saved blocks show the chosen answer. */
+export function closeChoiceBlocks(root:{querySelectorAll?:(selector:string)=>ArrayLike<Element>|Iterable<Element>}|null,answer?:string|null):void {
+  for(const box of Array.from(root?.querySelectorAll?.('.chat-choices')??[]) as HTMLElement[]){
+    if(box.dataset.state==='open')closeChoiceBlock(box,'closed');
+    else if(box.dataset.restored==='true'&&box.dataset.answer==='none'&&typeof answer==='string')markChoiceAnswer(box,answer);
+  }
 }
 /** Buttons for one validated block. Plan: "Approve plan" sends PLAN_APPROVE_TEXT; "Change plan" only pre-fills the message box. */
 export function renderChoiceBlock(doc:Document,block:ChoiceBlock,options:ChoiceBlockOptions={}):HTMLElement {
   const make=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string)=>{const node=doc.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
   const box=make('section',undefined,'chat-choices');box.dataset.kind=block.kind;box.setAttribute('role','group');
-  box.dataset.state=options.choose?'open':'closed';
+  const live=!!options.choose&&options.restored!==true;
+  box.dataset.state=live?'open':'closed';if(options.restored===true)box.dataset.restored='true';
   const status=make('p','','chat-choices-status');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
   if(block.kind==='plan'){
     box.setAttribute('aria-label','Proposed plan');box.append(make('strong','Proposed plan','chat-choices-question'));
@@ -630,24 +995,90 @@ export function renderChoiceBlock(doc:Document,block:ChoiceBlock,options:ChoiceB
   } else {box.setAttribute('aria-label','Question: '+block.question);box.append(make('p',block.question,'chat-choices-question'));}
   const actions=make('div',undefined,'chat-choices-actions');
   const answer=(button:HTMLButtonElement,text:string)=>{
-    if(box.dataset.state!=='open'||!options.choose)return;
+    if(!live||box.dataset.state!=='open'||!options.choose)return;
     let accepted=false;try{accepted=options.choose(text)===true;}catch{accepted=false;}
     if(!accepted){status.textContent='This answer could not be sent now. Try again when the chat is ready.';return;}
     closeChoiceBlock(box,'answered');button.setAttribute('aria-pressed','true');status.textContent='Sent: '+text;
   };
   const button=(label:string,className:string,onClick:(node:HTMLButtonElement)=>void)=>{
-    const node=make('button',label,className);node.type='button';node.disabled=!options.choose;
-    node.addEventListener('click',()=>onClick(node));actions.append(node);return node;
+    const node=make('button',label,className);node.type='button';node.disabled=!live;
+    // A restored block gets no click handler at all: it can never send or pre-fill anything.
+    if(live)node.addEventListener('click',()=>onClick(node));actions.append(node);return node;
   };
   if(block.kind==='plan'){
     button('Approve plan','chat-choice chat-choice-primary',node=>answer(node,PLAN_APPROVE_TEXT));
     button('Change plan','secondary chat-choice',()=>{
-      if(box.dataset.state!=='open')return;
+      if(!live||box.dataset.state!=='open')return;
       if(prefillComposer(doc,PLAN_CHANGE_TEXT))status.textContent='Describe the change in the message box, then send it.';
     });
   } else for(const option of block.options)button(option,'secondary chat-choice',node=>answer(node,option));
   box.append(actions,status);
+  if(options.restored===true)markChoiceAnswer(box,options.answer);
   return box;
+}
+// ---- Suggested project memory (both providers): ```arcane-memory\n<1 to 8 short lines>\n``` in a finished reply. It is never
+// saved automatically; only a click on "Save to project memory" appends it to ARCANE.md through the registered saver.
+export const MEMORY_BLOCK_LIMITS=Object.freeze({bytes:2048,lines:8,line:300});
+export type ProjectMemorySaver=(note:string)=>Promise<{ok:boolean;message:string}>;
+let projectMemorySaver:ProjectMemorySaver|null=null;
+/** Installed by the Settings › Project memory module; null removes it (save buttons then explain they are unavailable). */
+export function setProjectMemorySaver(saver:ProjectMemorySaver|null):void { projectMemorySaver=typeof saver==='function'?saver:null; }
+/** Strict parse of one arcane-memory fence body; null on any problem (the caller then shows a plain code block). */
+export function parseMemoryBlock(body:string):string|null {
+  if(typeof body!=='string'||utf8(body)>MEMORY_BLOCK_LIMITS.bytes)return null;
+  const lines=body.replace(/\r\n?/g,'\n').split('\n').map(line=>line.replace(/\s+$/,'')).filter(line=>line.trim());
+  if(!lines.length||lines.length>MEMORY_BLOCK_LIMITS.lines||lines.some(line=>line.length>MEMORY_BLOCK_LIMITS.line||/[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/u.test(line)
+    // Invisible characters (zero-width, tags, variation selectors) or the memory delimiter: never offered for saving.
+    ||/[­؜᠎​‌‎‏⁠-⁯︀-️﻿]|[\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]|<\/?\s*project-memory/iu.test(line)))return null;
+  return lines.join('\n');
+}
+/** The suggestion as text plus one explicit save button; textContent only. */
+export function renderMemoryBlock(doc:Document,note:string):HTMLElement {
+  const box=doc.createElement('section');box.className='chat-memory';box.dataset.state='open';
+  box.setAttribute('role','group');box.setAttribute('aria-label','Suggested project memory');
+  const heading=doc.createElement('strong');heading.className='chat-memory-heading';heading.textContent='Suggested project memory';
+  const text=doc.createElement('pre');text.className='chat-memory-text';text.textContent=note;
+  const button=doc.createElement('button');button.type='button';button.className='secondary chat-memory-save';button.textContent='Save to project memory';
+  const status=doc.createElement('p');status.className='chat-memory-status';status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+  button.addEventListener('click',()=>{
+    if(box.dataset.state!=='open')return;
+    const saver=projectMemorySaver;
+    if(!saver){status.textContent='Project memory is unavailable right now. Add the note in Settings › Project memory.';return;}
+    box.dataset.state='saving';button.disabled=true;status.textContent='Saving…';
+    let pending:Promise<{ok:boolean;message:string}>;
+    try{pending=saver(note);}catch{pending=Promise.resolve({ok:false,message:'Project memory could not be saved.'});}
+    void pending.catch(()=>({ok:false,message:'Project memory could not be saved.'})).then(result=>{
+      const ok=result?.ok===true;
+      box.dataset.state=ok?'saved':'open';button.disabled=ok;
+      if(ok)button.textContent='Saved to project memory';
+      status.textContent=typeof result?.message==='string'&&result.message.length<=300?result.message:ok?'Saved to ARCANE.md.':'Project memory could not be saved.';
+    });
+  });
+  box.append(heading,text,button,status);
+  return box;
+}
+/** Visible, enabled tab stops of the open model picker's current view, in DOM order. */
+export function pickerTabStops(popover:HTMLElement):HTMLElement[] {
+  return Array.from(popover.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]')).filter(node=>
+    node.tabIndex>=0&&!(node as HTMLButtonElement).disabled&&!node.closest('[hidden],[inert]')&&
+    (typeof node.getClientRects!=='function'||node.getClientRects().length>0));
+}
+/**
+ * Focus loop for the open model picker (both providers): Tab / Shift+Tab move between its visible controls and wrap at the
+ * ends, so focus never escapes to the page behind it. Returns true when it handled the key.
+ */
+export function loopPickerFocus(popover:HTMLElement,event:KeyboardEvent):boolean {
+  if(event.key!=='Tab'||event.altKey||event.ctrlKey||event.metaKey||popover.hidden)return false;
+  const stops=pickerTabStops(popover);event.preventDefault();
+  if(!stops.length)return true;
+  const active=popover.ownerDocument.activeElement as HTMLElement|null;
+  const inside=!!active&&popover.contains(active)&&active!==popover;
+  // compareDocumentPosition: 4 = the stop follows the focused node, 2 = it precedes it.
+  const after=inside?stops.filter(stop=>stop!==active&&(active!.compareDocumentPosition(stop)&4)!==0):[];
+  const before=inside?stops.filter(stop=>stop!==active&&(active!.compareDocumentPosition(stop)&2)!==0):[];
+  const next=event.shiftKey?(before.at(-1)??stops.at(-1)):(after[0]??stops[0]);
+  next?.focus({preventScroll:true});
+  return true;
 }
 /** Shared selected-row check mark for model and reasoning options. */
 export function composerPickerCheck(doc:Document,selected:boolean):SVGSVGElement {
@@ -732,10 +1163,14 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
     case 'scene_update':return 'Updating '+(ref??'an instance')+propertyList(args);
     case 'scene_build':{const parent=studioRefPath(args?.parent);return 'Building a scene'+(parent?' in '+parent:'');}
     case 'environment_apply':return 'Shaping terrain and lighting';
+    case 'terrain_generate':return 'Generating terrain';
     case 'studio_viewport_capture':return 'Looking at the scene';
     case 'studio_asset_search':{const query=activityText(args?.query,60);return 'Searching the Creator Store'+(query?' for '+quoted(query):'');}
     case 'studio_asset_insert':return 'Placing a Creator Store asset';
     case 'studio_asset_generate':return 'Generating '+(activityText(args?.kind,20)??'an asset');
+    case 'assets_procedural':return 'Modelling a procedural mesh';
+    case 'assets_preview':return 'Previewing a mesh';
+    case 'assets_place_studio_import':return 'Placing a mesh in Studio';
     case 'receipt_status':return 'Checking a change receipt';
     case 'receipt_restore':return 'Restoring an earlier change';
     case 'playtest_request':return 'Starting a playtest';
@@ -776,6 +1211,7 @@ function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupIn
     case 'scene_update':return make(['Updating','Updated'],['instance','instances'],parentPath(ref));
     case 'scene_build':return make(['Building','Built'],['scene','scenes'],studioRefPath(args?.parent));
     case 'environment_apply':return make(['Shaping','Shaped'],['environment','environments'],null);
+    case 'terrain_generate':return make(['Generating','Generated'],['terrain region','terrain regions'],null);
     case 'studio_viewport_capture':return make(['Capturing','Captured'],['view','views'],null);
     case 'studio_asset_search':return make(['Searching','Searched'],['asset search','asset searches'],null);
     case 'studio_asset_insert':return make(['Placing','Placed'],['asset','assets'],null);
@@ -788,6 +1224,7 @@ function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupIn
     case 'script_search':return make(['Running','Ran'],['script search','script searches'],null);
     case 'script_set_enabled':{const enabled=args?.enabled!==false;
       return make(enabled?['Enabling','Enabled']:['Disabling','Disabled'],['script','scripts'],parentPath(ref),enabled?'on':'off');}
+    case 'assets_procedural':return make(['Modelling','Modelled'],['mesh','meshes'],null);
     case 'receipt_status':return make(['Checking','Checked'],['change receipt','change receipts'],null);
     case 'skills_get':return make(['Reading','Read'],['skill guide','skill guides'],null);
   }
@@ -837,6 +1274,20 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const pre=doc.createElement('pre');pre.className='hint mono';pre.textContent=details;
   more.append(summary,pre);
   return [line,more];
+}
+/**
+ * A Codex transcript tool message as article.codex-message.tool: the same activity line, state and Details the Claude
+ * chat renders for its tool events. Saved history keeps only the result text; an Arcane Studio result names its command.
+ */
+export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'scope'|'text'|'toolState'|'toolCall'>,safe:(value:string)=>string=value=>value):{article:HTMLElement;change:ToolChange|null} {
+  const read=message.text?readToolResultText(message.text):null,state:ToolActivityState=message.toolState??read?.state??'finished';
+  // A result that names its own command wins; otherwise the live identity (tool name + display args) describes the call.
+  const live=message.toolCall,activity=read?.name?describeToolActivity(read.name,read.input,read.result,state)
+    :live?describeToolActivity(live.name,live.input,read?.result??null,state):{text:message.text?'Tool output':state==='started'?'Using an Arcane tool…':'Used an Arcane tool',change:null};
+  const article=doc.createElement('article');article.className='codex-message tool';
+  article.setAttribute('data-role','tool');article.setAttribute('aria-label','Tool activity');article.dataset.toolState=state;
+  article.append(...renderToolActivity(doc,activity,state,safe(message.scope+(message.text?'\n'+message.text:''))));
+  return {article,change:activity.change};
 }
 // ---- Grouped tool cards: consecutive calls of one kind on one container collapse into one compact, expandable card. ----
 /** Calls needed before a run of same-kind lines becomes one card. */
@@ -971,8 +1422,52 @@ export function prefillComposer(doc:Document,text:string):boolean {
   try{input.focus({preventScroll:true});input.setSelectionRange?.(input.value.length,input.value.length);}catch{/* Focus is presentation only. */}
   return true;
 }
-export interface ChangeCardOptions { copy?:(text:string)=>Promise<void> }
+/** Recorded before/after source of one script edit, read on demand for the change card's diff (display only). */
+export interface ScriptChangeSources { commandId:string; path:string; before:string; after:string }
+export type ScriptChangeReader=(commandId:string)=>Promise<ScriptChangeSources>;
+/** Response bound for one script change read: two 100 KiB sources with worst-case JSON escaping. */
+const SCRIPT_CHANGE_BYTES=1536*1024,SCRIPT_SOURCE_CHARS=100*1024;
+/** Validates the daemon's `{change}` envelope for the exact requested receipt; anything else is null. */
+export function readScriptChange(value:unknown,commandId:string):ScriptChangeSources|null {
+  const change=object(value)?value.change:null;
+  if(!object(change)||change.commandId!==commandId||!text(change.path,8192)||typeof change.before!=='string'||typeof change.after!=='string'
+    ||change.before.length>SCRIPT_SOURCE_CHARS||change.after.length>SCRIPT_SOURCE_CHARS)return null;
+  return {commandId,path:change.path,before:change.before,after:change.after};
+}
+// One reader per document: the chat that owns the human control token provides it, and every change card in that
+// document (either provider's transcript) uses it. Without a reader, script rows show no diff actions.
+const scriptChangeReaders=new WeakMap<object,ScriptChangeReader>();
+export function provideScriptChanges(doc:Document,reader:ScriptChangeReader):void { scriptChangeReaders.set(doc,reader); }
+export interface ChangeCardOptions { copy?:(text:string)=>Promise<void>; scriptChange?:ScriptChangeReader|null }
 const CHANGE_CARD_ROWS=8;
+// The diff viewer loads only when someone first opens a script's changes.
+let scriptDiffModule:Promise<typeof import('./script-diff.js')>|null=null;
+const loadScriptDiff=()=>scriptDiffModule??=import('./script-diff.js').catch((error:unknown)=>{scriptDiffModule=null;throw error;});
+let scriptDiffIds=0;
+/** "View changes" (an inline unified diff) and "Copy new source" for one edited script. Sources are read once, on demand. */
+function scriptRowActions(doc:Document,row:HTMLElement,change:ToolChange,read:ScriptChangeReader,copy:(text:string)=>Promise<void>,status:HTMLElement):void {
+  const button=(label:string,className:string,aria:string)=>{const node=doc.createElement('button');node.type='button';node.textContent=label;node.className=className;node.setAttribute('aria-label',aria);return node;};
+  const name=change.path??'this script';
+  let sources:Promise<ScriptChangeSources>|null=null;
+  const load=()=>sources??=read(change.receipt).catch((error:unknown)=>{sources=null;throw error;});
+  const view=button('View changes','quiet chat-change-diff','View changes to '+name),copySource=button('Copy new source','quiet chat-change-copy-source','Copy new source of '+name);
+  view.setAttribute('aria-expanded','false');
+  let panel:HTMLElement|null=null,busy=false;
+  const expanded=(open:boolean)=>{view.setAttribute('aria-expanded',String(open));view.textContent=open?'Hide changes':'View changes';view.setAttribute('aria-label',(open?'Hide changes to ':'View changes to ')+name);};
+  view.addEventListener('click',()=>{
+    if(panel){panel.hidden=!panel.hidden;expanded(!panel.hidden);return;}
+    if(busy)return;busy=true;view.disabled=true;status.textContent='Loading the changes to '+name+'…';
+    void Promise.all([load(),loadScriptDiff()]).then(([source,module])=>{
+      panel=module.renderScriptDiff(doc,{path:source.path,before:source.before,after:source.after});
+      panel.id='chat-script-diff-'+(++scriptDiffIds);view.setAttribute('aria-controls',panel.id);
+      row.append(panel);expanded(true);status.textContent='';
+    },()=>{status.textContent='Could not load the changes to '+name+'. Its receipt may no longer be recorded.';}).finally(()=>{busy=false;view.disabled=false;});
+  });
+  copySource.addEventListener('click',()=>{
+    void load().then(source=>copy(source.after)).then(()=>{status.textContent='Copied the new source of '+name;},()=>{status.textContent='Could not copy the new source of '+name+'.';});
+  });
+  row.append(view,copySource);
+}
 /** One compact card per turn that changed the Studio place: counts, names and actions. Null when nothing changed. */
 export function renderChangeCard(doc:Document,changes:readonly ToolChange[],options:ChangeCardOptions={}):HTMLElement|null {
   const unique=changes.filter((change,index)=>changes.findIndex(other=>other.receipt===change.receipt)===index);
@@ -984,6 +1479,7 @@ export function renderChangeCard(doc:Document,changes:readonly ToolChange[],opti
   const list=make('ul',undefined,'chat-change-list');
   const status=make('p','','chat-change-status');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
   const copy=options.copy??(async (text:string)=>{const clipboard=doc.defaultView?.navigator?.clipboard;if(!clipboard)throw Error('clipboard');await clipboard.writeText(text);});
+  const readScript=options.scriptChange===undefined?scriptChangeReaders.get(doc)??null:options.scriptChange;
   unique.slice(0,CHANGE_CARD_ROWS).forEach(change=>{
     const row=make('li',undefined,'chat-change-row');row.dataset.changeKind=change.kind;
     row.append(make('span',change.text,'chat-change-text'));
@@ -992,6 +1488,7 @@ export function renderChangeCard(doc:Document,changes:readonly ToolChange[],opti
       button.addEventListener('click',()=>{void copy(path).then(()=>{status.textContent='Copied '+path;},()=>{status.textContent='Could not copy. Path: '+path;});});
       row.append(button);
     }
+    if(change.kind==='script'&&readScript)scriptRowActions(doc,row,change,readScript,copy,status);
     list.append(row);
   });
   if(unique.length>CHANGE_CARD_ROWS)list.append(make('li','+'+(unique.length-CHANGE_CARD_ROWS)+' more','chat-change-row chat-change-more'));
@@ -1016,7 +1513,10 @@ export const COMPOSER_TIPS=Object.freeze([
   'Type @selection to refer to what is selected in Studio; the assistant reads it with selection_read.',
   'While Claude is replying, press Enter to queue your next message. It is sent when the reply finishes.',
   'Studio changes appear in a card after each reply. Restore writes a restore request you can review before sending.',
+  'Be specific: name the style, scale and mood. Turn on Playtest to let the assistant check gameplay.',
 ]);
+/** The Settings › Guide page (studio.html) that /help links to. */
+export const COMPOSER_GUIDE_ID='settings-guide';
 type ComposerMenuItem={name:string;hint:string};
 class ComposerCommands {
   private mode:'slash'|'mention'|'help'|null=null;
@@ -1115,7 +1615,17 @@ class ComposerCommands {
     const list=this.doc.createElement('ul');
     for(const tip of COMPOSER_TIPS){const row=this.doc.createElement('li');row.textContent=tip;list.append(row);}
     const close=this.doc.createElement('p');close.className='hint';close.textContent='Press Esc or start typing to close.';
-    menu.append(title,list,close);
+    menu.append(title,list);
+    // The full guide lives in Settings; the shell opens it through its existing settings request.
+    if(this.doc.getElementById(COMPOSER_GUIDE_ID)){
+      const guide=this.doc.createElement('button');guide.type='button';guide.className='settings-text-button';guide.textContent='Open the full guide';
+      guide.addEventListener('click',()=>{
+        this.close();
+        try{const View=this.doc.defaultView?.CustomEvent??(typeof CustomEvent==='function'?CustomEvent:null);if(View)this.doc.dispatchEvent(new View('workspace:settingsrequest',{detail:{target:COMPOSER_GUIDE_ID}}));}catch{/* presentation only */}
+      });
+      menu.append(guide);
+    }
+    menu.append(close);
     // Typing closes the tips (update() runs on every input).
     this.attr('aria-expanded','false');this.attr('aria-activedescendant',null);
   }
@@ -1318,10 +1828,16 @@ export class CodexChat {
   private pendingSelection:{model:string;effort:string|null;at:number}|null=null;
   /** Project switch "Auto-approve edits and tool use" (off until the desktop host reports the saved setting). */
   private autoApprove=false;
+  /** Formats a finished turn's usage line; null (no line) until the usage presentation attaches one. */
+  private replyUsage:ReplyUsageFormat|null=null;
+  private replyUsageVersion=0;
   private readonly autoHandled=new Set<string>();
   private readonly autoLog:{at:number;summary:string}[]=[];
   private readonly autoListeners=new Set<()=>void>();
-  constructor(private readonly doc:Document,private readonly api:CodexChatApi) {}
+  constructor(private readonly doc:Document,private readonly api:CodexChatApi) {
+    // Change cards in this document (both providers) read script diffs through this human-token API.
+    if(typeof api?.scriptChange==='function')provideScriptChanges(doc,commandId=>api.scriptChange(commandId));
+  }
   /** Apply the persisted per-project switch; turning it off stops automatic acceptance immediately. */
   setAutoApprove(enabled:boolean):void {
     this.autoApprove=enabled===true;
@@ -1421,6 +1937,20 @@ export class CodexChat {
     return {provider:'codex',label:'ChatGPT',available:signedIn,hint:signedIn?'Connect to choose a model':'Sign in to use',models};
   }
   /** Fresh evidence that the signed-in ChatGPT account is out of usage (presentation only; see codexUsageLimit). */
+  /** Shows a '12k tokens (~$0.31)' line under each finished reply, as the Claude chat does. Presentation only. */
+  setReplyUsage(format:ReplyUsageFormat|null):void {this.replyUsage=format;this.replyUsageChanged();}
+  /** Cost display preferences changed: redraw the usage lines. */
+  replyUsageChanged():void {this.replyUsageVersion++;if(this.state&&!this.stopped&&!this.surfaceYielded)this.render();}
+  private replyUsageLine(threadId:string,turnId:string):HTMLElement|null {
+    const key=threadId+'\0'+turnId;
+    if(!this.replyUsage||!this.transcript.finishedTurns.has(key))return null;
+    const model=this.state?.actions.findLast(row=>row.action==='turn-start'&&row.threadId===threadId&&row.turnId===turnId)?.model??this.snapshot()?.thread?.selection.model??null;
+    const usage=turnReplyUsage(this.transcript.turnUsage.get(key),model);if(!usage)return null;
+    let view:{text:string;title:string}|null=null;try{view=this.replyUsage(usage);}catch{view=null;}
+    if(!view)return null;
+    const line=this.make('p',view.text,'reply-usage');line.title=view.title;line.dataset.tokens=String(usage.tokens);
+    return line;
+  }
   usageLimit():ProviderUsageLimit|null {
     if(!this.state||!this.fresh||this.stopped)return null;
     try{return codexUsageLimit(this.snapshot(),this.state.actions);}catch{return null;}
@@ -2090,6 +2620,7 @@ export class CodexChat {
         if(this.pickerModelsOpen){this.showPickerModels(false);currentModel?.focus({preventScroll:true});}else this.closePicker(true);
         return;
       }
+      if (loopPickerFocus(this.picker()!, key)) return; // Tab stays inside the open picker.
       const target = event.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts');
       const inModels = models.contains(target), inEfforts = efforts.contains(target);
       const columns = models.dataset.layout === 'columns';
@@ -2434,7 +2965,85 @@ export class CodexChat {
       role:entry.role==='user'?'human':entry.role==='assistant'?'codex':'tool',threadId:entry.ids.threadId,
       scope:entry.ids.threadId+' · '+entry.ids.turnId+' · '+entry.ids.itemId,text:entry.text}));
     const keys=new Set(recorded.map(row=>row.key));
+    // A saved tool result keeps the live call's name and display arguments when this session saw it run.
+    const liveCalls=new Map(this.transcript.messages.flatMap(m=>m.role==='tool'&&m.toolCall?[[m.key,m.toolCall] as const]:[]));
+    if(liveCalls.size)for(const row of recorded){const live=row.role==='tool'?liveCalls.get(row.key):undefined;if(live)row.toolCall=live;}
     return [...recorded,...(this.tabs.bound(this.state)?this.transcript.messages.filter(row=>row.threadId===active.threadId&&!keys.has(row.key)):[])];
+  }
+
+  /** What is drawn for each transcript row, so an update rebuilds only from the first row whose rendering changed. */
+  private transcriptRows:{sig:string;body:string;nodes:Node[];turn:string|null;change:ToolChange|null;role:string}[]=[];
+  /** The conversation (tab key or thread) whose earlier messages were asked for. */
+  private earlierView:string|null=null;
+  /**
+   * Draws the shared transcript. Rows before the first changed one keep their nodes (and listeners, open details and
+   * selection); a reply that is still streaming patches only its open block. Studio changes are summarised once per
+   * turn, after that turn's last message; a finished turn's usage line follows, inside its last reply when the turn ended
+   * with one (as in the Claude chat). Choice buttons stay live only in replies after the last message the user sent.
+   */
+  private renderTranscript(messages:HTMLElement,all:ChatMessage[],view:string,running:boolean,reset:boolean):void {
+    if(!all.length){
+      this.transcriptRows=[];
+      messages.replaceChildren(this.make('p',this.tabs?.active()?.kind==='draft'?'Local draft. Starting a conversation will not send your message.':this.tabs?.recording()?.recorded?'No public text entries in this saved recording.':'No public history has been loaded for this conversation.','empty'));
+      return;
+    }
+    const turnOf=(message:ChatMessage)=>message.key.split('\0')[1]??null;
+    const starts:number[]=[];all.forEach((message,index)=>{if(!index||turnOf(message)!==turnOf(all[index-1]!))starts.push(index);});
+    const first=this.earlierView===view?0:transcriptWindowStart(starts);
+    const lastHuman=all.findLastIndex(message=>message.role==='human'),nextHuman:(string|null)[]=new Array(all.length).fill(null);
+    for(let index=all.length-2,answer:string|null=null;index>=0;index--){if(all[index+1]!.role==='human')answer=all[index+1]!.text;nextHuman[index]=answer;}
+    const options=(index:number):ChoiceBlockOptions=>index>lastHuman?{choose:answer=>this.answerChoice(answer)}:{restored:true,answer:nextHuman[index]??null};
+    interface Spec{message:ChatMessage;index:number;turn:string|null;last:boolean;line:HTMLElement|null;streaming:boolean;sig:string;body:string}
+    const specs:Spec[]=[];let thread:string|null=null;
+    for(let index=first;index<all.length;index++){
+      const message=all[index]!,turn=turnOf(message),last=index===all.length-1||turnOf(all[index+1]!)!==turn;
+      if(index===first||turn!==turnOf(all[index-1]!))thread=message.threadId??message.key.split('\0')[0]??null;
+      const line=last&&turn&&thread?this.replyUsageLine(thread,turn):null,streaming=running&&index===all.length-1&&message.role==='codex';
+      const extra=JSON.stringify([message.role==='codex'?index>lastHuman?'live':nextHuman[index]??null:'',last,line?[line.textContent,line.title]:null,streaming]);
+      specs.push({message,index,turn,last,line,streaming,sig:JSON.stringify(message)+extra,body:JSON.stringify({...message,text:''})+extra});
+    }
+    const earlier=first>0?'earlier:'+first:null,offset=earlier?1:0,sigs=[...(earlier?[earlier]:[]),...specs.map(spec=>spec.sig)];
+    // Rows drawn earlier are reused only while every one of their nodes is still in this transcript.
+    const rows=this.transcriptRows,valid=!reset&&typeof messages.contains==='function'&&rows.every(row=>row.nodes.every(node=>messages.contains(node)));
+    let keep=0;
+    if(valid)while(keep<rows.length&&keep<sigs.length&&rows[keep]!.sig===sigs[keep])keep++;
+    if(valid&&keep===sigs.length&&keep===rows.length)return;
+    // Only the streaming reply changed: patch its open block in place.
+    const tail=specs.at(-1)!,row=rows[keep];
+    if(valid&&keep===rows.length-1&&keep===sigs.length-1&&row&&row.role==='codex'&&tail.message.role==='codex'&&row.body===tail.body){
+      const card=row.nodes[0] as HTMLElement,body=card.querySelector<HTMLElement>('.message-text');
+      if(body){const next=patchMessageText(this.doc,body,this.api.safe(tail.message.text),options(tail.index));if(next!==body)body.replaceWith(next);row.sig=tail.sig;return;}
+    }
+    if(keep===0)messages.replaceChildren();else for(const old of rows.slice(keep))for(const node of old.nodes)(node as ChildNode).remove();
+    const out=rows.slice(0,keep);
+    if(earlier&&keep===0){const button=renderEarlierButton(this.doc,first,()=>this.showEarlier(view));messages.append(button);out.push({sig:earlier,body:'',nodes:[button],turn:null,change:null,role:'earlier'});}
+    const from=Math.max(0,keep-offset);
+    let changes:ToolChange[]=[];
+    for(let j=out.length-1;j>=offset&&from>0&&out[j]!.turn===specs[from]!.turn;j--)if(out[j]!.change)changes.unshift(out[j]!.change!);
+    for(const spec of specs.slice(from)){
+      const {message}=spec,nodes:Node[]=[];let element:HTMLElement,change:ToolChange|null=null;
+      if(message.role==='tool'){const tool=renderCodexToolArticle(this.doc,message,value=>this.api.safe(value));change=tool.change??null;element=tool.article;}
+      else{
+        const card=element=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');
+        // Only the reply being written is a live region; it is announced once it settles.
+        if(spec.streaming){card.setAttribute('aria-busy','true');card.setAttribute('aria-live','polite');}
+        card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text),options(spec.index)):this.make('pre',message.text,'message-text'));
+        if(message.role==='human'&&message.text.trim())card.append(this.editAsNewButton(message.text));
+        if(message.acknowledgement){const acknowledgement=message.acknowledgement==='Native acknowledgement: acknowledged'?'Accepted':message.acknowledgement==='Native acknowledgement: rejected'?'Not accepted':'Awaiting confirmation';card.append(this.make('p',acknowledgement,'message-acknowledgement'));}
+        const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));card.append(metadata);
+      }
+      messages.append(element);nodes.push(element);if(change)changes.push(change);
+      if(spec.last){
+        const card=renderChangeCard(this.doc,changes);if(card){messages.append(card);nodes.push(card);}changes=[];
+        if(spec.line){if(element.className.split(' ').includes('codex'))element.append(spec.line);else{messages.append(spec.line);nodes.push(spec.line);}}
+      }
+      out.push({sig:spec.sig,body:spec.body,nodes,turn:spec.turn,change,role:message.role});
+    }
+    this.transcriptRows=out;
+  }
+  private showEarlier(view:string):void {
+    if(this.surfaceYielded)return;
+    revealEarlier(this.el('codex-messages'),()=>{this.earlierView=view;this.render();});
   }
 
   private render() {
@@ -2457,35 +3066,14 @@ export class CodexChat {
     if(catalogueChanged){this.modelSignature=signature;const select=this.el<HTMLSelectElement>('codex-model');select.replaceChildren();const p=this.make('option','Choose reported model');p.value='';select.append(p);for(const m of s?.models??[]){const o=this.make('option',m.displayName+' · '+m.model);o.value=m.model;select.append(o);}}
     if(catalogueChanged||selectionSignature!==this.selectionSignature){this.selectionSignature=selectionSignature;this.el<HTMLSelectElement>('codex-model').value=selection?.model??'';this.populateEfforts();if(selection)this.el<HTMLSelectElement>('codex-effort').value=selection.effort;}
     this.text('codex-selection',s?.selection?'Reported selection: '+s.selection.model+' · '+s.selection.effort:'No model/effort selection acknowledged.');
-    const displayedMessages=this.displayMessages(),messageSignature=JSON.stringify(displayedMessages);
+    const usage=this.replyUsage?this.replyUsageVersion+JSON.stringify([[...this.transcript.finishedTurns],[...this.transcript.turnUsage]]):'';
+    // A long transcript shows its last turns until "Show earlier messages" is chosen for this conversation.
+    const view=this.tabs?.active()?.key??'thread:'+(t?.threadId??'');
+    const displayedMessages=this.displayMessages(),messageSignature=JSON.stringify(displayedMessages)+usage+(this.earlierView===view?'\0all':'');
     if(!this.surfaceYielded&&messageSignature!==this.messageSignature){
-    this.messageSignature=messageSignature;
-    const messages=this.el('codex-messages'),bottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<80;messages.replaceChildren();
-    if(!displayedMessages.length)messages.append(this.make('p',this.tabs?.active()?.kind==='draft'?'Local draft. Starting a conversation will not send your message.':this.tabs?.recording()?.recorded?'No public text entries in this saved recording.':'No public history has been loaded for this conversation.','empty'));
-    // Studio changes are summarised once per turn, after that turn's last message.
-    let turnChanges:ToolChange[]=[],turnKey:string|null=null;
-    const flushChanges=()=>{const card=renderChangeCard(this.doc,turnChanges);if(card)messages.append(card);turnChanges=[];};
-    // Choice buttons stay live only in replies after the last message the user sent.
-    const lastHuman=displayedMessages.findLastIndex(message=>message.role==='human');
-    for(const [index,message] of displayedMessages.entries()){
-      const turn=message.key.split('\0')[1]??null;
-      if(turn!==turnKey){flushChanges();turnKey=turn;}
-      const card=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');
-      if(message.role==='tool'){
-        // Plain-language activity line; the raw result stays in the collapsed Details.
-        card.setAttribute('aria-label','Tool activity');
-        const read=message.text?readToolResultText(message.text):null,state:ToolActivityState=message.toolState??read?.state??'finished';
-        const activity=read?.name?describeToolActivity(read.name,read.input,read.result,state):{text:message.text?'Tool output':state==='started'?'Using an Arcane tool…':'Used an Arcane tool',change:null};
-        if(activity.change)turnChanges.push(activity.change);
-        card.dataset.toolState=state;card.append(...renderToolActivity(this.doc,activity,state,this.api.safe(message.scope+(message.text?'\n'+message.text:''))));
-        messages.append(card);continue;
-      }
-      card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text),index>lastHuman?{choose:answer=>this.answerChoice(answer)}:{}):this.make('pre',message.text,'message-text'));
-      if(message.role==='human'&&message.text.trim())card.append(this.editAsNewButton(message.text));
-      if(message.acknowledgement){const acknowledgement=message.acknowledgement==='Native acknowledgement: acknowledged'?'Accepted':message.acknowledgement==='Native acknowledgement: rejected'?'Not accepted':'Awaiting confirmation';card.append(this.make('p',acknowledgement,'message-acknowledgement'));}
-      const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));card.append(metadata);messages.append(card);
-    }
-    flushChanges();
+    const reset=!this.messageSignature;this.messageSignature=messageSignature;
+    const messages=this.el('codex-messages'),bottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<80;
+    this.renderTranscript(messages,displayedMessages,view,!!t&&['starting','inProgress'].includes(t.turnStatus),reset);
     if(bottom)messages.scrollTop=messages.scrollHeight;
     }
     this.text('codex-events-note','Event sequence '+this.transcript.cursor+' · native dropped '+this.transcript.dropped+' · missing sequences '+this.transcript.gaps+(this.transcript.truncated?' · public display truncated; earlier text may be missing.':' · bounded public message stream.'));

@@ -19,4 +19,5 @@ export const STUDIO_PLUGIN_SOURCES = Object.freeze([
   ['AssetUpload', 'ModuleScript', 'AssetUpload.luau'],
   ['Diagnostics', 'ModuleScript', 'Diagnostics.luau'],
   ['AssetPlacement', 'ModuleScript', 'AssetPlacement.luau'],
+  ['TerrainGen', 'ModuleScript', 'TerrainGen.luau'],
 ] as const);

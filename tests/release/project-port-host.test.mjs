@@ -268,7 +268,7 @@ test('owned Node loopback restart: exact persisted endpoint and original real-st
   const f = fixture(t);
   // Compile only the current store dependencies into this owned fixture,
   // using Node's type erasure. Never import stale dist or execute product services.
-  for (const name of ['packages/storage/src/studio-store.ts', 'packages/storage/src/sqlite-path.ts', 'packages/protocol/src/providers.ts', 'packages/protocol/src/studio.ts', 'packages/core/src/studio-policy.ts', 'packages/core/src/studio-asset-policy.ts', 'packages/core/src/native-property-outcomes.ts']) {
+  for (const name of ['packages/storage/src/studio-store.ts', 'packages/storage/src/sqlite-path.ts', 'packages/protocol/src/providers.ts', 'packages/protocol/src/studio.ts', 'packages/core/src/studio-policy.ts', 'packages/core/src/studio-asset-policy.ts', 'packages/core/src/native-property-outcomes.ts', 'packages/core/src/terrain-policy.ts']) {
     const full = path.join(f.productRoot, name.replace(/\.ts$/, '.js')); fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, stripTypeScriptTypes(source(name), { mode: 'transform' }));
   }

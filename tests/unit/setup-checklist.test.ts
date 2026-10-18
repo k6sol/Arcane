@@ -24,6 +24,24 @@ test('checklist rows map each signal to done/todo with its one-click fix', () =>
   assert.equal(checklistRows(ready)[3]!.detail, 'Obby');
 });
 
+test('with one-click pairing the Studio row offers Connect Studio, then shows the waiting code with the API key as fallback', () => {
+  const idle = { phase: 'idle', code: null, message: '' } as const;
+  const studio = (pairing: NonNullable<ChecklistSignals['pairing']> | null, connected: boolean | null = false) => checklistRows({ ...ready, studioConnected: connected, pairing })[2]!;
+  assert.deepEqual([studio(idle).state, studio(idle).action], ['todo', { kind: 'connect-studio', label: 'Connect Studio' }]);
+  const waiting = studio({ phase: 'waiting', code: '042718', message: '' });
+  assert.equal(waiting.detail, 'Waiting for Studio… In Roblox Studio, type 042 718 into the Arcane plugin and click Connect.');
+  const approval = studio({ phase: 'approval', code: null, message: 'Roblox Studio place “Obby” (place 1) wants to connect.' });
+  assert.deepEqual([approval.state, approval.detail, approval.action?.kind], ['todo', 'Roblox Studio place “Obby” (place 1) wants to connect.', 'review-studio'], 'Approve/Deny live next to the place on the Studio plugin card.');
+  assert.deepEqual([studio({ phase: 'approved', code: null, message: 'Approved.' }).state, studio({ phase: 'approved', code: null, message: 'Approved.' }).action], ['checking', null]);
+  assert.deepEqual(waiting.action, { kind: 'show-key', label: 'Use API key' });
+  assert.deepEqual([studio({ phase: 'starting', code: null, message: '' }).state, studio({ phase: 'starting', code: null, message: '' }).action], ['checking', null]);
+  assert.equal(studio({ phase: 'busy', code: null, message: 'Another Arcane window is waiting.' }).action?.kind, 'show-key');
+  assert.equal(studio({ phase: 'expired', code: null, message: 'Expired.' }).detail, 'Expired.');
+  assert.equal(studio(idle, null).state, 'checking');
+  assert.equal(studio({ phase: 'waiting', code: '0427', message: '' }, true).state, 'done', 'A live session always wins.');
+  assert.equal(studio(null).action?.kind, 'show-key', 'Without pairing the original key flow is unchanged.');
+});
+
 test('starter project detection is exact', () => {
   assert.equal(isStarterProject('C:\\Users\\me\\AppData\\Roaming\\Arcane\\projects\\Untitled'), true);
   assert.equal(isStarterProject('/home/me/.config/Arcane/projects/Untitled/'), true);

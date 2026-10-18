@@ -443,6 +443,28 @@ test('browser summary and model list fit desktop/mobile viewports using actual c
   assert.equal(f.posts.length, 0);
 });
 
+test('browser picker keeps Tab inside the open popover in both views; Escape closes back to the picker button', { skip: !browserModule, timeout: 30000 }, async t => {
+  const f = await browserFixture(t), { page } = f;
+  const focusedInside = () => page.evaluate(() => { const a = document.activeElement; return !!a && a !== document.body && document.getElementById('codex-model-popover')!.contains(a); });
+  const focusedId = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.id || (document.activeElement as HTMLElement | null)?.dataset.pickerModel || '');
+  for (const view of ['reasoning', 'models'] as const) {
+    await f.open(); if (view === 'models') await f.list();
+    const stops = await page.evaluate(() => Array.from(document.getElementById('codex-model-popover')!.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]'))
+      .filter(node => node.tabIndex >= 0 && !(node as HTMLButtonElement).disabled && !node.closest('[hidden],[inert]') && node.getClientRects().length > 0).length);
+    assert.ok(stops >= 1, view);
+    const forward: string[] = [];
+    for (let index = 0; index < stops + 2; index++) { await page.keyboard.press('Tab'); assert.equal(await focusedInside(), true, view + ' Tab ' + index); forward.push(await focusedId()); }
+    assert.equal(forward[stops], forward[0], view + ' Tab wraps to the first control');
+    for (let index = 0; index < stops + 2; index++) { await page.keyboard.press('Shift+Tab'); assert.equal(await focusedInside(), true, view + ' Shift+Tab ' + index); }
+    assert.equal(await page.locator('#codex-model-popover').isVisible(), true);
+    if (view === 'models') { await page.keyboard.press('Escape'); assert.equal(await page.locator('#codex-picker-summary').isVisible(), true); }
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#codex-model-popover').isVisible(), false);
+    assert.equal(await page.locator('#codex-model-trigger').evaluate(el => el === document.activeElement), true, view + ' Escape returns focus to the picker button');
+  }
+  assert.equal(f.posts.length, 0, 'Tabbing never applies a selection');
+});
+
 test('browser catalogue refresh excludes removed rows and exposes only reported range levels/defaults', { skip: !browserModule, timeout: 30000 }, async t => {
   const initial = state(); initial.snapshot!.thread = null; delete initial.workflowModel;
   initial.snapshot!.models.push({ model: 'fixture-custom', id: 'opaque-custom', displayName: 'Custom reported model', efforts: ['reported-balanced', 'reported-deep', 'reported-quick'], defaultEffort: 'reported-deep', entitlement: 'unverified' });

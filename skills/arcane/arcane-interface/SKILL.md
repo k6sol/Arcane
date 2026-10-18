@@ -7,11 +7,13 @@ license: MIT
 # Game UI design system
 
 ## Rules first
-- Arcane cannot create GuiObjects directly. UI is built at runtime by code:
-  - `ReplicatedStorage.UI`: ModuleScripts `Theme` (tokens), `Components` (factories), and one module per screen exporting `mount(playerGui) -> { open, close, destroy }`.
-  - `StarterPlayer.StarterPlayerScripts.UIController`: the one LocalScript that requires and mounts screens.
-  - Create them with `scene_create`, write source with `script_update`. The LocalScript starts disabled; after writing, `script_read` + `script_set_enabled`.
-- Verify with `playtest_request` scenarios: `click-gui`, `assert-gui` (Visible), `assert-text`, `assert-gui-layout`. Give every testable object a stable name path: `PlayerGui.<Screen>.Root.<Name>`.
+- Build the GUI tree directly with `scene_build` (plugin capability `scene.gui`). Never write a script that constructs static UI.
+  - Screen: `container: "ScreenGui"`, parent = the StarterGui root ref from `scene_children`, `screen` props. Items: a GUI className + `ui`, `in` = key of the parent item. One screen = one atomic build (one undo step, one receipt).
+  - Repeated components (button, card, slot) are `prototypes` `{ui: [root, UICorner, UIStroke, ...]}` stamped by items with `use` + `ui` overrides (Text, LayoutOrder).
+  - World UI: BillboardGui (part/Attachment) and SurfaceGui (part) items in a Model build.
+  - Values: UDim2 `[xScale,xOffset,yScale,yOffset]`, UDim `[scale,offset]` or px, FontFace a built-in family, Image only `rbxassetid://<digits>`. Text is one line (no newlines); wrap with TextWrapped.
+- Then write only behaviour: LocalScript `StarterPlayer.StarterPlayerScripts.UIController` plus ModuleScripts in `ReplicatedStorage.UI` (`scene_create`, source via `script_update`, then `script_read` + `script_set_enabled`). It finds the built tree (`PlayerGui:WaitForChild("<Screen>")`) and wires events, tweens and data binding. Runtime lists (inventory slots, toasts) clone a hidden template element built in the tree (Visible false).
+- Verify: `studio_viewport_capture` cannot show a ScreenGui in Edit mode. Use `playtest_request` scenarios `click-gui`, `assert-gui` (Visible), `assert-text`, `assert-gui-layout`; for a quick look at a component, stamp it on a temporary SurfaceGui part facing the camera, capture, then `receipt_restore` it. Stable name paths: `PlayerGui.<Screen>.Root.<Name>`.
 - UI never owns state. Buttons request actions through remotes; the server validates (`arcane-remote-security`). Show pending, accepted and denied states.
 - Inspect any existing UI first and keep its style; these tokens are the default when none exists.
 - Full screen recipes (main menu, HUD bars, shop, inventory grid, notifications, loading, settings): `skills_get` with ids ["arcane-interface"], references ["arcane-interface:recipes"], allowExperimental true ([recipes](references/recipes.md)).
@@ -37,7 +39,7 @@ license: MIT
 Radius: panel 12, button 10, pill UDim.new(0.5, 0). UIPadding: panel 16 px, card 10 px. One subtle UIGradient on panels (Rotation 90, surface to 10% darker).
 
 ## Typography
-- Body: `Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.Medium)`; numbers and timers Bold.
+- Body: BuilderSans Medium (`FontFace: {family: "BuilderSans", weight: "Medium"}`); numbers and timers Bold.
 - Display (titles only), pick one by genre: Montserrat Bold (default), FredokaOne or LuckiestGuy (playful), Michroma or Oswald (sci-fi, military), Merriweather or GrenzeGotisch (fantasy), Creepster or SpecialElite (horror), PressStart2P (retro). Max two families.
 - Sizes at 1080p: title 48-64, heading 32, body 20-24, caption 16; never below 14 px on a phone.
 - TextScaled true only inside fixed-proportion labels, always with UITextSizeConstraint (title Max 64 Min 24, body Max 24 Min 14). Body text: TextWrapped; names: TextTruncate AtEnd.
@@ -54,6 +56,6 @@ Radius: panel 12, button 10, pill UDim.new(0.5, 0). UIPadding: panel 16 px, card
 - Never convey state by colour alone: pair it with an icon or text. Contrast at least 4.5:1 for text and 3:1 for bars and icons. Full rules: `arcane-accessibility`.
 
 ## Code structure
-- `Theme` returns frozen tables (`table.freeze`) of colours, fonts, radii and tween infos. `Components` exports `panel`, `button`, `label`, `bar` and `icon` factories taking a props table and returning the instance. Screens compose components and never hard-code colours.
+- Static look (tokens, sizes, fonts, strokes) lives in the build. `Theme` returns frozen tables (`table.freeze`) of state colours and tween infos for runtime changes only. Each screen module exports `bind(screenGui) -> { open, close, destroy }` and looks elements up by name, never creating them.
 - Each screen owns its connections in a cleanup list and disconnects them in `destroy` (pattern: `arcane-luau-architecture`).
 - Screens listen to server state (attributes, leaderstats, remotes) and re-render. Ignore stale responses after a screen closes.

@@ -16,7 +16,7 @@ import {parseNativeStudioReconstructionResponse,parseNativeStudioReconstructionS
 export {NATIVE_STUDIO_IMPORT_RESPONSE_BYTES,parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import {readAssetJson,discardRejectedAssetBody} from './asset-routes.js';
 const PREFIX='/v1/assets/native/';
-const METHODS=new Map([['start','POST'],['adopt-glb','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['reconstruct-studio-import','POST'],['studio-reconstruction-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET']]);
+const METHODS=new Map([['start','POST'],['adopt-glb','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['reconstruct-studio-import','POST'],['studio-reconstruction-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET'],['preview','GET']]);
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
 function jobId(value:unknown):string {if(typeof value!=='string'||!UUID.test(value))fail('INPUT');return value;}
@@ -53,7 +53,7 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const mutation=route==='start'||route==='adopt-glb'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import'||route==='reconstruct-studio-import';
    // Capture BEFORE body reads/queue waits. Never resolve again into a fresh generation.
    const actor=registry.capture(credential,mutation?'mutate':'read');
-   const allowed=route==='manifest'||route==='studio-staging-status'||route==='studio-reconstruction-status'?['jobId']:route==='jobs'?['limit','after']:[];
+   const allowed=route==='manifest'||route==='studio-staging-status'||route==='studio-reconstruction-status'?['jobId']:route==='preview'?['jobId','path']:route==='jobs'?['limit','after']:[];
    const seen=new Set<string>();for(const[key]of url.searchParams){if(!allowed.includes(key)||seen.has(key))fail('INPUT');seen.add(key);}
    if(route==='jobs'){
     const text=url.searchParams.get('limit');if(text!==null&&!/^[1-9][0-9]?$/.test(text))fail('INPUT');const limit=text===null?32:Number(text);
@@ -63,6 +63,14 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
     const id=jobId(url.searchParams.get('jobId'));if(!host.bindingNative(actor,id))fail('NOT_FOUND');
     const manifest=await service.manifest(id);assertNativeAssetActor(actor,'read');
     if(!host.bindingNative(actor,id)||manifest.jobId!==id)fail('NOT_FOUND');await send(200,{manifest});return true;
+   }
+   if(route==='preview'){
+    // The same two manifest-approved review renders as the human viewer, scoped to this conversation's job.
+    const id=jobId(url.searchParams.get('jobId'));if(!host.bindingNative(actor,id))fail('NOT_FOUND');
+    const bytes=await service.preview(id,url.searchParams.get('path'));assertNativeAssetActor(actor,'read');if(!host.bindingNative(actor,id))fail('NOT_FOUND');
+    if(response.headersSent||response.destroyed)return true;
+    response.writeHead(200,{'Content-Type':'image/png','Content-Length':bytes.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'"});
+    response.end(bytes);return true;
    }
    if(route==='studio-staging-status'){
     const id=jobId(url.searchParams.get('jobId')),binding=host.bindingNative(actor,id);if(!binding)fail('NOT_FOUND');

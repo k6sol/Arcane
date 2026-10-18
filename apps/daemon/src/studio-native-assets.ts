@@ -80,7 +80,8 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
       actorOk(actor);const a=nativeAssetSearchSchema.parse(input);prune();idle();admit('search');
       return withNative(a.sessionId,a.nativeStudioId,DEADLINE.search,async(context,session,nativeStudioId,signal)=>{
         const found=await searchNativeAssets(context,a,signal);
-        for(const item of found.results){
+        // Audio ids are Sound.SoundId values only; they never become insertable.
+        for(const item of a.category==='Audio'?[]:found.results){
           searched.delete(session.id+':'+item.id);searched.set(session.id+':'+item.id,Date.now()+NATIVE_ASSET_RATE.searchedTtlMs);
           while(searched.size>NATIVE_ASSET_RATE.searchedIds)searched.delete(searched.keys().next().value!);
         }

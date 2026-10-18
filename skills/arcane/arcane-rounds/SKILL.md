@@ -14,4 +14,4 @@ Choose player joining/leaving/rejoining rules consistent with the game. Keep eli
 Own and clean connections, scheduled tasks, temporary instances and replicated UI state at phase exit. A reset should restore a known baseline, not assume every previous player survived. Do not award completion twice because a timeout and final objective arrive together.
 
 ## Verification
-Exercise one-player start, full lobby, simultaneous final events, no eligible survivors, disconnect during results and repeated rounds. Assertions should cover exactly one result/award, correct remaining lives/teams and no old callbacks. Do not impose Hunted's match structure or three-life rule on unrelated genres.
+Exercise one-player start, full lobby, simultaneous final events, no eligible survivors, disconnect during results and repeated rounds. Assertions should cover exactly one result/award, correct remaining lives/teams and no old callbacks.

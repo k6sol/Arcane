@@ -1,5 +1,7 @@
 # Native project handoffs
 
+Claude also runs directly in Arcane's chat, in the same conversation surface as ChatGPT. The terminal handoff described here is an optional extra for people who want Claude Code's own terminal.
+
 Arcane can open Claude Code in a native Windows terminal with its project tools configured. Claude Code owns authentication, model access, billing and permission prompts. The desktop conversation continues to use its selected connection.
 
 In General settings, select Claude Code and check sign-in status. Arcane reads the installed CLI's version, authentication status and help metadata. In Connections, choose a model and effort under **Claude Code project tools**, then select **Open with Arcane tools**. Both choices start empty. The native confirmation shows the selected CLI version, model, effort and project.

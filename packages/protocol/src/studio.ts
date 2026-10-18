@@ -20,7 +20,7 @@ export interface StudioContinuityProof {
   connected: boolean; observedAt: string; expiresAt: string;
 }
 export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context', 'scene.asset_watch'] as const;
-export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.build', 'environment.apply', 'scene.place_asset', 'scene.apply_material'] as const;
+export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.build', 'environment.apply', 'scene.place_asset', 'scene.apply_material', 'terrain.generate'] as const;
 /** Native asset adoption (plugin side). scene.asset_watch arms a one-shot Workspace insertion watch;
  * scene.place_asset adopts exactly one natively inserted/generated instance, strips scripts by default,
  * fits, grounds, anchors and parents it under one receipt; scene.apply_material applies a generated
@@ -32,10 +32,24 @@ export const SCENE_BUILD_LIMITS = Object.freeze({ items: 2000, prototypes: 32, p
 /** environment.apply: bounded terrain fills plus Lighting/effect settings in one undo recording.
  * Terrain is undone with Studio Undo; receipts record the prior lighting values. */
 export const ENVIRONMENT_LIMITS = Object.freeze({ terrainShapes: 128, extent: 2048, volume: 400_000_000 });
+/** terrain.generate: one seeded heightfield (noise + landform/water features + material rules) written to
+ * a 4-stud-grid region in bounded WriteVoxels chunks, one undo recording. Reverted with Studio Undo only. */
+export const TERRAIN_LIMITS = Object.freeze({ extent: 2048, minExtent: 16, height: 512, minHeight: 8, coordinate: 100000, floor: 10000,
+  features: 32, points: 32, rules: 16, octaves: 8, voxel: 4, voxels: 33_554_432, chunkVoxels: 524_288 });
 /** Non-method plugin capability: effects classes in scene.create/scene.build, environment presets,
  * Lighting.Technology, Terrain.Decoration, MaterialVariants and scene.inspect bounds. Older plugins never advertise it. */
 export const STUDIO_EFFECTS_CAPABILITY = 'scene.effects' as const;
 export const EFFECT_LIMITS = Object.freeze({ properties: 32, keypoints: 20, materials: 8 });
+/** Non-method plugin capability: GUI classes (ScreenGui/SurfaceGui/BillboardGui, GuiObjects and UI modifiers) in
+ * scene.create/scene.build, ScreenGui build roots and GUI prototypes stamped by scene.build. Older plugins never advertise it. */
+export const STUDIO_GUI_CAPABILITY = 'scene.gui' as const;
+/** Non-method plugin capability: character classes (Humanoid, HumanoidDescription, AnimationController, Animator) with typed,
+ * bounded properties in scene.create/scene.build. Rig parts, joints and animations stay with server Scripts. Older plugins never advertise it. */
+export const STUDIO_CHARACTERS_CAPABILITY = 'scene.characters' as const;
+/** Every non-method feature capability a plugin may advertise at pairing (anything else must be a known method). */
+export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts']);
+/** GUI value bounds: Text/PlaceholderText UTF-8 bytes, UDim scale magnitude and integer pixel-offset magnitude. */
+export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOffset: 10000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
 export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
@@ -94,7 +108,7 @@ export interface StudioUploadContextObservation extends StudioImportContextObser
     | {status: 'unavailable'; id: null; provenance: 'StudioService:GetUserId'};
 }
 export interface MutationReceipt {
-  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply' | 'scene.place_asset' | 'scene.apply_material'; ref: InstanceRef;
+  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply' | 'scene.place_asset' | 'scene.apply_material' | 'terrain.generate'; ref: InstanceRef;
   before: Record<string, Json> | null; after: Record<string, Json>;
 }
 export interface PluginPairInput { code: string; protocolVersion: 1; identity: StudioIdentity; capabilities: string[] }

@@ -7,14 +7,18 @@ license: MIT
 # Conflict-safe Studio edits
 
 ## Bound the change
-Read current editor content and relevant conventions. Capture exact base text or typed property values, session identity and the user's permitted scope. Produce a reviewable diff with dependency-aware partial acceptance. A previous approval does not authorize a different place or an expanded task.
+- Stay inside the user's request, the paired session and its granted roots. An explicit in-scope request already authorizes the edits; do not ask again per part or per script. A previous approval never covers a different place or a larger task.
+- Baselines come from fresh reads: `script_read` for `expectedSource`, `scene_inspect` for `scene_update` `expected` (exactly the changed keys). `script_search` excerpts are never edit baselines.
+- Preserve manual work: change only what the task needs, keep the user's names, style and unrelated scripts, and never overwrite a newer editor buffer (a dirty-editor conflict is refused; re-read and redo the change on the real source).
+- Prefer one atomic `scene_build` per logical layer over many small writes; it is one undo step and one receipt.
 
-For source commits, check the baseline again inside the supported editor update callback. Keep the callback deterministic: no logging side effects, remote calls or unrelated edits. If the adapter cannot enforce this check, expose the weaker guarantee and use an appropriate reviewed fallback.
-
-For scene batches, validate the plan first, then retain each actual operation's receipt. History recordings group changes but do not make an external multi-file batch atomic. Resolve unknown outcomes before retries.
+## Uncertain outcomes
+- Keep every commandId and receipt. A timeout or lost acknowledgement is unknown, not failed: check `receipt_status` before anything else and never repeat a mutation automatically.
+- On a conflict or refusal, read the current state and revise from it; never force or widen scope as a workaround.
 
 ## Restore carefully
-Compare current state to the recorded after-state. Restore matching owned operations; report conflicts without resetting unrelated work. New session handles and lost writer leases invalidate old commands.
+- `receipt_restore` undoes one of Arcane's own succeeded mutations only while its after-state is unchanged; later manual edits make it refuse, which protects them. Terrain and lighting revert with Studio Undo.
+- Delete and reparent are not exposed: name the manual Studio step instead of approximating it.
 
 ## Verification
-Simulate an open-buffer manual edit, a partial batch failure, duplicate delivery and a later unrelated edit. Preserve both proposal and manual source. Never call a timed-out mutation definitely failed without reconciliation.
+Report each change with its receipt or verified read-back, and list anything uncertain or refused separately.

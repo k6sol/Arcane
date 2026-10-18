@@ -68,7 +68,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     if (mode === 'duplicate-effort') data = [{ ...model(), supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'low' }] }];
     setTimeout(() => send({ id, result: { data, nextCursor: mode === 'cursor-loop' ? 'page-two' : first ? 'page-two' : null } }), 2); return;
   }
-  if (method === 'mcpServerStatus/list') { send({id,result:{data:[...(mode==='inherited-mcp-active'?[{name:'unsafe-inherited',runtimeStatus:'connected',tools:{write:{}},toolsError:null,pluginId:null}]:[]),{name:'arcane',runtimeStatus:mode==='bad-mcp-inventory'?'unsafe':'connected',tools:Object.fromEntries(["sessions","scene_children","scene_inspect","scene_search","selection_read","script_read","script_search","script_update","script_set_enabled","scene_create","scene_update","scene_build","environment_apply","receipt_status","receipt_restore","playtest_request","playtest_status","playtest_cancel","skills_recommend","skills_list","skills_get","work_runs","work_ready","work_create","work_claim","work_progress","work_submit","assets_probe","assets_jobs","assets_start","assets_cancel","assets_manifest","studio_viewport_capture","studio_asset_search","studio_asset_insert","studio_asset_generate"].filter(name=>mode!=='missing-script-search'||name!=='script_search').map(name=>[name,{description:'FIXTURE_SECRET'}])),toolsError:null,pluginId:null,accessToken:'FIXTURE_SECRET'}],nextCursor:mode==='mcp-cursor-loop'?'same':null}});return; }
+  if (method === 'mcpServerStatus/list') { send({id,result:{data:[...(mode==='inherited-mcp-active'?[{name:'unsafe-inherited',runtimeStatus:'connected',tools:{write:{}},toolsError:null,pluginId:null}]:[]),{name:'arcane',runtimeStatus:mode==='bad-mcp-inventory'?'unsafe':'connected',tools:Object.fromEntries(["sessions","scene_children","scene_inspect","scene_search","selection_read","script_read","script_search","script_update","script_set_enabled","scene_create","scene_update","scene_build","environment_apply","receipt_status","receipt_restore","playtest_request","playtest_status","playtest_cancel","skills_recommend","skills_list","skills_get","work_runs","work_ready","work_create","work_claim","work_progress","work_submit","assets_probe","assets_jobs","assets_start","assets_cancel","assets_manifest","studio_viewport_capture","studio_asset_search","studio_asset_insert","studio_asset_generate","assets_procedural","assets_preview","terrain_generate"].filter(name=>mode!=='missing-script-search'||name!=='script_search').map(name=>[name,{description:'FIXTURE_SECRET'}])),toolsError:null,pluginId:null,accessToken:'FIXTURE_SECRET'}],nextCursor:mode==='mcp-cursor-loop'?'same':null}});return; }
   if(method==='thread/read'&&mode==='image-history-resume'){
     // Metadata-only reads (includeTurns:false) carry no turns, as in the public schema.
     const thread={id:params.threadId,sessionId:'fixture-session-root',cwd:process.cwd(),ephemeral:false};
@@ -140,6 +140,16 @@ createInterface({ input: process.stdin }).on('line', line => {
     if (mode === 'event-flood') {
       for(let n=0;n<40;n++) notify('item/agentMessage/delta',{threadId,turnId,itemId:'fixture-message',delta:'delta-'+n});
       notify('account/chatgptAuthTokens/changed',{accessToken:'FIXTURE_SECRET',email:'synthetic@example.test'}); return;
+    }
+    if (mode === 'mcp-tool-items') {
+      const call = (id, extra) => ({ id, type: 'mcpToolCall', status: 'inProgress', server: 'arcane', tool: 'scene_create', appContext: null, result: null, error: null, durationMs: null, ...extra });
+      const args = { className: 'Part', name: 'Tree', parent: { root: 'Workspace', pathSegments: ['Forest'], instanceId: 'FIXTURE_SECRET' }, source: 'print("FIXTURE_SECRET")', properties: { Size: [1, 2, 3], Color: 'FIXTURE_SECRET' }, token: 'FIXTURE_SECRET' };
+      notify('item/started', { threadId, turnId, item: call('fixture-mcp-1', { arguments: args }) });
+      notify('item/completed', { threadId, turnId, item: call('fixture-mcp-1', { arguments: args, status: 'completed', result: { content: [{ type: 'text', text: 'FIXTURE_SECRET' }] } }) });
+      notify('item/started', { threadId, turnId, item: call('fixture-mcp-2', { server: 'other', tool: 'scene_create', arguments: { name: 'FIXTURE_SECRET' } }) });
+      notify('item/started', { threadId, turnId, item: call('fixture-mcp-3', { tool: 'bad tool\nname', arguments: { name: 'x' } }) });
+      notify('item/started', { threadId, turnId, item: call('fixture-mcp-4', { tool: 'script_update', arguments: { ref: { root: 'ServerScriptService', pathSegments: ['Main'] }, source: 'x'.repeat(200000), name: 'sk-proj-FIXTURESECRET123', query: 'q'.repeat(101) } }) });
+      return;
     }
     if (mode === 'account-change') { notify('account/updated',{authMode:'apikey',accessToken:'FIXTURE_SECRET'}); return; }
     if (mode === 'resolved-approval') { approval(7); setTimeout(()=>notify('serverRequest/resolved',{threadId,requestId:7}),150); return; }

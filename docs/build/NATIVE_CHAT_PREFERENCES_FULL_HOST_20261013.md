@@ -17,7 +17,7 @@ encrypted draft recovery. No actual default-main/frontend/controller recovery
 claim is made by this follow-up.
 
 The concrete conflict is in the unchanged
-[main.cjs](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/apps/desktop/electron/main.cjs:155):
+[main.cjs](../../apps/desktop/electron/main.cjs):
 
 ```js
 window.once('ready-to-show', () => {
@@ -47,8 +47,8 @@ and completion record.
 
 The evidence directory is
 `runtime/verification/native-chat-preferences-full-host-20261013/run-51040b27-d155-4ec5-934b-ef8b7a9884ff/`.
-[runner.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-chat-preferences-full-host-20261013/run-51040b27-d155-4ec5-934b-ef8b7a9884ff/runner.json),
-[acceptance-limitation.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-chat-preferences-full-host-20261013/run-51040b27-d155-4ec5-934b-ef8b7a9884ff/acceptance-limitation.json)
+runner.json (`runtime/verification/native-chat-preferences-full-host-20261013/run-51040b27-d155-4ec5-934b-ef8b7a9884ff/runner.json`, local evidence, not committed),
+acceptance-limitation.json (`runtime/verification/native-chat-preferences-full-host-20261013/run-51040b27-d155-4ec5-934b-ef8b7a9884ff/acceptance-limitation.json`, local evidence, not committed)
 and `completion.json` retain the distinction. The run finished at
 **2026-10-13 19:35:05.405 UTC**, in **1,061 ms**, with no error, timeout or forced
 termination.
@@ -97,7 +97,7 @@ output. Scans reject links/special/hardlinked files and impose limits of
 app, 20 seconds per phase, 60 seconds overall and 32 KiB diagnostics per child.
 
 The earlier
-[native factory/preload DPAPI proof](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/docs/build/NATIVE_WORKSPACE_PREFERENCES_PROOF_20261013.md)
+[native factory/preload DPAPI proof](NATIVE_WORKSPACE_PREFERENCES_PROOF_20261013.md)
 remains retained and unchanged. Its **69-file evidence seal reverified successfully**
 during this follow-up. That proof covers exact native preferences save/read,
 restart/port-change recovery and scope/frame rejection for its original CJS
@@ -129,7 +129,7 @@ verify a separately packaged Arcane EXE or genuine keyboard input.
 
 Authoritative evidence:
 `runtime/verification/native-chat-preferences-full-host-20261013/actual-98f84cc1-3fbd-40dd-ba44-6707af55d347/`.
-[Actual runner.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-chat-preferences-full-host-20261013/actual-98f84cc1-3fbd-40dd-ba44-6707af55d347/runner.json)
+Actual runner.json (`runtime/verification/native-chat-preferences-full-host-20261013/actual-98f84cc1-3fbd-40dd-ba44-6707af55d347/runner.json`, local evidence, not committed)
 and `completion.json` record `passed:true` and `actualFullHostAcceptance:true`.
 The separate `save.json` and `restart-read.json` retain UI/native comparisons,
 owned project identity, observed HTTP methods/paths and actual daemon exits.
@@ -214,7 +214,7 @@ are retained for review. Bounds were 45 seconds per app, 65 seconds per phase,
 run.
 
 The independent
-[actual postrun-process-check.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-chat-preferences-full-host-20261013/actual-98f84cc1-3fbd-40dd-ba44-6707af55d347/postrun-process-check.json)
+actual postrun-process-check.json (`runtime/verification/native-chat-preferences-full-host-20261013/actual-98f84cc1-3fbd-40dd-ba44-6707af55d347/postrun-process-check.json`, local evidence, not committed)
 at **19:51:39.324 UTC** found all seven recorded runner/app/renderer/daemon PIDs
 absent, the owned listener closed, and no daemon descriptor or preferences
 lock/stage remaining. It inspected only those owned identities and terminated

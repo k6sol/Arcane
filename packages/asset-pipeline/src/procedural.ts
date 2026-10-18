@@ -1,0 +1,109 @@
+import { AssetError } from './types.js';
+import type { ProceduralSpec, Vec3 } from './types.js';
+
+/** Bounded parameters for the bundled Blender generators (workers/blender/procedural.py).
+ * Data only: typed numbers/enums, never code, paths or imports. Normalization is
+ * canonical (fixed key order, explicit defaults) so a stored request re-normalizes
+ * to itself. Triangle budgets follow the 20,000-triangle per-mesh Roblox limit. */
+export const PROCEDURAL_KINDS = ['tree', 'rock', 'column', 'foliage'] as const;
+export const TREE_SPECIES = ['pine', 'oak', 'birch', 'palm'] as const;
+export const COLUMN_BASES = ['none', 'plinth', 'attic'] as const;
+export const COLUMN_CAPITALS = ['none', 'doric', 'ionic', 'corinthian'] as const;
+export const FOLIAGE_STYLES = ['bush', 'grass', 'fern'] as const;
+export const PROCEDURAL_LIMITS = Object.freeze({
+  minTriangles: 2500, maxTriangles: 20000,
+  defaultTriangles: { tree: 16000, rock: 6000, column: 12000, foliage: 8000 } as const,
+  treeHeight: [2, 20] as const, trunkRadius: [0.03, 1.5] as const, rockSize: [0.1, 12] as const,
+  columnRadius: [0.05, 2] as const, columnHeight: [0.5, 20] as const, flutes: [8, 32] as const,
+  foliageRadius: [0.1, 5] as const, foliageHeight: [0.1, 5] as const,
+});
+/** Per-species default colours (linear RGB) and approximate crown width/height ratio. */
+const SPECIES = {
+  pine: { bark: [0.24, 0.14, 0.09], leaves: [0.05, 0.16, 0.07], width: 0.7 },
+  oak: { bark: [0.22, 0.18, 0.14], leaves: [0.12, 0.25, 0.06], width: 0.9 },
+  birch: { bark: [0.82, 0.8, 0.75], leaves: [0.24, 0.42, 0.1], width: 0.55 },
+  palm: { bark: [0.42, 0.34, 0.24], leaves: [0.14, 0.32, 0.08], width: 0.8 },
+} as const;
+const PRIMARY = { rock: [0.2, 0.19, 0.17], column: [0.78, 0.75, 0.68], foliage: [0.13, 0.3, 0.08] } as const;
+
+function fail(message: string): never { throw new AssetError('INPUT', message); }
+function fields(value: unknown, allowed: string[]): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('procedural must be an object.');
+  const r = value as Record<string, unknown>;
+  const extra = Object.keys(r).find(k => !allowed.includes(k));
+  if (extra !== undefined) fail('Unsupported procedural field: ' + extra.slice(0, 64) + '.');
+  return r;
+}
+function num(v: unknown, [low, high]: readonly [number, number], fallback: number, label: string): number {
+  const n = v ?? fallback;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < low || n > high) fail(`${label} must be ${low}..${high}.`);
+  return n;
+}
+function int(v: unknown, [low, high]: readonly [number, number], fallback: number, label: string): number {
+  const n = num(v, [low, high], fallback, label);
+  if (!Number.isInteger(n)) fail(`${label} must be an integer.`);
+  return n;
+}
+function choice<T extends string>(v: unknown, options: readonly T[], fallback: T, label: string): T {
+  const value = v ?? fallback;
+  if (typeof value !== 'string' || !(options as readonly string[]).includes(value)) fail(`${label} must be one of ${options.join(', ')}.`);
+  return value as T;
+}
+function color(v: unknown, label: string): Vec3 | null {
+  if (v === undefined || v === null) return null;
+  if (!Array.isArray(v) || v.length !== 3 || v.some(n => typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 1)) fail(`${label} must be three linear 0..1 numbers.`);
+  return [...v] as Vec3;
+}
+function vec(v: unknown, range: readonly [number, number], fallback: Vec3, label: string): Vec3 {
+  const value = v ?? fallback;
+  if (!Array.isArray(value) || value.length !== 3) fail(`${label} needs three numbers.`);
+  return value.map(n => num(n, range, 0, label)) as Vec3;
+}
+
+export function normalizeProcedural(value: unknown): ProceduralSpec {
+  const kind = choice((value as { kind?: unknown } | null)?.kind, PROCEDURAL_KINDS, 'tree', 'procedural.kind');
+  if (kind === 'tree') {
+    const r = fields(value, ['kind', 'species', 'height', 'trunkTaper', 'branchLevels', 'leafDensity', 'trunkRadius', 'secondaryColor']);
+    const height = num(r.height, PROCEDURAL_LIMITS.treeHeight, 9, 'Tree height (m)'), species = choice(r.species, TREE_SPECIES, 'oak', 'Tree species');
+    return { kind, species, height,
+      trunkTaper: num(r.trunkTaper, [0.2, 0.95], 0.55, 'trunkTaper'), branchLevels: int(r.branchLevels, [1, 3], 2, 'branchLevels'),
+      leafDensity: num(r.leafDensity, [0, 1], 0.7, 'leafDensity'),
+      trunkRadius: r.trunkRadius === null || r.trunkRadius === undefined ? null : num(r.trunkRadius, PROCEDURAL_LIMITS.trunkRadius, 0, 'trunkRadius (m)'),
+      secondaryColor: color(r.secondaryColor, 'secondaryColor') ?? [...SPECIES[species].leaves] as Vec3 };
+  }
+  if (kind === 'rock') {
+    const r = fields(value, ['kind', 'size', 'roughness']);
+    return { kind, size: vec(r.size, PROCEDURAL_LIMITS.rockSize, [1.6, 1.2, 0.9], 'Rock size (m)'), roughness: num(r.roughness, [0, 1], 0.5, 'roughness') };
+  }
+  if (kind === 'column') {
+    const r = fields(value, ['kind', 'radius', 'height', 'flutes', 'base', 'capital']);
+    const radius = num(r.radius, PROCEDURAL_LIMITS.columnRadius, 0.35, 'Column radius (m)'), height = num(r.height, PROCEDURAL_LIMITS.columnHeight, 4, 'Column height (m)');
+    const flutes = int(r.flutes, [0, PROCEDURAL_LIMITS.flutes[1]], 20, 'flutes');
+    if (flutes !== 0 && flutes < PROCEDURAL_LIMITS.flutes[0]) fail('flutes must be 0 (smooth) or 8..32.');
+    if (height < radius * 4) fail('Column height must be at least four times its radius.');
+    return { kind, radius, height, flutes, base: choice(r.base, COLUMN_BASES, 'attic', 'Column base'), capital: choice(r.capital, COLUMN_CAPITALS, 'doric', 'Column capital') };
+  }
+  const r = fields(value, ['kind', 'style', 'radius', 'height', 'density']);
+  return { kind, style: choice(r.style, FOLIAGE_STYLES, 'bush', 'Foliage style'), radius: num(r.radius, PROCEDURAL_LIMITS.foliageRadius, 0.8, 'Foliage radius (m)'),
+    height: num(r.height, PROCEDURAL_LIMITS.foliageHeight, 0.9, 'Foliage height (m)'), density: num(r.density, [0, 1], 0.7, 'density') };
+}
+
+const clamp = (n: number) => Math.min(20, Math.max(0.1, Math.round(n * 1e4) / 1e4));
+/** Approximate bounding size, informational only; the worker measures the real bounds. */
+export function proceduralSize(spec: ProceduralSpec): Vec3 {
+  if (spec.kind === 'tree') { const w = clamp(spec.height * SPECIES[spec.species].width); return [w, w, clamp(spec.height)]; }
+  if (spec.kind === 'rock') return spec.size.map(clamp) as Vec3;
+  if (spec.kind === 'column') { const w = clamp(spec.radius * (spec.base === 'none' ? 2.6 : 2.7)); return [w, w, clamp(spec.height)]; }
+  return [clamp(spec.radius * 2), clamp(spec.radius * 2), clamp(spec.height)];
+}
+export function proceduralColor(spec: ProceduralSpec): Vec3 {
+  return [...(spec.kind === 'tree' ? SPECIES[spec.species].bark : PRIMARY[spec.kind])] as Vec3;
+}
+export function proceduralDefaultBudget(spec: ProceduralSpec): number { return PROCEDURAL_LIMITS.defaultTriangles[spec.kind]; }
+/** Worst-case preflight so an impossible budget fails before Blender starts. */
+export function proceduralMinimumTriangles(spec: ProceduralSpec): number {
+  if (spec.kind === 'column') { const segments = spec.flutes ? Math.max(32, spec.flutes * 4) : 32; return 2 * segments * 26 + 2 * (segments - 2) + 3500; }
+  return PROCEDURAL_LIMITS.minTriangles;
+}
+/** Roblox material the Studio plugin applies per generated part (by source key). */
+export const PROCEDURAL_PART_MATERIALS = Object.freeze({ bark: 'Wood', leaves: 'Grass', rock: 'Slate', stone: 'Marble', foliage: 'Grass' } as const);

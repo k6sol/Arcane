@@ -148,6 +148,12 @@ test('router maps everyday VFX, GUI, scripting, systems, data and realism phrasi
     ['Make the scene look realistic', 'arcane-photoreal', []],
     ['photoreal lighting at golden hour', 'arcane-photoreal', []],
     ['spooky horror lighting with fog', 'arcane-photoreal', []],
+    ['Add ambience, footstep sfx and background music', 'arcane-audio', []],
+    ['Make realistic sound for my forest with birds and a river', 'arcane-audio', []],
+    ['Add an enemy NPC that patrols and chases players', 'arcane-characters', ['arcane-npc', 'arcane-gameplay-systems']],
+    ['Make zombie mobs with pathfinding ai', 'arcane-characters', ['arcane-npc']],
+    ['Spawn a shopkeeper character with an idle animation', 'arcane-characters', []],
+    ['Create a creature rig that walks around', 'arcane-characters', ['arcane-rig-animation']],
   ];
   for (const [request, first, alsoIncluded] of cases) {
     const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
@@ -272,4 +278,18 @@ test('actual scene_create handler forwards bounded cylinder/wedge/spawn recipes 
     assert.equal(reply.result.isError, true); assert.equal(reply.data.error.code, 'PROPERTY');
   }
   assert.equal(forwarded.length, count);
+});
+
+test('default routing is token-lean: the most relevant skill loads first and the rest stay deferred for skills_get', async () => {
+  assert.equal(SKILL_ROUTER_LIMITS.defaultBytes, 10_240);
+  const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Make a magic waterfall with fireflies and falling leaves' });
+  assert.equal(result.ids[0], 'arcane-vfx', 'domain guidance leads');
+  assert.ok(result.context.indexOf('## Loaded skill: arcane-vfx\n') >= 0);
+  assert.ok(result.bytes <= 10_240 && result.bytes === Buffer.byteLength(result.context));
+  // Core process is also in initialize.instructions, so it is deferred before task-specific guidance.
+  const core = ['arcane-studio-context', 'arcane-safe-edits', 'arcane-project-director', 'arcane-quality-review'];
+  for (const id of core) assert.ok(result.ids.includes(id) || result.deferredIds.includes(id), id);
+  const firstCore = result.ids.findIndex(id => core.includes(id));
+  if (firstCore >= 0) assert.ok(result.ids.slice(firstCore).every(id => core.includes(id)), 'core trails domain skills');
+  assert.ok(result.deferredIds.length > 0, 'remaining guidance is listed for on-demand skills_get');
 });

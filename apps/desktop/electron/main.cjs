@@ -28,10 +28,12 @@ let workspacePreferences;
 let claudeChat;
 let studioPlugin;
 let projectPermissions;
-// Workflow questions (Claude chat consent, provider setup, plugin install, project switch, Luau setup, About) render as
-// Arcane-styled in-app dialogs once the trusted workspace renderer attaches (in-app-dialog.cjs). Before that, e.g. for
-// startup failures, and whenever the renderer is gone, the native message box remains. Folder/file pickers stay native.
-let appDialogs = null;
+// Decisions (any question with more than one button: Claude tool consent, provider sign-in/terminal, plugin install,
+// project switch, checkout, turning auto-approve on, Luau setup) open in a separate main-process-owned Arcane window
+// (trusted-dialog.cjs) that the workspace renderer cannot answer. Purely informational one-button notices (About,
+// warnings) render in-page once the trusted workspace renderer attaches (in-app-dialog.cjs). Without an owner window,
+// e.g. for startup failures, the native message box remains. Folder/file pickers stay native.
+let appDialogs = null, trustedDialogs = null;
 const dialog = Object.freeze({
   showMessageBox: (...args) => appDialogs ? appDialogs.showMessageBox(...args) : nativeDialog.showMessageBox(...args),
   showOpenDialog: (...args) => nativeDialog.showOpenDialog(...args),
@@ -279,10 +281,29 @@ function installMenu() {
 }
 async function failStartup(message) {
   providerSetup?.dispose(); void stopClaudeChat();
-  if (closing) return; closing = true; appDialogs?.dispose();
+  if (closing) return; closing = true; appDialogs?.dispose(); trustedDialogs?.dispose();
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
   await stopDaemon(); app.exit(1);
+}
+// Smoke only: read-only checks of packaged host inputs. The Studio plugin check uses a separate installer pointed at an
+// empty folder inside the smoke root, so it verifies the bundled plugin build without touching Roblox Studio or writing files.
+async function smokePackagedFeatures() {
+  const load = async path => import(require('node:url').pathToFileURL(join(productRoot, path)).href);
+  const result = { bundledPluginVerified: false, plansConfigValid: false, chatInstructionsBundled: false, trustedDialogBundled: false };
+  try {
+    const plugin = await require('./plugin-install.cjs').createStudioPluginInstaller({ productRoot, pluginsDirectory: join(smokeRoot, 'studio-plugins-empty'),
+      confirm: async () => false }).status();
+    result.bundledPluginVerified = plugin.state === 'missing' && typeof plugin.pluginVersion === 'string';
+  } catch {}
+  try { const plans = await load('dist/packages/protocol/src/plans.js'); plans.validatePlansConfig(plans.ARCANE_PLANS); result.plansConfigValid = true; } catch {}
+  try {
+    const { TRUSTED_DIALOG_PAGE_FILES } = require('./trusted-dialog.cjs');
+    for (const file of [...TRUSTED_DIALOG_PAGE_FILES, 'trusted-dialog-preload.cjs']) await policy.directPath(join(__dirname, file), 'file');
+    result.trustedDialogBundled = !!trustedDialogs && !!appDialogs;
+  } catch {}
+  try { const tools = await load('dist/packages/protocol/src/arcane-tools.js'); result.chatInstructionsBundled = typeof tools.ARCANE_TASK_INSTRUCTIONS === 'string' && tools.ARCANE_TASK_INSTRUCTIONS.length > 0; } catch {}
+  return result;
 }
 async function checkSmoke() {
   await sleep(1200);
@@ -334,6 +355,29 @@ async function checkSmoke() {
     return typeof boot.startTaskPlanCard === 'function' && typeof card.TaskPlanCard?.mount === 'function';
   })()`);
   const workspacePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.workspacePreferences.read()');
+  // Newer desktop bridges: frozen shape plus the verification-mode answer of each read-only or disabled call. In smoke the
+  // hosts are disabled, so no Claude process, folder picker, browser, checkout or system notification can start.
+  const desktopBridges = JSON.parse(await window.webContents.executeJavaScript(`(async () => {
+    const d = window.arcaneDesktop || {};
+    const shaped = (bridge, names) => !!bridge && Object.isFrozen(bridge) && bridge.version === 1 && names.every(name => typeof bridge[name] === 'function');
+    const settle = async call => { try { return { ok: true, value: await call() }; } catch (error) { return { ok: false, message: String(error && error.message || '') }; } };
+    const chat = shaped(d.claudeChat, ['status','list','history','send','rewind','stop','remove','onEvent']) ? await settle(() => d.claudeChat.status()) : null;
+    const plugin = shaped(d.studioPlugin, ['status','install']) ? await settle(() => d.studioPlugin.status()) : null;
+    const project = shaped(d.workspaceProject, ['open']) ? await settle(() => d.workspaceProject.open()) : null;
+    const permissions = shaped(d.projectPermissions, ['read','save']) ? await settle(() => d.projectPermissions.read()) : null;
+    const billing = shaped(d.billing, ['status','openCheckout']) ? await settle(() => d.billing.status()) : null;
+    const notice = shaped(d.notifications, ['notify','onActivate']) ? await settle(() => d.notifications.notify({ kind: 'finished', body: 'Arcane smoke check.', target: 'arcane-smoke' })) : null;
+    return JSON.stringify({
+      claudeChat: !!chat && chat.ok === false,
+      studioPlugin: !!plugin && plugin.ok && plugin.value.state === 'unavailable' && plugin.value.message === 'Studio plugin setup is disabled in verification mode.',
+      workspaceProject: !!project && project.ok === false && project.message === 'The project picker is unavailable.',
+      dialogs: shaped(d.dialogs, ['attach','reply']),
+      projectPermissions: !!permissions && permissions.ok && permissions.value.available === false,
+      billing: !!billing && billing.ok && billing.value.state === 'not-connected' && billing.value.account === 'unavailable',
+      notifications: !!notice && notice.ok && notice.value.shown === false
+    });
+  })()`));
+  const packagedFeatures = await smokePackagedFeatures();
   await writeFile(join(smokeRoot, 'workspace.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
   // Exercise only the actual packaged renderer's local draft controllers. No
   // provider setup/lifecycle button, API command or native input is simulated.
@@ -388,6 +432,17 @@ async function checkSmoke() {
     nativeLifecycleNotStarted: renderer.modelOptions <= 1,
     conversationOnlyDefault:renderer.conversationOnly === true,providerSetupMounted:renderer.providerSetupMounted === true,
     nativeHandoffMounted: renderer.nativeHandoffMounted === true,
+    claudeChatBridgeDisabledInSmoke: desktopBridges.claudeChat === true,
+    studioPluginBridgeDisabledInSmoke: desktopBridges.studioPlugin === true,
+    workspaceProjectBridgeDisabledInSmoke: desktopBridges.workspaceProject === true,
+    inAppDialogsBridgeMounted: desktopBridges.dialogs === true,
+    projectPermissionsBridgeDisabledInSmoke: desktopBridges.projectPermissions === true,
+    billingBridgeNotConnectedInSmoke: desktopBridges.billing === true,
+    notificationsBridgeSilentInSmoke: desktopBridges.notifications === true,
+    bundledStudioPluginVerified: packagedFeatures.bundledPluginVerified === true,
+    bundledPlansConfigValid: packagedFeatures.plansConfigValid === true,
+    bundledChatInstructionsLoadable: packagedFeatures.chatInstructionsBundled === true,
+    trustedDecisionDialogsBundled: packagedFeatures.trustedDialogBundled === true,
     nativeAssetPermissionMounted: nativeAssetResponse.ok && nativeAssetState.state?.snapshot === null &&
       nativeAssetState.state?.nativeAssets?.available === true && nativeAssetState.state.nativeAssets.sealed === false &&
       nativeAssetState.state.nativeAssets.granted === false && nativeAssetState.state.nativeAssets.admissionOpen === false &&
@@ -444,16 +499,27 @@ else {
         if (smoke || args.length || !rendererEvent(event)) throw new Error('The project picker is unavailable.');
         void chooseProject(); return { requested: true };
       });
-      appDialogs = require('./in-app-dialog.cjs').createInAppDialogs({ native: nativeDialog, getWindow: () => closing || switching ? null : window, trusted: rendererEvent });
+      trustedDialogs = require('./trusted-dialog.cjs').createTrustedDialogs({ BrowserWindow, native: nativeDialog, getWindow: () => closing || switching ? null : window });
+      trustedDialogs.installIpc(ipcMain);
+      appDialogs = require('./in-app-dialog.cjs').createInAppDialogs({ native: nativeDialog, getWindow: () => closing || switching ? null : window, trusted: rendererEvent,
+        decisions: trustedDialogs.showMessageBox });
       appDialogs.installIpc(ipcMain);
       projectPermissions = require('./project-permissions.cjs').createProjectPermissions({ enabled: !smoke,
         getSession: () => closing || switching || !projectSession ? null : { stateRoot: projectSession.stateRoot, epoch: projectSession } });
-      projectPermissions.installIpc(ipcMain, { trusted: rendererEvent });
+      // Turning a switch ON grants authority, so the host asks in the trusted decision window first; OFF needs no question.
+      projectPermissions.installIpc(ipcMain, { trusted: rendererEvent, confirmEnable: async keys => {
+        const owner = window; if (closing || switching || !owner || owner.isDestroyed()) return false;
+        const lines = keys.map(key => key === 'claudeTools' ? 'Claude chat will use Arcane project tools without asking each time.' : 'In-project edits and commands will be approved automatically.');
+        const choice = await dialog.showMessageBox(owner, { type: 'warning', title: 'Turn on automatic approval', message: 'Let Arcane act without asking in this project?',
+          detail: lines.join('\n\n') + '\n\nYou can turn this off again in Settings > Permissions.', buttons: ['Cancel', 'Turn on'], defaultId: 0, cancelId: 0, noLink: true });
+        return choice.response === 1 && !closing && !switching && window === owner;
+      } });
       // Switching Claude tools to "ask" revokes this session's consent and its shared credential immediately.
       projectPermissions.subscribe(next => { if (!next.claudeTools) claudeChat?.revokeApproval?.(); });
       // Plans & credits checkout: one offer id in; the host builds the URL from the shipped plans config and the local
       // billing-service.json (billing.cjs), checks the exact https allowlist, confirms in an Arcane dialog, then opens the browser.
-      require('./billing.cjs').createBilling({ enabled: !smoke, dialog, shell, getWindow: () => closing || switching ? null : window,
+      // Connect Arcane account stays unavailable unless a gateway URL is allowlisted; its token is kept with safeStorage.
+      require('./billing.cjs').createBilling({ enabled: !smoke, dialog, shell, safeStorage, getWindow: () => closing || switching ? null : window,
         configDirectory: () => userRoot ?? null,
         loadPlans: async () => productRoot ? (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/plans.js')).href)).ARCANE_PLANS : null,
       }).installIpc(ipcMain, { trusted: rendererEvent });

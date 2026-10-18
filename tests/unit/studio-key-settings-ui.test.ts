@@ -61,7 +61,8 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
           account: { auth: 'subscription', plan: 'fixture', requiresOpenaiAuth: true }, models: [], selection: null, thread: null,
           operations: [], approvals: [], events: [], droppedEvents: 0, lastEventSeq: 0, failureCode: null },
         lastSnapshot: null, nativeTools: { configured: false, verified: false } } }); return; }
-      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/playtests'].includes(path)) { send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic UI fixture only.' }, 503); return; }
+      // Plans & credits reads local usage once at start for the top-bar chip; the fixture leaves it unavailable.
+      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/playtests', '/v1/plans/state'].includes(path)) { send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic UI fixture only.' }, 503); return; }
       if (path === '/v1/assets/conversation-jobs') { send({ error: 'NO_NATIVE_THREAD', message: 'No native thread in this UI fixture.' }, 409); return; }
     }
     if (request.method === 'POST' && ['/v1/studio/keys/rotate', '/v1/studio/keys/revoke'].includes(path)) {
@@ -125,7 +126,9 @@ test('real Edge synthetic native key fixture: masked mount, trusted Show/Copy, c
     assert.equal(await page.locator('#settings-drawer').isVisible(), false); assert.deepEqual(await f.counts(), []);
     await f.open(); await page.waitForFunction(() => !(document.getElementById('settings-key-show') as HTMLButtonElement).disabled);
     assert.equal((await page.locator('body').textContent())?.includes(f.secret), false);
-    assert.equal(await page.locator('#workspace-settings .settings-card').count(), 2);
+    // General holds the key card first, then the plugin, provider, display, notification, permission and shortcut cards.
+    assert.deepEqual(await page.locator('#workspace-settings > .settings-card h3').allTextContents(),
+      ['Arcane API key', 'Studio plugin', 'Provider', 'Display', 'Notifications', 'Permissions', 'Keyboard shortcuts']);
     assert.equal(await page.locator('#key-form').isVisible(), false);
     assert.equal(await page.locator('#settings-key-select').inputValue(), KEY_ID);
     assert.equal(await page.locator('#settings-key-select option').textContent(), 'Studio key 1 · Editing');

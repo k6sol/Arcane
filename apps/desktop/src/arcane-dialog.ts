@@ -1,7 +1,8 @@
 /// <reference lib="dom" />
 // Arcane-styled in-app dialogs and the per-project Permissions settings.
 //
-// Dialogs: the desktop host (apps/desktop/electron/in-app-dialog.cjs) sends one bounded question at a time; this module
+// Dialogs: the desktop host (apps/desktop/electron/in-app-dialog.cjs) sends one bounded one-button notice at a time
+// (decisions that grant authority open in the host's separate trusted window, trusted-dialog.cjs, never here); this module
 // renders it as a focused modal (role=dialog, aria-modal, focus trap, the rest of the page inert), Esc answers the cancel
 // button, Enter the default button, and the answer goes back with the request id. The host validates the id and button
 // index again and treats a timeout, navigation or close as cancel. Text is set with textContent only.
@@ -20,7 +21,7 @@ interface DialogBridge {
 }
 interface PermissionBridge {
   read(): Promise<{ available: boolean; settings: PermissionSettings }>;
-  save(patch: Partial<PermissionSettings>): Promise<{ saved: true; settings: PermissionSettings }>;
+  save(patch: Partial<PermissionSettings>): Promise<{ saved: boolean; settings: PermissionSettings }>;
 }
 export interface AutoApprovalSource {
   setAutoApprove(enabled: boolean): void;
@@ -177,7 +178,7 @@ export function startArcaneDialogs(doc: Document, options: ArcaneDialogOptions =
   async function save(patch: Partial<PermissionSettings>, message: string) {
     if (!permissions || saving) return;
     saving = true; render();
-    try { const value = await permissions.save(patch); if (!stopped) { apply(value.settings); say(message); } }
+    try { const value = await permissions.save(patch); if (!stopped) { apply(value.settings); say(value.saved === false ? 'Nothing changed. Automatic approval stays off until you confirm it in the Arcane window.' : message); } }
     catch { if (!stopped) say('The permission could not be saved. Nothing changed.'); }
     finally { saving = false; if (!stopped) render(); }
   }

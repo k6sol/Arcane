@@ -8,7 +8,7 @@ license: MIT
 
 ## Rules first
 - One `scene_build` for all parts of a system (pads, doors, waypoints) in named Folders/Models, with keys for the refs you need. Then one server Script per system in ServerScriptService via `scene_create` + `script_update`. Scripts stay disabled until activated with `script_read` + `script_set_enabled`.
-- scene_build cannot add tags, attributes, prompts or Humanoids. The server script finds parts by Folder and name, adds tags, ProximityPrompts and RemoteEvents at start.
+- scene_build cannot add tags, attributes or prompts (Humanoids only on a plugin with scene.characters; see `arcane-characters`). The server script finds parts by Folder and name, adds tags, ProximityPrompts and RemoteEvents at start.
 - All outcomes are decided on the server. Expose results as player attributes so `playtest_request` can assert them with `assert-player-attribute`.
 - Code structure and cleanup: `arcane-luau-architecture`. Remote checks: `arcane-remote-security`. Saving anything: `arcane-datastore-safety` (never enable saving code without an explicit request).
 
@@ -38,17 +38,13 @@ license: MIT
 - Opening checks the attribute and distance on the server, tweens the anchored panel's CFrame 90 degrees about its hinge edge (0.6 s Quad Out), sets CanCollide false while open and closes after 4 s. Locked: play a denied sound and show "Needs the red key".
 
 ## NPC dialogue
-- Spawn rigs from code: `Players:CreateHumanoidModelFromDescription(HumanoidDescription.new(), Enum.HumanoidRigType.R15)`, anchor the HumanoidRootPart for stationary NPCs, PivotTo a stand part.
+- Load `arcane-characters` for any NPC: rigs, default animations, state machines and network ownership. Stationary speakers: anchor the HumanoidRootPart and PivotTo a stand part.
 - Dialogue tree in a ReplicatedStorage ModuleScript: `nodes[id] = { text, choices = { { label, next, action? } } }`.
 - Server ProximityPrompt (ActionText "Talk", MaxActivationDistance 10) fires the player's client with a node id. The client shows the bottom dialogue panel (`arcane-interface`) with a 40 chars/s typewriter that clicking skips.
 - A choice sends `(npcId, nodeId, choiceIndex)`. The server checks the node is the player's current node and the distance, then runs the action (quest, item). Rewards are never sent by the client.
 
 ## Pathfinding NPC
-- `PathfindingService:CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 4, Costs = { Water = 20 } })`.
-- `pcall(path.ComputeAsync, path, from, to)`; continue only when `path.Status == Enum.PathStatus.Success`.
-- Walk waypoints with `Humanoid:MoveTo` and `MoveToFinished` (it times out after 8 s); for a Jump waypoint set `Humanoid.Jump = true`. Recompute on `path.Blocked`.
-- Chasing: replan every 0.5-1 s only if the target moved more than 4 studs. Stuck (moved under 1 stud in 2 s): jump, then replan.
-- `HumanoidRootPart:SetNetworkOwner(nil)` to stop stutter. Limit concurrent path computations (e.g. 4 per frame budget). Patrols use parts in a `Waypoints` Folder in order.
+- Load `arcane-characters` for the full recipe (`pcall` around `ComputeAsync`, waypoint walking, replanning, stuck recovery, idle/patrol/chase/flee states, network ownership). Build patrol points as parts in a `Waypoints` Folder in the same `scene_build`.
 - Perception and behaviour design: `arcane-npc`.
 
 ## Verify

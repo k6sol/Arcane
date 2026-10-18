@@ -1,0 +1,252 @@
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+
+// Token-lean model surface. Every tool list and result is paid on every turn, so the serialized
+// form drops what the model never needs. Nothing here changes validation: each call is still
+// parsed by the tool's strict zod schema, and the daemon and plugin keep their own checks.
+
+type Node = Record<string, unknown>;
+const REF_KEYS = ['instanceId', 'sessionId', 'root', 'pathSegments', 'className'];
+const isNode = (value: unknown): value is Node => !!value && typeof value === 'object' && !Array.isArray(value);
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const isTagged = (value: unknown) => isNode(value) && isNode(value.properties) && Object.keys(value.properties).join() === 'type,value'
+  && isNode(value.properties.type) && typeof value.properties.type.const === 'string';
+
+/** Compact one advertised JSON Schema node: same accepted shape for the model, fewer tokens. */
+export function compactToolSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(compactToolSchema);
+  if (!isNode(value)) return value;
+  const node: Node = {};
+  for (const [key, item] of Object.entries(value)) node[key] = key === 'enum' || key === 'required' || key === 'const' || key === 'default' ? item : compactToolSchema(item);
+  delete node.$schema;
+  if (isNode(node.propertyNames) && Object.keys(node.propertyNames).join() === 'type' && node.propertyNames.type === 'string') delete node.propertyNames;
+  if (node.type === 'string') {
+    if (node.minLength === 1) delete node.minLength;
+    if (typeof node.maxLength === 'number' && node.maxLength >= 256) delete node.maxLength;
+  }
+  // Fixed tuples with identical members, e.g. [x,y,z]: one item schema plus the exact length.
+  const items = node.items;
+  if (node.type === 'array' && Array.isArray(items) && items.length && items.every(item => same(item, items[0]))
+      && node.minItems === items.length && node.maxItems === items.length) { node.items = items[0]; delete node.additionalItems; }
+  // Where a compact form ([x,y,z], "#rrggbb") is accepted, advertise only it; tagged {type,value} still validates.
+  if (Array.isArray(node.anyOf) && node.anyOf.length > 1) {
+    const kept = node.anyOf.filter(option => !isTagged(option));
+    if (kept.length) node.anyOf = kept;
+  }
+  if (Array.isArray(node.anyOf) && node.anyOf.length === 1 && isNode(node.anyOf[0]) && !Object.keys(node.anyOf[0]).some(key => key in node)) {
+    const [only] = node.anyOf as Node[]; delete node.anyOf; Object.assign(node, only);
+  }
+  // Opaque instance refs are copied from results unchanged, in the compact form results use (no
+  // sessionId; path string). serveCompactRefs re-expands them per call before strict validation.
+  if (node.type === 'object' && isNode(node.properties) && same(Object.keys(node.properties), REF_KEYS)) {
+    // Full refs (sessionId, pathSegments) stay accepted; extra keys are still refused.
+    node.properties = { instanceId: { type: 'string' }, root: { type: 'string' }, path: { type: 'string' }, className: { type: 'string' },
+      sessionId: { type: 'string' }, pathSegments: { type: 'array', items: { type: 'string' } } };
+    node.required = ['instanceId', 'root', 'className'];
+  }
+  return node;
+}
+
+const HOIST_MIN_CHARS = 48;
+/** Child schema positions only (never property-name maps, enums or defaults). */
+function childSchemas(node: Node): { holder: Node | unknown[]; key: string | number; name: string }[] {
+  const out: { holder: Node | unknown[]; key: string | number; name: string }[] = [];
+  if (isNode(node.properties)) for (const key of Object.keys(node.properties)) out.push({ holder: node.properties, key, name: key });
+  if (isNode(node.additionalProperties)) out.push({ holder: node, key: 'additionalProperties', name: 'value' });
+  if (isNode(node.items)) out.push({ holder: node, key: 'items', name: 'item' });
+  for (const list of ['anyOf', 'oneOf', 'allOf', 'prefixItems'] as const) {
+    const options = node[list];
+    if (Array.isArray(options)) options.forEach((_, index) => out.push({ holder: options, key: index, name: 'option' }));
+  }
+  return out;
+}
+const read = (slot: { holder: Node | unknown[]; key: string | number }) => (slot.holder as Record<string | number, unknown>)[slot.key];
+const write = (slot: { holder: Node | unknown[]; key: string | number }, value: unknown) => { (slot.holder as Record<string | number, unknown>)[slot.key] = value; };
+const withoutDescription = (node: Node) => { const { description: _description, ...rest } = node; return JSON.stringify(rest); };
+
+/**
+ * Hoist subschemas repeated within one tool (shared property sets, colour/vector unions) into
+ * definitions with $ref, as the SDK already does for recursive JSON values. Equivalent schema.
+ */
+export function hoistRepeatedSchemas(schema: Node): Node {
+  const root: Node = structuredClone(schema), definitions: Node = isNode(root.definitions) ? root.definitions : {};
+  for (let round = 0; round < 16; round++) {
+    const groups = new Map<string, { slots: { holder: Node | unknown[]; key: string | number; name: string }[] }>();
+    const visit = (node: Node) => {
+      for (const slot of childSchemas(node)) {
+        const child = read(slot);
+        if (!isNode(child) || typeof child.$ref === 'string') continue;
+        const text = withoutDescription(child);
+        if (text.length >= HOIST_MIN_CHARS) { const group = groups.get(text) ?? { slots: [] }; group.slots.push(slot); groups.set(text, group); }
+        visit(child);
+      }
+    };
+    visit(root);
+    for (const definition of Object.values(definitions)) if (isNode(definition)) visit(definition);
+    let text = '', saving = 0;
+    for (const [candidate, group] of groups) {
+      // Each use becomes a ~40-character $ref plus a definitions entry; hoist only when that is a real saving.
+      const gain = (group.slots.length - 1) * candidate.length - group.slots.length * 48 - 32;
+      if (group.slots.length > 1 && gain > saving) { text = candidate; saving = gain; }
+    }
+    if (!saving) break;
+    const { slots } = groups.get(text)!;
+    const descriptions = new Set(slots.map(slot => (read(slot) as Node).description));
+    const counts = new Map<string, number>();
+    for (const slot of slots) if (!['option', 'item', 'value'].includes(slot.name)) counts.set(slot.name, (counts.get(slot.name) ?? 0) + 1);
+    const common = [...counts].sort((a, b) => b[1] - a[1])[0];
+    const base = text.includes('"pathSegments"') && text.includes('"instanceId"') ? 'ref' : common && common[1] > 1 ? common[0]
+      : text.includes('[0-9a-fA-F]') && text.length < 200 ? 'color' : text.includes('"minItems":3,"maxItems":3') && text.length < 200 ? 'vector3' : common ? common[0] : 'shared';
+    let name = base;
+    for (let suffix = 2; name in definitions; suffix++) name = base + suffix;
+    const shared = descriptions.size === 1 ? [...descriptions][0] : undefined;
+    definitions[name] = { ...(JSON.parse(text) as Node), ...(typeof shared === 'string' ? { description: shared } : {}) };
+    for (const slot of slots) {
+      const description = (read(slot) as Node).description;
+      write(slot, { $ref: '#/definitions/' + name, ...(shared === undefined && typeof description === 'string' ? { description } : {}) });
+    }
+  }
+  if (Object.keys(definitions).length) root.definitions = definitions;
+  return root;
+}
+
+/** Serve tools/list with compact input schemas. Registration and call validation are untouched. */
+export function serveCompactToolList(server: McpServer): void {
+  const handlers = (server.server as unknown as { _requestHandlers?: unknown })._requestHandlers;
+  if (!(handlers instanceof Map)) return;
+  const list = handlers.get('tools/list') as ((request: unknown, extra: unknown) => Promise<{ tools: Node[] }>) | undefined;
+  if (typeof list !== 'function') return;
+  handlers.set('tools/list', async (request: unknown, extra: unknown) => {
+    const result = await list(request, extra);
+    return { ...result, tools: result.tools.map(tool => ({ ...tool, inputSchema: hoistRepeatedSchemas(compactToolSchema(tool.inputSchema) as Node) })) };
+  });
+}
+
+// ---- Tool results ----
+
+const BULKY_ARGS_BYTES = 200, BULKY_TEXT_CHARS = 512;
+const isRef = (value: unknown): value is Node => isNode(value) && typeof value.instanceId === 'string' && typeof value.className === 'string' && Array.isArray(value.pathSegments);
+
+/** A scene node repeats its ref's last path segment and class name; keep only what differs. */
+function compactNode(value: unknown): unknown {
+  if (!isNode(value) || !isRef(value.ref)) return value;
+  const { name, className, ...rest } = value;
+  const segments = value.ref.pathSegments as unknown[];
+  return { ...rest, ...(name !== segments.at(-1) ? { name } : {}), ...(className !== value.ref.className ? { className } : {}) };
+}
+/** Receipt payloads echo text the model just sent (script sources); summarise long strings by size. */
+function compactSnapshot(value: unknown): unknown {
+  if (typeof value === 'string') return value.length > BULKY_TEXT_CHARS ? { omitted: 'text', bytes: Buffer.byteLength(value, 'utf8') } : value;
+  if (Array.isArray(value)) return value.map(compactSnapshot);
+  if (!isNode(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactSnapshot(item)]));
+}
+function compactResult(result: unknown): unknown {
+  if (!isNode(result)) return result;
+  const out: Node = { ...result };
+  if (Array.isArray(out.items)) out.items = out.items.map(compactNode);
+  if (Array.isArray(out.children)) out.children = out.children.map(compactNode);
+  if (isNode(out.mutation)) {
+    const mutation: Node = { ...out.mutation };
+    if (same(mutation.ref, out.ref)) delete mutation.ref;
+    if (same(mutation.after, out.created)) delete mutation.after;
+    for (const key of ['before', 'after']) if (key in mutation) mutation[key] = compactSnapshot(mutation[key]);
+    out.mutation = mutation;
+  }
+  return out;
+}
+
+/**
+ * Compact a Studio command outcome for the model. The command record's per-session metadata
+ * (protocol, lease, grants, timestamps, client lifetime) never changes what the model should do
+ * and is repeated on every call; bulky echoed arguments are what the model just sent. State,
+ * ids, ambiguity, errors and the plugin result are kept exactly (receipt snapshots summarise
+ * long text by size; the daemon keeps the full immutable receipt for receipt_restore).
+ */
+export function compactOutcome<T>(data: T): T {
+  if (!isNode(data) || !isNode(data.command) || !('protocolVersion' in data.command)) return data;
+  const command = data.command;
+  const args = command.args, argsBytes = args === undefined ? 0 : Buffer.byteLength(JSON.stringify(args));
+  return { ...data, command: {
+    id: command.id, method: command.method, state: command.state,
+    ...(args !== undefined && argsBytes <= BULKY_ARGS_BYTES ? { args } : {}),
+    result: compactResult(command.result),
+    ...(command.error !== null && command.error !== undefined ? { error: command.error } : {}),
+  } } as T;
+}
+
+// ---- Compact opaque refs ----
+//
+// Results carry refs as {instanceId, root, path, className}: the sessionId is the call's own and
+// pathSegments become one "a/b/c" string whenever that is lossless (the plugin resolves by
+// instanceId only; pathSegments are display and root-depth data). On every tools/call the server
+// re-attaches the call's sessionId (and expands path) BEFORE the tool's strict zod validation, so
+// the daemon and plugin receive exactly the full refs they did before. A compact ref can therefore
+// only ever address the call's own session; an explicit ref sessionId must still match it exactly.
+
+const FULL_REF_KEYS = new Set(REF_KEYS);
+const INPUT_REF_KEYS = new Set([...REF_KEYS, 'path']);
+const isText = (value: unknown): value is string => typeof value === 'string';
+/** A ref-shaped object as the model may send it (full or compact). */
+const isInputRef = (value: unknown): value is Node => isNode(value) && isText(value.instanceId) && isText(value.root) && isText(value.className)
+  && Object.keys(value).every(key => INPUT_REF_KEYS.has(key)) && (Array.isArray(value.pathSegments) || isText(value.path));
+/** pathSegments become one string only when splitting it back is exact. */
+const joinable = (segments: unknown[]) => segments.every(segment => isText(segment) && !segment.includes('/')) && !(segments.length === 1 && segments[0] === '');
+
+export class RefSessionError extends Error {
+  readonly code = 'REFERENCE_SESSION';
+  constructor() { super('Reference must belong to the exact selected session and root.'); }
+}
+
+/** Expand compact refs in tool arguments for the call's sessionId. Throws on an explicit foreign sessionId. */
+export function expandRefs(value: unknown, sessionId: string | undefined): unknown {
+  if (Array.isArray(value)) return value.map(item => expandRefs(item, sessionId));
+  if (!isNode(value)) return value;
+  if (isInputRef(value)) {
+    if (sessionId === undefined) return value; // No call session: strict validation refuses a compact ref.
+    if ('sessionId' in value && value.sessionId !== sessionId) throw new RefSessionError();
+    if ('path' in value && 'pathSegments' in value) return value; // Ambiguous; strict validation refuses it.
+    const { path, ...rest } = value;
+    return { ...rest, sessionId, ...(isText(path) ? { pathSegments: path === '' ? [] : path.split('/') } : {}) };
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandRefs(item, sessionId)]));
+}
+
+/** Compact every full ref of sessionId in a result; refs of any other session stay whole. */
+export function compactRefs(value: unknown, sessionId: string): unknown {
+  if (Array.isArray(value)) return value.map(item => compactRefs(item, sessionId));
+  if (!isNode(value)) return value;
+  const keys = Object.keys(value);
+  if (keys.length === FULL_REF_KEYS.size && keys.every(key => FULL_REF_KEYS.has(key)) && value.sessionId === sessionId
+      && isText(value.instanceId) && Array.isArray(value.pathSegments)) {
+    const segments = value.pathSegments;
+    return { instanceId: value.instanceId, root: value.root, ...(joinable(segments) ? { path: segments.join('/') } : { pathSegments: segments }), className: value.className };
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactRefs(item, sessionId)]));
+}
+
+type ToolCall = { method: string; params?: Node & { arguments?: unknown } };
+type ToolResult = Node & { content?: { type: string; text?: string }[]; structuredContent?: unknown };
+/** Wrap tools/call for every tool: expand compact refs before validation and compact refs in results. */
+export function serveCompactRefs(server: McpServer): void {
+  const handlers = (server.server as unknown as { _requestHandlers?: unknown })._requestHandlers;
+  if (!(handlers instanceof Map)) return;
+  const call = handlers.get('tools/call') as ((request: ToolCall, extra: unknown) => Promise<ToolResult>) | undefined;
+  if (typeof call !== 'function') return;
+  handlers.set('tools/call', async (request: ToolCall, extra: unknown) => {
+    const args = request?.params?.arguments;
+    const sessionId = isNode(args) && isText(args.sessionId) ? args.sessionId : undefined;
+    let expanded: unknown;
+    try { expanded = expandRefs(args, sessionId); } catch (error) {
+      if (!(error instanceof RefSessionError)) throw error;
+      const detail = { code: error.code, message: error.message };
+      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: detail }) }], structuredContent: { error: detail } };
+    }
+    const result = await call(isNode(args) ? { ...request, params: { ...request.params, arguments: expanded } } : request, extra);
+    const data = result?.structuredContent;
+    const session = sessionId ?? (isNode(data) && isText(data.sessionId) ? data.sessionId : undefined);
+    if (!isNode(data) || session === undefined || !Array.isArray(result.content)) return result;
+    const original = JSON.stringify(data), compact = compactRefs(data, session), text = JSON.stringify(compact);
+    if (text === original) return result;
+    return { ...result, structuredContent: compact, content: result.content.map(item => item.type === 'text' && item.text === original ? { ...item, text } : item) };
+  });
+}

@@ -25,6 +25,8 @@ import { normalizeRequest, validateAudit, sha256 } from '../../packages/asset-pi
 import { preflightRecipe, preflightPart, expectedSockets, rotate, CUSTOM_REQUEST_BYTES } from '../../packages/asset-pipeline/src/recipe.js';
 import { READ_METHODS, WRITE_METHODS } from '../../packages/protocol/src/studio.js';
 import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { compactOutcome, compactRefs, expandRefs, RefSessionError } from '../../apps/mcp/src/token-lean.js';
 import type { StudioCommand, StudioSession, InstanceRef, Json } from '../../packages/protocol/src/studio.js';
 
 // These fixtures exercise actual SDK/HTTP/SQLite code, but simulate the plugin and never use native Studio.
@@ -40,6 +42,7 @@ const TOOL_ACCESS = {
   skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
   work_progress: false, work_submit: false, assets_probe: true, assets_jobs: true, assets_start: false, assets_cancel: false, assets_manifest: true,
   studio_viewport_capture: true, studio_asset_search: true, studio_asset_insert: false, studio_asset_generate: false,
+  assets_procedural: false, assets_preview: true, terrain_generate: false,
 };
 const EDITOR_SOURCE = '--!strict\nreturn "café 🧩"\n';
 type Behavior = 'normal' | 'timeout' | 'lost-ack' | 'redirect' | 'invalid' | 'oversize' | 'wrong-session' | 'failed' | 'reconciliation' | 'forbidden' | 'poll-failure' | 'hang-enqueue' | 'server-error';
@@ -201,6 +204,59 @@ test('fixture SDK: advertised tools are strict bounded operations with read/writ
   assert.equal(tools.find(tool=>tool.name==='receipt_restore')?.annotations?.idempotentHint,false);
 });
 
+test('fixture SDK: tools/list is token-lean and the compact schemas accept and refuse the same shapes', async t => {
+  const f = await fixture(t), client = await linked(t,f);
+  const { tools } = await client.listTools();
+  const validator = new AjvJsonSchemaValidator();
+  for (const tool of tools) {
+    const schema = JSON.stringify(tool.inputSchema);
+    assert.ok(!schema.includes('"$schema"') && !schema.includes('"additionalItems"'), tool.name);
+    for (const [, name] of schema.matchAll(/"\$ref":"#\/definitions\/([^"]+)"/g)) assert.ok((tool.inputSchema as any).definitions?.[name!], `${tool.name}: ${name}`);
+    assert.ok(JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }).length < 12_000, `${tool.name} stays within its per-turn budget`);
+    assert.doesNotThrow(() => validator.getValidator(tool.inputSchema as any), tool.name);
+  }
+  const accepts = (name: string, input: unknown) => validator.getValidator(tools.find(tool => tool.name === name)!.inputSchema as any)(input).valid;
+  const forest = { sessionId: SESSION_ID, parent: REFERENCE, name: 'Forest', defaults: { Material: 'Wood' },
+    prototypes: { Pine: { parts: [{ name: 'Trunk', props: { Size: [1, 5, 1], Position: [0, 2.5, 0], Color: '#5a4030', Material: 'Wood' } }] } },
+    items: [{ key: 'Trees', className: 'Model', name: 'Trees' }], scatter: [{ use: 'Pine', in: 'Trees', count: 20, center: [0, 0, 0], radius: 50, minSpacing: 6 }] };
+  assert.equal(accepts('scene_build', forest), true);
+  assert.equal(accepts('scene_build', { ...forest, extra: 1 }), false);
+  assert.equal(accepts('scene_build', { ...forest, parent: { ...REFERENCE, extra: 1 } }), false);
+  const { sessionId: _session, pathSegments: _segments, ...compactRef } = REFERENCE;
+  assert.equal(accepts('scene_build', { ...forest, parent: { ...compactRef, path: 'Same/Same' } }), true, 'the compact ref results return is advertised');
+  assert.equal(accepts('scene_build', { ...forest, parent: { root: 'Workspace', path: '' } }), false);
+  assert.equal(accepts('scene_build', { ...forest, defaults: { Material: 'Lava' } }), false);
+  assert.equal(accepts('scene_build', { ...forest, prototypes: { Pine: { parts: [{ name: 'Trunk', props: { Size: [1, 5] } }] } } }), false);
+  const update = { sessionId: SESSION_ID, ref: REFERENCE, expected: { Anchored: false }, properties: { Anchored: true, Size: { type: 'Vector3', value: [1, 2, 3] } } };
+  assert.equal(accepts('scene_update', update), true);
+  assert.equal(accepts('scene_update', { ...update, properties: { Parent: 'Workspace' } }), false);
+  assert.equal(accepts('environment_apply', { sessionId: SESSION_ID, lighting: { Ambient: '#454a4d', FogColor: [0.5, 0.5, 0.5] } }), true);
+  assert.equal(accepts('environment_apply', { sessionId: SESSION_ID, lighting: { Ambient: 'grey' } }), false);
+  // Validation on the server is unchanged: tagged forms the compact list no longer advertises still parse.
+  const tagged = await call(client, 'scene_build', { ...forest, prototypes: { Pine: { parts: [{ name: 'Trunk', props: { Size: { type: 'Vector3', value: [1, 5, 1] } } }] } } });
+  assert.notEqual(tagged.data.error?.code, 'INPUT', JSON.stringify(tagged.data));
+});
+
+test('compact outcomes keep state, ids, results and receipts but drop repeated session metadata and echoed bulk', () => {
+  const source = 'print("x")\n'.repeat(200), ref = REFERENCE as unknown as Json;
+  const command: StudioCommand = { protocolVersion: 1, id: 'cmd-1', requestId: 'req-1', sessionId: SESSION_ID, clientSessionId: 'lifetime', method: 'script.update',
+    args: { ref, expectedSource: source, source: source + '--' }, allowedRoots: ['Workspace'], allowWrites: true, leaseEpoch: 4, expiresAt: 'x', state: 'succeeded', createdAt: 'x', finishedAt: 'x',
+    result: { ref, mutation: { kind: 'script.update', ref, before: { source }, after: { source: 'return 1' } } }, error: null };
+  const outcome = { commandId: 'cmd-1', requestId: 'req-1', sessionId: SESSION_ID, state: 'succeeded', terminal: true, ambiguous: false, wait: 'terminal', command };
+  const compact = compactOutcome(outcome) as any;
+  assert.deepEqual(Object.keys(compact), Object.keys(outcome), 'top-level outcome fields are unchanged');
+  assert.deepEqual(compact.command, { id: 'cmd-1', method: 'script.update', state: 'succeeded',
+    result: { ref, mutation: { kind: 'script.update', before: { source: { omitted: 'text', bytes: Buffer.byteLength(source) } }, after: { source: 'return 1' } } } });
+  const read = compactOutcome({ ...outcome, command: { ...command, method: 'script.read', args: { ref }, result: { ref, source } } }) as any;
+  assert.equal(read.command.result.source, source, 'a read baseline is never summarised');
+  const children = compactOutcome({ ...outcome, command: { ...command, method: 'scene.children', args: { root: 'Workspace', limit: 50 }, error: 'kept',
+    result: { parentRef: ref, items: [{ ref, name: 'Same', className: 'Part', childCount: 0 }, { ref, name: 'Renamed', className: 'Model', childCount: 2 }], truncated: false } } }) as any;
+  assert.deepEqual(children.command.args, { root: 'Workspace', limit: 50 }, 'small arguments are still echoed');
+  assert.equal(children.command.error, 'kept');
+  assert.deepEqual(children.command.result.items, [{ ref, childCount: 0 }, { ref, childCount: 2, name: 'Renamed', className: 'Model' }]);
+  assert.equal(compactOutcome({ sessions: [] }).sessions.length, 0, 'non-command data passes through');
+});
+
 test('fixture SDK: every scene/selection/script read uses exact shared endpoints, UUIDs and current source', async t => {
   const f = await fixture(t), client = await linked(t,f);
   const sessions=await call(client,'sessions'); assert.notEqual(sessions.result.isError,true,JSON.stringify(sessions.data));
@@ -231,7 +287,11 @@ test('fixture SDK: script content search uses one read command with closed liter
     const read = await call(client, 'script_search', { sessionId: SESSION_ID, ...args });
     assert.notEqual(read.result.isError, true);
     assert.equal(read.data.command.method, 'script.search');
-    assert.deepEqual(read.data.command.args, { limit: 50, caseSensitive: true, ...args });
+    // The daemon receives the exact closed arguments; the model-facing result echoes them only when small.
+    assert.deepEqual(f.requests.filter(request => request.method === 'POST').at(-1)!.body!.args, { limit: 50, caseSensitive: true, ...args });
+    if ('ref' in args) assert.equal(read.data.command.args, undefined, 'bulky echoed arguments are omitted');
+    else assert.deepEqual(read.data.command.args, { limit: 50, caseSensitive: true, ...args });
+    for (const key of ['protocolVersion', 'clientSessionId', 'allowedRoots', 'allowWrites', 'leaseEpoch', 'expiresAt', 'createdAt', 'error']) assert.ok(!(key in read.data.command), key);
   }
   const before = f.state.posts;
   for (const patch of [{ query: '' }, { query: '\ud800' }, { query: 'x\n' }, { query: '\u007f' }, { query: '🧩'.repeat(65) }, { limit: 101 }, { regex: true }, { caseSensitive: 0 }, { source: 'return 1' }]) {
@@ -240,6 +300,53 @@ test('fixture SDK: script content search uses one read command with closed liter
   assert.equal(f.state.posts, before, 'invalid search inputs never reach HTTP enqueue');
   assert.equal((await call(client, 'script_search', { sessionId: SESSION_ID, root: 'Workspace', query: 'x', ref: { ...REFERENCE, sessionId: 'other-window' } })).data.error.code, 'REFERENCE_SESSION');
   assert.equal(f.state.posts, before);
+});
+
+test('fixture SDK: refs come back compact and are re-bound to the exact call session before validation', async t => {
+  const f = await fixture(t), client = await linked(t, f);
+  const compact = { instanceId: REFERENCE.instanceId, root: REFERENCE.root, path: 'Same/Same', className: REFERENCE.className };
+  const listed = await call(client, 'scene_search', { sessionId: SESSION_ID, root: 'Workspace', query: 'Same' });
+  assert.deepEqual(listed.data.command.result.items, [{ ref: compact, childCount: 0 }]);
+  assert.deepEqual(listed.result.structuredContent, listed.data, 'structured and text content agree');
+  assert.ok(!JSON.stringify(listed.data.command.result).includes('sessionId'), 'no repeated sessionId inside results');
+  // Compact, full and nested refs all reach the daemon as the exact full ref of this call's session.
+  for (const ref of [compact, REFERENCE]) {
+    const inspected = await call(client, 'scene_inspect', { sessionId: SESSION_ID, ref });
+    assert.equal(inspected.data.state, 'succeeded');
+    assert.deepEqual(f.requests.filter(request => request.method === 'POST').at(-1)!.body!.args, { ref: REFERENCE });
+    assert.deepEqual(inspected.data.command.result.ref, compact);
+  }
+  const built = await call(client, 'scene_build', { sessionId: SESSION_ID, parent: compact, name: 'Forest', templates: { Tree: { ...compact, className: 'Model' } },
+    items: [{ key: 'Trees', className: 'Model', name: 'Trees' }], scatter: [{ use: 'Tree', in: 'Trees', count: 3, center: [0, 0, 0], radius: 20, minSpacing: 4 }] });
+  assert.notEqual(built.result.isError, true, JSON.stringify(built.data));
+  const sent = JSON.stringify(f.requests.filter(request => request.method === 'POST').at(-1)!.body!.args);
+  assert.ok(sent.includes(JSON.stringify(REFERENCE)) && sent.includes(JSON.stringify({ ...REFERENCE, className: 'Model' })), 'parent and template refs are expanded');
+  const before = f.state.posts;
+  // An explicit foreign session is refused anywhere in the arguments; a compact ref cannot name another session at all.
+  for (const args of [{ ref: { ...compact, sessionId: 'other-window' } }, { ref: { ...REFERENCE, sessionId: 'other-window' } }]) {
+    const refused = await call(client, 'scene_inspect', { sessionId: SESSION_ID, ...args });
+    assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'REFERENCE_SESSION');
+  }
+  const nested = await call(client, 'scene_build', { sessionId: SESSION_ID, parent: compact, name: 'Forest', templates: { Tree: { ...compact, sessionId: 'other-window' } }, items: [] });
+  assert.equal(nested.data.error.code, 'REFERENCE_SESSION');
+  for (const ref of [{ ...compact, path: undefined }, { ...compact, pathSegments: ['Same'] }, { ...compact, extra: 1 }, { ...compact, instanceId: '' }]) {
+    assert.equal((await call(client, 'scene_inspect', { sessionId: SESSION_ID, ref: JSON.parse(JSON.stringify(ref)) })).result.isError, true, JSON.stringify(ref));
+  }
+  assert.equal(f.state.posts, before, 'refused refs never reach HTTP enqueue');
+});
+
+test('compact refs round-trip exactly and never rebind an explicit session', () => {
+  const full = (pathSegments: string[]) => ({ ...REFERENCE, pathSegments });
+  for (const segments of [[], ['A'], ['Map', 'Tree 1'], ['a/b'], [''], ['', 'x'], ['x', '']]) {
+    const compact = compactRefs({ ref: full(segments) }, SESSION_ID) as any;
+    assert.ok(!('sessionId' in compact.ref));
+    assert.deepEqual(expandRefs(compact, SESSION_ID), { ref: full(segments) }, JSON.stringify(segments));
+  }
+  assert.deepEqual(compactRefs({ ref: full(['a/b']) }, SESSION_ID), { ref: { instanceId: 'opaque-1', root: 'Workspace', pathSegments: ['a/b'], className: 'Part' } }, 'lossy joins keep the array');
+  assert.deepEqual(compactRefs({ ref: REFERENCE }, 'another-session'), { ref: REFERENCE }, 'refs of another session stay whole');
+  assert.deepEqual(expandRefs({ ref: { ...REFERENCE, path: 'x' } }, SESSION_ID), { ref: { ...REFERENCE, path: 'x' } }, 'ambiguous refs are left for strict refusal');
+  assert.deepEqual(expandRefs({ ref: { instanceId: 'i', root: 'Workspace', path: 'x', className: 'Part' } }, undefined), { ref: { instanceId: 'i', root: 'Workspace', path: 'x', className: 'Part' } });
+  assert.throws(() => expandRefs({ list: [{ ...REFERENCE, sessionId: 'other' }] }, SESSION_ID), RefSessionError);
 });
 
 test('fixture SDK: guarded writes and daemon-built restore use separate receipt endpoint', async t => {
@@ -425,7 +532,7 @@ test('real daemon HTTP + SQLite + SDK: non-native mock plugin pairing, source up
   assert.equal(read.data.command.result.source,EDITOR_SOURCE);
   const updated=await completePluginWork(call(client,'script_update',{sessionId:paired.sessionId,ref:scriptRef,expectedSource:EDITOR_SOURCE,source:'return 2'}),'script.update',command=>({ref:scriptRef as unknown as Json,mutation:{kind:'script.update',ref:scriptRef as unknown as Json,before:{source:command.args.expectedSource!},after:{source:command.args.source!}}}));
   const status=await call(client,'receipt_status',{commandId:updated.data.commandId}); assert.equal(status.data.command.result.mutation.after.source,'return 2');
-  const exact = { sessionId: paired.sessionId, requestId: updated.data.requestId, method: 'script.update', args: updated.data.command.args };
+  const exact = { sessionId: paired.sessionId, requestId: updated.data.requestId, method: 'script.update', args: store.command(updated.data.commandId).args };
   assert.equal((await http('/v1/studio/commands', exact, lab.token)).command.id, updated.data.commandId);
   const conflict = await fetch(lab.origin + '/v1/studio/commands', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + lab.token },
     body: JSON.stringify({ ...exact, args: { ...exact.args, source: 'return 999' } }) });
@@ -819,7 +926,7 @@ function closedMeshGrid(copies = 1000): Extract<AssemblyGeometry,{kind:'mesh'}> 
 test('custom assembly SDK: advertised strict recipe schema exposes every safe geometry and bound', async t => {
   const f = await fixture(t),client = await linked(t,f);
   const schema = (await client.listTools()).tools.find(tool=>tool.name === 'assets_start')!.inputSchema as any;
-  assert.deepEqual(schema.properties.template.enum,['hero-prop','environment-kit','custom-assembly']);
+  assert.deepEqual(schema.properties.template.enum,['hero-prop','environment-kit','custom-assembly','procedural']);
   const recipe = schema.properties.recipe;
   assert.equal(recipe.additionalProperties,false);assert.equal(recipe.properties.parts.maxItems,96);assert.equal(recipe.properties.materials.maxItems,8);assert.equal(recipe.properties.sockets.maxItems,64);
   assert.equal(recipe.properties.parts.items.additionalProperties,false);assert.equal(recipe.properties.materials.items.additionalProperties,false);assert.equal(recipe.properties.sockets.items.additionalProperties,false);

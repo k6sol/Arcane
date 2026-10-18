@@ -5,8 +5,8 @@ import type { Json } from '../../../packages/protocol/src/studio.js';
 import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
 import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, sceneBuildDescription, environmentDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
-import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput, compileEffectProps, effectCatalog, effectProps } from './scene-build.js';
-import { validateProperties, EFFECT_CLASSES, isEffectClass, ENVIRONMENT_PRESET_NAMES } from '../../../packages/core/src/studio-policy.js';
+import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput, compileEffectProps, effectCatalog, effectProps, compileGuiProps, guiCatalog, guiProps } from './scene-build.js';
+import { validateProperties, EFFECT_CLASSES, isEffectClass, GUI_CLASSES, isGuiClass, ENVIRONMENT_PRESET_NAMES } from '../../../packages/core/src/studio-policy.js';
 import { instanceRef } from '../../../packages/protocol/src/studio.js';
 import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
@@ -14,6 +14,9 @@ import { nativeAdoptGlbInput, assetInput, assetJobId, assetHistoryInput, nativeA
 import { scenarioPlanSchema } from '../../../packages/studio-test-controller/src/scenario.js';
 import { registerViewportTool } from './viewport-tool.js';
 import { registerNativeAssetTools } from './native-asset-tools.js';
+import { registerProceduralTools, registerProceduralPlaceTool } from './procedural-tools.js';
+import { compactOutcome, serveCompactRefs, serveCompactToolList } from './token-lean.js';
+import { TERRAIN_TOOL, TERRAIN_DESCRIPTION, terrainShape, compileTerrain } from './terrain-tool.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
@@ -35,7 +38,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     handler: (input: z.output<z.ZodObject<Shape>>, signal: AbortSignal) => Promise<unknown>) {
     server.registerTool<z.ZodRawShape, z.ZodObject<Shape>>(name, { description, inputSchema: schema, annotations }, async (input, extra): Promise<CallToolResult> => {
       try {
-        const data = client.redact(await handler(input as z.output<z.ZodObject<Shape>>, extra.signal)) as Record<string, unknown>;
+        const data = compactOutcome(client.redact(await handler(input as z.output<z.ZodObject<Shape>>, extra.signal)) as Record<string, unknown>);
         const failed = data.terminal === true && ['failed', 'cancelled', 'needs_reconciliation'].includes(String(data.state));
         return { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, ...(failed ? { isError: true } : {}) };
       } catch (error) {
@@ -49,7 +52,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
 
   // Mirrors STUDIO_SESSION_LIVE_MS in packages/storage/src/studio-store.ts; the daemon's own `live` wins when it is supplied.
   const SESSION_LIVE_MS = 60_000;
-  register('sessions', 'Read: list paired Studio sessions, IDs, root grants, write permission and live (plugin heard from within the last 60 s). Reopening Studio leaves the old pairing listed with live=false; commands to it are refused with SESSION_OFFLINE. Choose an exact live session; non-live or revoked sessions are not substitutes.',
+  register('sessions', 'Read: paired Studio sessions with root grants, allowWrites, capabilities and live (plugin heard within 60 s). Reopened Studio leaves the old pairing listed with live=false (refused with SESSION_OFFLINE); choose the exact live session.',
     z.strictObject({ timeoutMs }), READ, async (input, signal) => {
       const listed = await client.sessions({ ...input, signal });
       return { sessions: listed.sessions.map(s => {
@@ -57,36 +60,41 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
         return { ...s, live: typeof reported === 'boolean' ? reported : !s.revokedAt && Date.now() - Date.parse(s.lastSeenAt) <= SESSION_LIVE_MS };
       }) };
     });
-  register('scene_children', 'Read: return parentRef for the exact requested granted root/parent (including an empty Workspace), plus at most 200 child nodes. Reuse the actual parentRef for authorized scene_create; never fabricate root references. No changes.',
-    z.strictObject({ ...target, root, ref: ref.optional(), limit: z.number().int().min(1).max(200).default(100) }), READ,
+  register('scene_children', 'Read: parentRef for the granted root or ref (even an empty Workspace) plus the first limit child nodes (max 200; truncated marks more). Use that parentRef as a write parent; never fabricate refs.',
+    z.strictObject({ ...target, root, ref: ref.optional(), limit: z.number().int().min(1).max(200).default(50) }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'scene.children', args as Record<string, Json>, { timeoutMs, signal }));
   register('scene_inspect', 'Read: inspect allowlisted properties and child count of an opaque session reference. Script source is available only through script_read.',
     z.strictObject({ ...target, ref }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'scene.inspect', args, { timeoutMs, signal }));
-  register('scene_search', 'Read: case-insensitive name search in an explicitly granted root. At most 5000 nodes inspected and 200 returned; truncated indicates the limit.',
-    z.strictObject({ ...target, root, query: id.max(100).refine(value => value.trim().length > 0, 'Use a nonempty query.'), limit: z.number().int().min(1).max(200).default(100) }), READ,
+  register('scene_search', 'Read: case-insensitive name search in a granted root (at most 5000 nodes inspected, limit returned up to 200; truncated marks the limit).',
+    z.strictObject({ ...target, root, query: id.max(100).refine(value => value.trim().length > 0, 'Use a nonempty query.'), limit: z.number().int().min(1).max(200).default(50) }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'scene.search', args, { timeoutMs, signal }));
   register('selection_read', 'Read: return the current Studio selection only within this exact session’s granted roots.',
     z.strictObject(target), READ, ({ sessionId, timeoutMs }, signal) => client.execute(sessionId, 'selection.read', {}, { timeoutMs, signal }));
-  register('script_read', 'Read: obtain up to 100 KiB UTF-8 current editor source and Script/LocalScript enabled state for an opaque script reference. Use these exact baselines for an authorized update or activation. ModuleScripts have no enabled state.',
+  register('script_read', 'Read: current editor source (up to 100 KiB) and Script/LocalScript enabled state for a script ref: the exact baselines for script_update and script_set_enabled.',
     z.strictObject({ ...target, ref }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.read', args, { timeoutMs, signal }));
-  register('script_search', 'Read: search current editor script contents for one literal single-line query inside a granted root or its observed subtree ref. Case-sensitive by default; false uses ASCII case folding, not Unicode case folding. Returns at most 100 matching lines (one match per line), genuine refs, one-based line/UTF-8-byte columns and bounded excerpts. Fixed limits: 5000 nodes, 128 script reads, 2 MiB scanned source, 100 KiB per script and 256 KiB matched-item JSON. Truncation reasons and skipped scripts are explicit. This is a changing editor observation, not an atomic snapshot or update baseline; use script_read before editing. No regex, file writes, evaluation or mutations.',
+  register('script_search', 'Read: find one literal single-line query in editor script text under a granted root or ref (caseSensitive false = ASCII folding). Returns up to limit matching lines with refs, 1-based line/byte columns and excerpts; fixed scan limits (5000 nodes, 128 scripts, 2 MiB) are reported as truncation/skipped. Excerpts are not an edit baseline: script_read before script_update. No regex or mutations.',
     z.strictObject({ ...target, root, ref: ref.optional(), query: z.string().min(1).max(256).refine(value => Buffer.byteLength(value, 'utf8') <= 256 && !/[\x00-\x1f\x7f]/.test(value) && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value), 'Use a literal single-line query of at most 256 UTF-8 bytes.'), limit: z.number().int().min(1).max(100).default(50), caseSensitive: z.boolean().default(true) }), READ,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.search', args as Record<string, Json>, { timeoutMs, signal }));
-  register('script_update', 'Write: user-authorized exact-baseline editor update. Requires this session’s write grant and Studio edit mode; refuses dirty-editor conflicts. Both sources are bounded to 100 KiB UTF-8. Returns immutable receipt or ambiguous command state; never auto-retry.',
+  register('script_update', 'Write: replace editor source given the exact expectedSource from script_read (each up to 100 KiB). Needs the write grant and edit mode; dirty-editor conflicts are refused. Returns a receipt or ambiguous state; never auto-retry.',
     z.strictObject({ ...target, ref, expectedSource: source, source }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.update', args, { timeoutMs, signal }));
-  register('script_set_enabled', 'Write: activate or disable a Script/LocalScript using its exact current source and enabled baseline from script_read. New scripts start disabled. Enabling (including restoring a previously disabled script) requires the trusted host pinned Luau syntax compiler and matching persisted/editor source; empty, invalid or unsaved source is refused. Syntax verification is not a playtest. Requires exact paired write scope and edit mode; returns a recoverable receipt. Never auto-retry on timeout.',
+  register('script_set_enabled', 'Write: enable or disable a Script/LocalScript using exact source and enabled baselines from script_read (new scripts start disabled). Enabling needs the host\'s pinned Luau syntax compiler and matching saved/editor source; empty, invalid or unsaved source is refused. Syntax verification is not a playtest. Write grant and edit mode; returns a receipt; never auto-retry.',
     z.strictObject({ ...target, ref, expectedSource: source, expectedEnabled: z.boolean(), enabled: z.boolean() }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => client.execute(sessionId, 'script.set_enabled', args, { timeoutMs, signal }));
-  register('scene_create', sceneCreateDescription() + ` Effects (plugin with scene.effects; parent a part, Attachment or Model per class): set className to an effect class and pass fx (no properties): ${effectCatalog()}. Beam/Trail Attachment0/1 take Attachment refs from this session.`,
-    z.strictObject({ ...target, parent: ref, className: z.enum([...createClass.options, ...EFFECT_CLASSES]), name: id.max(100), properties: properties.omit({ Name: true }).optional(), fx: effectProps.optional() }), { ...WRITE, destructiveHint: false },
-    ({ sessionId, timeoutMs, fx, ...args }, signal) => {
+  register('scene_create', sceneCreateDescription() + ` Effects (plugin with scene.effects; parent a part, Attachment or Model): effect className plus fx, no properties. fx keys: ${effectCatalog()}. Beam/Trail Attachment0/1 take Attachment refs from this session. Audio: Sound in a part/Attachment (positional) or Model (global); SoundId only rbxassetid://<digits> the user gave or studio_asset_search (category Audio) returned, never invented; Sound.SoundGroup takes a SoundGroup ref; *SoundEffect classes go inside a Sound or SoundGroup. GUI (plugin with scene.gui): GUI className plus ui, no properties. ScreenGui in the StarterGui root; SurfaceGui on a part; BillboardGui on a part or Attachment; elements in a ScreenGui/SurfaceGui/BillboardGui or GuiObject; UI* modifiers in a GuiObject (UIListLayout/UIGridLayout/UIScale also in a layer GUI). ui keys: ${guiCatalog()}. For a whole screen use scene_build container ScreenGui.`,
+    z.strictObject({ ...target, parent: ref, className: z.enum([...createClass.options, ...EFFECT_CLASSES, ...GUI_CLASSES]), name: id.max(100), properties: properties.omit({ Name: true }).optional(), fx: effectProps.optional(), ui: guiProps.optional() }), { ...WRITE, destructiveHint: false },
+    ({ sessionId, timeoutMs, fx, ui, ...args }, signal) => {
+      if (isGuiClass(args.className)) {
+        if (args.properties || fx) throw new BridgeError('INPUT', 'GUI classes take ui, not properties/fx.');
+        return client.execute(sessionId, 'scene.create', { ...args, properties: compileGuiProps(args.className, ui ?? {}) } as Record<string, Json>, { timeoutMs, signal });
+      }
+      if (ui) throw new BridgeError('INPUT', 'ui applies only to GUI classes.');
       if (isEffectClass(args.className)) {
         if (args.properties) throw new BridgeError('INPUT', 'Effect classes take fx, not properties.');
-        const compiled = compileEffectProps(args.className, fx ?? {}, (value, label) => {
-          try { return { type: 'Ref', ref: instanceRef(value) as unknown as Json }; } catch { throw new BridgeError('INPUT', `${label} must be an Attachment ref from this session.`); }
+        const compiled = compileEffectProps(args.className, fx ?? {}, (value, label, kind) => {
+          try { return { type: 'Ref', ref: instanceRef(value) as unknown as Json }; } catch { throw new BridgeError('INPUT', `${label} must be ${kind === 'attachment' ? 'an Attachment' : 'a SoundGroup'} ref from this session.`); }
         });
         return client.execute(sessionId, 'scene.create', { ...args, properties: compiled } as Record<string, Json>, { timeoutMs, signal });
       }
@@ -101,7 +109,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       if (!keys.length || Object.keys(args.expected).length !== keys.length || keys.some(key => !Object.hasOwn(args.expected, key))) throw new BridgeError('INPUT', 'expected must cover exactly every changed property, and properties must be nonempty.');
       return client.execute(sessionId, 'scene.update', args as Record<string, Json>, { timeoutMs, signal });
     });
-  register('scene_build', sceneBuildDescription() + ' Effects in the same atomic build: items with an effect className, name, in (group, part or Attachment key) and fx; Beam/Trail Attachment0/1 name earlier Attachment item keys. Classes and fx keys are listed on scene_create. Every effect value is verified before the root is parented.',
+  register('scene_build', sceneBuildDescription() + ' Effects: items with an effect className, name, in (group, part or Attachment key) and fx (keys listed on scene_create); Beam/Trail Attachment0/1 name earlier Attachment item keys. GUI (scene.gui): container ScreenGui or world GUIs; GUI className + ui; a ui prototype (e.g. a styled button) is stamped N times via use. Then only interaction logic, in a LocalScript via script_update.',
     z.strictObject({ ...target, parent: ref, ...sceneBuildShape }), { ...WRITE, destructiveHint: false },
     async ({ sessionId, timeoutMs, parent, ...input }, signal) => {
       const compiled = compileSceneBuild(input as SceneBuildInput, parent as Json);
@@ -110,32 +118,32 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       const command = outcome.command ? { ...outcome.command, args: { compiled: true, items: (compiled.args.items as Json[]).length, instances: compiled.instances } } : null;
       return { ...outcome, command, plannedInstances: compiled.instances, ...(compiled.scatter.length ? { scatter: compiled.scatter } : {}) };
     });
-  register('environment_apply', environmentDescription() + ` Also (plugin with scene.effects): preset ${ENVIRONMENT_PRESET_NAMES.join('/')} expands host-side to exact values (explicit sections override); technology Future/ShadowMap/Voxel/Compatibility; terrainDecoration; materials (MaterialVariants with built-in or numeric asset maps, optional base-material override). A setting Studio refuses rolls everything back and names the Properties-window step.`,
+  register('environment_apply', environmentDescription() + ` With scene.effects: preset ${ENVIRONMENT_PRESET_NAMES.join('/')} (explicit sections override), technology, terrainDecoration, materials (MaterialVariants) and soundService (AmbientReverb, DistanceFactor, DopplerScale, RolloffScale). A setting Studio refuses rolls everything back and names the Properties-window step.`,
     z.strictObject({ ...target, ...environmentShape }), WRITE,
     ({ sessionId, timeoutMs, ...input }, signal) => client.execute(sessionId, 'environment.apply', compileEnvironment(input), { timeoutMs, signal }));
-  register('receipt_status', 'Read: look up an existing immutable command/receipt by commandId, including queued, dispatched, failed or needs_reconciliation states. This does not enqueue or replay work; use after an ambiguous timeout.',
+  register('receipt_status', 'Read: an existing command/receipt by commandId in any state. Never enqueues or replays; use after an ambiguous timeout.',
     z.strictObject({ commandId: id, timeoutMs }), READ,
     ({ commandId, timeoutMs }, signal) => client.receiptStatus(commandId, { timeoutMs, signal }));
-  register('receipt_restore', 'Write: user-authorized restoration from a succeeded mutation receipt commandId. The daemon constructs the inverse; the plugin requires the exact current after-state and refuses later-edit conflicts. Requires current write grant and edit mode. Do not supply an inverse or repeat on timeout.',
+  register('receipt_restore', 'Write: user-authorized undo of a succeeded mutation receipt commandId. The daemon builds the inverse; the plugin requires the exact after-state and refuses later edits. Write grant and edit mode; never repeat on timeout.',
     z.strictObject({ commandId: id, timeoutMs }), WRITE,
     ({ commandId, timeoutMs }, signal) => client.restore(commandId, { timeoutMs, signal }));
-  register('playtest_request','Prepare a finite Studio playtest for the exact paired/native unpublished target, with separate human approval in Arcane. An optional sealed scenario can hold movement/interaction keys, click one privately bound GUI target, assert displacement or GUI/text transitions, and restore approved temporary property edits. Source and editor revisions are observed by the host. Request data cannot supply Luau or native tools. Current captures are retained for human review with unattested context; a required Client screenshot remains unsupported evidence. Returns needs_approval; follow playtest_status through settled input release, owned Play stop, and restoration before reporting measured results.',
+  register('playtest_request','Prepare a finite playtest of the exact paired/native unpublished target for separate human approval in Arcane; returns needs_approval and never starts Play itself. Optional sealed scenario: movement/interaction keys, one bound GUI click, displacement or GUI/text assertions and restored temporary property edits; no Luau or native tools. Captures are unattested human-review context; a required Client screenshot remains unsupported evidence. Follow playtest_status through input release, owned Play stop and restoration before reporting measured results.',
     z.strictObject({...target,nativeStudioId:id.optional(),durationMs:z.number().int().min(5000).max(60000).default(15000),observationIntervalMs:z.number().int().min(250).max(2000).default(1000),failOnRuntimeError:z.boolean().default(true),scenario:scenarioPlanSchema.optional()}),{...WRITE,destructiveHint:false},
     ({timeoutMs,...input},signal)=>client.playtestRequest(input,{timeoutMs,signal}));
   register('playtest_status','Read the actual current playtest request/report or caller-scoped pending requests. No effects or retries. Evidence records bounded state/console observations, not exhaustive gameplay correctness; fixture and native evidence remain distinct.',
     z.strictObject({jobId:id.optional(),timeoutMs}),READ,({jobId,timeoutMs},signal)=>client.playtestStatus(jobId,{timeoutMs,signal}));
   register('playtest_cancel','Cancel this caller-owned playtest request/run. Only the original verified owned play epoch can be stopped; foreign/manual play is refused. Cleanup can remain unknown and fenced. Never retry after an ambiguous response; read playtest_status.',
     z.strictObject({jobId:id,timeoutMs}),WRITE,({jobId,timeoutMs},signal)=>client.playtestCancel(jobId,{timeoutMs,signal}));
-  register(SKILLS_RECOMMEND_TOOL, 'Read locally: automatically select and load relevant bundled skill guidance from the actual task brief, including matching declared genre references, within a byte budget. Call before substantive inspect/plan/build/verify work; the user need not select skill IDs or tools. The product owner opted into experimental guidance, so allowExperimental defaults true for this router only; states remain honest and no skill is promoted to behavior-verified or approved. Quarantined/deprecated, tampered or escaped content is refused. Returns loaded IDs/status/context and explicitly deferred items; grants no permissions, calls no model or daemon, and scans no project.',
+  register(SKILLS_RECOMMEND_TOOL, 'Read locally: call once with the actual task brief before substantive work. Loads the most relevant bundled skill guidance first (plus matching genre references) within byteBudget and lists the rest as deferredIds for skills_get on demand. allowExperimental defaults true here (owner opt-in; not behavior-verified or approved). Tampered, quarantined or deprecated content is refused. Grants no permissions; calls no model or daemon.',
     z.strictObject({ request: boundedText(SKILL_ROUTER_LIMITS.requestCharacters).refine(value => value.trim().length > 0, 'Describe the actual task.'),
       limit: z.number().int().min(1).max(SKILL_ROUTER_LIMITS.skills).default(SKILL_ROUTER_LIMITS.skills),
       byteBudget: z.number().int().min(256).max(SKILL_ROUTER_LIMITS.maximumBytes).default(SKILL_ROUTER_LIMITS.defaultBytes),
       allowExperimental: z.boolean().default(BUNDLED_GUIDANCE_POLICY.allowExperimental) }), READ,
     input => recommendSkills(skills, input));
-  register('skills_list', 'Read bundled skill metadata from the existing integrity-checked registry. Approved skills only by default. Set allowExperimental=true only when the user explicitly opts into experimental content; quarantined/deprecated skills remain unavailable.',
+  register('skills_list', 'Read bundled skill metadata from the integrity-checked registry. Approved only by default; allowExperimental=true needs explicit opt-in. Quarantined/deprecated skills stay unavailable.',
     z.strictObject({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(20), allowExperimental: z.boolean().default(false) }), READ,
     input => skills.list(input));
-  register('skills_get', 'Read 1–8 selected bundled registry skills and declared references within a byte budget, verifying checksums and contained paths. Approved only by default; allowExperimental=true requires explicit user opt-in. Content grants no tools or permission. Nothing is silently truncated.',
+  register('skills_get', 'Read 1–8 bundled skills (e.g. deferredIds from skills_recommend) and declared references within byteBudget, checksum-verified; never silently truncated. Approved only by default; allowExperimental=true needs explicit opt-in. Content grants no tools or permission.',
     z.strictObject({ ids: z.array(skillId).min(1).max(8), references: z.array(z.string().min(1).max(256)).max(20).default([]),
       byteBudget: z.number().int().min(256).max(128 * 1024).default(16_384), allowExperimental: z.boolean().default(false) }), READ,
     input => skills.get(input));
@@ -170,6 +178,10 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
   registerViewportTool(server, client);
   registerNativeAssetTools(server, client);
+  registerProceduralTools(server, client, assetScope);
+  // Appended last in ARCANE_TOOL_NAMES, so it is registered after the procedural tools.
+  register(TERRAIN_TOOL, TERRAIN_DESCRIPTION, z.strictObject({ ...target, ...terrainShape }), WRITE,
+    ({ sessionId, timeoutMs, ...input }, signal) => client.execute(sessionId, 'terrain.generate', compileTerrain(input), { timeoutMs, signal }));
   if (client.assetAudience === 'native-session') {
     register('assets_adopt_glb','Write: adopt an existing owned project-relative GLB into a managed immutable chat asset for interactive preview. Requires the exact native project/conversation capture and explicit asset admission. Validates actual bounded GLB bytes, embedded image budgets and direct ordinary-file containment before copying; no links, URLs, Python/scripts or caller authority fields. Uses explicit adopted provenance, never bundled-Blender evidence. Engine import/upload remains unavailable pending safe conversion. The returned job acknowledgement is not engine acceptance. Inspect assets_jobs after ambiguity; never auto-retry.'+assetScope,
       nativeAdoptGlbInput, { ...WRITE,destructiveHint:false },
@@ -189,6 +201,9 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     register('assets_studio_reconstruction_status','Read historical detached reconstruction evidence for this exact conversation-bound jobId. Returns the original command state and matching receipt or null, with currentResources unobserved, imported false, engineVerification pending and retry false. A succeeded receipt never proves resources survived a reconnect/Play epoch or authorizes upload/insertion. This operation never allocates, resumes, repairs or retries anything.'+assetScope,
       z.strictObject({jobId:nativeAssetJobId,timeoutMs}),READ,
       ({jobId,timeoutMs},signal)=>client.assetsStudioReconstructionStatus(jobId,{timeoutMs,signal}));
+    registerProceduralPlaceTool(server, client, assetScope);
   }
+  serveCompactToolList(server);
+  serveCompactRefs(server);
   return server;
 }

@@ -3,6 +3,7 @@ import { jsonSnapshot, normalizeRecipe, preflightRecipe, preflightPart, checkSoc
 import { inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { AssetError } from './types.js';
+import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralSize, PROCEDURAL_LIMITS } from './procedural.js';
 import type { AssetAudit, AssetManifest, AssetRequest } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
 
@@ -20,9 +21,11 @@ function vector(v: unknown, low: number, high: number, label: string): [number, 
 }
 export function normalizeRequest(value: unknown): AssetRequest {
   const r = record(jsonSnapshot(value), 'asset request');
-  const allowed = ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples', 'recipe'];
+  const allowed = ['schemaVersion', 'template', 'name', 'seed', 'sizeMeters', 'color', 'triangleBudget', 'renderResolution', 'renderSamples', 'recipe', 'procedural'];
   if (Object.keys(r).some(k => !allowed.includes(k)) || (r.schemaVersion !== undefined && r.schemaVersion !== 1)) throw new AssetError('INPUT', 'Unsupported asset request field.');
-  if (!['hero-prop', 'environment-kit', 'custom-assembly'].includes(String(r.template))) throw new AssetError('INPUT', 'Choose a fixed template or custom-assembly.');
+  if (!['hero-prop', 'environment-kit', 'custom-assembly', 'procedural'].includes(String(r.template))) throw new AssetError('INPUT', 'Choose a fixed template, custom-assembly or procedural.');
+  if (r.template === 'procedural') return normalizeProceduralRequest(r);
+  if (r.procedural !== undefined) throw new AssetError('INPUT', 'Only the procedural template accepts procedural parameters.');
   const budget = integer(r.triangleBudget ?? (r.template === 'custom-assembly' ? 15000 : 5000), 100, 50000, 'triangle budget');
   const recipe = r.template === 'custom-assembly' ? normalizeRecipe(r.recipe, budget) : undefined;
   if (!recipe && r.recipe !== undefined) throw new AssetError('INPUT', 'Only custom-assembly accepts a recipe.');
@@ -36,6 +39,17 @@ export function normalizeRequest(value: unknown): AssetRequest {
     renderResolution: integer(r.renderResolution ?? 384, 128, 1024, 'render resolution'), renderSamples: integer(r.renderSamples ?? 16, 4, 64, 'render samples'), ...(recipe ? { recipe } : {}) };
   if (Buffer.byteLength(JSON.stringify(request)) > CUSTOM_REQUEST_BYTES) throw new AssetError('INPUT', 'Normalized recipe exceeds 256 KiB.');
   return request;
+}
+/** Procedural size is derived from its parameters; colour defaults per kind/species. */
+function normalizeProceduralRequest(r: Record<string, unknown>): AssetRequest {
+  if (r.recipe !== undefined) throw new AssetError('INPUT', 'Only custom-assembly accepts a recipe.');
+  const procedural = normalizeProcedural(r.procedural ?? {}), size = proceduralSize(procedural);
+  if (r.sizeMeters !== undefined && !isDeepStrictEqual(r.sizeMeters, size)) throw new AssetError('INPUT', 'Procedural size comes from its generator parameters.');
+  const budget = integer(r.triangleBudget ?? proceduralDefaultBudget(procedural), PROCEDURAL_LIMITS.minTriangles, PROCEDURAL_LIMITS.maxTriangles, 'procedural triangle budget (2500..20000)');
+  if (budget < proceduralMinimumTriangles(procedural)) throw new AssetError('INPUT', 'This column needs triangleBudget >= ' + proceduralMinimumTriangles(procedural) + ' (or fewer flutes).');
+  return { schemaVersion: 1, template: 'procedural', name: assetName(r.name), seed: integer(r.seed ?? 1, 0, 2147483647, 'seed'), sizeMeters: size,
+    color: vector(r.color ?? proceduralColor(procedural), 0, 1, 'color'), triangleBudget: budget,
+    renderResolution: integer(r.renderResolution ?? 512, 128, 1024, 'render resolution'), renderSamples: integer(r.renderSamples ?? 16, 4, 64, 'render samples'), procedural };
 }
 export async function readJson(path: string, max = 1024 * 1024): Promise<unknown> {
   await regularFile(path, max);
@@ -74,6 +88,12 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
   const reported = record(audit.totals, 'audit totals');
   for (const key of Object.keys(totals) as (keyof typeof totals)[]) if (reported[key] !== totals[key]) throw new AssetError('MESH', 'Mesh metrics disagree with totals.');
   if (!totals.renderTriangles || totals.renderTriangles > request.triangleBudget || !totals.collisionTriangles || totals.collisionTriangles > (request.recipe?.collisionTriangleBudget ?? 256) || totals.materials > (request.recipe ? 8 : 3)) throw new AssetError('MESH', 'Mesh budget failed.');
+  if (request.procedural) {
+    const keys = request.procedural.kind === 'tree' ? ['bark', 'leaves'] : [request.procedural.kind === 'column' ? 'stone' : request.procedural.kind === 'rock' ? 'rock' : 'foliage'];
+    const render = (audit.meshes as Record<string, unknown>[]).filter(m => m.role === 'render').map(m => m.name).sort();
+    if (!isDeepStrictEqual(render, keys.map(k => 'SM_' + request.name + '_' + k).sort()) || totals.lod1Triangles !== 0 || totals.renderTriangles > PROCEDURAL_LIMITS.maxTriangles) throw new AssetError('MESH', 'Procedural parts differ from the generator contract.');
+    for (const raw of audit.meshes as Record<string, unknown>[]) if (raw.role === 'render' && (raw.materials as unknown[]).length !== 1) throw new AssetError('MESH', 'Procedural parts are joined per material (one material each).');
+  }
   if (request.template === 'hero-prop' && (!totals.lod1Triangles || totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Hero LOD must reduce geometry.');
   if (!Array.isArray(audit.renders) || audit.renders.length !== 2) throw new AssetError('RENDER', 'Two review renders are required.');
   const renderNames = new Set<string>();
@@ -260,6 +280,10 @@ export function inspectPng(bytes: Buffer, expectedResolution: number): void {
   if (max - min < 12) bad();
 }
 
+/** Bundled worker files hashed into a job's template digest, in fixed order. */
+export function workerScripts(request: AssetRequest): string[] {
+  return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : [])];
+}
 export async function validateManifestFiles(directory: string, value: unknown): Promise<AssetManifest> {
   const m = record(value, 'manifest');
   if (m.schemaVersion !== 1 || typeof m.jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(m.jobId) || typeof m.templateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.templateSha256)) throw new AssetError('MANIFEST', 'Unsupported manifest or worker digest.');
@@ -269,7 +293,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
   const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request);
   if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 32) throw new AssetError('MANIFEST', 'Invalid artifact list.');
-  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
+  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
   const names = new Set<string>(), hashes = new Map<string, string>();
   let totalBytes = 0;
@@ -287,12 +311,12 @@ export async function validateManifestFiles(directory: string, value: unknown): 
       if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', 'GLB geometry disagrees with export audit.');
     } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
   }
-  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : [])]) {
+  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : [])]) {
     if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
   }
-  if (sha256(Buffer.from(['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : [])].map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
+  if (sha256(Buffer.from(workerScripts(request).map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
   if (JSON.stringify(normalizeRequest(await readJson(artifactPath(directory, 'request.json')))) !== JSON.stringify(request) || JSON.stringify(await readJson(artifactPath(directory, 'audit.json'))) !== JSON.stringify(m.validation)) throw new AssetError('MANIFEST', 'Manifest request/audit differs from the original evidence.');
-  if (m.sourceRequestSha256 !== undefined || request.recipe) {
+  if (m.sourceRequestSha256 !== undefined || request.recipe || request.procedural) {
     if (m.sourceRequestSha256 !== hashes.get('input.json') || !isDeepStrictEqual(normalizeRequest(await readJson(artifactPath(directory, 'input.json'), CUSTOM_REQUEST_BYTES)), request)) throw new AssetError('MANIFEST', 'Original input provenance differs from normalized request.');
   }
   if (request.recipe && (!isDeepStrictEqual(m.assembly, audit.assembly) || !isDeepStrictEqual(await readJson(artifactPath(directory, 'assembly.json')), audit.assembly))) throw new AssetError('MANIFEST', 'Assembly evidence disagrees with saved artifacts.');

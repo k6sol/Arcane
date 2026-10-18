@@ -1486,17 +1486,60 @@ test('Claude choices: a click sends exactly one message; plan approval sends onc
   assert.equal(plan.dataset.state, 'answered');
 });
 
-test('Claude choices: saved replies answered by a later message stay closed; the latest open block stays live', async t => {
+test('Claude choices: blocks restored from saved history are inert and show the answer given when it is known', async t => {
   const b = fakeBridge();
+  const choices = (q: string, options: string[]) => '```arcane-choices\n' + JSON.stringify({ question: q, options }) + '\n```';
   b.histories.set('conv-new', { conversationId: 'conv-new', messages: [
-    { id: 'u1', role: 'user', text: 'Door?', at: '' }, { id: 'a1', role: 'assistant', text: '```arcane-choices\n{"question":"Colour?","options":["Red","Blue"]}\n```', at: '' },
-    { id: 'u2', role: 'user', text: 'Red', at: '' }, { id: 'a2', role: 'assistant', text: '```arcane-choices\n{"question":"Size?","options":["Small","Large"]}\n```', at: '' }] });
+    { id: 'u1', role: 'user', text: 'Door?', at: '' }, { id: 'a1', role: 'assistant', text: choices('Colour?', ['Red', 'Blue']), at: '' },
+    { id: 'u2', role: 'user', text: ' red ', at: '' }, { id: 'a2', role: 'assistant', text: '```arcane-plan\n{"steps":["Frame","Hinges"]}\n```', at: '' },
+    { id: 'u3', role: 'user', text: PLAN_APPROVE_TEXT, at: '' }, { id: 'a3', role: 'assistant', text: choices('Handle?', ['Brass', 'Steel']), at: '' },
+    { id: 'u4', role: 'user', text: 'Something else entirely', at: '' }, { id: 'a4', role: 'assistant', text: choices('Size?', ['Small', 'Large']), at: '' }] });
   const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh(); await f.chat.open('conv-new'); await tick();
   const blocks = f.messages.querySelectorAll('.chat-choices');
-  assert.deepEqual(blocks.map(node => node.dataset.state), ['closed', 'open']);
-  assert.ok(blocks[0]!.querySelectorAll('button').every(node => node.disabled));
-  click(blocks[1]!.querySelectorAll('button')[1]!); await tick();
-  assert.deepEqual(sends(b).map((row: any) => row.text), ['Large']);
+  assert.deepEqual(blocks.map(node => node.dataset.state), ['closed', 'closed', 'closed', 'closed'], 'no restored block is live');
+  assert.ok(blocks.every(node => node.dataset.restored === 'true'));
+  assert.ok(blocks.every(node => node.querySelectorAll('button').every(button => button.disabled)), 'every restored button is disabled');
+  assert.deepEqual(blocks.map(node => node.dataset.answer), ['chosen', 'chosen', 'answered', 'none']);
+  assert.deepEqual(blocks.map(node => node.querySelector('.chat-choices-status')!.textContent),
+    ['Chosen: Red', 'Chosen: plan approved', 'Answered earlier', 'No longer active']);
+  assert.deepEqual(blocks.map(node => node.querySelectorAll('button').filter(button => button.dataset.chosen === 'true').map(button => button.textContent)),
+    [['Red'], ['Approve plan'], [], []]);
+  // Clicking restored buttons (dispatched directly, bypassing disabled) sends, queues and pre-fills nothing.
+  const input = f.input.value;
+  for (const block of blocks) for (const button of block.querySelectorAll('button')) click(button);
+  await tick();
+  assert.deepEqual(sends(b), [], 'no stale choice or plan approval was sent');
+  assert.deepEqual(f.chat.queued(), []); assert.equal(f.input.value, input, 'Change plan on a restored plan never pre-fills');
+  assert.ok(blocks.every(node => node.dataset.state === 'closed'));
+  // A new reply in this conversation is live again; typing an option marks the last restored block as chosen.
+  f.type('Large'); key(f.input, 'Enter'); await tick();
+  assert.equal(blocks[3]!.querySelector('.chat-choices-status')!.textContent, 'Chosen: Large');
+  b.emit({ type: 'message', message: { id: 'a5', role: 'assistant', text: choices('Hinge side?', ['Left', 'Right']), at: '' } });
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  const live = f.messages.querySelectorAll('.chat-choices').at(-1)!;
+  assert.equal(live.dataset.state, 'open'); assert.equal(live.dataset.restored, undefined);
+  click(live.querySelectorAll('button')[1]!); await tick();
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['Large', 'Right'], 'live choices still send exactly once');
+  assert.equal(live.dataset.state, 'answered');
+});
+
+test('choice blocks: restored rendering ignores a send callback and resolves the chosen answer', () => {
+  const { doc } = surface();
+  let calls = 0;
+  const render = (value: string, answer?: string | null) => renderMessageText(doc as unknown as Document, value, { choose: () => { calls++; return true; }, restored: true, ...(answer === undefined ? {} : { answer }) }) as unknown as Element;
+  const block = render('```arcane-choices\n{"question":"Q","options":["Alpha","Beta"]}\n```', 'beta');
+  assert.equal(block.querySelector('.chat-choices')!.dataset.state, 'closed');
+  assert.deepEqual(block.querySelectorAll('button').map(node => [node.textContent, node.disabled, node.dataset.chosen ?? null, node.getAttribute('aria-pressed')]),
+    [['Alpha', true, null, 'false'], ['Beta', true, 'true', 'true']]);
+  for (const button of block.querySelectorAll('button')) click(button);
+  assert.equal(calls, 0, 'a restored block never calls choose');
+  const change = render('```arcane-plan\n{"steps":["A"]}\n```', PLAN_CHANGE_TEXT + 'add a roof');
+  assert.equal(change.querySelector('.chat-choices-status')!.textContent, 'Chosen: plan change requested');
+  const open = render('```arcane-plan\n{"steps":["A"]}\n```');
+  assert.equal(open.querySelector('.chat-choices-status')!.textContent, 'No longer active');
+  assert.ok(open.querySelectorAll('button').every(node => node.disabled && node.dataset.chosen === undefined));
+  const live = renderMessageText(doc as unknown as Document, '```arcane-choices\n{"question":"Q","options":["Alpha","Beta"]}\n```', { choose: () => { calls++; return true; } }) as unknown as Element;
+  click(live.querySelectorAll('button')[0]!); assert.equal(calls, 1, 'a live block still sends');
 });
 
 test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu',{ skip: !browserModule, timeout: 60000 }, async t => {

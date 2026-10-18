@@ -10,6 +10,7 @@ license: MIT
 - Build one landmark with one `scene_build` call (roughly 120-220 parts).
 - Group it in a Model with keyed sub-Models: Plinth, Column, Capital, Stair, Top.
 - Key the spawn so its ref comes back.
+- Structure players stand on (plinth, stairs, platform, spawn) is always primitive parts; assets only dress it.
 
 ## Geometry rules
 - Discs and columns are Part Shape Cylinder with Size [length, d, d] and Orientation [0,0,90], which makes the axis vertical.
@@ -63,7 +64,8 @@ license: MIT
 - Never let foliage intersect the plinth or stair.
 
 ## Finish
-- Keep exact-dimension structure (plinths, columns, stairs, spawn) as primitive parts. Dress it with real assets: `studio_asset_search` + `studio_asset_insert` for props (lamps, statues, vases, benches, ivy); `studio_asset_generate` kind mesh for a carved hero ornament and kind material for bespoke stone applied to the parts. Check with `studio_viewport_capture`.
+- Decorative columns (colonnades, ruins): Creator Store asset first, else `assets_procedural` column (radius, height, 0 or 8-32 flutes, base none/plinth/attic, capital doric/ionic/corinthian; check `assets_preview`; it vanishes in Play until the user uploads it, so say so), placed once with `assets_place_studio_import` and repeated with `scene_build` templates; else the primitive column above.
+- Dress the primitive structure with real assets: `studio_asset_search` + `studio_asset_insert` for props (lamps, statues, vases, benches, ivy); `studio_asset_generate` kind mesh for a carved hero ornament and kind material for bespoke stone applied to the parts. Check with `studio_viewport_capture`.
 - Realistic scale, weathering and lighting moods: `arcane-photoreal`. Torches, lamps and glow: `arcane-vfx`.
 
 ## Verify

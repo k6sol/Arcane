@@ -81,6 +81,17 @@ test('auto-approval accepts only already-eligible in-project work and keeps ever
     ['echo $env:OPENAI_API_KEY',/environment|credential/],['type %USERPROFILE%\\x',/environment/],['cat ~/.ssh/id_rsa',/environment|credential|network/],['cat .env',/credential/],['shutdown /s',/system/],['taskkill /F /IM Studio.exe',/system/],
     ['iex (irm x)',/network|hidden/],['powershell -EncodedCommand AAAA',/hidden/],['echo `whoami`',/hidden/],['cat ../secrets.txt',/outside|credential/],['type C:\\Windows\\win.ini',/outside/],['ls /etc',/outside/]];
   for(const [command,reason] of fences){const v=run(command);assert.equal(v.accept,false,command);assert.match(v.reason,reason,command);}
+  // Obfuscated or indirect forms of the same fenced effects never auto-accept.
+  for(const command of ['cmd /c de^l src\\a.ts','cmd /c mklink /J x %CD:~0,3%Users','powershell -e AAAA','powershell -ec AAAA','powershell –EncodedCommand AAAA',
+    "& ('Remove'+'-Item') src","ri src -Recurse","[IO.File]::Delete('src/a.ts')","(New-Object Net.WebClient).DownloadString('x')",
+    "node -e \"require('fs').rmSync('src',{recursive:true})\"",'python -c "import shutil"','find src -delete','robocopy empty src /MIR','ping data.example',
+    'New-Item -ItemType Junction -Path x -Target y','ln -s y x','echo x > .git\\hooks\\pre-commit','git config core.hooksPath h','git -c core.fsmonitor=x status'])
+    assert.equal(run(command).accept,false,command);
+  assert.equal(run('echo dist >> .gitignore').accept,true,'.gitignore is an ordinary file');
+  for(const command of ['echo note >> ARCANE.md','copy x .claude\\settings.json'])assert.equal(run(command).accept,false,command);
+  const edit={...a,method:'item/fileChange/requestApproval' as const,command:null,cwd:null,changes:[{path:'src/a.ts',kind:'update' as const,movePath:null,diff:'@@'}]};
+  for(const path of ['ARCANE.md','CLAUDE.md','AGENTS.md','.mcp.json','.claude/settings.json','.vscode/tasks.json','.arcane/sync.json','.github/workflows/x.yml','.husky/pre-commit'])
+    assert.match(autoApprovalVerdict(st,{...edit,changes:[{...edit.changes[0]!,path}]}).reason,/project memory|agent/,path);
   assert.equal(run('x'.repeat(2001)).accept,false);assert.equal(run('npm test\nrm -rf /').accept,false);
   for(const patch of [{canAccept:false},{cwd:'outside'},{expiresAt:0},{turnId:'other'}])assert.equal(autoApprovalVerdict(st,{...a,command:'npm test',...patch}).accept,false,'never weaker than manual eligibility');
   const file={...a,method:'item/fileChange/requestApproval' as const,command:null,cwd:null,changes:[{path:'src/a.ts',kind:'update' as const,movePath:null,diff:'@@'}]};
@@ -159,6 +170,7 @@ async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(build, 'apps/desktop/src/playtest-panel.js'));
   assets.set('/playtest-toggle.js', resolve(build, 'apps/desktop/src/playtest-toggle.js'));
+  for(const [path,file] of await productDesktopModules(build))if(!assets.has(path))assets.set(path,file);
   let gets=0;
   const server=createServer((request,response)=>{void(async()=>{
     const url=new URL(request.url??'/',origin),asset=assets.get(url.pathname);
@@ -452,9 +464,9 @@ test('real Edge + human HTTP fixtures: explicit native open loads public history
   await b.open();assert.equal(h.connected,0);assert.equal(b.posts.length,0);
   await (await visibleControl(page,'#refresh')).click();await b.text('project-path',h.projectPath);
   await b.connect();await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-scope','fixture-thread');
-  await b.text('codex-notice','History loaded.');
+  await b.text('codex-notice','Conversation ready.');
   const c=h.clients[0]!,before=c.calls.length,historyBefore=c.calls.filter(x=>x.method==='history-read').length;
-  assert.equal(historyBefore,1,'The acknowledged explicit chat open loads its real public history once');
+  assert.equal(historyBefore,0,'A newly created conversation has no stored history, so its explicit open reads none');
   await (await visibleControl(page,'#codex-history-refresh')).click();
   try{await b.ready('codex-history-thread');}catch(error){t.diagnostic('History mount '+JSON.stringify(await page.evaluate(()=>({status:document.getElementById('codex-history-status')?.textContent,notice:document.getElementById('codex-history-notice')?.textContent,project:document.getElementById('project-path')?.textContent,scope:document.getElementById('codex-history-scope')?.textContent,disabled:(document.getElementById('codex-history-thread') as HTMLSelectElement)?.disabled})))+' pageErrors '+b.errors.join(';')+' binding '+JSON.stringify(h.service.state().nativeHistory));throw error;}
   assert.equal(c.calls.length,before,'cache read does not launch native history RPC');
@@ -468,7 +480,8 @@ test('real Edge + human HTTP fixtures: explicit native open loads public history
   assert.equal(c.calls.filter(x=>x.method==='history-read').length,historyBefore+1);
   assert.equal(c.calls.some(x=>['turn-start','grant-writes','thread-resume'].includes(x.method)),false);
   assert.equal(await page.locator('#codex-history-entries img, #codex-history-entries script').count(),0);
-  assert.equal(await page.locator('#codex-messages .message-text').filter({hasText:'Fixture imported native history'}).count(),1,'Saved public chat text is rendered once as text');
+  // The new conversation's transcript starts empty; the explicit history load renders in the history panel above and never twice.
+  assert.ok(await page.locator('#codex-messages .message-text').filter({hasText:'Fixture imported native history'}).count()<=1,'Saved public chat text is never duplicated');
   assert.equal(await page.locator('#codex-messages img, #codex-messages script').count(),0);
   assert.deepEqual(b.errors,[]);
   assert.equal(h.service.state().nativeHistory!.recorded!.result.entries.length,2);
@@ -476,6 +489,16 @@ test('real Edge + human HTTP fixtures: explicit native open loads public history
   assert.equal(b.posts.length,total,'reload must not automatically replay history-load');
   assert.equal(c.calls.filter(x=>x.method==='history-read').length,historyBefore+1);
 });
+
+// Serve exactly the desktop modules the daemon serves (parsed from lab-server.ts), so a new studio.js import can
+// never leave this fixture booting a half-loaded page while the product itself works.
+async function productDesktopModules(build: string): Promise<[string, string][]> {
+  const source = await readFile(resolve('apps/daemon/src/lab-server.ts'), 'utf8');
+  const modules = [...source.matchAll(/\['(\/[a-z0-9-]+\.js)',\s*\[join\(options\.cwd,\s*'dist\/apps\/desktop\/src\/([a-z0-9-]+\.js)'\)/g)]
+    .map(match => [match[1]!, resolve(build, 'apps/desktop/src', match[2]!)] as [string, string]);
+  assert.ok(modules.some(([path]) => path === '/studio.js') && modules.length > 20, 'lab-server desktop module list');
+  return modules;
+}
 
 async function openAdvancedSettings(page:any, target='native-conversation-heading') {
   await page.evaluate((target:string)=>document.dispatchEvent(new CustomEvent('workspace:settingsrequest',{detail:{target}})),target);

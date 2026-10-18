@@ -8,9 +8,9 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ARCANE_PLANS, CHECKOUT_NOT_CONNECTED, resolveCheckout, serviceBase, validatePlansConfig, type PlansConfig } from '../../packages/protocol/src/plans.js';
 import { ActionsLedger, LEDGER_FILE } from '../../apps/daemon/src/actions-ledger.js';
-import { createArcaneGateway, createEncryptedTokenVault, gatewayStatus, GatewayUnavailable, type ArcaneCredentialVault } from '../../apps/daemon/src/arcane-gateway.js';
+import { createArcaneGateway, createEncryptedTokenVault, gatewayBase, gatewayStatus, GatewayUnavailable, type ArcaneCredentialVault } from '../../apps/daemon/src/arcane-gateway.js';
 import { plansRoutes } from '../../apps/daemon/src/plans-routes.js';
-import { checkoutUrlAllowed, chipLabel, formatPrice, readPlansState } from '../../apps/desktop/src/plans.js';
+import { checkoutUrlAllowed, chipLabel, formatPrice, readDesktopAccount, readDesktopAccountReply, readPlansState } from '../../apps/desktop/src/plans.js';
 
 const temp = () => mkdtemp(join(tmpdir(), 'arcane-plans-test-'));
 const configured = (patch: Partial<PlansConfig> = {}): PlansConfig => ({ ...structuredClone(ARCANE_PLANS),
@@ -102,6 +102,35 @@ test('Arcane gateway reads balance, usage and a streamed chat from the documente
   assert.deepEqual(chunks, [{ type: 'delta', text: 'Hel' }, { type: 'delta', text: 'lo' }, { type: 'done', creditsUsed: 3 }]);
   assert.ok(seen.every(call => call.url.startsWith('https://gateway.arcane.test/api/') && call.auth === 'Bearer ' + token && call.redirect === 'error'));
   await assert.rejects(gateway.models(), GatewayUnavailable);
+});
+
+test('Arcane gateway: a local URL enables it only on an allowlisted origin; turnId and rate limits pass through', async () => {
+  const allowlisted = configured({ gateway: { url: '', allowedOrigins: ['https://gateway.arcane.test'] } });
+  assert.equal(gatewayBase(ARCANE_PLANS, 'https://gateway.arcane.test'), null, 'Shipped config allowlists nothing.');
+  assert.equal(gatewayBase(allowlisted, 'https://evil.test'), null);
+  assert.equal(gatewayBase(allowlisted, 'https://gateway.arcane.test/'), 'https://gateway.arcane.test');
+  assert.equal(gatewayStatus(allowlisted, true).state, 'disabled');
+  assert.equal(gatewayStatus(allowlisted, true, 'https://gateway.arcane.test').state, 'ready');
+  let body: Record<string, unknown> = {}, status = 200;
+  const fake = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body ?? '{}'));
+    return status === 200 ? new Response('data: {"type":"done","creditsUsed":1}\n\n') : new Response('{}', { status });
+  }) as typeof fetch;
+  const gateway = createArcaneGateway({ config: allowlisted, vault: memoryVault('arc_' + 'd'.repeat(43)), fetch: fake, localUrl: 'https://gateway.arcane.test' });
+  for await (const chunk of gateway.streamChat({ model: 'arcane-default', messages: [{ role: 'user', content: 'hi' }], turnId: 'turn-7' })) void chunk;
+  assert.equal(body.turnId, 'turn-7');
+  await assert.rejects(async () => { for await (const chunk of gateway.streamChat({ model: 'm', messages: [{ role: 'user', content: 'x' }], turnId: 'bad id' })) void chunk; }, /cannot be sent/);
+  status = 429;
+  await assert.rejects(async () => { for await (const chunk of gateway.streamChat({ model: 'm', messages: [{ role: 'user', content: 'x' }] })) void chunk; }, /Too many/);
+  status = 402;
+  await assert.rejects(gateway.balance(), /out of Arcane Credits/);
+});
+
+test('desktop account replies are read strictly', () => {
+  assert.equal(readDesktopAccount({ version: 1, state: 'ready', message: 'x', account: 'signed-in' }), 'signed-in');
+  for (const value of [null, {}, { version: 2, account: 'signed-in' }, { version: 1, account: 'admin' }]) assert.equal(readDesktopAccount(value), 'unavailable');
+  assert.equal(readDesktopAccountReply({ version: 1, state: 'opened', message: 'x' }), 'opened');
+  assert.equal(readDesktopAccountReply({ version: 1, state: 'token', message: 'x' }), 'unavailable');
 });
 
 test('encrypted token vault never writes the token in plain text and refuses without OS encryption', async () => {

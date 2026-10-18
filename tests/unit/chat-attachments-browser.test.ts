@@ -573,7 +573,8 @@ test('Edge first draft Send carries only the captured PNG through its acknowledg
   const f = await fixture(t, { tabs: true, setup: true }), original = f.observed().snapshot!.connectionId;
   await f.page.locator('#workspace-new-chat').click(); await selectDraftModel(f); await choosePng(f, 'draft-reference.png');
   await sendReference(f, 'Build the tower from this reference.');
-  assert.deepEqual(f.setup.map(row => row.action), ['disconnect', 'connect', 'select', 'thread-start', 'history-load']);
+  // A newly created conversation has no stored history, so its explicit setup ends at thread-start.
+  assert.deepEqual(f.setup.map(row => row.action), ['disconnect', 'connect', 'select', 'thread-start']);
   assert.equal(f.posts.length, 1); assert.equal(f.posts[0]!.threadId, 'synthetic-created-thread');
   assert.notEqual(f.posts[0]!.connectionId, original);
   assert.deepEqual(f.posts[0]!.references, [{ name: 'draft-reference.png', dataUrl: 'data:image/png;base64,' + png().toString('base64') }]);

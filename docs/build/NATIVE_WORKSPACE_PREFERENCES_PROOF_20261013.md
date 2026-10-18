@@ -9,8 +9,8 @@ controller hydration remain **unverified**; parent UI/daemon work remains unfroz
 
 The authoritative evidence is
 `runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/`.
-[runner.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/runner.json)
-and [completion.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/completion.json)
+runner.json (`runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/runner.json`, local evidence, not committed)
+and completion.json (`runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/completion.json`, local evidence, not committed)
 both record `passed: true`. Phase reports retain actual IPC event identity,
 generic rejection results and real filesystem operation observations, without
 arguments, decrypted preferences or draft contents.
@@ -111,7 +111,7 @@ apps destroyed all owned windows and removed handlers before
 `windows-destroyed-ipc-removed-will-quit`. Both fixture servers closed and the
 runner emitted `owned-app-processes-exited-loopback-servers-closed`. No forced
 termination was needed. The additional
-[postrun-process-check.json](C:/Users/alexk/OneDrive/Documents/GitHub/Arcane/runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/postrun-process-check.json)
+postrun-process-check.json (`runtime/verification/native-workspace-preferences-proof-20261013/run-0af90bc3-173d-44cf-b448-62cecf74a1d2/postrun-process-check.json`, local evidence, not committed)
 at **17:13:36.307 UTC** found all seven recorded runner/app/renderer PIDs absent
 and neither fixture port listening. No process was terminated by that check.
 No preferences lock/stage remained; unknown fixture files were preserved.

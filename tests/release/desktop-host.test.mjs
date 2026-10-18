@@ -5,6 +5,7 @@ import { win32 } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
+import { REQUIRED_SMOKE_CHECKS, smokeChecksComplete } from '../../scripts/check-windows-executable.mjs';
 
 // Read source directly: no build, Electron, HTTP listener, native CLI or provider.
 const source = path => readFileSync(new URL('../../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
@@ -28,6 +29,7 @@ test('packaged smoke records module delivery after initialization and fails when
     const context={origin,token,smokeRoot:'C:\\Smoke',closing:false,started:0,daemonReadyMs:1,firstReadyMs:2,
       sleep:async()=>{},join:win32.join,performance:{now:()=>3},process:{versions:{electron:'fixture'}},
       projectSession:{verificationUnavailable:false},safeStorage:{isEncryptionAvailable:()=>false},
+      smokePackagedFeatures:async()=>({bundledPluginVerified:true,plansConfigValid:true,chatInstructionsBundled:true,trustedDialogBundled:true}),
       stopDaemon:async()=>true,app:{getVersion:()=> 'fixture',exit:code=>exits.push(code)},
       writeFile:async(path,value)=>writes.set(path,value),
       policy:{validOrigin:value=>value===origin,navigationAllowed:()=>false,requestAllowed:()=>false},
@@ -39,6 +41,7 @@ test('packaged smoke records module delivery after initialization and fails when
           if(code.includes('title: document.title'))return JSON.stringify(renderer);
           if(code.includes("'/task-plan-boot.js'"))return modulesAvailable;
           if(code==='window.arcaneDesktop.workspacePreferences.read()')return{available:false,preferences:null};
+          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true});
           if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
           assert.fail('Unexpected smoke renderer request');
         }}},Math,JSON,Buffer,
@@ -49,7 +52,49 @@ test('packaged smoke records module delivery after initialization and fails when
     assert.equal(report.inferenceStarted,false);assert.equal(report.studioOperations,0);
     assert.equal(scripts.filter(code=>code.includes("'/task-plan-boot.js'")).length,1);
     if(modulesAvailable)assert.ok(Object.values(report.checks).every(Boolean));
+    assert.deepEqual(Object.keys(report.checks).sort(),[...REQUIRED_SMOKE_CHECKS].sort(),'checkSmoke and the executable verifier name the same checks');
+    assert.equal(smokeChecksComplete(report.checks),modulesAvailable);
   }
+});
+
+test('executable verifier requires every named smoke check, including the newer desktop bridges',()=>{
+  const all=Object.fromEntries(REQUIRED_SMOKE_CHECKS.map(name=>[name,true]));
+  assert.equal(smokeChecksComplete(all),true);
+  for(const name of ['claudeChatBridgeDisabledInSmoke','studioPluginBridgeDisabledInSmoke','workspaceProjectBridgeDisabledInSmoke','inAppDialogsBridgeMounted',
+    'projectPermissionsBridgeDisabledInSmoke','billingBridgeNotConnectedInSmoke','notificationsBridgeSilentInSmoke','bundledStudioPluginVerified','bundledPlansConfigValid','bundledChatInstructionsLoadable','trustedDecisionDialogsBundled']){
+    assert.ok(REQUIRED_SMOKE_CHECKS.includes(name),name);
+    const {[name]:_,...missing}=all;assert.equal(smokeChecksComplete(missing),false,name+' missing');
+    assert.equal(smokeChecksComplete({...all,[name]:false}),false,name+' false');
+  }
+  assert.equal(smokeChecksComplete({...all,extra:false}),false);assert.equal(smokeChecksComplete(null),false);
+});
+
+test('smoke bridge probe accepts only the disabled verification-mode answers of the newer bridges',async()=>{
+  const start=mainSource.indexOf('async function checkSmoke() {'),end=mainSource.indexOf('\n}\n',start);
+  const probe=[...mainSource.slice(start,end).matchAll(/executeJavaScript\(`([\s\S]*?)`\)/g)].map(m=>m[1]).find(code=>code.includes('d.claudeChat.status()'));
+  assert.ok(probe,'Expected the desktop bridge smoke probe.');
+  const calls=[];
+  const bridge=(names,impl={})=>Object.freeze({version:1,...Object.fromEntries(names.map(n=>[n,impl[n]??(()=>{calls.push(n);throw new Error('Smoke must not call '+n+'.');})]))});
+  const desktop=overrides=>({
+    claudeChat:bridge(['status','list','history','send','rewind','stop','remove','onEvent'],{status:async()=>{calls.push('chat.status');throw new Error('Claude chat is unavailable.');}}),
+    studioPlugin:bridge(['status','install'],{status:async()=>({version:1,state:'unavailable',pluginVersion:null,message:'Studio plugin setup is disabled in verification mode.'})}),
+    workspaceProject:bridge(['open'],{open:async()=>{throw new Error('The project picker is unavailable.');}}),
+    dialogs:bridge(['attach','reply']),
+    projectPermissions:bridge(['read','save'],{read:async()=>({available:false,settings:{claudeTools:false,codexAutoApprove:false}})}),
+    billing:bridge(['status','openCheckout'],{status:async()=>({version:1,state:'not-connected',message:"Checkout isn't connected yet",account:'unavailable'})}),
+    notifications:bridge(['notify','onActivate'],{notify:async()=>({shown:false})}),
+    ...overrides});
+  const observe=async d=>JSON.parse(await vm.runInNewContext(probe,{window:{arcaneDesktop:d},Object,String,JSON}));
+  const good=await observe(desktop({}));
+  assert.deepEqual(good,{claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true});
+  assert.deepEqual(calls,['chat.status'],'only read-only or disabled calls are made');
+  assert.equal((await observe(desktop({studioPlugin:bridge(['status','install'],{status:async()=>({state:'missing',message:'The Arcane Studio plugin is not installed yet.'})})}))).studioPlugin,false);
+  assert.equal((await observe(desktop({billing:bridge(['status','openCheckout'],{status:async()=>({state:'ready',account:'unavailable'})})}))).billing,false);
+  assert.equal((await observe(desktop({notifications:bridge(['notify','onActivate'],{notify:async()=>({shown:true})})}))).notifications,false);
+  assert.equal((await observe(desktop({workspaceProject:bridge(['open'],{open:async()=>({requested:true})})}))).workspaceProject,false);
+  assert.equal((await observe(desktop({dialogs:{version:1,attach(){},reply(){}}}))).dialogs,false,'bridges must be frozen');
+  assert.equal((await observe(desktop({claudeChat:undefined}))).claudeChat,false);
+  assert.equal((await observe(desktop({projectPermissions:bridge(['read','save'],{read:async()=>({available:true})})}))).projectPermissions,false);
 });
 
 function filesystemFixture() {
@@ -317,7 +362,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
   });
   assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
   assert.equal(Object.isFrozen(exposed.billing), true);
-  assert.deepEqual(Object.keys(exposed.billing).sort(), ['openCheckout', 'status', 'version']);
+  assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'status', 'version']);
   assert.equal(exposed.billing.version, 1);
   assert.equal(Object.isFrozen(exposed.notifications), true);
   assert.deepEqual(Object.keys(exposed.notifications).sort(), ['notify', 'onActivate', 'version']);
@@ -430,6 +475,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before test cleanup'); } } },
     ownedSourceVerifier: { dispose() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before compiler disposal'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before compiler disposal'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before compiler disposal'); } },
     nativeAssetRegistry: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before registry retirement'); nativeAssetsFenced = true; } },
+    scriptSync: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before script sync stops watching'); } },
     codex: { close: () => { assert.equal(taskAdmissionFenced, true, 'Task admission must be fenced before child cleanup'); assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); assert.equal(handoffsFenced,true,'Handoff authority must be fenced before child cleanup'); return childCleanup; } },
   });
   const closing = cleanup();
@@ -637,8 +683,10 @@ test('main routes workflow message boxes through the in-app host and keeps picke
   assert.match(mainSource, /dialog: nativeDialog/);
   assert.match(mainSource, /showMessageBox: \(\.\.\.args\) => appDialogs \? appDialogs\.showMessageBox\(\.\.\.args\) : nativeDialog\.showMessageBox\(\.\.\.args\)/);
   assert.match(mainSource, /showOpenDialog: \(\.\.\.args\) => nativeDialog\.showOpenDialog\(\.\.\.args\)/);
-  assert.match(mainSource, /createInAppDialogs\(\{ native: nativeDialog, getWindow: \(\) => closing \|\| switching \? null : window, trusted: rendererEvent \}\)/);
-  assert.match(mainSource, /projectPermissions\.installIpc\(ipcMain, \{ trusted: rendererEvent \}\)/);
+  assert.match(mainSource, /createInAppDialogs\(\{ native: nativeDialog, getWindow: \(\) => closing \|\| switching \? null : window, trusted: rendererEvent,\n\s+decisions: trustedDialogs\.showMessageBox \}\)/);
+  assert.match(mainSource, /createTrustedDialogs\(\{ BrowserWindow, native: nativeDialog, getWindow: \(\) => closing \|\| switching \? null : window \}\)/);
+  assert.match(mainSource, /trustedDialogs\.installIpc\(ipcMain\)/);
+  assert.match(mainSource, /appDialogs\?\.dispose\(\); trustedDialogs\?\.dispose\(\);/);
   assert.match(mainSource, /if \(isMainFrame && !inPlace\) appDialogs\?\.detach\(dialogContents\)/);
   assert.match(mainSource, /createClaudeChat\(\{[^\n]*dialog, permissions,/);
 });
@@ -668,18 +716,163 @@ test('project permissions persist per project, default to auto-approve and accep
     assert.deepEqual(await handlers.get('arcane:project-permissions-save')({ ok: true }, { codexAutoApprove: false }), { saved: true, settings: { claudeTools: true, codexAutoApprove: false } });
     await writeFile(join(a, 'agent-permissions.json'), '{not json');
     session = { stateRoot: a, epoch: {} };
-    assert.deepEqual({ ...await make().read() }, { claudeTools: true, codexAutoApprove: true }, 'a damaged record falls back to defaults');
+    assert.deepEqual({ ...await make().read() }, { claudeTools: false, codexAutoApprove: false }, 'a damaged record fails closed (never re-enables auto-approval)');
+    await writeFile(join(a, 'agent-permissions.json'), JSON.stringify({ version: 2, claudeTools: true, codexAutoApprove: true }));
+    assert.deepEqual({ ...await make().read() }, { claudeTools: false, codexAutoApprove: false }, 'an unknown record version fails closed');
     const off = requireHost('project-permissions.cjs').createProjectPermissions({ getSession: () => session, enabled: false });
     await assert.rejects(off.save({ claudeTools: true }), /unavailable/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------- trusted decision window
+function trustedFixture({ loadFails = false, timeoutMs = 200 } = {}) {
+  const handlers = new Map(), windows = [], natives = [];
+  class FakeContents extends EventEmitter {
+    constructor() { super(); this.destroyed = false; this.mainFrame = { main: true }; this.filter = null;
+      this.session = { setPermissionRequestHandler: () => {}, setPermissionCheckHandler: () => {}, setDevicePermissionHandler: () => {},
+        webRequest: { onBeforeRequest: (_filter, callback) => { this.filter = callback; } } }; }
+    isDestroyed() { return this.destroyed; } setWindowOpenHandler(handler) { this.openHandler = handler; } focus() { this.focused = true; }
+  }
+  class FakeWindow extends EventEmitter {
+    constructor(opts) { super(); this.opts = opts; this.webContents = new FakeContents(); this.destroyed = false; this.shown = false; windows.push(this); }
+    isDestroyed() { return this.destroyed; }
+    destroy() { if (this.destroyed) return; this.destroyed = true; this.webContents.destroyed = true; this.emit('closed'); }
+    loadURL(url) { this.url = url; return loadFails ? Promise.reject(new Error('load failed')) : Promise.resolve(); }
+    setMenu() {} setContentSize(width, height) { this.size = [width, height]; } getBounds() { return { x: 0, y: 0, width: 480, height: 240 }; }
+    setPosition() {} show() { this.shown = true; } focus() { this.focused = true; }
+  }
+  const owner = Object.assign(new EventEmitter(), { isDestroyed: () => false, getBounds: () => ({ x: 0, y: 0, width: 1500, height: 900 }), webContents: new FakeContents() });
+  let current = owner, ids = 0;
+  const host = requireHost('trusted-dialog.cjs').createTrustedDialogs({ BrowserWindow: FakeWindow, getWindow: () => current, timeoutMs,
+    randomUUID: () => '00000000-0000-4000-8000-' + String(++ids).padStart(12, '0'),
+    native: { async showMessageBox(...args) { natives.push(args); return { response: 0, native: true }; } } });
+  host.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } });
+  const call = (sender, channel, ...args) => handlers.get(channel)({ sender, senderFrame: sender.mainFrame }, ...args);
+  return { host, handlers, windows, natives, owner, call, setOwner: value => { current = value; } };
+}
+const consent = { type: 'question', title: 'Arcane Claude chat', message: 'Use Claude chat with Arcane project tools?', detail: 'Project: Obby', buttons: ['Cancel', 'Allow', 'Always allow'], defaultId: 0, cancelId: 0 };
+
+test('trusted dialogs: a sandboxed modal child window asks; the workspace renderer cannot read or answer it', async () => {
+  const f = trustedFixture();
+  const pending = f.host.showMessageBox(f.owner, consent); await nextTick();
+  assert.equal(f.windows.length, 1); const w = f.windows[0];
+  assert.equal(w.opts.parent, f.owner); assert.equal(w.opts.modal, true); assert.equal(w.opts.frame, false); assert.equal(w.opts.show, false);
+  const prefs = w.opts.webPreferences;
+  assert.deepEqual([prefs.sandbox, prefs.contextIsolation, prefs.nodeIntegration, prefs.webviewTag, prefs.devTools], [true, true, false, false, false]);
+  assert.match(prefs.preload, /trusted-dialog-preload\.cjs$/); assert.match(w.url, /^file:\/\/\/.*trusted-dialog\.html$/);
+  const blocked = []; w.webContents.filter({ url: 'https://example.com/' }, out => blocked.push(out.cancel));
+  w.webContents.filter({ url: w.url }, out => blocked.push(out.cancel));
+  assert.deepEqual(blocked, [true, false], 'only the local dialog page files load');
+  const navigation = { prevented: false, preventDefault() { this.prevented = true; } }; w.webContents.emit('will-navigate', navigation);
+  assert.equal(navigation.prevented, true); assert.deepEqual(w.webContents.openHandler(), { action: 'deny' });
+  // The workspace renderer (the owner's webContents) can neither read the question nor answer it.
+  await assert.rejects(f.call(f.owner.webContents, 'arcane:trusted-dialog-open'), /unavailable/);
+  await assert.rejects(f.call(f.owner.webContents, 'arcane:trusted-dialog-answer', { id: '00000000-0000-4000-8000-000000000001', response: 2 }), /not accepted/);
+  await assert.rejects(f.handlers.get('arcane:trusted-dialog-answer')({ sender: w.webContents, senderFrame: { child: true } }, { id: '00000000-0000-4000-8000-000000000001', response: 2 }), /not accepted/, 'a subframe cannot answer');
+  const request = await f.call(w.webContents, 'arcane:trusted-dialog-open');
+  assert.deepEqual(request, { version: 1, id: '00000000-0000-4000-8000-000000000001', type: 'question', title: 'Arcane Claude chat', message: 'Use Claude chat with Arcane project tools?', detail: 'Project: Obby', buttons: ['Cancel', 'Allow', 'Always allow'], defaultId: 0, cancelId: 0 });
+  assert.deepEqual(await f.call(w.webContents, 'arcane:trusted-dialog-ready', 220), { shown: true });
+  assert.equal(w.shown, true); assert.equal(w.focused, true); assert.deepEqual(w.size, [480, 220]);
+  await assert.rejects(f.call(w.webContents, 'arcane:trusted-dialog-ready', 220), /unavailable/, 'shown once');
+  // Only this window's own request id and an in-range index are accepted, exactly once.
+  for (const bad of [[{ id: '00000000-0000-4000-8000-000000000009', response: 1 }], [{ id: request.id, response: 3 }], [{ id: request.id, response: 1, extra: 1 }], [{ id: request.id }], []])
+    await assert.rejects(f.call(w.webContents, 'arcane:trusted-dialog-answer', ...bad), /not accepted/);
+  assert.deepEqual(await f.call(w.webContents, 'arcane:trusted-dialog-answer', { id: request.id, response: 2 }), { accepted: true });
+  assert.deepEqual(await pending, { response: 2, checkboxChecked: false });
+  assert.equal(w.destroyed, true, 'the window closes after the answer');
+  await assert.rejects(f.call(w.webContents, 'arcane:trusted-dialog-answer', { id: request.id, response: 1 }), /not accepted/, 'one answer only');
+  assert.equal(f.natives.length, 0);
+});
+
+test('trusted dialogs: timeout, closing the window, owner close and dispose all answer cancel; no owner or a failed page asks natively', async () => {
+  const f = trustedFixture({ timeoutMs: 50 });
+  assert.deepEqual(await f.host.showMessageBox(f.owner, consent), { response: 0, checkboxChecked: false }, 'timeout = cancel');
+  assert.equal(f.windows[0].destroyed, true);
+  const closed = f.host.showMessageBox(f.owner, { ...consent, cancelId: 1, defaultId: 1 }); await nextTick();
+  f.windows[1].destroy(); assert.deepEqual(await closed, { response: 1, checkboxChecked: false }, 'closing the window (Alt+F4) = cancel');
+  const ownerGone = f.host.showMessageBox(f.owner, consent); await nextTick();
+  f.owner.emit('closed'); assert.deepEqual(await ownerGone, { response: 0, checkboxChecked: false }, 'owner closed = cancel');
+  const crashed = f.host.showMessageBox(f.owner, consent); await nextTick();
+  f.windows[3].webContents.emit('render-process-gone'); assert.deepEqual(await crashed, { response: 0, checkboxChecked: false }, 'crash = cancel');
+  const queuedA = f.host.showMessageBox(f.owner, consent), queuedB = f.host.showMessageBox(f.owner, consent); await nextTick();
+  assert.equal(f.windows.length, 5, 'one decision window at a time');
+  f.host.dispose();
+  assert.deepEqual(await queuedA, { response: 0, checkboxChecked: false }); assert.deepEqual(await queuedB, { response: 0, checkboxChecked: false });
+  assert.equal(f.natives.length, 0);
+  const g = trustedFixture({ loadFails: true });
+  assert.deepEqual(await g.host.showMessageBox(g.owner, consent), { response: 0, native: true }, 'page failure: native question, never a silent grant');
+  await g.host.showMessageBox(consent); assert.equal(g.natives.length, 2, 'no owner: native');
+  g.setOwner(null); await g.host.showMessageBox(g.owner, consent); assert.equal(g.natives.length, 3, 'closing/switching: native');
+  const { isDecisionDialog } = requireHost('trusted-dialog.cjs');
+  assert.equal(isDecisionDialog(consent), true); assert.equal(isDecisionDialog({ buttons: ['OK'] }), false); assert.equal(isDecisionDialog({}), false);
+});
+
+test('in-app host delegates every decision to the trusted window; the renderer only ever receives one-button notices', async () => {
+  const f = dialogFixture(); const decided = [];
+  const host = requireHost('in-app-dialog.cjs').createInAppDialogs({ getWindow: () => f.window, trusted: () => true, timeoutMs: 200,
+    native: { async showMessageBox() { throw new Error('unexpected native'); } }, decisions: async (...args) => { decided.push(args); return { response: 1 }; } });
+  const handlers = new Map(); host.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } });
+  const sent = []; f.contents.send = (channel, value) => sent.push(value);
+  await handlers.get('arcane:dialog-attach')({ sender: f.contents });
+  assert.deepEqual(await host.showMessageBox(f.window, consent), { response: 1 });
+  assert.deepEqual(await host.showMessageBox({ ...consent, buttons: ['Cancel', 'Open project'] }), { response: 1 });
+  assert.equal(sent.length, 0, 'no decision reaches the workspace renderer');
+  assert.deepEqual(decided.map(args => args.length), [2, 1]);
+  const notice = host.showMessageBox(f.window, { type: 'info', title: 'Arcane', message: 'About', buttons: ['OK'] }); await nextTick();
+  assert.equal(sent.length, 1); assert.deepEqual([...sent[0].buttons], ['OK']);
+  await handlers.get('arcane:dialog-reply')({ sender: f.contents }, { id: sent[0].id, response: 0 }); assert.deepEqual(await notice, { response: 0, checkboxChecked: false });
+});
+
+test('trusted dialog preload exposes only request/ready/answer, keeps the request id and answers once', async () => {
+  let exposed; const invoked = [];
+  const answers = { 'arcane:trusted-dialog-open': { version: 1, id: '00000000-0000-4000-8000-000000000001', type: 'question', title: 'Switch project', message: 'Stop?', detail: '', buttons: ['Cancel', 'Open project'], defaultId: 0, cancelId: 0 },
+    'arcane:trusted-dialog-ready': { shown: true }, 'arcane:trusted-dialog-answer': { accepted: true } };
+  vm.runInNewContext(source('apps/desktop/electron/trusted-dialog-preload.cjs'), { require(name) { assert.equal(name, 'electron');
+    return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneTrustedDialog'); exposed = value; } },
+      ipcRenderer: { invoke: async (channel, ...args) => { invoked.push([channel, ...args]); return answers[channel]; } } }; } });
+  assert.equal(Object.isFrozen(exposed), true); assert.deepEqual(Object.keys(exposed).sort(), ['answer', 'ready', 'request', 'version']);
+  await assert.rejects(exposed.answer(1), /unavailable/, 'no answer before the request is read');
+  const request = await exposed.request();
+  assert.equal('id' in request, false, 'the page never sees the request id');
+  await assert.rejects(exposed.request(), /unavailable/, 'one request per window');
+  await exposed.ready(180);
+  await assert.rejects(exposed.answer(2), /unavailable/, 'out of range');
+  assert.equal((await exposed.answer(1)).accepted, true);
+  await assert.rejects(exposed.answer(0), /unavailable/, 'answers once');
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked)), [['arcane:trusted-dialog-open'], ['arcane:trusted-dialog-ready', 180], ['arcane:trusted-dialog-answer', { id: '00000000-0000-4000-8000-000000000001', response: 1 }]]);
+  const page = source('apps/desktop/electron/trusted-dialog.html'), script = source('apps/desktop/electron/trusted-dialog.js');
+  assert.match(page, /Content-Security-Policy" content="default-src 'none'; script-src file:; style-src file:/);
+  assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML|eval\(|new Function/);
+  assert.doesNotMatch(preloadSource, /trusted-dialog/, 'the workspace preload has no way to reach the trusted dialog channels');
+});
+
+test('turning a permission ON from the renderer needs the trusted confirmation; OFF does not', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'arcane-permissions-confirm-'));
+  try {
+    const session = { stateRoot: root, epoch: {} }, handlers = new Map(), asked = []; let allow = false;
+    const p = requireHost('project-permissions.cjs').createProjectPermissions({ getSession: () => session });
+    p.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } }, { trusted: () => true, confirmEnable: async keys => { asked.push(keys); return allow; } });
+    const save = patch => handlers.get('arcane:project-permissions-save')({}, patch);
+    assert.deepEqual(await save({ claudeTools: false, codexAutoApprove: false }), { saved: true, settings: { claudeTools: false, codexAutoApprove: false } });
+    assert.deepEqual(asked, [], 'turning off asks nothing');
+    assert.deepEqual(await save({ claudeTools: true }), { saved: false, settings: { claudeTools: false, codexAutoApprove: false } }, 'declined: nothing changes');
+    allow = true;
+    assert.deepEqual(await save({ claudeTools: true, codexAutoApprove: true }), { saved: true, settings: { claudeTools: true, codexAutoApprove: true } });
+    assert.deepEqual(asked, [['claudeTools'], ['claudeTools', 'codexAutoApprove']]);
+    assert.deepEqual(await save({ claudeTools: true }), { saved: true, settings: { claudeTools: true, codexAutoApprove: true } }); assert.equal(asked.length, 2, 'already on: no question');
+  } finally { await rm(root, { recursive: true, force: true }); }
+  assert.match(mainSource, /projectPermissions\.installIpc\(ipcMain, \{ trusted: rendererEvent, confirmEnable: async keys => \{/);
+  assert.match(preloadSource, /return \{ saved: out\.saved, settings: permissionSettings\(out\.settings\) \};/);
+});
+
 
 // ---------------------------------------------------------------- checkout bridge and build-done notifications
 test('main wires the checkout bridge and build notifications through the trusted renderer check', () => {
   assert.match(mainSource, /require\('\.\/billing\.cjs'\)\.createBilling\(\{ enabled: !smoke, dialog, shell,/);
   assert.match(mainSource, /dist\/packages\/protocol\/src\/plans\.js/);
   assert.match(mainSource, /require\('\.\/build-notifications\.cjs'\)\.createBuildNotifications\(\{ enabled: !smoke, Notification,/);
-  assert.ok((mainSource.match(/\.installIpc\(ipcMain, \{ trusted: rendererEvent \}\)/g) ?? []).length >= 4);
+  assert.ok((mainSource.match(/\.installIpc\(ipcMain, \{ trusted: rendererEvent[ ,]/g) ?? []).length >= 4);
 });
 
 test('checkout bridge: unconfigured never opens; configured opens only an allowlisted https URL after an in-app confirm', async () => {
@@ -726,6 +919,81 @@ test('checkout bridge: unconfigured never opens; configured opens only an allowl
     // Disabled (smoke) and a failing browser stay fixed and quiet.
     assert.equal((await make({ enabled: false }).openCheckout('pro')).state, 'not-connected');
     assert.equal((await make({ shell: { openExternal: async () => { throw new Error('C:\\secret path'); } } }).openCheckout('pro')).message, 'Checkout is unavailable right now. Nothing was charged.');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('connect Arcane account: disabled by default; device sign-in on the allowlisted gateway stores the token only encrypted', async () => {
+  const { mkdtemp, writeFile, readFile, rm, access } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'arcane-account-'));
+  try {
+    const TOKEN = 'arc_' + 'T'.repeat(43);
+    const opened = [], asked = [], calls = [], handlers = new Map();
+    let answer = 1, verification = 'https://gw.arcane.test/v1/auth/verify?user_code=BCDF-GHJK', polls = 0;
+    const window = { isDestroyed: () => false };
+    const plans = { plans: [], packs: [], credits: { offers: [] }, billing: { serviceUrl: '', allowedOrigins: [] },
+      gateway: { url: '', allowedOrigins: ['https://gw.arcane.test', 'https://gw2.arcane.test'] } };
+    const safeStorage = { isEncryptionAvailable: () => true,
+      encryptString: plain => Buffer.from('enc:' + Buffer.from(plain).toString('base64')), decryptString: buffer => Buffer.from(String(buffer).slice(4), 'base64').toString() };
+    const fetch = async (url, init) => {
+      calls.push({ url, auth: init.headers.Authorization ?? null, redirect: init.redirect });
+      const path = new URL(url).pathname;
+      const body = path === '/v1/auth/device' ? { deviceCode: 'D'.repeat(43), userCode: 'BCDF-GHJK', verificationUrl: 'https://gw.arcane.test/v1/auth/verify', verificationUrlComplete: verification, interval: 5, expiresIn: 600 }
+        : path === '/v1/auth/token' ? (++polls < 2 ? { error: 'authorization_pending' } : { token: TOKEN, tokenType: 'Bearer' }) : { signedOut: true };
+      return new Response(JSON.stringify(body), { status: path === '/v1/auth/token' && !body.token ? 400 : 200 });
+    };
+    const make = (overrides = {}) => requireHost('billing.cjs').createBilling({ loadPlans: async () => plans, configDirectory: () => root, getWindow: () => window,
+      dialog: { showMessageBox: async (owner, options) => { asked.push(options); return { response: answer }; } }, shell: { openExternal: async url => { opened.push(url); } },
+      safeStorage, fetch, sleep: async () => {}, ...overrides });
+    const settle = async billing => { for (let i = 0; i < 200 && (await billing.status()).account === 'signing-in'; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+    // Default: no gateway URL, so the account stays unavailable and nothing is requested.
+    let billing = make();
+    assert.equal((await billing.status()).account, 'unavailable');
+    assert.equal((await billing.connectAccount()).state, 'not-connected');
+    assert.equal((await make({ safeStorage: undefined }).status()).account, 'unavailable');
+    assert.equal((await make({ enabled: false }).connectAccount()).state, 'not-connected');
+    for (const gatewayUrl of ['https://evil.test', 'http://gw.arcane.test', 'https://gw.arcane.test:8443']) {
+      await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, gatewayUrl }));
+      assert.equal((await billing.connectAccount()).state, 'not-connected', gatewayUrl);
+    }
+    assert.deepEqual(calls, []); assert.deepEqual(asked, []);
+
+    await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, gatewayUrl: 'https://gw.arcane.test' }));
+    assert.equal((await make({ safeStorage: { ...safeStorage, isEncryptionAvailable: () => false } }).connectAccount()).state, 'unavailable');
+    assert.equal((await billing.status()).account, 'signed-out');
+    // An off-origin sign-in page is never opened.
+    verification = 'https://evil.test/v1/auth/verify';
+    assert.equal((await billing.connectAccount()).state, 'unavailable'); assert.deepEqual(opened, []);
+    verification = 'https://gw.arcane.test/v1/auth/verify?user_code=BCDF-GHJK';
+    answer = 0;
+    assert.equal((await billing.connectAccount()).state, 'cancelled'); assert.deepEqual(opened, []);
+    assert.match(asked.at(-1).message, /BCDF-GHJK/); assert.equal(asked.at(-1).defaultId, 0);
+    answer = 1;
+    assert.deepEqual({ ...await billing.connectAccount() }, { version: 1, state: 'opened', message: 'Finish signing in in your browser' });
+    assert.deepEqual(opened, [verification]);
+    await settle(billing);
+    assert.equal((await billing.status()).account, 'signed-in');
+    assert.ok(calls.every(call => call.redirect === 'error' && call.url.startsWith('https://gw.arcane.test/')));
+    const stored = await readFile(join(root, 'arcane-account.bin'), 'utf8');
+    assert.ok(!stored.includes(TOKEN), 'token never stored in plain text');
+    assert.deepEqual({ ...await billing.accountCredential() }, { base: 'https://gw.arcane.test', token: TOKEN });
+    assert.equal((await billing.connectAccount()).state, 'signed-in');
+
+    // The token is bound to its gateway origin.
+    await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, gatewayUrl: 'https://gw2.arcane.test' }));
+    assert.equal((await billing.status()).account, 'signed-out'); assert.equal(await billing.accountCredential(), null);
+    await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, gatewayUrl: 'https://gw.arcane.test' }));
+
+    // IPC: trusted sender and no arguments; replies never carry the token.
+    billing.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } }, { trusted: event => event.ok === true });
+    await assert.rejects(handlers.get('arcane:billing-account-connect')({ ok: false }), /unavailable/);
+    await assert.rejects(handlers.get('arcane:billing-account-disconnect')({ ok: true }, 'x'), /unavailable/);
+    assert.ok(!JSON.stringify(await handlers.get('arcane:billing-status')({ ok: true })).includes(TOKEN));
+    assert.deepEqual({ ...await handlers.get('arcane:billing-account-disconnect')({ ok: true }) }, { version: 1, state: 'signed-out', message: 'Your Arcane account is disconnected.' });
+    await assert.rejects(access(join(root, 'arcane-account.bin')));
+    assert.equal(calls.at(-1).url, 'https://gw.arcane.test/v1/auth/logout'); assert.equal(calls.at(-1).auth, 'Bearer ' + TOKEN);
+    assert.equal((await billing.status()).account, 'signed-out');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

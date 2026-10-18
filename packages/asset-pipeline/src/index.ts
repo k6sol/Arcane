@@ -10,7 +10,7 @@ import { artifactPath, noLinks, prepareOutputRoot, regularFile, readRegularFile,
 import { runBounded, workerEnvironment, type CommandOptions, type CommandResult, type CommandSpec } from './process.js';
 import { WorkerSupervision } from './worker-journal.js';
 import type { ProcessQueryHost, WorkerRole } from './worker-identity.js';
-import { normalizeRequest, readJson, record, sha256, validateAudit, validateManifestFiles } from './validation.js';
+import { normalizeRequest, readJson, record, sha256, validateAudit, validateManifestFiles, workerScripts } from './validation.js';
 import { AssetError } from './types.js';
 import { atomicAssetJson, AtomicJsonFailure } from './atomic-json.js';
 import type { Artifact, AssetInput, AssetJob, AssetJobEvent, AssetJobResult, AssetManifest, AssetProbe, AssetRequest, JobOptions, OperationOptions, PipelineOptions, RuntimeEvidence } from './types.js';
@@ -18,6 +18,7 @@ export * from './types.js';
 export { discoverExecutables } from './discovery.js';
 export { normalizeRecipe, preflightRecipe, RECIPE_LIMITS, CUSTOM_REQUEST_BYTES } from './recipe.js';
 export { normalizeRequest } from './validation.js';
+export { normalizeProcedural, PROCEDURAL_KINDS, PROCEDURAL_LIMITS, PROCEDURAL_PART_MATERIALS } from './procedural.js';
 
 // One supervised Blender operation per Node worker, including across pipeline instances.
 let busy = false;
@@ -184,7 +185,7 @@ export class AssetPipeline {
       remaining(end, signal); emit('probe');
       const evidence = await this.probeIn(environmentDirectory, end, signal, supervision);
       if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.');
-      for (const name of ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : [])]) await copyFile(await this.script(name), artifactPath(directory, name), 1);
+      for (const name of workerScripts(request)) await copyFile(await this.script(name), artifactPath(directory, name), 1);
       const requestText = JSON.stringify(request, null, request.recipe ? undefined : 2) + '\n';
       await writeFile(artifactPath(directory, 'request.json'), requestText, { flag: 'wx' });
       const recipeArguments = request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(request.recipe, request.triangleBudget).estimatedTriangles)] : [];
@@ -203,16 +204,17 @@ export class AssetPipeline {
       const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
       files.push(['input.json', 'request']);
       if (request.recipe) files.push(['assembly.py', 'worker'], ['assembly.json', 'audit']);
+      if (request.procedural) files.push(['procedural.py', 'worker']);
       if (audit.totals.lod1Triangles) files.push(['asset-lod1.glb', 'export']);
       for (const [name, role] of files) {
         remaining(end, signal); const path = artifactPath(directory, name), size = await regularFile(path, 128 * 1024 * 1024);
         artifacts.push({ path: name, role, bytes: size, sha256: sha256(await readRegularFile(path, 128 * 1024 * 1024)) });
       }
       const manifest: AssetManifest = { schemaVersion: 1, jobId: id, createdAt: new Date().toISOString(), request, runtime: evidence.blender,
-        templateSha256: sha256(Buffer.from(['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : [])].map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
+        templateSha256: sha256(Buffer.from(workerScripts(request).map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
         sourceRequestSha256: artifacts.find(a => a.path === 'input.json')!.sha256, ...(audit.assembly ? { assembly: audit.assembly } : {}),
         coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false },
-        validation: audit, artifacts, limitations: ['Supervised native process; not a sandbox for arbitrary Python.', 'Artistic fidelity, UV overlap/texel density and inter-object intersections require review.', 'No Roblox import, scale/collision verification, upload, install or publication has run.'] };
+        validation: audit, artifacts, limitations: [...(request.procedural ? ['Procedural mesh from a bundled, parameter-only Blender generator; materials are flat PBR colours (no textures or vertex colours).'] : []), 'Supervised native process; not a sandbox for arbitrary Python.', 'Artistic fidelity, UV overlap/texel density and inter-object intersections require review.', 'No Roblox import, scale/collision verification, upload, install or publication has run.'] };
       await validateManifestFiles(directory, manifest); remaining(end, signal);
       await atomicJson(directory, 'manifest.json', manifest);
       const result: AssetJobResult = { ...base, state: 'succeeded', manifestPath: artifactPath(directory, 'manifest.json') };

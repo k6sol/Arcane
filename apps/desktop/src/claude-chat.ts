@@ -4,11 +4,13 @@
 // model picker) using the same markup classes, so both providers present one chat experience. It talks exclusively to
 // the Electron preload bridge `window.arcaneDesktop.claudeChat` and writes model output with textContent only.
 import {
-  closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderRows, describeToolActivity, fillModelOptions, firstModelRow, installComposerCommands, modelListEntry,
-  modelListMove, parseToolDetail, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderMessageText, renderToolActivity, restoreRequestText, toolDetailText,
+  closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderRows, describeToolActivity, fillModelOptions, firstModelRow, installComposerCommands, loopPickerFocus, modelListEntry,
+  modelListMove, parseToolDetail, patchMessageText, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderEarlierButton, renderMessageText, renderToolActivity,
+  restoreRequestText, revealEarlier, toolDetailText, transcriptWindowStart,
 } from './codex-chat.js';
 import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
+import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, restoreChatSwitchFocus } from './chat-tabs.js';
 import { USAGE_PRICES_AS_OF, compactTokenCount, estimateUsageUsd, formatUsageCost, type TaskUsageCostDisplay } from './task-usage.js';
 import { costDisplay, onCostPreferences, replyUsageText } from './task-usage-ui.js';
 
@@ -66,6 +68,8 @@ export const CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT = 'Attachments are sent with the
 /** The engine's one fixed usage-limit message (claude-chat.cjs MESSAGES.usageLimit). */
 export const CLAUDE_CHAT_USAGE_LIMIT_TEXT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
 const MAX_TEXT = 1024 * 1024, MAX_INPUT = 100000, MAX_BUFFERED = 2000, DEFAULT_EFFORT = 'high';
+/** A streamed reply is drawn at most once per animation frame and at most this often (about 30 times a second). */
+const STREAM_FRAME_MS = 32;
 const SEND_PATH = 'M12 19V5m-6 6 6-6 6 6', STOP_PATH = 'M7 7h10v10H7Z';
 // Fixed, already-safe messages the preload bridge may reject with; anything else is replaced by a generic message.
 const KNOWN_BRIDGE_ERRORS = new Set(['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
@@ -287,6 +291,9 @@ export class ClaudeChat {
   private readonly usageListeners = new Set<() => void>();
   /** Messages shown for the active tab, in order (tool entries updated in place); used to find an edit's discarded changes. */
   private shown: ClaudeChatMessage[] = [];
+  /** Cancels the streamed reply's pending paint; null when nothing is waiting to be drawn. */
+  private streamFrame: (() => void) | null = null;
+  private streamPainted = 0;
   /** An edit's rewind call is in flight; sending waits for it. */
   private rewinding = false;
 
@@ -434,6 +441,7 @@ export class ClaudeChat {
     this.el('codex-messages')?.removeAttribute('aria-busy');
     for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
     this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
+    this.cancelStream();
     if (this.turn) { this.turn.bubble = null; }
   }
 
@@ -750,6 +758,7 @@ export class ClaudeChat {
     if (!this.active) { this.render(); return; }
     const epoch = ++this.viewEpoch;
     const input = this.input(); if (input) input.value = tab.draft;
+    this.cancelStream();
     if (this.turn) { this.turn.bubble = null; this.turn.text = ''; }
     this.closePicker();
     this.loading = !!tab.conversationId; this.clearMessages();
@@ -761,7 +770,12 @@ export class ClaudeChat {
       const messages = Array.isArray(value?.messages) ? value.messages : null;
       if (!messages) throw Error('history');
       this.loading = false; this.clearMessages();
-      for (const item of messages) { const message = readClaudeChatMessage(item); if (message) this.appendMessage(message, false); }
+      // A long conversation shows its last turns; the earlier ones render in place from "Show earlier messages".
+      const saved = messages.map(readClaudeChatMessage).filter((message): message is ClaudeChatMessage => !!message);
+      const first = transcriptWindowStart(saved.flatMap((message, index) => message.role === 'user' || index === 0 ? [index] : []));
+      this.shown.push(...saved.slice(0, first));
+      for (const message of saved.slice(first)) this.appendMessage(message, false, true);
+      if (first) this.offerEarlier(saved.slice(0, first), saved[first]?.role === 'user' ? saved[first]!.text : null);
       // The last saved turn's changes; a turn still running in this chat shows its card when it finishes.
       if (this.turn?.conversationId !== tab.conversationId) this.flushChanges();
       this.scrollToBottom();
@@ -810,20 +824,21 @@ export class ClaudeChat {
       case 'delta': {
         turn.text = (turn.text + text(event.text)).slice(-MAX_TEXT);
         if (!visible) return;
-        const near = this.nearBottom();
-        if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '' }, false); turn.bubble.setAttribute('aria-busy', 'true'); }
-        this.setText(turn.bubble, turn.text);
-        if (near) this.scrollToBottom();
+        // Only the reply being written is a live region; aria-busy holds its announcement until it settles.
+        if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '' }, false); turn.bubble.setAttribute('aria-busy', 'true'); turn.bubble.setAttribute('aria-live', 'polite'); }
+        this.paintStream();
         return;
       }
       case 'message': case 'tool': {
         const message = readClaudeChatMessage(event.message);
         if (!message) return;
         if (message.role === 'user' && turn.echo !== null && message.text.trim() === turn.echo) { turn.echo = null; return; }
+        // A finished reply replaces the pending paint; anything else first draws the text that streamed before it.
+        if (message.role === 'assistant') this.cancelStream(); else this.flushStream();
         if (!visible) { if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; } return; }
         if (message.role === 'assistant' && turn.bubble) {
           this.setText(turn.bubble, message.text || turn.text, true);
-          turn.bubble.setAttribute('aria-busy', 'false');
+          turn.bubble.setAttribute('aria-busy', 'false'); turn.bubble.removeAttribute('aria-live');
           turn.bubble = null; turn.text = ''; return;
         }
         if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; }
@@ -833,7 +848,8 @@ export class ClaudeChat {
         return;
       }
       case 'done': {
-        turn.bubble?.setAttribute('aria-busy', 'false');
+        this.flushStream();
+        turn.bubble?.setAttribute('aria-busy', 'false'); turn.bubble?.removeAttribute('aria-live');
         const ok = event.ok === true, error = nullableText(event.error, 2048), limited = ok ? null : readUsageLimit(event.usageLimit, error);
         this.turn = null;
         // At the usage limit the unanswered message returns to an empty composer so it can move to the other provider.
@@ -943,7 +959,7 @@ export class ClaudeChat {
   }
 
   /** Codex transcript markup: article.codex-message.{human|codex|tool} > pre.message-text + Message details. */
-  private messageElement(message: ClaudeChatMessage): HTMLElement {
+  private messageElement(message: ClaudeChatMessage, restored = false): HTMLElement {
     const role = message.role === 'user' ? 'human' : message.role === 'assistant' ? 'codex' : 'tool';
     if (message.tool || message.role === 'tool') {
       const tool = message.tool ?? { name: message.text || 'Tool', status: 'finished' as const };
@@ -956,7 +972,7 @@ export class ClaudeChat {
     article.setAttribute('data-role', message.role);
     article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : 'Error');
     const body = this.make('pre', undefined, 'message-text');
-    article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text, this.choiceOptions()) : Object.assign(body, { textContent: message.text }));
+    article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text, restored ? { restored: true } : this.choiceOptions()) : Object.assign(body, { textContent: message.text }));
     if (message.role === 'error') article.append(this.make('p', 'Not completed', 'message-acknowledgement'));
     const details = this.make('details', undefined, 'message-details');
     details.append(this.make('summary', 'Message details'), this.make('pre', 'Claude · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : ''), 'hint mono'));
@@ -969,8 +985,57 @@ export class ClaudeChat {
    * arcane-choices / arcane-plan block becomes buttons; while streaming it stays display-only.
    */
   private setText(article: HTMLElement, value: string, live = false): void {
-    const body = article.querySelector<HTMLElement>(".message-text"), next = renderMessageText(this.doc, value, live ? this.choiceOptions() : {});
+    // Finished blocks keep their nodes; only the changed tail (normally the block being written) is replaced.
+    const body = article.querySelector<HTMLElement>(".message-text"), next = patchMessageText(this.doc, body, value, live ? this.choiceOptions() : {});
+    if (next === body) return;
     if (body) body.replaceWith(next); else article.prepend(next);
+  }
+  /** Draws the streamed reply: at once without animation frames, otherwise once per frame and STREAM_FRAME_MS at most. */
+  private paintStream(): void {
+    const view = this.doc.defaultView;
+    if (typeof view?.requestAnimationFrame !== 'function') { this.drawStream(); return; }
+    if (this.streamFrame) return;
+    let id = 0;
+    const tick = () => {
+      if (Date.now() - this.streamPainted < STREAM_FRAME_MS) { id = view.requestAnimationFrame(tick); return; }
+      this.streamFrame = null; this.drawStream();
+    };
+    id = view.requestAnimationFrame(tick);
+    this.streamFrame = () => view.cancelAnimationFrame(id);
+  }
+  /** Draws a pending streamed paint now (before a tool line, the end of the turn, and so on). */
+  private flushStream(): void { if (this.streamFrame) { this.cancelStream(); this.drawStream(); } }
+  private cancelStream(): void { const cancel = this.streamFrame; this.streamFrame = null; cancel?.(); }
+  private drawStream(): void {
+    const turn = this.turn; if (!turn?.bubble || !this.active) return;
+    // Follows the reply only while the reader is at the bottom; scrolling up stops the follow.
+    const near = this.nearBottom();
+    this.setText(turn.bubble, turn.text); this.streamPainted = Date.now();
+    if (near) this.scrollToBottom();
+  }
+  /** Long saved conversations show their last turns first; "Show earlier messages" renders the rest in place. */
+  private offerEarlier(earlier: ClaudeChatMessage[], answer: string | null): void {
+    const box = this.el('codex-messages'); if (!box) return;
+    const key = this.activeKey;
+    const button = renderEarlierButton(this.doc, earlier.length, () => {
+      if (!this.active || this.activeKey !== key || !button.isConnected) return;
+      revealEarlier(box, () => button.replaceWith(this.renderEarlier(earlier, answer)));
+    });
+    box.prepend(button);
+  }
+  /** Saved messages before the window, with their turns' change cards and answered choices, as they render on load. */
+  private renderEarlier(earlier: ClaudeChatMessage[], answer: string | null): DocumentFragment {
+    const fragment = this.doc.createDocumentFragment(), live = this.turnChanges;
+    this.turnChanges = [];
+    const flush = () => { const card = renderChangeCard(this.doc, this.turnChanges); this.turnChanges = []; if (card) fragment.append(card); };
+    try {
+      for (const message of earlier) {
+        if (message.role === 'user') { flush(); closeChoiceBlocks(fragment, message.text); }
+        fragment.append(this.messageElement(message, true));
+      }
+      flush(); closeChoiceBlocks(fragment, answer);
+    } finally { this.turnChanges = live; }
+    return fragment;
   }
   private choiceOptions(): ChoiceBlockOptions { return { choose: answer => this.answerChoice(answer) }; }
   /**
@@ -1074,7 +1139,8 @@ export class ClaudeChat {
     await this.send(edited);
   }
 
-  private appendMessage(message: ClaudeChatMessage, scroll: boolean): HTMLElement {
+  /** `restored`: from saved history, so its choice / plan buttons are inert and only show the answer given. */
+  private appendMessage(message: ClaudeChatMessage, scroll: boolean, restored = false): HTMLElement {
     const known = message.id && message.tool ? this.tools.get(message.id) : undefined;
     if (known) {
       // Status update of a shown tool line: the started event's input is kept when the update omits it.
@@ -1087,11 +1153,12 @@ export class ClaudeChat {
     }
     const box = this.el('codex-messages');
     // A new user message starts a new turn: the previous turn's changes are summarised first, and earlier choice buttons close.
-    if (message.role === 'user') { this.flushChanges(); closeChoiceBlocks(box); }
+    if (message.role === 'user') { this.flushChanges(); closeChoiceBlocks(box, message.text); }
     if (this.active) this.shown.push(message);
-    const element = this.messageElement(message);
+    const element = this.messageElement(message, restored);
     if (!box) return element;
-    const near = scroll || this.nearBottom();
+    // Saved history loads without per-message layout reads; showTab scrolls once at the end.
+    const near = !restored && (scroll || this.nearBottom());
     if (this.messageCount === 0) box.replaceChildren();
     box.append(element); this.messageCount++;
     if (near) this.scrollToBottom();
@@ -1099,6 +1166,7 @@ export class ClaudeChat {
   }
 
   private clearMessages(): void {
+    this.cancelStream();
     this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
     const box = this.el('codex-messages'); if (!box || !this.active) return;
     box.replaceChildren(this.make('p', this.loading ? 'Loading conversation…' : CLAUDE_CHAT_EMPTY_TEXT, 'empty'));
@@ -1183,6 +1251,8 @@ export class ClaudeChat {
       if (this.pickerModels) { this.showModels(false); this.el('codex-picker-current-model')?.focus({ preventScroll: true }); } else this.closePicker(true);
       return;
     }
+    const popover = this.el('codex-model-popover');
+    if (popover && loopPickerFocus(popover, key)) return; // Tab stays inside the open picker.
     const target = key.target as HTMLElement, models = this.el('codex-model-options'), efforts = this.el('codex-picker-efforts'), search = this.el('codex-model-search');
     const inModels = !!models?.contains(target), inEfforts = !!efforts?.contains(target);
     if (target === search && key.key === 'Enter') { key.preventDefault(); if (models) firstModelRow(models)?.click(); return; }
@@ -1324,8 +1394,13 @@ export class ClaudeChat {
   private renderSaved(): void {
     const menu = this.el<HTMLDetailsElement>('claude-saved-chats'); if (!menu) return;
     const sending = !!this.turn && this.turn.turnId === null, current = this.activeTab()?.conversationId ?? null;
-    const summary = this.make('summary', 'Saved chats');
-    const rows: HTMLElement[] = [summary];
+    const focus = chatSwitchFocus(this.doc, menu), active = this.activeTab();
+    // Same switcher as the ChatGPT tabs: on narrow layouts the strip is hidden and this sheet lists open chats and New chat.
+    const rows: HTMLElement[] = [chatSwitchSummary(this.doc, active ? this.tabTitle(active) : 'Saved chats', 'claude'),
+      chatSwitchOpenSection(this.doc, menu, this.tabs.map(tab => ({ key: tab.key, label: this.tabTitle(tab), current: tab.key === this.activeKey,
+        selectDisabled: sending && tab.key !== this.activeKey, closeDisabled: sending && this.turn?.tabKey === tab.key })), {
+        select: key => { if (this.active) this.selectTab(key); }, close: key => { if (this.active) this.closeTab(key); },
+        newChat: () => { if (this.active) this.el<HTMLButtonElement>('workspace-new-chat')?.click(); }, newDisabled: sending })];
     for (const row of sortConversations(this.conversations)) {
       const button = this.make('button', row.title || 'Untitled chat'); button.type = 'button';
       button.dataset.conversationId = row.conversationId; button.setAttribute('aria-current', String(row.conversationId === current));
@@ -1348,6 +1423,7 @@ export class ClaudeChat {
       rows.push(remove);
     }
     menu.replaceChildren(...rows);
+    restoreChatSwitchFocus(menu, focus);
   }
 
   private statusText(): string {

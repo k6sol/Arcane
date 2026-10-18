@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'AssetMesh', 'Sha256Stream', 'AssetTransfer', 'AssetPlacement', 'Operations', 'Transport', 'TestProof'];
+const modules = ['Validation', 'Registry', 'Properties', 'AssetMesh', 'Sha256Stream', 'AssetTransfer', 'AssetPlacement', 'TerrainGen', 'Operations', 'Transport', 'TestProof'];
 const runtimeOptions = { skip: !runtime && 'Standalone Luau runtime not configured; native Studio is not used by this test.' };
 const marker = 'Arcane script activation fixture passed';
 

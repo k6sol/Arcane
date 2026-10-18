@@ -329,3 +329,121 @@ test('effects sources compile with the official Luau compiler', { skip: !compile
 test('real Luau: effects classes with sequences, Attachment refs, content-id refusal, environment extras and framing bounds', { skip: !runtime }, async () => {
   await runLuau(checks, /Arcane effects checks passed: \d+/);
 });
+
+/** Wire-form audio build: a SoundGroup bus with reverb, a positional looped Sound bound to it, an EQ inside the Sound and a global music Sound. */
+const audioBuild = {
+  parent: '__PARENT__', container: { className: 'Folder', name: 'Audio' }, prototypes: [],
+  items: [
+    { kind: 'effect', className: 'SoundGroup', name: 'Ambience', parent: 0, key: 'Ambience', properties: { Volume: 0.6 } },
+    { kind: 'effect', className: 'ReverbSoundEffect', name: 'Cave', parent: 1, properties: { DecayTime: 3.5, Density: 1, WetLevel: -4, Enabled: true } },
+    { kind: 'part', className: 'Part', name: 'River', parent: 0, key: 'River', properties: { Size: v3([1, 1, 1]), Position: v3([0, 2, 0]), Anchored: true } },
+    { kind: 'effect', className: 'Sound', name: 'Water', parent: 3, key: 'Water', properties: { SoundId: 'rbxassetid://123456789', Volume: 0.5, Looped: true, Playing: false,
+      RollOffMode: 'InverseTapered', RollOffMinDistance: 10, RollOffMaxDistance: 90, SoundGroup: { type: 'Ref', item: 1 } } },
+    { kind: 'effect', className: 'EqualizerSoundEffect', name: 'Weight', parent: 4, properties: { LowGain: 3, HighGain: -2 } },
+    { kind: 'effect', className: 'Sound', name: 'Music', parent: 0, properties: { SoundId: 'rbxassetid://42', Volume: 0.4, TimePosition: 1.5, PlaybackSpeed: 1 } },
+  ],
+};
+const audioChecks = `
+local V = Validation
+local checks, serial = 0, 0
+local function check(condition: boolean, label: string): () assert(condition, label); checks += 1 end
+Enum.RollOffMode = enumCategory({"Inverse", "Linear", "LinearSquare", "InverseTapered"})
+Enum.ReverbType = enumCategory({"NoReverb", "GenericReverb", "PaddedCell", "Room", "Bathroom", "LivingRoom", "StoneRoom", "Auditorium", "ConcertHall", "Cave", "Arena",
+  "Hangar", "CarpetedHallway", "Hallway", "StoneCorridor", "Alley", "Forest", "City", "Mountains", "Quarry", "Plain", "ParkingLot", "SewerPipe", "UnderWater"})
+local workspace = game:GetService("Workspace")
+local lighting = game:GetService("Lighting")
+lighting._properties.ClockTime = 14
+local soundService = game:GetService("SoundService")
+soundService._properties.AmbientReverb = Enum.ReverbType.NoReverb
+soundService._properties.DistanceFactor = 3.33
+soundService._properties.RolloffScale = 1
+local ops = Operations.new({sessionId = "audio-session", allowedRoots = {"Workspace", "Lighting"}}, game, http)
+local function run(method: string, args: any): (any, string)
+  serial += 1
+  local id = "audio-" .. serial
+  return ops:execute({id = id, method = method, args = args}, function() end), id
+end
+local function refuses(code: string, callback: () -> any, text: string?): any
+  local ok, err = pcall(callback)
+  check(not ok and type(err) == "table" and err.code == code, "expected " .. code .. ": " .. V.safeError(err))
+  if text then check(string.find(err.message, text, 1, true) ~= nil, "message names: " .. text .. " / " .. err.message) end
+  return err
+end
+local function near(a: number, b: number): boolean return math.abs(a - b) < 1e-4 end
+local host = Instance.new("Part"); host.Name = "Host"; host.Parent = workspace
+local hostRef = ops.registry:ref(host)
+local function create(className: string, properties: any, parent: any?): any
+  return run("scene.create", {parent = parent or hostRef, className = className, name = className, properties = properties})
+end
+
+-- 1. scene.build: SoundGroup bus, reverb, positional Sound bound to the bus, EQ inside the Sound, global music.
+local args = V.decode(${json(audioBuild)}, http)
+args.parent = ops.registry:ref(workspace)
+local committed = fixture.committed
+local built, buildId = run("scene.build", args)
+check(fixture.committed == committed + 1 and built.created.count == 7, "one recording for root + 6 items")
+check(built.created.classes.Sound == 2 and built.created.classes.SoundGroup == 1 and built.created.classes.ReverbSoundEffect == 1, "audio class histogram")
+local bus = ops.registry:resolve(built.refs.Ambience)
+local water = ops.registry:resolve(built.refs.Water)
+local river = ops.registry:resolve(built.refs.River)
+local root = ops.registry:resolve(built.ref)
+check(water.Parent == river and water.SoundGroup == bus and bus.Parent == root, "positional Sound in its part, bound to the build's SoundGroup")
+check(water.SoundId == "rbxassetid://123456789" and water.Looped == true and water.Playing == false and water.RollOffMode == Enum.RollOffMode.InverseTapered, "Sound values verified")
+check(near(water.RollOffMinDistance, 10) and near(water.RollOffMaxDistance, 90) and near(water.Volume, 0.5), "roll-off distances")
+check(bus:GetChildren()[1].ClassName == "ReverbSoundEffect" and near(bus:GetChildren()[1].WetLevel, -4), "reverb inside the SoundGroup")
+check(water:GetChildren()[1].ClassName == "EqualizerSoundEffect" and near(water:GetChildren()[1].LowGain, 3), "EQ inside the Sound")
+local restored = run("scene.restore", {receiptCommandId = buildId, mutation = built.mutation})
+check(restored.restored and root.Parent == nil, "restore removes the unchanged audio build")
+
+-- 2. scene.create: a Sound bound to a session SoundGroup; sound effects only inside a Sound/SoundGroup.
+local group = ops.registry:resolve(create("SoundGroup", {Volume = 0.9}, ops.registry:ref(workspace)).ref)
+local sound = ops.registry:resolve(create("Sound", {SoundId = "rbxassetid://7", SoundGroup = {type = "Ref", ref = ops.registry:ref(group)}, Volume = 1.2}).ref)
+check(sound.Parent == host and sound.SoundGroup == group, "Sound created in the part and bound to the SoundGroup")
+local echo = ops.registry:resolve(create("EchoSoundEffect", {Delay = 0.35, Feedback = 0.3}, ops.registry:ref(sound)).ref)
+check(echo.Parent == sound and near(echo.Delay, 0.35), "EchoSoundEffect inside the Sound")
+
+-- 3. Refusals before any allocation: invented/URL ids, bounds, hosts and refs.
+local allocations = #fixture.created
+for _, bad in ipairs({"http://example.com/a.ogg", "https://www.roblox.com/asset/?id=1", "rbxassetid://abc", "rbxassetid://0123", "rbxasset://sounds/action_jump.mp3",
+  "rbxassetid://12345678901234567890", "12345", ""}) do
+  refuses("PROPERTY", function() return create("Sound", {SoundId = bad}) end)
+end
+refuses("PROPERTY", function() return create("Sound", {RollOffMinDistance = 50, RollOffMaxDistance = 10}) end, "RollOffMinDistance")
+refuses("INPUT", function() return create("Sound", {Volume = 11}) end)
+refuses("PROPERTY", function() return create("Sound", {RollOffMode = "Exponential"}) end)
+refuses("PROPERTY", function() return create("Sound", {SoundGroup = {type = "Ref", ref = hostRef}}) end, "SoundGroup")
+refuses("PROPERTY", function() return create("Sound", {Source = "print(1)"}) end)
+refuses("CLASS", function() return create("ReverbSoundEffect", {DecayTime = 2}) end)
+refuses("CLASS", function() return create("Sound", {}, ops.registry:ref(group)) end)
+local wrongRef = V.decode(${json(audioBuild)}, http); wrongRef.parent = ops.registry:ref(workspace); wrongRef.items[4].properties.SoundGroup = {type = "Ref", item = 3}
+refuses("INPUT", function() return run("scene.build", wrongRef) end, "earlier SoundGroup")
+local looseEffect = V.decode(${json(audioBuild)}, http); looseEffect.parent = ops.registry:ref(workspace); looseEffect.items[2].parent = 3
+refuses("INPUT", function() return run("scene.build", looseEffect) end)
+check(#fixture.created == allocations, "refused audio payloads allocate nothing")
+
+-- 4. Studio refusing an audio write is a clean VERIFY failure; nothing reaches the place.
+fixture.refuse = {["Sound.Volume"] = true}
+local children = #host:GetChildren()
+refuses("VERIFY", function() return create("Sound", {Volume = 0.5}) end, "Sound.Volume")
+fixture.refuse = nil
+check(#host:GetChildren() == children, "refused Sound is not parented")
+
+-- 5. environment.apply soundService: verified, receipted and rolled back with everything else on refusal.
+committed = fixture.committed
+local env = run("environment.apply", V.decode(${json({ lighting: { ClockTime: 17 }, soundService: { AmbientReverb: 'Forest', DistanceFactor: 3.5, RolloffScale: 1.5 } })}, http))
+check(fixture.committed == committed + 1 and lighting.ClockTime == 17, "one recording with lighting")
+check(soundService.AmbientReverb == Enum.ReverbType.Forest and near(soundService.DistanceFactor, 3.5) and near(soundService.RolloffScale, 1.5), "SoundService applied")
+check(env.mutation.before.soundService.AmbientReverb == "NoReverb" and env.mutation.after.soundService.AmbientReverb == "Forest" and near(env.mutation.before.soundService.RolloffScale, 1), "receipt records prior SoundService values")
+fixture.refuse = {["SoundService.RolloffScale"] = true}
+refuses("STUDIO_SETTING", function() return run("environment.apply", V.decode(${json({ lighting: { ClockTime: 9 }, soundService: { AmbientReverb: 'Cave', RolloffScale: 2 } })}, http)) end, "SoundService.RolloffScale")
+check(lighting.ClockTime == 17 and soundService.AmbientReverb == Enum.ReverbType.Forest and near(soundService.RolloffScale, 1.5), "lighting and AmbientReverb rolled back")
+fixture.refuse = nil
+refuses("PROPERTY", function() return run("environment.apply", {soundService = {AmbientReverb = "Bathtub"}}) end)
+refuses("INPUT", function() return run("environment.apply", {soundService = {DistanceFactor = 500}}) end)
+refuses("INPUT", function() return run("environment.apply", {soundService = {Volume = 1}}) end)
+print("Arcane audio checks passed: " .. checks)
+`;
+
+test('real Luau: audio classes with rbxassetid-only SoundIds, SoundGroup refs, sound effects and SoundService settings', { skip: !runtime }, async () => {
+  await runLuau(audioChecks, /Arcane audio checks passed: \d+/);
+});

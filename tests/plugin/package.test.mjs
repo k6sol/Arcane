@@ -27,6 +27,7 @@ const expectedSources = [
   ['AssetUpload', 'ModuleScript', 'AssetUpload.luau'],
   ['Diagnostics', 'ModuleScript', 'Diagnostics.luau'],
   ['AssetPlacement', 'ModuleScript', 'AssetPlacement.luau'],
+  ['TerrainGen', 'ModuleScript', 'TerrainGen.luau'],
 ];
 const files = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) => ({ filename, source: await readFile(path.join(sourceDir, filename), 'utf8') })));
 const byFile = Object.fromEntries(files.map(({ filename, source }) => [filename, source]));
@@ -216,13 +217,19 @@ test('packaged source has no arbitrary evaluation, asset insertion, unscoped per
   assert.doesNotMatch(allSource, /\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
   assert.doesNotMatch(allSource, /(?:InsertService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
   // The one production acquisition belongs only to the guarded host-owned
-  // reconstruction operation. It grants no MeshPart/insertion/upload command.
+  // reconstruction operation (retained for its own placement). It grants no insertion/upload command.
   const acquisition=/GetService\s*\(\s*["']AssetService["']\s*\)/g;
   assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(acquisition)].map(()=>file.filename)),['Operations.luau']);
   const operations=byFile['Operations.luau'],start=operations.indexOf('function Operations:reconstructAsset('),end=operations.indexOf('function Operations:source(',start);
   assert.ok(start>=0&&end>start);assert.equal([...operations.slice(start,end).matchAll(acquisition)].length,1);
   assert.doesNotMatch(operations.slice(0,start)+operations.slice(end),acquisition);
-  assert.doesNotMatch(allSource, /:CreateMeshPartAsync\s*\(/);
+  // Exactly one MeshPart creation: the materialization of this plugin's own retained
+  // reconstruction, reached only through guarded scene.place_asset adoption (no upload).
+  const meshParts=/:CreateMeshPartAsync\s*\(/g;
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)),['Operations.luau']);
+  const mStart=operations.indexOf('function Operations:materializeReconstruction('),mEnd=operations.indexOf('function Operations:source(',mStart);
+  assert.ok(mStart>=0&&mEnd>mStart);assert.equal([...operations.slice(mStart,mEnd).matchAll(meshParts)].length,1);
+  assert.doesNotMatch(operations.slice(mStart,mEnd),/GetService|CreateAssetAsync|Upload|Publish/);
   assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
   assert.doesNotMatch(byFile['TestProof.luau'], /AddTag|SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
@@ -239,6 +246,8 @@ test('packaged source has no arbitrary evaluation, asset insertion, unscoped per
   assert.deepEqual(calls, [
     ['GetSetting', 'Arcane.LocalApiKey.v1'], ['GetSetting', 'Arcane.LastConnection.v1'],
     ['SetSetting', 'Arcane.LastConnection.v1'], ['SetSetting', 'Arcane.LocalApiKey.v1'],
+    ['SetSetting', 'Arcane.LocalApiKey.v1'],
+    // One-click pairing saves the daemon-issued key under the same owned setting (docs/studio-pairing.md).
     ['SetSetting', 'Arcane.LocalApiKey.v1'],
     ['SetSetting', 'Arcane.LocalApiKey.v1'],
   ]);
@@ -443,4 +452,33 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'), main.indexOf('-- Queue safe recovery'));
   assert.match(unload, /savedKey = nil[\s\S]*clearInput\(\)[\s\S]*transport:stop\(\)/);
   assert.doesNotMatch(unload, /SetSetting|GetSetting|requestConnect|requestDisconnect/);
+});
+
+test('two-sided pairing: typed Arcane code, credential-free discovery, Arcane proves the code first, key saved like an entered key', () => {
+  const transport = byFile['Transport.luau'], main = byFile['Main.server.luau'];
+  assert.match(transport, /Transport\.DISCOVERY_URL = "http:\/\/127\.0\.0\.1:45870"/);
+  assert.ok(transport.includes('discover = "/v1/pairing/discover"') && transport.includes('challenge = "/v1/plugin/pairing/challenge"') && transport.includes('claim = "/v1/plugin/pairing/claim"'));
+  // Discovery carries no bearer and only reaches its fixed endpoint; its answer has no code.
+  assert.match(transport, /self:post\(Transport\.DISCOVERY_URL, ROUTES\.discover, \{protocolVersion = V\.PROTOCOL\}, nil\)/);
+  assert.match(transport, /\(route == ROUTES\.discover\) ~= \(url == Transport\.DISCOVERY_URL\)/);
+  assert.match(transport, /V\.fields\(result, \{"protocolVersion", "port", "ticket", "expiresAt"\}, "pairing offer"\)/);
+  // The challenge carries only the ticket and nonce; the daemon's proof is checked before any plugin proof exists.
+  assert.match(transport, /ROUTES\.challenge, \{protocolVersion = V\.PROTOCOL, ticket = pairing\.ticket, clientNonce = pairing\.clientNonce\}, nil\)/);
+  const challenge = transport.slice(transport.indexOf('elseif stage == "challenge" then'), transport.indexOf('if ok then return 0 end'));
+  assert.ok(challenge.indexOf('sameText(result.proof, expected)') > 0 && challenge.indexOf('sameText(result.proof, expected)') < challenge.indexOf('pairingProof(pairing.code, "plugin"'));
+  assert.doesNotMatch(main, /ticket|pairingProof/i);
+  assert.match(main, /transport.sha256 = Sha256/);
+  // A claimed key must belong to the exact claimed loopback endpoint before Main may save it.
+  assert.match(transport, /V\.keyOrigin\(pairedKey\) ~= desired\.url/);
+  assert.ok(transport.indexOf('V.keyOrigin(pairedKey) ~= desired.url') < transport.indexOf('pcall(self.onPaired, pairedKey)'));
+  // The attempt needs an explicit Connect click with the code; nothing is scheduled on load, idle or toolbar.
+  const click = main.slice(main.indexOf('connectButton.Activated:Connect(function()'), main.indexOf('plugin.Unloading:Connect(function()'));
+  assert.equal((main.match(/requestArcaneCode\(/g) ?? []).length, 1);
+  assert.ok(click.includes('transport:requestArcaneCode(typed)'));
+  assert.doesNotMatch(main, /discoveryEnabled|requestDiscovery|requestClaim/);
+  assert.doesNotMatch(transport, /discoveryEnabled|nextDiscovery|DISCOVERY_SECONDS|discoveryRequested|onOffer/);
+  assert.equal((transport.match(/self\.codePairing = \{/g) ?? []).length, 1);
+  const paired = main.slice(main.indexOf('transport.onPaired = function'), main.indexOf('-- Studio errors/warnings'));
+  assert.ok(paired.indexOf('V.keyOrigin(apiKey)') < paired.indexOf('plugin:SetSetting(KEY_SETTING, apiKey)'));
+  assert.match(main, /"Approve in Arcane\.\.\."/);
 });

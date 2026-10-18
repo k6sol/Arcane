@@ -1,7 +1,7 @@
 import { access, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
-import { CodexSession } from './session.js';
+import { CodexSession, type ProjectInstructions } from './session.js';
 import { prepareCodexDiscoveryProcess, prepareCodexProcess } from './mcp-profile.js';
 import { arcaneIsolationOverrides } from './mcp-isolation.js';
 import { exact, fail, limits, str } from './validation.js';
@@ -13,6 +13,8 @@ import { collectProposalResult, PROPOSAL_DURATION_MS, type ProposalResult } from
 export type {ProposalResult} from './proposal-result.js';
 export { CODEX_LIMITS, CodexClientError } from './types.js';
 export type { Account, ArcaneMcpLaunchProfile, Approval, ConnectOptions, FileChangePreview, HumanAction, LimitOptions, LocalUse, Model, NativeAssetHooks, NativeAssetIntent, Operation, Selection, SessionEvent, SessionEventValue, Snapshot, ThreadState } from './types.js';
+export type { McpToolCallArgs, McpToolCallRef, McpToolCallSummary } from './types.js';
+export { MCP_TOOL_SUMMARY_LIMITS, summarizeMcpToolCall } from './tool-call.js';
 export type CodexClient = CodexSession;
 export type { NativeRateLimits, NativeRateLimitBucket, NativeRateLimitWindow, NativeLimitReason } from './rate-limits.js';
 export type { NativeTaskContinuation, ManagedTaskStart, NativeIncorporationChain, NativeIncorporationPermit } from './types.js';
@@ -127,8 +129,8 @@ export async function connectCodexProposalWorker(options: ProposalWorkerOptions)
 /** Embedded history uses only the separate, secret-free isolated launch template. */
 class ArcaneCodexSession extends CodexSession {
   readonly #historySpec: { readonly command: string; readonly cwd: string; readonly args: readonly string[]; readonly env: Readonly<NodeJS.ProcessEnv> };
-  constructor(spec: InternalProcess, bounds: Limits, historySpec: InternalProcess, hooks?: NativeAssetHooks) {
-    super(spec, bounds, 'installed-cli', 'arcane-only', hooks);
+  constructor(spec: InternalProcess, bounds: Limits, historySpec: InternalProcess, hooks?: NativeAssetHooks, projectInstructions?: ProjectInstructions) {
+    super(spec, bounds, 'installed-cli', 'arcane-only', hooks, undefined, projectInstructions);
     this.#historySpec = Object.freeze({
       ...historySpec, args: Object.freeze([...historySpec.args]), env: Object.freeze({ ...historySpec.env }),
     });
@@ -140,7 +142,9 @@ class ArcaneCodexSession extends CodexSession {
 
 /** Host-code API only. Never map executable paths or lifecycle actions directly from an unauthenticated request. */
 export async function connectCodexClient(options: ConnectOptions): Promise<CodexClient> {
-  exact(options, ['command','cwd','use','limits','arcaneMcp','nativeAssetHooks']);
+  exact(options, ['command','cwd','use','limits','arcaneMcp','nativeAssetHooks','projectInstructions']);
+  if (options.projectInstructions !== undefined && typeof options.projectInstructions !== 'function') fail('ARGUMENTS', 'Project instructions must be a host callback.');
+  const projectInstructions = options.projectInstructions;
   const hookField = Object.getOwnPropertyDescriptor(options, 'nativeAssetHooks');
   if (hookField && !Object.hasOwn(hookField, 'value') || !hookField && 'nativeAssetHooks' in options) fail('ARGUMENTS', 'Native asset hooks must be an own data option.');
   const hooks = hookField?.value === undefined ? undefined : validateNativeAssetHooks(hookField.value);
@@ -192,7 +196,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
         processSpec.env.ARCANE_ASSET_AUDIENCE = 'native-session';
       }
       processSpec.args.push(...overrides);
-      session = new ArcaneCodexSession(processSpec, bounds, historySpec, hooks);
+      session = new ArcaneCodexSession(processSpec, bounds, historySpec, hooks, projectInstructions);
       hooksAttached = true;
       await session.initialize();
     }

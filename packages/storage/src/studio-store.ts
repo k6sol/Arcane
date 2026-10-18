@@ -2,13 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from './sqlite-path.js';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_EFFECTS_CAPABILITY, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs, sceneBuildInstanceCount } from '../../core/src/studio-policy.js';
 import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
+import { terrainVoxelCount } from '../../core/src/terrain-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
@@ -40,6 +41,32 @@ export interface AssetUploadContextPin {
  * session unseen for longer than this is a dead Studio lifetime, not a substitute target. */
 export const STUDIO_SESSION_LIVE_MS = 60_000;
 export type ListedStudioSession = StudioSession & { live: boolean };
+/** Before/after source of one succeeded script.update receipt (display path only; never authority). */
+export interface StudioScriptChange { commandId: string; path: string; className: string | null; before: string; after: string }
+/** Studio pairing (docs/studio-pairing.md). A human click in Arcane mints one in-memory, single-use offer with a 10 minute
+ * expiry, bound to this daemon's loopback port and project. Its 6-digit code is shown only in Arcane and typed into the
+ * plugin. Two-sided: Arcane proves it knows the code first (so a process squatting the discovery port cannot pass as
+ * Arcane), the plugin proves it second, and the key is issued only after the user approves the named place in Arcane. */
+export const STUDIO_PAIRING_OFFER_MS = 10 * 60_000;
+export interface StudioPairingClaim { placeName: string; placeId: number; universeId: number; sessionId: string; keyId: string; claimedAt: string }
+/** The place waiting for the user's Approve in Arcane (display data only). */
+export interface StudioPairingRequest { placeName: string; placeId: number; universeId: number; requestedAt: string; approved: boolean }
+export interface StudioPairingOfferView {
+  offerId: string; code: string; issuedAt: string; expiresAt: string; state: 'pending' | 'awaiting-approval' | 'claimed' | 'expired' | 'cancelled' | 'failed';
+  allowedRoots: StudioSession['allowedRoots']; allowWrites: boolean; claim: StudioPairingClaim | null; request: StudioPairingRequest | null;
+}
+/** Discovery never carries the code: a process that reads it still cannot pass either proof. */
+export interface StudioPairingDiscovery { protocolVersion: 1; port: number; ticket: string; expiresAt: string }
+export type StudioPairingClaimResult = (PairResult & { apiKey: string }) | { state: 'awaiting-approval'; expiresAt: string };
+/** HMAC-SHA256 keyed by the 6-digit code over a role-separated transcript; the plugin computes the same (Transport.luau). */
+export function studioPairingProof(code: string, role: 'arcane' | 'plugin', ticket: string, clientNonce: string): string {
+  return createHmac('sha256', code).update('arcane-pair-v2|' + role + '|' + ticket + '|' + clientNonce).digest('hex');
+}
+const PAIRING_NONCE = /^[a-f0-9]{32}$/;
+type PairingOfferRecord = { view: StudioPairingOfferView; ticket: string | null; ticketHash: string; port: number; projectId: string; expires: number;
+  clientNonce: string | null; request: { identity: Record<string, unknown>; proof: string } | null };
+const PAIRING_PROOF = /^[a-f0-9]{64}$/;
+const PAIRING_TICKET = /^arcane_pair_v1_([1-9][0-9]{0,4})_([a-f0-9]{48})$/;
 /** Non-method capability: the plugin reports bounded Studio output errors/warnings on its poll. */
 export const STUDIO_DIAGNOSTICS_CAPABILITY = 'studio.diagnostics';
 /** In-memory only. Diagnostics are display data for the human dock, never command authority. */
@@ -201,6 +228,7 @@ export class StudioStore {
   #testReservationRecords = new Map<string,TestReservationRecord>();
   #testCommandAdmissions = new WeakMap<object,TestCommandAdmission>();
   #diagnostics = new Map<string,{placeName:string;placeId:number;entries:Map<string,StudioDiagnostic>}>();
+  #pairingOffer: PairingOfferRecord | null = null;
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
@@ -289,8 +317,9 @@ export class StudioStore {
   private live(s: StudioSession): boolean {
     if (s.revokedAt) return false;
     if (this.now() - Date.parse(s.lastSeenAt) <= STUDIO_SESSION_LIVE_MS) return true;
-    return (this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state='dispatched'").all(s.id) as Row[])
-      .some(r => Date.parse((JSON.parse(r.payload as string) as StudioCommand).expiresAt) > this.now());
+    // Only the lease expiry is needed: never re-parse a dispatched command's (up to 256 KiB) payload here.
+    return (this.db.prepare("SELECT json_extract(payload,'$.expiresAt') AS expires_at FROM commands WHERE session_id=? AND state='dispatched'").all(s.id) as Row[])
+      .some(r => Date.parse(String(r.expires_at)) > this.now());
   }
   /** Leases expire by time even when the owning plugin never polls again; mirrors poll() expiry
    * exactly. Joins an enclosing transaction, otherwise opens its own. */
@@ -331,7 +360,7 @@ export class StudioStore {
     const name = textField(identity.name, 'Studio name', 200); const pluginVersion = textField(identity.pluginVersion, 'plugin version', 80);
     for (const f of ['placeId', 'universeId']) if (typeof identity[f] !== 'number' || !Number.isSafeInteger(identity[f]) || (identity[f] as number) < 0) throw new ArcaneError('IDENTITY', 'Invalid place/universe identity.');
     if (!Array.isArray(a.capabilities) || a.capabilities.length > 32 || a.capabilities.some(c => typeof c !== 'string')) throw new ArcaneError('CAPABILITY', 'Invalid plugin capabilities.');
-    const capabilities: string[] = [...new Set(a.capabilities)].map(c => c === STUDIO_DIAGNOSTICS_CAPABILITY || c === STUDIO_EFFECTS_CAPABILITY ? c : methodField(c));
+    const capabilities: string[] = [...new Set(a.capabilities)].map(c => c === STUDIO_DIAGNOSTICS_CAPABILITY || STUDIO_FEATURE_CAPABILITIES.includes(c) ? c : methodField(c));
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM grants WHERE hash=?').get(hash(code)) as Row | undefined;
       if (!row || row.used || Number(row.expires) <= this.now()) throw new ArcaneError('PAIRING', 'Pairing code is invalid, expired or already used.');
@@ -427,6 +456,120 @@ export class StudioStore {
     const active=scoped.find(row=>!(JSON.parse(row.payload as string) as StudioSession).revokedAt);
     if(active)return {...base,state:'active',sessionId:active.id as string};
     return {...base,state:'lost',sessionId:scoped[0]!.id as string};
+  }
+  /** Human-only (enforced by the route). A newer offer cancels any older pending one. Nothing is persisted:
+   * a daemon restart drops every offer, and the claim compares only a hash of the ticket. */
+  createPairingOffer(input: unknown, port: number, projectId: string): StudioPairingOfferView {
+    const a = object(input);
+    if (Object.keys(a).some(key => key !== 'allowedRoots' && key !== 'allowWrites')) throw new ArcaneError('INPUT', 'Invalid pairing offer request.');
+    const allowedRoots = roots(a.allowedRoots);
+    if (typeof a.allowWrites !== 'boolean' || !Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/.test(projectId)) throw new ArcaneError('INPUT', 'Explicit grants, a local port and a project are required.');
+    this.cancelPairingOffer();
+    const now = this.now(), ticket = 'arcane_pair_v1_' + port + '_' + randomBytes(24).toString('hex');
+    const view: StudioPairingOfferView = { offerId: randomUUID(), code: String(randomInt(0, 1_000_000)).padStart(6, '0'), issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + STUDIO_PAIRING_OFFER_MS).toISOString(), state: 'pending', allowedRoots, allowWrites: a.allowWrites, claim: null, request: null };
+    this.#pairingOffer = { view, ticket, ticketHash: hash(ticket), port, projectId, expires: now + STUDIO_PAIRING_OFFER_MS, clientNonce: null, request: null };
+    this.event('studio_pairing_offered', view.offerId, { allowedRoots, allowWrites: a.allowWrites, expiresAt: view.expiresAt });
+    return structuredClone(view);
+  }
+  /** Metadata for the human panel. Never contains the ticket. */
+  pairingOffer(): StudioPairingOfferView | null {
+    const offer = this.#pairingOffer;
+    if (!offer) return null;
+    if ((offer.view.state === 'pending' || offer.view.state === 'awaiting-approval') && this.now() >= offer.expires) { offer.view.state = 'expired'; offer.ticket = null; offer.request = null; }
+    return structuredClone(offer.view);
+  }
+  /** The loopback discovery answer, only while a fresh offer for this exact daemon port is pending. */
+  pairingDiscovery(port: number): StudioPairingDiscovery | null {
+    const view = this.pairingOffer(), offer = this.#pairingOffer;
+    if (!view || !offer || view.state !== 'pending' || !offer.ticket || offer.port !== port) return null;
+    if (offer.clientNonce) return null; // Already challenged: discovery closes for everyone else.
+    return { protocolVersion: 1, port: offer.port, ticket: offer.ticket, expiresAt: view.expiresAt };
+  }
+  cancelPairingOffer(): boolean {
+    const offer = this.#pairingOffer, state = this.pairingOffer()?.state;
+    if (!offer || (state !== 'pending' && state !== 'awaiting-approval')) return false;
+    offer.view.state = 'cancelled'; offer.ticket = null; offer.request = null; offer.view.request = null;
+    this.event('studio_pairing_cancelled', offer.view.offerId, {});
+    return true;
+  }
+  /** The live offer for this exact ticket, port and project; anything else is rejected without detail. */
+  #pairingFor(ticket: string, port: number, projectId: string) {
+    const match = PAIRING_TICKET.exec(ticket);
+    const view = this.pairingOffer(), offer = this.#pairingOffer;
+    if (!match || Number(match[1]) !== port || !view || !offer || (view.state !== 'pending' && view.state !== 'awaiting-approval') || !offer.ticket
+      || offer.port !== port || offer.projectId !== projectId || !equal(offer.ticketHash, hash(ticket))) return null;
+    return offer;
+  }
+  #burnPairing(offer: PairingOfferRecord, event: string): void {
+    offer.ticket = null; offer.request = null; offer.view.state = 'failed'; offer.view.request = null;
+    this.event(event, offer.view.offerId, {});
+  }
+  /** Step 1 (plugin -> Arcane): the plugin sends a fresh nonce; Arcane answers with proof that it knows the code the user
+   * typed into the plugin. Exactly one challenge per offer: a second one (another process racing the plugin) burns it. */
+  challengePairingOffer(input: unknown, port: number, projectId: string): { protocolVersion: 1; proof: string } {
+    const a = object(input);
+    if (Object.keys(a).some(key => !['protocolVersion', 'ticket', 'clientNonce'].includes(key)) || a.protocolVersion !== 1) throw new ArcaneError('INPUT', 'Invalid pairing challenge.');
+    const rejected = () => new ArcaneError('PAIRING', 'This Arcane pairing offer is invalid, expired or already used. Click Connect Studio in Arcane again.');
+    const ticket = textField(a.ticket, 'pairing ticket', 100), clientNonce = textField(a.clientNonce, 'pairing nonce', 32);
+    const offer = this.#pairingFor(ticket, port, projectId);
+    if (!offer || !PAIRING_NONCE.test(clientNonce)) throw rejected();
+    if (offer.clientNonce !== null || offer.view.state !== 'pending') { this.#burnPairing(offer, 'studio_pairing_contested'); throw rejected(); }
+    offer.clientNonce = clientNonce;
+    this.event('studio_pairing_challenged', offer.view.offerId, {});
+    return { protocolVersion: 1, proof: studioPairingProof(offer.view.code, 'arcane', ticket, clientNonce) };
+  }
+  /** Step 2 (plugin -> Arcane): the plugin proves the code over the same nonce. A wrong proof burns the offer (one guess).
+   * The first valid claim records the place and waits for the user's Approve in Arcane; the plugin repeats the same claim
+   * until then. Only after approval is the ticket burned and a long-lived key plus a live session issued, exactly once. */
+  claimPairingOffer(input: unknown, port: number, projectId: string): StudioPairingClaimResult {
+    const a = object(input);
+    if (Object.keys(a).some(key => !['protocolVersion', 'ticket', 'clientNonce', 'proof', 'identity', 'capabilities'].includes(key))) throw new ArcaneError('INPUT', 'Invalid pairing claim.');
+    const rejected = () => new ArcaneError('PAIRING', 'This Arcane pairing offer is invalid, expired or already used. Click Connect Studio in Arcane again.');
+    const ticket = textField(a.ticket, 'pairing ticket', 100);
+    const offer = this.#pairingFor(ticket, port, projectId);
+    if (!offer) throw rejected();
+    const clientNonce = typeof a.clientNonce === 'string' ? a.clientNonce : '', proof = typeof a.proof === 'string' ? a.proof : '';
+    if (!offer.clientNonce || !equal(offer.clientNonce, clientNonce) || !PAIRING_PROOF.test(proof) || !equal(proof, studioPairingProof(offer.view.code, 'plugin', ticket, clientNonce))) {
+      this.#burnPairing(offer, 'studio_pairing_failed'); throw rejected();
+    }
+    const identity = object(a.identity);
+    if (!offer.request) {
+      if (typeof identity.name !== 'string' || !Number.isSafeInteger(identity.placeId) || !Number.isSafeInteger(identity.universeId)) { this.#burnPairing(offer, 'studio_pairing_failed'); throw rejected(); }
+      offer.request = { identity: structuredClone(identity), proof };
+      offer.view.state = 'awaiting-approval';
+      offer.view.request = { placeName: textField(identity.name, 'place name', 200), placeId: identity.placeId as number, universeId: identity.universeId as number, requestedAt: this.iso(), approved: false };
+      this.event('studio_pairing_requested', offer.view.offerId, { placeId: identity.placeId, universeId: identity.universeId });
+      return { state: 'awaiting-approval', expiresAt: offer.view.expiresAt };
+    }
+    // The same plugin, same place, repeating its claim while the user decides.
+    if (!equal(offer.request.proof, proof) || JSON.stringify(offer.request.identity) !== JSON.stringify(identity)) { this.#burnPairing(offer, 'studio_pairing_failed'); throw rejected(); }
+    if (!offer.view.request?.approved) return { state: 'awaiting-approval', expiresAt: offer.view.expiresAt };
+    offer.ticket = null; offer.view.state = 'failed';
+    const key = this.issueKey({ allowedRoots: offer.view.allowedRoots, allowWrites: offer.view.allowWrites }, port);
+    let result: PairResult;
+    try { result = this.connectWithKey({ apiKey: key.apiKey, protocolVersion: a.protocolVersion, identity: a.identity, capabilities: a.capabilities }, port); }
+    catch (error) {
+      try { this.revokeKey(key.keyId); } catch { /* The unused key stays listed for manual revocation. */ }
+      offer.request = null; offer.view.request = null;
+      this.event('studio_pairing_failed', offer.view.offerId, {});
+      throw error;
+    }
+    offer.request = null; offer.view.state = 'claimed';
+    offer.view.claim = { placeName: identity.name as string, placeId: identity.placeId as number, universeId: identity.universeId as number,
+      sessionId: result.sessionId, keyId: key.keyId, claimedAt: this.iso() };
+    this.event('studio_pairing_claimed', offer.view.offerId, { keyId: key.keyId, sessionId: result.sessionId, placeId: identity.placeId, universeId: identity.universeId });
+    return { ...result, apiKey: key.apiKey };
+  }
+  /** Human-only (enforced by the route): Approve or Deny the place waiting on this exact offer. Deny burns the offer. */
+  decidePairingOffer(input: unknown): StudioPairingOfferView {
+    const a = object(input);
+    if (Object.keys(a).sort().join() !== 'approve,offerId' || typeof a.approve !== 'boolean') throw new ArcaneError('INPUT', 'Invalid pairing decision.');
+    const view = this.pairingOffer(), offer = this.#pairingOffer;
+    if (!view || !offer || view.offerId !== a.offerId || view.state !== 'awaiting-approval' || !offer.view.request || offer.view.request.approved) throw new ArcaneError('PAIRING', 'No Studio connection is waiting for approval.');
+    if (a.approve) { offer.view.request.approved = true; this.event('studio_pairing_approved', offer.view.offerId, {}); }
+    else { offer.ticket = null; offer.request = null; offer.view.state = 'cancelled'; offer.view.request = null; this.event('studio_pairing_denied', offer.view.offerId, {}); }
+    return structuredClone(offer.view);
   }
   authenticate(sessionId: string, token: string): StudioSession {
     const row = this.db.prepare('SELECT token_hash FROM sessions WHERE id=?').get(sessionId) as Row | undefined;
@@ -547,6 +690,16 @@ export class StudioStore {
   command(id: string): StudioCommand {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return this.expired(JSON.parse(row.payload as string) as StudioCommand);
+  }
+  /** Read-only: the exact before/after source of one succeeded script.update receipt, for the human "View changes" diff.
+   * Both sources were validated against the request when the receipt completed (each at most 100 KiB). */
+  scriptChange(id: string): StudioScriptChange {
+    const c = this.command(id);
+    if (c.method !== 'script.update' || c.state !== 'succeeded') throw new ArcaneError('COMMAND', 'Only a succeeded script edit receipt has a source change.');
+    const mutation = object(object(c.result).mutation), before = object(mutation.before).source, after = object(mutation.after).source, r = object(mutation.ref);
+    if (typeof before !== 'string' || typeof after !== 'string' || typeof r.root !== 'string') throw new ArcaneError('RECEIPT', 'Script receipt has no recorded sources.');
+    const segments = Array.isArray(r.pathSegments) ? r.pathSegments.filter((s): s is string => typeof s === 'string').slice(0, 64).map(s => s.slice(0, 100)) : [];
+    return { commandId: c.id, path: [r.root, ...segments].join('.'), className: typeof r.className === 'string' ? r.className : null, before, after };
   }
   /** Durable intent before an irreversible engine call. Admission/rights are
    * checked by the trusted native controller, never inferred from these fields.
@@ -1250,6 +1403,7 @@ export class StudioStore {
           : after.count !== sceneBuildInstanceCount(c.args))
           || r.className !== object(c.args.container).className)) throw new ArcaneError('RECEIPT', 'Build receipt does not match the exact requested hierarchy.');
         if (isAssetMethod(c.method)) validateAssetReceipt(c.method, c.args, mutation);
+        if (c.method === 'terrain.generate' && (mutation.before !== null || r.className !== 'Terrain' || after.voxels !== terrainVoxelCount(c.args))) throw new ArcaneError('RECEIPT', 'Terrain receipt does not match the requested region.');
       }
       c.state = completedState === 'failed' && result && typeof result === 'object' && !Array.isArray(result) && result.partial === true ? 'needs_reconciliation' : completedState;
       c.result = result; c.error = error; c.finishedAt = this.iso(); this.saveCommand(c);
@@ -1266,6 +1420,7 @@ export class StudioStore {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
     if(this.db.prepare('SELECT 1 FROM studio_test_commands WHERE command_id=?').get(prior.id))throw new ArcaneError('TEST_RESERVATION','Temporary setup receipts require their original private restoration owner.');
     if (prior.method === 'environment.apply') throw new ArcaneError('RESTORE', 'Terrain and lighting changes are reverted with Studio Undo (one recording); the receipt lists the prior lighting values.');
+    if (prior.method === 'terrain.generate') throw new ArcaneError('RESTORE', 'Generated terrain is reverted with Studio Undo (one recording); receipt_restore is refused.');
     if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet'||prior.method==='asset.reconstruct') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
     return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };

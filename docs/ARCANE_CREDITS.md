@@ -38,6 +38,11 @@ You provide:
 1. A payment processor account (merchant of record, tax handling, refunds) under your own business terms.
 2. A hosted **Arcane billing service** that you run over https.
 
+**Reference implementation:** `services/gateway/` is a deployable billing service *and* model gateway in one process
+(Node 24, TypeScript run directly, SQLite, no runtime dependencies). Deploy steps, test-mode setup and every
+environment variable are in `services/gateway/README.md` and `services/gateway/.env.example`. Point both
+`billing.serviceUrl` and `gateway.url` at its origin.
+
 Then edit `billing` in `packages/protocol/src/plans.ts`:
 
 ```ts
@@ -49,7 +54,9 @@ The billing service must expose:
 | Method | Path | Response |
 | --- | --- | --- |
 | `GET` | `/v1/health` | `{"service":"arcane-billing","version":1}`. Arcane opens checkout only after this check passes. The result is cached for 10 minutes. |
-| `GET` | `/checkout?kind=plan\|pack\|credits&offer=<id>` | An https page hosted by the billing service. It signs the user in to their Arcane account and starts the processor's hosted checkout. |
+| `GET` | `/checkout?kind=plan\|pack\|credits&offer=<id>` | An https page hosted by the billing service. It asks for the email of the Arcane account to credit and starts the processor's hosted checkout. |
+| `POST` | `/v1/checkout` | Creates a hosted Checkout Session for one offer id from the **server-side price map** and redirects to it. Form post from the page above (`offer`, `email`) answers `303` to the session URL. JSON with `Authorization: Bearer <account token>` and an optional `Idempotency-Key` header, body `{"offer":"pro"}`, answers `{"id":"cs_…","url":"https://…"}`; the same key returns the same session. `404` unknown offer, `503` offer has no price configured. |
+| `POST` | `/v1/stripe/webhook` | The processor's webhook. The `Stripe-Signature` header is verified (HMAC-SHA256 with `STRIPE_WEBHOOK_SECRET`, 5-minute replay window). Handled: `checkout.session.completed` / `checkout.session.async_payment_succeeded` (grant credits, a pack, or a plan's first month), `invoice.paid` with `billing_reason: subscription_cycle` (reset the plan allowance), `customer.subscription.deleted` (end the plan). Each event id and each grant (`checkout:<session>`, `invoice:<invoice>`) applies at most once. |
 
 - **How Arcane builds the URL.** Arcane builds the checkout URL from trusted config and a known offer id, never from
   request text. It then checks the URL again in the renderer against the verified origin.
@@ -62,11 +69,13 @@ The billing service must expose:
     `shell.openExternal` only after the user confirms.
   - Replies are fixed states and messages (`not-connected`, `opened`, `cancelled`, `unknown-offer`, `busy`,
     `unavailable`). Unconfigured always answers "Checkout isn't connected yet" and opens nothing.
-  - `billing.status()` reports `ready` or `not-connected` and `account: 'unavailable'` (Arcane account sign-in is not
-    implemented yet; see below).
+  - `billing.status()` reports `ready` or `not-connected` and an `account` state: `unavailable` (default: no gateway
+    configured, no OS encryption, or verification mode), `signed-out`, `signing-in` or `signed-in` (see
+    "Connect Arcane account" below).
 - **Where the desktop reads the service URL.** Default: unset. Either
   - a local file `<Arcane userData>/billing-service.json` (Windows: `%APPDATA%\Arcane\billing-service.json`), a plain
-    file of at most 4 KiB: `{"version":1,"serviceUrl":"https://billing.your-domain.example"}`, or
+    file of at most 4 KiB: `{"version":1,"serviceUrl":"https://billing.your-domain.example","gatewayUrl":"https://billing.your-domain.example"}`
+    (`gatewayUrl` is optional and must be on an origin in `gateway.allowedOrigins`), or
   - `billing.serviceUrl` in `packages/protocol/src/plans.ts`.
 
   The local file wins when present. In both cases the origin must also be listed in `billing.allowedOrigins` in
@@ -94,45 +103,93 @@ The seam is `apps/daemon/src/arcane-gateway.ts`:
 
 The provider stays **disabled and hidden from the model picker** until two things are true:
 
-1. `gateway.url` in `plans.ts` is https and its origin is in `gateway.allowedOrigins`.
+1. A gateway URL is configured on an https origin listed in `gateway.allowedOrigins`: `gateway.url` in `plans.ts`, or
+   the user's local `gatewayUrl` in `billing-service.json` (passed to the seam as `localUrl`; see `gatewayBase()`).
 2. A signed-in account token is present in the vault.
 
 `gatewayStatus()` returns `showInModelPicker: true` only in the `ready` state. Until then, every call refuses and
 makes no network request.
 
+### Connect Arcane account (desktop)
+
+Settings > Plans & credits shows **Connect Arcane account** under the Arcane Credits status, but only when
+`billing.status()` reports an account state other than `unavailable`. Everything stays off by default: the shipped
+`plans.ts` allowlists no gateway origin.
+
+The sign-in is a **device code confirmed by an emailed link**. It needs no local callback server, no password, and
+works with any mail service:
+
+1. The host (`billing.cjs`) calls `POST /v1/auth/device` on the allowlisted gateway and gets a secret `deviceCode` and
+   a short `userCode` such as `BCDF-GHJK`.
+2. It shows the code in an Arcane dialog ("Open sign-in page", Cancel is the default). After confirmation, it opens the
+   gateway's `/v1/auth/verify` page in the browser. The page must be on the gateway origin.
+3. On that page the user checks the code and enters their email. The gateway emails a single-use link that expires in
+   15 minutes. Opening the link shows the code again, and the user approves with a button. Approval is a POST, so mail
+   scanners that prefetch links cannot approve.
+4. The host polls `POST /v1/auth/token` and receives an opaque bearer token once. It stores `{origin, token}` encrypted
+   with `safeStorage` in `<userData>/arcane-account.bin`. The token is bound to that gateway origin, never crosses to
+   the renderer, and is not sent anywhere else.
+
+**Disconnect** deletes the file and revokes the token on the gateway (`POST /v1/auth/logout`). Replies to the renderer
+are fixed states and messages only: `not-connected`, `opened`, `cancelled`, `busy`, `signed-in`, `signed-out`,
+`unavailable`.
+
 ### Expected gateway API
 
-All requests send `Authorization: Bearer <account token>`. The gateway must not redirect; Arcane sends requests with
-`redirect: "error"`. JSON replies may be at most 64 KB, and a stream at most 4 MB.
+Account requests send `Authorization: Bearer <account token>`. The gateway must not redirect; Arcane sends requests
+with `redirect: "error"`. JSON replies may be at most 64 KB, and a stream at most 4 MB.
 
 | Method | Path | Response |
 | --- | --- | --- |
+| `POST` | `/v1/auth/device` | No auth. `{"deviceCode":"…","userCode":"BCDF-GHJK","verificationUrl":"https://…/v1/auth/verify","verificationUrlComplete":"…?user_code=BCDF-GHJK","interval":5,"expiresIn":600}` |
+| `GET`/`POST` | `/v1/auth/verify` | Browser page: the user enters the code and an email address; a sign-in link is emailed. The page looks the same whether or not the code is valid. |
+| `GET`/`POST` | `/v1/auth/confirm?t=…` | Browser page from the emailed link. It shows the code; the POST button approves the device. |
+| `POST` | `/v1/auth/token` | No auth. Body `{"deviceCode":"…"}`. Returns `200 {"token":"arc_…","tokenType":"Bearer"}` once, or `400 {"error":"authorization_pending" \| "slow_down" \| "expired_token" \| "invalid_grant"}`. |
+| `POST` | `/v1/auth/logout` | Revokes the presented token. |
 | `GET` | `/v1/balance` | `{"credits":1200,"actionsRemaining":40,"plan":"Pro","renewsAt":"2026-11-01T00:00:00Z"}`. `actionsRemaining`, `plan` and `renewsAt` may be `null`. |
-| `GET` | `/v1/usage` | `{"period":"2026-10","creditsUsed":300,"actionsUsed":12}` |
+| `GET` | `/v1/usage` | `{"period":"2026-10","creditsUsed":300,"actionsUsed":12}` (current UTC month). |
 | `GET` | `/v1/models` | `{"models":[{"id":"arcane-default","label":"Arcane default"}]}`, with at most 32 models. |
-| `POST` | `/v1/chat/stream` | Request body: `{"model":"…","messages":[{"role":"user","content":"…"}],"conversationId":"…"}`. The reply is Server-Sent Events. |
+| `POST` | `/v1/chat/stream` (alias `/v1/chat`) | Request body: `{"model":"…","messages":[{"role":"user","content":"…"}],"conversationId":"…","turnId":"…","maxTokens":4096}`. `turnId` and `maxTokens` are optional. An optional `Idempotency-Key` header refuses a resend with `409`. The reply is Server-Sent Events. |
 
 The `/v1/chat/stream` reply sends these events:
 
 - `data: {"type":"delta","text":"…"}`, repeated as text arrives.
 - Then one of:
-  - `data: {"type":"done","creditsUsed":3}`
+  - `data: {"type":"done","creditsUsed":3,"actionsUsed":0}`
   - `data: {"type":"error","message":"…"}`
 
 Error statuses:
 
 - `401` means the sign-in expired.
-- `402` means the account is out of credits.
+- `402` means the account is out of credits. Nothing is sent upstream.
+- `429` means the per-account rate limit or concurrent-stream cap was hit (`Retry-After: 60`).
 - Any other non-2xx status shows "The Arcane gateway is unavailable".
 
-### Remaining wiring once the gateway exists
+### How usage is metered (reference gateway)
 
-1. Desktop host: an Arcane account sign-in flow, using a browser handoff like provider login, that stores the token
-   with `createEncryptedTokenVault` and `safeStorage`. Not implemented: `arcaneDesktop.billing.status()` always reports
-   `account: 'unavailable'` until it exists.
-2. Daemon: pass `gatewaySignedIn` to `plansRoutes` so the Settings page shows "Arcane Credits are ready".
+- **Price table.** Each model in `MODELS_JSON` has `inputPerMTok` and `outputPerMTok`: credits per million tokens,
+  before markup. `MARKUP_BPS` is the markup in basis points; `12000` means +20 %.
+- **Formula.** `credits = ceil((input × inputPerMTok + output × outputPerMTok) × MARKUP_BPS / 10¹⁰)`. The math is
+  integer only and always rounds up.
+- **Hold before streaming.** The worst-case cost (estimated prompt plus `maxTokens`) is held before the stream starts.
+  When it ends, the actual cost from the provider's usage report is charged and the rest is refunded. If the balance
+  cannot cover the hold, the gateway answers `402`.
+- **Plan and pack actions.** A request with a new `turnId` while the account has plan or pack actions left consumes one
+  action. That action covers up to `ACTION_CREDIT_ALLOWANCE` credits of usage for every request in that turn. Usage
+  beyond the allowance, or with no actions left, is paid from credits.
+- **Failures.** A failed request that streamed nothing is not charged. If the server crashes, open holds are refunded
+  on the next start.
+
+### Remaining wiring
+
+1. ~~Desktop host sign-in~~: done (Connect Arcane account, above).
+2. Daemon: the daemon process cannot reach `safeStorage`. The host exposes `billing.accountCredential()` (main process
+   only) for a later handoff. Hand `{base, token}` to the daemon over the existing authenticated host-to-daemon
+   channel. Then build `createArcaneGateway({ config, vault, localUrl })` with a vault that reads that value, and pass
+   `gatewaySignedIn` to `plansRoutes` so the page says "Arcane Credits are ready".
 3. Chat: add the `arcane` provider to the model picker only when `gateway.showInModelPicker` is true. Stream turns
-   through `streamChat`. Count each finished turn as an action, like the other providers.
+   through `streamChat` and send the chat turn id as `turnId`. Count each finished turn as an action, like the other
+   providers. Not done yet: the model picker and chat files are shared with work in progress.
 
 ## Local routes (human bearer only)
 

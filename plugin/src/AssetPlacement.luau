@@ -118,7 +118,18 @@ function AssetPlacement.arrival(ops: any, id: string, expectName: string?, works
 		end
 		if not chosen and #tops > 1 then V.fail("AMBIGUOUS", "Several new instances appeared in Workspace during the insertion; nothing was adopted. Inspect Workspace and remove any unwanted insert.") end
 		chosen = chosen or tops[1]
-		if chosen then return chosen end
+		if chosen then
+			-- A script dropped next to the asset (not inside it) would escape the strip below: refuse instead.
+			for _, instance in ipairs(entry.additions) do
+				if instance ~= chosen and instance.Parent ~= nil and instance:IsDescendantOf(workspace) and not ops.registry.owned[instance]
+					and not instance:IsDescendantOf(chosen) and not chosen:IsDescendantOf(instance) then
+					local scripted = instance:IsA("LuaSourceContainer")
+					if not scripted then for _, item in ipairs(instance:GetDescendants()) do if item:IsA("LuaSourceContainer") then scripted = true; break end end end
+					if scripted then V.fail("AMBIGUOUS", "Scripts appeared in Workspace next to the inserted asset; nothing was adopted.") end
+				end
+			end
+			return chosen
+		end
 		if attempt < polls then task.wait(0.25) end
 	end
 	V.fail("NOT_FOUND", "No inserted instance appeared in Workspace within " .. L.arrivalSeconds .. " seconds; nothing was adopted.")
@@ -137,7 +148,47 @@ function AssetPlacement.place(ops: any, command: any, args: any, guard: () -> ()
 	local ground, anchor, allowScripts = V.boolean(args.ground, "ground"), V.boolean(args.anchor, "anchor"), V.boolean(args.allowScripts, "allowScripts")
 	local workspace = ops.registry:root("Workspace")
 	if ops.registry.count >= V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
-	local asset = AssetPlacement.arrival(ops, id, expectName, workspace)
+	-- "editable-<digest>" adopts this plugin's retained reconstruction (procedural/Blender
+	-- meshes) as new MeshParts instead of waiting for a native insertion.
+	local editable = string.match(id, "^editable%-([0-9a-f]+)$")
+	local placed: (() -> ())? = nil
+	local asset: any
+	local watched = if editable then nil else ops.assetWatches and ops.assetWatches[id]
+	-- A refused native insert stays in Workspace for the person to inspect, but never with its scripts or package links.
+	local function scrub(): ()
+		if allowScripts or not watched then return end
+		for _, instance in ipairs(watched.additions) do
+			if instance.Parent ~= nil and instance:IsDescendantOf(workspace) and not ops.registry.owned[instance] then
+				local items = instance:GetDescendants()
+				table.insert(items, instance)
+				for _, item in ipairs(items) do
+					if item.Parent ~= nil and (item:IsA("LuaSourceContainer") or item.ClassName == "PackageLink") then pcall(function() item:Destroy() end) end
+				end
+			end
+		end
+	end
+	if editable then
+		if type(ops.materializeReconstruction) ~= "function" then V.fail("WATCH", "This plugin cannot place reconstructed meshes.") end
+		asset, placed = ops:materializeReconstruction(editable, guard)
+	else
+		local arrived, value = pcall(AssetPlacement.arrival, ops, id, expectName, workspace)
+		if not arrived then scrub(); error(value, 0) end
+		asset = value
+	end
+	local ok, result = pcall(AssetPlacement.adopt, ops, command, args, guard, asset, container, name, maxSize, position, yaw, ground, anchor, allowScripts, editable ~= nil, id)
+	if not ok then
+		-- A detached materialized model never reached the scene: release it, no receipt.
+		if editable and asset.Parent == nil then pcall(function() asset:Destroy() end) end
+		scrub()
+		error(result, 0)
+	end
+	if placed then placed() end
+	return result
+end
+
+function AssetPlacement.adopt(ops: any, command: any, args: any, guard: () -> (), asset: any, container: any, name: string, maxSize: {number}?,
+	position: {number}, yaw: number, ground: boolean, anchor: boolean, allowScripts: boolean, detached: boolean, id: string): any
+	local workspace = ops.registry:root("Workspace")
 	local descendants = asset:GetDescendants()
 	if #descendants + 1 > L.descendants then V.fail("BODY_LIMIT", "The inserted asset has more than " .. L.descendants .. " instances; nothing was adopted. Remove it or choose a lighter asset.") end
 	local physical = asset:IsA("BasePart")
@@ -146,13 +197,19 @@ function AssetPlacement.place(ops: any, command: any, args: any, guard: () -> ()
 	return ops:record(command, guard, function(progress: any): any
 		guard()
 		ops.registry:resolve(args.parent)
-		if asset.Parent == nil then V.fail("ASSET", "The inserted asset disappeared before adoption.") end
+		if asset.Parent == nil and not detached then V.fail("ASSET", "The inserted asset disappeared before adoption.") end
 		progress.touched = true
 		-- Free models can carry hostile scripts: remove every script unless explicitly allowed.
 		local removed: number, kept: number, classes: {[string]: number}, names: any = 0, 0, {}, V.array({})
 		for _, item in ipairs(asset:GetDescendants()) do
-			if item.Parent ~= nil and item:IsA("LuaSourceContainer") then
-				if allowScripts then kept += 1
+			if item.Parent ~= nil and item.ClassName == "PackageLink" then
+				-- An auto-updating package could bring scripts back after adoption.
+				item:Destroy()
+			elseif item.Parent ~= nil and item:IsA("LuaSourceContainer") then
+				if allowScripts then
+					kept += 1
+					-- Kept scripts land disabled; turning one on is a separate, reviewed script.set_enabled.
+					if item:IsA("BaseScript") then item.Disabled = true end
 				else
 					removed += 1
 					classes[item.ClassName] = (classes[item.ClassName] or 0) + 1
@@ -302,7 +359,7 @@ function AssetPlacement.buildTemplates(ops: any, raw: any): {any}
 		local descendants = template:GetDescendants()
 		if #descendants > L.templateDescendants then V.fail("BODY_LIMIT", "A clone template may hold at most " .. L.templateDescendants .. " instances.") end
 		for _, item in ipairs(descendants) do
-			if item:IsA("LuaSourceContainer") then V.fail("SCRIPT", "Clone templates must be script-free; adopt them with scripts stripped.") end
+			if item:IsA("LuaSourceContainer") or item.ClassName == "PackageLink" then V.fail("SCRIPT", "Clone templates must be script-free; adopt them with scripts stripped.") end
 		end
 		table.insert(templates, {instance = template, extra = #descendants})
 	end
@@ -326,6 +383,13 @@ end
 function AssetPlacement.instantiate(entry: any): any
 	local copy = entry.clone:Clone()
 	if not copy then V.fail("VERIFY", "The clone template is not archivable.") end
+	-- The template was checked when the build was planned; it may have changed since, so check the copy itself.
+	for _, item in ipairs(copy:GetDescendants()) do
+		if item:IsA("LuaSourceContainer") or item.ClassName == "PackageLink" then
+			copy:Destroy()
+			V.fail("SCRIPT", "Clone templates must be script-free; adopt them with scripts stripped.")
+		end
+	end
 	if entry.scale ~= 1 then
 		if copy:IsA("Model") then copy:ScaleTo(copy:GetScale() * entry.scale)
 		else copy.Size = Vector3.new(copy.Size.X * entry.scale, copy.Size.Y * entry.scale, copy.Size.Z * entry.scale) end

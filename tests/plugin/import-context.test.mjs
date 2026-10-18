@@ -13,7 +13,7 @@ const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE;
 const proof = process.env.ARCANE_IMPORT_CONTEXT_PROOF_DIR;
 const digest = value => createHash('sha256').update(value).digest('hex');
-const modules = ['Validation', 'Registry', 'Properties', 'AssetMesh', 'Sha256Stream', 'AssetTransfer', 'AssetPlacement', 'Operations', 'Transport', 'TestProof'];
+const modules = ['Validation', 'Registry', 'Properties', 'AssetMesh', 'Sha256Stream', 'AssetTransfer', 'AssetPlacement', 'TerrainGen', 'Operations', 'Transport', 'TestProof'];
 async function directory(label) {
   if (!proof) return mkdtemp(path.join(tmpdir(), `arcane-import-context-${label}-`));
   const dir = path.join(path.resolve(proof), label);

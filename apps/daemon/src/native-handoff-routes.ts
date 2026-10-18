@@ -8,16 +8,27 @@ import { NativeHandoffError, NativeHandoffRegistry, type NativeHandoffLease } fr
  * Human endpoints mint, seal, revoke and list handoff credentials for exactly this project. `agentToken`
  * returns a handoff bearer only after fresh live recognition and only for a fixed method/path allowlist;
  * every other request gets '' (no alternate grant and never the core token). Real StudioRoutes still
- * enforces Studio grants, human-only actions and bound original-task authority. Owns no processes. */
+ * enforces Studio grants, human-only actions and bound original-task authority. Owns no processes.
+ * The allowlist is the in-app chat's Arcane MCP surface (ARCANE_TOOL_NAMES): Studio commands, viewport
+ * capture, native Studio asset search/insert/generate/job, playtest request/status/cancel, work coordination
+ * and generic local asset tools. Playtest approval and capture, native-hook asset delivery (/v1/assets/native),
+ * asset artifacts/history control, settings, pairing, plans, memory and diagnostics stay excluded. The
+ * downstream routes keep their own exact-session, write-grant, Edit-mode and rate-limit fences. */
 export const NATIVE_HANDOFF_ROUTE_LIMITS = Object.freeze({ bodyBytes: 8192, bodyTimeoutMs: 8000, responseBytes: 131072, spentRequests: 256 } as const);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PROJECT_ID = /^[a-f0-9]{64}$/;
 const HANDOFF_BEARER = /^Bearer ([A-Za-z0-9_-]{43})(?![\s\S])/;
 const COMMAND_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const RUN_PATH = /^\/v1\/work\/runs\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const GET_PATHS = new Set(['/v1/product/state', '/v1/work/runs', '/v1/work/ready', '/v1/studio/sessions', '/v1/studio/commands']);
-const POST_PATHS = new Set(['/v1/work/create', '/v1/work/claim', '/v1/work/progress', '/v1/work/submit', '/v1/studio/commands', '/v1/studio/restore']);
-const QUERY_KEYS: Readonly<Record<string, string>> = Object.freeze({ '/v1/work/ready': 'runId', '/v1/studio/commands': 'sessionId' });
+const GET_PATHS = new Set(['/v1/product/state', '/v1/work/runs', '/v1/work/ready', '/v1/studio/sessions', '/v1/studio/commands',
+  '/v1/playtests', '/v1/assets/jobs', '/v1/assets/manifest', '/v1/assets/preview']);
+const POST_PATHS = new Set(['/v1/work/create', '/v1/work/claim', '/v1/work/progress', '/v1/work/submit', '/v1/studio/commands', '/v1/studio/restore',
+  '/v1/playtests/prepare', '/v1/playtests/cancel', '/v1/playtests/viewport',
+  '/v1/studio-native/asset-search', '/v1/studio-native/asset-insert', '/v1/studio-native/asset-generate', '/v1/studio-native/asset-job',
+  '/v1/assets/probe', '/v1/assets/start', '/v1/assets/cancel']);
+/** Optional GET query keys, each at most once; every other query is refused. */
+const QUERY_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({ '/v1/work/ready': ['runId'], '/v1/studio/commands': ['sessionId'], '/v1/playtests': ['id'],
+  '/v1/assets/jobs': ['limit', 'after'], '/v1/assets/manifest': ['jobId'], '/v1/assets/preview': ['jobId', 'path'] });
 
 class RouteError extends Error { constructor(readonly code: string, readonly status: number) { super(code); } }
 const MESSAGES: Readonly<Record<string, string>> = Object.freeze({
@@ -152,12 +163,14 @@ export function createNativeHandoffRoutes(options: { projectPath: string; now?: 
       const path = url.pathname, method = request.method;
       let allowed = method === 'GET' && (GET_PATHS.has(path) || RUN_PATH.test(path) ||
         path.startsWith('/v1/studio/commands/') && COMMAND_ID.test(path.slice('/v1/studio/commands/'.length))) || method === 'POST' && POST_PATHS.has(path);
-      const keys = [...url.searchParams.keys()], queryKey = method === 'GET' ? QUERY_KEYS[path] : undefined;
-      if (keys.length && !(queryKey && keys.length === 1 && keys[0] === queryKey && url.searchParams.getAll(queryKey).length === 1)) allowed = false;
+      const keys = [...url.searchParams.keys()], queryKeys = method === 'GET' ? QUERY_KEYS[path] ?? [] : [];
+      if (keys.some(key => !queryKeys.includes(key)) || new Set(keys).size !== keys.length) allowed = false;
       if (!allowed) return '';
       const authorization = registry.recognize(match[1]!);
       if (!authorization || authorization.projectId !== projectId || authorization.audience !== 'external-handoff') return '';
-      const scope = path.startsWith('/v1/work/') ? 'work-coordination' : path.startsWith('/v1/studio/') ? 'studio-granted-commands' : null;
+      const scope = path.startsWith('/v1/work/') ? 'work-coordination'
+        : path.startsWith('/v1/studio/') || path === '/v1/playtests' || path.startsWith('/v1/playtests/') || path.startsWith('/v1/studio-native/') ? 'studio-granted-commands'
+        : path.startsWith('/v1/assets/') ? 'fixed-template-assets' : null;
       if (scope && !authorization.scopes.includes(scope)) return '';
       return match[1]!;
     } catch { return ''; }

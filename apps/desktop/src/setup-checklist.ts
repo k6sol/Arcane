@@ -6,7 +6,9 @@
 export type ChecklistStep = 'provider' | 'plugin' | 'studio' | 'project';
 export type ChecklistState = 'done' | 'todo' | 'checking' | 'unavailable';
 export type PluginInstallState = 'installed' | 'outdated' | 'missing' | 'unavailable';
-export type ChecklistAction = 'sign-in' | 'install-plugin' | 'check-plugin' | 'show-key' | 'open-project';
+export type ChecklistAction = 'sign-in' | 'install-plugin' | 'check-plugin' | 'show-key' | 'open-project' | 'connect-studio' | 'review-studio';
+/** Two-sided pairing state (studio-key-settings.ts StudioPairing). Display data only: a phase, the 6-digit code and a message. */
+export interface ChecklistPairing { phase: 'idle' | 'starting' | 'waiting' | 'busy' | 'approval' | 'approved' | 'claimed' | 'expired' | 'failed' | 'error'; code: string | null; message: string }
 
 export interface PluginStatus { state: PluginInstallState; pluginVersion: string | null; message: string }
 export interface ChecklistSignals {
@@ -21,6 +23,8 @@ export interface ChecklistSignals {
   studioConnected: boolean | null;
   /** Null until the daemon reports the open project. */
   projectPath: string | null;
+  /** Present only when one-click pairing is available; absent keeps the API key flow. */
+  pairing?: ChecklistPairing | null;
 }
 export interface ChecklistRow { step: ChecklistStep; label: string; detail: string; state: ChecklistState; action: { kind: ChecklistAction; label: string } | null }
 export interface ChecklistMemory { version: 1; completed: boolean; dismissed: boolean }
@@ -57,13 +61,30 @@ export function checklistRows(s: ChecklistSignals): ChecklistRow[] {
     plugin,
     s.studioConnected === true
       ? { step: 'studio', label: 'Studio connected', detail: 'A live Studio session is paired.', state: 'done', action: null }
-      : { step: 'studio', label: 'Connect Studio', detail: s.studioConnected === null ? 'Checking for a Studio session…' : 'Paste your Arcane API key into the plugin in Studio.',
-        state: s.studioConnected === null ? 'checking' : 'todo', action: { kind: 'show-key', label: 'Show pairing key' } },
+      : s.pairing ? studioPairingRow(s.studioConnected, s.pairing)
+      : { step: 'studio', label: 'Connect Studio', detail: s.studioConnected === null ? 'Checking for a Studio session…' : 'Paste an Arcane API key into the plugin in Studio (one-click Connect Studio is unavailable here).',
+        state: s.studioConnected === null ? 'checking' : 'todo', action: { kind: 'show-key', label: 'Use API key' } },
     s.projectPath
       ? { step: 'project', label: 'Project open', detail: isStarterProject(s.projectPath) ? 'Starter project. Open your own folder anytime.' : folderName(s.projectPath), state: 'done', action: null }
       : { step: 'project', label: 'Open a project', detail: s.desktop ? 'Choose the folder for your game.' : 'Open a project from the Arcane desktop app.', state: 'todo',
         action: s.desktop ? { kind: 'open-project', label: 'Open project' } : null },
   ];
+}
+
+/** Studio row with one-click pairing: Connect Studio here, then one click in the plugin. The API key stays a fallback. */
+function studioPairingRow(connected: boolean | null, pairing: ChecklistPairing): ChecklistRow {
+  const base = { step: 'studio' as const, label: 'Connect Studio' };
+  const fallback = { kind: 'show-key' as const, label: 'Use API key' };
+  if (pairing.phase === 'waiting' && pairing.code) return { ...base, state: 'todo', detail: 'Waiting for Studio… In Roblox Studio, type ' + (pairing.code.length === 6 ? pairing.code.slice(0, 3) + ' ' + pairing.code.slice(3) : pairing.code) + ' into the Arcane plugin and click Connect.', action: fallback };
+  // Approve/Deny live on the Studio plugin card in Settings, next to the place name and ID.
+  if (pairing.phase === 'approval') return { ...base, state: 'todo', detail: pairing.message, action: { kind: 'review-studio', label: 'Review request' } };
+  if (pairing.phase === 'approved') return { ...base, state: 'checking', detail: pairing.message, action: null };
+  if (pairing.phase === 'starting') return { ...base, state: 'checking', detail: 'Preparing a Studio connection…', action: null };
+  if (pairing.phase === 'busy' || pairing.phase === 'error') return { ...base, state: 'todo', detail: pairing.message, action: fallback };
+  if (connected === null) return { ...base, state: 'checking', detail: 'Checking for a Studio session…', action: { kind: 'connect-studio', label: 'Connect Studio' } };
+  const detail = pairing.phase === 'expired' || pairing.phase === 'failed' ? pairing.message
+    : pairing.phase === 'claimed' ? 'Studio paired. Waiting for its first heartbeat…' : 'Click Connect Studio, then type its code into the Arcane plugin.';
+  return { ...base, state: 'todo', detail, action: { kind: 'connect-studio', label: 'Connect Studio' } };
 }
 
 /** Bounded, exact memory record; anything else reads as a first run. */
@@ -113,6 +134,8 @@ export interface SetupChecklistOptions {
   };
   /** The preload bridge (window.arcaneDesktop); absent in a plain browser. */
   desktop?: unknown;
+  /** One-click Studio pairing; without it the Studio row keeps the API key flow. */
+  pairing?: { available(): boolean; view(): ChecklistPairing; start(): Promise<void>; subscribe(listener: () => void): () => void } | null;
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 }
 export interface SetupChecklistController {
@@ -137,7 +160,9 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     try { providerName = options.provider.chatSurface() === 'claude' || options.provider.selectedProvider() === 'claude' ? 'Claude' : 'ChatGPT'; } catch { /* Default label. */ }
     try { studio = options.workbench.studioConnected(); } catch { studio = null; }
     try { path = options.workbench.getCurrentProduct()?.projectPath ?? null; } catch { path = null; }
-    return { signedIn, providerName, plugin, desktop: !!native.plugin, studioConnected: studio, projectPath: path };
+    let pairing: ChecklistPairing | null = null;
+    try { if (options.pairing?.available()) { const view = options.pairing.view(); pairing = { phase: view.phase, code: view.code, message: view.message }; } } catch { pairing = null; }
+    return { signedIn, providerName, plugin, desktop: !!native.plugin, studioConnected: studio, projectPath: path, pairing };
   };
   const rows = () => checklistRows(signals());
   const el = (id: string) => doc.getElementById(id);
@@ -206,6 +231,10 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     finally { pluginBusy = false; }
     // Re-read the file state from the host rather than trusting the install reply.
     await refreshPlugin();
+    // The same click that installed the plugin also opens a 10 minute Studio code, so the user only clicks
+    // Connect in the plugin after Studio restarts. Never when Studio is already connected.
+    let connected: boolean | null = null; try { connected = options.workbench.studioConnected(); } catch { connected = null; }
+    if (!stopped && !disposed && plugin?.state === 'installed' && connected !== true) { try { if (options.pairing?.available()) await options.pairing.start(); } catch { /* Connect Studio stays available. */ } }
   };
   const dispatch = (type: string, detail: Record<string, string>) => {
     const Event = doc.defaultView?.CustomEvent; if (Event) doc.dispatchEvent(new Event(type, { detail }));
@@ -218,6 +247,8 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     } else if (kind === 'install-plugin') void installPlugin();
     else if (kind === 'check-plugin') void refreshPlugin();
     else if (kind === 'show-key') dispatch('workspace:settingsrequest', { target: 'settings-key-heading' });
+    else if (kind === 'review-studio') dispatch('workspace:settingsrequest', { target: 'studio-plugin-heading' });
+    else if (kind === 'connect-studio' && options.pairing) void options.pairing.start().catch(() => { /* The row shows the pairing error. */ });
     else if (kind === 'open-project' && native.project) {
       notice = ''; void native.project.open().catch(() => { notice = 'The project picker is unavailable. Use File > Open project.'; render(); });
     }
@@ -239,6 +270,7 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
   for (const subscribe of [options.provider.subscribeSignInChange, options.provider.subscribeChatSurface, options.workbench.subscribeStudioChange, options.workbench.subscribeProjectChange]) {
     try { removers.push(subscribe(render)); } catch { /* A missing signal only leaves its row pending. */ }
   }
+  if (options.pairing) { try { removers.push(options.pairing.subscribe(render)); } catch { /* The row keeps its last state. */ } }
   render(); void refreshPlugin();
   return {
     rows, visible: () => !!root && !root.hidden, memory: () => ({ ...memory }), refreshPlugin,

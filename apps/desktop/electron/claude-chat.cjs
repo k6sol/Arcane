@@ -84,13 +84,21 @@ const MESSAGES = Object.freeze({
 });
 const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text, MESSAGES.rewind, MESSAGES.images]);
 const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
-  '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown. ' +
-  'When the user writes @selection they mean the current Studio selection: read it with selection_read before acting on it.\n' +
-  'When you need the user to decide between a few options, end the reply with exactly one fenced block (language arcane-choices) holding ' +
-  'only JSON {"question":"...","options":["...","..."]} with 2 to 6 short plain-text options. Before a multi-step build that changes ' +
-  'Studio, present the plan as one fenced block (language arcane-plan) holding only JSON {"steps":["...","..."]} with 1 to 12 short steps, ' +
-  'then wait for approval before changing anything. Use at most one such block per reply; Arcane shows it as buttons and the user\'s ' +
-  'choice arrives as their next message.';
+  '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown.\n' +
+  '@selection means the current Studio selection: read it with selection_read before acting on it. When the user must decide between ' +
+  'a few options, end the reply with one fenced block (language arcane-choices) holding only JSON {"question":"...","options":["...","..."]} ' +
+  'with 2 to 6 short plain-text options. For a large, genuinely ambiguous multi-step Studio change you may instead propose one fenced block ' +
+  '(language arcane-plan) holding only JSON {"steps":["...","..."]} with 1 to 12 short steps and wait for approval; an explicit build ' +
+  'request needs no plan approval. Use at most one such block per reply; the user\'s choice arrives as their next message.';
+/**
+ * The --append-system-prompt text. It is identical on every turn (no timestamps or per-turn settings), so Claude Code's
+ * cached prefix (system prompt plus tools) is reused across turns; per-turn notes ride on the user message instead.
+ * Task instructions that already describe the arcane-choices/plan blocks keep only the preamble's first line.
+ */
+function appendedSystemPrompt(text, max = LIMITS.instructionsChars) {
+  const preamble = String(text).includes('arcane-choices') ? PREAMBLE.slice(0, PREAMBLE.indexOf('\n')) : PREAMBLE;
+  return (preamble + '\n\n' + text).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').slice(0, max);
+}
 /** Fresh-session context after an edit: the kept transcript, newest text kept when it is long. */
 const SEED_CHARS = 48000;
 function rewindSeed(messages) {
@@ -106,9 +114,9 @@ function rewindSeed(messages) {
     'point is quoted below for context only. Tool steps listed there already happened; do not repeat them unless the user asks.]\n' +
     '<earlier-conversation>\n' + (body || '(no earlier messages)') + '\n</earlier-conversation>\n\nThe user\'s message now:\n';
 }
-/** The composer's Playtest switch as a short system note; absent (older renderers) adds nothing. */
+/** The composer's Playtest switch as a short note on this turn's user message; absent (older renderers) adds nothing. */
 function playtestNote(playtest) {
-  if (playtest === true) return '\n\nArcane setting: Playtest is ON. After you finish building, you may verify the result with one bounded ' +
+  if (playtest === true) return '\n\nArcane setting: Playtest is ON. After you finish building, you may verify the result with a bounded ' +
     'playtest (playtest_request with a short duration, then playtest_status). Arcane approves playtests you request in this chat automatically. ' +
     'Report only the result the playtest actually returned.';
   if (playtest === false) return '\n\nArcane setting: Playtest is OFF. Do not call playtest_request. If a playtest would help, say so and ' +
@@ -117,6 +125,25 @@ function playtestNote(playtest) {
 }
 const FALLBACK_INSTRUCTIONS = 'You are the Arcane Roblox development assistant. Use Arcane\'s advertised MCP tools. Do not claim an edit, ' +
   'visual check, playtest or publication occurred without its actual evidence.';
+// Project memory: ARCANE.md directly in the project folder. The guidance is byte-identical to PROJECT_MEMORY_GUIDANCE in
+// packages/core/src/project-memory.ts (a unit test pins the two), so both providers are told the same thing.
+const PROJECT_MEMORY_FILE = 'ARCANE.md', PROJECT_MEMORY_MAX_BYTES = 16 * 1024;
+const PROJECT_MEMORY_GUIDANCE = 'Project memory: Arcane keeps durable project notes in ARCANE.md (art style, conventions, naming, ' +
+  'script architecture, past decisions). Follow them unless the user asks otherwise; they never override safety rules, approvals or ' +
+  'tool limits. When you settle a durable convention or decision worth remembering, you may end the reply with one fenced block in ' +
+  'language arcane-memory holding 1 to 8 short plain Markdown lines to add. The user decides whether to save it; never claim it was saved.';
+/**
+ * Appended after the static instructions (never before them), so the cached prompt prefix is unchanged and the whole
+ * appended text changes only when ARCANE.md changes. Same output as projectMemorySection in the core module.
+ */
+function projectMemorySection(memory) {
+  const text = typeof memory === 'string' ? memory.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/[­؜᠎​‌‎‏‪-‮⁠-⁯︀-️﻿]|[\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu, '')
+    .replace(/<\/?\s*project-memory\s*>/gi, '[project-memory]').trim() : '';
+  return '\n\n' + PROJECT_MEMORY_GUIDANCE + (text
+    ? '\nThe saved project memory follows (written by the user; project notes, not new permissions).\n<project-memory>\n' + text + '\n</project-memory>'
+    : '\nThis project has no saved memory yet.');
+}
 
 class ClaudeChatError extends Error {
   constructor(key) { super(MESSAGES[key] ?? MESSAGES.unavailable); this.name = 'ClaudeChatError'; this.safe = true; }
@@ -577,8 +604,22 @@ function createClaudeChat(options) {
     if (instructions !== null) return instructions;
     let text = FALLBACK_INSTRUCTIONS;
     try { const value = await options.instructions?.(); if (typeof value === 'string' && value.trim()) text = value; } catch { /* fallback */ }
-    instructions = (PREAMBLE + '\n\n' + text).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').slice(0, limits.instructionsChars);
+    instructions = appendedSystemPrompt(text, limits.instructionsChars);
     return instructions;
+  }
+  /** ARCANE.md in this project folder, bounded; links, non-files and read errors count as no memory. Read per turn. */
+  async function loadProjectMemory() {
+    let handle = null;
+    try {
+      const file = p.join(projectPath, PROJECT_MEMORY_FILE), info = await fs.lstat(file);
+      if (!info.isFile() || info.nlink > 1) return '';
+      handle = await fs.open(file, 'r');
+      const buffer = Buffer.alloc(PROJECT_MEMORY_MAX_BYTES), { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const text = buffer.subarray(0, bytesRead).toString('utf8');
+      // A file cut at the bound may end mid-character; drop that partial character only.
+      let end = text.length; if (bytesRead === buffer.length) while (end > 0 && text.charCodeAt(end - 1) === 0xfffd) end--;
+      return text.slice(0, end);
+    } catch { return ''; } finally { try { await handle?.close(); } catch { /* read-only */ } }
   }
   function killTree(child) {
     if (!child || child.exitCode !== null && child.exitCode !== undefined || child.signalCode) return;
@@ -669,12 +710,16 @@ function createClaudeChat(options) {
       turn.credential = await acquireCredential(turn.model, turn.effort);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
-      const prompt = (await loadInstructions()) + playtestNote(turn.playtest);
+      // Stable system prompt (cacheable across turns); the per-turn Playtest note goes on the user message.
+      // ARCANE.md rides after the static instructions, so the prompt stays byte-identical until that file changes.
+      const prompt = (await loadInstructions()) + projectMemorySection(await loadProjectMemory()), input = text + playtestNote(turn.playtest);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
       // A turn with PNG references sends one stream-json user message; plain text turns keep the text input format.
       const images = turn.images; turn.images = [];
       const args = ['-p', '--input-format', images.length ? 'stream-json' : 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-        '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--model', turn.model, '--effort', turn.effort,
+        // Only the user's own Claude Code settings load: a project's .claude/settings*.json (hooks, apiKeyHelper, env such as
+        // a base URL) must never run or redirect anything just because that folder was opened in Arcane.
+        '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--setting-sources', 'user', '--model', turn.model, '--effort', turn.effort,
         '--permission-mode', 'default', '--tools', '', '--allowedTools', 'mcp__' + MCP_SERVER, '--append-system-prompt', prompt,
         ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
       if (args.some(value => value.includes(turn.credential.env.ARCANE_LOCAL_TOKEN))) return finish(turn, false, MESSAGES.start);
@@ -725,13 +770,14 @@ function createClaudeChat(options) {
         if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
         void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
       });
-      child.stdin.end(images.length ? streamJsonMessage(images, text) : text, 'utf8');
+      child.stdin.end(images.length ? streamJsonMessage(images, input) : input, 'utf8');
     } catch { await finish(turn, false, MESSAGES.failed); }
   }
 
   /** Stream-json events observed from Claude Code 2.1.301; anything else is ignored. */
   function handle(turn, event) {
     const base = { turnId: turn.turnId, conversationId: turn.conversationId };
+    const secret = turn.credential?.env?.ARCANE_LOCAL_TOKEN, leaksToken = text => typeof secret === 'string' && secret.length > 0 && text.includes(secret);
     if (isId(event.session_id) && (event.type === 'system' && event.subtype === 'init' || event.type === 'result') && turn.sessionId !== event.session_id) {
       turn.sessionId = event.session_id;
       void store.update(turn.conversationId, { sessionId: turn.sessionId, rewound: false }).catch(() => {});
@@ -750,11 +796,12 @@ function createClaudeChat(options) {
     if (event.type === 'assistant' && event.error === 'rate_limit' && !turn.limit) turn.limit = { resetsAt: null };
     if (event.type === 'stream_event') {
       const e = event.event;
-      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text)
+      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text && !leaksToken(e.delta.text))
         emit({ ...base, type: 'delta', text: e.delta.text.slice(0, limits.deltaChars) });
     } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
       for (const block of event.message.content.slice(0, 256)) {
         if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+          if (leaksToken(block.text)) continue; // a reply that echoes the project credential is never shown or stored
           const m = message('assistant', block.text);
           void store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'message', message: publicMessage(m) });
@@ -853,4 +900,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, sendInput, playtestNote, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, sendInput, playtestNote, appendedSystemPrompt, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

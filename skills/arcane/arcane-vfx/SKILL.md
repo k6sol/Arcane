@@ -13,7 +13,7 @@ license: MIT
 - Beam/Trail: create two Attachment items first, then `Attachment0`/`Attachment1` = their keys (`scene_create`: Attachment refs).
 - Textures: only these built-ins, or an asset id the user gives or that already exists in the place. Never invent rbxassetid numbers; other URLs are refused.
   `rbxasset://textures/particles/` + `fire_main.dds`, `fire_sparks_main.dds`, `smoke_main.dds`, `sparkles_main.dds`, `explosion01_smoke_main.dds`, `explosion01_core_main.dds`, `explosion01_shockwave_main.dds`, `forcefield_glow_main.dds`, `forcefield_vortex_main.dds`, `SquareParticle.png`.
-- Scripts only for runtime behaviour (bursts with `Emit(`, flicker, swing-only trails): `scene_create` a Script, `script_update`, keep it disabled until the user wants it live, then `script_read` + `script_set_enabled`.
+- Scripts only for runtime behaviour (bursts with `Emit(`, flicker, swing-only trails): `scene_create` a Script, `script_update`, then enable it with `script_read` + `script_set_enabled` once complete.
 - Budget: Rate x max Lifetime <= 200 per emitter, <= 1500 live particles in view, <= 8 lights with Shadows on screen, <= 31 Highlights. Effects are cosmetic only.
 - Mood, fog and post-processing live in `arcane-photoreal`.
 
@@ -33,7 +33,7 @@ Set `Rotation: [0,360]` on soft particles so copies never look stamped.
 | Fireflies | sparkles_main | 3 | 6-9 | 0.3-0.8 | 180,180 | 0:0.1 0.5:0.22 1:0.1 | 0:1 0.2:0 0.4:0.6 0.6:0 0.8:0.5 1:1 | d8ff6a | Box host 60x8x60 at 2-6 studs, LightEmission 1, LightInfluence 0, Drag 1; night only |
 | Falling leaves | SquareParticle | 3 | 8-12 | 1-2 | 30,30 | 0:0.4 1:0.4 | 0:1 0.05:0 0.9:0 1:1 | c8742b 9a3b1d (or 6f8f3a) | Box host above canopy, EmissionDirection Bottom, Acceleration 0.6,-1.2,0.3, Drag 0.6, RotSpeed -90..90, Squash 0.6 |
 
-Emitter Shape follows its host part (Box = host Size). Waterfall body: Terrain Water pool via `environment_apply`; falling sheet as Glass parts (Transparency 0.35, #5aa7c8) behind the particles.
+Emitter Shape follows its host part (Box = host Size). Waterfall body: a `terrain_generate` lake (or an `environment_apply` Water fill) as the pool; falling sheet as Glass parts (Transparency 0.35, #5aa7c8) behind the particles.
 
 ## Beams, trails, lights, Highlight
 - Beam (laser/energy): Width0 = Width1 = 0.3, FaceCamera true, LightEmission 1, Segments 10, TextureMode Wrap, TextureSpeed 2. Light shaft: Width0 6, Width1 14, Transparency 0:0.85 1:1, warm colour, no texture.

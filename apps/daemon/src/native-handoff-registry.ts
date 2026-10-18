@@ -9,11 +9,14 @@ import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-
  * until it expires (no renewal), is revoked, the project changes or the registry closes. There is no
  * restart persistence: every credential dies with this instance. Recognition returns detached display
  * metadata that grants nothing by itself; routes must consult the live registry on every request and
- * again after every await. No asset, bound-task, human-review, Studio grant/revoke or provider-login
+ * again after every await. The in-app Claude chat runs on this credential, so it carries the same scopes
+ * as the workbench agent token: Studio granted commands (incl. viewport, native Studio assets, playtest
+ * requests), work coordination and local fixed-template assets (generic /v1/assets reads/start/cancel).
+ * No native-hook asset delivery, bound-task, human-review, Studio grant/revoke, settings or provider-login
  * authority is ever expressed here. */
 export const NATIVE_HANDOFF_LIMITS = Object.freeze({ active: 8, retained: 256, lifetimeMs: 30 * 60_000, minLifetimeMs: 1000, credentialBytes: 32 } as const);
 export const NATIVE_HANDOFF_AUDIENCE = 'external-handoff';
-export const NATIVE_HANDOFF_SCOPES = Object.freeze(['work-coordination', 'studio-granted-commands'] as const);
+export const NATIVE_HANDOFF_SCOPES = Object.freeze(['work-coordination', 'studio-granted-commands', 'fixed-template-assets'] as const);
 export type NativeHandoffState = 'pending' | 'sealed' | 'expired' | 'revoked' | 'project_changed' | 'closed';
 export type NativeHandoffErrorCode = 'INPUT' | 'LEASE' | 'STATE' | 'CAPACITY' | 'RETENTION' | 'CLOCK' | 'PROJECT' | 'CLOSED';
 export class NativeHandoffError extends Error {

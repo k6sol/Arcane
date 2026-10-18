@@ -138,9 +138,12 @@ else
 		assert(oldPair.token == nil and client.pair == nil and client.operations == nil and pollCount == 0,
 			"old connection is cleaned up without another command poll")
 		if value == "" then
+			local before = fixture.requests
 			control.Activated:Fire()
-			assert(control.Text == "Failed" and keyInput.PlaceholderText == "Enter a new API key"
-				and client.desiredPair == nil and connectCount == 1, "empty Connect cannot fall back to deleted saved auth")
+			assert(control.Text == "Failed" and keyInput.PlaceholderText == "Enter the 6-digit code shown in Arcane" and client.desiredPair == nil
+				and client.codePairing == nil and connectCount == 1, "empty Connect asks for the Arcane code and cannot fall back to deleted saved auth")
+			cycle()
+			assert(fixture.requests == before and client.desiredPair == nil and client.pair == nil and connectCount == 1, "empty Connect makes no request and never reuses deleted saved auth")
 			enter(otherKey)
 		end
 		expectKey = otherKey; clickConnect(); ack(); unload()

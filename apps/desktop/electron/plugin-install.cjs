@@ -2,7 +2,8 @@
 
 // Main-process host for one-click Studio plugin install and update. It copies only the bundled, manifest-verified
 // plugin build into Roblox Studio's local Plugins folder (temp file + rename), after a native confirm dialog.
-// The plugin file never carries keys or session links: pairing still uses the Arcane API key flow.
+// The plugin file never carries keys, tickets or session links: after install Arcane opens a short-lived one-click
+// pairing offer (docs/studio-pairing.md); the Arcane API key flow remains the fallback.
 // Import and construction have no native side effects; reading status never writes anything.
 const nativeFs = require('node:fs/promises');
 const nativePath = require('node:path');
@@ -34,6 +35,7 @@ const MESSAGES = Object.freeze({
 // Credential material that must never be written into a Studio plugin file.
 const CREDENTIAL_PATTERNS = Object.freeze([
   /arcane_local_v1_[0-9]+_[a-f0-9]{64}/i,
+  /arcane_pair_v1_[0-9]+_[a-f0-9]{48}/i,
   /127\.0\.0\.1:[0-9]+\/(?:studio)?#[a-f0-9]{64}/i,
   /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/,
 ]);
@@ -153,7 +155,7 @@ function createStudioPluginInstaller(options = {}) {
         title: update ? 'Update Arcane Studio plugin' : 'Install Arcane Studio plugin',
         message: update ? 'Update the Arcane plugin in Roblox Studio?' : 'Install the Arcane plugin into Roblox Studio?',
         detail: 'Arcane will copy its verified plugin' + (verified.pluginVersion ? ' (version ' + verified.pluginVersion + ')' : '') +
-          ' into your Roblox Studio Plugins folder. The plugin file holds no keys; connect it with your Arcane API key after Studio restarts.',
+          ' into your Roblox Studio Plugins folder. The plugin file holds no keys. After Studio restarts, click Connect in the Arcane plugin.',
         confirmLabel: update ? 'Update plugin' : 'Install plugin',
       });
       if (accepted !== true) return reply(found.state, verified.pluginVersion, MESSAGES.cancelled, false);
