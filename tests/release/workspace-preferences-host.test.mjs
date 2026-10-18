@@ -159,6 +159,10 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
       preloadContext.serializedArgs = JSON.stringify(args);
       return exposed.workspacePreferences[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
     },
+    tour(action, ...args) {
+      preloadContext.serializedArgs = JSON.stringify(args);
+      return exposed.welcomeTour[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
+    },
   };
 }
 
@@ -168,7 +172,7 @@ test('production wiring and preload expose only frozen version 1 read/save; inst
   assert.equal(Object.isFrozen(f.exposed), true); assert.equal(Object.isFrozen(f.exposed.workspacePreferences), true);
   assert.equal(f.exposed.workspacePreferences.version, 1);
   assert.deepEqual(Object.keys(f.exposed.workspacePreferences).sort(), ['read', 'save', 'version']);
-  assert.deepEqual([...f.handlers.keys()].sort(), ['read', 'save'].map(a => 'arcane:workspace-preferences-' + a));
+  assert.deepEqual([...f.handlers.keys()].sort(), ['arcane:welcome-tour-dismiss', 'arcane:welcome-tour-read', ...['read', 'save'].map(a => 'arcane:workspace-preferences-' + a)]);
   assert.match(mainSource, /partition: 'arcane-workspace'/);
   assert.match(mainSource, /workspacePreferences: \{ enabled: false,[^\n]+encryptionRoundTripTested: false \}/);
 });
@@ -192,6 +196,49 @@ test('encrypted TEST DOUBLE: raw drafts/provider/tabs survive restart, reload an
     assert.equal(restarted.disk.descriptors.size, 0);
   }
   assert.ok(f.ipcCalls.every(channel => channel.startsWith('arcane:workspace-preferences-')));
+});
+
+test('welcome tour dismissal survives a fresh renderer, daemon port and project', async () => {
+  for (const how of ['finished', 'skipped']) {
+    const f=fixture();
+    assert.equal(Object.isFrozen(f.exposed.welcomeTour),true);
+    assert.deepEqual(json(await f.exposed.welcomeTour.read()),{available:true,seen:false});
+    assert.deepEqual(json(await f.tour('dismiss',{how})),{saved:true});
+    const restarted=fixture({disk:f.disk,safeStorage:f.safeStorage,origin:'http://127.0.0.1:59123',projectPath:'C:\\OtherProject'});
+    assert.deepEqual(json(await restarted.exposed.welcomeTour.read()),{available:true,seen:true});
+    assert.equal(f.disk.descriptors.size,0);assert.equal(restarted.disk.descriptors.size,0);
+    const count=f.disk.writes.length;
+    await restarted.tour('dismiss',{how});
+    assert.equal(f.disk.writes.length,count,'dismissal is monotonic; replay does not rewrite the record');
+  }
+});
+
+test('welcome tour IPC refuses foreign frames, arbitrary input and disabled writes',async()=>{
+  const f=fixture(),before=f.disk.writes.length;
+  for(const args of [[],[{how:'paused'}],[{how:'skipped',path:'C:\\Other'}],[{how:'finished'},{}]])await assert.rejects(f.exposed.welcomeTour.dismiss(...args));
+  await assert.rejects(f.exposed.welcomeTour.read({}));
+  f.setEvent({...f.event,senderFrame:{url:origin+'/studio#fixture'}});
+  await assert.rejects(f.exposed.welcomeTour.read());await assert.rejects(f.exposed.welcomeTour.dismiss({how:'skipped'}));
+  assert.equal(f.disk.writes.length,before);
+  const disabled=fixture({smoke:true});
+  assert.deepEqual(json(await disabled.exposed.welcomeTour.read()),{available:false,seen:false});
+  await assert.rejects(disabled.exposed.welcomeTour.dismiss({how:'finished'}));assert.equal(disabled.disk.reads,0);
+});
+
+test('welcome tour dismissal does not compete with a pending chat preference save',async()=>{
+  const f=fixture(),saving=f.call('save',snapshot());
+  assert.deepEqual(json(await f.tour('dismiss',{how:'skipped'})),{saved:true});
+  assert.deepEqual(json(await saving),{saved:true});
+  assert.deepEqual(json(await f.tour('read')),{available:true,seen:true});
+});
+
+test('welcome tour preserves malformed and redirected records',async()=>{
+  for(const options of [{kind:'file',bytes:Buffer.from('{"version":2,"seen":true}\n')},{kind:'link'}]){
+    const f=fixture(),full=win32.join(f.userRoot,'welcome-tour.v1.json');f.disk.put(full,options);
+    const before=f.disk.node(full),writes=f.disk.writes.length;
+    await assert.rejects(f.tour('read'));await assert.rejects(f.tour('dismiss',{how:'finished'}));
+    assert.equal(f.disk.node(full),before);assert.equal(f.disk.writes.length,writes);assert.equal(f.disk.descriptors.size,0);
+  }
 });
 
 test('presentation choices and drafts are isolated across canonical projects', async () => {

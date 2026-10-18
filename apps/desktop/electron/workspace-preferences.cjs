@@ -114,7 +114,7 @@ function checkPin(pin) {
 
 function createWorkspacePreferences({ safeStorage, getSession, enabled = true }) {
   // Construction/install are inert, including in smoke mode. All reads are gated IPC intents.
-  let busy = false;
+  let busy = false, tourBusy = false;
   function available() {
     return enabled === true && process.platform === 'win32' &&
       typeof safeStorage?.encryptString === 'function' && typeof safeStorage?.decryptString === 'function' &&
@@ -184,6 +184,9 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
     if (!Buffer.isBuffer(encrypted) || !encrypted.length || encrypted.length > MAX_FILE_BYTES) fail();
     const bytes = Buffer.from(JSON.stringify({ version: 1, ciphertext: encrypted.toString('base64') }) + '\n');
     if (bytes.length > MAX_FILE_BYTES) fail();
+    persistBytes(scope, event, snapshot, bytes);
+  }
+  function persistBytes(scope, event, snapshot, bytes) {
     const lock = snapshot.full + '.lock', temp = snapshot.full + '.' + randomUUID() + '.tmp';
     let lockFd, tempFd, lockChain, tempChain, savedIdentity;
     try {
@@ -259,6 +262,34 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
     } finally { fs.closeSync(confirmed.pin.fd); }
   }
   function installIpc(ipcMain) {
+    // One non-secret app-wide flag, independent of project, daemon port and the temporary browser partition.
+    for (const action of ['read', 'dismiss']) {
+      ipcMain.handle('arcane:welcome-tour-' + action, async (event, ...args) => {
+        let snapshot, ownsBusy = false;
+        try {
+          const scope = current(event);
+          if (action === 'read') { if (args.length) fail(); }
+          else if (args.length !== 1 || !['finished', 'skipped'].includes(fields(args[0], ['how']).how)) fail();
+          if (tourBusy) fail(); tourBusy = true; ownsBusy = true;
+          if (!available()) { if (action === 'read') return { available: false, seen: false }; fail(); }
+          const chain = checkedPath(scope.userRoot);
+          snapshot = { full: path.join(scope.userRoot, 'welcome-tour.v1.json'), projectChain: chain, stateChain: chain, pin: null };
+          guard(scope, event); checkChain(chain); unlocked(snapshot);
+          const bytes = Buffer.from('{"version":1,"seen":true}\n');
+          let seen = false;
+          if (!missing(snapshot.full)) {
+            const opened = openPin(snapshot.full); snapshot.pin = opened.pin;
+            if (!opened.bytes.equals(bytes)) fail();
+            seen = true;
+          }
+          guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
+          if (action === 'read') return { available: true, seen };
+          if (!seen) persistBytes(scope, event, snapshot, bytes);
+          return { saved: true };
+        } catch { fail(); }
+        finally { try { if (snapshot?.pin) fs.closeSync(snapshot.pin.fd); } finally { if (ownsBusy) tourBusy = false; } }
+      });
+    }
     for (const action of ['read', 'save']) {
       ipcMain.handle('arcane:workspace-preferences-' + action, async (event, ...args) => {
         let ownsBusy = false, snapshot;

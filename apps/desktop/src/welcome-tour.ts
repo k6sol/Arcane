@@ -77,9 +77,15 @@ export function placeCard(target: Box | null, card: { width: number; height: num
 
 export interface WelcomeTourOptions {
   storage?: TourStorage | null;
+  /** The desktop owns this app-wide flag; browser storage is only a fallback for web use. */
+  persistence?: WelcomeTourPersistence | null;
   steps?: readonly TourStep[];
   /** Auto-start on first launch once signed in. Default true. */
   autoStart?: boolean;
+}
+export interface WelcomeTourPersistence {
+  read(): Promise<{available: boolean; seen: boolean}>;
+  dismiss(input: {how: 'finished' | 'skipped'}): Promise<{saved: true}>;
 }
 export interface WelcomeTour { start(): boolean; close(how: 'finished' | 'skipped' | 'paused'): void; active(): boolean; stop(): void }
 
@@ -92,10 +98,13 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
   const back = doc.getElementById('welcome-tour-back') as HTMLButtonElement | null, next = doc.getElementById('welcome-tour-next') as HTMLButtonElement | null;
   const skip = doc.getElementById('welcome-tour-skip') as HTMLButtonElement | null, replay = doc.getElementById('welcome-tour-replay') as HTMLButtonElement | null;
   const view = doc.defaultView;
+  const persistence = options.persistence ?? (view as (Window & {arcaneDesktop?: {welcomeTour?: WelcomeTourPersistence}}) | null)?.arcaneDesktop?.welcomeTour ?? null;
   const noop: WelcomeTour = { start: () => false, close() {}, active: () => false, stop() {} };
   if (!root || !card || !spot || !title || !body || !back || !next || !skip || !view || !steps.length) return noop;
   let index = -1, stopped = false, returnFocus: HTMLElement | null = null, target: HTMLElement | null = null;
   let pending: number | null = null;
+  let hydrated = !persistence, allowAuto = true, seen = tourSeen(storage);
+  const wasSeen = () => seen || tourSeen(storage);
 
   const visible = (node: Element | null): node is HTMLElement => {
     if (!(node instanceof view.HTMLElement) || node.closest('[hidden], [inert]')) return false;
@@ -168,7 +177,10 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
     index = -1; target = null; root!.hidden = true; spot!.hidden = true; delete root!.dataset.step;
     doc.removeEventListener('keydown', onKey, true); doc.removeEventListener('focusin', onFocusIn);
     view!.removeEventListener('resize', onLayout); view!.removeEventListener('scroll', onLayout, true);
-    if (how !== 'paused') markTourSeen(storage, how);
+    if (how !== 'paused') {
+      seen = true; markTourSeen(storage, how);
+      void persistence?.dismiss({how}).catch(() => { /* Keep dismissal for this window even if the profile is unavailable. */ });
+    }
     const to = returnFocus && returnFocus.isConnected && visible(returnFocus) ? returnFocus : doc.getElementById('codex-composer');
     returnFocus = null;
     try { (to as HTMLElement | null)?.focus({ preventScroll: true }); } catch { /* Optional. */ }
@@ -193,9 +205,9 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
   const Observer = view.MutationObserver;
   let observer: MutationObserver | null = null;
   const tryAuto = () => {
-    if (stopped || index >= 0 || pending !== null || tourSeen(storage)) return;
+    if (stopped || !hydrated || !allowAuto || index >= 0 || pending !== null || wasSeen()) return;
     // A short settle so the signed-in workspace (checklist, gallery) has rendered before measuring targets.
-    pending = view.setTimeout(() => { pending = null; if (!stopped && !tourSeen(storage)) start(); }, 400);
+    pending = view.setTimeout(() => { pending = null; if (!stopped && !wasSeen()) start(); }, 400);
   };
   // Pause (without marking seen) if the user is signed out while the tour is open.
   const onGate = () => { if (index >= 0 && signInShowing()) close('paused'); else if (options.autoStart !== false) tryAuto(); };
@@ -206,7 +218,16 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
     if (stage) observer.observe(stage, { attributes: true, attributeFilter: ['class'] });
     const drawer = doc.getElementById('settings-drawer'); if (drawer) observer.observe(drawer, { attributes: true, attributeFilter: ['open'] });
   }
-  if (options.autoStart !== false && !tourSeen(storage)) tryAuto();
+  if (persistence) {
+    void persistence.read().then(async value => {
+      if (stopped) return;
+      allowAuto = value.available;
+      if (value.seen) { seen = true; markTourSeen(storage, 'skipped'); }
+      else if (seen && value.available) await persistence.dismiss({how: 'skipped'});
+    }).catch(() => { allowAuto = false; }).finally(() => {
+      hydrated = true; if (options.autoStart !== false) tryAuto();
+    });
+  } else if (options.autoStart !== false && !wasSeen()) tryAuto();
 
   return {
     start, close, active: () => index >= 0,

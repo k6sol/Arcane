@@ -194,6 +194,23 @@ const workspacePreferenceInvoke = async (action, args) => {
 const workspacePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args), save: (...args) => workspacePreferenceInvoke('save', args),
 });
+const welcomeTourInvoke = async (action, args) => {
+  try {
+    if (action === 'read') { if (args.length) workspacePreferenceError(); }
+    else if (args.length !== 1 || !['finished', 'skipped'].includes(workspacePreferenceFields(args[0], ['how']).how)) workspacePreferenceError();
+    const value = await ipcRenderer.invoke('arcane:welcome-tour-' + action, ...(action === 'read' ? [] : [{ how: args[0].how }]));
+    if (action === 'read') {
+      workspacePreferenceFields(value, ['available', 'seen']);
+      if (typeof value.available !== 'boolean' || typeof value.seen !== 'boolean' || !value.available && value.seen) workspacePreferenceError();
+      return { available: value.available, seen: value.seen };
+    }
+    workspacePreferenceFields(value, ['saved']); if (value.saved !== true) workspacePreferenceError();
+    return { saved: true };
+  } catch { workspacePreferenceError(); }
+};
+const welcomeTour = Object.freeze({ version: 1,
+  read: (...args) => welcomeTourInvoke('read', args), dismiss: (...args) => welcomeTourInvoke('dismiss', args),
+});
 // In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
 const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
@@ -523,4 +540,4 @@ const updates = Object.freeze({ version: 1,
     return { state: value.state, message: typeof value.message === 'string' ? value.message.slice(0, 400) : '' };
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, welcomeTour, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));

@@ -192,4 +192,30 @@ test('real Edge tour: waits for sign-in, spotlights real controls, traps focus, 
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await page.keyboard.press('Escape');
   assert.deepEqual(errors, []);
+
+  // A new renderer has empty browser storage. Wait for the app-wide flag before deciding to show anything.
+  await page.evaluate((key:string)=>{
+    const w=window as any;w.tour.stop();localStorage.removeItem(key);
+    w.readTour=null;
+    w.tour=undefined;
+  },WELCOME_TOUR_KEY);
+  await page.evaluate(async()=>{
+    const w=window as any,path='/welcome-tour.js',module=await import(path);
+    w.tour=module.startWelcomeTour(document,{storage:localStorage,persistence:{read:()=>new Promise(resolve=>{w.readTour=resolve;}),dismiss:async()=>({saved:true})}});
+  });
+  await page.waitForTimeout(700);assert.equal(await shown(),false,'a slow native read never flashes the tutorial');
+  await page.evaluate(()=>(window as any).readTour({available:true,seen:true}));
+  await page.waitForTimeout(700);assert.equal(await shown(),false,'app-wide dismissal wins with empty renderer storage');
+
+  // Skip remains quiet in this window even if browser storage cannot be written.
+  await page.evaluate(async()=>{
+    const w=window as any,path='/welcome-tour.js',module=await import(path);w.tour.stop();w.dismissals=[];
+    w.tour=module.startWelcomeTour(document,{storage:{getItem:()=>null,setItem:()=>{throw Error('Unavailable');}},persistence:{read:async()=>({available:true,seen:false}),dismiss:async(input:any)=>{w.dismissals.push(input.how);return{saved:true};}}});
+  });
+  await page.waitForFunction(()=>!document.getElementById('welcome-tour')!.hidden);
+  await page.locator('#welcome-tour-skip').click();
+  await page.evaluate(()=>document.getElementById('workspace-stage')!.classList.toggle('tour-fixture-refresh'));
+  await page.waitForTimeout(700);assert.equal(await shown(),false);
+  assert.deepEqual(await page.evaluate(()=>(window as any).dismissals),['skipped']);
+  assert.deepEqual(errors, []);
 });
