@@ -164,6 +164,7 @@ export function revoke(db: DatabaseSync, config: GatewayConfig, header: string |
 
 /** Removes expired device requests and links (run periodically). */
 export function sweepAuth(db: DatabaseSync, now = Date.now()): void {
+  db.prepare('DELETE FROM account_device_approvals WHERE device_id IN (SELECT id FROM device_requests WHERE expires_at < ?)').run(now - 86_400_000);
   db.prepare('DELETE FROM login_links WHERE expires_at < ?').run(now - 86_400_000);
   db.prepare("DELETE FROM device_requests WHERE expires_at < ? AND id NOT IN (SELECT device_id FROM login_links)").run(now - 86_400_000);
 }

@@ -2,7 +2,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {randomBytes,createHash} from 'node:crypto';import type {AddressInfo} from 'node:net';
 import {createGatewayServer} from '../src/server.ts';import {openDatabase} from '../src/db.ts';import {testConfig} from './helpers.ts';
 import {resolve} from 'node:path';import {pathToFileURL} from 'node:url';
-import {keyedHash} from '../src/auth.ts';
+import {keyedHash,sweepAuth} from '../src/auth.ts';
 const OWNER='11111111-2222-4333-8444-555555555555',MEMBER='22222222-2222-4333-8444-555555555555',FACTOR='33333333-2222-4333-8444-555555555555',CHALLENGE='44444444-2222-4333-8444-555555555555';
 async function fixture(t:import('node:test').TestContext){
  const config=testConfig({SUPABASE_URL:'https://project.supabase.co',SUPABASE_PUBLISHABLE_KEY:'sb_publishable_'+ 'p'.repeat(24),ACCOUNTS_SESSION_KEY:randomBytes(32).toString('base64url'),ADMIN_BOOTSTRAP_EMAIL:'owner@example.com'}),db=openDatabase(':memory:');
@@ -110,7 +110,11 @@ test('managed native sessions reject legacy tokens, expired approvals and expire
  const expired=await approve();h.advance(5*60000+1);
  assert.equal((await (await redeem(expired)).json() as Record<string,string>).error,'invalid_grant');
  const fresh=await approve();h.advance(6000);const token=(await (await redeem(fresh)).json() as Record<string,string>).token!;
- assert.equal((await balance(token)).status,200);h.advance(30*86400000);
+ assert.equal((await balance(token)).status,200);h.advance(2*86400000);
+ assert.doesNotThrow(()=>sweepAuth(h.db,h.now()),'expired device rows and their approval records can be collected together');
+ assert.equal(h.db.prepare('SELECT count(*) AS n FROM account_device_approvals').get()!.n,0);
+ assert.equal((await balance(token)).status,200,'collecting an old approval does not revoke the issued native session');
+ h.advance(28*86400000);
  assert.equal((await balance(token)).status,401,'native account access has an absolute expiry');
 });
 
