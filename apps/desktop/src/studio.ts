@@ -2162,6 +2162,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   {
     recovery=startRuntimeRecovery(document,{checkpoint:async()=>{await claudeChat?.prepareForRuntimeRecovery();await codexChat.prepareForRuntimeRecovery();}});
     window.addEventListener('pagehide',()=>recovery?.stop());
+    window.addEventListener('pageshow',event=>{if(event.persisted)recovery?.resume();});
   }
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);

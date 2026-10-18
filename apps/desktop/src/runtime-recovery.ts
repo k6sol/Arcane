@@ -16,7 +16,8 @@ function state(value:unknown):RuntimeState|null {
 /** The native host owns the restart. This page only saves presentation state and acknowledges that exact request. */
 export function startRuntimeRecovery(doc:Document,options:RuntimeRecoveryOptions) {
   const bridge=Object.hasOwn(options,'bridge')?options.bridge:(doc.defaultView as unknown as {arcaneDesktop?:{runtimeRecovery?:RuntimeRecoveryBridge}}|null)?.arcaneDesktop?.runtimeRecovery;
-  let stopped=false,epoch=0,revision=0,working=false,retrying=false,restore:(()=>void)|null=null;
+  let stopped=false,epoch=0,lifecycle=0,revision=0,working=false,retrying=false,restore:(()=>void)|null=null;
+  let removeState:(()=>void)|undefined,removeCheckpoint:(()=>void)|undefined;
   let current:RuntimeState={version:1,state:'ready',message:''};const completed=new Set<string>();
   const banner=doc.createElement('aside');banner.id='runtime-recovery-banner';banner.className='desktop-update-banner';banner.hidden=true;
   banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');banner.setAttribute('aria-label','Local service recovery');
@@ -51,11 +52,22 @@ export function startRuntimeRecovery(doc:Document,options:RuntimeRecoveryOptions
     }catch{if(!stopped&&generation===epoch){current={version:1,state:'stopped',message:UNSAVED};release();}}
     finally{if(!stopped&&generation===epoch){working=false;render();}}
   }
-  const removeState=bridge?.onState(accept),removeCheckpoint=bridge?.onCheckpoint(request=>{void checkpoint(request);});
+  function connect(){
+    const generation=++lifecycle;
+    removeState=bridge?.onState(value=>{if(!stopped&&generation===lifecycle)accept(value);});
+    removeCheckpoint=bridge?.onCheckpoint(request=>{if(!stopped&&generation===lifecycle)void checkpoint(request);});
+    const before=revision;
+    void bridge?.status().then(value=>{if(!stopped&&generation===lifecycle&&before===revision)accept(value);}).catch(()=>{});
+  }
   retry.addEventListener('click',event=>{if(!bridge||!event.isTrusted||event.defaultPrevented||stopped||working||retrying||current.state!=='stopped')return;
-    retrying=true;render();void bridge.retry().catch(()=>{if(!stopped){current={version:1,state:'stopped',message:'Local services could not restart. Keep this window open and try again.'};}}).finally(()=>{retrying=false;if(!stopped)render();});
+    const generation=lifecycle;retrying=true;render();void bridge.retry().catch(()=>{if(!stopped&&generation===lifecycle){current={version:1,state:'stopped',message:'Local services could not restart. Keep this window open and try again.'};}}).finally(()=>{if(!stopped&&generation===lifecycle){retrying=false;render();}});
   });
-  const before=revision;
-  void bridge?.status().then(value=>{if(!stopped&&before===revision)accept(value);}).catch(()=>{});
-  return {async ready(){if(stopped||!bridge)return false;const value=await bridge.ready() as {ready?:unknown};return !stopped&&value?.ready===true;},stop(){if(stopped)return;stopped=true;epoch++;release();removeState?.();removeCheckpoint?.();render();}};
+  connect();
+  return {
+    async ready(){if(stopped||!bridge)return false;const generation=lifecycle,value=await bridge.ready() as {ready?:unknown};return !stopped&&generation===lifecycle&&value?.ready===true;},
+    stop(){if(stopped)return;stopped=true;lifecycle++;epoch++;working=false;retrying=false;release();
+      const removers=[removeState,removeCheckpoint];removeState=removeCheckpoint=undefined;
+      for(const remove of removers){try{remove?.();}catch{/* Old callbacks remain fenced by the lifecycle. */}}render();},
+    resume(){if(!stopped)return;stopped=false;epoch++;current={version:1,state:'ready',message:''};render();connect();},
+  };
 }
