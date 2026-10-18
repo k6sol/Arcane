@@ -702,3 +702,10 @@ test('concurrent Claude and Codex preference saves remain independent',async()=>
  await Promise.all([f.claude('save',claude),f.call('save',codex)]);
  const [a,b]=await Promise.all([f.claude('read'),f.call('read')]);assert.deepEqual(json(a.preferences),claude);assert.deepEqual(json(b.preferences),codex);assert.equal(f.disk.descriptors.size,0);
 });
+
+
+test('Claude preferences preserve reported model aliases without changing the Codex record schema',async()=>{
+ const f=fixture({includeClaude:true}),value=claudeSnapshot({tabs:[tab(1,{provider:'claude',modelId:'sonnet[1m]',draft:'Model alias draft'})]});
+ await f.claude('save',value);assert.deepEqual(json((await f.claude('read')).preferences),value);
+ await assert.rejects(f.call('save',snapshot({tabs:[tab(1,{modelId:'sonnet[1m]'})]})),ERROR);
+});

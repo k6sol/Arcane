@@ -320,6 +320,7 @@ export async function createConnectionLab(options: Options) {
           ['/desktop-verification.js', [join(options.cwd, 'dist/apps/desktop/src/desktop-verification.js'), 'text/javascript']],
           ['/provider-setup.js',[join(options.cwd,'dist/apps/desktop/src/provider-setup.js'),'text/javascript']],
           ['/claude-chat.js',[join(options.cwd,'dist/apps/desktop/src/claude-chat.js'),'text/javascript']],
+          ['/claude-preferences.js',[join(options.cwd,'dist/apps/desktop/src/claude-preferences.js'),'text/javascript']],
           ['/setup-checklist.js',[join(options.cwd,'dist/apps/desktop/src/setup-checklist.js'),'text/javascript']],
           ['/plans.js',[join(options.cwd,'dist/apps/desktop/src/plans.js'),'text/javascript']],
           ['/notifications.js',[join(options.cwd,'dist/apps/desktop/src/notifications.js'),'text/javascript']],

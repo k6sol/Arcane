@@ -1,3 +1,4 @@
+import type {ClaudePreferenceBridge} from '../../apps/desktop/src/claude-preferences.js';
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,9 +99,9 @@ function surface() {
   el('codex-messages').clientHeight = 300;
   return { doc, root, el };
 }
-function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | null = memory(), activate = true) {
+function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | null = memory(), activate = true, preferences?:ClaudePreferenceBridge) {
   const { doc, root, el } = surface();
-  const chat = new ClaudeChat(doc as unknown as Document, { bridge, storage });
+  const chat = new ClaudeChat(doc as unknown as Document, { bridge, storage,...(preferences?{preferences}:{}) });
   if (activate) chat.activate();
   const input = el('codex-composer'), messages = el('codex-messages');
   const type = (text: string) => { input.value = text; input.dispatchEvent(new Event('input')); };
@@ -815,7 +816,7 @@ const FENCE = '`'.repeat(3);
 test('Edge: Codex and Claude share one chat surface; only provider labels differ', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/unify/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const reply = JSON.stringify('Here is the lobby plan.\n\n' + FENCE + 'lua\nlocal lobby = workspace.Lobby\n' + FENCE);
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
@@ -918,7 +919,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
 test('Edge: one model list switches between ChatGPT and Claude in one click and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/xprovider/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1044,7 +1045,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
 test('Edge: usage-limit notice offers the other provider in both directions and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/usage/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1545,7 +1546,7 @@ test('choice blocks: restored rendering ignores a send callback and resolves the
 test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu',{ skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/chatux/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1667,7 +1668,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
 test('Edge: Claude edit and rewind with the undo option, plan approval and option buttons', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/rewind/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const create = { parent: { instanceId: 'i', sessionId: 's', root: 'Workspace', pathSegments: [], className: 'Folder' }, className: 'Part', name: 'RedDoor' };
   const saved = [
     { id: '00000000-0000-4000-8000-000000000001', role: 'user', text: 'Make a lobby with a spawn point', at: '2026-10-17T10:00:00.000Z' },
@@ -1864,4 +1865,105 @@ test('desktop update keeps unsent provider drafts and running turns in the curre
   ui.type('');await ui.chat.prepareForRestart();ui.type('Start a task');ui.form.dispatchEvent(new Event('submit',{cancelable:true}));await settle();
   await assert.rejects(ui.chat.prepareForRestart(),/Finish or stop/);
   assert.equal(f.calls.filter(row=>row[0]==='stop').length,0,'Update preparation never silently stops a turn.');
+});
+
+
+const nativeClaudeProject='C:\\Project';
+function nativeClaudePreferences(initial:unknown=null){
+ let saved=initial,refuse=false;
+ const writes:unknown[]=[];
+ const bridge={read:async()=>({available:true,projectPath:nativeClaudeProject,preferences:structuredClone(saved)}),save:async(value:unknown)=>{
+   if(refuse)throw Error('private native detail');saved=structuredClone(value);writes.push(saved);return{saved:true};
+ }};
+ return{bridge,writes,get saved(){return saved;},setRefuse(value:boolean){refuse=value;}};
+}
+test('native Claude drafts and model choices survive a fresh renderer without plaintext draft storage',async t=>{
+ const native=nativeClaudePreferences(),storage=memory(),first=mount(fakeBridge().bridge,storage,true,native.bridge);t.after(()=>first.chat.stop());
+ await first.chat.refresh();await tick();const draft='  Keep this unsent text\n\n🧩  ';
+ first.chat.receiveHandoff({draft,model:'opus',effort:'low'});await first.chat.prepareForRestart();
+ assert.equal([...storage.data.values()].some(value=>value.includes(draft)),false,'legacy renderer storage contains no raw draft');
+ const fresh=mount(fakeBridge().bridge,memory(),true,native.bridge);t.after(()=>fresh.chat.stop());await fresh.chat.refresh();await tick();
+ assert.equal(fresh.input.value,draft);assert.equal(fresh.el('codex-model-label').textContent,'Opus 5.5');assert.equal(fresh.el('codex-effort-label').textContent,'low');
+ fresh.chat.newChat();assert.equal(fresh.chat.openTabs().at(-1)!.model,'opus');assert.equal(fresh.chat.openTabs().at(-1)!.effort,'low');
+});
+
+test('native Claude tab restoration keeps separate unsent drafts and the active tab',async t=>{
+ const native=nativeClaudePreferences(),first=mount(fakeBridge().bridge,memory(),true,native.bridge);t.after(()=>first.chat.stop());await first.chat.refresh();await tick();
+ first.type('First native draft');first.chat.newChat();first.type('Second native draft');await first.chat.prepareForRestart();
+ const saved=native.saved as {tabs:{localId:string,draft:string}[],activeTabId:string};assert.deepEqual(saved.tabs.map(tab=>tab.draft),['First native draft','Second native draft']);
+ const fresh=mount(fakeBridge().bridge,memory(),true,native.bridge);t.after(()=>fresh.chat.stop());await fresh.chat.refresh();await tick();
+ assert.equal(fresh.input.value,'Second native draft');fresh.chat.selectTab(saved.tabs[0]!.localId);await tick();assert.equal(fresh.input.value,'First native draft');
+});
+
+test('a native Claude save failure blocks restart and retries without clearing or sending the text',async t=>{
+ const native=nativeClaudePreferences(),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ const draft='Keep me while the save is unavailable';f.type(draft);native.setRefuse(true);
+ await assert.rejects(f.chat.prepareForRestart(),/Keep this window open/);assert.equal(f.input.value,draft);assert.equal(sends(backend).length,0);
+ native.setRefuse(false);await f.chat.prepareForRestart();assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);assert.equal(f.input.value,draft);assert.equal(sends(backend).length,0);
+});
+
+test('a late native Claude preference read preserves newer composer text and recovers the earlier saved draft',async t=>{
+ let finish:(value:unknown)=>void=()=>assert.fail('Read was not started');let saved:unknown=null;
+ const bridge={read:()=>new Promise(resolve=>{finish=resolve;}),save:async(value:unknown)=>{saved=structuredClone(value);return{saved:true};}};
+ const f=mount(fakeBridge().bridge,memory(),true,bridge);t.after(()=>f.chat.stop());await f.chat.refresh();
+ // A provider handoff or other programmatic edit can arrive while the input is disabled for hydration.
+ f.type('Newer live draft');
+ finish({available:true,projectPath:nativeClaudeProject,preferences:{version:1,projectPath:nativeClaudeProject,provider:'claude',activeTabId:'claude-tab-1',tabs:[{
+  localId:'claude-tab-1',title:'Saved draft',provider:'claude',threadId:null,sessionId:null,draft:'Earlier saved draft',modelId:'opus',effort:'low',tool:'all',previewOpen:false,
+ }]}});await tick();await tick();assert.equal(f.input.value,'Newer live draft');await f.chat.prepareForRestart();
+ assert.deepEqual((saved as {tabs:{draft:string}[]}).tabs.map(tab=>tab.draft).sort(),['Earlier saved draft','Newer live draft']);
+});
+
+
+test('Edge: native Claude preference contract restores raw drafts and model choice into an empty browser context', {skip:!browserModule,timeout:60000},async t=>{
+ // Actual production HTML/CSS/renderer and browser. The native preference and chat hosts are explicit loopback doubles.
+ // The separate native-host suite verifies encryption and IPC scope; this fixture starts no CLI, Studio or inference.
+ const build=process.env.ARCANE_UI_BUILD_DIR??'dist';let saved:unknown=null,sendsStarted=0;
+ const bootstrap="import {ClaudeChat} from '/claude-chat.js';\n"+
+  "window.arcaneDesktop={claudePreferences:{version:1,read:async()=>await(await fetch('/fixture/preferences')).json(),save:async(value)=>await(await fetch('/fixture/preferences',{method:'POST',body:JSON.stringify(value)})).json()},claudeChat:{version:1,status:async()=>("+JSON.stringify(signedIn)+"),list:async()=>({conversations:[]}),history:async(id)=>({conversationId:id,messages:[]}),send:async()=>{await fetch('/fixture/send',{method:'POST'});throw Error('Inference is disabled in this fixture');},stop:async()=>true,remove:async()=>true,onEvent:()=>()=>{}}};\n"+
+  "const chat=new ClaudeChat(document);chat.activate();await chat.refresh();document.getElementById('workspace-stage').classList.remove('provider-required');document.getElementById('provider-login-gate').hidden=true;window.fixtureNative={chat,ready:true};";
+ const server=createServer((request,response)=>{void(async()=>{
+  const url=request.url?.split('?')[0]??'';
+  if(url==='/fixture/preferences'){
+   response.setHeader('content-type','application/json');
+   if(request.method==='POST'){const parts:Buffer[]=[];let bytes=0;for await(const chunk of request){bytes+=chunk.length;if(bytes>1024*1024)throw Error('Fixture body bound');parts.push(Buffer.from(chunk));}saved=JSON.parse(Buffer.concat(parts).toString('utf8'));response.end('{"saved":true}');}
+   else response.end(JSON.stringify({available:true,projectPath:nativeClaudeProject,preferences:saved}));return;
+  }
+  if(url==='/fixture/send'){sendsStarted++;response.end('{}');return;}
+  if(url==='/studio.js'){response.setHeader('content-type','text/javascript');response.end(bootstrap);return;}
+  const file=url==='/studio'?'apps/desktop/public/studio.html':url==='/studio.css'?'apps/desktop/public/studio.css':/^\/[a-z0-9-]+\.js$/.test(url)?join(build,'apps/desktop/src',url.slice(1)):null;
+  if(!file){response.writeHead(404);response.end();return;}
+  response.setHeader('content-type',url==='/studio'?'text/html':url.endsWith('.css')?'text/css':'text/javascript');response.end(await readFile(resolve(file)));
+ })().catch(()=>{if(!response.headersSent)response.writeHead(500);response.end();});});
+ await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));t.after(async()=>{server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});
+ const{chromium}=await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+ const browser=await chromium.launch({headless:true,args:['--disable-gpu'],executablePath:process.env.ARCANE_UI_BROWSER_EXE??'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});t.after(()=>browser.close());
+ const origin='http://127.0.0.1:'+(server.address() as {port:number}).port;
+ const firstContext=await browser.newContext(),first=await firstContext.newPage();first.on('pageerror',error=>t.diagnostic('Preference fixture page error: '+error.message));first.on('console',message=>{if(message.type()==='error')t.diagnostic('Preference fixture console: '+message.text());});await first.goto(origin+'/studio');
+ await first.waitForFunction(()=>!!(window as unknown as {fixtureNative?:{ready:boolean}}).fixtureNative?.ready&&!(document.getElementById('codex-composer') as HTMLTextAreaElement).disabled);
+ const draft='  Native contract draft\n\n🧩  ';await first.locator('#codex-composer').fill(draft);
+ await first.evaluate("window.fixtureNative.chat.receiveHandoff({draft:'',model:'opus',effort:'low'})");await first.evaluate('window.fixtureNative.chat.prepareForRestart()');
+ assert.equal((saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);await firstContext.close();
+ const freshContext=await browser.newContext(),fresh=await freshContext.newPage();t.after(()=>freshContext.close());assert.deepEqual(await freshContext.storageState(),{cookies:[],origins:[]});await fresh.goto(origin+'/studio');
+ await fresh.waitForFunction(()=>!!(window as unknown as {fixtureNative?:{ready:boolean}}).fixtureNative?.ready&&!(document.getElementById('codex-composer') as HTMLTextAreaElement).disabled);
+ assert.equal(await fresh.evaluate("Object.values(localStorage).some(value=>value.includes('Native contract draft'))"),false,'renderer storage contains no raw draft text');
+ assert.equal(await fresh.locator('#codex-composer').inputValue(),draft);assert.equal(await fresh.locator('#codex-model-label').innerText(),'Opus 5.5');assert.equal(await fresh.locator('#codex-effort-label').innerText(),'low');
+ await fresh.evaluate('window.fixtureNative.chat.newChat()');assert.match(await fresh.locator('#codex-model-trigger').innerText(),/Opus 5\.5/);assert.equal(sendsStarted,0);
+});
+
+
+test('retrying a failed native Claude preference read merges earlier saved text without replacing a newer draft',async t=>{
+ let reads=0,saved:unknown=null;
+ const old={version:1,projectPath:nativeClaudeProject,provider:'claude',activeTabId:'claude-tab-1',tabs:[{localId:'claude-tab-1',title:'Saved draft',provider:'claude',threadId:null,sessionId:null,draft:'Earlier retained draft',modelId:'opus',effort:'low',tool:'all',previewOpen:false}]};
+ const preferences={read:async()=>{if(++reads===1)throw Error('temporary read fault');return{available:true,projectPath:nativeClaudeProject,preferences:old};},save:async(value:unknown)=>{saved=structuredClone(value);return{saved:true};}};
+ const f=mount(fakeBridge().bridge,memory(),true,preferences);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();f.type('Draft typed after the read failure');
+ await f.chat.prepareForRestart();assert.equal(f.input.value,'Draft typed after the read failure');
+ assert.deepEqual((saved as {tabs:{draft:string}[]}).tabs.map(tab=>tab.draft).sort(),['Draft typed after the read failure','Earlier retained draft']);
+});
+
+
+test('a restored unavailable Claude model remains explicit and never silently starts a different model',async t=>{
+ const stored={version:1,projectPath:nativeClaudeProject,provider:'claude',activeTabId:'claude-tab-1',tabs:[{localId:'claude-tab-1',title:'Draft',provider:'claude',threadId:null,sessionId:null,draft:'Keep the chosen model',modelId:'claude-unavailable-9-9',effort:'low',tool:'all',previewOpen:false}]};
+ const native=nativeClaudePreferences(stored),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ assert.equal(f.chat.openTabs()[0]!.model,'claude-unavailable-9-9');assert.equal(f.submit.disabled,true);assert.match(f.notice.textContent,/previous model or reasoning choice is unavailable/);assert.equal(sends(backend).length,0);
 });

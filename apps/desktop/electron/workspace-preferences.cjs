@@ -29,7 +29,13 @@ function text(value, max, identifier = false) {
   return value;
 }
 function nullableId(value, max) { return value === null ? null : text(value, max, true); }
-function preferences(value, scope) {
+function presentationModel(value) {
+  if (value === null) return null;
+  const model = text(value, 256);
+  if (!model.length || model.trim() !== model || /[\x00-\x1f\x7f]/.test(model)) fail();
+  return model;
+}
+function preferences(value, scope, claude = false) {
   fields(value, ['version', 'projectPath', 'provider', 'tabs', 'activeTabId']);
   // Advisory comparison only. Never derive a path, project identity or authority from renderer data.
   const projectPath = text(value.projectPath, 4096);
@@ -51,7 +57,7 @@ function preferences(value, scope) {
         !['all', 'blender', 'roblox'].includes(row.tool) || typeof row.previewOpen !== 'boolean') fail();
     ids.add(localId);
     tabs.push({ localId, title, provider: row.provider, threadId: nullableId(row.threadId, 256), sessionId: nullableId(row.sessionId, 256),
-      draft: text(row.draft, 128 * 1024), modelId: nullableId(row.modelId, 256), effort: nullableId(row.effort, 64),
+      draft: text(row.draft, 128 * 1024), modelId: claude ? presentationModel(row.modelId) : nullableId(row.modelId, 256), effort: nullableId(row.effort, 64),
       tool: row.tool, previewOpen: row.previewOpen, ...(flagged ? { workflowDraft: row.workflowDraft } : {}) });
   }
   const activeTabId = nullableId(value.activeTabId, 128);
@@ -117,7 +123,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
   const recordFile = record === 'claude' ? 'claude-preferences.v1.json' : FILE;
   const recordChannel = record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
   function recordPreferences(value, scope) {
-    const parsed = preferences(value, scope);
+    const parsed = preferences(value, scope, record === 'claude');
     if (record === 'claude' && (parsed.provider !== 'claude' || parsed.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) fail();
     return parsed;
   }

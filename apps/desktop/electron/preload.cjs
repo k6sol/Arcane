@@ -148,7 +148,13 @@ const workspacePreferenceText = (value, max, identifier = false) => {
 };
 const workspacePreferenceId = (value, max) => value === null ? null : workspacePreferenceText(value, max, true);
 const WORKSPACE_PREFERENCE_ROW = Object.freeze(['localId', 'title', 'provider', 'threadId', 'sessionId', 'draft', 'modelId', 'effort', 'tool', 'previewOpen']);
-const workspacePreferenceSnapshot = value => {
+const claudePreferenceModel = value => {
+  if (value === null) return null;
+  const model = workspacePreferenceText(value, 256);
+  if (!model.length || model.trim() !== model || /[\x00-\x1f\x7f]/.test(model)) workspacePreferenceError();
+  return model;
+};
+const workspacePreferenceSnapshot = (value, claude = false) => {
   workspacePreferenceFields(value, ['version', 'projectPath', 'provider', 'tabs', 'activeTabId']);
   const projectPath = workspacePreferenceText(value.projectPath, 4096);
   if (value.version !== 1 || !['codex', 'claude'].includes(value.provider) || !Array.isArray(value.tabs) ||
@@ -167,7 +173,7 @@ const workspacePreferenceSnapshot = value => {
         !['all', 'blender', 'roblox'].includes(row.tool) || typeof row.previewOpen !== 'boolean') workspacePreferenceError();
     ids.add(localId);
     tabs.push({ localId, title, provider: row.provider, threadId: workspacePreferenceId(row.threadId, 256), sessionId: workspacePreferenceId(row.sessionId, 256),
-      draft: workspacePreferenceText(row.draft, 128 * 1024), modelId: workspacePreferenceId(row.modelId, 256), effort: workspacePreferenceId(row.effort, 64),
+      draft: workspacePreferenceText(row.draft, 128 * 1024), modelId: claude ? claudePreferenceModel(row.modelId) : workspacePreferenceId(row.modelId, 256), effort: workspacePreferenceId(row.effort, 64),
       tool: row.tool, previewOpen: row.previewOpen, ...(flagged ? { workflowDraft: row.workflowDraft } : {}) });
   }
   const activeTabId = workspacePreferenceId(value.activeTabId, 128);
@@ -180,7 +186,7 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
   try {
     let input;
     if (action === 'read') { if (args.length) workspacePreferenceError(); }
-    else { if (args.length !== 1) workspacePreferenceError(); input = workspacePreferenceSnapshot(args[0]);
+    else { if (args.length !== 1) workspacePreferenceError(); input = workspacePreferenceSnapshot(args[0], record === 'claude');
       if (record === 'claude' && (input.provider !== 'claude' || input.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) workspacePreferenceError();
     }
     const value = await ipcRenderer.invoke((record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-') + action, ...(input ? [input] : []));
@@ -189,7 +195,7 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
       if (typeof value.available !== 'boolean' || (!value.available && value.preferences !== null)) workspacePreferenceError();
       if (record === 'claude') {
         if (value.available ? typeof value.projectPath !== 'string' || !value.projectPath.length : value.projectPath !== null) workspacePreferenceError();
-        const preferences = value.preferences === null ? null : workspacePreferenceSnapshot(value.preferences);
+        const preferences = value.preferences === null ? null : workspacePreferenceSnapshot(value.preferences, true);
         if (preferences && (preferences.projectPath !== value.projectPath || preferences.provider !== 'claude' || preferences.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) workspacePreferenceError();
         return { available: value.available, projectPath: value.available ? workspacePreferenceText(value.projectPath, 4096) : null, preferences };
       }

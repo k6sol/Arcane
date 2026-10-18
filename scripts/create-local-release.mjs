@@ -26,6 +26,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/studio-key-settings.ts', 'dist/apps/desktop/src/studio-key-settings.js', 'dist/apps/desktop/src/studio-key-settings.js.map',
   'apps/desktop/src/studio-diagnostics.ts', 'dist/apps/desktop/src/studio-diagnostics.js', 'dist/apps/desktop/src/studio-diagnostics.js.map',
   'apps/desktop/src/claude-chat.ts', 'dist/apps/desktop/src/claude-chat.js', 'dist/apps/desktop/src/claude-chat.js.map',
+  'apps/desktop/src/claude-preferences.ts', 'dist/apps/desktop/src/claude-preferences.js', 'dist/apps/desktop/src/claude-preferences.js.map',
   'apps/desktop/src/setup-checklist.ts', 'dist/apps/desktop/src/setup-checklist.js', 'dist/apps/desktop/src/setup-checklist.js.map',
   'apps/desktop/src/arcane-dialog.ts', 'dist/apps/desktop/src/arcane-dialog.js', 'dist/apps/desktop/src/arcane-dialog.js.map',
   'apps/desktop/src/plans.ts', 'dist/apps/desktop/src/plans.js', 'dist/apps/desktop/src/plans.js.map',

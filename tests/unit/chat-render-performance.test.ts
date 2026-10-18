@@ -82,7 +82,7 @@ const CONNECTION = randomUUID();
 
 test('Edge: long transcripts, streamed replies and chat switches stay bounded in both providers', { skip: !browserModule, timeout: 240000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist';
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui', 'script-diff'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui', 'script-diff'];
   // Codex: 120 public items over 60 turns (tool calls and markdown replies); the live turn then streams 40 more deltas.
   const events: unknown[] = [];
   const reply = (n: number) => '### Step ' + n + '\n\nPlaced **part ' + n + '** with `Anchored = true`.\n\n- size 4x1x4\n- colour teal\n\n' + FENCE + 'lua\nprint(' + n + ')\n' + FENCE;

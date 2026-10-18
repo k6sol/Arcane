@@ -10,6 +10,7 @@ import {
 } from './codex-chat.js';
 import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
+import { ClaudePreferenceStore, claudePreferenceBridge, type ClaudePreferenceBridge, type ClaudePreferenceSnapshot } from './claude-preferences.js';
 import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, restoreChatSwitchFocus } from './chat-tabs.js';
 import { USAGE_PRICES_AS_OF, compactTokenCount, estimateUsageUsd, formatUsageCost, type TaskUsageCostDisplay } from './task-usage.js';
 import { costDisplay, onCostPreferences, replyUsageText } from './task-usage-ui.js';
@@ -48,6 +49,8 @@ export interface ClaudeChatAttachments {
   controller(): ChatAttachmentsController | null;
 }
 export interface ClaudeChatOptions {
+  /** Scoped native presentation persistence; test injection never grants chat authority. */
+  preferences?:ClaudePreferenceBridge|null;
   /** Test seam. When omitted the bridge is read from the document's window. */
   bridge?: unknown;
   /** Test seam. When omitted the document's shared composer attachments are used. */
@@ -242,7 +245,7 @@ interface Turn {
 /** The transcript's lightweight marker for sent PNG references (claude-chat.cjs imageMarkers). */
 export const claudeImageMarkers = (images: readonly { name: string }[]): string => images.map(image => '[image: ' + image.name + ']').join(' ');
 const editable = (message: ClaudeChatMessage) => message.role === 'user' && !!message.id;
-interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string }
+interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string; title?:string }
 type El = HTMLElement;
 /** Claude-only composer nodes created on first activation (studio.html stays provider-neutral). */
 const QUEUE_ID = 'claude-chat-queue', METER_ID = 'claude-usage-meter';
@@ -251,6 +254,13 @@ const SVG_NS = 'http://www.w3.org/2000/svg', RING = 2 * Math.PI * 7;
 export class ClaudeChat {
   private readonly bridge: ClaudeChatBridge | null;
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'> | null;
+  private readonly preferenceStore:ClaudePreferenceStore|null;
+  private nativeHydrating=false;
+  private nativeReading:Promise<void>|null=null;
+  private nativeDisposed=false;
+  private preferenceEdits=0;
+  private nativeDeferred:Tab[]=[];
+  private nativeQueuedView:{projectPath:string;active:string|null;rows:(Pick<Tab,'key'|'conversationId'|'model'|'effort'|'draft'>&{title:string})[]}|null=null;
   private readonly attachments: ClaudeChatAttachments;
   /** This chat currently holds the shared composer attachments. */
   private claimed = false;
@@ -303,6 +313,13 @@ export class ClaudeChat {
     if (Object.hasOwn(options, 'storage')) storage = options.storage ?? null;
     else { try { storage = doc?.defaultView?.localStorage ?? null; } catch { storage = null; } }
     this.storage = storage;
+    const preferences=Object.hasOwn(options,'preferences')?options.preferences??null:claudePreferenceBridge(doc?.defaultView);
+    this.preferenceStore=preferences?new ClaudePreferenceStore(preferences,()=>{
+      if(this.nativeDisposed)return;
+      const failure='Claude chat preferences could not be saved. Keep this window open and try again.';
+      if(this.preferenceStore?.error())this.notice=failure;else if(this.notice===failure)this.notice='';
+      this.render();
+    }):null;
     if (options.attachments) this.attachments = options.attachments;
     else {
       // The attachments module loads on first activation (as the workspace loads it); until then nothing attaches.
@@ -321,6 +338,7 @@ export class ClaudeChat {
       };
     }
     this.restoreTabs();
+    if(this.preferenceStore)void this.loadNativePreferences();
   }
 
   /** True when the preload bridge is present; otherwise the surface explains it needs the desktop app. */
@@ -362,7 +380,7 @@ export class ClaudeChat {
       if (event.defaultPrevented || composerMenuOpen(this.doc)) return;
       event.preventDefault(); this.submit();
     });
-    listen(input, 'input', () => { const tab = this.activeTab(); if (tab && input) tab.draft = input.value; this.renderControls(); });
+    listen(input, 'input', () => { const tab = this.activeTab(); if (tab && input) {tab.draft = input.value;this.preferenceEdits++;if(this.preferenceStore)this.persistTabs();} this.renderControls(); });
     // Model picker: the same popover and controls as Codex, backed by Claude Code's reported aliases and efforts.
     listen(this.el('codex-model-trigger'), 'click', () => { if (this.pickerOpen()) this.closePicker(true); else this.openPicker(); });
     listen(this.el('codex-picker-current-model'), 'click', () => { if (this.pickerOpen()) { this.showModels(true); this.el('codex-model-search')?.focus({ preventScroll: true }); } });
@@ -410,6 +428,7 @@ export class ClaudeChat {
   }
 
   stop(): void {
+    this.nativeDisposed=true;this.preferenceStore?.dispose();
     this.deactivate();
     this.started = false;
     for (const remove of this.removers.splice(0)) remove();
@@ -434,6 +453,7 @@ export class ClaudeChat {
     if (!this.active) return;
     const tab = this.activeTab(), input = this.input();
     if (tab && input) tab.draft = input.value;
+    this.queueNativePreferences();
     this.closePicker();
     if (this.claimed) { this.claimed = false; try { this.attachments.claim(null); } catch { /* Presentation only. */ } }
     const attach = this.el('workspace-add-context'); if (attach && this.restoreAttach !== null) attach.hidden = this.restoreAttach;
@@ -533,7 +553,7 @@ export class ClaudeChat {
   takeComposerDraft(): string {
     const input = this.input(), tab = this.activeTab();
     if (!this.active || !input || !input.value) return '';
-    const value = input.value; input.value = ''; if (tab) tab.draft = '';
+    const value = input.value; input.value = ''; if (tab) tab.draft = '';this.preferenceEdits++;this.queueNativePreferences();
     this.renderControls();
     return value;
   }
@@ -544,7 +564,7 @@ export class ClaudeChat {
   receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }): void {
     if (!this.active) this.activate();
     const tab = this.activeTab(), input = this.input();
-    if (handoff.draft && tab) { tab.draft = handoff.draft; if (input) input.value = handoff.draft; }
+    if (handoff.draft && tab) { tab.draft = handoff.draft; if (input) input.value = handoff.draft;this.preferenceEdits++;this.queueNativePreferences(); }
     this.pendingChoice = handoff.model ? { model: handoff.model, effort: handoff.effort } : null;
     this.applyPendingChoice();
     this.render();
@@ -561,6 +581,7 @@ export class ClaudeChat {
 
   /** New chat: reuses an empty draft tab, otherwise opens a new one. */
   newChat(): void {
+    if(this.nativeHydrating){void this.nativeReading?.then(()=>{if(!this.nativeDisposed)this.newChat();});return;}
     if (this.turn && this.turn.turnId === null) return;
     this.saveDraft();
     const empty = this.tabs.find(tab => tab.conversationId === null && !tab.draft.trim());
@@ -572,6 +593,7 @@ export class ClaudeChat {
 
   /** Opens a saved conversation as a tab (or switches to its existing tab). */
   async open(conversationId: string): Promise<void> {
+    if(this.nativeReading)await this.nativeReading;if(this.nativeDisposed)return;
     if (!this.bridge || this.turn && this.turn.turnId === null) return;
     this.saveDraft();
     let tab = this.tabs.find(row => row.conversationId === conversationId);
@@ -595,7 +617,7 @@ export class ClaudeChat {
     const index = this.tabs.findIndex(tab => tab.key === key);
     if (index < 0 || this.turn && this.turn.turnId === null && this.turn.tabKey === key) return;
     this.saveDraft();
-    this.tabs.splice(index, 1);
+    this.tabs.splice(index, 1);this.restoreDeferredPreferences();
     if (!this.tabs.length) this.createTab(null);
     if (this.activeKey === key) void this.showTab(this.tabs[Math.max(0, index - 1)]!.key);
     else { this.persistTabs(); this.render(); }
@@ -655,6 +677,7 @@ export class ClaudeChat {
 
   /** Sends the composer text, or one queued message (which leaves the composer untouched). */
   async send(queued?: string): Promise<void> {
+    if(this.nativeHydrating)return;
     const bridge = this.bridge, input = this.input(), tab = this.activeTab();
     if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn || this.rewinding) return;
     const message = (queued ?? input.value).trim();
@@ -746,11 +769,11 @@ export class ClaudeChat {
 
   private createTab(conversationId: string | null): Tab {
     const saved = this.readChoice();
-    const tab: Tab = { key: 'claude-tab-' + (++this.tabSeq), conversationId, model: saved.model, effort: saved.effort, draft: '' };
+    const tab: Tab = { key: this.nextTabKey(), conversationId, model: saved.model, effort: saved.effort, draft: '' };
     this.tabs.push(tab); this.applyDefaultsTo(tab);
     return tab;
   }
-  private saveDraft(): void { const tab = this.activeTab(), input = this.input(); if (this.active && tab && input) tab.draft = input.value; }
+  private saveDraft(): void { const tab = this.activeTab(), input = this.input(); if (this.active && tab && input && tab.draft!==input.value) {tab.draft = input.value;this.preferenceEdits++;if(this.preferenceStore)this.persistTabs();} }
 
   private async showTab(key: string): Promise<void> {
     const tab = this.tabs.find(row => row.key === key); if (!tab) return;
@@ -1185,11 +1208,17 @@ export class ClaudeChat {
     } catch { return { model: '', effort: '' }; }
   }
   private saveChoice(tab: Tab): void {
+    this.preferenceEdits++;this.queueNativePreferences();
     try { this.storage?.setItem(CLAUDE_CHAT_CHOICE_KEY, JSON.stringify({ model: tab.model, effort: tab.effort })); } catch { /* Only the remembered choice is lost. */ }
   }
   private applyDefaultsTo(tab: Tab): void {
     const models = this.models(), efforts = this.efforts();
     if (!models.length) return;
+    if(this.preferenceStore?.available()&&((tab.model&&!models.includes(tab.model))||(tab.effort&&!efforts.includes(tab.effort)))) {
+      if(tab.key===this.activeKey)this.notice='Your previous model or reasoning choice is unavailable. Choose a reported option to continue.';
+      return;
+    }
+    if(tab.key===this.activeKey&&this.notice==='Your previous model or reasoning choice is unavailable. Choose a reported option to continue.')this.notice='';
     if (!models.includes(tab.model)) tab.model = this.state?.defaultModel && models.includes(this.state.defaultModel) ? this.state.defaultModel : models[0]!;
     if (!efforts.includes(tab.effort)) tab.effort = efforts.includes(DEFAULT_EFFORT) ? DEFAULT_EFFORT : efforts[0] ?? '';
   }
@@ -1360,22 +1389,84 @@ export class ClaudeChat {
       this.activeKey = active?.key ?? this.tabs[0]?.key ?? null;
     } catch { /* Presentation storage is optional. */ }
   }
+
+  private nativePreferenceSnapshot():ClaudePreferenceSnapshot|null {
+    const project=this.preferenceStore?.projectPath;if(!project)return null;
+    return {version:1,projectPath:project,provider:'claude',activeTabId:this.activeKey,tabs:this.tabs.map(tab=>({
+      localId:tab.key,title:Array.from(this.tabTitle(tab).replace(/[\x00-\x1f\x7f]/g,' ')).slice(0,100).join(''),provider:'claude',threadId:tab.conversationId,sessionId:null,
+      draft:tab.draft,modelId:tab.model||null,effort:tab.effort||null,tool:'all',previewOpen:false,
+    }))};
+  }
+  private queueNativePreferences():void {
+    if(this.nativeHydrating||this.nativeDisposed||this.nativeDeferred.length)return;
+    const projectPath=this.preferenceStore?.projectPath;if(!projectPath)return;
+    const rows=this.tabs.map(tab=>({key:tab.key,conversationId:tab.conversationId,model:tab.model,effort:tab.effort,draft:tab.draft,title:this.tabTitle(tab)})),previous=this.nativeQueuedView;
+    if(previous&&previous.projectPath===projectPath&&previous.active===this.activeKey&&previous.rows.length===rows.length&&rows.every((row,index)=>(['key','conversationId','model','effort','draft','title'] as const).every(key=>row[key]===previous.rows[index]![key])))return;
+    const value=this.nativePreferenceSnapshot();if(!value)return;
+    try{this.preferenceStore?.queue(value);this.nativeQueuedView={projectPath,active:this.activeKey,rows};}catch{this.notice='Claude chat preferences could not be saved. Keep this window open and try again.';}
+  }
+  private loadNativePreferences():Promise<void> {
+    const store=this.preferenceStore;if(!store||this.nativeDisposed)return Promise.resolve();if(this.nativeReading)return this.nativeReading;
+    const revision=this.preferenceEdits,preserveLocal=this.preferenceEdits>0||this.tabs.some(tab=>tab.draft.length>0);this.nativeHydrating=true;
+    this.nativeReading=(async()=>{
+      let restored=false;
+      try{
+        const saved=await store.read();if(this.nativeDisposed)return;
+        this.saveDraft();
+        if(saved){
+          const tabs:Tab[]=saved.tabs.map(row=>({key:row.localId,conversationId:row.threadId,model:row.modelId??'',effort:row.effort??'',draft:row.draft,title:row.title}));
+          if(!preserveLocal&&revision===this.preferenceEdits&&!this.turn){this.tabs=tabs;this.activeKey=saved.activeTabId;restored=true;}
+          else for(const tab of tabs){
+            const existing=this.tabs.find(row=>row.key===tab.key||tab.conversationId!==null&&row.conversationId===tab.conversationId);
+            if(existing&&existing.draft===tab.draft)continue;
+            if(existing){if(!tab.draft)continue;tab.key=this.nextTabKey();tab.conversationId=null;tab.title='Recovered draft';}
+            if(this.tabs.length<CLAUDE_CHAT_TAB_LIMIT)this.tabs.push(tab);else this.nativeDeferred.push(tab);
+          }
+          if(!this.tabs.length)this.createTab(null);if(!this.activeTab())this.activeKey=this.tabs[0]!.key;
+        }
+      }catch{if(!this.nativeDisposed)this.notice='Claude chat preferences could not be saved. Keep this window open and try again.';}
+      finally{
+        if(!this.nativeDisposed){
+          this.nativeHydrating=false;this.applyDefaults();
+          if(restored&&this.activeTab())this.saveChoice(this.activeTab()!);
+          if(this.nativeDeferred.length)this.notice='Close a chat tab to load the remaining saved drafts. Keep this window open until they are loaded.';
+          this.queueNativePreferences();if(restored&&this.active&&!this.turn)void this.showTab(this.activeKey!);this.render();
+        }
+      }
+    })().finally(()=>{this.nativeReading=null;});return this.nativeReading;
+  }
+  private nextTabKey():string {let key:string;do{key='claude-tab-'+(++this.tabSeq);}while(this.tabs.some(tab=>tab.key===key)||this.nativeDeferred.some(tab=>tab.key===key));return key;}
+  private restoreDeferredPreferences():void {
+    while(this.nativeDeferred.length&&this.tabs.length<CLAUDE_CHAT_TAB_LIMIT)this.tabs.push(this.nativeDeferred.shift()!);
+    if(!this.nativeDeferred.length&&this.notice?.startsWith('Close a chat tab to load'))this.notice='';
+  }
+  async prepareForRuntimeRecovery():Promise<void> {
+    if(this.nativeReading)await this.nativeReading;
+    if(this.preferenceStore&&!this.preferenceStore.available())await this.loadNativePreferences();
+    this.saveDraft();this.persistTabs();
+    if(this.nativeDeferred.length)throw new Error('Load the remaining saved drafts before restarting. Keep this window open.');
+    const value=this.nativePreferenceSnapshot();
+    if(value&&this.preferenceStore?.available()){await this.preferenceStore.flush(value);return;}
+    if(this.tabs.some(tab=>tab.draft.length))throw new Error('Send or clear your unsent drafts before restarting. Keep this window open.');
+  }
+
   async prepareForRestart():Promise<void> {
     if(this.turn)throw new Error('Finish or stop the current chat before restarting.');
     if(this.active){const tab=this.activeTab(),input=this.input();if(tab&&input)tab.draft=input.value;
       const attachments=this.attachments.controller();
       if(attachments&&(attachments.prepareReferences().length||attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
     }
-    if(this.tabs.some(tab=>tab.draft.trim()))throw new Error('Send or clear your unsent drafts before restarting.');
-    this.persistTabs();
+    await this.prepareForRuntimeRecovery();
   }
   private persistTabs(): void {
+    this.queueNativePreferences();
     try {
       this.storage?.setItem(CLAUDE_CHAT_TABS_KEY, JSON.stringify({ version: 1,
         open: this.tabs.map(tab => tab.conversationId).filter((id): id is string => !!id), active: this.activeTab()?.conversationId ?? null }));
     } catch { /* Only the remembered tabs are lost. */ }
   }
   private tabTitle(tab: Tab): string {
+    if(tab.title&&!tab.conversationId)return tab.title;
     if (!tab.conversationId) return 'New chat';
     return this.conversations.find(row => row.conversationId === tab.conversationId)?.title || 'Chat';
   }
@@ -1454,7 +1545,7 @@ export class ClaudeChat {
   private renderControls(): void {
     const input = this.input(), submit = this.el<HTMLButtonElement>('codex-submit');
     const ready = this.ready(), turn = this.turn, stopMode = this.turnOwnsActiveTab();
-    if (input) input.disabled = !ready;
+    if (input) input.disabled = !ready||this.nativeHydrating;
     if (submit) {
       submit.type = stopMode ? 'button' : 'submit';
       const state = stopMode ? 'active' : 'idle';
@@ -1463,13 +1554,14 @@ export class ClaudeChat {
         const path = submit.querySelector?.('svg path'); path?.setAttribute('d', stopMode ? STOP_PATH : SEND_PATH); path?.setAttribute('fill', stopMode ? 'currentColor' : 'none');
       }
       const controls = submit.closest?.<HTMLElement>('.composer-controls'); if (controls) controls.dataset.taskActive = String(stopMode);
-      submit.disabled = stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || this.rewinding || !(input?.value.trim());
+      submit.disabled = this.nativeHydrating|| (stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || this.rewinding || !(input?.value.trim()));
     }
     const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create) create.disabled = !!turn && turn.turnId === null;
   }
 
   private render(): void {
     if (!this.active) return;
+    this.queueNativePreferences();
     if (this.claimed) this.claimAttachments();
     const notice = this.el('claude-chat-notice'); if (notice) notice.textContent = this.statusText();
     const status = this.el('claude-chat-status');

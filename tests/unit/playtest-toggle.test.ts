@@ -95,7 +95,7 @@ const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 test('Edge: Playtest switch in the composer and grouped tool cards', { skip: !browserModule, timeout: 90000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/playtest-toggle/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'task-usage', 'task-usage-ui', 'playtest-toggle'];
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui', 'playtest-toggle'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
