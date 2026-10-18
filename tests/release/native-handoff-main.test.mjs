@@ -116,14 +116,18 @@ test('human IPC mounts in normal mode, delegates to the CURRENT broker, and refu
 
 test('main-frame navigation cancels broker and provider work; subframe navigation does not', () => {
   const code = block("  window.webContents.on('did-start-navigation'", "  window.webContents.on('render-process-gone'");
-  const handlers = new Map(), counts = { handoff: 0, provider: 0 };
-  const context = vm.createContext({ window: { webContents: { on(name, handler) { handlers.set(name, handler); } } },
+  const handlers = new Map(), counts = { handoff: 0, provider: 0, recovery: 0 };
+  const owner = { webContents: { on(name, handler) { handlers.set(name, handler); } } };
+  const context = vm.createContext({ window: owner, owner,
+    runtimeRecovery: { invalidate(value) { assert.equal(value, owner); counts.recovery++; } },
     nativeHandoff: { cancelPending() { counts.handoff++; } }, providerSetup: { cancelPending() { counts.provider++; } } });
   vm.runInContext(code, context);
   const navigate = handlers.get('did-start-navigation');
-  navigate({}, origin + '/x', false, false); assert.deepEqual(counts, { handoff: 0, provider: 0 }, 'subframe');
-  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 1 }, 'main frame');
-  context.nativeHandoff = null; navigate({}, origin + '/studio', true, true); assert.deepEqual(counts, { handoff: 1, provider: 2 }, 'no broker: provider still cancelled, no throw');
+  navigate({}, origin + '/x', false, false); assert.deepEqual(counts, { handoff: 0, provider: 0, recovery: 0 }, 'subframe');
+  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 1, recovery: 1 }, 'main frame');
+  context.nativeHandoff = null; navigate({}, origin + '/studio', true, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 2 }, 'no broker: provider still cancelled, no throw');
+  context.window = { webContents: {} };
+  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 3 }, 'an inactive window retires only its own recovery scope');
 });
 
 /** Production stopDaemon with a scripted owned child and broker. */
