@@ -113,7 +113,7 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   const service=await createStudioTestService({directory,store,pluginArtifactHash:ARTIFACT,connect,
     ...(options.fixtureClock?{fixtureScheduler}:{}),...(options.taskPort?{taskPort:options.taskPort}:{})});
   t.after(async()=>{inputAck.release();setupAck.release();clearInterval(timer);try{await service.lifecycle.close();for(const connection of connections)await connection.close();assert.equal(pluginFailure,undefined);}finally{store.close();const inside=relative(fixtureTempDirectory(),root);assert.ok(!isAbsolute(inside)&&inside.startsWith('arcane-scenario-service-')&&!inside.startsWith('..'));rmSync(root,{recursive:true,force:true});}});
-  const prepare=()=>service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs:5000,observationIntervalMs:250,failOnRuntimeError:true,scenario:plan},ACTOR);
+  const prepare=(durationMs=5000)=>service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs,observationIntervalMs:250,failOnRuntimeError:true,scenario:plan},ACTOR);
   const approve=(job:{id:string;displayDigest:string})=>service.humanControl.approve({id:job.id,displayDigest:job.displayDigest},()=>{});
   const status=(id:string)=>service.requests.status(id,ACTOR);
   return{root,directory,store,service,state,pair,plan,prepare,approve,status,records,calls,inputEntered,inputAck,setupEntered,setupAck,observationTime:()=>advanced,clockTime:fixtureScheduler.now};
@@ -225,8 +225,11 @@ test('changed persisted/editor source invalidates approval before any scenario s
 });
 
 test('measured assertion failure retains the actual failed row, bounded console observation and human-review image',{timeout:15000},async t=>{
-  const f=await fixture(t,{runtime:{immobile:true}}),job=await f.prepare();await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);
+  // Measure failure evidence within the service's default approved window. The separate
+  // real five-second lifecycle test verifies duration expiry; disk latency is not an assertion result.
+  const f=await fixture(t,{runtime:{immobile:true}}),job=await f.prepare(15000);await f.approve(job);await until(()=>f.status(job.id).review.phase==='done'&&f.state.closes===1);
   const report=f.status(job.id);assert.equal(report.review.code,'ASSERTION_FAILED');assert.equal(report.review.scenario!.state,'failed');
+  assert.equal(report.review.deadline!-report.review.startedAt!,15000);assert.equal(report.review.watchdog.fired,false);
   assert.equal(report.review.scenario!.steps[1]!.observed,0);assert.equal(report.review.scenario!.steps[1]!.outcome,'failed');assert.equal(report.review.cleanup,'complete');
   assert.equal(report.review.observations,1);assert.equal(f.state.captures,1);assert.equal(report.review.scenario!.capture!.context,'unattested');assert.deepEqual(playtestJob.parse(report),report);
 });
