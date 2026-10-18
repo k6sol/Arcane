@@ -41,7 +41,7 @@ export function startDesktopUpdates(doc:Document,options:DesktopUpdateOptions={}
       const result=await bridge.restart() as {state?:unknown;message?:unknown};if(stopped||generation!==epoch)return;
       restarting=result?.state==='restarting';notice=message(result?.message,'Arcane could not restart. Try again when your work is saved.');
     }catch(error){if(!stopped&&generation===epoch)notice=error instanceof Error?message(error.message,'Save your work before restarting.'): 'Save your work before restarting.';}
-    finally{restore();pending=false;if(!stopped&&generation===epoch){render();schedule();}}})();
+    finally{if(!restarting)restore();pending=false;if(!stopped){if(generation!==epoch){notice='';void check();}else{render();schedule();}}}})();
   });
   const visible=()=>{if(!doc.hidden)void check();};doc.addEventListener('visibilitychange',visible);doc.defaultView?.addEventListener('focus',visible);
   void check();

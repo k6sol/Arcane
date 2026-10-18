@@ -44,7 +44,16 @@ test('real browser update banner waits for draft saving, handles refusal, ignore
     await page.waitForTimeout(200);assert.equal(await banner.isVisible(),false);
     const reads=await page.evaluate(()=>(window as any).fixture.reads);await page.waitForTimeout(200);assert.equal(await page.evaluate(()=>(window as any).fixture.reads),reads);
     await page.evaluate(()=>{(window as any).fixture.readGate=false;(window as any).controller.resume();});await page.waitForFunction(()=>!document.getElementById('desktop-update-banner')?.hidden);
+    const sentBeforeNavigation=await page.evaluate(()=>(window as any).fixture.restarts);
+    await page.evaluate(()=>{(window as any).fixture.hold=true;(window as any).fixture.releaseSave=null;});await button.click();
+    await page.waitForFunction(()=>!!(window as any).fixture.releaseSave);
+    await page.evaluate(()=>{(window as any).controller.stop();(window as any).controller.resume();(window as any).fixture.releaseSave();});
+    await page.waitForFunction(()=>!document.getElementById('desktop-update-banner')?.hidden,null,{timeout:2000});
+    assert.equal(await page.evaluate(()=>(window as any).fixture.restarts),sentBeforeNavigation,'A resumed page never continues the old restart.');
+    await page.evaluate(()=>{(window as any).fixture.hold=false;});
     await page.evaluate(()=>{(window as any).fixture.reply={state:'restarting',message:'Restarting Arcane…'};});await button.click();
     await page.waitForFunction(()=>document.getElementById('desktop-update-banner')?.textContent?.includes('Restarting Arcane'));
-    assert.equal(await button.isVisible(),false);await page.evaluate(()=>(window as any).controller.stop());assert.deepEqual(errors,[]);
+    assert.equal(await button.isVisible(),false);
+    assert.equal(await page.evaluate(()=>!!document.querySelector('#draft')?.closest('[inert]')),true,'Typing stays paused until the accepted restart exits.');
+    await page.evaluate(()=>(window as any).controller.stop());assert.deepEqual(errors,[]);
   });
