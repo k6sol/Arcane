@@ -28,12 +28,12 @@ function createRuntimeRecovery(options) {
         project: context.project, epoch: Object.freeze({}) };
     } catch { return null; }
   }
-  function current(value = capsule) {
+  function current(value = capsule, frameUrl = value?.frameUrl) {
     try {
       const context = options.getContext();
       return !!value && capsule === value && !context.closing && (!context.switching || ownsBusy) &&
         context.window === value.window && !value.window.isDestroyed() && !value.contents.isDestroyed() &&
-        value.contents.mainFrame === value.frame && value.frame.url === value.frameUrl && context.userRoot === value.userRoot &&
+        value.contents.mainFrame === value.frame && value.frame.url === frameUrl && context.userRoot === value.userRoot &&
         ['projectId', 'projectPath', 'stateRoot'].every(key => context.project?.[key] === value.project[key]);
     } catch { return false; }
   }
@@ -54,6 +54,19 @@ function createRuntimeRecovery(options) {
     if (owner && capsule?.window !== owner) return;
     capsule = null;
     if (pending) { const old = pending; pending = null; cancelTimer(old.timer); old.resolve(false); }
+  }
+  // Only Electron's completed same-document navigation may refresh the URL. The retained
+  // window, main frame, project and profile must still match; no runtime authority is restored.
+  function navigatedInPage(owner, url) {
+    const value = capsule;
+    if (!value || owner !== value.window) return false;
+    try {
+      if (!current(value, url) || !policy.navigationAllowed(value.origin, url) || new URL(url).href !== url) {
+        invalidate(owner); return false;
+      }
+      if (value.frameUrl !== url) { value.frameUrl = url; value.epoch = Object.freeze({}); }
+      return true;
+    } catch { invalidate(owner); return false; }
   }
   function cancelRenderer(owner) {
     if (!renderer || renderer.window !== owner) return;
@@ -152,6 +165,6 @@ function createRuntimeRecovery(options) {
       pending = null; cancelTimer(item.timer); item.resolve(input.saved && current(item.value)); return { acknowledged: true };
     });
   }
-  return Object.freeze({ stopped, preferences, invalidate, installIpc, status, waitForRenderer, cancelRenderer, limits: LIMITS });
+  return Object.freeze({ stopped, preferences, invalidate, navigatedInPage, installIpc, status, waitForRenderer, cancelRenderer, limits: LIMITS });
 }
 module.exports = { createRuntimeRecovery };

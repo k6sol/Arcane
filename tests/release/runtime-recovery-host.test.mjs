@@ -42,6 +42,32 @@ test('only an exact current-frame nonce and boolean can acknowledge a checkpoint
 test('navigation invalidation cancels the checkpoint and retires presentation scope',async()=>{
  const f=fixture(),done=f.stop();await settle();f.recovery.invalidate();await done;assert.equal(f.timers.size,0);assert.equal(f.recovery.preferences(),null);assert.equal(named(f,'start').length,0);
 });
+
+test('completed same-document navigation retains draft saves and rotates the preference epoch',async()=>{
+ const f=fixture({confirm:false});await f.stop({code:0});const previous=f.recovery.preferences();
+ f.frame.url='http://127.0.0.1:45871/studio#settings';
+ assert.equal(f.recovery.preferences(),null,'A changed URL is not trusted before the native completion event.');
+ assert.equal(f.recovery.navigatedInPage({},f.frame.url),false,'Another window cannot update the scope.');
+ assert.equal(f.recovery.navigatedInPage(f.owner,f.frame.url),true);
+ const next=f.recovery.preferences();assert.ok(next);assert.notEqual(next.epoch,previous.epoch,'Earlier asynchronous preference operations must recheck ownership.');
+ assert.equal(next.projectPath,previous.projectPath);assert.equal(next.origin,previous.origin);assert.equal(Object.hasOwn(next,'token'),false);
+ assert.equal(f.recovery.navigatedInPage(f.owner,f.frame.url),true);assert.equal(f.recovery.preferences().epoch,next.epoch,'Duplicate completion does not invalidate new saves.');
+});
+
+test('same-document completion keeps the exact checkpoint usable without authorizing another frame',async()=>{
+ const f=fixture(),done=f.stop();await settle();const request=f.request();f.frame.url='http://127.0.0.1:45871/studio#chat';
+ assert.equal(f.recovery.navigatedInPage(f.owner,f.frame.url),true);
+ await assert.rejects(f.handlers.get('arcane:runtime-recovery-saved')({sender:f.contents,senderFrame:{url:f.frame.url}},{requestId:request.requestId,saved:true}),/unavailable/);
+ await f.acknowledge(true);await done;assert.equal(named(f,'reload').length,1);
+});
+
+test('same-document events cannot adopt a different frame, project, profile or disallowed URL',async()=>{
+ for(const mutate of[f=>f.contents.mainFrame={url:f.frame.url},f=>f.context.project={...f.context.project,projectPath:'C:\\Other'},f=>f.context.userRoot='C:\\Other',f=>f.context.closing=true,
+  f=>f.frame.url='https://example.com/studio',f=>f.frame.url='http://127.0.0.1:45871/v1/other',f=>f.frame.url='http://127.0.0.1:45871/studio?other=1']){
+  const f=fixture({confirm:false});await f.stop({code:0});mutate(f);assert.equal(f.recovery.navigatedInPage(f.owner,f.frame.url),false);assert.equal(f.recovery.preferences(),null);await assert.rejects(f.invoke('retry'),/unavailable/);
+ }
+ const f=fixture({confirm:false});await f.stop({code:0});assert.equal(f.recovery.navigatedInPage(f.owner,'http://127.0.0.1:45871/studio#not-the-frame'),false);assert.equal(f.recovery.preferences(),null,'A completion URL must match the actual main frame.');
+});
 test('retained presentation scope rejects changed owner, frame, project, profile and closing',async()=>{
  for(const mutate of[f=>f.context.window=null,f=>f.contents.mainFrame={url:f.frame.url},f=>f.frame.url+='x',f=>f.context.project={...f.context.project,projectId:'b'.repeat(64)},f=>f.context.userRoot='C:\\Other',f=>f.context.closing=true]){
   const f=fixture({confirm:false});await f.stop({code:0});assert.ok(f.recovery.preferences());mutate(f);assert.equal(f.recovery.preferences(),null);await assert.rejects(f.invoke('retry'),/unavailable/);

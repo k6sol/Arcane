@@ -259,8 +259,11 @@ function makeWindow() {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   for (const type of ['will-navigate', 'will-redirect', 'will-frame-navigate']) window.webContents.on(type, event => { if (!event.isMainFrame || !policy.navigationAllowed(origin, event.url)) event.preventDefault(); });
   window.webContents.on('will-attach-webview', event => event.preventDefault());
-  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-    if (isMainFrame) { runtimeRecovery?.invalidate(owner); if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
+  window.webContents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+    if (isMainFrame) { if (!inPlace) runtimeRecovery?.invalidate(owner); if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
+  });
+  window.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+    if (isMainFrame) runtimeRecovery?.navigatedInPage(owner, url);
   });
   window.webContents.on('render-process-gone', () => {
     if (recoveryWindow === owner) { recoveryWindowFailure = owner; runtimeRecovery?.cancelRenderer(owner); return; }
