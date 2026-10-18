@@ -68,7 +68,6 @@ test('the parser accepts only bounded raw JSON text with exact keys, enums, orde
 
 test('every phase and review state renders honest copy as plain text; native completion is never accepted', async () => {
   const views: [unknown, RegExp, RegExp | null][] = [
-    [{ taskId: TASK, plan: null }, /No automatic plan for this task/, null],
     [full({ state: 'active', review: null, steps: [step(1, 'worker', 1, 0, 'reserved'), step(2, 'incorporation', 1, 0, 'acknowledged')].map((s, i) => ({ ...s, seq: i + 1 })) }), /sent, waiting for result/, /Accepted/],
     [full({ state: 'stopped', reason: 'repair_reserved', review: null, steps: [step(1, 'incorporation', 1, 0, 'completed', 'failed')] }), /main task reported a problem/, /Accepted|verified/],
     [full({ state: 'unknown', reason: 'step_unknown', review: null, steps: [step(1, 'incorporation', 1, 0, 'unknown', null, 'dispatch_uncertain')] }), /Outcome unknown/, null],
@@ -87,6 +86,11 @@ test('every phase and review state renders honest copy as plain text; native com
   assert.match(loading.host.textContent, /Checking plan status/);
   const failed = mount(async () => { throw new Error('offline'); }); failed.card.setSelection(selection()); await failed.card.refresh();
   assert.match(failed.host.textContent, /Plan status unavailable/);
+});
+
+test('ordinary chat hides the plan card when the server reports no plan',async()=>{
+  const m=mount(async()=>text({taskId:TASK,plan:null}));m.card.setSelection(selection());await m.card.refresh();
+  assert.equal(m.host.hidden,true);assert.equal(m.host.textContent,'');assert.equal(m.host.attributes.get('aria-busy'),'false');
 });
 
 test('one held read is coalesced; a selection change clears immediately and ignores the held response; disposal fences', async () => {

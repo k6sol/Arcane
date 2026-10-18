@@ -93,6 +93,8 @@ interface Options {
   codexConnect?: CodexServiceOptions['connect'];
   /** Trusted owned worker injection for product composition/fixtures; never HTTP input. */
   codexProposalWorker?: CodexServiceOptions['proposalWorker'];
+  /** Trusted embedding opt-in; never accepted from HTTP. Standard chat leaves this disabled. */
+  codexAutomaticTaskPlanning?: boolean;
   /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
   workflowCodeVerification?: WorkflowCodeHostConfiguration;
   /** Trusted/test-only borrowed verifier. Never accepted from HTTP or agent data. */
@@ -142,6 +144,7 @@ export async function createConnectionLab(options: Options) {
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
     ...(options.codexConnect ? {connect:options.codexConnect} : {}),
     ...(options.codexProposalWorker ? {proposalWorker:options.codexProposalWorker} : {}),
+    ...(options.codexAutomaticTaskPlanning === true ? {automaticTaskPlanning:true} : {}),
     ...(nativeAssetRegistry ? {assetRegistry:nativeAssetRegistry} : {}),
     ...(options.workStore ? {workStore:options.workStore} : {}),
     arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),

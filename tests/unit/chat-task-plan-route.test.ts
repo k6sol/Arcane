@@ -56,7 +56,7 @@ async function fixture(t: TestContext) {
     propose: async () => { proposals++; return { threadId: 'worker.thread', sessionId: null, turnId: 'worker.turn:' + proposals, text: 'Suggestion ' + proposals + ': keep the change bounded.' }; },
     close: async () => {} });
   const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
-    codexProposalWorker: proposalWorker,
+    codexProposalWorker: proposalWorker, codexAutomaticTaskPlanning: true,
     codexConnect: async hooks => {
       assert.ok(hooks); tokens.push(hooks.finalCredential()); const index = providers.length;
       const client = new CodexSession({ command: process.execPath, args: ['-e', PEER, JSON.stringify({ thread: index ? THREAD + '.second' : THREAD, session: index ? SESSION + '.second' : SESSION, audit: index ? audit + '.second' : audit, gate: index ? gate + '.second' : gate, tools: ARCANE_NATIVE_TOOL_NAMES })], cwd: project, env: nativeEnvironment() },

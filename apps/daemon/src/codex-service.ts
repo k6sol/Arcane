@@ -124,6 +124,8 @@ export interface CodexServiceOptions {
   arcaneMcp?: () => ArcaneMcpLaunchProfile;
   /** Trusted composition/fixture proposal worker factory. Injected legacy clients without it gain no proposal authority. */
   proposalWorker?: ChatTaskProposalFactory;
+  /** Explicit host opt-in for multi-round planning. Standard chat keeps suggestions on request. */
+  automaticTaskPlanning?: boolean;
   /** Borrowed original-project evidence store; never accepted from an action envelope. */
   workStore?: WorkStore;
 }
@@ -554,7 +556,7 @@ export function createCodexService(options: CodexServiceOptions) {
                     }
                   }});
                 ownedContext.taskId=origin.taskId;taskContexts.set(origin.taskId,ownedContext);taskAfterCommit=taskId;
-                if(options.workStore&&proposalFactory&&owned.openIncorporationChain&&owned.issueIncorporationPermit&&owned.continueIncorporation&&Buffer.byteLength(value.text)<=CHAT_TASK_PLAN_INPUT_BYTES)
+                if(options.automaticTaskPlanning===true&&options.workStore&&proposalFactory&&owned.openIncorporationChain&&owned.issueIncorporationPermit&&owned.continueIncorporation&&Buffer.byteLength(value.text)<=CHAT_TASK_PLAN_INPUT_BYTES)
                   planInputs.set(taskId,{objective:value.text,inputSha256:createHash('sha256').update(JSON.stringify({text:value.text,
                     references:value.references?referenceImageMetadata(value.references):[],allowWorkspaceWrites:allowWrites,allowAssets})).digest('hex')});
                 try {const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites,...(value.references?{references:value.references}:{})});continuation=started.continuation;accepted=true;}

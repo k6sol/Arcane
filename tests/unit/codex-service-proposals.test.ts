@@ -17,6 +17,7 @@ import { limits } from '../../packages/codex-client/src/validation.js';
 import { ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import type { StudioTestTaskOrigin } from '../../packages/protocol/src/chat-task-playtest.js';
 import { ChatTaskStore } from '../../packages/storage/src/chat-task-store.js';
+import { WorkStore } from '../../packages/storage/src/work-store.js';
 
 const THREAD = 'managed.thread:exact', SESSION = 'managed.session:exact';
 // Production service/coordinator/client/SQLite/HTTP with a labelled JSONL process peer
@@ -53,10 +54,11 @@ function proposalWorkers(plan: Plan = {}) {
   };
   return { factory, calls, texts, get closes() { return closes; } };
 }
-async function fixture(t: test.TestContext, options: { legacy?: true; proposalWorker?: ChatTaskProposalFactory } = {}) {
+async function fixture(t: test.TestContext, options: { legacy?: true; proposalWorker?: ChatTaskProposalFactory; withWorkStore?: true } = {}) {
   const boundary = await realpath(tmpdir()), root = await realpath(await mkdtemp(join(boundary, 'arcane-proposal-service-'))), project = join(root, 'project'); await mkdir(project);
   const registry = createNativeAssetRegistry({ projectPath: await realpath(project) }), clients: CodexSession[] = [], audit = join(root, 'wire.jsonl');
-  const service = createCodexService({ directory: join(root, 'journal'), projectPath: project, assetRegistry: registry, ...(options.proposalWorker ? { proposalWorker: options.proposalWorker } : {}), connect: async hooks => {
+  const work = options.withWorkStore ? new WorkStore({directory:join(root,'work'),projectPath:project}) : null;
+  const service = createCodexService({ directory: join(root, 'journal'), projectPath: project, assetRegistry: registry, ...(work?{workStore:work}:{}), ...(options.proposalWorker ? { proposalWorker: options.proposalWorker } : {}), connect: async hooks => {
     assert.ok(hooks); hooks.finalCredential(); const index = clients.length; // Mints the task actor exactly as chat-task-loop does.
     const client = new CodexSession({ command: process.execPath, args: ['-e', PEER, JSON.stringify({ index, email: 'fixture@example.invalid', session: SESSION, newThread: THREAD, tools: ARCANE_NATIVE_TOOL_NAMES }), audit], cwd: project, env: nativeEnvironment() },
       limits({ requestTimeoutMs: 1500 }), 'spawned-node-fixture', 'arcane-only', hooks);
@@ -72,7 +74,7 @@ async function fixture(t: test.TestContext, options: { legacy?: true; proposalWo
   const server = createServer(async (request, response) => { if (!await route(request, response, new URL(request.url ?? '/', origin), control, origin, generic)) { response.writeHead(404); response.end(); } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); origin = 'http://127.0.0.1:' + (server.address() as { port: number }).port;
   t.after(async () => {
-    if (!closed) await service.close(); registry.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    if (!closed) await service.close(); work?.close(); registry.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     const part = relative(boundary, root); assert.ok(part.startsWith('arcane-proposal-service-') && !isAbsolute(part) && !part.includes(sep)); await rm(root, { recursive: true, force: true });
   });
   const post = async (input: unknown, bearer = control) => { const response = await fetch(origin + '/v1/codex/action', { method: 'POST', headers: { Authorization: 'Bearer ' + bearer, Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(10000) });
@@ -80,7 +82,7 @@ async function fixture(t: test.TestContext, options: { legacy?: true; proposalWo
   const envelope = (action: string, fields: Record<string, unknown> = {}) => ({ requestId: randomUUID(), connectionId: action === 'connect' ? null : service.state().snapshot!.connectionId, action, ...fields });
   const action = (name: string, fields: Record<string, unknown> = {}) => post(envelope(name, fields));
   const ready = async () => { for (const [name, fields] of [['connect', {}], ['select', { model: 'fixture', effort: 'low' }], ['thread-start', {}]] as const) { const outcome = (await action(name, fields)).data; assert.equal(outcome.record?.state, 'acknowledged', name + ': ' + JSON.stringify(outcome.record?.errorCode ?? outcome)); } };
-  const send = async () => { const outcome = await action('turn-start', { threadId: service.state().snapshot!.thread!.threadId, text: 'Synthetic human task', allowWorkspaceWrites: true, allowAssets: true }); assert.equal(outcome.data.record.state, 'acknowledged', 'turn-start: ' + outcome.data.record.errorCode); };
+  const send = async (text = 'Synthetic human task') => { const outcome = await action('turn-start', { threadId: service.state().snapshot!.thread!.threadId, text, allowWorkspaceWrites: true, allowAssets: true }); assert.equal(outcome.data.record.state, 'acknowledged', 'turn-start: ' + outcome.data.record.errorCode); };
   const task = () => service.state().chatTasks?.at(-1);
   const propose = (taskId: string, text = 'Suggest one bounded change.', bearer = control, requestId: string = randomUUID()) =>
     post({ requestId, connectionId: service.state().snapshot!.connectionId, action: 'proposal-start', threadId: THREAD, taskId, text }, bearer);
@@ -106,6 +108,20 @@ test('human proposal-start reaches only the exact owned task, stays display-only
   const state = f.service.state();
   assert.ok(!state.actions.some(record => record.action === 'proposal-start'), 'proposal receipts never enter desktop action history');
   assert.doesNotThrow(() => readCodexState(JSON.parse(JSON.stringify(state))));
+});
+
+test('ordinary chat Send starts one native turn and no automatic suggestion plan',async t=>{
+  const workers=proposalWorkers(),f=await fixture(t,{proposalWorker:workers.factory,withWorkStore:true});await f.ready();await f.send('Tell me why ts is not working.');
+  const taskId=f.task()!.taskId;
+  const plan=await f.service.taskPlan!({connectionId:f.service.state().snapshot!.connectionId,threadId:THREAD,taskId});
+  assert.equal(plan.plan,null,'ordinary messages keep their existing conversation rather than launching context-free suggestion rounds');
+  assert.equal(workers.calls.length,0);
+  assert.equal((await f.post({...f.envelope('turn-start',{threadId:THREAD,text:'extra context'}),automaticTaskPlanning:true})).status,400,'HTTP input cannot enable automatic planning');
+  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
+  const input=(await f.wire()).find(row=>row.method==='turn/start')!.params.input as {type:string;text:string}[];
+  assert.deepEqual(input,[{type:'text',text:'Tell me why ts is not working.',text_elements:[]}],'only the new human message is submitted');
+  const requested=await f.propose(taskId,'Review the forest build and its terrain failure.');
+  assert.equal(requested.data.record.state,'acknowledged');await until(()=>workers.calls.length===1);
 });
 
 test('agent bearer, stale scope, legacy clients and missing worker factory gain no proposal authority', async t => {

@@ -165,7 +165,7 @@ export class TaskPlanCard {
   #render(): void {
     if (this.#disposed) return;
     const host = this.host; host.replaceChildren();
-    if (!this.#selection) { host.hidden = true; return; }
+    if (!this.#selection || this.#status === 'ready' && this.#view?.plan === null) { host.hidden = true; host.setAttribute('aria-busy','false'); return; }
     host.hidden = false; host.setAttribute('aria-busy', String(this.#status === 'loading'));
     const header = this.#el('div', 'task-plan-header'), title = this.#el('h3', 'task-plan-title', 'Automatic plan'); title.id = 'codex-task-plan-title';
     const status = this.#el('p', 'task-plan-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
