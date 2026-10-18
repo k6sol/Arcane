@@ -79,7 +79,7 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
     ownedDirectory: async full => { await policy.directPath(full, 'directory', true); fs.mkdirSync(full, { recursive: true }); return policy.directPath(full); },
     setTimeout: real ? setTimeout : fn => { timers.set(++timerId, fn); return timerId; },
     clearTimeout: real ? clearTimeout : timer => timers.delete(timer),
-    failStartup() { assert.fail('No unexpected post-adoption child exit.'); },
+    runtimeStopped() { assert.fail('No unexpected post-adoption child exit.'); },
     spawn(executable, args, options) {
       calls.push({ executable, args, options });
       if (real) return spawn(executable, args, options);

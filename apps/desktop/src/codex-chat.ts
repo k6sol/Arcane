@@ -2018,14 +2018,17 @@ export class CodexChat {
     return tab&&this.draftDirty&&tab.key===this.tabs?.active()?.key?{...tab,draft:this.value('codex-composer'),workflowDraft:!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft}:tab;
   }
   chatTabsView(): readonly ChatTabView[] { return this.safeView((this.tabs?.views()??[]).map(tab=>this.draftView(tab)!)); }
-  async prepareForRestart():Promise<void> {
+  async readyForRuntimeRecovery():Promise<void> { if(this.tabs?.persistenceStatus()==='native-error')throw new Error('Saved chat drafts could not be read.'); }
+  async prepareForRuntimeRecovery():Promise<void> { await this.checkpointDrafts(false); }
+  async prepareForRestart():Promise<void> { await this.checkpointDrafts(true); }
+  private async checkpointDrafts(checkActivity:boolean):Promise<void> {
     const idle=()=>{const thread=this.snapshot()?.thread;
-      if(this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus))throw new Error('Finish or stop the current chat before restarting.');
+      if(checkActivity&&(this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus)))throw new Error('Finish or stop the current chat before restarting.');
       if(!this.surfaceYielded&&this.attachments&&(this.attachments.prepareReferences().length||this.attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
     };
     idle();this.flushDraft();this.tabs?.updatePresentation({});
     // A settings acknowledgement must not trap an idle workspace with no unsent text.
-    const hasDraft=()=>this.value('codex-composer').length>0||this.tabs?.views().some(tab=>tab.draft.length>0);
+    const hasDraft=()=>!this.surfaceYielded&&this.value('codex-composer').length>0||this.tabs?.views().some(tab=>tab.draft.length>0);
     if(!this.tabs?.active()||!hasDraft())return;
     const project=this.state?.projectPath,key=this.tabs.active()?.key,deadline=Date.now()+10000;
     let retryAt=Date.now()+500;

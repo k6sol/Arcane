@@ -41,6 +41,7 @@ test('packaged smoke records module delivery after initialization and fails when
           if(code.includes('title: document.title'))return JSON.stringify(renderer);
           if(code.includes("'/task-plan-boot.js'"))return modulesAvailable;
           if(code==='window.arcaneDesktop.workspacePreferences.read()')return{available:false,preferences:null};
+          if(code.includes('const bridge=window.arcaneDesktop.runtimeRecovery;'))return{frozen:true,status:{version:1,state:'unavailable',message:''}};
           if(code==='window.arcaneDesktop.claudePreferences.read()')return{available:false,projectPath:null,preferences:null};
           if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
           if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
@@ -365,7 +366,9 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'claudePreferences', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'setupChecklist', 'studioKeys', 'studioPlugin', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'claudePreferences', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'setupChecklist', 'studioKeys', 'studioPlugin', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.equal(Object.isFrozen(exposed.runtimeRecovery), true);
+  assert.deepEqual(Object.keys(exposed.runtimeRecovery).sort(), ['acknowledge','onCheckpoint','onState','ready','retry','status','version']);
   assert.equal(Object.isFrozen(exposed.billing), true);
   assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'status', 'version']);
   assert.equal(exposed.billing.version, 1);
@@ -405,8 +408,8 @@ test('source contract: renderer isolation, exact navigation and deny-by-default 
   assert.match(mainSource, /policy\.navigationAllowed\(origin,\s*event\.url\)/);
   assert.match(mainSource, /onBeforeRequest[\s\S]*policy\.requestAllowed\(origin,\s*details\.url\)/);
   assert.match(mainSource, /setWindowOpenHandler\([\s\S]*?action:\s*'deny'/);
-  assert.match(mainSource, /policy\.installClipboardPermissions\(session,/);
-  assert.match(mainSource, /active: !closing && !switching && window === permissionWindow/);
+  assert.match(mainSource, /policy\.installClipboardPermissions\(owner\.webContents\.session,/);
+  assert.match(mainSource, /active: !closing && !switching && window === owner/);
   assert.match(mainSource, /setDevicePermissionHandler\(\(\)\s*=>\s*false\)/);
 });
 

@@ -61,7 +61,7 @@ test('real Edge in-app dialog: focus, Esc/Enter, inert page, Arcane styling, per
     const open = (value: unknown) => page.evaluate((v: unknown) => (window as any).push(v), value);
     await page.locator('#permissions-claude-tools').focus();
     await open({ ...request });
-    const dialog = page.locator('[role=dialog][aria-modal=true]');
+    const dialog = page.locator('.arcane-modal[role=dialog][aria-modal=true]');
     await dialog.waitFor();
     assert.equal(await dialog.getAttribute('aria-labelledby'), 'arcane-modal-title-' + request.id);
     assert.equal(await page.locator('#arcane-modal-title-' + request.id).textContent(), 'Arcane Claude chat');
@@ -86,7 +86,7 @@ test('real Edge in-app dialog: focus, Esc/Enter, inert page, Arcane styling, per
     await open({ ...request, id: '00000000-0000-4000-8000-000000000003', type: 'warning', title: 'Switch project', buttons: ['Cancel', 'Open project'] });
     await page.locator('.arcane-modal').focus(); await page.keyboard.press('Enter');
     await page.waitForFunction(() => (window as any).replies.length === 2);
-    await page.locator('[role=alertdialog]').waitFor();
+    await page.locator('.arcane-modal[role=alertdialog]').waitFor();
     if (shots && colorScheme === 'dark') await page.screenshot({ path: join(shots, 'in-app-dialog-warning.png') });
     await page.getByRole('button', { name: 'Open project' }).click();
     await page.waitForFunction(() => (window as any).replies.length === 3);
@@ -98,6 +98,11 @@ test('real Edge in-app dialog: focus, Esc/Enter, inert page, Arcane styling, per
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'no horizontal overflow on a phone');
     if (shots && colorScheme === 'dark') await page.screenshot({ path: join(shots, 'in-app-dialog-mobile.png') });
     await page.keyboard.press('Escape');
+    const beforeRecovery=await page.evaluate(()=>(window as any).replies.length);
+    await open({...request,id:'00000000-0000-4000-8000-000000000005',buttons:['Close'],defaultId:0,cancelId:0});
+    await page.evaluate(()=>document.dispatchEvent(new Event('workspace:runtimestopped')));
+    assert.equal(await page.locator('.arcane-modal-layer').count(),0);
+    await page.waitForTimeout(30);assert.equal(await page.evaluate(()=>(window as any).replies.length),beforeRecovery,'Retired dialog listeners cannot answer another native request.');
     assert.deepEqual(errors, []);
     await context.close();
   }

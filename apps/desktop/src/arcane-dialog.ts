@@ -133,7 +133,7 @@ export function startArcaneDialogs(doc: Document, options: ArcaneDialogOptions =
     const shown = showArcaneDialog(doc, request); open = shown;
     void shown.result.then(response => {
       open = null;
-      void dialogs.reply({ id: request.id, response }).catch(() => { /* the host times out to cancel */ });
+      if(!stopped)void dialogs.reply({ id: request.id, response }).catch(() => { /* the host times out to cancel */ });
       next();
     });
   }
@@ -189,9 +189,11 @@ export function startArcaneDialogs(doc: Document, options: ArcaneDialogOptions =
   claude?.addEventListener('change', onClaude); codex?.addEventListener('change', onCodex);
   // The log listener lives for the page lifetime, like the other settings panels.
   options.codex?.subscribeAutoApprovals(() => { if (!stopped) render(); });
+  const interrupted=()=>{stopped=true;open?.close();open=null;queue.length=0;settings=null;options.codex?.setAutoApprove(false);render();};
+  doc.addEventListener('workspace:runtimestopped',interrupted);
   void load();
   return {
-    stop() { stopped = true; open?.close(); open = null; queue.length = 0; },
-    resume() { if (!stopped) return; stopped = false; void load(); },
+    stop() { interrupted();doc.removeEventListener('workspace:runtimestopped',interrupted); },
+    resume() { if (!stopped) return; stopped = false;doc.addEventListener('workspace:runtimestopped',interrupted); void load(); },
   };
 }

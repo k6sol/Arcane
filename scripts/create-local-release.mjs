@@ -41,6 +41,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/starter-gallery.ts', 'dist/apps/desktop/src/starter-gallery.js', 'dist/apps/desktop/src/starter-gallery.js.map',
   'apps/desktop/src/starter-prompts.ts', 'dist/apps/desktop/src/starter-prompts.js', 'dist/apps/desktop/src/starter-prompts.js.map',
   'apps/desktop/src/welcome-tour.ts', 'dist/apps/desktop/src/welcome-tour.js', 'dist/apps/desktop/src/welcome-tour.js.map',
+  'apps/desktop/src/runtime-recovery.ts', 'dist/apps/desktop/src/runtime-recovery.js', 'dist/apps/desktop/src/runtime-recovery.js.map',
   'apps/desktop/src/desktop-update.ts', 'dist/apps/desktop/src/desktop-update.js', 'dist/apps/desktop/src/desktop-update.js.map',
   'apps/desktop/src/mesh-keep.ts', 'dist/apps/desktop/src/mesh-keep.js', 'dist/apps/desktop/src/mesh-keep.js.map',
   'apps/desktop/src/project-memory.ts', 'dist/apps/desktop/src/project-memory.js', 'dist/apps/desktop/src/project-memory.js.map',

@@ -126,7 +126,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
   });
   // Execute the actual main-owned session accessor and actual installIpc, not a substitute gate.
-  vm.runInContext('let workspacePreferences, claudePreferences, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
+  vm.runInContext('let workspacePreferences, claudePreferences, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
     'globalThis.setState = next => {' + ['closing', 'switching', 'window', 'origin', 'userRoot', 'token', 'projectSession']
       .map(name => `if(Object.hasOwn(next,'${name}')) ${name}=next.${name};`).join('') + '};\n' +
     mainSource.slice(begin, end), mainContext, { filename: 'workspace-preferences-main-wiring.cjs' });

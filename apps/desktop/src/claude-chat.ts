@@ -661,7 +661,7 @@ export class ClaudeChat {
     for (const item of this.queue.splice(0)) {
       const tab = this.tabs.find(row => row.key === item.tabKey); if (!tab) continue;
       const shown = this.active && tab.key === this.activeKey && input;
-      const current = (shown ? input!.value : tab.draft).replace(/\s+$/, '');
+      const current = shown ? input!.value : tab.draft;
       const next = current ? current + '\n\n' + item.text : item.text;
       tab.draft = next; if (shown) input!.value = next;
     }
@@ -1443,7 +1443,10 @@ export class ClaudeChat {
     while(this.nativeDeferred.length&&this.tabs.length<CLAUDE_CHAT_TAB_LIMIT)this.tabs.push(this.nativeDeferred.shift()!);
     if(!this.nativeDeferred.length&&this.notice?.startsWith('Close a chat tab to load'))this.notice='';
   }
+  async readyForRuntimeRecovery():Promise<void> { if(this.nativeReading)await this.nativeReading;if(this.preferenceStore?.error())throw new Error('Saved chat drafts could not be read.'); }
   async prepareForRuntimeRecovery():Promise<void> {
+    if(this.active){const attachments=this.attachments.controller();if(attachments&&(attachments.prepareReferences().length||attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');}
+    this.returnQueue();
     if(this.nativeReading)await this.nativeReading;
     if(this.preferenceStore&&!this.preferenceStore.available())await this.loadNativePreferences();
     this.saveDraft();this.persistTabs();

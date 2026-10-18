@@ -26,6 +26,8 @@ let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
 let claudePreferences;
+let runtimeRecovery;
+let recoveryWindow = null, recoveryWindowFailure = null, deferWindowShow = false;
 let claudeChat;
 let studioPlugin;
 let projectPermissions;
@@ -52,7 +54,7 @@ const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
 /** Stop every in-app Claude chat turn of the current project and revoke its scoped credentials (quit/switch/failure). */
-function stopClaudeChat() { const chat = claudeChat; claudeChat = null; return chat ? chat.dispose().catch(() => null) : Promise.resolve(null); }
+function stopClaudeChat(reason) { const chat = claudeChat; claudeChat = null; return chat ? chat.dispose(reason).catch(() => null) : Promise.resolve(null); }
 // In-app Claude chat: headless installed Claude Code per turn, Arcane-only MCP config and a scoped credential from this
 // project's handoff broker. Bound to this project epoch; the transcript lives in an owned per-project directory.
 // Started after startDaemon, so the port/state host fixtures exercise only the daemon boundary.
@@ -215,30 +217,62 @@ async function startDaemon(project) {
     launchTerminal: request => providerSetup.launchHandoffTerminal(request),
   });
   if (projectSession.verificationUnavailable) console.warn(CODE_VERIFICATION_WARNING);
-  owned.once('exit', () => { if (child === owned && !closing && !switching) { token = ''; origin = ''; void failStartup('The local runtime stopped. Your project records have been retained.'); } });
+  const adoptedAt = performance.now();
+  owned.once('exit', (code, signal) => { if (child === owned && !closing && !switching) void runtimeStopped({ code, signal, uptimeMs: performance.now() - adoptedAt }); });
+}
+function installClipboardForWindow(owner) {
+  policy.installClipboardPermissions(owner.webContents.session, () => ({ window: owner,
+    origin: origin || runtimeRecovery?.preferences()?.origin || '', active: !closing && !switching && window === owner }));
+}
+/** Keep the previous document until the replacement has loaded with a live owned runtime. */
+async function reloadRecoveredWorkspace() {
+  const previous = window; if (!previous || previous.isDestroyed()) throw new Error('Workspace closed.');
+  let replacement = null, timer = null, retired = false;
+  const previousClosed = () => { if (!retired && !closing) app.quit(); };
+  previous.once('closed', previousClosed);
+  try {
+    deferWindowShow = true;
+    try { makeWindow(); replacement = window; } finally { deferWindowShow = false; }
+    const rendererReady = runtimeRecovery.waitForRenderer(replacement);
+    switching = false;
+    const mounted = await Promise.race([Promise.all([loadWorkspace(), rendererReady]), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Workspace loading timed out.')), 30000); })]);
+    if (!Array.isArray(mounted) || mounted[1] !== true || recoveryWindowFailure === replacement || closing || window !== replacement || replacement.isDestroyed() || !child || child.exitCode != null || child.signalCode != null) throw new Error('Runtime stopped while loading the workspace.');
+    recoveryWindow = null; retired = true; previous.removeListener('closed', previousClosed);
+    previous.destroy(); if (!smoke) replacement.show();
+    void showCodeVerificationWarning();
+  } catch (error) {
+    const failed = replacement; if (failed) runtimeRecovery.cancelRenderer(failed);
+    window = !previous.isDestroyed() ? previous : null; recoveryWindow = null;
+    if (failed && failed !== previous && !failed.isDestroyed()) failed.destroy();
+    if (window && !closing) { installClipboardForWindow(window); if (!smoke) window.show(); }
+    throw error;
+  } finally { if (timer) clearTimeout(timer); previous.removeListener('closed', previousClosed); }
 }
 function makeWindow() {
   window = new BrowserWindow({ width: 1512, height: 960, minWidth: 1000, minHeight: 680, show: false, title: 'Arcane', backgroundColor: '#0b0b0d', autoHideMenuBar: true, icon: join(__dirname, 'icon.png'),
     webPreferences: { preload: join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, navigateOnDragDrop: false, spellcheck: false, devTools: !app.isPackaged, partition: 'arcane-workspace' } });
-  const session = window.webContents.session;
-  const permissionWindow = window;
-  policy.installClipboardPermissions(session, () => ({ window: permissionWindow, origin, active: !closing && !switching && window === permissionWindow }));
+  const owner = window; if (deferWindowShow) { recoveryWindow = owner; recoveryWindowFailure = null; }
+  const session = owner.webContents.session;
+  installClipboardForWindow(owner);
   session.setDevicePermissionHandler(() => false);
   session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => callback({ cancel: !policy.requestAllowed(origin, details.url) }));
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   for (const type of ['will-navigate', 'will-redirect', 'will-frame-navigate']) window.webContents.on(type, event => { if (!event.isMainFrame || !policy.navigationAllowed(origin, event.url)) event.preventDefault(); });
   window.webContents.on('will-attach-webview', event => event.preventDefault());
   window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-    if (isMainFrame) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); }
+    if (isMainFrame) { runtimeRecovery?.invalidate(owner); if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
   });
-  window.webContents.on('render-process-gone', () => { if (!closing && !switching) void failStartup('The workspace renderer stopped. Restart Arcane to recover saved records.'); });
+  window.webContents.on('render-process-gone', () => {
+    if (recoveryWindow === owner) { recoveryWindowFailure = owner; runtimeRecovery?.cancelRenderer(owner); return; }
+    if (window === owner && !closing && !switching) void failStartup('The workspace renderer stopped. Restart Arcane to recover saved records.');
+  });
   // A document change, crash or close answers any open in-app dialog with its cancel button and detaches the renderer.
   const dialogContents = window.webContents;
   dialogContents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => { if (isMainFrame && !inPlace) appDialogs?.detach(dialogContents); });
   for (const type of ['render-process-gone', 'destroyed']) dialogContents.on(type, () => appDialogs?.detach(dialogContents));
-  window.once('ready-to-show', () => { firstReadyMs = performance.now() - started; if (!smoke) window.show(); });
+  window.once('ready-to-show', () => { firstReadyMs = performance.now() - started; if (!smoke && window === owner && recoveryWindow !== owner) owner.show(); });
   window.on('page-title-updated', event => event.preventDefault());
-  window.on('closed', () => { window = null; if (!switching && !closing) app.quit(); });
+  window.on('closed', () => { runtimeRecovery?.invalidate(owner); if (window === owner) { window = null; if (!switching && !closing) app.quit(); } });
 }
 async function showCodeVerificationWarning() {
   if (smoke || closing || !window || window.isDestroyed() || !projectSession?.verificationUnavailable) return;
@@ -246,17 +280,20 @@ async function showCodeVerificationWarning() {
   catch { console.warn('Luau verification warning could not be displayed.'); }
 }
 async function loadWorkspace() {
-  await window.loadURL(origin + '/studio#' + token); window.setTitle('Arcane - ' + basename(projectPath).slice(0, 80));
-  await showCodeVerificationWarning();
+  const owner = window, expectedOrigin = origin, expectedToken = token, expectedProject = projectSession;
+  await owner.loadURL(expectedOrigin + '/studio#' + expectedToken);
+  if (window !== owner || owner.isDestroyed() || closing || projectSession !== expectedProject || origin !== expectedOrigin || token !== expectedToken) throw new Error('Workspace changed during loading.');
+  owner.setTitle('Arcane - ' + basename(projectPath).slice(0, 80));
+  if (recoveryWindow !== owner) await showCodeVerificationWarning();
 }
 async function chooseProject() {
-  if (switching || closing || !window) return;
+  if (switching || closing || !window || runtimeRecovery && runtimeRecovery.status().state !== 'ready') return;
   const selected = await dialog.showOpenDialog(window, { title: 'Open a local project', properties: ['openDirectory', 'dontAddToRecent'] });
   if (selected.canceled || selected.filePaths.length !== 1) return;
   let path; try { path = await policy.directPath(selected.filePaths[0]); } catch { await dialog.showMessageBox(window, { type: 'error', message: 'Choose a direct local folder, not a link or network directory.' }); return; }
   if (path === projectPath) return;
   const confirm = await dialog.showMessageBox(window, { type: 'question', title: 'Switch project', message: 'Stop this workspace and open the selected project?', detail: 'Active jobs and native connections will stop. Saved records are retained. No inference, Studio connection, write grant or upload starts automatically.', buttons: ['Cancel', 'Open project'], defaultId: 0, cancelId: 0 });
-  if (confirm.response !== 1 || closing || switching) return;
+  if (confirm.response !== 1 || closing || switching || runtimeRecovery && runtimeRecovery.status().state !== 'ready') return;
   switching = true;
   try {
     // Discard the previous renderer and credential before selecting a new project.
@@ -272,7 +309,7 @@ async function chooseProject() {
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'File', submenu: [{ label: 'Open project...', accelerator: 'CmdOrCtrl+O', click: () => void chooseProject() }, { type: 'separator' }, { label: 'Quit Arcane', accelerator: 'Alt+F4', click: () => app.quit() }] },
-    { label: 'View', submenu: [{ label: 'Reload workspace', accelerator: 'CmdOrCtrl+R', click: () => { if (window && !switching && origin && token) window.webContents.reload(); } }, { role: 'togglefullscreen' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }] },
+    { label: 'View', submenu: [{ label: 'Reload workspace', accelerator: 'CmdOrCtrl+R', click: () => { if (window && !switching && origin && token && (!runtimeRecovery || runtimeRecovery.status().state === 'ready')) window.webContents.reload(); } }, { role: 'togglefullscreen' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }] },
     { label: 'Tool', submenu: [{ label: 'Configure Luau verification...', enabled: !smoke, click: () => {
       void codeVerification.configure().catch(() => { if (window && !closing && !switching) void dialog.showMessageBox(window,
         { type: 'error', title: 'Luau verification', message: 'Luau verification configuration is unavailable. Saved settings were retained.' }); });
@@ -286,6 +323,12 @@ async function failStartup(message) {
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
   await stopDaemon(); app.exit(1);
+}
+async function runtimeStopped(info) {
+  if (smoke) return failStartup('The local runtime stopped. Your project records have been retained.');
+  if (closing || switching) return;
+  try { if (await runtimeRecovery?.stopped(info) === false && !closing) await failStartup('Local services stopped before the workspace opened. Saved records were retained. Restart Arcane to try again.'); }
+  catch { console.warn('Local service recovery is unavailable. Keep this workspace open.'); }
 }
 // Smoke only: read-only checks of packaged host inputs. The Studio plugin check uses a separate installer pointed at an
 // empty folder inside the smoke root, so it verifies the bundled plugin build without touching Roblox Studio or writing files.
@@ -357,6 +400,7 @@ async function checkSmoke() {
   })()`);
   const workspacePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.workspacePreferences.read()');
   const claudePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.claudePreferences.read()');
+  const runtimeRecoveryRead = await window.webContents.executeJavaScript('(async()=>{const bridge=window.arcaneDesktop.runtimeRecovery;return {frozen:Object.isFrozen(bridge),status:await bridge.status()};})()');
   // Newer desktop bridges: frozen shape plus the verification-mode answer of each read-only or disabled call. In smoke the
   // hosts are disabled, so no Claude process, folder picker, browser, checkout or system notification can start.
   const desktopBridges = JSON.parse(await window.webContents.executeJavaScript(`(async () => {
@@ -429,6 +473,7 @@ async function checkSmoke() {
     desktopVerificationSetupMounted: renderer.codeVerificationBridge === true && renderer.desktopVerificationController === true,
     studioKeyVaultBridgeMounted: renderer.studioKeysBridge === true,
     workspacePreferencesDisabledAndEmpty: workspacePreferenceRead?.available === false && workspacePreferenceRead.preferences === null,
+    runtimeRecoveryDisabledAndEmpty: runtimeRecoveryRead?.frozen === true && runtimeRecoveryRead.status?.version === 1 && runtimeRecoveryRead.status.state === 'unavailable' && runtimeRecoveryRead.status.message === '',
     claudePreferencesDisabledAndEmpty: claudePreferenceRead?.available === false && claudePreferenceRead.projectPath === null && claudePreferenceRead.preferences === null,
     localChatDraftSwitching: localChat.draftsSeparate === true && localChat.stableComposer === true && localChat.cleaned === true,
     taskUsageHiddenWithoutTask: localChat.taskUsageInactive === true,
@@ -478,6 +523,21 @@ else {
   app.whenReady().then(async () => {
     try {
       nativeTheme.themeSource = 'dark';
+      runtimeRecovery = require('./runtime-recovery.cjs').createRuntimeRecovery({ enabled: !smoke,
+        getContext: () => ({ window, project: projectSession, userRoot, origin, closing, switching }),
+        setBusy: value => { switching = value; }, delay: sleep,
+        retire: async () => { appDialogs?.detach(window?.webContents); const chats = stopClaudeChat('interrupted'); await Promise.all([stopDaemon(), chats]); },
+        start: async () => { await startDaemon(projectPath); await startClaudeChat(); },
+        reload: reloadRecoveredWorkspace,
+        running: () => !!child && child.exitCode == null && child.signalCode == null,
+        confirm: async () => {
+          const owner = window; if (closing || !owner || owner.isDestroyed()) return false;
+          const result = await dialog.showMessageBox(owner, { type: 'warning', title: 'Arcane services stopped',
+            message: 'Restart local services to continue?', detail: 'Arcane will save your chat drafts first. Running replies are interrupted; messages and tool calls are not sent again automatically.',
+            buttons: ['Keep window open', 'Restart local services'], defaultId: 1, cancelId: 0, noLink: true });
+          return result.response === 1 && !closing && window === owner;
+        } });
+      runtimeRecovery.installIpc(ipcMain, rendererEvent);
       codeVerification = createCodeVerification({ dialog, smoke, getSession: () => {
         if (closing || switching || !window || !projectSession || !origin || !token) return null;
         return { ...projectSession, window, origin, epoch: projectSession };
@@ -489,12 +549,12 @@ else {
       } });
       studioKeyVault.installIpc(ipcMain);
       workspacePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, getSession: () => {
-        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return null;
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       workspacePreferences.installIpc(ipcMain);
       claudePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'claude', getSession: () => {
-        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return null;
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       claudePreferences.installIpc(ipcMain);

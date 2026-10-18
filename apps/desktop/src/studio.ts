@@ -1,3 +1,4 @@
+import { startRuntimeRecovery } from './runtime-recovery.js';
 import type { startWorkflowPanel, WorkflowPanelOptions } from './workflow-panel.js';
 import { CodexHistoryPanel } from './codex-history.js';
 import { LearningPanel } from './learning-panel.js';
@@ -2157,6 +2158,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
     window.addEventListener('pagehide',()=>updates.stop());window.addEventListener('pageshow',event=>{if(event.persisted)updates.resume();});
   }).catch(()=>{});
+  let recovery:ReturnType<typeof startRuntimeRecovery>|null=null;
+  {
+    recovery=startRuntimeRecovery(document,{checkpoint:async()=>{await claudeChat?.prepareForRuntimeRecovery();await codexChat.prepareForRuntimeRecovery();}});
+    window.addEventListener('pagehide',()=>recovery?.stop());
+  }
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
@@ -2244,6 +2250,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       imageInputAvailable:()=>codexChat.referenceImageInputAvailable(),
     }));
     if (workflowsStopped) chatTabController.stop();
+    if(!workflowsStopped){await claudeChat?.readyForRuntimeRecovery();await codexChat.readyForRuntimeRecovery();await recovery?.ready();}
   }).catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Chat could not be opened. Your saved history is unchanged.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

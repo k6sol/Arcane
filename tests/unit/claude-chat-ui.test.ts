@@ -1978,3 +1978,14 @@ test('native Claude model choice carries into new chats when browser storage is 
  assert.equal(fresh.input.value,'Keep this second draft');assert.equal(fresh.chat.openTabs().at(-1)!.model,'opus');
  fresh.chat.newChat();assert.equal(fresh.chat.openTabs().at(-1)!.model,'opus');assert.equal(fresh.chat.openTabs().at(-1)!.effort,'low');
 });
+
+
+test('runtime recovery preserves raw composer text and queued messages without replaying a turn',async t=>{
+ for(const interrupted of[false,true]){
+ const native=nativeClaudePreferences(),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ f.type('Start the original task');key(f.input,'Enter');await tick();await tick();f.type('Queued follow-up');key(f.input,'Enter');await tick();
+ assert.equal(f.chat.queued().length,1);const draft='  Keep raw composer text\n\n  ';f.type(draft);const before=sends(backend).length;
+ if(interrupted){backend.emit({type:'done',ok:false,error:'Local services stopped.',usage:null});await tick();}
+ await f.chat.prepareForRuntimeRecovery();assert.equal(f.input.value,draft+'\n\nQueued follow-up');assert.equal(f.chat.queued().length,0);assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,f.input.value);assert.equal(sends(backend).length,before);
+ }
+});

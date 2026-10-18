@@ -579,4 +579,39 @@ const updates = Object.freeze({ version: 1,
     return { state: value.state, message: typeof value.message === 'string' ? value.message.slice(0, 400) : '' };
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));
+const RUNTIME_RECOVERY_ERROR = 'Local service recovery is unavailable.';
+const recoveryState = value => {
+  workspacePreferenceFields(value, ['version', 'state', 'message']);
+  if (value.version !== 1 || !['ready', 'stopped', 'saving', 'starting', 'unavailable'].includes(value.state) ||
+      typeof value.message !== 'string' || value.message.length > 400 || /[\x00-\x1f\x7f]/.test(value.message)) throw new Error(RUNTIME_RECOVERY_ERROR);
+  return { version: 1, state: value.state, message: value.message };
+};
+const recoveryListen = (channel, listener, checkpoint = false) => {
+  if (typeof listener !== 'function') throw new Error(RUNTIME_RECOVERY_ERROR);
+  const wrapped = (_event, value) => { try {
+    let payload;
+    if (checkpoint) { workspacePreferenceFields(value, ['version', 'requestId']);
+      if (value.version !== 1 || typeof value.requestId !== 'string' || !/^[a-f0-9-]{36}$/.test(value.requestId)) return;
+      payload = { version: 1, requestId: value.requestId };
+    } else payload = recoveryState(value);
+    Promise.resolve(listener(payload)).catch(() => {});
+  } catch {} };
+  ipcRenderer.on(channel, wrapped); let active = true;
+  return () => { if (active) { active = false; ipcRenderer.removeListener(channel, wrapped); } };
+};
+const runtimeRecovery = Object.freeze({ version: 1,
+  ready: async (...args) => { try { if(args.length)throw new Error(); const value=await ipcRenderer.invoke('arcane:runtime-recovery-ready');workspacePreferenceFields(value,['ready']);if(typeof value.ready!=='boolean')throw new Error();return{ready:value.ready};}catch{throw new Error(RUNTIME_RECOVERY_ERROR);} },
+  status: async (...args) => { try { if (args.length) throw new Error(); return recoveryState(await ipcRenderer.invoke('arcane:runtime-recovery-status')); } catch { throw new Error(RUNTIME_RECOVERY_ERROR); } },
+  retry: async (...args) => { try { if (args.length) throw new Error(); const value = await ipcRenderer.invoke('arcane:runtime-recovery-retry');
+    workspacePreferenceFields(value, ['requested']); if (value.requested !== true) throw new Error(); return { requested: true };
+  } catch { throw new Error(RUNTIME_RECOVERY_ERROR); } },
+  acknowledge: async (...args) => { try {
+    if (args.length !== 1) throw new Error(); const input = args[0]; workspacePreferenceFields(input, ['requestId', 'saved']);
+    if (typeof input.requestId !== 'string' || !/^[a-f0-9-]{36}$/.test(input.requestId) || typeof input.saved !== 'boolean') throw new Error();
+    const value = await ipcRenderer.invoke('arcane:runtime-recovery-saved', { requestId: input.requestId, saved: input.saved });
+    workspacePreferenceFields(value, ['acknowledged']); if (value.acknowledged !== true) throw new Error(); return { acknowledged: true };
+  } catch { throw new Error(RUNTIME_RECOVERY_ERROR); } },
+  onState: listener => recoveryListen('arcane:runtime-recovery-state', listener),
+  onCheckpoint: listener => recoveryListen('arcane:runtime-recovery-checkpoint', listener, true),
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));

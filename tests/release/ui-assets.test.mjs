@@ -150,6 +150,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/codex-chat.js', ['dist/apps/desktop/src/codex-chat.js', 'text/javascript; charset=utf-8']],
     ['/workspace-shell.js', ['dist/apps/desktop/src/workspace-shell.js', 'text/javascript; charset=utf-8']],
     ['/desktop-verification.js', ['dist/apps/desktop/src/desktop-verification.js', 'text/javascript; charset=utf-8']],
+    ['/runtime-recovery.js',['dist/apps/desktop/src/runtime-recovery.js','text/javascript; charset=utf-8']],
     ['/provider-setup.js',['dist/apps/desktop/src/provider-setup.js','text/javascript; charset=utf-8']],
     ['/claude-chat.js',['dist/apps/desktop/src/claude-chat.js','text/javascript; charset=utf-8']],
     ['/claude-preferences.js',['dist/apps/desktop/src/claude-preferences.js','text/javascript; charset=utf-8']],

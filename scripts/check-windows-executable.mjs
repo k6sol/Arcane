@@ -10,7 +10,7 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 export const REQUIRED_SMOKE_CHECKS = Object.freeze([
   'taskStatusModules', 'ownDaemonReady', 'productStateReadable', 'projectMemoryOffByDefault', 'projectMemoryScoped', 'studioIdle', 'noCommands',
   'isolatedRenderer', 'sameOriginCsp', 'requiredUi', 'noHorizontalOverflow', 'genuineEmptyPreview', 'desktopIdentity',
-  'desktopVerificationSetupMounted', 'studioKeyVaultBridgeMounted', 'workspacePreferencesDisabledAndEmpty', 'claudePreferencesDisabledAndEmpty', 'localChatDraftSwitching',
+  'desktopVerificationSetupMounted', 'studioKeyVaultBridgeMounted', 'workspacePreferencesDisabledAndEmpty', 'claudePreferencesDisabledAndEmpty', 'runtimeRecoveryDisabledAndEmpty', 'localChatDraftSwitching',
   'taskUsageHiddenWithoutTask', 'localChatIntentsStartNoNativeLifecycle', 'optionalCodeVerificationFailureContained', 'externalNavigationRejected',
   'nativeLifecycleNotStarted', 'conversationOnlyDefault', 'providerSetupMounted', 'nativeHandoffMounted',
   'claudeChatBridgeDisabledInSmoke', 'studioPluginBridgeDisabledInSmoke', 'workspaceProjectBridgeDisabledInSmoke', 'inAppDialogsBridgeMounted',

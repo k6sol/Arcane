@@ -215,3 +215,13 @@ test('host-valid legacy tab identifiers preserve drafts and selection across upd
   const tabs=await restoredTabs(t,record);
   assert.equal(tabs.persistenceStatus(),'native');assert.equal(tabs.active()!.draft,'An older saved draft');assert.deepEqual(tabs.active()!.selection,{model:'gpt-6.1-sol',effort:'low'});
 });
+
+
+test('runtime recovery saves drafts while stale native activity still blocks an ordinary update',async t=>{
+ const doc=new DocumentFixture(),observed=state(true),writes:ChatTabPreferences[]=[];const requests:string[]=[];
+ const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async input=>{requests.push(String(input));return Response.json({state:observed});}));t.after(()=>chat.stop());
+ await chat.start();await chat.enableChatTabs({preferences:{read:async()=>plainRow('Earlier draft').preferences,save:async value=>{writes.push(structuredClone(value));}}});await settle();
+ observed.busy=true;observed.connecting=true;await chat.refresh();const input=doc.getElementById('codex-composer');input.value='  Draft retained after service loss\n\n';input.dispatchEvent(new Event('input'));
+ await assert.rejects(chat.prepareForRestart(),/Finish or stop/);await chat.prepareForRuntimeRecovery();
+ assert.equal(writes.at(-1)?.tabs[0]?.draft,input.value);assert.equal(chat.currentStateView().preferencesSaved,true);assert.equal(requests.some(url=>/turn|send|resume/.test(url)),false);
+});
