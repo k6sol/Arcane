@@ -77,7 +77,7 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
       return codeVerification.daemonConfiguration(project);
     },
     ownedDirectory: async full => { await policy.directPath(full, 'directory', true); fs.mkdirSync(full, { recursive: true }); return policy.directPath(full); },
-    setTimeout: real ? (fn, ms) => setTimeout(fn, Math.min(ms, 5000)) : fn => { timers.set(++timerId, fn); return timerId; },
+    setTimeout: real ? setTimeout : fn => { timers.set(++timerId, fn); return timerId; },
     clearTimeout: real ? clearTimeout : timer => timers.delete(timer),
     failStartup() { assert.fail('No unexpected post-adoption child exit.'); },
     spawn(executable, args, options) {
@@ -264,7 +264,7 @@ test('fresh and legacy state without a port record request 0 and do not inspect 
   assert.match(issuance, /hash\(apiKey\)/); assert.doesNotMatch(issuance, /issuedPort|port\s*[:,]\s*port/);
 });
 
-test('owned Node loopback restart: exact persisted endpoint and original real-store key authenticate after busy failure', { timeout: 20000 }, async t => {
+test('owned Node loopback restart: exact persisted endpoint and original real-store key authenticate after busy failure', { timeout: 120000 }, async t => {
   const f = fixture(t);
   // Compile only the current store dependencies into this owned fixture,
   // using Node's type erasure. Never import stale dist or execute product services.
