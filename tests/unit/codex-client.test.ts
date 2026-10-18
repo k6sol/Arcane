@@ -966,6 +966,7 @@ test('optional MCP profile creates fixed ephemeral argv and only named child env
     '-c','mcp_servers.arcane.env_vars=["ARCANE_DAEMON_URL","ARCANE_LOCAL_TOKEN"]',
     '-c','mcp_servers.arcane.enabled=true',
     '-c','mcp_servers.arcane.required=true',
+    '-c','mcp_servers.arcane.default_tools_approval_mode="approve"',
     '-c','mcp_servers.arcane.enabled_tools='+JSON.stringify(ARCANE_TOOL_NAMES),
     '-c','mcp_servers.arcane.disabled_tools=[]',
   ]);
@@ -1075,6 +1076,20 @@ test('MCP profile preserves exact uppercase hexadecimal bearer without normalizi
   assert.equal(spawn.arcaneDaemonUrl,'http://127.0.0.1:65535');
   assert.ok(!JSON.stringify(await receipts()).includes(token));
   assert.ok(!JSON.stringify(session).includes(token));
+});
+
+test('scoped Arcane tool calls use the configured approval policy while native file and shell approvals remain on request',async t=>{
+  const f=await fixture(t,'scoped-mcp-approval',{},true,hostProfile(),'arcane-only');
+  f.session.selectModel({...HUMAN,...PAIR});await f.session.startThread(HUMAN);
+  await f.session.startTurn({...INPUT,allowWorkspaceWrites:true});
+  await until(()=>['completed','failed'].includes(f.session.snapshot().thread!.turnStatus));
+  assert.equal(f.session.snapshot().thread!.turnStatus,'completed');
+  const receipts=await f.receipts();
+  assert.ok(!receipts.some(row=>row.message?.error),'ordinary Arcane calls do not reach an unsupported approval callback');
+  const start=receipts.find(row=>row.message?.method==='turn/start')!.message!.params!;
+  assert.equal(start.approvalPolicy,'on-request');
+  assert.equal((start.sandboxPolicy as {type:string}).type,'workspaceWrite');
+  assert.ok(f.session.snapshot().events.some(event=>event.type==='item'&&event.tool?.tool==='terrain_generate'&&event.status==='completed'));
 });
 
 test('public factory preserves local-use restrictions and rejects browser-style extra profile controls',async()=>{

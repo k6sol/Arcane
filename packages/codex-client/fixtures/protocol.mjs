@@ -34,6 +34,10 @@ createInterface({ input: process.stdin }).on('line', line => {
   record({ type: 'input', message });
   if (!message.method) {
     notify('serverRequest/resolved', { threadId, requestId: message.id });
+    if(mode==='scoped-mcp-approval'&&message.id==='terrain-approval') {
+      notify('item/completed',{threadId,turnId:'fixture-turn-'+turnNumber,item:{id:'terrain-call',type:'mcpToolCall',server:'arcane',tool:'terrain_generate',status:'failed',error:{message:'user rejected MCP tool call'}}});
+      notify('turn/completed',{threadId,turn:turn('fixture-turn-'+turnNumber,'failed')});return;
+    }
     if (deferredTurnAck && message.id === 701) approval(702);
     else if (deferredTurnAck && message.id === 702) {
       send({ id: deferredTurnAck.id, result: { turn: turn(deferredTurnAck.turnId) } });
@@ -123,6 +127,16 @@ createInterface({ input: process.stdin }).on('line', line => {
     if ((mode === 'stale-turn-event' || mode.startsWith('stale-approval-before-turn-id-')) && turnNumber === 1) notify('turn/completed',{threadId,turn:turn(turnId,'completed')});
     if (mode === 'complete-before-ack'||mode==='image-history-resume') notify('turn/completed', { threadId, turn: turn(turnId, 'completed') });
     send({ id, result: { turn: turn(turnId) } });
+    if(mode==='scoped-mcp-approval') {
+      // Explicit test peer behavior for the documented server approval setting. No native/model or Studio call.
+      const item={id:'terrain-call',type:'mcpToolCall',server:'arcane',tool:'terrain_generate',arguments:{},status:'inProgress'};
+      notify('item/started',{threadId,turnId,item});
+      if(process.argv.includes('mcp_servers.arcane.default_tools_approval_mode="approve"')) {
+        notify('item/completed',{threadId,turnId,item:{...item,status:'completed'}});
+        notify('turn/completed',{threadId,turn:turn(turnId,'completed')});
+      } else send({id:'terrain-approval',method:'mcpServer/elicitation/request',params:{threadId,turnId,serverName:'arcane',mode:'form',message:'Allow this tool call?',requestedSchema:{type:'object',properties:{approved:{type:'boolean'}},required:['approved']}}});
+      return;
+    }
     if (mode === 'split-utf8') { void split({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'fixture-message', delta: 'héllo 🌕' } }); return; }
     if (mode === 'malformed') { process.stdout.write('{"not JSON"\n'); return; }
     if (mode === 'bad-utf8') { process.stdout.write(Buffer.from([0x7b,0x22,0xff,0x22,0x7d,10])); return; }

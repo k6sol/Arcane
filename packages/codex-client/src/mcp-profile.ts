@@ -64,6 +64,9 @@ export async function prepareCodexProcess(command: string, cwd: string, profile?
     '-c', 'mcp_servers.arcane.env_vars=["ARCANE_DAEMON_URL","ARCANE_LOCAL_TOKEN"]',
     '-c', 'mcp_servers.arcane.enabled=true',
     '-c', 'mcp_servers.arcane.required=true',
+    // Arcane's daemon owns scoped write, asset and playtest admission. Do not add an inherited native MCP
+    // prompt which this integration cannot render; shell/file approvals keep their separate on-request policy.
+    '-c', 'mcp_servers.arcane.default_tools_approval_mode="approve"',
     '-c', 'mcp_servers.arcane.enabled_tools=' + JSON.stringify(ARCANE_TOOL_NAMES),
     '-c', 'mcp_servers.arcane.disabled_tools=[]',
   );
