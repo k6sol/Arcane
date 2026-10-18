@@ -73,11 +73,14 @@ function createDesktopUpdates(options) {
     restarting = true;
     let accepted = false;
     try {
+      const context = options.getContext?.();
       const { release, current } = await target();
       if (current) return { state: 'refused', message: 'Arcane is already up to date.' };
       // Status is a hint; every restart independently revalidates the complete new package.
       const proof = await verify(release.directory);
       const fresh = await readInstalledRelease(options.installRoot, options.productRoot);
+      const latestContext = options.getContext?.();
+      if (['window', 'epoch', 'origin', 'token'].some(key => context?.[key] !== latestContext?.[key])) throw Error(UNAVAILABLE);
       if (proof.manifestSha256 !== release.manifestSha256 || fresh.manifestSha256 !== release.manifestSha256 || fresh.buildId !== release.buildId || options.available?.() === false)
         throw Error(UNAVAILABLE);
       if (await options.restart(release.executable) !== true) throw Error(UNAVAILABLE);

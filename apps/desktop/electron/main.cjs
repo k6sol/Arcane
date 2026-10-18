@@ -547,6 +547,7 @@ else {
         installRoot: join(process.env.LOCALAPPDATA ?? app.getPath('userData'), 'Arcane', 'Desktop'),
         currentDirectory: resolve(app.getPath('exe'), '..'),
         productRoot: app.isPackaged ? join(process.resourcesPath, 'product') : resolve(__dirname, '../../..'),
+        getContext: () => ({ window, epoch: projectSession, origin, token }),
         available: () => !closing && !switching && !!window && !window.isDestroyed(),
         restart: async executable => {
           if (closing || switching || !window || window.isDestroyed()) return false;

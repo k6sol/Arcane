@@ -66,6 +66,15 @@ test('verification mode observes no installation and starts no update',async()=>
   const host=createDesktopUpdates({enabled:false,verifyBundle:()=>assert.fail('no filesystem verification'),restart:()=>assert.fail('no restart')});
   assert.equal((await host.status()).state,'unavailable');assert.equal((await host.restart()).state,'unavailable');
 });
+test('a completed project or window change during update verification retires the original restart request',async t=>{
+  for(const field of ['window','epoch','origin','token'])await t.test(field,async sub=>{
+    const f=await fixture(sub),context={window:{},epoch:{},origin:'http://127.0.0.1:4000',token:'original'};
+    const host=createDesktopUpdates({...f.options,getContext:()=>({...context}),verifyBundle:async()=>{
+      context[field]=field==='window'||field==='epoch'?{}:'changed';return {manifestSha256:f.sha};
+    }});
+    assert.equal((await host.restart()).state,'refused');assert.deepEqual(f.starts,[],'An old request cannot close the new workspace.');
+  });
+});
 test('sandboxed preload exposes only bounded zero-argument update intents',async()=>{
   let desktop;const calls=[];
   const preload=await readFile(new URL('../../apps/desktop/electron/preload.cjs',import.meta.url),'utf8');
