@@ -90,4 +90,15 @@ test('real Edge setup: bounded startup status, explicit login/install, auth gate
  assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
  assert.equal(await page.evaluate(()=>(window as any).calls.length),9,'displaying an update starts no sign-in or provider request');
  await page.evaluate(()=>{(window as any).updater.stop();(window as any).controller.cleanup();});
+ await page.evaluate(async()=>{
+   const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.connections=0;
+   const path:string='/provider-setup.js',m=await import(path);
+   const status=async()=>({version:1,provider:'codex',installed:true,auth:'subscription',busy:false,cliVersion:'1',message:null});
+   w.controller=m.startProviderSetup(document,{nativeBridge:Object.freeze({version:1,status,login:status,install:status,launch:status}),chat:{providerConnectionStatus:()=>w.account,subscribeProviderStateChange:(fn:()=>void)=>{w.subscriber=fn;return()=>{};},connectForSavedLogin:async()=>{w.connections++;}}});
+   const disconnect=document.getElementById('codex-disconnect') as HTMLButtonElement;disconnect.disabled=false;disconnect.hidden=false;document.body.append(disconnect);
+ });
+ await page.locator('#codex-disconnect').click();
+ await page.waitForTimeout(5500);
+ assert.equal(await page.evaluate(()=>(window as any).connections),0,'trusted Disconnect is captured before the native handler disables its button');
+ await page.evaluate(()=>(window as any).controller.cleanup());
 });

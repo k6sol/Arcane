@@ -299,7 +299,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (publish && Event) doc.dispatchEvent(new Event(PROVIDER_PREFERENCE_EVENT, { detail: { provider } }));
     if (changed) requestStatus();
   };
-  const listen = (target: EventTarget, event: string, handler: (event: Event) => void) => { target.addEventListener(event, handler); removers.push(() => target.removeEventListener(event, handler)); };
+  const listen = (target: EventTarget, event: string, handler: (event: Event) => void, capture = false) => { target.addEventListener(event, handler, capture); removers.push(() => target.removeEventListener(event, handler, capture)); };
   const trusted = (event: Event) => { const mouse = event as MouseEvent; return event.isTrusted === true && !event.defaultPrevented && !mouse.altKey && !mouse.ctrlKey && !mouse.metaKey && !mouse.shiftKey; };
   const invoke = async (action: 'status' | 'login' | 'install' | 'launch') => {
     if (!native || busy || stopped || disposed) return;
@@ -411,9 +411,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   if(typeof doc.defaultView?.addEventListener==='function')listen(doc.defaultView,'focus',checkOnReturn);
   const disconnectIntent = () => { reconnectAllowed=false;clearRecovery(); };
   const disconnect = button('codex-disconnect');
-  if(disconnect)listen(disconnect,'click',event=>{if(trusted(event)&&!disconnect.disabled)disconnectIntent();});
+  if(disconnect)listen(disconnect,'click',event=>{if(trusted(event)&&!disconnect.disabled)disconnectIntent();},true);
   const connect = button('codex-connect');
-  if(connect)listen(connect,'click',event=>{if(trusted(event)&&!connect.disabled)reconnectAllowed=true;});
+  if(connect)listen(connect,'click',event=>{if(trusted(event)&&!connect.disabled)reconnectAllowed=true;},true);
   for (const [id, action] of [['provider-setup-refresh', 'status'], ['provider-setup-login', 'login'], ['provider-setup-install', 'install'], ['provider-setup-launch', 'launch'], ['claude-chat-terminal', 'launch'], ['provider-login-refresh', 'status']] as const) {
     const control = button(id); if (control) listen(control, 'click', event => { if (trusted(event) && !control.disabled) void invoke(action); });
   }
