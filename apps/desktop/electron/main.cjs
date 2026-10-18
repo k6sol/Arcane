@@ -367,6 +367,7 @@ async function checkSmoke() {
     const permissions = shaped(d.projectPermissions, ['read','save']) ? await settle(() => d.projectPermissions.read()) : null;
     const billing = shaped(d.billing, ['status','openCheckout']) ? await settle(() => d.billing.status()) : null;
     const notice = shaped(d.notifications, ['notify','onActivate']) ? await settle(() => d.notifications.notify({ kind: 'finished', body: 'Arcane smoke check.', target: 'arcane-smoke' })) : null;
+    const keep = shaped(d.meshKeep, ['keep']) ? await settle(() => d.meshKeep.keep({ digest: '0'.repeat(64), sessionId: 'arcane-smoke' })) : null;
     return JSON.stringify({
       claudeChat: !!chat && chat.ok === false,
       studioPlugin: !!plugin && plugin.ok && plugin.value.state === 'unavailable' && plugin.value.message === 'Studio plugin setup is disabled in verification mode.',
@@ -374,7 +375,8 @@ async function checkSmoke() {
       dialogs: shaped(d.dialogs, ['attach','reply']),
       projectPermissions: !!permissions && permissions.ok && permissions.value.available === false,
       billing: !!billing && billing.ok && billing.value.state === 'not-connected' && billing.value.account === 'unavailable',
-      notifications: !!notice && notice.ok && notice.value.shown === false
+      notifications: !!notice && notice.ok && notice.value.shown === false,
+      meshKeep: !!keep && keep.ok && keep.value.state === 'unavailable'
     });
   })()`));
   const packagedFeatures = await smokePackagedFeatures();
@@ -439,6 +441,7 @@ async function checkSmoke() {
     projectPermissionsBridgeDisabledInSmoke: desktopBridges.projectPermissions === true,
     billingBridgeNotConnectedInSmoke: desktopBridges.billing === true,
     notificationsBridgeSilentInSmoke: desktopBridges.notifications === true,
+    meshKeepBridgeUnavailableInSmoke: desktopBridges.meshKeep === true,
     bundledStudioPluginVerified: packagedFeatures.bundledPluginVerified === true,
     bundledPlansConfigValid: packagedFeatures.plansConfigValid === true,
     bundledChatInstructionsLoadable: packagedFeatures.chatInstructionsBundled === true,
@@ -526,6 +529,17 @@ else {
       // Build-done notifications: fixed titles and a bounded body, only while the window is not focused; click focuses it.
       require('./build-notifications.cjs').createBuildNotifications({ enabled: !smoke, Notification,
         getWindow: () => closing || switching ? null : window }).installIpc(ipcMain, { trusted: rendererEvent });
+      // Keep this mesh: the host asks in the trusted decision window (account, asset name, upload quota) and only then hands
+      // the daemon a single-use consent over the private child IPC channel. Never automatic, never from a model.
+      require('./mesh-keep.cjs').createMeshKeepHost({ enabled: !smoke,
+        getSession: () => closing || switching || !window || !origin || !token || !child || !child.connected ? null :
+          { window, origin, token, send: message => { if (!child || !child.connected) throw new Error('Runtime unavailable.'); child.send(message); } },
+        confirm: async request => {
+          const owner = window; if (closing || switching || !owner || owner.isDestroyed()) return false;
+          const choice = await dialog.showMessageBox(owner, { type: 'warning', title: request.title, message: request.message, detail: request.detail,
+            buttons: ['Cancel', request.confirmLabel], defaultId: 0, cancelId: 0, noLink: true });
+          return choice.response === 1 && !closing && !switching && window === owner;
+        } }).installIpc(ipcMain, { trusted: rendererEvent });
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
         getHost: () => claudeChat ?? null,

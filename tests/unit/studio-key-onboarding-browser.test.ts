@@ -67,7 +67,7 @@ for (const storageAvailable of [true, false]) test('key onboarding: trusted rota
       if (await bridgeRoutes(request, response, url, HUMAN, origin)) return;
       assert.equal(request.headers.authorization, 'Bearer ' + HUMAN);
       // Plans & credits reads local usage once at start for the top-bar chip; the fixture leaves it unavailable.
-      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/work/runs', '/v1/work/ready', '/v1/assets/conversation-jobs', '/v1/playtests', '/v1/plans/state'].includes(path) && request.method === 'GET') {
+      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/work/runs', '/v1/work/ready', '/v1/assets/conversation-jobs', '/v1/playtests', '/v1/plans/state', '/v1/mesh-keep/state'].includes(path) && request.method === 'GET') {
         send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic metadata only.' }, 503); return;
       }
       unexpected.push(request.method + ' ' + path); send({ error: 'FIXTURE_ROUTE' }, 404);

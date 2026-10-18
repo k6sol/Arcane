@@ -2116,5 +2116,17 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
   .arcane-app .welcome-tour-count,.arcane-app #welcome-tour-body,.arcane-app .welcome-tour-keys{color:CanvasText}
 }
 /* ---- End welcome tour ---- */
+/* Keep this mesh (mesh-keep.ts): assets panel list and inline chat-card controls. */
+.mesh-keep-panel{margin:14px 0;display:flex;flex-direction:column;gap:6px}
+.mesh-keep-panel h3{margin:0;font-size:13px;font-weight:600}
+.mesh-keep-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.mesh-keep-item{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;min-width:0}
+.mesh-keep-name{font-size:13px;font-weight:550;overflow-wrap:anywhere}
+.mesh-keep-status{margin:0;overflow-wrap:anywhere}
+.mesh-keep-item[data-state=failed] .mesh-keep-status,.mesh-keep-item[data-state=unknown] .mesh-keep-status,.mesh-keep-inline[data-state=failed] .mesh-keep-status,.mesh-keep-inline[data-state=unknown] .mesh-keep-status{color:var(--danger,#e5484d)}
+.chat-asset-card:has(.mesh-keep-inline){flex-wrap:wrap}
+.mesh-keep-inline{flex-basis:100%;display:flex;flex-direction:column;gap:6px;min-width:0}
+.mesh-keep-inline .mesh-keep-status{font-size:12px}
+@media(forced-colors:active){.mesh-keep-item{border-color:CanvasText}}
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

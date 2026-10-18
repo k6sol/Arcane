@@ -281,6 +281,8 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 			current()
 			if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
 			part.Parent = model
+			-- Keep this mesh swaps exactly these session parts (AssetPlacement.keep).
+			resource.part, resource.keptAssetId = part, nil
 			local low, high = object.worldBounds.min, object.worldBounds.max
 			local size = {}
 			for axis = 1, 3 do size[axis] = math.max(0.05, (high[axis] - low[axis]) * STUDS_PER_METER) end
@@ -310,6 +312,31 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	-- AssetPlacement calls this once the adopted Model is parented.
 	return model, function() owner.placed = model end
 end
+
+-- asset.keep_mesh: host-only (the daemon admits it solely after the person's trusted-dialog consent). Resolves the
+-- retained owner of ONE placed reconstruction in THIS plugin session and hands it to AssetPlacement.keep.
+-- No final guard after uploads: a lease or scope change must never discard the asset IDs Roblox already returned.
+function Operations:keepReconstruction(args: any, guard: () -> ()): any
+	V.fields(args, {"source", "attemptId", "name", "description", "creatorId", "continuity", "finish", "assetIds"}, "keep-mesh arguments")
+	local digest = string.match(V.string(args.source, "keep source", 80), "^editable%-([0-9a-f]+)$")
+	if not digest or #digest ~= 64 then V.fail("INPUT", "Expected an editable-<transfer digest> source.") end
+	local owners = assetOwners[self]
+	local owner = owners and owners.resources[digest]
+	if not owner or not owner.finished or owner.retired or owner.service == nil or #owner.meshes == 0 then
+		V.fail("STATE", "This mesh is no longer held by this Studio session (reconnected, Play or reopened). Nothing was uploaded; generate and place it again.")
+	end
+	if owner.keeping then V.fail("STATE", "This mesh is already being kept.") end
+	-- keepEngineDouble is set only by the standalone VM tests; production always probes and binds the real engine.
+	local double = self.keepEngineDouble
+	if not double and not AssetPlacement.keepSupported(self.gameModel) then V.fail("CAPABILITY", "This Studio does not let plugins upload meshes. Nothing was uploaded.") end
+	owner.keeping = true
+	local ok, result = pcall(AssetPlacement.keep, self, owner, digest, args, guard, double or AssetPlacement.keepEngine(self, AssetUpload))
+	owner.keeping = false
+	if not ok then error(result, 0) end
+	if #V.encode(result, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Keep receipt exceeds its bound.") end
+	return V.immutable(result)
+end
+function Operations.meshKeepSupported(gameModel: any): boolean return AssetPlacement.keepSupported(gameModel) end
 
 function Operations:source(instance: any): string
 	if not instance:IsA("LuaSourceContainer") then V.fail("CLASS", "Reference is not a script.") end
@@ -1479,6 +1506,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	if method == "scene.children" then result = self:children(args)
 	elseif method == "asset.stage_packet" then result = self:stageAssetPacket(args, guard)
 	elseif method == "asset.reconstruct" then return self:reconstructAsset(args, guard)
+	elseif method == "asset.keep_mesh" then return self:keepReconstruction(args, guard)
 	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)

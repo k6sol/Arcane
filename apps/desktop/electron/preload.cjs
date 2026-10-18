@@ -494,4 +494,18 @@ const notifications = Object.freeze({ version: 1,
     return () => { if (active) { active = false; ipcRenderer.removeListener('arcane:notification-activate', wrapped); } };
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications }));
+// Keep this mesh: one placed mesh id (transfer digest + Studio session) out after the person's click; the host confirms in its
+// own trusted dialog and answers with a fixed state and a short message. Nothing else crosses.
+const MESH_KEEP_UNAVAILABLE = 'Keep this mesh is unavailable.';
+const meshKeep = Object.freeze({ version: 1,
+  keep: async (...args) => {
+    try {
+      const value = args[0];
+      if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2 ||
+          typeof value.digest !== 'string' || !/^[a-f0-9]{64}$/.test(value.digest) || typeof value.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.sessionId)) throw new Error();
+      const out = await ipcRenderer.invoke('arcane:mesh-keep', { digest: value.digest, sessionId: value.sessionId });
+      return { state: ['started', 'cancelled', 'refused', 'unavailable'].includes(out?.state) ? out.state : 'unavailable', message: typeof out?.message === 'string' ? out.message.slice(0, 400) : '' };
+    } catch { throw new Error(MESH_KEEP_UNAVAILABLE); }
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep }));

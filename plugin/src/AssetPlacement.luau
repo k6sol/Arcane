@@ -398,4 +398,197 @@ function AssetPlacement.instantiate(entry: any): any
 	return copy
 end
 
+-- "Keep this mesh" (docs/build/MESH_KEEP.md). Uploads each retained EditableMesh of ONE placed procedural reconstruction to
+-- the signed-in Studio user's own Roblox account through AssetUpload (AssetService.CreateAssetAsync), then swaps every
+-- session MeshPart for a persistent MeshPart made from its new asset ID (AssetService.CreateMeshPartAsync) in one undo
+-- recording. Only the host mesh-keep service can queue it, after the person confirmed the Arcane dialog; the host records
+-- the intent durably before queueing, which is what recordIntent acknowledges. Nothing is retried. Asset IDs are always
+-- returned, even when a later upload or the swap fails, so an upload is never lost from the receipt.
+-- APIs (create.roblox.com, checked 2026-10-18): AssetService.CreateAssetAsync(object, Enum.AssetType, {CreatorId,
+-- CreatorType, Name, Description}) -> (Enum.CreateAssetResult, assetId or error); AssetService.CreateMeshPartAsync(Content,
+-- options) -> MeshPart; Content.fromAssetId(id), with Content.fromUri("rbxassetid://" .. id) as the fallback.
+-- keepSupported probes every one of them; when any is missing the capability is not advertised (fails closed).
+AssetPlacement.KEEP_LIMITS = table.freeze({meshes = 16, nameCodepoints = 50})
+local KL = AssetPlacement.KEEP_LIMITS
+
+function AssetPlacement.keepSupported(gameModel: any): boolean
+	local ok, supported = pcall(function(): boolean
+		local service = gameModel:GetService("AssetService")
+		local enums: any, content: any = Enum, Content
+		return type(service.CreateAssetAsync) == "function" and type(service.CreateMeshPartAsync) == "function"
+			and typeof(enums.AssetType.Mesh) == "EnumItem" and typeof(enums.AssetCreatorType.User) == "EnumItem"
+			and typeof(enums.CreateAssetResult.Success) == "EnumItem"
+			and (type(content.fromAssetId) == "function" or type(content.fromUri) == "function")
+	end)
+	return ok and supported == true
+end
+
+-- Production engine bindings; the standalone tests inject doubles with the same shape.
+function AssetPlacement.keepEngine(ops: any, assetUpload: any): any
+	local content: any = Content
+	return {service = ops.gameModel:GetService("AssetService"), AssetUpload = assetUpload,
+		enums = {AssetType = Enum.AssetType, AssetCreatorType = Enum.AssetCreatorType, CreateAssetResult = Enum.CreateAssetResult},
+		content = function(id: number): any
+			if type(content.fromAssetId) == "function" then return content.fromAssetId(id) end
+			return content.fromUri("rbxassetid://" .. string.format("%d", id))
+		end,
+		userId = function(): number return ops.gameModel:GetService("StudioService"):GetUserId() end}
+end
+
+local function clipName(name: string, suffix: string): string
+	local room = KL.nameCodepoints - utf8.len(suffix)
+	if (utf8.len(name) or 0) > room then name = string.sub(name, 1, (utf8.offset(name, room + 1) or (#name + 1)) - 1) end
+	return name .. suffix
+end
+
+local SWAP_FIELDS = table.freeze({"Name", "Size", "CFrame", "Anchored", "CanCollide", "CanQuery", "CanTouch", "CastShadow", "Transparency", "Material", "Color"})
+
+function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, guard: () -> (), engine: any): any
+	V.fields(args, {"source", "attemptId", "name", "description", "creatorId", "continuity", "finish", "assetIds"}, "keep-mesh arguments")
+	local attemptId = V.string(args.attemptId, "attempt ID", 36)
+	if not string.match(attemptId, "^%x+%-%x+%-%x+%-%x+%-%x+$") then V.fail("INPUT", "Expected a host upload attempt ID.") end
+	local name = V.string(args.name, "asset name", 200)
+	if (utf8.len(name) or 0) > KL.nameCodepoints or not string.find(name, "%S") then V.fail("INPUT", "Invalid asset name.") end
+	local description = V.string(args.description, "asset description", 4096, true)
+	local creatorId = V.integer(args.creatorId, 1, 9007199254740991, "creator ID")
+	local continuity = V.fields(args.continuity, {"clientLifetimeId", "pluginArtifactHash", "playEpoch"}, "keep-mesh continuity")
+	local finish = V.boolean(args.finish, "finish")
+	local reuse: {number}? = nil
+	if finish then
+		reuse = {}
+		for index, value in ipairs(V.list(args.assetIds, KL.meshes, "asset IDs")) do (reuse :: any)[index] = V.integer(value, 1, 9007199254740991, "asset ID") end
+	elseif args.assetIds ~= nil then V.fail("INPUT", "A new keep never carries asset IDs.") end
+	local meshes = owner.meshes
+	if #meshes == 0 or #meshes > KL.meshes then V.fail("CAPACITY", "Keep this mesh supports 1.." .. KL.meshes .. " meshes per model; nothing was uploaded.") end
+	if reuse and #reuse ~= #meshes then V.fail("SCOPE", "The recorded asset IDs do not match this model's meshes.") end
+	local model = owner.placed
+	if model == nil or model.Parent == nil then V.fail("STATE", "The placed model was removed or undone; nothing was uploaded. Place it again first.") end
+	for _, resource in ipairs(meshes) do
+		if resource.disposed or resource.mesh == nil then V.fail("STATE", "The session meshes were released; nothing was uploaded.") end
+	end
+	-- The account the person confirmed in Arcane must still be the signed-in Studio user, right before any upload.
+	local function signedIn(): boolean
+		local ok, id = pcall(engine.userId)
+		return ok and id == creatorId
+	end
+	if not signedIn() then V.fail("ACCOUNT", "The Roblox account signed in to Studio changed since you confirmed. Nothing was uploaded.") end
+	guard()
+	local entries: {any} = {}
+	local started = 0
+	if reuse then
+		for index, resource in ipairs(meshes) do
+			local object = resource.object
+			entries[index] = {index = index, name = if type(object) == "table" and type(object.name) == "string" then string.sub(object.name, 1, 100) else "Mesh" .. index,
+				assetId = reuse[index], upload = "reused", reason = V.NULL, swapped = false}
+		end
+	else
+		local lastResult: string? = nil
+		-- Pass-through that only remembers the engine's own CreateAssetResult name for the receipt (quota, moderation...).
+		local recorder = {CreateAssetAsync = function(_self: any, resource: any, assetType: any, parameters: any): (any, any)
+			local result, idOrError = engine.service:CreateAssetAsync(resource, assetType, parameters)
+			lastResult = if typeof(result) == "EnumItem" and type(result.Name) == "string" and string.match(result.Name, "^%a+$") then string.sub(result.Name, 1, 40) else nil
+			return result, idOrError
+		end}
+		local function current(resource: any): boolean
+			for _, item in ipairs(meshes) do if item.mesh == resource and not item.disposed then return true end end
+			return false
+		end
+		local uploader = engine.AssetUpload.new(recorder, engine.enums, {
+			assertAdmission = function(_ticket: any, resource: any): ()
+				if owner.retired or not current(resource) or not signedIn() then error("admission", 0) end
+			end,
+			liveGuard = function(_ticket: any, _resource: any): () guard() end,
+			-- The host wrote this attempt's intent receipt before the command existed; the command is that acknowledgement.
+			recordIntent = function(ticket: any): any return table.freeze({phase = "intent", ticket = ticket}) end,
+			recordResult = function(ticket: any, observation: any): any
+				return table.freeze({phase = "result", ticket = ticket, assetId = observation.assetId})
+			end,
+		})
+		local identity = {sessionId = ops.registry.sessionId, clientLifetimeId = V.string(continuity.clientLifetimeId, "client lifetime", 128),
+			pluginArtifactHash = V.string(continuity.pluginArtifactHash, "plugin artifact hash", 64), playEpoch = V.integer(continuity.playEpoch, 0, 9007199254740991, "play epoch"),
+			placeId = ops.gameModel.PlaceId, universeId = ops.gameModel.GameId}
+		local stop: string? = nil
+		for index, resource in ipairs(meshes) do
+			local object = resource.object
+			local label = if type(object) == "table" and type(object.name) == "string" then string.sub(object.name, 1, 100) else "Mesh" .. index
+			local entry: any = {index = index, name = label, assetId = V.NULL, upload = "skipped", reason = V.NULL, swapped = false}
+			entries[index] = entry
+			if stop then entry.reason = stop; continue end
+			local sha = if type(object) == "table" then object.meshExportSha256 else nil
+			if type(sha) ~= "string" or not string.match(sha, "^[0-9a-f]+$") or #sha ~= 64 then entry.upload, entry.reason, stop = "failed", "SOURCE_METADATA", "STOPPED"; continue end
+			lastResult = nil
+			local ticket = table.freeze({attemptId = attemptId .. "." .. index, assetType = "Mesh",
+				creator = table.freeze({kind = "user", id = creatorId}),
+				source = table.freeze({jobId = "transfer-" .. string.sub(digest, 1, 32), resourceId = "mesh-" .. index, sha256 = sha}),
+				uploader = table.freeze({status = "available", id = creatorId, provenance = "StudioService:GetUserId"}),
+				continuity = table.freeze(table.clone(identity)),
+				name = if #meshes == 1 then name else clipName(name, " " .. index), description = description})
+			local called, outcome = pcall(uploader.upload, uploader, ticket, resource.mesh)
+			if not called then
+				entry.upload, entry.reason, stop = "failed", if type(outcome) == "table" and type(outcome.code) == "string" and string.match(outcome.code, "^[%u_]+$") then outcome.code else "INPUT", "STOPPED"
+				continue
+			end
+			if outcome.uploadStarted then started += 1 end
+			if outcome.state == "succeeded" then entry.assetId, entry.upload = outcome.assetId, "succeeded"
+			elseif outcome.assetId ~= nil then
+				-- Roblox created the asset but continuing scope was lost: keep the ID, stop further uploads.
+				entry.assetId, entry.upload, entry.reason, stop = outcome.assetId, "succeeded", outcome.reason, "STOPPED"
+			elseif outcome.state == "failed" then
+				entry.upload, entry.reason, stop = "failed", "ENGINE_REJECTED" .. (if lastResult then ":" .. lastResult else ""), "STOPPED"
+			else
+				entry.upload, entry.reason, stop = if outcome.uploadStarted then "reconciliation" else "failed", outcome.reason or "UNKNOWN", "STOPPED"
+			end
+		end
+	end
+	-- Swap only when every mesh has an asset ID: a model is never left half persistent by a partial upload.
+	local complete = true
+	for _, entry in ipairs(entries) do if entry.assetId == V.NULL then complete = false end end
+	local swapped = 0
+	if complete then
+		pcall(function()
+			guard()
+			if model.Parent == nil then V.fail("STATE", "The placed model was removed.") end
+			local fresh: {any} = {}
+			for index, resource in ipairs(meshes) do
+				local old, id = resource.part, entries[index].assetId
+				if resource.keptAssetId == id and old ~= nil and old.Parent ~= nil then fresh[index] = false -- already persistent (earlier finish)
+				else
+					if old == nil or old.Parent == nil or not old:IsDescendantOf(model) then V.fail("STATE", "A session part was removed from the model.") end
+					local part = engine.service:CreateMeshPartAsync(engine.content(id), {CollisionFidelity = old.CollisionFidelity, RenderFidelity = old.RenderFidelity})
+					guard()
+					if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
+					fresh[index] = part
+				end
+			end
+			local recording = ops.history:TryBeginRecording("Arcane.keep." .. attemptId, "Arcane keep mesh")
+			if not recording then V.fail("HISTORY", "Cannot begin an undo recording.") end
+			local done = pcall(function()
+				for index, resource in ipairs(meshes) do
+					local part = fresh[index]
+					if part then
+						local old = resource.part
+						for _, field in ipairs(SWAP_FIELDS) do (part :: any)[field] = old[field] end
+						part.Parent = old.Parent
+						old.Parent = nil
+						resource.part, resource.keptAssetId = part, entries[index].assetId
+					end
+					entries[index].swapped = true
+				end
+			end)
+			pcall(function() ops.history:FinishRecording(recording, Enum.FinishRecordingOperation.Commit) end)
+			if not done then V.fail("ENGINE", "The part swap stopped part-way.") end
+		end)
+		for _, entry in ipairs(entries) do if entry.swapped then swapped += 1 end end
+		-- The placement receipt stays restorable: same model, same instance count after a 1:1 swap.
+		local owned = if swapped == #entries then ops.registry.owned[model] else nil
+		if owned and owned.placed then owned.placed.count = #model:GetDescendants() end
+	end
+	local ids = 0
+	for _, entry in ipairs(entries) do if entry.assetId ~= V.NULL then ids += 1 end end
+	local state = if ids == 0 then "failed" elseif ids < #entries then "partial" elseif swapped == #entries then "kept" else "uploaded"
+	local refOk, ref = pcall(function(): any return ops.registry:ref(model) end)
+	return {state = state, meshes = V.array(entries), uploadsStarted = started, swapped = swapped,
+		persistence = if state == "kept" then "saved-asset" else "studio-session-only", creatorId = creatorId, ref = if refOk then ref else V.NULL}
+end
+
 return table.freeze(AssetPlacement)

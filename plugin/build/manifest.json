@@ -7,7 +7,7 @@
   "entry": "ArcaneLocalBridge",
   "runtimeIdentity": {
     "scheme": "arcane-plugin-source-v1",
-    "sha256": "bc03b3d5315ddb11bfd80b89b9f69a2ee34dc0c3f12c34d47933ad40f7e2fe4f"
+    "sha256": "ad5112577303cb6dada6be68bbaf0cb8d3ee2a9ff27ce23a31076c94b72d5a43"
   },
   "sources": [
     {
@@ -22,8 +22,8 @@
     },
     {
       "path": "src/Validation.luau",
-      "bytes": 19980,
-      "sha256": "0d0554ee62a470d7d80f980bb66e72f111f6571af359af2dd2361324249a759b"
+      "bytes": 20177,
+      "sha256": "ca67de4a80b89c938d820aea5337856995793b34d128a069d24c3ae771d54bef"
     },
     {
       "path": "src/Registry.luau",
@@ -37,13 +37,13 @@
     },
     {
       "path": "src/Operations.luau",
-      "bytes": 88623,
-      "sha256": "490aeb3b71785b8052b71750c6ac4245c9670215be49a5286433371a2f938675"
+      "bytes": 90820,
+      "sha256": "f8bf2e42edf054d53e1b659deace058a53c0a42735c74c544c178192a8cbabd7"
     },
     {
       "path": "src/Transport.luau",
-      "bytes": 47937,
-      "sha256": "0763dc46eca9d057110d65f4a0935290e3eeee38aa73ff3c2ae6cf26a7fe901a"
+      "bytes": 48282,
+      "sha256": "34dd1fd3d0380f17cc80740eda697d509bbb347c0538de20958f9ef6e376ed7e"
     },
     {
       "path": "src/TestProof.luau",
@@ -87,8 +87,8 @@
     },
     {
       "path": "src/AssetPlacement.luau",
-      "bytes": 21559,
-      "sha256": "c7ddcad4db2d1a3671d2da4d952c2ec782032d0df8d9eb01cf27b4572a5ddb7d"
+      "bytes": 34222,
+      "sha256": "9cccf3236533443119b4372afcc34659987f67944d5e1b139dc3ae2cd80dddd3"
     },
     {
       "path": "src/TerrainGen.luau",
@@ -100,14 +100,14 @@
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 360990,
-      "sha256": "5c3af6fb9b865f9220d1bfc15c4ed16058b6e4b306477e1ac0eb1ae21ee6dd85"
+      "bytes": 376392,
+      "sha256": "6928e3994e3039751de15e7e992f085c86ab13a81c52634c2546ed3d0bea9d47"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 360990,
-      "sha256": "5c3af6fb9b865f9220d1bfc15c4ed16058b6e4b306477e1ac0eb1ae21ee6dd85"
+      "bytes": 376392,
+      "sha256": "6928e3994e3039751de15e7e992f085c86ab13a81c52634c2546ed3d0bea9d47"
     }
   ]
 }

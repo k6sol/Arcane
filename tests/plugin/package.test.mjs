@@ -213,21 +213,30 @@ test('method/root/class/material allowlists exactly match the shared protocol an
   }
 });
 
-test('packaged source has no arbitrary evaluation, asset insertion, unscoped persistence or publishing API', () => {
+test('packaged source confines asset APIs to reviewed bindings and excludes arbitrary execution', () => {
   assert.doesNotMatch(allSource, /\b(?:loadstring|loadfile|dofile|getfenv|setfenv)\s*\(/);
   assert.doesNotMatch(allSource, /(?:InsertService|DataStoreService|MemoryStoreService|MarketplaceService|PublishToRoblox|StartPlay)/);
   // The one production acquisition belongs only to the guarded host-owned
   // reconstruction operation (retained for its own placement). It grants no insertion/upload command.
   const acquisition=/GetService\s*\(\s*["']AssetService["']\s*\)/g;
-  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(acquisition)].map(()=>file.filename)),['Operations.luau']);
+  // Plus Keep this mesh (docs/build/MESH_KEEP.md): the capability probe and the engine binding, both in AssetPlacement.
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(acquisition)].map(()=>file.filename)).sort(),['AssetPlacement.luau','AssetPlacement.luau','Operations.luau']);
   const operations=byFile['Operations.luau'],start=operations.indexOf('function Operations:reconstructAsset('),end=operations.indexOf('function Operations:source(',start);
   assert.ok(start>=0&&end>start);assert.equal([...operations.slice(start,end).matchAll(acquisition)].length,1);
   assert.doesNotMatch(operations.slice(0,start)+operations.slice(end),acquisition);
   // Exactly one MeshPart creation: the materialization of this plugin's own retained
   // reconstruction, reached only through guarded scene.place_asset adoption (no upload).
   const meshParts=/:CreateMeshPartAsync\s*\(/g;
-  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)),['Operations.luau']);
-  const mStart=operations.indexOf('function Operations:materializeReconstruction('),mEnd=operations.indexOf('function Operations:source(',mStart);
+  // A second one only in AssetPlacement.keep: persistent parts from the person's own confirmed upload IDs.
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)).sort(),['AssetPlacement.luau','Operations.luau']);
+  const placement=byFile['AssetPlacement.luau'],kStart=placement.indexOf('function AssetPlacement.keep('),kEnd=placement.indexOf('return table.freeze(AssetPlacement)',kStart);
+  assert.ok(kStart>=0&&kEnd>kStart);assert.equal([...placement.slice(kStart,kEnd).matchAll(meshParts)].length,1);
+  assert.doesNotMatch(placement.slice(0,kStart),/:CreateMeshPartAsync\s*\(|:CreateAssetAsync\s*\(/);
+  // Uploads: AssetUpload calls the engine method by reference; the only direct call is AssetPlacement.keep's
+  // pass-through recorder, which AssetPlacement.keep hands to that uploader.
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(/:CreateAssetAsync\s*\(/g)].map(()=>file.filename)),['AssetPlacement.luau']);
+  assert.match(placement.slice(kStart,kEnd),/engine\.AssetUpload\.new\(recorder,/);
+  const mStart=operations.indexOf('function Operations:materializeReconstruction('),mEnd=operations.indexOf('function Operations:keepReconstruction(',mStart);
   assert.ok(mStart>=0&&mEnd>mStart);assert.equal([...operations.slice(mStart,mEnd).matchAll(meshParts)].length,1);
   assert.doesNotMatch(operations.slice(mStart,mEnd),/GetService|CreateAssetAsync|Upload|Publish/);
   assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);

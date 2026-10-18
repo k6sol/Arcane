@@ -117,7 +117,11 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => 
 // shell evaluation, public listener, or browser-controlled process message.
 if (process.send) process.once('disconnect', () => { void shutdown(); });
 if (process.send && !process.connected) void shutdown();
+// Keep this mesh: the desktop main process (the only holder of this channel) delivers the person's trusted-dialog
+// consent here; the renderer and agents cannot reach it, so they can never start an upload.
+if (process.send) app.meshKeep?.enableConsentChannel();
 if (process.send) process.on('message', (message: unknown) => {
   if (message && typeof message === 'object' && 'type' in message && 'protocolVersion' in message &&
       message.type === 'arcane-shutdown' && message.protocolVersion === 1) void shutdown();
+  else if (!closing) app.meshKeep?.acceptConsent(message);
 });

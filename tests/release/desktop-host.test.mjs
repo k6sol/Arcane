@@ -41,7 +41,7 @@ test('packaged smoke records module delivery after initialization and fails when
           if(code.includes('title: document.title'))return JSON.stringify(renderer);
           if(code.includes("'/task-plan-boot.js'"))return modulesAvailable;
           if(code==='window.arcaneDesktop.workspacePreferences.read()')return{available:false,preferences:null};
-          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true});
+          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true});
           if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
           assert.fail('Unexpected smoke renderer request');
         }}},Math,JSON,Buffer,
@@ -61,7 +61,7 @@ test('executable verifier requires every named smoke check, including the newer 
   const all=Object.fromEntries(REQUIRED_SMOKE_CHECKS.map(name=>[name,true]));
   assert.equal(smokeChecksComplete(all),true);
   for(const name of ['claudeChatBridgeDisabledInSmoke','studioPluginBridgeDisabledInSmoke','workspaceProjectBridgeDisabledInSmoke','inAppDialogsBridgeMounted',
-    'projectPermissionsBridgeDisabledInSmoke','billingBridgeNotConnectedInSmoke','notificationsBridgeSilentInSmoke','bundledStudioPluginVerified','bundledPlansConfigValid','bundledChatInstructionsLoadable','trustedDecisionDialogsBundled']){
+    'projectPermissionsBridgeDisabledInSmoke','billingBridgeNotConnectedInSmoke','notificationsBridgeSilentInSmoke','meshKeepBridgeUnavailableInSmoke','bundledStudioPluginVerified','bundledPlansConfigValid','bundledChatInstructionsLoadable','trustedDecisionDialogsBundled']){
     assert.ok(REQUIRED_SMOKE_CHECKS.includes(name),name);
     const {[name]:_,...missing}=all;assert.equal(smokeChecksComplete(missing),false,name+' missing');
     assert.equal(smokeChecksComplete({...all,[name]:false}),false,name+' false');
@@ -83,11 +83,14 @@ test('smoke bridge probe accepts only the disabled verification-mode answers of 
     projectPermissions:bridge(['read','save'],{read:async()=>({available:false,settings:{claudeTools:false,codexAutoApprove:false}})}),
     billing:bridge(['status','openCheckout'],{status:async()=>({version:1,state:'not-connected',message:"Checkout isn't connected yet",account:'unavailable'})}),
     notifications:bridge(['notify','onActivate'],{notify:async()=>({shown:false})}),
+    meshKeep:bridge(['keep'],{keep:async()=>({state:'unavailable',message:'Keep this mesh is unavailable.'})}),
     ...overrides});
   const observe=async d=>JSON.parse(await vm.runInNewContext(probe,{window:{arcaneDesktop:d},Object,String,JSON}));
   const good=await observe(desktop({}));
-  assert.deepEqual(good,{claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true});
+  assert.deepEqual(good,{claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true});
   assert.deepEqual(calls,['chat.status'],'only read-only or disabled calls are made');
+  assert.equal((await observe(desktop({meshKeep:bridge(['keep'],{keep:async()=>({state:'started',message:''})})}))).meshKeep,false,'smoke must never start an upload');
+  assert.equal((await observe(desktop({meshKeep:undefined}))).meshKeep,false);
   assert.equal((await observe(desktop({studioPlugin:bridge(['status','install'],{status:async()=>({state:'missing',message:'The Arcane Studio plugin is not installed yet.'})})}))).studioPlugin,false);
   assert.equal((await observe(desktop({billing:bridge(['status','openCheckout'],{status:async()=>({state:'ready',account:'unavailable'})})}))).billing,false);
   assert.equal((await observe(desktop({notifications:bridge(['notify','onActivate'],{notify:async()=>({shown:true})})}))).notifications,false);
@@ -360,12 +363,14 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
   assert.equal(Object.isFrozen(exposed.billing), true);
   assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'status', 'version']);
   assert.equal(exposed.billing.version, 1);
   assert.equal(Object.isFrozen(exposed.notifications), true);
   assert.deepEqual(Object.keys(exposed.notifications).sort(), ['notify', 'onActivate', 'version']);
+  assert.equal(Object.isFrozen(exposed.meshKeep), true);
+  assert.deepEqual(Object.keys(exposed.meshKeep).sort(), ['keep', 'version']);
   assert.equal(Object.isFrozen(exposed.dialogs), true);
   assert.deepEqual(Object.keys(exposed.dialogs).sort(), ['attach', 'reply', 'version']);
   assert.equal(Object.isFrozen(exposed.projectPermissions), true);
@@ -1028,4 +1033,73 @@ test('build notifications: fixed titles, bounded body, only when unfocused; clic
   assert.deepEqual(sent, [{ channel: 'arcane:notification-activate', value: { target: 'n1-abc' } }]);
   const off = requireHost('build-notifications.cjs').createBuildNotifications({ Notification: FakeNotification, getWindow: () => window, enabled: false });
   focused = false; assert.deepEqual(off.notify({ kind: 'finished', title: 'Arcane — Build finished', body: '', target: 'n8' }), { shown: false });
+});
+
+// ---------------------------------------------------------------- Keep this mesh (trusted dialog + IPC consent)
+test('main wires Keep this mesh through the trusted decision dialog and the private child IPC channel', () => {
+  assert.match(mainSource, /require\('\.\/mesh-keep\.cjs'\)\.createMeshKeepHost\(\{ enabled: !smoke,/);
+  assert.match(mainSource, /send: message => \{ if \(!child \|\| !child\.connected\) throw new Error\('Runtime unavailable\.'\); child\.send\(message\); \}/);
+  assert.match(mainSource, /buttons: \['Cancel', request\.confirmLabel\], defaultId: 0, cancelId: 0, noLink: true \}\);\n\s+return choice\.response === 1 && !closing && !switching && window === owner;\n\s+\} \}\)\.installIpc\(ipcMain, \{ trusted: rendererEvent \}\);/);
+  assert.match(productSource, /app\.meshKeep\?\.acceptConsent\(message\)/);
+  assert.match(labSource, /if\(meshKeep&&await meshKeep\.handle\(request,response,url,token,origin\)\)return;/);
+});
+
+test('Keep this mesh host: exact request, trusted confirmation naming account/name/quota, consent only over IPC, never on cancel', async () => {
+  const { createMeshKeepHost, meshKeepRequest } = requireHost('mesh-keep.cjs');
+  const digest = 'ab'.repeat(32), window = {};
+  assert.equal(meshKeepRequest({ digest, sessionId: 's-1' }).digest, digest);
+  for (const bad of [null, { digest }, { digest: 'x', sessionId: 's' }, { digest, sessionId: 'a b' }, { digest, sessionId: 's', extra: 1 }, Object.create({ digest, sessionId: 's' })]) assert.equal(meshKeepRequest(bad), null);
+  const run = async ({ answer = true, prepare = { prepareId: '11111111-2222-4333-8444-555555555555', account: { kind: 'user', userId: 42 }, name: 'Oak\u202e tree', meshCount: 3, placeName: 'My place', expiresAt: 'x' }, startOk = true, session } = {}) => {
+    const calls = [], sent = [], questions = [];
+    const current = session === undefined ? { window, origin, token, send: message => sent.push(message) } : session;
+    const host = createMeshKeepHost({ getSession: () => current, randomBytes: () => Buffer.alloc(32, 7),
+      confirm: async question => { questions.push(question); return answer; },
+      fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body), auth: init.headers.Authorization });
+        return url.endsWith('/prepare') ? { ok: true, json: async () => prepare } : { ok: startOk, json: async () => (startOk ? { receipt: {} } : { message: 'Roblox said no' }) }; } });
+    return { result: await host.keep({ digest, sessionId: 's-1' }), calls, sent, questions };
+  };
+  const ok = await run();
+  assert.deepEqual(ok.result, { state: 'started', message: 'Uploading to your Roblox account…' });
+  assert.deepEqual(ok.calls.map(c => c.url), [origin + '/v1/mesh-keep/prepare', origin + '/v1/mesh-keep/start']);
+  assert.ok(ok.calls.every(c => c.auth === 'Bearer ' + token));
+  const consent = Buffer.alloc(32, 7).toString('hex');
+  assert.deepEqual(ok.sent, [{ type: 'arcane-mesh-keep-consent', protocolVersion: 1, prepareId: '11111111-2222-4333-8444-555555555555', consent }]);
+  assert.deepEqual(ok.calls[1].body, { prepareId: '11111111-2222-4333-8444-555555555555', consent });
+  const q = ok.questions[0];
+  assert.equal(q.confirmLabel, 'Upload and keep');
+  assert.match(q.detail, /Roblox user ID 42/); assert.match(q.detail, /Asset name: Oak tree/); assert.match(q.detail, /upload quota/); assert.match(q.detail, /3 mesh assets/);
+  assert.doesNotMatch(q.message + q.detail, /\u202e/, 'bidi controls never reach the dialog');
+  const cancelled = await run({ answer: false });
+  assert.equal(cancelled.result.state, 'cancelled'); assert.deepEqual(cancelled.sent, []); assert.equal(cancelled.calls.length, 1, 'cancel never starts');
+  const bad = await run({ prepare: { prepareId: 'nope' } });
+  assert.equal(bad.result.state, 'refused'); assert.equal(bad.questions.length, 0); assert.deepEqual(bad.sent, []);
+  const refused = await run({ startOk: false });
+  assert.deepEqual(refused.result, { state: 'refused', message: 'Roblox said no' });
+  const none = await run({ session: null });
+  assert.equal(none.result.state, 'unavailable'); assert.equal(none.calls.length, 0);
+  const off = createMeshKeepHost({ enabled: false, getSession: () => ({ window, origin, token, send() {} }), confirm: async () => true, fetch: async () => assert.fail('disabled host must not call the daemon') });
+  assert.equal((await off.keep({ digest, sessionId: 's-1' })).state, 'unavailable');
+  const handlers = new Map();
+  createMeshKeepHost({ getSession: () => null, confirm: async () => true }).installIpc({ handle: (name, fn) => handlers.set(name, fn) }, { trusted: () => false });
+  await assert.rejects(handlers.get('arcane:mesh-keep')({}, { digest, sessionId: 's-1' }), /unavailable/);
+});
+
+
+test('Keep this mesh preserves uncertainty when a delivered start has no readable refusal', async () => {
+  const { createMeshKeepHost } = requireHost('mesh-keep.cjs');
+  for (const unreadable of [false, true]) {
+    const sent = [], calls = [];
+    const session = { window: {}, origin, token, send: message => sent.push(message) };
+    const host = createMeshKeepHost({ getSession: () => session, confirm: async () => true,
+      fetch: async url => {
+        calls.push(url);
+        if (url.endsWith('/prepare')) return { ok: true, json: async () => ({ prepareId: '11111111-2222-4333-8444-555555555555', account: { kind: 'user', userId: 42 }, name: 'Oak', meshCount: 1, placeName: 'Game' }) };
+        return { ok: false, json: async () => { if (unreadable) throw Error('response lost'); return {}; } };
+      } });
+    const result = await host.keep({ digest: 'ab'.repeat(32), sessionId: 's-1' });
+    assert.equal(sent.length, 1); assert.equal(calls.length, 2, 'The start was delivered once; nothing is retried.');
+    assert.equal(result.state, 'refused');
+    assert.match(result.message, /Review the mesh card/);
+    assert.doesNotMatch(result.message, /Nothing was uploaded/);
+  }
 });

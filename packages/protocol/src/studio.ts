@@ -53,7 +53,13 @@ export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOf
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
 export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
-export type StudioMethod = typeof READ_METHODS[number] | typeof WRITE_METHODS[number] | typeof ASSET_STAGE_METHODS[number];
+/** "Keep this mesh": uploads the retained procedural EditableMeshes of one placement to the signed-in Studio user's own
+ * Roblox account (AssetService:CreateAssetAsync) and swaps the session MeshParts for persistent ones. Host-owned only:
+ * the store admits it solely from the mesh-keep service after a human-confirmed trusted-dialog consent (docs/build/MESH_KEEP.md).
+ * Plugins advertise it only when their capability probe finds the upload API in the running Studio. */
+export const MESH_KEEP_METHODS = ['asset.keep_mesh'] as const;
+export const MESH_KEEP_LIMITS = Object.freeze({ meshes: 16, nameChars: 50, descriptionChars: 1000 });
+export type StudioMethod = typeof READ_METHODS[number] | typeof WRITE_METHODS[number] | typeof ASSET_STAGE_METHODS[number] | typeof MESH_KEEP_METHODS[number];
 export interface StudioAssetStageArgs {
   expected: { digest: string; payloadDigest: string; manifestDigest: string };
   packet: string;
@@ -127,9 +133,9 @@ export function roots(value: unknown): StudioRoot[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > ROOTS.length || value.some(r => !ROOTS.includes(r))) throw new ArcaneError('INPUT', 'Choose explicit supported Studio roots.');
   return [...new Set(value)] as StudioRoot[];
 }
-export function isWrite(method: StudioMethod): boolean { return [...WRITE_METHODS, ...ASSET_STAGE_METHODS].includes(method as typeof WRITE_METHODS[number] | typeof ASSET_STAGE_METHODS[number]); }
+export function isWrite(method: StudioMethod): boolean { return ([...WRITE_METHODS, ...ASSET_STAGE_METHODS, ...MESH_KEEP_METHODS] as readonly string[]).includes(method); }
 export function methodField(value: unknown): StudioMethod {
-  if (![...READ_METHODS, ...WRITE_METHODS, ...ASSET_STAGE_METHODS].includes(value as StudioMethod)) throw new ArcaneError('METHOD', 'Unsupported Studio method. Raw Luau execution is not exposed.');
+  if (![...READ_METHODS, ...WRITE_METHODS, ...ASSET_STAGE_METHODS, ...MESH_KEEP_METHODS].includes(value as StudioMethod)) throw new ArcaneError('METHOD', 'Unsupported Studio method. Raw Luau execution is not exposed.');
   return value as StudioMethod;
 }
 export function instanceRef(value: unknown): InstanceRef {

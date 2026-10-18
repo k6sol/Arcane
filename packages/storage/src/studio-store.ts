@@ -10,6 +10,7 @@ import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField
 import { canonical, validateCommandArgs, sceneBuildInstanceCount } from '../../core/src/studio-policy.js';
 import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
 import { terrainVoxelCount } from '../../core/src/terrain-policy.js';
+import { validateMeshKeepReceipt } from '../../core/src/mesh-keep-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
@@ -220,6 +221,9 @@ export class StudioStore {
   // (including those in a restoration receipt) never authorize execution.
   #activationAdmissions = new WeakMap<object, ScriptSourceVerification>();
   #assetStageAdmissions = new WeakSet<object>();
+  // "Keep this mesh" uploads: minted only inside enqueueMeshKeep, which only the host mesh-keep service calls after it
+  // holds a human trusted-dialog consent. Routes, MCP and restore never reach it.
+  #meshKeepAdmissions = new WeakSet<object>();
   #uploadTickets = new WeakMap<object, string>();
   #stageRunHandles = new WeakMap<object,string>();
   #reconstructionClaims = new Set<string>();
@@ -598,6 +602,7 @@ export class StudioStore {
     // Before idempotent lookup: a model cannot read/reuse a host staging receipt
     // by guessing its request ID, even if its JSON is structurally identical.
     if ((method === 'asset.stage_packet'||method==='asset.reconstruct') && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Asset intake and reconstruction require the trusted native import controller.');
+    if (method === 'asset.keep_mesh' && (!admission || !this.#meshKeepAdmissions.has(admission))) throw new ArcaneError('MESH_KEEP_AUTHORITY', 'Keep this mesh uploads to the user\'s Roblox account; only the person can start it, with the Keep this mesh button and its Arcane confirmation.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     return this.transaction(() => this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,internalRestore,admission));
   }
@@ -605,6 +610,7 @@ export class StudioStore {
   private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object):StudioCommand {
       this.checkTestQueueAuthority(sessionId,requestId,admission);
       if((method==='asset.stage_packet'||method==='asset.reconstruct')&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require trusted host admission.');
+      if(method==='asset.keep_mesh'&&(!admission||!this.#meshKeepAdmissions.has(admission)))throw new ArcaneError('MESH_KEEP_AUTHORITY','Keep this mesh requires the person\'s confirmed host admission.');
       const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
       if (old) {
         if (!equal(old.fingerprint as string, fingerprint)) throw new ArcaneError('IDEMPOTENCY', 'Request ID was already used with different input.');
@@ -663,6 +669,7 @@ export class StudioStore {
     const method = methodField(a.method);
     this.checkTestQueueAuthority(sessionId,requestId);
     if(method==='asset.stage_packet'||method==='asset.reconstruct')throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require private host admission, including idempotent lookup.');
+    if(method==='asset.keep_mesh')throw new ArcaneError('MESH_KEEP_AUTHORITY','Keep this mesh uploads to the user\'s Roblox account; only the person can start it, with the Keep this mesh button and its Arcane confirmation.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
     if (old) {
@@ -1043,6 +1050,21 @@ export class StudioStore {
     try { return this.enqueue(a, false, admission); }
     finally { this.#assetStageAdmissions.delete(admission); }
   }
+  /** Host-only queue entry for "Keep this mesh" (apps/daemon/src/mesh-keep-routes.ts). The caller must already hold
+   * the person's single-use trusted-dialog consent and a durable intent receipt; this only mints the queue admission. */
+  enqueueMeshKeep(input: unknown, guard: () => void): StudioCommand {
+    guard();
+    const a = object(input);
+    if (a.method !== 'asset.keep_mesh') throw new ArcaneError('METHOD', 'Expected the fixed keep-mesh method.');
+    const admission = Object.freeze({}); this.#meshKeepAdmissions.add(admission);
+    try { return this.enqueue(a, false, admission); }
+    finally { this.#meshKeepAdmissions.delete(admission); }
+  }
+  /** The original asset job of a recorded reconstruction command, for display correlation only (never authority). */
+  stageJobForReconstruction(commandId: string): string | null {
+    const row = this.db.prepare('SELECT a.job_id AS job FROM asset_stage_reconstructions r JOIN asset_stage_attempts a ON a.run_id=r.run_id WHERE r.command_id=?').get(commandId) as Row | undefined;
+    return row && typeof row.job === 'string' ? row.job : null;
+  }
   /** Retiring a native caller never replays a delivered packet. Preserve unknown
    * plugin outcomes; a queued packet can be cancelled before delivery. */
   abandonAssetStage(commandId: string): void {
@@ -1385,7 +1407,8 @@ export class StudioStore {
         const expected:StudioAssetReconstructReceipt={runId:args.runId,transferDigest:args.expected.digest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending'};
         if(canonical(result)!==canonical(expected))throw new ArcaneError('RECEIPT','Reconstruction receipt differs from the exact original sources.');
       }
-      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet' && c.method !== 'asset.reconstruct') {
+      if (a.state === 'succeeded' && c.method === 'asset.keep_mesh') validateMeshKeepReceipt(c.args, result);
+      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet' && c.method !== 'asset.reconstruct' && c.method !== 'asset.keep_mesh') {
         const mutation = object(object(result).mutation, 'mutation receipt');
         if (mutation.kind !== c.method) throw new ArcaneError('RECEIPT', 'Mutation receipt kind mismatch.');
         const r = object(mutation.ref);
@@ -1421,6 +1444,7 @@ export class StudioStore {
     if(this.db.prepare('SELECT 1 FROM studio_test_commands WHERE command_id=?').get(prior.id))throw new ArcaneError('TEST_RESERVATION','Temporary setup receipts require their original private restoration owner.');
     if (prior.method === 'environment.apply') throw new ArcaneError('RESTORE', 'Terrain and lighting changes are reverted with Studio Undo (one recording); the receipt lists the prior lighting values.');
     if (prior.method === 'terrain.generate') throw new ArcaneError('RESTORE', 'Generated terrain is reverted with Studio Undo (one recording); receipt_restore is refused.');
+    if (prior.method === 'asset.keep_mesh') throw new ArcaneError('RESTORE', 'An upload to your Roblox account cannot be undone from Arcane. The part swap is one Studio Undo step; the uploaded asset stays in your inventory.');
     if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet'||prior.method==='asset.reconstruct') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');
     const mutation = jsonObject(object(prior.result).mutation);
     return { sessionId: prior.sessionId, requestId: textField(a.requestId, 'request ID'), method: 'scene.restore', args: { receiptCommandId: prior.id, mutation } };

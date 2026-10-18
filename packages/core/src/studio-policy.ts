@@ -1,6 +1,7 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
 import { validateTerrainGenerate } from './terrain-policy.js';
+import { validateMeshKeep } from './mesh-keep-policy.js';
 import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt', 'Marble', 'Granite', 'Limestone', 'Sandstone', 'Basalt', 'Pebble', 'LeafyGrass', 'Mud', 'Snow', 'Ice', 'Pavement', 'Plaster', 'DiamondPlate', 'CorrodedMetal', 'Foil'] as const;
@@ -726,6 +727,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   if (isWrite(method) && !session.allowWrites) throw new ArcaneError('READ_ONLY', 'This Studio pairing is read-only. Create an explicit writable pairing to edit.');
   if (!session.capabilities.includes(method)) {
     if (isAssetMethod(method)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates native asset placement. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
+    if (method === 'asset.keep_mesh') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `Keep this mesh is unavailable in this Studio connection: the connected Arcane Studio plugin (${session.pluginVersion}) predates it, or this Roblox Studio does not let plugins upload meshes (its capability probe failed closed). Update Roblox Studio and the Arcane plugin, restart Studio and connect again. Nothing was uploaded.`);
     if (method === 'terrain.generate') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates procedural terrain. Update the Studio plugin from Arcane, restart Studio and connect again; until then use environment_apply terrain fills. No command was queued.`);
     if (method === 'scene.build' || method === 'environment.apply') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates batch building and environment tools. Update the Studio plugin from Arcane, restart Studio and connect again; until then use scene_create. No command was queued.`);
     throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
@@ -828,6 +830,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
     case 'scene.asset_watch': case 'scene.place_asset': case 'scene.apply_material': return validateAssetCommand(method, a, session);
     case 'environment.apply': return validateEnvironment(a, session);
     case 'terrain.generate': return validateTerrainGenerate(a, session);
+    case 'asset.keep_mesh': return validateMeshKeep(a, session);
     case 'scene.update': {
       keys(a, ['ref', 'expected', 'properties']); const r = ref(a.ref, session);
       const p = validateProperties(a.properties, r.className, r.pathSegments.length > 0);

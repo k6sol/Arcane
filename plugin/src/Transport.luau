@@ -400,6 +400,10 @@ function Transport:exchange(desired: any): ()
 	for _, method in ipairs(V.WRITE_METHODS) do table.insert(capabilities, method) end
 	for _, method in ipairs(V.ASSET_STAGE_METHODS or {}) do table.insert(capabilities, method) end
 	for _, feature in ipairs(V.FEATURE_CAPABILITIES or {}) do table.insert(capabilities, feature) end
+	-- Keep this mesh only when this Studio exposes the plugin mesh upload API; the probe fails closed.
+	if Operations.meshKeepSupported and Operations.meshKeepSupported(self.gameModel) then
+		for _, method in ipairs(V.MESH_KEEP_METHODS or {}) do table.insert(capabilities, method) end
+	end
 	-- Output diagnostics are advertised only when Main attached the bounded collector.
 	if self.diagnostics and type(self.diagnostics.CAPABILITY) == "string" then table.insert(capabilities, self.diagnostics.CAPABILITY) end
 	local isKey = desired.apiKey ~= nil
@@ -533,7 +537,7 @@ function Transport:guard(command: any, pair: any): ()
 	if not ok or not expires or expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis then V.fail("LEASE", "Command lease has expired.") end
 	local staging = table.find(V.ASSET_STAGE_METHODS or {}, command.method) ~= nil
 	if not staging and not self:isEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
-	if (table.find(V.WRITE_METHODS, command.method) or staging) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end
+	if (table.find(V.WRITE_METHODS, command.method) or staging or table.find(V.MESH_KEEP_METHODS or {}, command.method)) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end
 	if staging then
 		-- One fresh snapshot per guard binds CPU staging to this exact Edit epoch.
 		-- A second snapshot could accidentally mix two play lifetimes.

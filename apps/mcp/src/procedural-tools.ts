@@ -70,7 +70,7 @@ const PLACE = 'Write: turn the reconstructed meshes of this exact job (after ass
   'then adopt them like studio_asset_insert in one undo step: Roblox material + colour per part (bark Wood, leaves/foliage Grass, rock Slate, stone Marble), invisible collision proxy, ' +
   'anchored, fitted (maxSize) or true scale (1 m ≈ 3.57 studs), bottom-centre pivot, grounded, parented; returns a receipt (receipt_restore removes it). ' +
   'For scattering, place ONE copy into a hidden template Folder, then scene_build templates + clone items/scatter. No upload, publication or asset ID: the meshes live in this Studio Edit session ' +
-  '(they vanish on reconnect, Play or reopening; keeping them in a saved place needs the user to upload them with their own account, which Arcane never does). Never auto-retry.';
+  '(they vanish on reconnect, Play or reopening; to keep them the user clicks Keep this mesh on the asset card, confirms in an Arcane dialog and it uploads to their own Roblox account; you can suggest that button but can never upload). Never auto-retry.';
 
 function ok(client: DaemonClient, value: Record<string, unknown>, failed = false): CallToolResult {
   const data = client.redact(value);
@@ -145,7 +145,7 @@ export function registerProceduralPlaceTool(server: McpServer, client: DaemonCli
       return ok(client, { jobId: a.jobId, transferDigest: digest, placement: receipt(outcome), uploaded: false,
         persistence: 'studio-session-only',
         nextStep: failed ? 'Placement did not succeed; inspect Workspace (scene_search or studio_viewport_capture) before trying again. Never repeat automatically.'
-          : 'Check it with studio_viewport_capture framed on the ref. For many copies use this model as a scene_build template (clone/scatter). Tell the user these MeshParts are session-only until they upload the mesh with their own account.' }, failed);
+          : 'Check it with studio_viewport_capture framed on the ref. For many copies use this model as a scene_build template (clone/scatter). Tell the user these MeshParts are session-only; to keep them they can click Keep this mesh on the asset card (uploads to their own Roblox account after they confirm). Never claim it was kept.' }, failed);
     } catch (error) { return failure(client, error); }
   });
 }

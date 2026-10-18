@@ -35,6 +35,7 @@ import { plansRoutes } from './plans-routes.js';
 import { projectMemoryRoutes } from './project-memory-routes.js';
 import { scriptSyncRoutes } from './script-sync-routes.js';
 import { ActionsLedger } from './actions-ledger.js';
+import { createMeshKeep } from './mesh-keep-routes.js';
 
 const unavailableTestMessages = {
   UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
@@ -152,6 +153,8 @@ export async function createConnectionLab(options: Options) {
   const projectMemory = options.studioStore ? projectMemoryRoutes({ projectPath: options.projectPath ?? options.cwd }) : null;
   // Script sync (opt-in per project): mirrors granted Studio scripts into <project>/src and applies file edits back. Human desktop only.
   const scriptSync = options.studioStore ? scriptSyncRoutes({ projectPath: options.projectPath ?? options.cwd, stateDirectory: options.stateDirectory, studio: options.studioStore }) : null;
+  // Keep this mesh: human desktop only; uploads need a trusted-dialog consent delivered over the parent IPC (product-main).
+  const meshKeep = options.studioStore ? createMeshKeep({ store: options.studioStore, stateDirectory: options.stateDirectory }) : null;
   const plans = options.studioStore ? plansRoutes({ ledger: new ActionsLedger(join(options.stateDirectory, 'arcane-actions')),
     codexState: () => codex?.state(), studioEvents: () => options.studioStore?.events(100) ?? [] }) : null;
   // Quiesce every retained task before other services publish terminal evidence.
@@ -317,6 +320,7 @@ export async function createConnectionLab(options: Options) {
           ['/setup-checklist.js',[join(options.cwd,'dist/apps/desktop/src/setup-checklist.js'),'text/javascript']],
           ['/plans.js',[join(options.cwd,'dist/apps/desktop/src/plans.js'),'text/javascript']],
           ['/notifications.js',[join(options.cwd,'dist/apps/desktop/src/notifications.js'),'text/javascript']],
+          ['/mesh-keep.js',[join(options.cwd,'dist/apps/desktop/src/mesh-keep.js'),'text/javascript']],
           ['/project-memory.js',[join(options.cwd,'dist/apps/desktop/src/project-memory.js'),'text/javascript']],
           ['/script-sync.js',[join(options.cwd,'dist/apps/desktop/src/script-sync.js'),'text/javascript']],
           ['/script-diff.js',[join(options.cwd,'dist/apps/desktop/src/script-diff.js'),'text/javascript']],
@@ -336,6 +340,7 @@ export async function createConnectionLab(options: Options) {
       if(plans&&await plans.handle(request,response,url,token,origin))return;
       if(projectMemory&&await projectMemory.handle(request,response,url,token,origin))return;
       if(scriptSync&&await scriptSync.handle(request,response,url,token,origin))return;
+      if(meshKeep&&await meshKeep.handle(request,response,url,token,origin))return;
       if(testApi&&await testApi(request,response,url,origin))return;
       if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;
@@ -393,7 +398,7 @@ export async function createConnectionLab(options: Options) {
   origin = 'http://127.0.0.1:' + address.port;
   let cleanup: Promise<void> | null = null;
   return {
-    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token,
+    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep,
     close(): Promise<void> {
       if (cleanup) return cleanup;
       shuttingDown = true; const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();

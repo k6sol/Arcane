@@ -14,7 +14,7 @@ export const REQUIRED_SMOKE_CHECKS = Object.freeze([
   'taskUsageHiddenWithoutTask', 'localChatIntentsStartNoNativeLifecycle', 'optionalCodeVerificationFailureContained', 'externalNavigationRejected',
   'nativeLifecycleNotStarted', 'conversationOnlyDefault', 'providerSetupMounted', 'nativeHandoffMounted',
   'claudeChatBridgeDisabledInSmoke', 'studioPluginBridgeDisabledInSmoke', 'workspaceProjectBridgeDisabledInSmoke', 'inAppDialogsBridgeMounted',
-  'projectPermissionsBridgeDisabledInSmoke', 'billingBridgeNotConnectedInSmoke', 'notificationsBridgeSilentInSmoke',
+  'projectPermissionsBridgeDisabledInSmoke', 'billingBridgeNotConnectedInSmoke', 'notificationsBridgeSilentInSmoke', 'meshKeepBridgeUnavailableInSmoke',
   'bundledStudioPluginVerified', 'bundledPlansConfigValid', 'bundledChatInstructionsLoadable', 'trustedDecisionDialogsBundled', 'nativeAssetPermissionMounted', 'shutdownClean',
 ]);
 export const smokeChecksComplete = checks => !!checks && typeof checks === 'object' &&

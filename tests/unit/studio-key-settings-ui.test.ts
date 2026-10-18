@@ -62,7 +62,7 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
           operations: [], approvals: [], events: [], droppedEvents: 0, lastEventSeq: 0, failureCode: null },
         lastSnapshot: null, nativeTools: { configured: false, verified: false } } }); return; }
       // Plans & credits reads local usage once at start for the top-bar chip; the fixture leaves it unavailable.
-      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/playtests', '/v1/plans/state'].includes(path)) { send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic UI fixture only.' }, 503); return; }
+      if (['/v1/learning/state', '/v1/codex/history', '/v1/workflows', '/v1/playtests', '/v1/plans/state', '/v1/mesh-keep/state'].includes(path)) { send({ error: 'FIXTURE_UNAVAILABLE', message: 'Synthetic UI fixture only.' }, 503); return; }
       if (path === '/v1/assets/conversation-jobs') { send({ error: 'NO_NATIVE_THREAD', message: 'No native thread in this UI fixture.' }, 409); return; }
     }
     if (request.method === 'POST' && ['/v1/studio/keys/rotate', '/v1/studio/keys/revoke'].includes(path)) {

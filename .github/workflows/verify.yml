@@ -84,7 +84,7 @@ jobs:
           $edgeExecutable = $edgeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
           if (-not $edgeExecutable) { throw 'Microsoft Edge is required for desktop key control verification.' }
           $env:ARCANE_UI_BROWSER_EXE = $edgeExecutable
-          node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js dist/tests/unit/welcome-tour.test.js
+          node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js dist/tests/unit/welcome-tour.test.js dist/tests/unit/mesh-keep-ui.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build deterministic Studio plugin
         if: matrix.suite == 'release'
