@@ -533,4 +533,29 @@ function Properties.snapshotGui(instance: any, names: {string}?): any
 	return result
 end
 
+
+-- Only immutable, locally retained receipt values enter this decoder. Intake uses decodeEffects instead.
+function Properties.restoreGuiValue(className: string, name: string, value: any): any
+	if name == "Name" then return value end
+	local spec = Properties.GUI_SPECS[className][name]
+	if not spec then V.fail("PROPERTY", "Unknown retained GUI property.") end
+	local kind = spec[1]
+	if kind == "enum" then return Enum[spec[2]][value] end
+	if kind == "font" then return Font.new(value.family, Enum.FontWeight[value.weight], Enum.FontStyle[value.style]) end
+	if kind == "udim" then return UDim.new(value.value[1], value.value[2]) end
+	if kind == "udim2" then return UDim2.new(value.value[1], value.value[2], value.value[3], value.value[4]) end
+	if kind == "color" then return Color3.new(value.value[1], value.value[2], value.value[3]) end
+	if kind == "vector2" then return Vector2.new(value.value[1], value.value[2]) end
+	if kind == "vector3" then return Vector3.new(value.value[1], value.value[2], value.value[3]) end
+	if kind == "sequence" or kind == "colorSequence" then
+		local points = {}
+		for _, point in ipairs(value.value) do
+			if kind == "sequence" then table.insert(points, NumberSequenceKeypoint.new(point[1], point[2], point[3]))
+			else table.insert(points, ColorSequenceKeypoint.new(point[1], Color3.new(point[2], point[3], point[4]))) end
+		end
+		return if kind == "sequence" then NumberSequence.new(points) else ColorSequence.new(points)
+	end
+	return value
+end
+
 return table.freeze(Properties)

@@ -45,11 +45,13 @@ export const EFFECT_LIMITS = Object.freeze({ properties: 32, keypoints: 20, mate
 export const STUDIO_GUI_CAPABILITY = 'scene.gui' as const;
 /** Non-method feature capability: UIFlexItem and flex/wrap properties on UIListLayout. */
 export const STUDIO_GUI_FLEX_CAPABILITY = 'scene.gui.flex' as const;
+/** Non-method feature: exact native GUI observations, bounded edits and receipt restoration. */
+export const STUDIO_GUI_EDIT_CAPABILITY = 'scene.gui.edit' as const;
 /** Non-method plugin capability: character classes (Humanoid, HumanoidDescription, AnimationController, Animator) with typed,
  * bounded properties in scene.create/scene.build. Rig parts, joints and animations stay with server Scripts. Older plugins never advertise it. */
 export const STUDIO_CHARACTERS_CAPABILITY = 'scene.characters' as const;
 /** Every non-method feature capability a plugin may advertise at pairing (anything else must be a known method). */
-export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts']);
+export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts']);
 /** GUI value bounds: Text/PlaceholderText UTF-8 bytes, UDim scale magnitude and integer pixel-offset magnitude. */
 export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOffset: 10000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent

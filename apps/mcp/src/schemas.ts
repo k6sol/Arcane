@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ROOTS, READ_METHODS, WRITE_METHODS, jsonObject } from '../../../packages/protocol/src/studio.js';
-import { MATERIALS, SAFE_CREATE_CLASSES, SHAPES } from '../../../packages/core/src/studio-policy.js';
+import { MATERIALS, SAFE_CREATE_CLASSES, SHAPES, GUI_PROPERTIES } from '../../../packages/core/src/studio-policy.js';
 
 export function boundedText(max: number) {
   return z.string().min(1).max(max).refine(value => !value.includes('\0'), 'NUL is not allowed.');
@@ -28,6 +28,10 @@ export const properties = z.strictObject({
   Position: vector.optional(), Orientation: orientation.optional(), Color: color.optional(), Anchored: z.boolean().optional(), CanCollide: z.boolean().optional(), CastShadow: z.boolean().optional(),
   Transparency: z.number().min(0).max(1).optional(), Reflectance: z.number().min(0).max(1).optional(), Material: z.enum(MATERIALS).optional(), Shape: z.enum(SHAPES).optional(),
 });
+// The native class selects the property validator; observed GUI values retain exact JSON types.
+const guiPropertyNames = [...new Set(['Name', ...Object.values(GUI_PROPERTIES).flatMap(fields => Object.keys(fields))])];
+const guiUpdateProperties = z.partialRecord(z.enum(guiPropertyNames), z.json());
+export const sceneUpdateProperties = z.union([properties, guiUpdateProperties]);
 export const createClass = z.enum(SAFE_CREATE_CLASSES);
 export const commandState = z.enum(['queued', 'dispatched', 'succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
 const boundedArgs = z.record(z.string(), z.json()).superRefine((value, context) => {

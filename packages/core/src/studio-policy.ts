@@ -2,7 +2,7 @@ import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
 import { validateTerrainGenerate } from './terrain-policy.js';
 import { validateMeshKeep } from './mesh-keep-policy.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt', 'Marble', 'Granite', 'Limestone', 'Sandstone', 'Basalt', 'Pebble', 'LeafyGrass', 'Mud', 'Snow', 'Ice', 'Pavement', 'Plaster', 'DiamondPlate', 'CorrodedMetal', 'Foil'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -392,6 +392,66 @@ export function validateEffectProperties(value: unknown, className: EffectClass 
 export function validateGuiProperties(value: unknown, className: GuiClass): Record<string, Json> {
   return validateEffectProperties(value, className, () => { throw new ArcaneError('PROPERTY', `${className} takes no references.`); });
 }
+
+/** New GUI values retain the creation allowlist; a descendant's name can also be edited. */
+export function validateGuiEditProperties(value: unknown, className: GuiClass): Record<string, Json> {
+  const p = jsonObject(value), gui = { ...p }; delete gui.Name;
+  if (Object.keys(p).length > MAX_PROPERTIES) throw new ArcaneError('INPUT', 'Too many GUI properties.');
+  validateGuiProperties(gui, className);
+  if (p.Name !== undefined) textField(p.Name, 'instance name', 100);
+  return p;
+}
+
+/** Linked native values must also be observed before a write can retain them for restoration. */
+export function guiEditBaselineNames(className: GuiClass, properties: Record<string, Json>): string[] {
+  const names = new Set(Object.keys(properties));
+  if (names.has('Font') || names.has('FontFace')) { names.add('Font'); names.add('FontFace'); }
+  if (className === 'UISizeConstraint' && (names.has('MinSize') || names.has('MaxSize'))) { names.add('MinSize'); names.add('MaxSize'); }
+  if (className === 'UITextSizeConstraint' && (names.has('MinTextSize') || names.has('MaxTextSize'))) { names.add('MinTextSize'); names.add('MaxTextSize'); }
+  return [...names].sort();
+}
+
+/** Baselines are canonical observations, not new writes: do not round, clamp or apply intake ranges. */
+export function validateGuiBaseline(value: unknown, className: GuiClass): Record<string, Json> {
+  const p = jsonObject(value), table = GUI_PROPERTIES[className] as Record<string, EffectKind>;
+  if (Object.keys(p).length > EFFECT_LIMITS.properties) throw new ArcaneError('INPUT', 'Too many GUI baseline properties.');
+  for (const [name, observed] of Object.entries(p)) {
+    const spec = name === 'Name' ? 'text' : Object.hasOwn(table, name) ? table[name] : undefined;
+    const label = className + '.' + name;
+    const fail = (): never => { throw new ArcaneError('PROPERTY', label + ' needs its exact typed scene_inspect value.'); };
+    if (!spec) fail();
+    const kind = typeof spec === 'string' ? spec : spec![0];
+    if (kind === 'boolean') { if (typeof observed !== 'boolean') fail(); continue; }
+    if (kind === 'text' || kind === 'content') { if (typeof observed !== 'string' || Buffer.byteLength(observed, 'utf8') > 65536) fail(); continue; }
+    if (kind === 'number' || kind === 'integer') { if (typeof observed !== 'number' || !Number.isFinite(observed)) fail(); continue; }
+    if (kind === 'enum') { if (typeof observed !== 'string' || !observed.length || observed.length > 128) fail(); continue; }
+    if (kind === 'font') {
+      const face = object(observed, label); keys(face, ['type', 'family', 'weight', 'style']);
+      if (face.type !== 'Font' || typeof face.family !== 'string' || !face.family.length || face.family.length > 2048 ||
+        !FONT_WEIGHTS.includes(face.weight as typeof FONT_WEIGHTS[number]) || (face.style !== 'Normal' && face.style !== 'Italic')) fail();
+      continue;
+    }
+    const types: Record<string, [string, number]> = { udim: ['UDim', 2], udim2: ['UDim2', 4], color: ['Color3', 3], vector2: ['Vector2', 2], vector3: ['Vector3', 3] };
+    const simple = types[kind];
+    if (simple) {
+      const numbers = tag(observed, simple[0], label) as number[];
+      if (numbers.length !== simple[1] || numbers.some(n => typeof n !== 'number' || !Number.isFinite(n))) fail();
+      if ((kind === 'udim' || kind === 'udim2') && numbers.some((n, i) => i % 2 === 1 && (!Number.isInteger(n) || n < -2147483648 || n > 2147483647))) fail();
+      continue;
+    }
+    if (kind !== 'sequence' && kind !== 'colorSequence') fail();
+    const points = tag(observed, kind === 'sequence' ? 'NumberSequence' : 'ColorSequence', label) as unknown[];
+    if (points.length < 2 || points.length > 64) fail();
+    let last = -1;
+    for (const [index, point] of points.entries()) {
+      if (!Array.isArray(point) || point.length !== (kind === 'sequence' ? 3 : 4) || point.some(n => typeof n !== 'number' || !Number.isFinite(n)) ||
+        point[0] < 0 || point[0] > 1 || point[0] <= last || index === 0 && point[0] !== 0 || index === points.length - 1 && point[0] !== 1) fail();
+      last = (point as number[])[0]!;
+    }
+  }
+  return p;
+}
+
 /** scene.build effect item: parent is the root/group, a part item or an Attachment/Sound/SoundGroup effect item;
  * Attachment0/1 (SoundGroup) are {type:'Ref', item:n} naming an EARLIER Attachment (SoundGroup) effect item of the same build. */
 function validateBuildEffect(item: Record<string, unknown>, kinds: string[], session: StudioSession): Json {
@@ -845,6 +905,13 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
     case 'asset.keep_mesh': return validateMeshKeep(a, session);
     case 'scene.update': {
       keys(a, ['ref', 'expected', 'properties']); const r = ref(a.ref, session);
+      if (isGuiClass(r.className) && Object.keys(jsonObject(a.properties)).some(name => name !== 'Name')) {
+        requireGui(session); requireEffects(session, 'GUI property editing', STUDIO_GUI_EDIT_CAPABILITY);
+        requireGuiFlex(session, r.className, a.properties);
+        const p = validateGuiEditProperties(a.properties, r.className), e = validateGuiBaseline(a.expected, r.className);
+        if (!Object.keys(p).length || canonical(guiEditBaselineNames(r.className, p)) !== canonical(Object.keys(e).sort())) throw new ArcaneError('BASELINE', 'GUI baselines must cover the changed keys and their linked font or constraint values.');
+        a.properties = p; a.expected = e; break;
+      }
       const p = validateProperties(a.properties, r.className, r.pathSegments.length > 0);
       const e = validateProperties(a.expected, r.className, r.pathSegments.length > 0);
       if (!Object.keys(p).length || canonical(Object.keys(p).sort()) !== canonical(Object.keys(e).sort())) throw new ArcaneError('BASELINE', 'Expected values must cover exactly every changed property.'); a.expected = engineProperties(e); a.properties = engineProperties(p); break;

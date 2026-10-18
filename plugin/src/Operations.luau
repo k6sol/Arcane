@@ -553,9 +553,105 @@ function Operations:searchScripts(args: any, guard: () -> ()): any
 		literal = true, caseSensitive = sensitive, sourceKind = "editor", columnEncoding = "utf8-bytes", atomicSnapshot = false}
 end
 
-function Operations:updateProperties(command: any, args: any, guard: () -> ()): any
+
+-- Expand a constraint's maximum before moving its minimum, then contract to the requested maximum.
+-- This also handles mixed-axis changes that neither simple min-first nor max-first ordering permits.
+local function assignGui(instance: any, decoded: any): ()
+	local vectorBounds = instance.ClassName == "UISizeConstraint" and decoded.MinSize ~= nil
+	local textBounds = instance.ClassName == "UITextSizeConstraint" and decoded.MinTextSize ~= nil
+	if vectorBounds then
+		instance.MaxSize = Vector2.new(math.max(instance.MaxSize.X, decoded.MaxSize.X), math.max(instance.MaxSize.Y, decoded.MaxSize.Y))
+		instance.MinSize, instance.MaxSize = decoded.MinSize, decoded.MaxSize
+	elseif textBounds then
+		instance.MaxTextSize = math.max(instance.MaxTextSize, decoded.MaxTextSize)
+		instance.MinTextSize, instance.MaxTextSize = decoded.MinTextSize, decoded.MaxTextSize
+	end
+	local names = {}; for name in pairs(decoded) do table.insert(names, name) end; table.sort(names)
+	for _, name in ipairs(names) do
+		if not (vectorBounds and (name == "MinSize" or name == "MaxSize")) and not (textBounds and (name == "MinTextSize" or name == "MaxTextSize")) then instance[name] = decoded[name] end
+	end
+end
+
+function Operations:updateGuiProperties(command: any, args: any, instance: any, guard: () -> (), restoring: boolean?): any
+	local className = instance.ClassName
+	V.object(args.properties, "GUI properties"); V.object(args.expected, "GUI baseline")
+	local names, gui, decoded = {}, {}, {}
+	for name, value in pairs(args.properties) do
+		if #names >= V.MAX_PROPERTIES then V.fail("INPUT", "Too many GUI properties.") end
+		if name ~= "Name" and LegacyProperties.GUI_SPECS[className][name] == nil then V.fail("PROPERTY", "Property is not writable for this GUI class.") end
+		table.insert(names, name)
+		if restoring then
+			if name ~= "Font" or args.properties.FontFace == nil then decoded[name] = LegacyProperties.restoreGuiValue(className, name, value) end
+		elseif name == "Name" then decoded.Name = V.string(value, "name", 100)
+		else gui[name] = value end
+	end
+	if #names == 0 then V.fail("INPUT", "Choose at least one GUI property to update.") end
+	table.sort(names)
+	if not restoring then
+		for name, value in pairs(LegacyProperties.decodeEffects(className, gui, function(): any return V.fail("PROPERTY", "GUI properties take no references.") end)) do decoded[name] = value end
+	end
+	local baselineSet = {}; for _, name in ipairs(names) do baselineSet[name] = true end
+	if args.properties.Font ~= nil or args.properties.FontFace ~= nil then baselineSet.Font, baselineSet.FontFace = true, true end
+	if className == "UISizeConstraint" and (args.properties.MinSize ~= nil or args.properties.MaxSize ~= nil) then baselineSet.MinSize, baselineSet.MaxSize = true, true end
+	if className == "UITextSizeConstraint" and (args.properties.MinTextSize ~= nil or args.properties.MaxTextSize ~= nil) then baselineSet.MinTextSize, baselineSet.MaxTextSize = true, true end
+	local baselineNames = {}; for name in pairs(baselineSet) do table.insert(baselineNames, name) end; table.sort(baselineNames)
+	local count = 0
+	for name in pairs(args.expected) do
+		if not baselineSet[name] then V.fail("INPUT", "Expected properties must cover changed and linked GUI values.") end
+		count += 1
+	end
+	if count ~= #baselineNames then V.fail("INPUT", "Expected properties must cover changed and linked GUI values.") end
+	if not V.equal(LegacyProperties.snapshotGui(instance, baselineNames), args.expected) then V.fail("CONFLICT", "GUI properties differ from the observed baseline.") end
+	local retained, allowed = {}, {}
+	for _, name in ipairs(names) do
+		allowed[name] = true
+		retained[name] = true
+	end
+	if decoded.Font ~= nil or decoded.FontFace ~= nil then retained.Font, retained.FontFace, allowed.Font, allowed.FontFace = true, true, true, true end
+	if className == "UISizeConstraint" and (decoded.MinSize ~= nil or decoded.MaxSize ~= nil) then
+		decoded.MinSize, decoded.MaxSize = decoded.MinSize or instance.MinSize, decoded.MaxSize or instance.MaxSize
+		retained.MinSize, retained.MaxSize, allowed.MinSize, allowed.MaxSize = true, true, true, true
+	elseif className == "UITextSizeConstraint" and (decoded.MinTextSize ~= nil or decoded.MaxTextSize ~= nil) then
+		decoded.MinTextSize, decoded.MaxTextSize = decoded.MinTextSize or instance.MinTextSize, decoded.MaxTextSize or instance.MaxTextSize
+		retained.MinTextSize, retained.MaxTextSize, allowed.MinTextSize, allowed.MaxTextSize = true, true, true, true
+	end
+	LegacyProperties.crossCheck(className, decoded)
+	local receiptNames = {}; for name in pairs(retained) do table.insert(receiptNames, name) end; table.sort(receiptNames)
+	local ref, ownership = self.registry:ref(instance), P.captureOwnership(instance, self.collection)
+	local before = V.immutable(LegacyProperties.snapshotGui(instance, receiptNames))
+	local unchanged = {}; for name, value in pairs(ownership.properties) do if not allowed[name] then unchanged[name] = value end end
+	local collateral = {properties = unchanged, attributes = ownership.attributes, tags = ownership.tags}
+	return self:record(command, guard, function(progress: any): any
+		guard(); self.registry:resolve(ref)
+		if not P.ownershipMatches(instance, self.collection, ownership) then V.fail("CONFLICT", "GUI properties changed before the write.") end
+		progress.ref = ref
+		local applied, applyError = pcall(function()
+			progress.touched = true
+			assignGui(instance, decoded)
+			for name, value in pairs(decoded) do
+				if name == "Name" then
+					if instance.Name ~= value then V.fail("VERIFY", "GUI name differs after assignment.") end
+				elseif not LegacyProperties.effectMatches(instance, className, name, value) then V.fail("VERIFY", "GUI property differs after assignment.") end
+			end
+			if not P.ownershipMatches(instance, self.collection, collateral) then V.fail("VERIFY", "An unrelated managed GUI value changed during assignment.") end
+		end)
+		if not applied then
+			local original = {}; for name, value in pairs(before) do
+				if name ~= "Font" or before.FontFace == nil then original[name] = LegacyProperties.restoreGuiValue(className, name, value) end
+			end
+			pcall(function() assignGui(instance, original) end)
+			if P.ownershipMatches(instance, self.collection, ownership) then progress.touched = false end
+			V.fail("VERIFY", "GUI assignment could not be verified: " .. V.safeError(applyError))
+		end
+		return {ref = self.registry:ref(instance), mutation = {kind = "scene.update", ref = ref,
+			before = {properties = before}, after = {properties = LegacyProperties.snapshotGui(instance, receiptNames)}}}
+	end)
+end
+
+function Operations:updateProperties(command: any, args: any, guard: () -> (), restoring: boolean?): any
 	V.fields(args, {"ref", "expected", "properties"}, "update arguments")
 	local instance = self.registry:resolve(args.ref)
+	if LegacyProperties.GUI_SPECS[instance.ClassName] then return self:updateGuiProperties(command, args, instance, guard, restoring) end
 	local decoded, names = P.validate(instance, args.properties, self.registry:isService(instance))
 	if #names == 0 then V.fail("INPUT", "Choose at least one property to update.") end
 	P.validate(instance, args.expected, self.registry:isService(instance))
@@ -1491,7 +1587,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 			return {restored = true, ref = original.ref}
 		end)
 	elseif original.kind == "scene.update" then
-		self:updateProperties(command, {ref = original.ref, expected = original.after.properties, properties = original.before.properties}, guard)
+		self:updateProperties(command, {ref = original.ref, expected = original.after.properties, properties = original.before.properties}, guard, true)
 	elseif original.kind == "script.update" then
 		self:updateSource(command, {ref = original.ref, expectedSource = original.after.source, source = original.before.source}, guard)
 	elseif original.kind == "script.set_enabled" then

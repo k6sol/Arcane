@@ -20,7 +20,7 @@ Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reco
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
 -- character classes: Humanoid, HumanoidDescription, AnimationController, Animator).
-Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.characters", "asset.mesh_parts"})
+Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})

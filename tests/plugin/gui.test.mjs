@@ -31,7 +31,7 @@ local UDim: any = {new = function(scale: number, offset: number): any
 end}
 local UDim2: any = {new = function(xs: number, xo: number, ys: number, yo: number): any return {X = UDim.new(xs, xo), Y = UDim.new(ys, yo), _type = "UDim2"} end}
 local Font: any = {new = function(family: string, weight: any, style: any): any
-  assert(string.match(family, "^rbxasset://fonts/families/%w+%.json$"), "built-in family path")
+  assert(type(family) == "string" and #family > 0, "explicit fixture family")
   return {Family = family, Weight = weight, Style = style, _type = "Font"}
 end}
 local NumberSequenceKeypoint: any = {new = function(t: number, v: number, e: number?): any return {Time = f32(t), Value = f32(v), Envelope = f32(e or 0)} end}
@@ -46,7 +46,7 @@ local function typeof(value: any): string
 end
 for name, items in pairs({NormalId = {"Right", "Top", "Back", "Left", "Bottom", "Front"}, AutomaticSize = {"None", "X", "Y", "XY"},
   TextXAlignment = {"Left", "Center", "Right"}, TextYAlignment = {"Top", "Center", "Bottom"}, TextTruncate = {"None", "AtEnd"},
-  Font = {"SourceSans", "SourceSansBold", "Gotham", "GothamBold", "BuilderSans", "BuilderSansBold", "FredokaOne", "Arcade"},
+  Font = {"SourceSans", "SourceSansBold", "Gotham", "GothamBold", "BuilderSans", "BuilderSansBold", "FredokaOne", "Arcade", "Unknown"},
   FontWeight = {"Thin", "ExtraLight", "Light", "Regular", "Medium", "SemiBold", "Bold", "ExtraBold", "Heavy"}, FontStyle = {"Normal", "Italic"},
   ScaleType = {"Stretch", "Slice", "Tile", "Fit", "Crop"}, ZIndexBehavior = {"Global", "Sibling"},
   ScreenInsets = {"None", "DeviceSafeInsets", "CoreUISafeInsets", "TopbarSafeInsets"}, SurfaceGuiSizingMode = {"FixedSize", "PixelsPerStud"},
@@ -67,7 +67,9 @@ local engineSetter = instanceMetatable.__newindex
 instanceMetatable.__newindex = function(self: any, key: string, value: any): ()
   if string.sub(key, 1, 1) == "_" then rawset(self, key, value); return end
   if fixture.coerceGui and fixture.coerceGui[key] ~= nil then value = fixture.coerceGui[key] end
+  if fixture.guiSetter then value = fixture.guiSetter(self, key, value) end
   engineSetter(self, key, value)
+  if fixture.guiAssigned then fixture.guiAssigned(self, key, value) end
 end
 `;
 
@@ -379,6 +381,102 @@ local flexObserved = run("scene.inspect", {ref = ops.registry:ref(flexList)}).pr
 check(flexObserved.Wraps == true and flexObserved.HorizontalFlex == "SpaceBetween", "boolean and enum observations remain plain JSON")
 local billboard = run("scene.inspect", {ref = world.refs.PlateA}).properties
 check(billboard.StudsOffset.type == "Vector3" and billboard.Size.type == "UDim2", "world GUI values retain their native types")
+
+
+-- 9. Existing GUI edits use exact observed baselines and selective receipt restoration.
+local function editGui(instance: any, properties: any): (any, string)
+  local selected = {}; for name in pairs(properties) do selected[name] = true end
+  if properties.Font ~= nil or properties.FontFace ~= nil then selected.Font, selected.FontFace = true, true end
+  if instance.ClassName == "UISizeConstraint" and (properties.MinSize ~= nil or properties.MaxSize ~= nil) then selected.MinSize, selected.MaxSize = true, true end
+  if instance.ClassName == "UITextSizeConstraint" and (properties.MinTextSize ~= nil or properties.MaxTextSize ~= nil) then selected.MinTextSize, selected.MaxTextSize = true, true end
+  local names = {}; for name in pairs(selected) do table.insert(names, name) end
+  return run("scene.update", {ref = ops.registry:ref(instance), expected = Properties.snapshotGui(instance, names), properties = properties})
+end
+local changed, changedId = editGui(faceLabel, {TextSize = 24, Text = "Edited"})
+check(faceLabel.TextSize == 24 and faceLabel.Text == "Edited", "existing text properties update")
+check(changed.mutation.before.properties.TextSize == 150.25 and changed.mutation.after.properties.TextSize == 24, "receipt retains exact native before and after values")
+faceLabel.TextSize = 24.00001
+refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = changedId, mutation = changed.mutation}) end)
+faceLabel.TextSize = 24
+faceLabel.BackgroundTransparency = 0.75
+check(run("scene.restore", {receiptCommandId = changedId, mutation = changed.mutation}).restored and faceLabel.TextSize == 150.25 and faceLabel.BackgroundTransparency == 0.75, "restoration retains an out-of-intake baseline and preserves unrelated later edits")
+local sizeChange, sizeId = editGui(panel, {Size = u2(0.75, 17, 0.6, -9), BackgroundColor3 = {type = "Color3", value = V.array({0.2, 0.3, 0.4})}})
+check(panel.Size.X.Offset == 17 and sizeChange.mutation.after.properties.Size.type == "UDim2", "GUI size and colour updates use native typed values")
+check(run("scene.restore", {receiptCommandId = sizeId, mutation = sizeChange.mutation}).restored and panel.Size.X.Scale == 0.5, "GUI size restoration uses canonical observed values")
+local untouched = fixture.writes
+refuses("CONFLICT", function() return run("scene.update", {ref = panelRef, expected = {Size = u2(0.5000001, 0, 0.4, 20)}, properties = {Size = u2(0.6, 0, 0.4, 20)}}) end)
+check(fixture.writes == untouched, "nearby stale GUI baseline makes no writes")
+local oldSize = Properties.snapshotGui(panel, {"Size"})
+fixture.historyHook = function() panel.Size = UDim2.new(0.55, 0, 0.4, 20) end
+refuses("CONFLICT", function() return run("scene.update", {ref = panelRef, expected = oldSize, properties = {Size = u2(0.6, 0, 0.4, 20)}}) end)
+fixture.historyHook = nil
+check(near(panel.Size.X.Scale, 0.55), "a later edit during undo setup remains intact")
+
+-- Font aliases are linked by this explicit engine double. A custom face must restore through FontFace.
+fixture.guiAssigned = function(item: any, key: string, value: any): ()
+  if key == "Font" then item._properties.FontFace = Font.new("rbxasset://fonts/families/" .. value.Name .. ".json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+  elseif key == "FontFace" then item._properties.Font = Enum.Font.Unknown end
+end
+faceLabel.FontFace = Font.new("rbxassetid://123", Enum.FontWeight.SemiBold, Enum.FontStyle.Italic)
+local fontChange, fontId = editGui(faceLabel, {Font = "Gotham"})
+check(fontChange.mutation.before.properties.FontFace.family == "rbxassetid://123" and fontChange.mutation.before.properties.Font == "Unknown", "font receipt retains the native face rather than a non-restorable Unknown alias")
+faceLabel.FontFace = Font.new("rbxassetid://456", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = fontId, mutation = fontChange.mutation}) end)
+faceLabel.Font = Enum.Font.Gotham
+check(run("scene.restore", {receiptCommandId = fontId, mutation = fontChange.mutation}).restored and faceLabel.FontFace.Family == "rbxassetid://123", "font restoration retains the custom family, weight and style")
+fixture.guiAssigned = nil
+
+-- A setter fault after an earlier assignment is reverted and verified before cancelling the undo record.
+local oldText, oldTransparency, beforeCancel = faceLabel.Text, faceLabel.BackgroundTransparency, fixture.cancelled
+local failedOnce = false
+fixture.guiSetter = function(_item: any, key: string, value: any): any
+  if key == "Text" and not failedOnce then failedOnce = true; error("explicit one-shot setter fault") end
+  return value
+end
+refuses("VERIFY", function() return editGui(faceLabel, {BackgroundTransparency = 0.25, Text = "Rejected"}) end)
+fixture.guiSetter = nil
+check(faceLabel.Text == oldText and faceLabel.BackgroundTransparency == oldTransparency and fixture.cancelled == beforeCancel + 1, "partial GUI setter failure restores the exact baseline and cancels only its own recording")
+local coerceOnce = false
+fixture.guiSetter = function(_item: any, key: string, value: any): any
+  if key == "TextSize" and not coerceOnce then coerceOnce = true; return value + 2 end
+  return value
+end
+refuses("VERIFY", function() return editGui(faceLabel, {TextSize = 22}) end)
+fixture.guiSetter = nil
+check(faceLabel.TextSize == 150.25, "coerced GUI assignment is reverted to the actual out-of-intake baseline")
+
+
+-- 10. Coupled constraints are verified as a pair and restored without overwriting a changed opposite bound.
+local vectorConstraint = ops.registry:resolve(create("UISizeConstraint", {MinSize = {type = "Vector2", value = V.array({0, 100})}, MaxSize = {type = "Vector2", value = V.array({100, 200})}}, panelRef).ref)
+fixture.guiSetter = function(item: any, key: string, value: any): any
+  if item == vectorConstraint then
+    if key == "MinSize" then assert(value.X <= item.MaxSize.X and value.Y <= item.MaxSize.Y, "minimum assigned before the upper bound permits it")
+    elseif key == "MaxSize" then assert(value.X >= item.MinSize.X and value.Y >= item.MinSize.Y, "maximum assigned before the lower bound permits it") end
+  end
+  return value
+end
+local boundsChange, boundsId = editGui(vectorConstraint, {MinSize = {type = "Vector2", value = V.array({150, 0})}, MaxSize = {type = "Vector2", value = V.array({200, 50})}})
+check(vectorConstraint.MinSize.X == 150 and vectorConstraint.MaxSize.Y == 50, "mixed-axis constraint edits use a valid intermediate bound")
+check(run("scene.restore", {receiptCommandId = boundsId, mutation = boundsChange.mutation}).restored and vectorConstraint.MinSize.Y == 100 and vectorConstraint.MaxSize.X == 100, "mixed-axis constraints restore both original bounds")
+local beforeConstraint = fixture.writes
+refuses("PROPERTY", function() return editGui(vectorConstraint, {MinSize = {type = "Vector2", value = V.array({150, 0})}}) end)
+check(fixture.writes == beforeConstraint, "invalid partial constraint update is refused before any write")
+local partialBounds, partialBoundsId = editGui(vectorConstraint, {MinSize = {type = "Vector2", value = V.array({10, 110})}})
+vectorConstraint.MaxSize = Vector2.new(120, 220)
+refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = partialBoundsId, mutation = partialBounds.mutation}) end)
+vectorConstraint.MaxSize = Vector2.new(100, 200)
+check(run("scene.restore", {receiptCommandId = partialBoundsId, mutation = partialBounds.mutation}).restored and vectorConstraint.MinSize.X == 0, "single-bound receipt tracks the companion bound")
+fixture.guiSetter = nil
+local textConstraint = ops.registry:resolve(create("UITextSizeConstraint", {MinTextSize = 10, MaxTextSize = 30}, panelRef).ref)
+local textBounds, textBoundsId = editGui(textConstraint, {MinTextSize = 20, MaxTextSize = 25})
+check(run("scene.restore", {receiptCommandId = textBoundsId, mutation = textBounds.mutation}).restored and textConstraint.MinTextSize == 10 and textConstraint.MaxTextSize == 30, "text constraints retain both bounds")
+
+-- A failed revert is explicitly partial, never reported as a clean failure.
+fixture.guiSetter = function(_item: any, key: string, value: any): any return if key == "TextSize" then value + 2 else value end
+local partialFailure = refuses("PARTIAL", function() return editGui(faceLabel, {TextSize = 22}) end)
+fixture.guiSetter = nil
+check(partialFailure.unsafe == true and partialFailure.recovery.needsReconciliation and not partialFailure.recovery.rollbackVerified, "unverified GUI rollback retains reconciliation evidence")
+faceLabel.TextSize = 150.25
 
 print("Arcane GUI checks passed: " .. checks)
 `;

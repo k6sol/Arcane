@@ -6,9 +6,9 @@ import { BridgeError, DaemonClient } from './daemon-client.js';
 import { SkillRegistry } from './skills.js';
 import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, sceneBuildDescription, environmentDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
 import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput, compileEffectProps, effectCatalog, effectProps, compileGuiProps, guiCatalog, guiProps } from './scene-build.js';
-import { validateProperties, EFFECT_CLASSES, isEffectClass, GUI_CLASSES, isGuiClass, ENVIRONMENT_PRESET_NAMES } from '../../../packages/core/src/studio-policy.js';
+import { validateProperties, validateGuiEditProperties, validateGuiBaseline, guiEditBaselineNames, EFFECT_CLASSES, isEffectClass, GUI_CLASSES, isGuiClass, ENVIRONMENT_PRESET_NAMES } from '../../../packages/core/src/studio-policy.js';
 import { instanceRef } from '../../../packages/protocol/src/studio.js';
-import { target, ref, root, id, timeoutMs, properties, source, createClass, boundedText } from './schemas.js';
+import { target, ref, root, id, timeoutMs, properties, sceneUpdateProperties, source, createClass, boundedText } from './schemas.js';
 import { evidenceInput, leaseToken, workDefinition } from './work-schemas.js';
 import { nativeAdoptGlbInput, assetInput, assetJobId, assetHistoryInput, nativeAssetHistoryInput, nativeAssetJobId } from './asset-schemas.js';
 import { scenarioPlanSchema } from '../../../packages/studio-test-controller/src/scenario.js';
@@ -103,10 +103,17 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       return client.execute(sessionId, 'scene.create', args as Record<string, Json>, { timeoutMs, signal });
     });
   register('scene_update', sceneUpdateDescription(),
-    z.strictObject({ ...target, ref, expected: properties, properties }), WRITE,
+    z.strictObject({ ...target, ref, expected: sceneUpdateProperties, properties: sceneUpdateProperties }), WRITE,
     ({ sessionId, timeoutMs, ...args }, signal) => {
-      const keys = Object.keys(args.properties);
-      if (!keys.length || Object.keys(args.expected).length !== keys.length || keys.some(key => !Object.hasOwn(args.expected, key))) throw new BridgeError('INPUT', 'expected must cover exactly every changed property, and properties must be nonempty.');
+      const changedKeys = Object.keys(args.properties);
+      const keys = isGuiClass(args.ref.className) ? guiEditBaselineNames(args.ref.className, args.properties as Record<string, Json>) : changedKeys;
+      if (!changedKeys.length || Object.keys(args.expected).length !== keys.length || keys.some(key => !Object.hasOwn(args.expected, key))) throw new BridgeError('INPUT', 'expected must cover the changed properties and any linked GUI font/constraint values; properties must be nonempty.');
+      if (isGuiClass(args.ref.className)) {
+        validateGuiEditProperties(args.properties, args.ref.className);
+        validateGuiBaseline(args.expected, args.ref.className);
+      } else {
+        properties.parse(args.properties); properties.parse(args.expected);
+      }
       return client.execute(sessionId, 'scene.update', args as Record<string, Json>, { timeoutMs, signal });
     });
   register('scene_build', sceneBuildDescription() + ' Effects: items with an effect className, name, in (group, part or Attachment key) and fx (keys listed on scene_create); Beam/Trail Attachment0/1 name earlier Attachment item keys. GUI (scene.gui): container ScreenGui or world GUIs; GUI className + ui; a ui prototype (e.g. a styled button) is stamped N times via use. Then only interaction logic, in a LocalScript via script_update.',

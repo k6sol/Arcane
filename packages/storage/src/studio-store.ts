@@ -7,11 +7,12 @@ import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
-import { canonical, validateCommandArgs, sceneBuildInstanceCount } from '../../core/src/studio-policy.js';
+import { canonical, validateCommandArgs, sceneBuildInstanceCount, isGuiClass } from '../../core/src/studio-policy.js';
 import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
 import { terrainVoxelCount } from '../../core/src/terrain-policy.js';
 import { validateMeshKeepReceipt } from '../../core/src/mesh-keep-policy.js';
 import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.js';
+import { guiEditReceiptMatches } from '../../core/src/gui-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
 import type { NativeConversation } from './conversation-work-store.js';
@@ -1416,7 +1417,9 @@ export class StudioStore {
         const after = jsonObject(mutation.after);
         if ((c.method === 'script.update' || c.method === 'scene.update') && !sameReceiptRef(mutation.ref, c.args.ref)) throw new ArcaneError('RECEIPT', 'Mutation receipt does not name the exact changed reference.');
         if (c.method === 'script.update' && (after.source !== c.args.source || object(mutation.before).source !== c.args.expectedSource)) throw new ArcaneError('RECEIPT', 'Script receipt does not match the intended baseline/change.');
-        if (c.method === 'scene.update' && (!nativePropertiesMatch(object(c.args.properties) as Record<string, Json>, after.properties, r.className as string) || canonical(object(mutation.before).properties) !== canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
+        if (c.method === 'scene.update' && !(isGuiClass(r.className)
+          ? guiEditReceiptMatches(r.className, c.args, mutation)
+          : nativePropertiesMatch(object(c.args.properties) as Record<string, Json>, after.properties, r.className as string) && canonical(object(mutation.before).properties) === canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
         if (c.method === 'script.set_enabled' && (!sameReceiptRef(mutation.ref,c.args.ref) || canonical(mutation.before) !== canonical({ source:c.args.expectedSource,enabled:c.args.expectedEnabled }) || canonical(after) !== canonical({source:c.args.expectedSource,enabled:c.args.enabled}))) throw new ArcaneError('RECEIPT', 'Execution-state receipt does not match the exact source/state baseline.');
         if (c.method === 'scene.create' && mutation.before !== null) throw new ArcaneError('RECEIPT', 'Creation receipt must have a null baseline.');
         // Clone items copy a template's whole subtree, so a build with clones creates at least the planned count.

@@ -164,7 +164,7 @@ Write: create one instance under scene_children.parentRef or another genuinely r
 
 **Safety:** Writes (may change or remove existing state)
 
-Write: update an observed ref with the schema fields its native class supports. expected must hold exactly the changed keys, with baselines from scene_inspect. Shape only on Part-shape classes; Orientation is a tagged Vector3 in -360..360 degrees. No CFrame, reparent, deletion, service rename or raw calls. Needs task authorization, the write grant and Studio edit mode. Keep the receipt and verify; on ambiguity use receipt_status, never auto-retry.
+Write: update an observed ref with the schema fields its native class supports. expected must hold the changed keys plus linked GUI font/constraint keys, with exact baselines from scene_inspect. Shape only on Part-shape classes; Orientation is a tagged Vector3 in -360..360 degrees. No CFrame, reparent, deletion, service rename or raw calls. Needs task authorization, the write grant and Studio edit mode. GUI edits need scene.gui.edit: copy exact tagged dimensions, colors, sequences and full Font observations from scene_inspect into expected; requested values use the scene_create GUI limits. For Font or FontFace edits, expected includes both Font and FontFace; for either constraint bound, expected includes both bounds. Receipts retain those linked values. Keep the receipt and verify; on ambiguity use receipt_status, never auto-retry.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
