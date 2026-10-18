@@ -33,8 +33,8 @@ export async function run(t, body, operations = false) {
   const prepared=authority.prepare(await authority.admit(JOB));
   const payload=decodeStudioImportPayload(prepared,new Map(generated.files.map(f=>[f.fileId,f.bytes])));
   const transfer=createStudioImportTransfer(prepared,payload);
-  let source='local __mods: any = {}\n';
-  for (const name of (operations ? ['Validation','Properties','Registry','Sha256Stream','AssetMesh','AssetTransfer','Operations'] : ['Sha256Stream','AssetMesh','AssetTransfer'])) {
+  let source='local __mods: any = setmetatable({}, {__index = function(_, name) error("Unloaded fixture module: " .. tostring(name)) end})\n';
+  for (const name of (operations ? ['Validation','Properties','Registry','Sha256Stream','AssetMesh','AssetTransfer','AssetUpload','AssetPlacement','TerrainGen','Operations'] : ['Sha256Stream','AssetMesh','AssetTransfer'])) {
     const text=(await readFile(join(root,'plugin/src',name+'.luau'),'utf8')).replace(/require\(script\.Parent\.(\w+)\)/g,'__mods.$1');
     source+='__mods.'+name+'=(function()\n'+text+'\nend)()\n';
   }

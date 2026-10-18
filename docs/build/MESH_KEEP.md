@@ -49,3 +49,5 @@ The receipt file retains every recorded attempt within an 8 MiB / 8,192-record s
 ## Verification status
 
 Automated only, with fakes: store/policy/receipt validation and the daemon service with a real `StudioStore` and a simulated plugin; the desktop host with a fake dialog/fetch/IPC; the Luau keep path in the standalone VM with engine doubles (`tests/plugin/mesh-keep.test.mjs`); the renderer module in the browser UI suite. No Roblox API was called. A native Studio run (real upload, moderation and reload after reopen) has **not** been performed and remains the acceptance gate.
+
+The plugin operation explicitly imports `AssetUpload` before binding the uploader to a retained reconstruction. `tests/plugin/mesh-keep-dispatch.test.mjs` exercises reconstruction ownership through the production operation and checks the module passed into its engine binding, using a simulated receiver and upload sink. It reproduces a missing import independently of the lower-level uploader tests. Standalone transfer fixtures also reject unloaded module references instead of silently substituting `nil`.

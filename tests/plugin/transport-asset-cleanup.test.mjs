@@ -11,7 +11,7 @@ const runtime = process.env.ARCANE_LUAU_BIN;
 const compiler = process.env.ARCANE_LUAU_COMPILE ?? (runtime
   ? join(dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
 const options = {skip: (!runtime || !compiler) && 'Configure existing standalone Luau compiler and VM; no tools are installed and no Studio is used.'};
-const names = ['Validation', 'Properties', 'Registry', 'Sha256Stream', 'AssetMesh', 'AssetTransfer', 'AssetPlacement', 'TerrainGen', 'Operations', 'TestProof', 'Transport'];
+const names = ['Validation', 'Properties', 'Registry', 'Sha256Stream', 'AssetMesh', 'AssetTransfer', 'AssetUpload', 'AssetPlacement', 'TerrainGen', 'Operations', 'TestProof', 'Transport'];
 
 // Keep production module bodies and their script-relative imports unchanged.
 // All engine services, HTTP, scheduling and future resource ownership are doubles.

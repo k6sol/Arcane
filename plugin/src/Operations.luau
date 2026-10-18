@@ -6,6 +6,7 @@ local Registry = require(script.Parent.Registry)
 local AssetTransfer = require(script.Parent.AssetTransfer)
 local AssetPlacement = require(script.Parent.AssetPlacement)
 local TerrainGen = require(script.Parent.TerrainGen)
+local AssetUpload = require(script.Parent.AssetUpload)
 local Operations = {}
 Operations.__index = Operations
 type Operations = any

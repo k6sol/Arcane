@@ -7,7 +7,7 @@
   "entry": "ArcaneLocalBridge",
   "runtimeIdentity": {
     "scheme": "arcane-plugin-source-v1",
-    "sha256": "be7ae0190d4b9d1627edddef69fe222c7b5bf218c3e622cb0a59831e29f41365"
+    "sha256": "944c36b53b4a6eea2be42ba1508ad683db4f3ebbe2e516272880b22b9a687e29"
   },
   "sources": [
     {
@@ -37,8 +37,8 @@
     },
     {
       "path": "src/Operations.luau",
-      "bytes": 90820,
-      "sha256": "f8bf2e42edf054d53e1b659deace058a53c0a42735c74c544c178192a8cbabd7"
+      "bytes": 90875,
+      "sha256": "d2b4ab35684ccce18d758245fcafee200a376c21cb9f63e844e97ccb5d502915"
     },
     {
       "path": "src/Transport.luau",
@@ -100,14 +100,14 @@
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 376501,
-      "sha256": "c40cb27cfdf955ca6e134d987c906148f5398dfb5571b07ab6d27a12d9b2ecc9"
+      "bytes": 376556,
+      "sha256": "f6b5bc9c54b874cca52f7a095f0f9db15e3f6816ee25ccff50315c0bd35c6e56"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 376501,
-      "sha256": "c40cb27cfdf955ca6e134d987c906148f5398dfb5571b07ab6d27a12d9b2ecc9"
+      "bytes": 376556,
+      "sha256": "f6b5bc9c54b874cca52f7a095f0f9db15e3f6816ee25ccff50315c0bd35c6e56"
     }
   ]
 }
