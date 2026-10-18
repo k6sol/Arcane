@@ -31,13 +31,18 @@ Enum.ZIndexBehavior = enumGroup({"Sibling"})
 Enum.AutomaticSize = enumGroup({"Y"})
 Enum.SortOrder = enumGroup({"LayoutOrder"})
 Enum.Font = enumGroup({"SourceSans", "SourceSansSemibold", "Gotham", "GothamBold", "GothamMedium", "Code"})
-Enum.TextXAlignment = enumGroup({"Left"})
+Enum.TextXAlignment = enumGroup({"Left", "Center", "Right"})
 Enum.TextYAlignment = enumGroup({"Top", "Center"})
 Enum.TextTruncate = enumGroup({"AtEnd"})
 Color3.fromRGB = function(r: number, g: number, b: number): any return Color3.new(r / 255, g / 255, b / 255) end
 local UDim: any = {new = function(scale: number, offset: number): any return {Scale = scale, Offset = offset} end}
 local UDim2: any = {new = function(xScale: number?, xOffset: number?, yScale: number?, yOffset: number?): any return {xScale or 0, xOffset or 0, yScale or 0, yOffset or 0} end,
 	fromScale = function(x: number, y: number): any return {x, 0, y, 0} end}
+-- Value doubles for the brand gradients; GUI rendering itself is not certified here.
+local ColorSequenceKeypoint: any = {new = function(time: number, color: any): any return table.freeze({Time = time, Value = color}) end}
+local ColorSequence: any = {new = function(points: any): any return table.freeze({Keypoints = table.freeze(table.clone(points))}) end}
+local NumberSequenceKeypoint: any = {new = function(time: number, value: number): any return table.freeze({Time = time, Value = value}) end}
+local NumberSequence: any = {new = function(points: any): any return table.freeze({Keypoints = table.freeze(table.clone(points))}) end}
 local DockWidgetPluginGuiInfo: any = {new = function(...: any): any return {...} end}
 fixture.workers = {}
 task.spawn = function(callback: any): () table.insert(fixture.workers, callback) end

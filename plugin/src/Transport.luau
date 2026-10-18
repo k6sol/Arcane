@@ -65,7 +65,7 @@ function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: stri
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
 		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil,
 		recovery = nil, checkInput = nil, assetCleanupFailed = false,
-		codePairing = nil, onPairing = nil, onPaired = nil,
+		codePairing = nil, onPairing = nil, onPaired = nil, onActivity = nil,
 		sizedArgs = setmetatable({}, {__mode = "k"})}, Transport)
 end
 
@@ -619,6 +619,11 @@ function Transport:dispatch(command: any): ()
 	end)
 	self.executingCommand = nil
 	if self.stopped then return end
+	-- Display-only summary for Main's activity line: the method name and a created count, never a payload.
+	if ok and self.onActivity and self.generation == pair.generation then
+		local created = if type(output) == "table" and type(output.created) == "table" then output.created.count else nil
+		pcall(self.onActivity, command.method, if type(created) == "number" then created else nil)
+	end
 	local unsafe = not ok and type(output) == "table" and output.unsafe == true
 	local payload: any = {sessionId = pair.sessionId, commandId = command.id,
 		state = if ok then "succeeded" else "failed"}

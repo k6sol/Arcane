@@ -349,18 +349,24 @@ test('native bundle rejects dynamic, undeclared and incorrectly parented module 
   }
 });
 
-test('Main exposes the red Arcane brand, editable key, Connect/Reconnect/Connected/Failed and live ACK color', () => {
+test('Main exposes the branded Arcane widget, editable key, Connect/Reconnect/Connected/Failed and live ACK color', () => {
   const main = byFile['Main.server.luau'];
   assert.equal((main.match(/Instance\.new\("TextBox"\)/g) ?? []).length, 1);
-  assert.equal((main.match(/Instance\.new\("TextButton"\)/g) ?? []).length, 1);
+  // Connect, the presentation-only Advanced toggle, and Replace (an explicit edit that clears the field).
+  assert.equal((main.match(/Instance\.new\("TextButton"\)/g) ?? []).length, 3);
   assert.doesNotMatch(main, /requestPair|pairing code|Daemon URL|local url|credits|quota/i);
-  assert.doesNotMatch(main, /"(?:OrangeStroke|WhiteStroke|Crossbar|Subtitle|Divider|ConnectionDot|ConnectionStatus|Footer|Grants|Detail|Disconnect)"|Instance\.new\("(?:ImageLabel|ImageButton)"\)/);
-  for (const feature of ['"Arcane"', '"Connect"', '"Reconnect"', '"Connected"', '"Failed"', '"Enter a new API key"', 'TextTransparency = 0', 'MaxVisibleGraphemes = -1', 'keyInput.Text = savedKey or ""', 'requestConnect(value)', 'status.sessionId ~= nil', 'status.state == "connected"', 'if live and not keyFailed then colors.green else colors.red']) assert.ok(main.includes(feature), feature);
-  assert.match(main, /header[^\n]*UDim2\.new\(1, 0, 0, 48\)/);
-  assert.match(main, /connectButton\.Position = UDim2\.new\(0, 14, 0, 100\)/);
-  assert.match(main, /inputPanel[^\n]*UDim2\.new\(0, 14, 0, 54\)/);
+  assert.doesNotMatch(main, /"(?:OrangeStroke|WhiteStroke|Crossbar|Grants|Disconnect)"|Instance\.new\("(?:ImageLabel|ImageButton)"\)|rbxasset|rbxthumb|https?:\/\/(?!127)/);
+  for (const feature of ['"Arcane"', '"Connect"', '"Reconnect"', '"Connected"', '"Failed"', '"Enter a new API key"', 'TextTransparency = 0', 'MaxVisibleGraphemes = -1', 'keyInput.Text = savedKey or ""', 'requestConnect(value)', 'status.sessionId ~= nil', 'status.state == "connected"', 'if live and not keyFailed then colors.green else colors.red',
+    '"Not connected"', '"Waiting for Arcane"', '"Code entry"', '"Connected to "', '"Update required"', '"Reconciliation needed"', '"Advanced: use a local key"', '"Local key ending "']) assert.ok(main.includes(feature), feature);
+  for (const piece of ['UICorner', 'UIStroke', 'UIGradient', 'UIPadding', 'UIListLayout']) assert.ok(main.includes(`Instance.new("${piece}")`), piece);
   assert.match(main, /red = Color3\.fromRGB\(255, 51, 64\)/);
+  assert.match(main, /white = Color3\.fromRGB\(245, 245, 245\)/);
+  // Red base x gradient = #e01b2c -> #c8102e.
+  assert.match(main, /gradient\(connectButton, Color3\.new\(224 \/ 255, 27 \/ 51, 44 \/ 64\), Color3\.new\(200 \/ 255, 16 \/ 51, 46 \/ 64\), 90\)/);
   assert.match(main, /for row = 0, 63 do/);
+  // Status copy is fixed per state: daemon-supplied detail is never rendered.
+  assert.doesNotMatch(main, /statusText\.Text\s*=[^\n]*status\.detail|Text = detail\b/);
+  assert.match(main, /savedLabel\.Text = "Local key ending " \.\. string\.sub\(savedKey :: string, -4\)/);
   assert.doesNotMatch(main, /\b(?:print|warn)\s*\(/);
   assert.ok(byFile['Transport.luau'].includes('"/v1/plugin/connect"'));
   assert.ok(byFile['Validation.luau'].includes('^arcane_local_v1_'));
@@ -369,19 +375,24 @@ test('Main exposes the red Arcane brand, editable key, Connect/Reconnect/Connect
   assert.doesNotMatch(byFile['TestProof.luau'], /SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
 });
 
-test('native Main auto-opens a compact floating popup with an unobstructed standard key input', () => {
+test('native Main auto-opens a floating popup with an unobstructed standard key input', () => {
   const main = byFile['Main.server.luau'];
-  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, true, true, 260, 184, 230, 176\)/);
-  assert.match(main, /panelPadding\.PaddingBottom = UDim\.new\(0, 18\)/);
-  assert.match(main, /content = frame\("Content", panel, UDim2\.new\(0, 0, 0\.5, -71\), UDim2\.new\(1, 0, 0, 152\)/);
-  assert.match(main, /panelPadding\.Parent = content/);
+  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, true, true, 300, 380, 264, 352\)/);
+  assert.match(main, /padding\(content, 16, 16, 18, 16\)/);
   assert.match(main, /connectButton\.Parent = content/);
   assert.doesNotMatch(main, /ScrollingFrame|AutomaticCanvasSize|CanvasSize/);
-  assert.match(main, /CreateDockWidgetPluginGuiAsync\("ArcaneLocalBridgeFloatingV3", info\)/);
+  assert.match(main, /CreateDockWidgetPluginGuiAsync\("ArcaneLocalBridgeFloatingV4", info\)/);
   assert.match(main, /keyInput\.Position = UDim2\.new\(\)/);
   assert.match(main, /keyInput\.Size = UDim2\.fromScale\(1, 1\)/);
   for (const property of ['ZIndex = 3', 'Active = true', 'Selectable = true', 'TextEditable = true']) assert.ok(main.includes('keyInput.' + property), property);
+  // The saved key is hidden by hiding the whole field row, never by an overlay or invisible glyphs.
   assert.doesNotMatch(main, /MaskedKey|mask\.ZIndex|TextTransparency = 1|MaxVisibleGraphemes = 0/);
+  assert.match(main, /entry\.Visible = not masked/);
+  // Theme lookups are guarded and never start network or transport work.
+  const theme = main.slice(main.indexOf('local function applyTheme()'), main.indexOf('local keyInput = Instance.new("TextBox")'));
+  assert.doesNotMatch(theme, /transport|RequestAsync|request/i);
+  const render = main.slice(main.indexOf('local function render()'), main.indexOf('local function refreshHint()'));
+  assert.doesNotMatch(render, /keyInput\.Text\s*=[^=]|transport:|SetSetting|request/);
   assert.match(main, /button:SetActive\(widget\.Enabled\)/);
   assert.doesNotMatch(main, /(?:GenerateGUID|math\.random).*ArcaneLocalBridge|CaptureFocus\(/, 'No accumulating random widgets or forced typing focus.');
 });
@@ -437,7 +448,7 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.ok(malformed);
   assert.match(malformed, /rejectKey\(\)[\s\S]*transport:requestDisconnect\(\)[\s\S]*return/);
   assert.equal((main.match(/requestDisconnect\(/g) ?? []).length, 3, 'Text edits, invalid keys and locally refused connects fence old access; there is no Disconnect control.');
-  const rejection = main.slice(main.indexOf('local function rejectKey()'), main.indexOf('local transport:'));
+  const rejection = main.slice(main.indexOf('local function rejectKey()'), main.indexOf('local function invalidateInput()'));
   assert.match(rejection, /savedKey, hint = true, nil, "Enter a new API key"/);
   assert.match(rejection, /plugin:SetSetting\(KEY_SETTING, ""\)/);
   assert.match(rejection, /clearInput\(\)/, 'A current rejection clears the rejected text for replacement guidance.');

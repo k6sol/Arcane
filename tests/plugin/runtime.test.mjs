@@ -88,36 +88,45 @@ local keySetting, lastSetting = "${LOCAL_KEY_SETTING}", "${LAST_CONNECTION_SETTI
 local key = "arcane_local_v1_45871_" .. string.rep("a", 64)
 local otherKey = "arcane_local_v1_45872_" .. string.rep("b", 64)
 local green = Color3.fromRGB(71, 203, 133)
-local inputs, controls = {}, {}
-local brand, header, inputPanel, mark, content
+local inputs, controls, named = {}, {}, {}
 for _, instance in ipairs(fixture.created) do
   if instance:IsA("TextBox") then table.insert(inputs, instance) end
   if instance:IsA("TextButton") then table.insert(controls, instance) end
   assert(instance.Name ~= "MaskedKey", "no overlay can intercept native key entry")
-  if instance.Name == "Brand" then brand = instance end
-  if instance.Name == "Header" then header = instance end
-  if instance.Name == "KeyInput" then inputPanel = instance end
-  if instance.Name == "ArcaneMark" then mark = instance end
-  if instance.Name == "Content" then content = instance end
-  assert(not table.find({"WhiteStroke", "OrangeStroke", "Subtitle", "ConnectionStatus", "ConnectionDot", "Divider", "Footer", "Grants", "Detail"}, instance.Name), "only the requested minimal UI")
+  assert(not instance:IsA("ImageLabel") and not instance:IsA("ImageButton") and not instance:IsA("ScrollingFrame"), "no external images or scrolling canvas")
+  if named[instance.Name] == nil then named[instance.Name] = instance end
+  assert(not table.find({"WhiteStroke", "OrangeStroke", "Disconnect", "Grants"}, instance.Name), "no disconnect toggle or grant editor in the widget")
 end
-assert(#inputs == 1 and #controls == 1 and inputs[1].Name == "ApiKey", "exactly one key field and one connection control")
-local keyInput, control = inputs[1], controls[1]
-assert(control.Name == "Connect" and control.Text ~= "Disconnect", "connection control never toggles to Disconnect")
-assert(keyInput.TextTransparency == 0 and keyInput.MaxVisibleGraphemes == -1 and not keyInput.RichText and not keyInput.MultiLine and not keyInput.ClearTextOnFocus, "ordinary editable textbox displays current and saved key text")
+local brand, header, inputPanel, mark, content = named.Brand, named.Header, named.KeyInput, named.ArcaneMark, named.Content
+assert(#inputs == 1 and inputs[1].Name == "ApiKey", "exactly one key field")
+assert(#controls == 3 and named.Connect and named.Advanced and named.ReplaceKey, "Connect plus the Advanced toggle and Replace key action")
+local keyInput, control = inputs[1], named.Connect
+assert(control:IsA("TextButton") and control.Text ~= "Disconnect", "connection control never toggles to Disconnect")
+assert(keyInput.TextTransparency == 0 and keyInput.MaxVisibleGraphemes == -1 and not keyInput.RichText and not keyInput.MultiLine and not keyInput.ClearTextOnFocus, "ordinary editable textbox, no glyph masking")
 assert(keyInput.ZIndex == 3 and keyInput.TextEditable, "native input has its own unobstructed editing layer")
 assert(keyInput.Active and keyInput.Selectable and keyInput.TextEditable, "key input accepts native focus and editing")
 assert(keyInput.Position[1] == 0 and keyInput.Position[2] == 0 and keyInput.Position[3] == 0 and keyInput.Position[4] == 0 and keyInput.Size[1] == 1 and keyInput.Size[2] == 0 and keyInput.Size[3] == 1 and keyInput.Size[4] == 0, "the entire key entry is an editable hit area")
 assert(fixture.widgetInfo[1] == Enum.InitialDockState.Float and fixture.widgetInfo[2] == true and fixture.widgetInfo[3] == true, "startup opens a floating popup even after a previously hidden session")
-assert(fixture.widgetInfo[4] == 260 and fixture.widgetInfo[5] == 184 and fixture.widgetInfo[6] == 230, "compact default content area and minimum width")
+assert(fixture.widgetInfo[4] == 300 and fixture.widgetInfo[5] == 380 and fixture.widgetInfo[6] == 264 and fixture.widgetInfo[7] == 352, "branded default and minimum content area")
 assert(__arcaneRequire("Validation").VERSION == "0.2.0", "runtime advertises plugin 0.2.0")
-local bottomPadding
-for _, child in ipairs(control.Parent:GetChildren()) do
-  if child:IsA("UIPadding") then bottomPadding = child.PaddingBottom.Offset end
+-- Brand: black glass card, white text, Arcane red mark and the #e01b2c -> #c8102e Connect gradient.
+local glass = named.Glass
+assert(glass and content.Parent == glass and glass.Parent == named.ArcanePanel, "content sits on the glass card")
+local function gradientOf(parent: any): any
+  for _, child in ipairs(parent:GetChildren()) do if child.ClassName == "UIGradient" and child.Color then return child end end
+  return nil
 end
-assert(bottomPadding and bottomPadding >= 18, "comfortable bottom padding below connection and failure UI")
-assert(header.Size[4] == 48 and inputPanel.Position[4] == 54 and control.Position[4] == 100, "fixed compact layout puts the key above Connect")
+local glassGradient = gradientOf(glass)
+assert(glassGradient and glassGradient.Color.Keypoints[2].Value == Color3.fromRGB(10, 10, 12), "glass card fades to near-black")
+local buttonGradient = gradientOf(control)
+local top, bottom = buttonGradient.Color.Keypoints[1].Value, buttonGradient.Color.Keypoints[2].Value
+local function near(a: number, b: number): boolean return math.abs(a - b) < 0.6 end
+assert(near(top.R * 255 * 1, 224) and near(top.G * 51, 27) and near(top.B * 64, 44) and near(bottom.R * 255, 200) and near(bottom.G * 51, 16) and near(bottom.B * 64, 46), "red base times the gradient renders exactly #e01b2c to #c8102e")
+assert(control.TextColor3 == Color3.fromRGB(245, 245, 245) and brand.TextColor3 == Color3.fromRGB(245, 245, 245), "white text on brand surfaces")
 assert(brand and brand.Text == "Arcane" and brand.TextSize >= 16 and brand.TextSize <= 20, "compact Arcane brand")
+for _, instance in ipairs(fixture.created) do
+  if instance.ClassName == "TextLabel" or instance.ClassName == "TextButton" or instance.ClassName == "TextBox" then assert(instance.TextSize >= 12, "accessible text sizes") end
+end
 assert(mark and #mark:GetChildren() > 64 and mark.BackgroundTransparency == 1, "the SVG mark is rendered as native scanline frames")
 for _, strip in ipairs(mark:GetChildren()) do
   assert(strip:IsA("Frame") and strip.BackgroundColor3 == Color3.fromRGB(255, 51, 64), "all logo scanlines use the exact Arcane red")
@@ -125,18 +134,23 @@ for _, strip in ipairs(mark:GetChildren()) do
   assert(strip.Size[3] == 1 / 64 and strip.Size[1] > 0 and strip.Position[2] == 0 and strip.Position[4] == 0, "logo uses sixty-four bounded fractional rows")
   assert(strip.BackgroundTransparency == (if string.sub(strip.Name, 1, 9) == "LogoFacet" then 0.2 else 0), "scanline opacity preserves the desktop facet")
 end
-assert(fixture.widgetInfo[7] == 176, "compact minimum content height")
-assert(fixture.widgetInfo[7] >= control.Position[4] + control.Size[4] + bottomPadding, "minimum content bounds fit the entire button and bottom padding without assuming host chrome height")
-assert(content and header.Parent == content and inputPanel.Parent == content and control.Parent == content, "all controls share the centered content frame")
-assert(content.Parent:IsA("Frame") and content.Size[3] == 0, "fixed content needs no scrolling canvas")
-for _, height in ipairs({fixture.widgetInfo[7], fixture.widgetInfo[5], 240}) do
-  local top = height * content.Position[3] + content.Position[4]
-  local bottom = top + control.Position[4] + control.Size[4]
-  assert(top >= 0 and top + content.Size[4] <= height, "entire content frame stays inside the widget")
-  assert(bottom + bottomPadding <= height, "button and bottom padding are never cropped")
-  assert(top + mark.Position[4] == height - bottom, "logo and button have balanced outer margins")
-  assert(top + header.Size[4] <= top + inputPanel.Position[4] and inputPanel.Position[4] + inputPanel.Size[4] < control.Position[4], "header, key and button never overlap")
+-- Stacked layout: every row fits the minimum height without scrolling, Connect below the field.
+local listPadding, contentPadding
+for _, child in ipairs(content:GetChildren()) do
+  if child.ClassName == "UIListLayout" then listPadding = child.Padding.Offset end
+  if child.ClassName == "UIPadding" then contentPadding = child end
 end
+assert(listPadding and contentPadding and contentPadding.PaddingBottom.Offset >= 18, "comfortable padding below connection and failure UI")
+local stack = {header, named.StatusCard, named.Entry, control, named.Advanced, named.Meta}
+local used = contentPadding.PaddingTop.Offset + contentPadding.PaddingBottom.Offset + listPadding * (#stack - 1) + glass.Position[4] * 2
+for index, item in ipairs(stack) do
+  assert(item.Parent == content and item.Size[3] == 0, "fixed-height rows share the content stack")
+  if index > 1 then assert(item.LayoutOrder > stack[index - 1].LayoutOrder, "header, status, code field, Connect, Advanced, activity in order") end
+  used += item.Size[4]
+end
+assert(named.SavedKey.Size[4] <= named.Entry.Size[4] and named.SavedKey.LayoutOrder > named.Entry.LayoutOrder and named.SavedKey.LayoutOrder < control.LayoutOrder, "the masked key row replaces the field in place")
+assert(used <= fixture.widgetInfo[7], "minimum content height fits every row and padding without scrolling")
+assert(inputPanel.Parent == named.Entry, "the key field lives in the code entry row")
 assert(#fixture.workers == 1 and #fixture.transports == 1, "exactly one transport worker")
 local client = fixture.transports[1]
 local worker = coroutine.create(fixture.workers[1])
@@ -270,7 +284,7 @@ async function runLuauFixture({ setup = '', checks, core = false, format = 'gene
       readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8'),
       // Adapt only the GUI double's old identity assertion to the compact widget.
       readFile(path.join(repository, 'plugin/fixtures/MockPlugin.luau'), 'utf8')
-        .then(source => source.replace('id == "ArcaneLocalBridgeFloatingV2"', 'id == "ArcaneLocalBridgeFloatingV3"')),
+        .then(source => source.replace('id == "ArcaneLocalBridgeFloatingV2"', 'id == "ArcaneLocalBridgeFloatingV4"')),
       core ? readFile(path.join(repository, 'plugin/fixtures/Logic.spec.luau'), 'utf8') : Promise.resolve(''),
       editingCase ? readFile(path.join(repository, 'plugin/fixtures/KeyInput.spec.luau'), 'utf8') : Promise.resolve(''),
       reconnectCase ? readFile(path.join(repository, 'plugin/fixtures/Reconnect.spec.luau'), 'utf8') : Promise.resolve(''),
@@ -389,10 +403,61 @@ unload()
   });
 }
 
+test('branded widget shows each connection state, masks the saved key and never probes on its own', { skip: !runtime || !compile }, async () => {
+  await runLuauFixture({ checks: `
+local statusTitle, statusText, statusDot = named.StatusTitle, named.StatusText, named.StatusDot
+local entryRow, savedRow, advanced, replace = named.Entry, named.SavedKey, named.Advanced, named.ReplaceKey
+local activity, diagnosticsCount = named.Activity, named.DiagnosticsCount
+assert(statusTitle.Text == "Not connected" and string.find(statusText.Text, "Connect Studio", 1, true) and entryRow.Visible and not savedRow.Visible, "cold start asks for the code shown in Arcane")
+assert(activity.Text == "No builds yet" and diagnosticsCount.Text == "Output: idle", "no activity or diagnostics before a connection")
+idleMount()
+advanced.Activated:Fire()
+assert(keyInput.PlaceholderText == "Paste your Arcane local key" and named.FieldLabel.Text == "Local key (Advanced)" and advanced.Text == "Hide advanced", "Advanced switches the field to a pasted local key")
+assert(fixture.requests == 0 and #fixture.setCalls == 0 and client.desiredPair == nil, "the Advanced toggle is presentation only")
+advanced.Activated:Fire()
+assert(keyInput.PlaceholderText == "6-digit code from Arcane", "closing Advanced returns to code entry")
+enter("123")
+assert(statusTitle.Text == "Code entry" and string.find(statusText.Text, "6 digits", 1, true), "partial code is a visible code-entry state")
+enter("123456")
+assert(statusTitle.Text == "Code entry" and fixture.requests == 0, "typing a full code makes no request")
+control.Activated:Fire()
+assert(statusTitle.Text == "Waiting for Arcane" and statusDot.BackgroundColor3 == Color3.fromRGB(225, 166, 68) and keyInput.Text == "" and fixture.requests == 0, "Connect with a code waits for Arcane; the click only queues it")
+enter(key)
+assert(entryRow.Visible and statusTitle.Text == "Code entry", "a pasted key stays editable until Connect")
+clickConnect()
+assert(not entryRow.Visible and not savedRow.Visible and keyInput.Text == key, "after Connect the saved key is hidden behind the masked summary")
+ack()
+assert(statusTitle.Text == "Connected to ArcaneDisposableFixture" and statusDot.BackgroundColor3 == green, "connected names the place with a green dot")
+assert(diagnosticsCount.Text == "Output: idle" or diagnosticsCount.Text == "Output: no errors", "connected output count starts clean")
+client.diagnostics = {entries = {a = {kind = "error", count = 2}, b = {kind = "warning", count = 1}}}
+client.onActivity("scene.build", 1240)
+assert(string.find(activity.Text, "Built 1,240 parts", 1, true) == 1 and string.find(activity.Text, "just now", 1, true), "last activity summarizes the build")
+assert(diagnosticsCount.Text == "Output: 2 errors" .. utf8.char(32, 0xB7, 32) .. "1 warning", "compact diagnostics count")
+client.diagnostics = nil
+client.onActivity("selection.read", nil)
+assert(string.find(activity.Text, "Built 1,240 parts", 1, true) == 1, "reads never replace the last build activity")
+advanced.Activated:Fire()
+assert(savedRow.Visible and not entryRow.Visible and named.SavedKeyLabel.Text == "Local key ending " .. string.sub(key, -4), "Advanced shows only the last four characters of the saved key")
+for _, instance in ipairs(fixture.created) do
+  if instance ~= keyInput and type(instance.Text) == "string" then assert(not string.find(instance.Text, string.sub(key, 1, 24), 1, true), "no label renders the saved key") end
+end
+client:status("reconciliation", "Partial change")
+assert(statusTitle.Text == "Reconciliation needed" and control.BackgroundColor3 ~= green, "reconciliation is its own red state")
+client:status("disconnected", "PROTOCOL: Unsupported daemon protocol. " .. key)
+assert(statusTitle.Text == "Update required" and not string.find(statusText.Text, key, 1, true), "protocol mismatch asks for an update without echoing daemon text")
+local requests, writes = fixture.requests, #fixture.setCalls
+replace.Activated:Fire()
+assert(keyInput.Text == "" and fixture.pluginSettings[keySetting] == "" and client.disconnectRequested and client.desiredPair == nil, "Replace forgets the saved key and fences the session like deleting the text")
+assert(fixture.requests == requests and entryRow.Visible and not savedRow.Visible and statusTitle.Text == "Not connected", "Replace makes no request and returns to entry")
+assert(#fixture.setCalls > writes, "Replace persists only the owned empty-key deletion")
+cycle(); unload()
+` });
+});
+
 test('generated Luau bundle compiles and executes cold Main, reconnects, cached factories and the extended logic suite', { skip: !runtime || !compile }, async () => {
   await runLuauFixture({ core: true, checks: `
 assert(fixture.toolbar.name == "Arcane" and fixture.widget.Title == "Arcane", "original Main initializes widget")
-assert(keyInput.Text == "" and keyInput.PlaceholderText == "Arcane code or API key" and control.Text == "Connect", "cold start offers only Connect")
+assert(keyInput.Text == "" and keyInput.PlaceholderText == "6-digit code from Arcane" and control.Text == "Connect", "cold start offers only Connect")
 assert(#fixture.getCalls == 2, "mount reads exactly the two owned keys")
 idleMount()
 enter(key)
@@ -486,7 +551,7 @@ fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):
 fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):Fire()
 for _ = 1, 6 do cycle() end
 assert(fixture.requests == 0 and fixture.discoveryProbes == nil and #fixture.setCalls == 0, "no network or settings write before an explicit Connect click")
-assert(control.Text == "Connect" and keyInput.PlaceholderText == "Arcane code or API key", "the field asks for the Arcane code or a key")
+assert(control.Text == "Connect" and keyInput.PlaceholderText == "6-digit code from Arcane", "the field asks for the Arcane code or a key")
 control.Activated:Fire(); for _ = 1, 3 do cycle() end
 assert(fixture.requests == 0 and fixture.discoveryProbes == nil and client.codePairing == nil and control.Text == "Failed"
   and keyInput.PlaceholderText == "Enter the 6-digit code shown in Arcane", "an empty Connect click asks for the code and makes no request")
@@ -577,7 +642,7 @@ test('any valid saved key queues status recovery regardless of transient connect
       setup: `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = ${connected}}`,
       checks: `
-assert(keyInput.Text == key and keyInput.PlaceholderText == "Arcane code or API key" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
+assert(keyInput.Text == key and keyInput.PlaceholderText == "6-digit code from Arcane" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
 assert(control.BackgroundColor3 == Color3.fromRGB(255, 51, 64), "cached true or false is red until current ACK")
 assert(#fixture.getCalls == 2, "reload reads exactly the two owned keys")
   assert(client.recovery ~= nil and client.desiredPair == nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == ${connected ? 1 : 0}, "saved key queues status recovery and clears cached connected state")
@@ -610,7 +675,7 @@ test('malformed saved keys and connection records are ignored without probes, sa
       setup: `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = ${keyValue}
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = ${stateValue}`,
       checks: `
-assert(keyInput.Text == "" and keyInput.PlaceholderText == "Arcane code or API key" and control.Text == "Connect", "malformed settings cannot prefill a credential or advertise a connection")
+assert(keyInput.Text == "" and keyInput.PlaceholderText == "6-digit code from Arcane" and control.Text == "Connect", "malformed settings cannot prefill a credential or advertise a connection")
 idleMount()
 enter("arbitrary-unsubmitted-user-text"); control.Activated:Fire()
 assert(keyInput.Text == "" and client.desiredPair == nil and fixture.requests == 0, "invalid explicit input is cleared and never dispatched")
@@ -679,7 +744,7 @@ assert(fixture.requests == requests and #fixture.setCalls == writes and control.
 storageBoundaries(); noSecretText()
 fixture.uiHttpHook = nil; expectKey = otherKey
 enter(otherKey)
-assert(control.Text == "Connect" and keyInput.Text == otherKey and keyInput.PlaceholderText == "Arcane code or API key" and control.BackgroundColor3 ~= green, "typing resets Failed to Connect without claiming ACK")
+assert(control.Text == "Connect" and keyInput.Text == otherKey and keyInput.PlaceholderText == "6-digit code from Arcane" and control.BackgroundColor3 ~= green, "typing resets Failed to Connect without claiming ACK")
 assert(fixture.pluginSettings[keySetting] == "", "typing alone never saves the new key")
 clickConnect()
 assert(fixture.pluginSettings[keySetting] == otherKey and ${saved ? 'fixture.pluginSettings[lastSetting].connected == false' : 'fixture.pluginSettings[lastSetting] == nil'}, "explicit replacement saves before ACK without claiming connected history")
@@ -757,7 +822,7 @@ fixture.uiHttpHook = function(_request: any): any
   ${failure === 'timeout' ? 'error("network fault unrelated-session-secret")' : 'return {StatusCode = 500, Success = false, Body = ""}'}
 end
 cycle()
-assert(client.pair == nil and client.desiredPair == nil and control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane code or API key" and keyInput.Text == key, "uncertain exchange retains visible saved-key reconnect UI")
+assert(client.pair == nil and client.desiredPair == nil and control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "6-digit code from Arcane" and keyInput.Text == key, "uncertain exchange retains visible saved-key reconnect UI")
 assert(fixture.pluginSettings[keySetting] == key and fixture.statuses[#fixture.statuses].state == "disconnected", "uncertainty retains the saved key and is not KEY_REJECTED")
 local requests = fixture.requests; cycle(); cycle()
 assert(fixture.requests == requests + 2 and client.pair == nil, "uncertain exchange only retries read-only status while unavailable")
@@ -774,7 +839,7 @@ fixture.uiHttpHook = function(request: any): any
 end
 cycle()
 assert(pair.token == nil and client.pair == nil and fixture.statuses[#fixture.statuses].state == "disconnected", "poll 401/403 remains REVOKED and clears only the session bearer")
-assert(control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "Arcane code or API key" and keyInput.Text == key and fixture.pluginSettings[keySetting] == key and fixture.pluginSettings[lastSetting].connected == false, "poll revocation retains the saved human key and never displays Failed")
+assert(control.Text == "Reconnect" and control.BackgroundColor3 ~= green and keyInput.PlaceholderText == "6-digit code from Arcane" and keyInput.Text == key and fixture.pluginSettings[keySetting] == key and fixture.pluginSettings[lastSetting].connected == false, "poll revocation retains the saved human key and never displays Failed")
 fixture.uiHttpHook = nil
 ack()
 assert(statusCount == 1 and connectCount == 2 and #fixture.workers == 1, "revoked poll reads status and reconnects through the original worker")
@@ -793,7 +858,7 @@ fixture.getSettingFaults = {["${setting}"] = "settings fault unrelated-provider-
       checks: `
 ${setting === LOCAL_KEY_SETTING ? 'idleMount()' : 'assert(client.recovery ~= nil and fixture.requests == 0, "failed health read still queues recovery from the independently valid key")'}; noSecretText()
 assert(control.BackgroundColor3 ~= green, "failed settings reads never authenticate a credential")
-${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "Arcane code or API key", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "Arcane code or API key" and keyInput.Text == key, "status read failure does not discard an independently valid local key")'}
+${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "6-digit code from Arcane", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "6-digit code from Arcane" and keyInput.Text == key, "status read failure does not discard an independently valid local key")'}
 enter(key); clickConnect(); ack(); unload()
 `,
     });

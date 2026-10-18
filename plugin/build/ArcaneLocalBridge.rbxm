@@ -75,20 +75,24 @@ previousState = nil
 local toolbar = plugin:CreateToolbar("Arcane")
 local button = toolbar:CreateButton("ArcaneBridge", "Open Arcane", "", "Arcane")
 button.ClickableWhenViewportHidden = true
--- A new stable widget identity migrates the old docked layout once. Studio
+-- A new stable widget identity migrates the old compact layout once. Studio
 -- owns floating-window placement; opening the UI never connects a place.
-local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 260, 184, 230, 176)
-local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV3", info)
+local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 300, 380, 264, 352)
+local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV4", info)
 widget.Title = "Arcane"
 widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
+-- Arcane desktop brand: black glass, white text, Arcane red accents. The glass
+-- card keeps these colours in both Studio themes; only the surround follows Studio.
 local colors = {
-	body = Color3.fromRGB(20, 20, 22), header = Color3.fromRGB(20, 20, 22),
-	input = Color3.fromRGB(27, 27, 30), divider = Color3.fromRGB(52, 52, 58),
-	white = Color3.fromRGB(245, 245, 245), muted = Color3.fromRGB(147, 147, 154),
-	red = Color3.fromRGB(255, 51, 64),
+	body = Color3.fromRGB(10, 10, 12), glass = Color3.fromRGB(26, 26, 31),
+	input = Color3.fromRGB(16, 16, 19), divider = Color3.fromRGB(58, 58, 66),
+	white = Color3.fromRGB(245, 245, 245), muted = Color3.fromRGB(166, 166, 174),
+	red = Color3.fromRGB(255, 51, 64), idle = Color3.fromRGB(112, 112, 120),
 	green = Color3.fromRGB(71, 203, 133), amber = Color3.fromRGB(225, 166, 68),
 }
+local DOT = " " .. utf8.char(0x00B7) .. " "
+local connections: {RBXScriptConnection} = {}
 local panel = Instance.new("Frame")
 panel.Name = "ArcanePanel"
 panel.Size = UDim2.fromScale(1, 1)
@@ -109,6 +113,26 @@ local function corner(parent: Instance, radius: number): ()
 	item.CornerRadius = UDim.new(0, radius)
 	item.Parent = parent
 end
+local function outline(parent: Instance, color: Color3, transparency: number): UIStroke
+	local item = Instance.new("UIStroke")
+	item.Color, item.Thickness, item.Transparency = color, 1, transparency
+	item.Parent = parent
+	return item
+end
+local function gradient(parent: Instance, first: Color3, last: Color3, rotation: number): UIGradient
+	local item = Instance.new("UIGradient")
+	item.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, first), ColorSequenceKeypoint.new(1, last)})
+	item.Rotation = rotation
+	item.Parent = parent
+	return item
+end
+local function padding(parent: Instance, top: number, right: number, bottom: number, left: number): UIPadding
+	local item = Instance.new("UIPadding")
+	item.PaddingTop, item.PaddingRight = UDim.new(0, top), UDim.new(0, right)
+	item.PaddingBottom, item.PaddingLeft = UDim.new(0, bottom), UDim.new(0, left)
+	item.Parent = parent
+	return item
+end
 local function label(name: string, parent: Instance, text: string, position: UDim2, size: UDim2, textSize: number, color: Color3): TextLabel
 	local item = Instance.new("TextLabel")
 	item.Name, item.Position, item.Size = name, position, size
@@ -119,19 +143,39 @@ local function label(name: string, parent: Instance, text: string, position: UDi
 	item.RichText = false
 	item.TextXAlignment = Enum.TextXAlignment.Left
 	item.TextYAlignment = Enum.TextYAlignment.Center
+	item.TextTruncate = Enum.TextTruncate.AtEnd
 	item.Parent = parent
 	return item
 end
+local function section(name: string, parent: Instance, height: number, order: number): Frame
+	local item = frame(name, parent, UDim2.new(), UDim2.new(1, 0, 0, height), colors.body)
+	item.BackgroundTransparency = 1
+	item.LayoutOrder = order
+	return item
+end
 
--- Center the visible logo-to-button bounds (8..134) at every widget height.
--- All 152px of content, including bottom padding, fit the 176px minimum.
-local content = frame("Content", panel, UDim2.new(0, 0, 0.5, -71), UDim2.new(1, 0, 0, 152), colors.body)
+-- Black glass card: a soft vertical sheen over near-black, a hairline edge and a red top accent.
+local glass = frame("Glass", panel, UDim2.new(0, 8, 0, 8), UDim2.new(1, -16, 1, -16), Color3.fromRGB(255, 255, 255))
+corner(glass, 12)
+gradient(glass, colors.glass, colors.body, 90)
+outline(glass, colors.white, 0.88)
+local accent = frame("Accent", glass, UDim2.new(0, 18, 0, 0), UDim2.new(1, -36, 0, 2), Color3.fromRGB(255, 255, 255))
+gradient(accent, Color3.fromRGB(224, 27, 44), Color3.fromRGB(255, 51, 64), 0)
+local accentFade = Instance.new("UIGradient")
+accentFade.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1)})
+accentFade.Parent = accent
+accent.ZIndex = 2
+
+local content = frame("Content", glass, UDim2.new(), UDim2.fromScale(1, 1), colors.body)
 content.BackgroundTransparency = 1
-local panelPadding = Instance.new("UIPadding")
-panelPadding.PaddingBottom = UDim.new(0, 18)
-panelPadding.Parent = content
-local header = frame("Header", content, UDim2.new(), UDim2.new(1, 0, 0, 48), colors.header)
-local mark = frame("ArcaneMark", header, UDim2.new(0, 14, 0, 8), UDim2.new(0, 32, 0, 32), colors.header)
+local panelPadding = padding(content, 16, 16, 18, 16)
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, 10)
+layout.Parent = content
+
+local header = section("Header", content, 32, 1)
+local mark = frame("ArcaneMark", header, UDim2.new(0, 0, 0, 2), UDim2.new(0, 28, 0, 28), colors.body)
 mark.BackgroundTransparency = 1
 -- Exact polygons from the desktop's 64x64 SVG, as bounded native scanlines.
 -- No upload, remote logo, or white/orange substitute.
@@ -155,30 +199,97 @@ end
 polygon("LogoLegs", {{32,4},{4,57},{17,57},{32,28},{47,57},{60,57}}, 0)
 polygon("LogoCrossbar", {{27,40},{46,53},{40,40}}, 0)
 polygon("LogoFacet", {{19,21},{26,26},{32,14},{27,6}}, 0.2)
-local brand = label("Brand", header, "Arcane", UDim2.new(0, 57, 0, 10), UDim2.new(1, -73, 0, 28), 20, colors.white)
+local brand = label("Brand", header, "Arcane", UDim2.new(0, 38, 0, 2), UDim2.new(1, -110, 0, 28), 19, colors.white)
 brand.Font = Enum.Font.GothamBold
+local version = label("Version", header, "Studio" .. DOT .. "v" .. V.VERSION, UDim2.new(1, -96, 0, 2), UDim2.new(0, 96, 0, 28), 12, colors.muted)
+version.TextXAlignment = Enum.TextXAlignment.Right
+
+-- Status: one glass tile with a coloured dot, a short state title and one plain sentence.
+local statusCard = section("StatusCard", content, 64, 2)
+statusCard.BackgroundColor3, statusCard.BackgroundTransparency = colors.white, 0.95
+corner(statusCard, 10)
+outline(statusCard, colors.white, 0.9)
+local statusDot = frame("StatusDot", statusCard, UDim2.new(0, 14, 0, 16), UDim2.new(0, 10, 0, 10), colors.idle)
+local dotCorner = Instance.new("UICorner")
+dotCorner.CornerRadius = UDim.new(1, 0)
+dotCorner.Parent = statusDot
+local statusTitle = label("StatusTitle", statusCard, "Not connected", UDim2.new(0, 34, 0, 10), UDim2.new(1, -46, 0, 20), 14, colors.white)
+statusTitle.Font = Enum.Font.GothamBold
+local statusText = label("StatusText", statusCard, "", UDim2.new(0, 34, 0, 31), UDim2.new(1, -46, 0, 28), 12, colors.muted)
+statusText.TextWrapped = true
+statusText.TextYAlignment = Enum.TextYAlignment.Top
+
+-- Entry: the 6-digit code shown in Arcane. Pasting a local key is the Advanced fallback.
+local entry = section("Entry", content, 62, 3)
+local fieldLabel = label("FieldLabel", entry, "Code shown in Arcane", UDim2.new(), UDim2.new(1, 0, 0, 16), 12, colors.muted)
+fieldLabel.Font = Enum.Font.GothamMedium
+local inputPanel = frame("KeyInput", entry, UDim2.new(0, 0, 0, 22), UDim2.new(1, 0, 0, 40), colors.input)
+corner(inputPanel, 8)
+local stroke = outline(inputPanel, colors.divider, 0)
+local savedRow = section("SavedKey", content, 40, 4)
+savedRow.BackgroundColor3, savedRow.BackgroundTransparency = colors.input, 0
+corner(savedRow, 8)
+outline(savedRow, colors.divider, 0)
+local savedLabel = label("SavedKeyLabel", savedRow, "", UDim2.new(0, 12, 0, 0), UDim2.new(1, -96, 1, 0), 13, colors.white)
+local replaceButton = Instance.new("TextButton")
+replaceButton.Name = "ReplaceKey"
+replaceButton.Position, replaceButton.Size = UDim2.new(1, -80, 0, 6), UDim2.new(0, 72, 0, 28)
+replaceButton.BackgroundColor3, replaceButton.BackgroundTransparency = colors.white, 0.92
+replaceButton.BorderSizePixel = 0
+replaceButton.Text, replaceButton.TextColor3 = "Replace", colors.white
+replaceButton.Font = Enum.Font.GothamMedium
+replaceButton.TextSize = 12
+replaceButton.RichText = false
+replaceButton.Parent = savedRow
+corner(replaceButton, 6)
 
 local connectButton = Instance.new("TextButton")
 connectButton.Name = "Connect"
-connectButton.Position = UDim2.new(0, 14, 0, 100)
-connectButton.Size = UDim2.new(1, -28, 0, 34)
+connectButton.LayoutOrder = 5
+connectButton.Size = UDim2.new(1, 0, 0, 40)
 connectButton.BackgroundColor3 = colors.red
 connectButton.BorderSizePixel = 0
 connectButton.Text, connectButton.TextColor3 = if savedKey then "Reconnect" else "Connect", colors.white
-connectButton.Font = Enum.Font.GothamMedium
+connectButton.Font = Enum.Font.GothamBold
 connectButton.TextSize = 14
 connectButton.RichText = false
 connectButton.Parent = content
-corner(connectButton, 6)
+corner(connectButton, 8)
+-- UIGradient multiplies the red base: exactly #e01b2c at the top to #c8102e at the bottom.
+local buttonGradient = gradient(connectButton, Color3.new(224 / 255, 27 / 51, 44 / 64), Color3.new(200 / 255, 16 / 51, 46 / 64), 90)
 
-local inputPanel = frame("KeyInput", content, UDim2.new(0, 14, 0, 54), UDim2.new(1, -28, 0, 36), colors.input)
-corner(inputPanel, 5)
-local stroke = Instance.new("UIStroke")
-stroke.Color, stroke.Thickness = colors.divider, 1
-stroke.Parent = inputPanel
+local advancedButton = Instance.new("TextButton")
+advancedButton.Name = "Advanced"
+advancedButton.LayoutOrder = 6
+advancedButton.Size = UDim2.new(1, 0, 0, 18)
+advancedButton.BackgroundTransparency = 1
+advancedButton.BorderSizePixel = 0
+advancedButton.Text, advancedButton.TextColor3 = "Advanced: use a local key", colors.muted
+advancedButton.Font = Enum.Font.GothamMedium
+advancedButton.TextSize = 12
+advancedButton.RichText = false
+advancedButton.TextXAlignment = Enum.TextXAlignment.Left
+advancedButton.Parent = content
 
--- Keep Studio's ordinary text editing and selection. The user's own saved
--- Arcane key remains visible here, including while connected.
+local meta = section("Meta", content, 36, 7)
+local activityLabel = label("Activity", meta, "No builds yet", UDim2.new(), UDim2.new(1, 0, 0, 16), 12, colors.muted)
+local diagnosticsLabel = label("DiagnosticsCount", meta, "Output: idle", UDim2.new(0, 0, 0, 20), UDim2.new(1, 0, 0, 16), 12, colors.muted)
+
+-- Follow the Studio theme only around the card; the brand card stays readable in Light and Dark.
+local function applyTheme(): ()
+	local ok, color = pcall(function(): any
+		return settings().Studio.Theme:GetColor(Enum.StudioStyleGuideColor.MainBackground)
+	end)
+	panel.BackgroundColor3 = if ok and typeof(color) == "Color3" then color else colors.body
+end
+applyTheme()
+pcall(function()
+	table.insert(connections, settings().Studio.ThemeChanged:Connect(applyTheme))
+end)
+
+-- Keep Studio's ordinary text editing and selection. A saved Arcane key is never
+-- rendered in full: while the field holds it, the field is hidden behind a short
+-- masked summary and Replace is the only way to change it.
 local keyInput = Instance.new("TextBox")
 keyInput.Name = "ApiKey"
 keyInput.Position = UDim2.new()
@@ -196,15 +307,15 @@ keyInput.ClearTextOnFocus = false
 keyInput.MultiLine = false
 keyInput.RichText = false
 keyInput.TextEditable = true
-keyInput.TextSize = 13
-keyInput.Font = Enum.Font.Gotham
+keyInput.TextSize = 15
+keyInput.Font = Enum.Font.GothamMedium
 keyInput.TextXAlignment = Enum.TextXAlignment.Left
 keyInput.Parent = inputPanel
 local inputPadding = Instance.new("UIPadding")
-inputPadding.PaddingLeft, inputPadding.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
+inputPadding.PaddingLeft, inputPadding.PaddingRight = UDim.new(0, 12), UDim.new(0, 12)
 inputPadding.Parent = keyInput
 keyInput.PlaceholderColor3 = colors.muted
-local DEFAULT_HINT = "Arcane code or API key"
+local DEFAULT_HINT = "6-digit code from Arcane"
 local hint = DEFAULT_HINT
 local keyFailed = false
 local inputText = keyInput.Text
@@ -213,17 +324,84 @@ local inputText = keyInput.Text
 -- connection finishes only after the user clicks Approve in Arcane. The code is never kept or saved here.
 local pairingStage: string? = nil
 local liveNow = false
+local advancedOpen = false
+-- Display-only memory of the last status; it never grants access or survives a reload.
+local phase, executing, writable, editMode = "idle", false, false, true
+local lastActivity: string?, lastActivityAt = nil, 0
+local function arcaneCode(text: string): boolean
+	return string.match(text, "^%s*%d%d%d[%s%-]?%d%d%d%s*$") ~= nil
+end
+local function placeName(): string
+	local ok, name = pcall(function(): any return game.Name end)
+	if not ok or type(name) ~= "string" or name == "" then return "this place" end
+	return if #name > 48 then string.sub(name, 1, 45) .. "..." else name
+end
+local function commas(value: number): string
+	local text = tostring(math.floor(value))
+	local result = string.reverse((string.gsub(string.reverse(text), "(%d%d%d)", "%1,")))
+	return (string.gsub(result, "^,", ""))
+end
+local function ago(seconds: number): string
+	if seconds < 60 then return "just now" end
+	if seconds < 3600 then return tostring(math.floor(seconds / 60)) .. " min ago" end
+	return tostring(math.floor(seconds / 3600)) .. " h ago"
+end
+local function statusView(): (string, string, Color3)
+	if liveNow and not keyFailed then
+		local line = if executing then "Working on a request from Arcane."
+			elseif not editMode then "Paused while playtesting."
+			elseif writable then "Ready. Arcane can build in this place." else "Ready with read-only access."
+		return "Connected to " .. placeName(), line, colors.green
+	end
+	if pairingStage == "approval" then return "Waiting for Arcane", "Click Approve in the Arcane window to finish.", colors.amber end
+	if pairingStage == "connecting" then return "Waiting for Arcane", "Checking the code with Arcane.", colors.amber end
+	if phase == "update" then return "Update required", "Update the Studio plugin from Arcane, then restart Studio.", colors.amber end
+	if phase == "reconciliation" then return "Reconciliation needed", "Review the last change in Arcane, then click Reconnect.", colors.red end
+	if keyFailed then return "Not connected", hint, colors.red end
+	local typed = keyInput.Text
+	if typed ~= "" and typed ~= savedKey then
+		if arcaneCode(typed) then return "Code entry", "Click Connect to pair with Arcane.", colors.red end
+		if string.match(typed, "^[%d%s%-]+$") then return "Code entry", "Type all 6 digits, then click Connect.", colors.red end
+		return "Code entry", "Click Connect to use this local key.", colors.red
+	end
+	if phase == "retrying" or phase == "connecting" then return "Waiting for Arcane", "Open Arcane on this computer. Checking again automatically.", colors.amber end
+	if savedKey then return "Not connected", "Your saved key is ready. Click Reconnect.", colors.idle end
+	return "Not connected", "In Arcane, click Connect Studio, then type the code here.", colors.idle
+end
+local transport: any
+local function diagnosticsText(): string
+	if not (liveNow and transport and transport.diagnostics) then return "Output: idle" end
+	local errors, warnings = 0, 0
+	for _, item in pairs(transport.diagnostics.entries or {}) do
+		if item.kind == "error" then errors += item.count else warnings += item.count end
+	end
+	if errors == 0 and warnings == 0 then return "Output: no errors" end
+	return "Output: " .. commas(errors) .. (if errors == 1 then " error" else " errors") .. DOT .. commas(warnings) .. (if warnings == 1 then " warning" else " warnings")
+end
+-- Presentation only: visibility, colours and copy. It never edits the field text.
+local function render(): ()
+	local masked = savedKey ~= nil and keyInput.Text == savedKey
+	entry.Visible = not masked
+	savedRow.Visible = masked and advancedOpen
+	if masked then savedLabel.Text = "Local key ending " .. string.sub(savedKey :: string, -4) end
+	fieldLabel.Text = if advancedOpen then "Local key (Advanced)" else "Code shown in Arcane"
+	advancedButton.Text = if advancedOpen then "Hide advanced" else "Advanced: use a local key"
+	local title, line, dot = statusView()
+	statusTitle.Text, statusText.Text, statusDot.BackgroundColor3 = title, line, dot
+	buttonGradient.Enabled = connectButton.BackgroundColor3 ~= colors.green
+	activityLabel.Text = if lastActivity then lastActivity .. DOT .. ago(os.clock() - lastActivityAt) else "No builds yet"
+	diagnosticsLabel.Text = diagnosticsText()
+end
 local function refreshHint(): ()
-	keyInput.PlaceholderText = if pairingStage == "approval" then "Click Approve in Arcane" else hint
+	keyInput.PlaceholderText = if pairingStage == "approval" then "Click Approve in Arcane"
+		elseif advancedOpen and hint == DEFAULT_HINT then "Paste your Arcane local key" else hint
+	render()
 end
 local function buttonText(): string
 	if liveNow and not keyFailed then return "Connected" end
 	if pairingStage == "approval" then return "Approve in Arcane..." end
 	if pairingStage == "connecting" then return "Checking Arcane..." end
 	return if keyFailed then "Failed" elseif savedKey then "Reconnect" else "Connect"
-end
-local function arcaneCode(text: string): boolean
-	return string.match(text, "^%s*%d%d%d[%s%-]?%d%d%d%s*$") ~= nil
 end
 -- Takes the typed Arcane code out of the field. It is not a key: never kept, saved or shown again.
 local function takeCode(): string
@@ -260,7 +438,6 @@ local function rejectKey(): ()
 	connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red
 	clearInput()
 end
-local transport: any
 local function invalidateInput(): boolean
 	if keyInput.Text == inputText then return false end
 	inputText = keyInput.Text
@@ -293,6 +470,13 @@ transport = Transport.new(game, function(status: any)
 	if live then rememberState(true)
 	else rememberState(false) end
 	stroke.Color = if storageFailed then colors.amber elseif status.state == "retrying" or status.state == "reconciliation" then colors.red else colors.divider
+	-- Fixed copy per state: daemon-supplied detail text is never rendered here.
+	local detail = if type(status.detail) == "string" then status.detail else ""
+	phase = if status.state == "reconciliation" then "reconciliation"
+		elseif string.find(detail, "Unsupported", 1, true) or string.find(detail, "UPDATE_REQUIRED", 1, true) then "update"
+		else status.state
+	executing, writable, editMode = status.state == "executing", status.allowWrites == true, status.editMode ~= false
+	render()
 end, artifactHash)
 -- The pairing proofs (HMAC) use the same bounded SHA-256 module that verifies this artifact.
 transport.sha256 = Sha256
@@ -320,8 +504,21 @@ transport.onPaired = function(apiKey: any): ()
 	savedKey, storageFailed = apiKey, not stored
 	inputText = apiKey -- Programmatic fill is not a new user edit.
 	keyInput.Text = apiKey
+	advancedOpen = false
 	refreshHint()
 	rememberState(false, true)
+end
+-- Completed write work, summarized for the activity line. Method names and counts only.
+local ACTIVITY: {[string]: string} = {["scene.create"] = "Created an object", ["environment.apply"] = "Updated lighting",
+	["terrain.generate"] = "Generated terrain", ["scene.update"] = "Updated properties", ["script.update"] = "Edited a script",
+	["script.set_enabled"] = "Toggled a script", ["scene.restore"] = "Restored a change", ["scene.place_asset"] = "Placed an asset",
+	["scene.apply_material"] = "Applied a material"}
+transport.onActivity = function(method: any, count: any): ()
+	local summary = if method == "scene.build" and type(count) == "number" then "Built " .. commas(count) .. (if count == 1 then " part" else " parts")
+		elseif method == "scene.build" then "Built a scene" else ACTIVITY[method]
+	if summary == nil then return end
+	lastActivity, lastActivityAt = summary, os.clock()
+	render()
 end
 -- Studio errors/warnings are kept only while this window is paired, and only
 -- reported on the authenticated poll. Missing engine signals leave it inert.
@@ -335,12 +532,25 @@ transport.guard = function(client: any, command: any, pair: any): ()
 	invalidateInput()
 	guard(client, command, pair)
 end
-local connections: {RBXScriptConnection} = {}
 table.insert(connections, button.Click:Connect(function() widget.Enabled = not widget.Enabled end))
 table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(function() button:SetActive(widget.Enabled) end))
 button:SetActive(widget.Enabled)
+table.insert(connections, widget:GetPropertyChangedSignal("Enabled"):Connect(render))
 table.insert(connections, keyInput:GetPropertyChangedSignal("Text"):Connect(function()
 	invalidateInput()
+	render()
+end))
+-- Presentation only: switches the field between the Arcane code and a pasted local key.
+table.insert(connections, advancedButton.Activated:Connect(function()
+	advancedOpen = not advancedOpen
+	refreshHint()
+end))
+-- Replacing the saved key is an explicit edit: like deleting the field text, it forgets the
+-- saved key and fences the current session. No request is made until the next Connect click.
+table.insert(connections, replaceButton.Activated:Connect(function()
+	keyInput.Text = ""
+	invalidateInput()
+	refreshHint()
 end))
 table.insert(connections, connectButton.Activated:Connect(function()
 	invalidateInput()
@@ -376,8 +586,9 @@ table.insert(connections, connectButton.Activated:Connect(function()
 	local value = entered :: string
 	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, value) end)
 	savedKey, storageFailed = value, not stored
-	refreshHint()
 	connectButton.Text, connectButton.BackgroundColor3 = "Reconnect", colors.red
+	advancedOpen = false
+	refreshHint()
 	local ok = pcall(function() transport:requestConnect(value) end)
 	if not ok then transport:requestDisconnect(); rememberState(false); stroke.Color = colors.red end
 	entered, value = nil, ""
@@ -399,6 +610,7 @@ if savedKey ~= nil and autoConnect then
 	local ok = pcall(function() transport:requestConnect(savedKey, true) end)
 	if not ok then rememberState(false) end
 end
+render()
 transport:start()
 ]]></ProtectedString>
 </Properties>
@@ -3066,7 +3278,7 @@ function Transport.new(gameModel: any, onStatus: (any) -> (), artifactHash: stri
 		inFlight = false, started = false, failures = 0, cache = {}, cacheCount = 0,
 		cacheBytes = 0, highEpoch = 0, pending = nil, blocked = false, identityFence = nil,
 		recovery = nil, checkInput = nil, assetCleanupFailed = false,
-		codePairing = nil, onPairing = nil, onPaired = nil,
+		codePairing = nil, onPairing = nil, onPaired = nil, onActivity = nil,
 		sizedArgs = setmetatable({}, {__mode = "k"})}, Transport)
 end
 
@@ -3620,6 +3832,11 @@ function Transport:dispatch(command: any): ()
 	end)
 	self.executingCommand = nil
 	if self.stopped then return end
+	-- Display-only summary for Main's activity line: the method name and a created count, never a payload.
+	if ok and self.onActivity and self.generation == pair.generation then
+		local created = if type(output) == "table" and type(output.created) == "table" then output.created.count else nil
+		pcall(self.onActivity, command.method, if type(created) == "number" then created else nil)
+	end
 	local unsafe = not ok and type(output) == "table" and output.unsafe == true
 	local payload: any = {sessionId = pair.sessionId, commandId = command.id,
 		state = if ok then "succeeded" else "failed"}
