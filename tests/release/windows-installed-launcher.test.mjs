@@ -22,7 +22,10 @@ internal static class Peer {
     // Owned harmless fixture peer: records how it was started, then exits.
     string marker = Environment.GetEnvironmentVariable("ARCANE_FIXTURE_MARKER");
     File.WriteAllText(marker + ".tmp", "{\"tag\":\"${tag}\",\"args\":" + args.Length + ",\"commandLine\":" + J(Environment.CommandLine) + ",\"cwd\":" + J(Environment.CurrentDirectory) +
-      ",\"probe\":" + J(Environment.GetEnvironmentVariable("ARCANE_FIXTURE_PROBE")) + "}");
+      ",\"probe\":" + J(Environment.GetEnvironmentVariable("ARCANE_FIXTURE_PROBE")) +
+      ",\"nodeMode\":" + J(Environment.GetEnvironmentVariable("ELECTRON_RUN_AS_NODE")) +
+      ",\"nodeOptions\":" + J(Environment.GetEnvironmentVariable("NODE_OPTIONS")) +
+      ",\"nodePath\":" + J(Environment.GetEnvironmentVariable("NODE_PATH")) + "}");
     File.Move(marker + ".tmp", marker); return 0;
   } }`;
 const HARNESS = String.raw`using System; using System.Text; using System.Runtime.InteropServices; using Arcane.Installer;
@@ -115,17 +118,18 @@ function rewriteActive(target, mutate) {
   fs.writeFileSync(recordPath, JSON.stringify(record) + '\n');
 }
 
-test('the production launcher starts exactly the active release with no arguments, its own cwd and the inherited environment', windows, async () => {
+test('the production launcher follows active releases with no arguments and clean desktop startup', windows, async () => {
   const s = setup(), f = await s.installed(s.peers.A, s.peers.B), before = snapshot(f.target);
   const run = async expectTag => {
     const marker = join(s.owned('marker'), 'started.json');
     const code = await new Promise((resolve, reject) => {
-      const child = spawn(join(f.target, 'Arcane.exe'), [], { windowsHide: true, stdio: 'ignore', env: { SystemRoot: process.env.SystemRoot, ARCANE_FIXTURE_MARKER: marker, ARCANE_FIXTURE_PROBE: 'kept' } });
+      const child = spawn(join(f.target, 'Arcane.exe'), [], { windowsHide: true, stdio: 'ignore', env: { SystemRoot: process.env.SystemRoot, ARCANE_FIXTURE_MARKER: marker, ARCANE_FIXTURE_PROBE: 'kept', ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--trace-warnings', NODE_PATH: 'fixture-only-path' } });
       child.on('error', reject); child.on('exit', resolve);
     });
     assert.equal(code, 0);
     const started = waitFor(marker), record = JSON.parse(fs.readFileSync(join(f.target, 'installation.json'), 'utf8'));
-    assert.equal(started.tag, expectTag); assert.equal(started.args, 0); assert.equal(started.probe, 'kept', 'environment inherited unchanged');
+    assert.equal(started.tag, expectTag); assert.equal(started.args, 0); assert.equal(started.probe, 'kept', 'ordinary desktop environment is retained');
+    assert.equal(started.nodeMode, null); assert.equal(started.nodeOptions, null); assert.equal(started.nodePath, null);
     assert.equal(started.cwd.toLowerCase(), f.release(record.activeReleaseId).toLowerCase());
     assert.equal(started.commandLine.trim(), '"' + join(f.release(record.activeReleaseId), 'Arcane.exe') + '"');
   };

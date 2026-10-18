@@ -320,6 +320,7 @@ export async function createConnectionLab(options: Options) {
           ['/setup-checklist.js',[join(options.cwd,'dist/apps/desktop/src/setup-checklist.js'),'text/javascript']],
           ['/plans.js',[join(options.cwd,'dist/apps/desktop/src/plans.js'),'text/javascript']],
           ['/notifications.js',[join(options.cwd,'dist/apps/desktop/src/notifications.js'),'text/javascript']],
+          ['/desktop-update.js',[join(options.cwd,'dist/apps/desktop/src/desktop-update.js'),'text/javascript']],
           ['/mesh-keep.js',[join(options.cwd,'dist/apps/desktop/src/mesh-keep.js'),'text/javascript']],
           ['/project-memory.js',[join(options.cwd,'dist/apps/desktop/src/project-memory.js'),'text/javascript']],
           ['/script-sync.js',[join(options.cwd,'dist/apps/desktop/src/script-sync.js'),'text/javascript']],

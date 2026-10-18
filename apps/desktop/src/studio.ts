@@ -2153,6 +2153,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try { codexChat.yieldSurface(false); } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
   };
   if (!chatLink) { providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat(); }
+  void import('./desktop-update.js').then(module=>{
+    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
+    window.addEventListener('pagehide',()=>updates.stop());window.addEventListener('pageshow',event=>{if(event.persisted)updates.resume();});
+  }).catch(()=>{});
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');

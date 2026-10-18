@@ -41,7 +41,7 @@ test('packaged smoke records module delivery after initialization and fails when
           if(code.includes('title: document.title'))return JSON.stringify(renderer);
           if(code.includes("'/task-plan-boot.js'"))return modulesAvailable;
           if(code==='window.arcaneDesktop.workspacePreferences.read()')return{available:false,preferences:null};
-          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true});
+          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
           if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
           assert.fail('Unexpected smoke renderer request');
         }}},Math,JSON,Buffer,
@@ -61,7 +61,7 @@ test('executable verifier requires every named smoke check, including the newer 
   const all=Object.fromEntries(REQUIRED_SMOKE_CHECKS.map(name=>[name,true]));
   assert.equal(smokeChecksComplete(all),true);
   for(const name of ['claudeChatBridgeDisabledInSmoke','studioPluginBridgeDisabledInSmoke','workspaceProjectBridgeDisabledInSmoke','inAppDialogsBridgeMounted',
-    'projectPermissionsBridgeDisabledInSmoke','billingBridgeNotConnectedInSmoke','notificationsBridgeSilentInSmoke','meshKeepBridgeUnavailableInSmoke','bundledStudioPluginVerified','bundledPlansConfigValid','bundledChatInstructionsLoadable','trustedDecisionDialogsBundled']){
+    'projectPermissionsBridgeDisabledInSmoke','billingBridgeNotConnectedInSmoke','notificationsBridgeSilentInSmoke','meshKeepBridgeUnavailableInSmoke','desktopUpdatesUnavailableInSmoke','bundledStudioPluginVerified','bundledPlansConfigValid','bundledChatInstructionsLoadable','trustedDecisionDialogsBundled']){
     assert.ok(REQUIRED_SMOKE_CHECKS.includes(name),name);
     const {[name]:_,...missing}=all;assert.equal(smokeChecksComplete(missing),false,name+' missing');
     assert.equal(smokeChecksComplete({...all,[name]:false}),false,name+' false');
@@ -83,11 +83,12 @@ test('smoke bridge probe accepts only the disabled verification-mode answers of 
     projectPermissions:bridge(['read','save'],{read:async()=>({available:false,settings:{claudeTools:false,codexAutoApprove:false}})}),
     billing:bridge(['status','openCheckout'],{status:async()=>({version:1,state:'not-connected',message:"Checkout isn't connected yet",account:'unavailable'})}),
     notifications:bridge(['notify','onActivate'],{notify:async()=>({shown:false})}),
+    updates:bridge(['status','restart'],{status:async()=>({version:1,state:'unavailable',buildId:null,message:'Updates are unavailable.'})}),
     meshKeep:bridge(['keep'],{keep:async()=>({state:'unavailable',message:'Keep this mesh is unavailable.'})}),
     ...overrides});
   const observe=async d=>JSON.parse(await vm.runInNewContext(probe,{window:{arcaneDesktop:d},Object,String,JSON}));
   const good=await observe(desktop({}));
-  assert.deepEqual(good,{claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true});
+  assert.deepEqual(good,{claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
   assert.deepEqual(calls,['chat.status'],'only read-only or disabled calls are made');
   assert.equal((await observe(desktop({meshKeep:bridge(['keep'],{keep:async()=>({state:'started',message:''})})}))).meshKeep,false,'smoke must never start an upload');
   assert.equal((await observe(desktop({meshKeep:undefined}))).meshKeep,false);
@@ -363,7 +364,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'version', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'studioKeys', 'studioPlugin', 'updates', 'version', 'workspacePreferences', 'workspaceProject']);
   assert.equal(Object.isFrozen(exposed.billing), true);
   assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'status', 'version']);
   assert.equal(exposed.billing.version, 1);

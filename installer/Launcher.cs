@@ -119,6 +119,10 @@ namespace Arcane.Installer
             ProcessStartInfo info = new ProcessStartInfo();
             info.FileName = prepared.Executable; info.Arguments = string.Empty; info.WorkingDirectory = prepared.Manifest.Directory;
             info.UseShellExecute = false; info.ErrorDialog = false;
+            // A desktop launch always opens Electron as the app, independently of its parent terminal's Node settings.
+            info.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE");
+            info.EnvironmentVariables.Remove("NODE_OPTIONS");
+            info.EnvironmentVariables.Remove("NODE_PATH");
             int? processId = null;
             try
             {

@@ -1360,6 +1360,15 @@ export class ClaudeChat {
       this.activeKey = active?.key ?? this.tabs[0]?.key ?? null;
     } catch { /* Presentation storage is optional. */ }
   }
+  async prepareForRestart():Promise<void> {
+    if(this.turn)throw new Error('Finish or stop the current chat before restarting.');
+    if(this.active){const tab=this.activeTab(),input=this.input();if(tab&&input)tab.draft=input.value;
+      const attachments=this.attachments.controller();
+      if(attachments&&(attachments.prepareReferences().length||attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
+    }
+    if(this.tabs.some(tab=>tab.draft.trim()))throw new Error('Send or clear your unsent drafts before restarting.');
+    this.persistTabs();
+  }
   private persistTabs(): void {
     try {
       this.storage?.setItem(CLAUDE_CHAT_TABS_KEY, JSON.stringify({ version: 1,

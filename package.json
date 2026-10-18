@@ -36,7 +36,8 @@
     "package:setup": "node scripts/build-windows-setup.mjs",
     "release:desktop": "node scripts/desktop-pipeline.mjs",
     "check:desktop": "node scripts/check-windows-executable.mjs",
-    "check:memory": "node scripts/check-project-memory.mjs"
+    "check:memory": "node scripts/check-project-memory.mjs",
+    "install:desktop": "node scripts/install-desktop.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

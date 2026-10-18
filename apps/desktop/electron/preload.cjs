@@ -508,4 +508,19 @@ const meshKeep = Object.freeze({ version: 1,
     } catch { throw new Error(MESH_KEEP_UNAVAILABLE); }
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep }));
+const updates = Object.freeze({ version: 1,
+  status: async (...args) => {
+    if (args.length) throw new Error('Updates are unavailable.');
+    const value = await ipcRenderer.invoke('arcane:updates-status');
+    if (!value || value.version !== 1 || !['current', 'available', 'unavailable'].includes(value.state) ||
+      !(value.buildId === null || typeof value.buildId === 'string' && /^[a-f0-9-]{1,128}$/.test(value.buildId))) throw new Error('Updates are unavailable.');
+    return { version: 1, state: value.state, buildId: value.buildId, message: typeof value.message === 'string' ? value.message.slice(0, 400) : '' };
+  },
+  restart: async (...args) => {
+    if (args.length) throw new Error('Updates are unavailable.');
+    const value = await ipcRenderer.invoke('arcane:updates-restart');
+    if (!value || !['restarting', 'refused', 'unavailable'].includes(value.state)) throw new Error('Updates are unavailable.');
+    return { state: value.state, message: typeof value.message === 'string' ? value.message.slice(0, 400) : '' };
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));

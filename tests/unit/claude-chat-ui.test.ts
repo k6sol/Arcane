@@ -1855,3 +1855,13 @@ test('the shared attachments controller follows a claiming surface and namespace
   controller.cleanup();
   assert.equal(sharedChatAttachments(doc as unknown as Document), null, 'cleanup forgets the controller');
 });
+
+
+test('desktop update keeps unsent provider drafts and running turns in the current window',async t=>{
+  const f=fakeBridge(),ui=mount(f.bridge);t.after(()=>ui.chat.stop());await ui.chat.refresh();await settle();
+  await ui.chat.prepareForRestart();ui.type('Keep this unsent message');
+  await assert.rejects(ui.chat.prepareForRestart(),/unsent drafts/);assert.equal(ui.input.value,'Keep this unsent message');
+  ui.type('');await ui.chat.prepareForRestart();ui.type('Start a task');ui.form.dispatchEvent(new Event('submit',{cancelable:true}));await settle();
+  await assert.rejects(ui.chat.prepareForRestart(),/Finish or stop/);
+  assert.equal(f.calls.filter(row=>row[0]==='stop').length,0,'Update preparation never silently stops a turn.');
+});

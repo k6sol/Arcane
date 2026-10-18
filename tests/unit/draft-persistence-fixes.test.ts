@@ -171,3 +171,24 @@ test('F1: malformed workflowDraft values in native preferences are refused',asyn
     assert.equal(tabs.active()?.draft??'','','a refused record never restores its text');
   }
 });
+
+
+test('desktop update waits for the newest typed draft to receive a native save acknowledgement',async t=>{
+  const doc=new DocumentFixture(),observed=state(true),saves:ChatTabPreferences[]=[];let hold=false,release!:()=>void;
+  const gate=new Promise<void>(done=>{release=done;});
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>Response.json({state:observed})));t.after(()=>chat.stop());
+  await chat.start();await chat.enableChatTabs({preferences:{read:async()=>plainRow('Old saved draft').preferences,save:async value=>{if(hold)await gate;saves.push(structuredClone(value));}}});await settle();
+  hold=true;const input=doc.getElementById('codex-composer');input.value='The newest unsent draft';input.dispatchEvent(new Event('input'));
+  let finished=false;const pending=chat.prepareForRestart().then(()=>{finished=true;});await settle();
+  assert.equal(finished,false,'Restart cannot leave while the native save is pending.');release();await pending;
+  assert.equal(saves.at(-1)?.tabs[0]?.draft,'The newest unsent draft');assert.equal(chat.currentStateView().preferencesSaved,true);
+});
+test('desktop update keeps a failed native draft save in the current window',async t=>{
+  const doc=new DocumentFixture(),observed=state(true);let fail=false,clock=1000;
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>Response.json({state:observed})));t.after(()=>chat.stop());
+  await chat.start();await chat.enableChatTabs({preferences:{read:async()=>plainRow('Existing draft').preferences,save:async()=>{if(fail)throw Error('save failed');}}});await settle();
+  fail=true;const input=doc.getElementById('codex-composer');input.value='Keep this draft';input.dispatchEvent(new Event('input'));
+  t.mock.method(Date,'now',()=>clock);const pending=chat.prepareForRestart();const rejected=assert.rejects(pending,/draft could not be saved/);
+  await settle();clock+=10001;await rejected;
+  assert.equal(input.value,'Keep this draft');assert.equal(chat.currentStateView().preferencesSaved,false);
+});

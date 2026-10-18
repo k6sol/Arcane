@@ -367,6 +367,7 @@ async function checkSmoke() {
     const permissions = shaped(d.projectPermissions, ['read','save']) ? await settle(() => d.projectPermissions.read()) : null;
     const billing = shaped(d.billing, ['status','openCheckout']) ? await settle(() => d.billing.status()) : null;
     const notice = shaped(d.notifications, ['notify','onActivate']) ? await settle(() => d.notifications.notify({ kind: 'finished', body: 'Arcane smoke check.', target: 'arcane-smoke' })) : null;
+    const updates = shaped(d.updates, ['status','restart']) ? await settle(() => d.updates.status()) : null;
     const keep = shaped(d.meshKeep, ['keep']) ? await settle(() => d.meshKeep.keep({ digest: '0'.repeat(64), sessionId: 'arcane-smoke' })) : null;
     return JSON.stringify({
       claudeChat: !!chat && chat.ok === false,
@@ -376,6 +377,7 @@ async function checkSmoke() {
       projectPermissions: !!permissions && permissions.ok && permissions.value.available === false,
       billing: !!billing && billing.ok && billing.value.state === 'not-connected' && billing.value.account === 'unavailable',
       notifications: !!notice && notice.ok && notice.value.shown === false,
+      updates: !!updates && updates.ok && updates.value.state === 'unavailable',
       meshKeep: !!keep && keep.ok && keep.value.state === 'unavailable'
     });
   })()`));
@@ -441,6 +443,7 @@ async function checkSmoke() {
     projectPermissionsBridgeDisabledInSmoke: desktopBridges.projectPermissions === true,
     billingBridgeNotConnectedInSmoke: desktopBridges.billing === true,
     notificationsBridgeSilentInSmoke: desktopBridges.notifications === true,
+    desktopUpdatesUnavailableInSmoke: desktopBridges.updates === true,
     meshKeepBridgeUnavailableInSmoke: desktopBridges.meshKeep === true,
     bundledStudioPluginVerified: packagedFeatures.bundledPluginVerified === true,
     bundledPlansConfigValid: packagedFeatures.plansConfigValid === true,
@@ -539,6 +542,22 @@ else {
           const choice = await dialog.showMessageBox(owner, { type: 'warning', title: request.title, message: request.message, detail: request.detail,
             buttons: ['Cancel', request.confirmLabel], defaultId: 0, cancelId: 0, noLink: true });
           return choice.response === 1 && !closing && !switching && window === owner;
+        } }).installIpc(ipcMain, { trusted: rendererEvent });
+      require('./desktop-updates.cjs').createDesktopUpdates({ enabled: !smoke && app.isPackaged && !!process.env.LOCALAPPDATA,
+        installRoot: join(process.env.LOCALAPPDATA ?? app.getPath('userData'), 'Arcane', 'Desktop'),
+        currentDirectory: resolve(app.getPath('exe'), '..'),
+        productRoot: app.isPackaged ? join(process.resourcesPath, 'product') : resolve(__dirname, '../../..'),
+        available: () => !closing && !switching && !!window && !window.isDestroyed(),
+        restart: async executable => {
+          if (closing || switching || !window || window.isDestroyed()) return false;
+          switching = true;
+          try {
+            const [, clean] = await Promise.all([stopClaudeChat(), stopDaemon()]);
+            if (!clean) { switching = false; return false; }
+            providerSetup?.dispose();
+            app.relaunch({ execPath: executable, args: [] });
+            closing = true; setTimeout(() => app.exit(0), 100); return true;
+          } catch { switching = false; return false; }
         } }).installIpc(ipcMain, { trusted: rendererEvent });
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },

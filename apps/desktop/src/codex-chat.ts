@@ -2018,6 +2018,22 @@ export class CodexChat {
     return tab&&this.draftDirty&&tab.key===this.tabs?.active()?.key?{...tab,draft:this.value('codex-composer'),workflowDraft:!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft}:tab;
   }
   chatTabsView(): readonly ChatTabView[] { return this.safeView((this.tabs?.views()??[]).map(tab=>this.draftView(tab)!)); }
+  async prepareForRestart():Promise<void> {
+    const idle=()=>{const thread=this.snapshot()?.thread;
+      if(this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus))throw new Error('Finish or stop the current chat before restarting.');
+      if(!this.surfaceYielded&&this.attachments&&(this.attachments.prepareReferences().length||this.attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
+    };
+    idle();this.flushDraft();this.tabs?.updatePresentation({});
+    if(!this.tabs?.active())return;
+    const project=this.state?.projectPath,key=this.tabs.active()?.key,deadline=Date.now()+10000;
+    while(!this.tabs.preferencesSaved()){
+      if(Date.now()>=deadline)throw new Error('Your chat draft could not be saved. Keep this window open and try again.');
+      await new Promise<void>(resolve=>setTimeout(resolve,25));
+      if(project!==this.state?.projectPath||key!==this.tabs.active()?.key)throw new Error('The workspace changed. Review your draft before restarting.');
+      idle();this.flushDraft();
+    }
+    idle();
+  }
   currentStateView(): ChatStateView {
     const state=this.state?readCodexState(structuredClone(this.state)):null;
     return this.safeView({state,fresh:this.fresh&&!this.stopped,switching:this.tabTransition,activeChat:this.draftView(this.tabs?.active()??null),
