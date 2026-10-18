@@ -2,7 +2,7 @@ import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
 import { validateTerrainGenerate } from './terrain-policy.js';
 import { validateMeshKeep } from './mesh-keep-policy.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt', 'Marble', 'Granite', 'Limestone', 'Sandstone', 'Basalt', 'Pebble', 'LeafyGrass', 'Mud', 'Snow', 'Ice', 'Pavement', 'Plaster', 'DiamondPlate', 'CorrodedMetal', 'Foil'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -117,7 +117,7 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
     if (proto.gui !== undefined) {
       requireGui(session); keys(proto, ['name', 'gui']); textField(proto.name, 'prototype name', 100);
       protoParts.push([]);
-      return { name: proto.name, gui: validateGuiPrototype(proto.gui) } as Json;
+      return { name: proto.name, gui: validateGuiPrototype(proto.gui, session) } as Json;
     }
     keys(proto, ['name', 'weld', 'parts']); textField(proto.name, 'prototype name', 100);
     if (typeof proto.weld !== 'boolean') throw new ArcaneError('INPUT', 'Prototype weld must be a boolean.');
@@ -157,7 +157,7 @@ function validateSceneBuild(a: Record<string, Json>, session: StudioSession): Re
       const tagged = /^(?:gui|stamp|effect):(.+)$/.exec(parentKind)?.[1];
       const host: EffectHost | null = parentKind === 'group' || parentKind === 'part' ? parentKind
         : tagged ? (Object.hasOwn(GUI_HOST_CLASSES, tagged) ? GUI_HOST_CLASSES[tagged]! : parentKind.startsWith('effect:') && tagged === 'Attachment' ? 'attachment' : null) : null;
-      const result = item.kind === 'gui' ? validateBuildGui(item, host, session) : validateBuildStamp(item, host, normalizedPrototypes);
+      const result = item.kind === 'gui' ? validateBuildGui(item, host, session) : validateBuildStamp(item, host, normalizedPrototypes, session);
       const rootClass = item.kind === 'gui' ? String(item.className) : (normalizedPrototypes[(item.template as number) - 1] as { gui: { className: string }[] }).gui[0]!.className;
       kinds.push('gui:' + rootClass);
       return result;
@@ -415,6 +415,11 @@ function requireEffects(session: StudioSession, feature: string, capability: str
   if (!session.capabilities.includes(capability)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates ${feature}. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
 }
 const requireGui = (session: StudioSession) => requireEffects(session, 'direct GUI building', STUDIO_GUI_CAPABILITY);
+function requireGuiFlex(session: StudioSession, className: GuiClass, properties: unknown): void {
+  const flex = className === 'UIFlexItem' || className === 'UIListLayout' && properties !== null && typeof properties === 'object' &&
+    ['Wraps', 'HorizontalFlex', 'VerticalFlex', 'ItemLineAlignment'].some(name => Object.hasOwn(properties, name));
+  if (flex) requireEffects(session, 'responsive GUI flex layouts', STUDIO_GUI_FLEX_CAPABILITY);
+}
 const requireCharacters = (session: StudioSession, className: EffectClass) => {
   if (CHARACTER_CLASSES.includes(className)) requireEffects(session, 'character classes (Humanoid, HumanoidDescription, AnimationController, Animator)', STUDIO_CHARACTERS_CAPABILITY);
 };
@@ -450,6 +455,8 @@ const GUI_LAYER = { Enabled: 'boolean', ResetOnSpawn: 'boolean', ZIndexBehavior:
 const GUI_WORLD = { AlwaysOnTop: 'boolean', MaxDistance: ['number', 0, 100000], LightInfluence: UNIT, Brightness: ['number', 0, 20], ClipsDescendants: 'boolean' } as const;
 const GUI_LAYOUT = { FillDirection: ['enum', 'FillDirection', ['Horizontal', 'Vertical']], HorizontalAlignment: ['enum', 'HorizontalAlignment', ['Left', 'Center', 'Right']],
   VerticalAlignment: ['enum', 'VerticalAlignment', ['Top', 'Center', 'Bottom']], SortOrder: ['enum', 'SortOrder', ['LayoutOrder', 'Name']] } as const;
+const FLEX_ALIGNMENT = ['enum', 'UIFlexAlignment', ['None', 'Fill', 'SpaceAround', 'SpaceBetween', 'SpaceEvenly']] as const;
+const ITEM_LINE_ALIGNMENT = ['enum', 'ItemLineAlignment', ['Automatic', 'Start', 'Center', 'End', 'Stretch']] as const;
 /** Fixed GUI allowlist: class -> property -> kind. UDim2 = [xScale,xOffset,yScale,yOffset], UDim = [scale,offset] (offsets whole pixels). */
 export const GUI_PROPERTIES = Object.freeze({
   ScreenGui: { ...GUI_LAYER, IgnoreGuiInset: 'boolean', DisplayOrder: ['integer', -1000, 1000], ScreenInsets: ['enum', 'ScreenInsets', ['None', 'DeviceSafeInsets', 'CoreUISafeInsets', 'TopbarSafeInsets']] },
@@ -472,7 +479,7 @@ export const GUI_PROPERTIES = Object.freeze({
     LineJoinMode: ['enum', 'LineJoinMode', ['Round', 'Bevel', 'Miter']], Enabled: 'boolean' },
   UIGradient: { Color: 'colorSequence', Transparency: ['sequence', 0, 1], Rotation: ['number', -360, 360], Offset: ['vector2', -1, 1], Enabled: 'boolean' },
   UIPadding: { PaddingTop: 'udim', PaddingBottom: 'udim', PaddingLeft: 'udim', PaddingRight: 'udim' },
-  UIListLayout: { ...GUI_LAYOUT, Padding: 'udim' },
+  UIListLayout: { ...GUI_LAYOUT, Padding: 'udim', Wraps: 'boolean', HorizontalFlex: FLEX_ALIGNMENT, VerticalFlex: FLEX_ALIGNMENT, ItemLineAlignment: ITEM_LINE_ALIGNMENT },
   UIGridLayout: { ...GUI_LAYOUT, CellSize: 'udim2', CellPadding: 'udim2', StartCorner: ['enum', 'StartCorner', ['TopLeft', 'TopRight', 'BottomLeft', 'BottomRight']],
     FillDirectionMaxCells: ['integer', 0, 100] },
   UIAspectRatioConstraint: { AspectRatio: ['number', 0.01, 100], AspectType: ['enum', 'AspectType', ['FitWithinMaxSize', 'ScaleWithParentSize']],
@@ -480,6 +487,7 @@ export const GUI_PROPERTIES = Object.freeze({
   UISizeConstraint: { MinSize: ['vector2', 0, 100000], MaxSize: ['vector2', 0, 100000] },
   UITextSizeConstraint: { MinTextSize: ['integer', 1, 100], MaxTextSize: ['integer', 1, 100] },
   UIScale: { Scale: ['number', 0.01, 20] },
+  UIFlexItem: { FlexMode: ['enum', 'UIFlexMode', ['None', 'Grow', 'Shrink', 'Fill', 'Custom']], GrowRatio: ['number', 0, 100], ShrinkRatio: ['number', 0, 100], ItemLineAlignment: ITEM_LINE_ALIGNMENT },
 } as const satisfies Record<string, Record<string, EffectKind>>);
 export type GuiClass = keyof typeof GUI_PROPERTIES;
 export const GUI_CLASSES = Object.keys(GUI_PROPERTIES) as GuiClass[];
@@ -494,7 +502,7 @@ export const GUI_HOSTS: Readonly<Record<GuiClass, readonly GuiHost[]>> = Object.
   TextBox: GUI_ELEMENT_HOSTS, ImageLabel: GUI_ELEMENT_HOSTS, ImageButton: GUI_ELEMENT_HOSTS, ViewportFrame: GUI_ELEMENT_HOSTS,
   UICorner: GUI_MODIFIER_HOSTS, UIStroke: GUI_MODIFIER_HOSTS, UIGradient: GUI_MODIFIER_HOSTS, UIPadding: GUI_MODIFIER_HOSTS,
   UIAspectRatioConstraint: GUI_MODIFIER_HOSTS, UISizeConstraint: GUI_MODIFIER_HOSTS, UITextSizeConstraint: GUI_MODIFIER_HOSTS,
-  UIListLayout: GUI_ELEMENT_HOSTS, UIGridLayout: GUI_ELEMENT_HOSTS, UIScale: GUI_ELEMENT_HOSTS,
+  UIListLayout: GUI_ELEMENT_HOSTS, UIGridLayout: GUI_ELEMENT_HOSTS, UIScale: GUI_ELEMENT_HOSTS, UIFlexItem: GUI_MODIFIER_HOSTS,
 });
 /** GUI classes that host other GUI items, and the host kind they provide. */
 export const GUI_HOST_CLASSES: Readonly<Record<string, 'layer' | 'guiObject'>> = Object.freeze({
@@ -512,12 +520,13 @@ function hostError(className: GuiClass): ArcaneError {
     layer: 'a ScreenGui/SurfaceGui/BillboardGui', guiObject: 'a GuiObject (Frame, TextButton, ...)' })[host]).join(' or ')}.`);
 }
 /** One GUI prototype: element 1 is the root (parent 0); later elements name an earlier element (1-based) that hosts them. */
-function validateGuiPrototype(value: unknown): Json[] {
+function validateGuiPrototype(value: unknown, session: StudioSession): Json[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > SCENE_BUILD_LIMITS.prototypeParts) throw new ArcaneError('INPUT', `A GUI prototype needs 1..${SCENE_BUILD_LIMITS.prototypeParts} elements.`);
   const classes: GuiClass[] = [];
   return value.map((raw, index) => {
     const element = object(raw, 'prototype element'); keys(element, ['className', 'name', 'parent', 'properties']);
     if (!isGuiClass(element.className)) throw new ArcaneError('CLASS', 'Unsupported GUI prototype class.');
+    requireGuiFlex(session, element.className, element.properties);
     textField(element.name, 'element name', 100);
     const parent = element.parent ?? 0;
     if (index === 0 ? parent !== 0 : !Number.isInteger(parent) || (parent as number) < 1 || (parent as number) > index) throw new ArcaneError('INPUT', 'The first element is the prototype root (parent 0); later elements name an earlier element (1-based).');
@@ -534,15 +543,17 @@ function validateBuildGui(item: Record<string, unknown>, host: EffectHost | null
   requireGui(session);
   keys(item, ['kind', 'className', 'name', 'parent', 'properties', 'key']);
   if (!isGuiClass(item.className)) throw new ArcaneError('CLASS', 'Unsupported GUI class.');
+  requireGuiFlex(session, item.className, item.properties);
   if (!host || !(GUI_HOSTS[item.className] as readonly string[]).includes(host)) throw hostError(item.className);
   return { ...item, properties: validateGuiProperties(item.properties, item.className) } as Json;
 }
 /** scene.build stamp item: one copy of a GUI prototype; properties override the prototype root's own properties. */
-function validateBuildStamp(item: Record<string, unknown>, host: EffectHost | null, prototypes: Json[]): Json {
+function validateBuildStamp(item: Record<string, unknown>, host: EffectHost | null, prototypes: Json[], session: StudioSession): Json {
   keys(item, ['kind', 'template', 'name', 'parent', 'properties', 'key']);
   const proto = Number.isInteger(item.template) ? prototypes[(item.template as number) - 1] as { gui?: { className: GuiClass; properties: Record<string, Json> }[] } | undefined : undefined;
   if (!proto || !proto.gui) throw new ArcaneError('INPUT', 'A stamp names an unknown GUI prototype index.');
   const root = proto.gui[0]!;
+  requireGuiFlex(session, root.className, item.properties);
   if (!host || !(GUI_HOSTS[root.className] as readonly string[]).includes(host)) throw hostError(root.className);
   const properties = validateGuiProperties(item.properties, root.className);
   validateGuiProperties({ ...root.properties, ...properties }, root.className);
@@ -818,6 +829,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       }
       if (isGuiClass(a.className)) {
         requireGui(session);
+        requireGuiFlex(session, a.className, a.properties);
         const host = hostKind(parent.className, parent.pathSegments.length === 0);
         if (!host || !(GUI_HOSTS[a.className] as readonly string[]).includes(host)) throw hostError(a.className);
         a.properties = validateGuiProperties(a.properties, a.className);

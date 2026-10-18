@@ -693,7 +693,7 @@ Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reco
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
 -- character classes: Humanoid, HumanoidDescription, AnimationController, Animator).
-Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.characters", "asset.mesh_parts"})
+Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.characters", "asset.mesh_parts"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -847,7 +847,7 @@ function Validation.geometryProperties(legacy: any): any
 		if name == "Orientation" then return actual == requested or codec.assignedMatches(instance, name, requested) end
 		return legacy.readMatches(name, requested, actual)
 	end
-	-- The property names snapshot() reads for an instance of this class (no names list).
+	-- The managed property names retained privately for creation/build ownership checks.
 	-- Depends only on the class, so a build computes it once per class.
 	function codec.snapshotFields(instance: any): {string}
 		local selected: {string} = {"Name"}
@@ -857,7 +857,67 @@ function Validation.geometryProperties(legacy: any): any
 			if instance:IsA("Part") then table.insert(selected, "Shape") end
 		end
 		if instance:IsA("BaseScript") then table.insert(selected, "Disabled") end
+		local specs = legacy.specsOf(instance.ClassName)
+		if specs then
+			for name in pairs(specs) do if not table.find(selected, name) then table.insert(selected, name) end end
+			table.sort(selected)
+		end
 		return table.freeze(selected)
+	end
+	-- Ownership baselines are exact. Post-assignment tolerances never authorize deleting a later manual edit.
+	local function sameValue(a: any, b: any): boolean
+		if a == nil then a = Validation.NULL end
+		if b == nil then b = Validation.NULL end
+		local kind = typeof(a)
+		if kind ~= typeof(b) then return false end
+		if kind == "NumberSequence" or kind == "ColorSequence" then
+			local first, second = a.Keypoints, b.Keypoints
+			if #first ~= #second then return false end
+			for index, point in ipairs(first) do
+				local other = second[index]
+				if point.Time ~= other.Time or not sameValue(point.Value, other.Value) then return false end
+				if kind == "NumberSequence" and point.Envelope ~= other.Envelope then return false end
+			end
+			return true
+		elseif kind == "Font" then return a.Family == b.Family and a.Weight == b.Weight and a.Style == b.Style
+		elseif kind == "Color3" then return a.R == b.R and a.G == b.G and a.B == b.B
+		elseif kind == "Vector2" then return a.X == b.X and a.Y == b.Y
+		elseif kind == "Vector3" then return a.X == b.X and a.Y == b.Y and a.Z == b.Z
+		elseif kind == "UDim" then return a.Scale == b.Scale and a.Offset == b.Offset
+		elseif kind == "UDim2" then return sameValue(a.X, b.X) and sameValue(a.Y, b.Y)
+		elseif kind == "NumberRange" then return a.Min == b.Min and a.Max == b.Max
+		elseif kind == "CFrame" then
+			local first, second = {a:GetComponents()}, {b:GetComponents()}
+			for index, value in ipairs(first) do if value ~= second[index] then return false end end
+			return true
+		end
+		return a == b
+	end
+	local function sameMap(a: any, b: any): boolean
+		local count = 0
+		for key, value in pairs(a) do if b[key] == nil or not sameValue(value, b[key]) then return false end; count += 1 end
+		for _ in pairs(b) do count -= 1 end
+		return count == 0
+	end
+	local function tagsOf(instance: any, collection: any): any
+		local result = {}
+		for _, tag in ipairs(collection:GetTags(instance)) do result[tag] = true end
+		return result
+	end
+	function codec.captureOwnership(instance: any, collection: any, properties: any?): any
+		if properties == nil then
+			properties = {}
+			for _, name in ipairs(codec.snapshotFields(instance)) do
+				local value = instance[name]
+				properties[name] = if value == nil then Validation.NULL else value
+			end
+			properties = table.freeze(properties)
+		end
+		return table.freeze({properties = properties, attributes = table.freeze(table.clone(instance:GetAttributes())), tags = table.freeze(tagsOf(instance, collection))})
+	end
+	function codec.ownershipMatches(instance: any, collection: any, owned: any): boolean
+		for name, value in pairs(owned.properties) do if not sameValue(instance[name], value) then return false end end
+		return sameMap(instance:GetAttributes(), owned.attributes) and sameMap(tagsOf(instance, collection), owned.tags)
 	end
 	return table.freeze(codec)
 end
@@ -1364,6 +1424,8 @@ local GUI_LAYER = {Enabled = {"boolean"}, ResetOnSpawn = {"boolean"}, ZIndexBeha
 local GUI_WORLD = {AlwaysOnTop = {"boolean"}, MaxDistance = {"number", 0, 100000}, LightInfluence = UNIT, Brightness = {"number", 0, 20}, ClipsDescendants = {"boolean"}}
 local GUI_LAYOUT = {FillDirection = {"enum", "FillDirection", {"Horizontal", "Vertical"}}, HorizontalAlignment = {"enum", "HorizontalAlignment", {"Left", "Center", "Right"}},
 	VerticalAlignment = {"enum", "VerticalAlignment", {"Top", "Center", "Bottom"}}, SortOrder = {"enum", "SortOrder", {"LayoutOrder", "Name"}}}
+local FLEX_ALIGNMENT = {"enum", "UIFlexAlignment", {"None", "Fill", "SpaceAround", "SpaceBetween", "SpaceEvenly"}}
+local ITEM_LINE_ALIGNMENT = {"enum", "ItemLineAlignment", {"Automatic", "Start", "Center", "End", "Stretch"}}
 Properties.GUI_SPECS = table.freeze({
 	ScreenGui = merge(GUI_LAYER, {IgnoreGuiInset = {"boolean"}, DisplayOrder = {"integer", -1000, 1000},
 		ScreenInsets = {"enum", "ScreenInsets", {"None", "DeviceSafeInsets", "CoreUISafeInsets", "TopbarSafeInsets"}}}),
@@ -1386,7 +1448,7 @@ Properties.GUI_SPECS = table.freeze({
 		LineJoinMode = {"enum", "LineJoinMode", {"Round", "Bevel", "Miter"}}, Enabled = {"boolean"}},
 	UIGradient = {Color = {"colorSequence"}, Transparency = {"sequence", 0, 1}, Rotation = {"number", -360, 360}, Offset = {"vector2", -1, 1}, Enabled = {"boolean"}},
 	UIPadding = {PaddingTop = {"udim"}, PaddingBottom = {"udim"}, PaddingLeft = {"udim"}, PaddingRight = {"udim"}},
-	UIListLayout = merge(GUI_LAYOUT, {Padding = {"udim"}}),
+	UIListLayout = merge(GUI_LAYOUT, {Padding = {"udim"}, Wraps = {"boolean"}, HorizontalFlex = FLEX_ALIGNMENT, VerticalFlex = FLEX_ALIGNMENT, ItemLineAlignment = ITEM_LINE_ALIGNMENT}),
 	UIGridLayout = merge(GUI_LAYOUT, {CellSize = {"udim2"}, CellPadding = {"udim2"}, StartCorner = {"enum", "StartCorner", {"TopLeft", "TopRight", "BottomLeft", "BottomRight"}},
 		FillDirectionMaxCells = {"integer", 0, 100}}),
 	UIAspectRatioConstraint = {AspectRatio = {"number", 0.01, 100}, AspectType = {"enum", "AspectType", {"FitWithinMaxSize", "ScaleWithParentSize"}},
@@ -1394,13 +1456,15 @@ Properties.GUI_SPECS = table.freeze({
 	UISizeConstraint = {MinSize = {"vector2", 0, 100000}, MaxSize = {"vector2", 0, 100000}},
 	UITextSizeConstraint = {MinTextSize = {"integer", 1, 100}, MaxTextSize = {"integer", 1, 100}},
 	UIScale = {Scale = {"number", 0.01, 20}},
+	UIFlexItem = {FlexMode = {"enum", "UIFlexMode", {"None", "Grow", "Shrink", "Fill", "Custom"}}, GrowRatio = {"number", 0, 100}, ShrinkRatio = {"number", 0, 100},
+		ItemLineAlignment = ITEM_LINE_ALIGNMENT},
 })
 local ELEMENT_HOSTS, MODIFIER_HOSTS = {"layer", "guiObject"}, {"guiObject"}
 Properties.GUI_HOSTS = table.freeze({ScreenGui = {"starterGui", "group"}, SurfaceGui = {"part"}, BillboardGui = {"part", "attachment"},
 	Frame = ELEMENT_HOSTS, CanvasGroup = ELEMENT_HOSTS, ScrollingFrame = ELEMENT_HOSTS, TextLabel = ELEMENT_HOSTS, TextButton = ELEMENT_HOSTS, TextBox = ELEMENT_HOSTS,
 	ImageLabel = ELEMENT_HOSTS, ImageButton = ELEMENT_HOSTS, ViewportFrame = ELEMENT_HOSTS, UIListLayout = ELEMENT_HOSTS, UIGridLayout = ELEMENT_HOSTS, UIScale = ELEMENT_HOSTS,
 	UICorner = MODIFIER_HOSTS, UIStroke = MODIFIER_HOSTS, UIGradient = MODIFIER_HOSTS, UIPadding = MODIFIER_HOSTS,
-	UIAspectRatioConstraint = MODIFIER_HOSTS, UISizeConstraint = MODIFIER_HOSTS, UITextSizeConstraint = MODIFIER_HOSTS})
+	UIAspectRatioConstraint = MODIFIER_HOSTS, UISizeConstraint = MODIFIER_HOSTS, UITextSizeConstraint = MODIFIER_HOSTS, UIFlexItem = MODIFIER_HOSTS})
 -- Host kind each GUI class provides to its children (nil: it hosts nothing).
 Properties.GUI_HOST_CLASSES = table.freeze({ScreenGui = "layer", SurfaceGui = "layer", BillboardGui = "layer", Frame = "guiObject", CanvasGroup = "guiObject",
 	ScrollingFrame = "guiObject", TextLabel = "guiObject", TextButton = "guiObject", TextBox = "guiObject", ImageLabel = "guiObject", ImageButton = "guiObject", ViewportFrame = "guiObject"})
@@ -2369,7 +2433,8 @@ function Operations:createEffect(command: any, args: any, guard: () -> ()): any
 		progress.ref = ref
 		local snapshot = P.snapshot(instance)
 		self.registry.owned[instance] = {parent = parent, properties = V.immutable(snapshot),
-			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance))}
+			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance)),
+			typedOwnership = P.captureOwnership(instance, self.collection)}
 		return {ref = ref, mutation = {kind = "scene.create", ref = ref, before = V.NULL, after = {properties = snapshot}}}
 	end)
 end
@@ -2682,7 +2747,10 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			local fields = fieldsByClass[entry.className]
 			if not fields then fields = P.snapshotFields(instance); fieldsByClass[entry.className] = fields end
 			local snapshot: {[string]: any} = {}
-			for _, field in ipairs(fields) do snapshot[field] = instance[field] end
+			for _, field in ipairs(fields) do
+				local value = instance[field]
+				snapshot[field] = if value == nil then V.NULL else value
+			end
 			if properties then
 				for _, key in ipairs(BUILD_ORDER) do
 					local value = properties[key]
@@ -2695,7 +2763,7 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 					end
 				end
 			end
-			snapshots[index] = table.freeze(snapshot)
+			snapshots[index] = P.captureOwnership(instance, self.collection, table.freeze(snapshot))
 			slice()
 		end
 		for index, entry in ipairs(plan) do
@@ -3127,6 +3195,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 		local function matches(): boolean
 			return owned ~= nil and instance.Parent == owned.parent and #instance:GetChildren() == 0
 				and V.equal(P.snapshot(instance), original.after.properties)
+				and (owned.typedOwnership == nil or P.ownershipMatches(instance, self.collection, owned.typedOwnership))
 				and V.equal(instance:GetAttributes(), owned.attributes)
 				and V.equal(self.collection:GetTags(instance), owned.tags)
 				and (owned.source == nil or self:source(instance) == owned.source)
@@ -3149,8 +3218,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 			if not build or instance.Parent ~= owned.parent then return false end
 			for index, item in ipairs(build.instances) do
 				if item.Parent ~= build.parents[index] or #item:GetChildren() ~= build.children[index] then return false end
-				-- Snapshots hold the engine values read once at build time (same fields as P.snapshot).
-				for field, value in pairs(build.snapshots[index]) do if item[field] ~= value then return false end end
+				if not P.ownershipMatches(item, self.collection, build.snapshots[index]) then return false end
 			end
 			return true
 		end

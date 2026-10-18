@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { validateCommandArgs, sceneBuildInstanceCount, GUI_CLASSES, GUI_PROPERTIES, GUI_HOSTS, GUI_HOST_CLASSES, FONT_FAMILIES, FONT_WEIGHTS, guiText } from '../../packages/core/src/studio-policy.js';
-import { READ_METHODS, WRITE_METHODS, ROOTS, GUI_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_FEATURE_CAPABILITIES, type InstanceRef, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
+import { READ_METHODS, WRITE_METHODS, ROOTS, GUI_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_FEATURE_CAPABILITIES, type InstanceRef, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
 import { compileSceneBuild, compileGuiProps, sceneBuildShape, type SceneBuildInput } from '../../apps/mcp/src/scene-build.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { z } from 'zod';
@@ -13,7 +13,7 @@ import { z } from 'zod';
 const SESSION = 'gui-session';
 const session = (gui = true, roots: StudioSession['allowedRoots'] = ['Workspace', 'StarterGui']): StudioSession => ({
   id: SESSION, protocolVersion: 1, clientSessionId: 'lifetime', placeId: 0, universeId: 0, name: 'Fixture', pluginVersion: '0.2.0',
-  allowedRoots: roots, allowWrites: true, capabilities: [...READ_METHODS, ...WRITE_METHODS, STUDIO_EFFECTS_CAPABILITY, ...(gui ? [STUDIO_GUI_CAPABILITY] : [])],
+  allowedRoots: roots, allowWrites: true, capabilities: [...READ_METHODS, ...WRITE_METHODS, STUDIO_EFFECTS_CAPABILITY, ...(gui ? [STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY] : [])],
   connectedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), revokedAt: null });
 const ref = (className: string, root: InstanceRef['root'] = 'StarterGui', path: string[] = [className]): InstanceRef => ({ instanceId: 'opaque-' + className, sessionId: SESSION, root, pathSegments: path, className });
 const STARTER_GUI = ref('StarterGui', 'StarterGui', []);
@@ -76,9 +76,9 @@ print(encode({specs = Properties.GUI_SPECS, hosts = Properties.GUI_HOSTS, provid
 });
 
 test('scene.create GUI: hosts, typed bounded values and the scene.gui capability are enforced', () => {
-  assert.equal(GUI_CLASSES.length, 22);
+  assert.equal(GUI_CLASSES.length, 23);
   for (const className of ['ScreenGui', 'SurfaceGui', 'BillboardGui', 'Frame', 'ScrollingFrame', 'TextLabel', 'TextButton', 'TextBox', 'ImageLabel', 'ImageButton', 'ViewportFrame',
-    'UICorner', 'UIStroke', 'UIGradient', 'UIPadding', 'UIListLayout', 'UIGridLayout', 'UIAspectRatioConstraint', 'UISizeConstraint', 'UITextSizeConstraint', 'UIScale'])
+    'UICorner', 'UIStroke', 'UIGradient', 'UIPadding', 'UIListLayout', 'UIGridLayout', 'UIAspectRatioConstraint', 'UISizeConstraint', 'UITextSizeConstraint', 'UIScale', 'UIFlexItem'])
     assert.ok(GUI_CLASSES.includes(className as never), className);
   const screen = { ResetOnSpawn: false, IgnoreGuiInset: true, ZIndexBehavior: 'Sibling', DisplayOrder: 3, ScreenInsets: 'CoreUISafeInsets' };
   assert.deepEqual(create('ScreenGui', screen, STARTER_GUI).properties, screen);
@@ -96,6 +96,11 @@ test('scene.create GUI: hosts, typed bounded values and the scene.gui capability
   assert.ok(create('UIListLayout', { Padding: u(0, 8), SortOrder: 'LayoutOrder', FillDirection: 'Vertical' }, ref('ScreenGui')));
   assert.ok(create('UISizeConstraint', { MinSize: { type: 'Vector2', value: [320, 240] }, MaxSize: { type: 'Vector2', value: [760, 560] } }, ref('Frame')));
   assert.ok(create('UITextSizeConstraint', { MinTextSize: 14, MaxTextSize: 24 }, ref('TextLabel')));
+  assert.ok(create('UIListLayout', { FillDirection: 'Horizontal', Wraps: true, HorizontalFlex: 'SpaceBetween', VerticalFlex: 'Fill', ItemLineAlignment: 'Center' }, ref('Frame')));
+  assert.ok(create('UIFlexItem', { FlexMode: 'Custom', GrowRatio: 2, ShrinkRatio: 0.5, ItemLineAlignment: 'Stretch' }, ref('TextButton')));
+  for (const [className, bad, parent] of [['UIFlexItem', { FlexMode: 'Stretch' }, ref('Frame')], ['UIFlexItem', { GrowRatio: 101 }, ref('Frame')],
+    ['UIListLayout', { HorizontalFlex: 'Justify' }, ref('Frame')], ['UIFlexItem', {}, ref('ScreenGui')]] as const)
+    assert.throws(() => create(className, bad, parent), className);
   assert.ok(create('BillboardGui', { Size: u2(0, 200, 0, 50), StudsOffset: { type: 'Vector3', value: [0, 3, 0] }, AlwaysOnTop: true, MaxDistance: 80 }, ref('Part', 'Workspace')));
   assert.ok(create('BillboardGui', {}, ref('Attachment', 'Workspace')));
   assert.ok(create('SurfaceGui', { Face: 'Front', SizingMode: 'PixelsPerStud', PixelsPerStud: 50 }, ref('Part', 'Workspace')));

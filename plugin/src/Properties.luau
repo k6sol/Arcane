@@ -186,6 +186,8 @@ local GUI_LAYER = {Enabled = {"boolean"}, ResetOnSpawn = {"boolean"}, ZIndexBeha
 local GUI_WORLD = {AlwaysOnTop = {"boolean"}, MaxDistance = {"number", 0, 100000}, LightInfluence = UNIT, Brightness = {"number", 0, 20}, ClipsDescendants = {"boolean"}}
 local GUI_LAYOUT = {FillDirection = {"enum", "FillDirection", {"Horizontal", "Vertical"}}, HorizontalAlignment = {"enum", "HorizontalAlignment", {"Left", "Center", "Right"}},
 	VerticalAlignment = {"enum", "VerticalAlignment", {"Top", "Center", "Bottom"}}, SortOrder = {"enum", "SortOrder", {"LayoutOrder", "Name"}}}
+local FLEX_ALIGNMENT = {"enum", "UIFlexAlignment", {"None", "Fill", "SpaceAround", "SpaceBetween", "SpaceEvenly"}}
+local ITEM_LINE_ALIGNMENT = {"enum", "ItemLineAlignment", {"Automatic", "Start", "Center", "End", "Stretch"}}
 Properties.GUI_SPECS = table.freeze({
 	ScreenGui = merge(GUI_LAYER, {IgnoreGuiInset = {"boolean"}, DisplayOrder = {"integer", -1000, 1000},
 		ScreenInsets = {"enum", "ScreenInsets", {"None", "DeviceSafeInsets", "CoreUISafeInsets", "TopbarSafeInsets"}}}),
@@ -208,7 +210,7 @@ Properties.GUI_SPECS = table.freeze({
 		LineJoinMode = {"enum", "LineJoinMode", {"Round", "Bevel", "Miter"}}, Enabled = {"boolean"}},
 	UIGradient = {Color = {"colorSequence"}, Transparency = {"sequence", 0, 1}, Rotation = {"number", -360, 360}, Offset = {"vector2", -1, 1}, Enabled = {"boolean"}},
 	UIPadding = {PaddingTop = {"udim"}, PaddingBottom = {"udim"}, PaddingLeft = {"udim"}, PaddingRight = {"udim"}},
-	UIListLayout = merge(GUI_LAYOUT, {Padding = {"udim"}}),
+	UIListLayout = merge(GUI_LAYOUT, {Padding = {"udim"}, Wraps = {"boolean"}, HorizontalFlex = FLEX_ALIGNMENT, VerticalFlex = FLEX_ALIGNMENT, ItemLineAlignment = ITEM_LINE_ALIGNMENT}),
 	UIGridLayout = merge(GUI_LAYOUT, {CellSize = {"udim2"}, CellPadding = {"udim2"}, StartCorner = {"enum", "StartCorner", {"TopLeft", "TopRight", "BottomLeft", "BottomRight"}},
 		FillDirectionMaxCells = {"integer", 0, 100}}),
 	UIAspectRatioConstraint = {AspectRatio = {"number", 0.01, 100}, AspectType = {"enum", "AspectType", {"FitWithinMaxSize", "ScaleWithParentSize"}},
@@ -216,13 +218,15 @@ Properties.GUI_SPECS = table.freeze({
 	UISizeConstraint = {MinSize = {"vector2", 0, 100000}, MaxSize = {"vector2", 0, 100000}},
 	UITextSizeConstraint = {MinTextSize = {"integer", 1, 100}, MaxTextSize = {"integer", 1, 100}},
 	UIScale = {Scale = {"number", 0.01, 20}},
+	UIFlexItem = {FlexMode = {"enum", "UIFlexMode", {"None", "Grow", "Shrink", "Fill", "Custom"}}, GrowRatio = {"number", 0, 100}, ShrinkRatio = {"number", 0, 100},
+		ItemLineAlignment = ITEM_LINE_ALIGNMENT},
 })
 local ELEMENT_HOSTS, MODIFIER_HOSTS = {"layer", "guiObject"}, {"guiObject"}
 Properties.GUI_HOSTS = table.freeze({ScreenGui = {"starterGui", "group"}, SurfaceGui = {"part"}, BillboardGui = {"part", "attachment"},
 	Frame = ELEMENT_HOSTS, CanvasGroup = ELEMENT_HOSTS, ScrollingFrame = ELEMENT_HOSTS, TextLabel = ELEMENT_HOSTS, TextButton = ELEMENT_HOSTS, TextBox = ELEMENT_HOSTS,
 	ImageLabel = ELEMENT_HOSTS, ImageButton = ELEMENT_HOSTS, ViewportFrame = ELEMENT_HOSTS, UIListLayout = ELEMENT_HOSTS, UIGridLayout = ELEMENT_HOSTS, UIScale = ELEMENT_HOSTS,
 	UICorner = MODIFIER_HOSTS, UIStroke = MODIFIER_HOSTS, UIGradient = MODIFIER_HOSTS, UIPadding = MODIFIER_HOSTS,
-	UIAspectRatioConstraint = MODIFIER_HOSTS, UISizeConstraint = MODIFIER_HOSTS, UITextSizeConstraint = MODIFIER_HOSTS})
+	UIAspectRatioConstraint = MODIFIER_HOSTS, UISizeConstraint = MODIFIER_HOSTS, UITextSizeConstraint = MODIFIER_HOSTS, UIFlexItem = MODIFIER_HOSTS})
 -- Host kind each GUI class provides to its children (nil: it hosts nothing).
 Properties.GUI_HOST_CLASSES = table.freeze({ScreenGui = "layer", SurfaceGui = "layer", BillboardGui = "layer", Frame = "guiObject", CanvasGroup = "guiObject",
 	ScrollingFrame = "guiObject", TextLabel = "guiObject", TextButton = "guiObject", TextBox = "guiObject", ImageLabel = "guiObject", ImageButton = "guiObject", ViewportFrame = "guiObject"})

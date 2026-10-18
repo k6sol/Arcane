@@ -691,7 +691,8 @@ function Operations:createEffect(command: any, args: any, guard: () -> ()): any
 		progress.ref = ref
 		local snapshot = P.snapshot(instance)
 		self.registry.owned[instance] = {parent = parent, properties = V.immutable(snapshot),
-			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance))}
+			attributes = V.immutable(instance:GetAttributes()), tags = V.immutable(self.collection:GetTags(instance)),
+			typedOwnership = P.captureOwnership(instance, self.collection)}
 		return {ref = ref, mutation = {kind = "scene.create", ref = ref, before = V.NULL, after = {properties = snapshot}}}
 	end)
 end
@@ -1004,7 +1005,10 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			local fields = fieldsByClass[entry.className]
 			if not fields then fields = P.snapshotFields(instance); fieldsByClass[entry.className] = fields end
 			local snapshot: {[string]: any} = {}
-			for _, field in ipairs(fields) do snapshot[field] = instance[field] end
+			for _, field in ipairs(fields) do
+				local value = instance[field]
+				snapshot[field] = if value == nil then V.NULL else value
+			end
 			if properties then
 				for _, key in ipairs(BUILD_ORDER) do
 					local value = properties[key]
@@ -1017,7 +1021,7 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 					end
 				end
 			end
-			snapshots[index] = table.freeze(snapshot)
+			snapshots[index] = P.captureOwnership(instance, self.collection, table.freeze(snapshot))
 			slice()
 		end
 		for index, entry in ipairs(plan) do
@@ -1449,6 +1453,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 		local function matches(): boolean
 			return owned ~= nil and instance.Parent == owned.parent and #instance:GetChildren() == 0
 				and V.equal(P.snapshot(instance), original.after.properties)
+				and (owned.typedOwnership == nil or P.ownershipMatches(instance, self.collection, owned.typedOwnership))
 				and V.equal(instance:GetAttributes(), owned.attributes)
 				and V.equal(self.collection:GetTags(instance), owned.tags)
 				and (owned.source == nil or self:source(instance) == owned.source)
@@ -1471,8 +1476,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 			if not build or instance.Parent ~= owned.parent then return false end
 			for index, item in ipairs(build.instances) do
 				if item.Parent ~= build.parents[index] or #item:GetChildren() ~= build.children[index] then return false end
-				-- Snapshots hold the engine values read once at build time (same fields as P.snapshot).
-				for field, value in pairs(build.snapshots[index]) do if item[field] ~= value then return false end end
+				if not P.ownershipMatches(item, self.collection, build.snapshots[index]) then return false end
 			end
 			return true
 		end

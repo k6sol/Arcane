@@ -53,7 +53,8 @@ for name, items in pairs({NormalId = {"Right", "Top", "Back", "Left", "Bottom", 
   ScrollingDirection = {"X", "Y", "XY"}, ScrollBarInset = {"None", "ScrollBar", "Always"}, ApplyStrokeMode = {"Contextual", "Border"},
   LineJoinMode = {"Round", "Bevel", "Miter"}, FillDirection = {"Horizontal", "Vertical"}, HorizontalAlignment = {"Left", "Center", "Right"},
   VerticalAlignment = {"Top", "Center", "Bottom"}, SortOrder = {"LayoutOrder", "Name"}, StartCorner = {"TopLeft", "TopRight", "BottomLeft", "BottomRight"},
-  AspectType = {"FitWithinMaxSize", "ScaleWithParentSize"}, DominantAxis = {"Width", "Height"}}) do Enum[name] = enumCategory(items) end
+  AspectType = {"FitWithinMaxSize", "ScaleWithParentSize"}, DominantAxis = {"Width", "Height"}, UIFlexMode = {"None", "Grow", "Shrink", "Fill", "Custom"},
+  UIFlexAlignment = {"None", "Fill", "SpaceAround", "SpaceBetween", "SpaceEvenly"}, ItemLineAlignment = {"Automatic", "Start", "Center", "End", "Stretch"}}) do Enum[name] = enumCategory(items) end
 local guiObjects = {"Frame", "CanvasGroup", "ScrollingFrame", "TextLabel", "TextButton", "TextBox", "ImageLabel", "ImageButton", "ViewportFrame"}
 local layers = {"ScreenGui", "SurfaceGui", "BillboardGui"}
 local baseIsA = methods.IsA
@@ -131,6 +132,9 @@ const menuBuild = {
 const fontConflict = structuredClone(menuBuild);
 const goodMenu = structuredClone(menuBuild);
 delete goodMenu.items[10].properties.Font; delete goodMenu.items[10].properties.FontFace;
+const responsiveMenu = structuredClone(goodMenu);
+responsiveMenu.prototypes[0].gui.push({className:'UIFlexItem',name:'Flex',parent:1,properties:{FlexMode:'Custom',GrowRatio:2,ShrinkRatio:0.5,ItemLineAlignment:'Stretch'}});
+Object.assign(responsiveMenu.items[3],{key:'FlexList',properties:{Wraps:true,FillDirection:'Horizontal',HorizontalFlex:'SpaceBetween',ItemLineAlignment:'Center'}});
 /** World GUIs: a BillboardGui nameplate prototype stamped onto two parts and a SurfaceGui sign. */
 const worldBuild = {
   parent: '__PARENT__', container: { className: 'Model', name: 'Stalls' },
@@ -175,6 +179,7 @@ local function u2(xs: number, xo: number, ys: number, yo: number): any return {t
 
 -- 1. scene.create: a ScreenGui in StarterGui, then a Frame, a TextLabel and modifiers inside it; every value verified.
 check(table.find(V.FEATURE_CAPABILITIES, "scene.gui") ~= nil, "plugin advertises scene.gui")
+check(table.find(V.FEATURE_CAPABILITIES, "scene.gui.flex") ~= nil, "plugin advertises scene.gui.flex")
 local committed = fixture.committed
 local screen = ops.registry:resolve(create("ScreenGui", {ResetOnSpawn = false, ZIndexBehavior = "Sibling", IgnoreGuiInset = true, DisplayOrder = 5}, starterRef).ref)
 check(fixture.committed == committed + 1 and screen.Parent == starterGui and screen.ResetOnSpawn == false, "ScreenGui created in StarterGui")
@@ -193,6 +198,10 @@ local corner = ops.registry:resolve(create("UICorner", {CornerRadius = {type = "
 check(corner.Parent == panel and corner.CornerRadius.Offset == 12, "UICorner radius")
 local grid = ops.registry:resolve(create("UIGridLayout", {CellSize = u2(0, 96, 0, 96), CellPadding = u2(0, 8, 0, 8), StartCorner = "TopLeft", FillDirectionMaxCells = 5}, screenRef).ref)
 check(grid.CellSize.X.Offset == 96 and grid.FillDirectionMaxCells == 5, "UIGridLayout on the ScreenGui")
+local flexList = ops.registry:resolve(create("UIListLayout", {FillDirection = "Horizontal", Wraps = true, HorizontalFlex = "SpaceBetween", ItemLineAlignment = "Center"}, panelRef).ref)
+check(flexList.Wraps == true and flexList.HorizontalFlex == Enum.UIFlexAlignment.SpaceBetween and flexList.ItemLineAlignment == Enum.ItemLineAlignment.Center, "flex UIListLayout")
+local flexItem = ops.registry:resolve(create("UIFlexItem", {FlexMode = "Custom", GrowRatio = 2, ShrinkRatio = 0.5, ItemLineAlignment = "Stretch"}, ops.registry:ref(label)).ref)
+check(flexItem.Parent == label and flexItem.FlexMode == Enum.UIFlexMode.Custom and near(flexItem.GrowRatio, 2) and near(flexItem.ShrinkRatio, 0.5), "UIFlexItem in a GuiObject")
 local part = Instance.new("Part"); part.Parent = workspace
 local partRef = ops.registry:ref(part)
 local billboard = ops.registry:resolve(create("BillboardGui", {Size = u2(0, 200, 0, 50), StudsOffset = {type = "Vector3", value = V.array({0, 3, 0})}, AlwaysOnTop = true, MaxDistance = 60}, partRef).ref)
@@ -205,6 +214,9 @@ local allocations = #fixture.created
 refuses("CLASS", function() return create("Frame", {}, starterRef) end)
 refuses("CLASS", function() return create("ScreenGui", {}, partRef) end)
 refuses("CLASS", function() return create("UICorner", {}, screenRef) end)
+refuses("CLASS", function() return create("UIFlexItem", {}, screenRef) end)
+refuses("PROPERTY", function() return create("UIFlexItem", {FlexMode = "Stretch"}, panelRef) end)
+refuses("INPUT", function() return create("UIFlexItem", {GrowRatio = 101}, panelRef) end, "GrowRatio")
 refuses("CLASS", function() return create("TextLabel", {}, partRef) end)
 refuses("CLASS", function() return create("SurfaceGui", {}, panelRef) end)
 for _, bad in ipairs({"line\\nbreak", "tab\\there", "bell\\7", "del\\127", "c1\\194\\133", string.rep("x", 2001)}) do
@@ -304,6 +316,41 @@ check(plate.ClassName == "BillboardGui" and plate.Parent.Name == "StallA" and ne
 check(plate:GetChildren()[1].Text == "Stall", "nameplate label")
 local sign = ops.registry:resolve(world.refs.Sign)
 check(sign.Face == Enum.NormalId.Front and sign:GetChildren()[1].Text == "Fresh fruit", "SurfaceGui sign")
+
+-- 7. Restore protects later GUI changes, including changes smaller than post-assignment tolerances.
+local flexResult, flexReceipt = create("UIFlexItem", {FlexMode = "Custom", GrowRatio = 2, ShrinkRatio = 0.5}, panelRef)
+local directFlex = ops.registry:resolve(flexResult.ref)
+directFlex.GrowRatio = 2.00001
+refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = flexReceipt, mutation = flexResult.mutation}) end)
+check(directFlex.Parent == panel, "manual flex edit remains in the place")
+directFlex.GrowRatio = 2
+check(run("scene.restore", {receiptCommandId = flexReceipt, mutation = flexResult.mutation}).restored, "unchanged flex element restores")
+
+local gradientResult, gradientReceipt = create("UIGradient", {Transparency = {type = "NumberSequence", value = V.array({V.array({0, 0}), V.array({1, 1})})}}, panelRef)
+local gradient = ops.registry:resolve(gradientResult.ref)
+gradient.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 0.99999)})
+refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = gradientReceipt, mutation = gradientResult.mutation}) end)
+gradient.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})
+check(run("scene.restore", {receiptCommandId = gradientReceipt, mutation = gradientResult.mutation}).restored, "structurally equal immutable sequence restores")
+
+local responsive, responsiveReceipt = run("scene.build", args(${json(responsiveMenu)}, starterRef))
+local responsiveRoot = ops.registry:resolve(responsive.ref)
+local layout = ops.registry:resolve(responsive.refs.FlexList)
+local button = ops.registry:resolve(responsive.refs.Play)
+local grow = nil
+for _, child in ipairs(button:GetChildren()) do if child.Name == "Flex" then grow = child end end
+check(responsive.created.count == 1 + 7 + 4 * 6 + 1 and grow ~= nil, "flex prototype stamped into each button")
+check(layout.Wraps and layout.HorizontalFlex == Enum.UIFlexAlignment.SpaceBetween and near(grow.GrowRatio, 2), "batch flex values are applied")
+local function refusesResponsiveRestore(): ()
+  refuses("CONFLICT", function() return run("scene.restore", {receiptCommandId = responsiveReceipt, mutation = responsive.mutation}) end)
+  check(responsiveRoot.Parent == starterGui, "changed GUI build remains in the place")
+end
+layout.Wraps = false; refusesResponsiveRestore(); layout.Wraps = true
+grow.GrowRatio = 2.00001; refusesResponsiveRestore(); grow.GrowRatio = 2
+button.Text = "Manual edit"; refusesResponsiveRestore(); button.Text = "Play"
+layout._attributes.ManualReview = true; refusesResponsiveRestore(); layout._attributes.ManualReview = nil
+layout._tags = {"ManualReview"}; refusesResponsiveRestore(); layout._tags = nil
+check(run("scene.restore", {receiptCommandId = responsiveReceipt, mutation = responsive.mutation}).restored and responsiveRoot.Parent == nil, "unchanged responsive hierarchy restores")
 print("Arcane GUI checks passed: " .. checks)
 `;
 
