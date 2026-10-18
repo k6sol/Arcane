@@ -1967,3 +1967,14 @@ test('a restored unavailable Claude model remains explicit and never silently st
  const native=nativeClaudePreferences(stored),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
  assert.equal(f.chat.openTabs()[0]!.model,'claude-unavailable-9-9');assert.equal(f.submit.disabled,true);assert.match(f.notice.textContent,/previous model or reasoning choice is unavailable/);assert.equal(sends(backend).length,0);
 });
+
+
+test('native Claude model choice carries into new chats when browser storage is unavailable',async t=>{
+ const native=nativeClaudePreferences(),first=mount(fakeBridge().bridge,null,true,native.bridge);t.after(()=>first.chat.stop());await first.chat.refresh();await tick();
+ first.chat.receiveHandoff({draft:'Keep this first draft',model:'opus',effort:'low'});first.chat.newChat();
+ assert.equal(first.chat.openTabs().at(-1)!.model,'opus');assert.equal(first.chat.openTabs().at(-1)!.effort,'low');
+ first.type('Keep this second draft');await first.chat.prepareForRestart();
+ const fresh=mount(fakeBridge().bridge,null,true,native.bridge);t.after(()=>fresh.chat.stop());await fresh.chat.refresh();await tick();
+ assert.equal(fresh.input.value,'Keep this second draft');assert.equal(fresh.chat.openTabs().at(-1)!.model,'opus');
+ fresh.chat.newChat();assert.equal(fresh.chat.openTabs().at(-1)!.model,'opus');assert.equal(fresh.chat.openTabs().at(-1)!.effort,'low');
+});

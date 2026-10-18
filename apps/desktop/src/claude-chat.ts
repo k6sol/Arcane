@@ -259,6 +259,7 @@ export class ClaudeChat {
   private nativeReading:Promise<void>|null=null;
   private nativeDisposed=false;
   private preferenceEdits=0;
+  private lastChoice:{model:string;effort:string}|null=null;
   private nativeDeferred:Tab[]=[];
   private nativeQueuedView:{projectPath:string;active:string|null;rows:(Pick<Tab,'key'|'conversationId'|'model'|'effort'|'draft'>&{title:string})[]}|null=null;
   private readonly attachments: ClaudeChatAttachments;
@@ -1202,12 +1203,14 @@ export class ClaudeChat {
 
   // ---- Model and reasoning choice (per tab; the last choice is remembered for new chats) ----
   private readChoice(): { model: string; effort: string } {
+    if(this.lastChoice)return {...this.lastChoice};
     try {
       const value = record(JSON.parse(this.storage?.getItem(CLAUDE_CHAT_CHOICE_KEY) ?? 'null'));
       return { model: text(value?.model, 128), effort: text(value?.effort, 64) };
     } catch { return { model: '', effort: '' }; }
   }
   private saveChoice(tab: Tab): void {
+    this.lastChoice={model:tab.model,effort:tab.effort};
     this.preferenceEdits++;this.queueNativePreferences();
     try { this.storage?.setItem(CLAUDE_CHAT_CHOICE_KEY, JSON.stringify({ model: tab.model, effort: tab.effort })); } catch { /* Only the remembered choice is lost. */ }
   }
