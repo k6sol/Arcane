@@ -41,6 +41,7 @@ test('packaged smoke records module delivery after initialization and fails when
           if(code.includes('title: document.title'))return JSON.stringify(renderer);
           if(code.includes("'/task-plan-boot.js'"))return modulesAvailable;
           if(code==='window.arcaneDesktop.workspacePreferences.read()')return{available:false,preferences:null};
+          if(code==='window.arcaneDesktop.claudePreferences.read()')return{available:false,projectPath:null,preferences:null};
           if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
           if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
           assert.fail('Unexpected smoke renderer request');
@@ -364,7 +365,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'setupChecklist', 'studioKeys', 'studioPlugin', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'claudePreferences', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'setupChecklist', 'studioKeys', 'studioPlugin', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
   assert.equal(Object.isFrozen(exposed.billing), true);
   assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'status', 'version']);
   assert.equal(exposed.billing.version, 1);
@@ -389,6 +390,8 @@ test('preload exposes immutable identity and only the bounded Luau verification 
   assert.equal(Object.isFrozen(exposed.claudeChat), true);
   assert.equal(Object.isFrozen(exposed.studioKeys), true);
   assert.equal(Object.isFrozen(exposed.workspacePreferences), true);
+  assert.equal(Object.isFrozen(exposed.claudePreferences), true);
+  assert.deepEqual(Object.keys(exposed.claudePreferences).sort(), ['read', 'save', 'version']);
   assert.deepEqual(Object.keys(exposed.workspacePreferences).sort(), ['read', 'save', 'version']);
   assert.deepEqual(Object.keys(exposed.studioKeys).sort(), ['copy', 'forget', 'list', 'remember', 'replace', 'reveal', 'version']);
   assert.deepEqual(Object.keys(exposed.providerSetup).sort(),['install','launch','login','status','version']);

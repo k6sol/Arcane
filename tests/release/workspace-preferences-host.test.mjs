@@ -95,7 +95,7 @@ function encryptedTestDouble() {
   };
 }
 
-function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin } = {}) {
+function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false } = {}) {
   const userRoot = 'C:\\Owned', projectId = hash(projectPath.toLowerCase());
   const stateRoot = win32.join(userRoot, 'runtime', 'projects', projectId), handlers = new Map(), ipcCalls = [];
   disk.ensure(projectPath); disk.ensure(stateRoot);
@@ -126,10 +126,16 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
   });
   // Execute the actual main-owned session accessor and actual installIpc, not a substitute gate.
-  vm.runInContext('let workspacePreferences, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
+  vm.runInContext('let workspacePreferences, claudePreferences, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
     'globalThis.setState = next => {' + ['closing', 'switching', 'window', 'origin', 'userRoot', 'token', 'projectSession']
       .map(name => `if(Object.hasOwn(next,'${name}')) ${name}=next.${name};`).join('') + '};\n' +
     mainSource.slice(begin, end), mainContext, { filename: 'workspace-preferences-main-wiring.cjs' });
+  if (includeClaude) {
+    const beginClaude = mainSource.indexOf("claudePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences(");
+    const endClaude = mainSource.indexOf('claudePreferences.installIpc(ipcMain);', beginClaude) + 'claudePreferences.installIpc(ipcMain);'.length;
+    assert.ok(beginClaude > 0 && endClaude > beginClaude, 'Production Claude preference wiring exists.');
+    vm.runInContext(mainSource.slice(beginClaude, endClaude), mainContext, { filename: 'claude-preferences-main-wiring.cjs' });
+  }
   let exposed, activeEvent = event, invokeError, replyOverride;
   const preloadContext = vm.createContext({ TextEncoder, require(name) {
     assert.equal(name, 'electron');
@@ -158,6 +164,10 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     call(action, ...args) {
       preloadContext.serializedArgs = JSON.stringify(args);
       return exposed.workspacePreferences[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
+    },
+    claude(action, ...args) {
+      preloadContext.serializedArgs = JSON.stringify(args);
+      return exposed.claudePreferences[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
     },
     tour(action, ...args) {
       preloadContext.serializedArgs = JSON.stringify(args);
@@ -647,4 +657,48 @@ test('optional workflowDraft flag round-trips through preload and host; legacy r
   const stored = fixture(), badPayload = { version: 1, projectId: stored.projectId, preferences: snapshot({ tabs: [tab(1, { workflowDraft: 'yes' })] }) };
   stored.disk.put(stored.full, { kind: 'file', bytes: Buffer.from(JSON.stringify({ version: 1, ciphertext: stored.safeStorage.encryptString(JSON.stringify(badPayload)).toString('base64') }) + '\n') });
   await assert.rejects(stored.raw('read'), ERROR); await assert.rejects(stored.call('read'), ERROR);
+});
+
+
+const claudeSnapshot = (values = {}) => snapshot({provider:'claude',tabs:[tab(1,{provider:'claude',threadId:'conversation-1',draft:'Unsent Claude text\n  keep whitespace 🧩',modelId:'claude-opus-4-6',effort:'low'})],...values});
+test('Claude preferences use their own encrypted record and retain drafts, tabs and model across host restart',async()=>{
+ const f=fixture({includeClaude:true});
+ assert.equal(Object.isFrozen(f.exposed.claudePreferences),true);
+ assert.deepEqual(json(await f.claude('read')),{available:true,projectPath:f.projectPath,preferences:null});
+ const codex=snapshot({tabs:[tab(1,{draft:'Codex draft'})]});await f.call('save',codex);
+ const claude=claudeSnapshot();await f.claude('save',claude);
+ const full=win32.join(f.stateRoot,'claude-preferences.v1.json');
+ assert.equal(f.disk.node(full).bytes.includes(Buffer.from(claude.tabs[0].draft)),false);
+ assert.deepEqual(json((await f.call('read')).preferences),codex);
+ const restarted=fixture({disk:f.disk,safeStorage:f.safeStorage,origin:'http://127.0.0.1:45872',includeClaude:true});
+ assert.deepEqual(json(await restarted.claude('read')),{available:true,projectPath:f.projectPath,preferences:claude});
+ assert.deepEqual(json((await restarted.call('read')).preferences),codex);
+ assert.equal(f.disk.descriptors.size,0);
+});
+
+test('encrypted Claude preference records reject cross-record substitution and non-Claude rows',async()=>{
+ const f=fixture({includeClaude:true});await f.call('save',snapshot());await f.claude('save',claudeSnapshot());
+ const full=win32.join(f.stateRoot,'claude-preferences.v1.json'),original=Buffer.from(f.disk.node(full).bytes);
+ f.disk.put(full,{kind:'file',bytes:Buffer.from(f.disk.node(f.full).bytes)});
+ await assert.rejects(f.claude('read'),ERROR);
+ f.disk.put(full,{kind:'file',bytes:original});
+ for(const value of [snapshot(),claudeSnapshot({tabs:[tab(1,{provider:'claude',sessionId:'foreign-session'})]}),claudeSnapshot({tabs:[tab(1,{provider:'claude',workflowDraft:false})]})])await assert.rejects(f.claude('save',value),ERROR);
+ assert.deepEqual(json((await f.claude('read')).preferences),claudeSnapshot());
+ assert.equal(f.disk.descriptors.size,0);
+});
+
+test('Claude preference channels preserve exact frame/project guards and are inert when disabled',async()=>{
+ const f=fixture({includeClaude:true});
+ f.setEvent({...f.event,senderFrame:{url:origin+'/studio#fixture'}});await assert.rejects(f.claude('read'),ERROR);
+ f.setEvent(f.event);await assert.rejects(f.claude('read','invented-record'),ERROR);
+ await assert.rejects(f.claude('save',claudeSnapshot({projectPath:'C:\\Other'})),ERROR);
+ assert.equal(f.disk.writes.length,0);
+ const disabled=fixture({includeClaude:true,smoke:true});assert.deepEqual(json(await disabled.claude('read')),{available:false,projectPath:null,preferences:null});
+ await assert.rejects(disabled.claude('save',claudeSnapshot()),ERROR);assert.deepEqual(disabled.safeStorage.calls,[]);assert.equal(disabled.disk.writes.length,0);
+});
+
+test('concurrent Claude and Codex preference saves remain independent',async()=>{
+ const f=fixture({includeClaude:true}),claude=claudeSnapshot(),codex=snapshot({tabs:[tab(1,{draft:'Independent Codex text'})]});
+ await Promise.all([f.claude('save',claude),f.call('save',codex)]);
+ const [a,b]=await Promise.all([f.claude('read'),f.call('read')]);assert.deepEqual(json(a.preferences),claude);assert.deepEqual(json(b.preferences),codex);assert.equal(f.disk.descriptors.size,0);
 });

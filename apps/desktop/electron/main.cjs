@@ -25,6 +25,7 @@ let codeVerification, projectSession, providerSetup;
 let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
+let claudePreferences;
 let claudeChat;
 let studioPlugin;
 let projectPermissions;
@@ -355,6 +356,7 @@ async function checkSmoke() {
     return typeof boot.startTaskPlanCard === 'function' && typeof card.TaskPlanCard?.mount === 'function';
   })()`);
   const workspacePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.workspacePreferences.read()');
+  const claudePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.claudePreferences.read()');
   // Newer desktop bridges: frozen shape plus the verification-mode answer of each read-only or disabled call. In smoke the
   // hosts are disabled, so no Claude process, folder picker, browser, checkout or system notification can start.
   const desktopBridges = JSON.parse(await window.webContents.executeJavaScript(`(async () => {
@@ -427,6 +429,7 @@ async function checkSmoke() {
     desktopVerificationSetupMounted: renderer.codeVerificationBridge === true && renderer.desktopVerificationController === true,
     studioKeyVaultBridgeMounted: renderer.studioKeysBridge === true,
     workspacePreferencesDisabledAndEmpty: workspacePreferenceRead?.available === false && workspacePreferenceRead.preferences === null,
+    claudePreferencesDisabledAndEmpty: claudePreferenceRead?.available === false && claudePreferenceRead.projectPath === null && claudePreferenceRead.preferences === null,
     localChatDraftSwitching: localChat.draftsSeparate === true && localChat.stableComposer === true && localChat.cleaned === true,
     taskUsageHiddenWithoutTask: localChat.taskUsageInactive === true,
     localChatIntentsStartNoNativeLifecycle: afterChatResponse.ok && afterChat.state?.snapshot === null && afterChat.state.actions?.length === 0,
@@ -490,6 +493,11 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       workspacePreferences.installIpc(ipcMain);
+      claudePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'claude', getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      claudePreferences.installIpc(ipcMain);
       // One-click Studio plugin install/update: verified bundled artifact only, after a native confirm dialog.
       studioPlugin = require('./plugin-install.cjs').createStudioPluginInstaller({ enabled: !smoke, productRoot: () => productRoot,
         backupDirectory: () => userRoot ? join(userRoot, 'plugin-backups') : null,

@@ -112,7 +112,15 @@ function checkPin(pin) {
   return bytes;
 }
 
-function createWorkspacePreferences({ safeStorage, getSession, enabled = true }) {
+function createWorkspacePreferences({ safeStorage, getSession, enabled = true, record = 'workspace' }) {
+  if (record !== 'workspace' && record !== 'claude') fail();
+  const recordFile = record === 'claude' ? 'claude-preferences.v1.json' : FILE;
+  const recordChannel = record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
+  function recordPreferences(value, scope) {
+    const parsed = preferences(value, scope);
+    if (record === 'claude' && (parsed.provider !== 'claude' || parsed.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) fail();
+    return parsed;
+  }
   // Construction/install are inert, including in smoke mode. All reads are gated IPC intents.
   let busy = false, tourBusy = false, checklistBusy = false;
   function available() {
@@ -140,7 +148,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
         !samePath(scope.stateRoot, path.join(scope.userRoot, 'runtime', 'projects', scope.projectId))) fail();
     const projectChain = checkedPath(scope.projectPath), stateChain = checkedPath(scope.stateRoot);
     // The full profile/state parent chain is pinned by checkedPath; no directories are created here.
-    const full = path.join(scope.stateRoot, FILE);
+    const full = path.join(scope.stateRoot, recordFile);
     if (!policy.within(scope.stateRoot, full)) fail();
     return { full, projectChain, stateChain };
   }
@@ -149,9 +157,9 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
     if (snapshot.pin) checkPin(snapshot.pin); else if (!missing(snapshot.full)) fail();
   }
   function payload(value, scope) {
-    fields(value, ['version', 'projectId', 'preferences']);
-    if (value.version !== 1 || value.projectId !== scope.projectId) fail();
-    return { version: 1, projectId: value.projectId, preferences: preferences(value.preferences, scope) };
+    fields(value, record === 'claude' ? ['version', 'projectId', 'record', 'preferences'] : ['version', 'projectId', 'preferences']);
+    if (value.version !== 1 || value.projectId !== scope.projectId || record === 'claude' && value.record !== 'claude') fail();
+    return { version: 1, projectId: value.projectId, ...(record === 'claude' ? { record: 'claude' } : {}), preferences: recordPreferences(value.preferences, scope) };
   }
   function unlocked(snapshot) { if (!missing(snapshot.full + '.lock')) fail(); }
   function readSnapshot(scope, event, paths) {
@@ -177,7 +185,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
   }
   function persist(scope, event, snapshot, input) {
     // Presentation data and the host's project identity are sealed together.
-    const plain = JSON.stringify(payload({ version: 1, projectId: scope.projectId, preferences: input }, scope));
+    const plain = JSON.stringify(payload({ version: 1, projectId: scope.projectId, ...(record === 'claude' ? { record: 'claude' } : {}), preferences: input }, scope));
     if (Buffer.byteLength(plain) > MAX_PLAIN_BYTES) fail();
     guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot); if (!available()) fail();
     const encrypted = safeStorage.encryptString(plain);
@@ -262,6 +270,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
     } finally { fs.closeSync(confirmed.pin.fd); }
   }
   function installIpc(ipcMain) {
+    if (record === 'workspace') {
     for (const action of ['read', 'save']) {
       ipcMain.handle('arcane:setup-checklist-' + action, async (event, ...args) => {
         let snapshot, ownsBusy = false;
@@ -323,8 +332,9 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
         finally { try { if (snapshot?.pin) fs.closeSync(snapshot.pin.fd); } finally { if (ownsBusy) tourBusy = false; } }
       });
     }
+    }
     for (const action of ['read', 'save']) {
-      ipcMain.handle('arcane:workspace-preferences-' + action, async (event, ...args) => {
+      ipcMain.handle(recordChannel + action, async (event, ...args) => {
         let ownsBusy = false, snapshot;
         try {
           const scope = current(event);
@@ -332,17 +342,17 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
           if (action === 'read') { if (args.length) fail(); }
           else {
             if (args.length !== 1) fail();
-            input = { ...preferences(args[0], scope), projectPath: scope.projectPath };
+            input = { ...recordPreferences(args[0], scope), projectPath: scope.projectPath };
           }
           if (busy) fail(); busy = true; ownsBusy = true;
           const usable = available(); guard(scope, event);
-          if (!usable) { if (action === 'read') return { available: false, preferences: null }; fail(); }
+          if (!usable) { if (action === 'read') return { available: false, ...(record === 'claude' ? { projectPath: null } : {}), preferences: null }; fail(); }
           const paths = projectScope(scope);
           // Pin paths before yielding; recheck owner/main frame/project/origin before access.
           await Promise.resolve(); guard(scope, event);
           if (!available()) fail(); guard(scope, event);
           snapshot = readSnapshot(scope, event, paths); guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
-          if (action === 'read') return { available: true, preferences: snapshot.preferences };
+          if (action === 'read') return { available: true, ...(record === 'claude' ? { projectPath: scope.projectPath } : {}), preferences: snapshot.preferences };
           persist(scope, event, snapshot, input); guard(scope, event);
           return { saved: true };
         } catch { fail(); }

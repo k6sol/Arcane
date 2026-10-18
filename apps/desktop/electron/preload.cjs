@@ -176,15 +176,23 @@ const workspacePreferenceSnapshot = value => {
   if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 512 * 1024) workspacePreferenceError();
   return result;
 };
-const workspacePreferenceInvoke = async (action, args) => {
+const workspacePreferenceInvoke = async (action, args, record = 'workspace') => {
   try {
     let input;
     if (action === 'read') { if (args.length) workspacePreferenceError(); }
-    else { if (args.length !== 1) workspacePreferenceError(); input = workspacePreferenceSnapshot(args[0]); }
-    const value = await ipcRenderer.invoke('arcane:workspace-preferences-' + action, ...(input ? [input] : []));
+    else { if (args.length !== 1) workspacePreferenceError(); input = workspacePreferenceSnapshot(args[0]);
+      if (record === 'claude' && (input.provider !== 'claude' || input.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) workspacePreferenceError();
+    }
+    const value = await ipcRenderer.invoke((record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-') + action, ...(input ? [input] : []));
     if (action === 'read') {
-      workspacePreferenceFields(value, ['available', 'preferences']);
+      workspacePreferenceFields(value, record === 'claude' ? ['available', 'projectPath', 'preferences'] : ['available', 'preferences']);
       if (typeof value.available !== 'boolean' || (!value.available && value.preferences !== null)) workspacePreferenceError();
+      if (record === 'claude') {
+        if (value.available ? typeof value.projectPath !== 'string' || !value.projectPath.length : value.projectPath !== null) workspacePreferenceError();
+        const preferences = value.preferences === null ? null : workspacePreferenceSnapshot(value.preferences);
+        if (preferences && (preferences.projectPath !== value.projectPath || preferences.provider !== 'claude' || preferences.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) workspacePreferenceError();
+        return { available: value.available, projectPath: value.available ? workspacePreferenceText(value.projectPath, 4096) : null, preferences };
+      }
       return { available: value.available, preferences: value.preferences === null ? null : workspacePreferenceSnapshot(value.preferences) };
     }
     workspacePreferenceFields(value, ['saved']); if (value.saved !== true) workspacePreferenceError();
@@ -193,6 +201,9 @@ const workspacePreferenceInvoke = async (action, args) => {
 };
 const workspacePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args), save: (...args) => workspacePreferenceInvoke('save', args),
+});
+const claudePreferences = Object.freeze({ version: 1,
+  read: (...args) => workspacePreferenceInvoke('read', args, 'claude'), save: (...args) => workspacePreferenceInvoke('save', args, 'claude'),
 });
 const welcomeTourInvoke = async (action, args) => {
   try {
@@ -562,4 +573,4 @@ const updates = Object.freeze({ version: 1,
     return { state: value.state, message: typeof value.message === 'string' ? value.message.slice(0, 400) : '' };
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));
