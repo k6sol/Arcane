@@ -211,6 +211,28 @@ const welcomeTourInvoke = async (action, args) => {
 const welcomeTour = Object.freeze({ version: 1,
   read: (...args) => welcomeTourInvoke('read', args), dismiss: (...args) => welcomeTourInvoke('dismiss', args),
 });
+const checklistMemory = value => {
+  workspacePreferenceFields(value, ['version', 'completed', 'dismissed']);
+  if (value.version !== 1 || typeof value.completed !== 'boolean' || typeof value.dismissed !== 'boolean') workspacePreferenceError();
+  return { version: 1, completed: value.completed, dismissed: value.dismissed };
+};
+const setupChecklistInvoke = async (action, args) => {
+  try {
+    if (action === 'read' ? args.length !== 0 : args.length !== 1) workspacePreferenceError();
+    const input = action === 'save' ? checklistMemory(args[0]) : null;
+    const value = await ipcRenderer.invoke('arcane:setup-checklist-' + action, ...(input ? [input] : []));
+    if (action === 'read') {
+      workspacePreferenceFields(value, ['available', 'memory']);
+      if (typeof value.available !== 'boolean' || !value.available && value.memory !== null) workspacePreferenceError();
+      return { available: value.available, memory: value.memory === null ? null : checklistMemory(value.memory) };
+    }
+    workspacePreferenceFields(value, ['saved']); if (value.saved !== true) workspacePreferenceError();
+    return { saved: true };
+  } catch { workspacePreferenceError(); }
+};
+const setupChecklist = Object.freeze({ version: 1,
+  read: (...args) => setupChecklistInvoke('read', args), save: (...args) => setupChecklistInvoke('save', args),
+});
 // In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
 const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
@@ -540,4 +562,4 @@ const updates = Object.freeze({ version: 1,
     return { state: value.state, message: typeof value.message === 'string' ? value.message.slice(0, 400) : '' };
   },
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, welcomeTour, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates }));

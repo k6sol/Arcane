@@ -124,6 +124,8 @@ function bridges(desktop: unknown): { plugin: PluginBridge | null; project: Proj
 }
 
 export interface SetupChecklistOptions {
+  /** App-owned presentation memory; survives the temporary browser session and daemon port. */
+  persistence?: SetupChecklistPersistence | null;
   provider: {
     isSignedIn(): boolean; chatSurface(): 'codex' | 'claude'; selectedProvider(): 'codex' | 'claude';
     subscribeSignInChange(listener: () => void): () => void; subscribeChatSurface(listener: () => void): () => void;
@@ -142,17 +144,32 @@ export interface SetupChecklistController {
   rows(): ChecklistRow[]; visible(): boolean; memory(): ChecklistMemory;
   refreshPlugin(): Promise<void>; stop(): void; resume(): void; cleanup(): void;
 }
+export interface SetupChecklistPersistence {
+  read(): Promise<{available: boolean; memory: ChecklistMemory | null}>;
+  save(memory: ChecklistMemory): Promise<{saved: true}>;
+}
 
 const TICK = 'M5 12.5 10 17 19 7';
 export function startSetupChecklist(doc: Document, options: SetupChecklistOptions): SetupChecklistController {
   const root = doc.getElementById('setup-checklist'), list = doc.getElementById('setup-checklist-items');
   const native = bridges(options.desktop), storage = options.storage ?? null;
+  const desktopMemory = (options.desktop as {setupChecklist?: SetupChecklistPersistence & {version: number}} | null)?.setupChecklist;
+  const persistence = options.persistence ?? (desktopMemory?.version === 1 && typeof desktopMemory.read === 'function' && typeof desktopMemory.save === 'function' ? desktopMemory : null);
   const removers: (() => void)[] = [];
   let plugin: PluginStatus | null = null, pluginBusy = false, later = false, stopped = false, disposed = false, notice = '';
   let memory = (() => { try { return readChecklistMemory(storage?.getItem(SETUP_CHECKLIST_KEY)); } catch { return readChecklistMemory(null); } })();
+  let hydrated = !persistence, automatic = !persistence, forced = false, revision = 0, preferenceError = '';
+  let pendingSave: Promise<void> = Promise.resolve();
   const save = (next: ChecklistMemory) => {
-    memory = next;
+    memory = {...next}; revision++;
     try { storage?.setItem(SETUP_CHECKLIST_KEY, JSON.stringify(next)); } catch { /* Only the reminder is lost. */ }
+    if (persistence) {
+      const snapshot = {...next};
+      pendingSave = pendingSave.then(() => persistence.save(snapshot)).then(reply => {
+        if (reply.saved !== true) throw new Error('Preference save refused');
+        preferenceError = ''; render();
+      }).catch(() => { preferenceError = 'Your setup checklist preference could not be saved. Try Hide checklist again.'; render(); });
+    }
   };
   const signals = (): ChecklistSignals => {
     let signedIn = false, providerName: 'ChatGPT' | 'Claude' = 'ChatGPT', studio: boolean | null = null, path: string | null = null;
@@ -180,19 +197,19 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     const install = el('studio-plugin-install') as HTMLButtonElement | null, refresh = el('studio-plugin-refresh') as HTMLButtonElement | null;
     const label = !native.plugin ? 'Desktop app only' : !plugin ? 'Checking' : plugin.state === 'installed' ? 'Installed' : plugin.state === 'outdated' ? 'Update available' : plugin.state === 'missing' ? 'Not installed' : 'Unavailable';
     if (state) { state.textContent = label; state.className = 'status-text ' + (plugin?.state === 'installed' ? 'good' : plugin?.state === 'outdated' || plugin?.state === 'missing' ? 'warning' : 'neutral'); }
-    if (status) status.textContent = notice || (!native.plugin ? PLUGIN_MESSAGES.desktop : plugin ? plugin.message + (plugin.pluginVersion ? ' Bundled version ' + plugin.pluginVersion + '.' : '') : PLUGIN_MESSAGES.checking);
+    if (status) status.textContent = preferenceError || notice || (!native.plugin ? PLUGIN_MESSAGES.desktop : plugin ? plugin.message + (plugin.pluginVersion ? ' Bundled version ' + plugin.pluginVersion + '.' : '') : PLUGIN_MESSAGES.checking);
     if (install) { install.disabled = !native.plugin || pluginBusy || stopped || !plugin || plugin.state === 'installed' || plugin.state === 'unavailable'; install.textContent = pluginBusy ? 'Installing…' : plugin?.state === 'outdated' ? 'Update plugin' : 'Install plugin'; }
     if (refresh) refresh.disabled = !native.plugin || pluginBusy || stopped;
     const show = el('setup-checklist-show') as HTMLButtonElement | null;
-    if (show) show.hidden = !(memory.dismissed || later) || memory.completed;
+    if (show) show.hidden = forced || !(memory.dismissed || memory.completed || later || !automatic);
   };
   const render = () => {
     if (disposed) return;
     const current = rows();
-    if (!memory.completed && current.every(row => row.state === 'done')) save({ ...memory, completed: true });
+    if (hydrated && automatic && !memory.completed && current.every(row => row.state === 'done')) save({ ...memory, completed: true });
     renderSettings();
     if (!root || !list) return;
-    const visible = !stopped && checklistVisible(current, memory, later);
+    const visible = !stopped && (forced || hydrated && automatic && checklistVisible(current, memory, later));
     root.hidden = !visible;
     if (!visible) return;
     const done = current.filter(row => row.state === 'done').length;
@@ -260,9 +277,9 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     const button = (event.target as Element | null)?.closest?.('button[data-setup-action]') as HTMLButtonElement | null;
     if (button && !button.disabled) act(button.dataset.setupAction ?? '', event);
   });
-  listen(el('setup-checklist-later'), 'click', event => { if (event.isTrusted) { later = true; render(); } });
-  listen(el('setup-checklist-hide'), 'click', event => { if (event.isTrusted) { save({ ...memory, dismissed: true }); render(); } });
-  listen(el('setup-checklist-show'), 'click', event => { if (event.isTrusted) { later = false; save({ ...memory, dismissed: false }); render(); } });
+  listen(el('setup-checklist-later'), 'click', event => { if (event.isTrusted) { forced = false; later = true; render(); } });
+  listen(el('setup-checklist-hide'), 'click', event => { if (event.isTrusted) { forced = false; save({ ...memory, dismissed: true }); render(); } });
+  listen(el('setup-checklist-show'), 'click', event => { if (event.isTrusted) { forced = memory.completed || !automatic; later = false; save({ ...memory, dismissed: false }); render(); } });
   listen(el('studio-plugin-install'), 'click', event => act('install-plugin', event));
   listen(el('studio-plugin-refresh'), 'click', event => act('check-plugin', event));
   // Returning from Studio re-reads the local plugin file once; there is no polling.
@@ -271,6 +288,14 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     try { removers.push(subscribe(render)); } catch { /* A missing signal only leaves its row pending. */ }
   }
   if (options.pairing) { try { removers.push(options.pairing.subscribe(render)); } catch { /* The row keeps its last state. */ } }
+  if (persistence) {
+    void persistence.read().then(value => {
+      if (disposed) return;
+      automatic = value.available;
+      if (revision === 0 && value.memory) memory = {...value.memory};
+      else if (revision === 0 && value.available && (memory.completed || memory.dismissed)) save(memory);
+    }).catch(() => { automatic = false; }).finally(() => { hydrated = true; render(); });
+  }
   render(); void refreshPlugin();
   return {
     rows, visible: () => !!root && !root.hidden, memory: () => ({ ...memory }), refreshPlugin,

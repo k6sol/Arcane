@@ -114,7 +114,7 @@ function checkPin(pin) {
 
 function createWorkspacePreferences({ safeStorage, getSession, enabled = true }) {
   // Construction/install are inert, including in smoke mode. All reads are gated IPC intents.
-  let busy = false, tourBusy = false;
+  let busy = false, tourBusy = false, checklistBusy = false;
   function available() {
     return enabled === true && process.platform === 'win32' &&
       typeof safeStorage?.encryptString === 'function' && typeof safeStorage?.decryptString === 'function' &&
@@ -262,6 +262,39 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true })
     } finally { fs.closeSync(confirmed.pin.fd); }
   }
   function installIpc(ipcMain) {
+    for (const action of ['read', 'save']) {
+      ipcMain.handle('arcane:setup-checklist-' + action, async (event, ...args) => {
+        let snapshot, ownsBusy = false;
+        const memory = value => {
+          fields(value, ['version', 'completed', 'dismissed']);
+          if (value.version !== 1 || typeof value.completed !== 'boolean' || typeof value.dismissed !== 'boolean') fail();
+          return { version: 1, completed: value.completed, dismissed: value.dismissed };
+        };
+        try {
+          const scope = current(event);
+          if (action === 'read' ? args.length !== 0 : args.length !== 1) fail();
+          const input = action === 'save' ? memory(args[0]) : null;
+          if (checklistBusy) fail(); checklistBusy = true; ownsBusy = true;
+          if (!available()) { if (action === 'read') return { available: false, memory: null }; fail(); }
+          const chain = checkedPath(scope.userRoot);
+          snapshot = { full: path.join(scope.userRoot, 'setup-checklist.v1.json'), projectChain: chain, stateChain: chain, pin: null };
+          guard(scope, event); checkChain(chain); unlocked(snapshot);
+          let saved = null, previousBytes = null;
+          if (!missing(snapshot.full)) {
+            const opened = openPin(snapshot.full); snapshot.pin = opened.pin; previousBytes = opened.bytes;
+            if (previousBytes.length > 128) fail();
+            saved = memory(JSON.parse(previousBytes.toString('utf8')));
+            if (!previousBytes.equals(Buffer.from(JSON.stringify(saved) + '\n'))) fail();
+          }
+          guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
+          if (action === 'read') return { available: true, memory: saved };
+          const bytes = Buffer.from(JSON.stringify(input) + '\n');
+          if (!previousBytes?.equals(bytes)) persistBytes(scope, event, snapshot, bytes);
+          return { saved: true };
+        } catch { fail(); }
+        finally { try { if (snapshot?.pin) fs.closeSync(snapshot.pin.fd); } finally { if (ownsBusy) checklistBusy = false; } }
+      });
+    }
     // One non-secret app-wide flag, independent of project, daemon port and the temporary browser partition.
     for (const action of ['read', 'dismiss']) {
       ipcMain.handle('arcane:welcome-tour-' + action, async (event, ...args) => {

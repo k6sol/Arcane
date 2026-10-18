@@ -163,6 +163,10 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
       preloadContext.serializedArgs = JSON.stringify(args);
       return exposed.welcomeTour[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
     },
+    checklist(action, ...args) {
+      preloadContext.serializedArgs = JSON.stringify(args);
+      return exposed.setupChecklist[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
+    },
   };
 }
 
@@ -172,7 +176,7 @@ test('production wiring and preload expose only frozen version 1 read/save; inst
   assert.equal(Object.isFrozen(f.exposed), true); assert.equal(Object.isFrozen(f.exposed.workspacePreferences), true);
   assert.equal(f.exposed.workspacePreferences.version, 1);
   assert.deepEqual(Object.keys(f.exposed.workspacePreferences).sort(), ['read', 'save', 'version']);
-  assert.deepEqual([...f.handlers.keys()].sort(), ['arcane:welcome-tour-dismiss', 'arcane:welcome-tour-read', ...['read', 'save'].map(a => 'arcane:workspace-preferences-' + a)]);
+  assert.deepEqual([...f.handlers.keys()].sort(), ['arcane:setup-checklist-read', 'arcane:setup-checklist-save', 'arcane:welcome-tour-dismiss', 'arcane:welcome-tour-read', ...['read', 'save'].map(a => 'arcane:workspace-preferences-' + a)]);
   assert.match(mainSource, /partition: 'arcane-workspace'/);
   assert.match(mainSource, /workspacePreferences: \{ enabled: false,[^\n]+encryptionRoundTripTested: false \}/);
 });
@@ -230,6 +234,35 @@ test('welcome tour dismissal does not compete with a pending chat preference sav
   assert.deepEqual(json(await f.tour('dismiss',{how:'skipped'})),{saved:true});
   assert.deepEqual(json(await saving),{saved:true});
   assert.deepEqual(json(await f.tour('read')),{available:true,seen:true});
+});
+
+test('setup checklist Hide, completion and Show survive native restart, port and project changes',async()=>{
+  const f=fixture();assert.equal(Object.isFrozen(f.exposed.setupChecklist),true);
+  assert.deepEqual(json(await f.checklist('read')),{available:true,memory:null});
+  for(const memory of [{version:1,completed:false,dismissed:true},{version:1,completed:true,dismissed:false},{version:1,completed:false,dismissed:false}]){
+    const saving=f.call('save',snapshot());
+    assert.deepEqual(json(await f.checklist('save',memory)),{saved:true});await saving;
+    const reopened=fixture({disk:f.disk,safeStorage:f.safeStorage,origin:'http://127.0.0.1:59123',projectPath:'C:\\AnotherProject'});
+    assert.deepEqual(json(await reopened.checklist('read')),{available:true,memory});
+    assert.deepEqual(json(await reopened.tour('read')),{available:true,seen:false},'checklist does not dismiss the guided tour');
+    assert.equal(f.disk.descriptors.size,0);assert.equal(reopened.disk.descriptors.size,0);
+  }
+});
+
+test('setup checklist bridge rejects untrusted input and preserves malformed or redirected records',async()=>{
+  const f=fixture();
+  for(const value of [{version:2,completed:false,dismissed:true},{version:1,completed:false,dismissed:1},{version:1,completed:false,dismissed:true,path:'C:\\Other'}]){
+    await assert.rejects(f.checklist('save',value));
+    await assert.rejects(f.handlers.get('arcane:setup-checklist-save')(f.event,f.hostValue('('+JSON.stringify(value)+')')));
+  }
+  f.setEvent({...f.event,senderFrame:{url:origin+'/studio#fixture'}});await assert.rejects(f.checklist('read'));assert.equal(f.disk.writes.length,0);
+  const disabled=fixture({smoke:true});assert.deepEqual(json(await disabled.checklist('read')),{available:false,memory:null});
+  await assert.rejects(disabled.checklist('save',{version:1,completed:false,dismissed:true}));assert.equal(disabled.disk.reads,0);
+  for(const options of [{kind:'file',bytes:Buffer.from('{"version":2}\n')},{kind:'link'}]){
+    const other=fixture(),full=win32.join(other.userRoot,'setup-checklist.v1.json');other.disk.put(full,options);const before=other.disk.node(full);
+    await assert.rejects(other.checklist('read'));await assert.rejects(other.checklist('save',{version:1,completed:false,dismissed:true}));
+    assert.equal(other.disk.node(full),before);assert.equal(other.disk.writes.length,0);assert.equal(other.disk.descriptors.size,0);
+  }
 });
 
 test('welcome tour preserves malformed and redirected records',async()=>{

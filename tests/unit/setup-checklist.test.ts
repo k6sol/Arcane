@@ -89,9 +89,16 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   const shots = process.env.ARCANE_UI_SCREENSHOT; if (shots) await mkdir(shots, { recursive: true });
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, colorScheme: 'dark' });
   const page = await context.newPage(), errors: string[] = []; page.on('pageerror', (e: Error) => errors.push(e.message));
-  const boot = async () => {
+  let nativeMemory: {version:1;completed:boolean;dismissed:boolean}|null = null, releaseRead:(()=>void)|null = null, holdRead = false;
+  const savedNativeMemory = (): {version:1;completed:boolean;dismissed:boolean}|null => nativeMemory;
+  await page.exposeFunction('fixtureChecklistRead',async()=>{
+    if(holdRead)await new Promise<void>(done=>{releaseRead=done;});
+    return {available:true,memory:nativeMemory};
+  });
+  await page.exposeFunction('fixtureChecklistSave',async(memory:{version:1;completed:boolean;dismissed:boolean})=>{nativeMemory=structuredClone(memory);return {saved:true};});
+  const boot = async (useNative = false) => {
     await page.goto(origin + '/fixture');
-    await page.evaluate(async () => {
+    await page.evaluate(async (useNative:boolean) => {
       const path: string = '/setup-checklist.js', m = await import(path); const w = window as any;
       w.calls = []; w.events = []; w.signedIn = false; w.studio = false; w.project = null; w.plugin = 'missing'; w.listeners = [];
       for (const type of ['workspace:providersetup', 'workspace:settingsrequest']) document.addEventListener(type, (e: Event) => w.events.push([type, (e as CustomEvent).detail]));
@@ -99,14 +106,16 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
       const desktop = { studioPlugin: Object.freeze({ version: 1,
         status: async () => { w.calls.push('status'); return { version: 1, state: w.plugin, pluginVersion: '0.1.9', message: w.plugin === 'installed' ? 'The Arcane Studio plugin is installed and current.' : 'The Arcane Studio plugin is not installed yet.' }; },
         install: async () => { w.calls.push('install'); w.plugin = 'installed'; return { version: 1, state: 'installed', pluginVersion: '0.1.9', changed: true, message: 'Arcane Studio plugin installed. Restart Roblox Studio to load it.' }; } }),
-        workspaceProject: Object.freeze({ version: 1, open: async () => { w.calls.push('open'); return { requested: true }; } }) };
+        workspaceProject: Object.freeze({ version: 1, open: async () => { w.calls.push('open'); return { requested: true }; } }),
+        ...(useNative ? {setupChecklist:Object.freeze({version:1,read:()=>w.fixtureChecklistRead(),save:(memory:unknown)=>w.fixtureChecklistSave(memory)})} : {}) };
+      if(useNative)localStorage.removeItem('arcane.setup-checklist.v1');
       document.getElementById('provider-login-gate')!.hidden = true;
       w.controller = m.startSetupChecklist(document, {
         provider: { isSignedIn: () => w.signedIn, chatSurface: () => 'codex', selectedProvider: () => 'claude', subscribeSignInChange: sub, subscribeChatSurface: sub },
         workbench: { studioConnected: () => w.studio, subscribeStudioChange: sub, getCurrentProduct: () => w.project ? { projectId: 'a'.repeat(64), projectPath: w.project } : null, subscribeProjectChange: sub },
         desktop, storage: window.localStorage });
       w.notify = () => { for (const fn of w.listeners) fn(); };
-    });
+    },useNative);
   };
   await boot();
   await page.waitForFunction(() => document.querySelector('#setup-checklist [data-step=plugin]')?.getAttribute('data-state') === 'todo');
@@ -159,6 +168,28 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   assert.deepEqual(JSON.parse(await page.evaluate((k: string) => localStorage.getItem(k), SETUP_CHECKLIST_KEY) ?? 'null'), { version: 1, completed: true, dismissed: false });
   await page.evaluate(() => { const w = window as any; w.studio = false; }); await boot();
   assert.equal(await page.locator('#setup-checklist').isVisible(), false, 'A returning user who finished setup skips it.');
+
+  // The desktop bridge stores the choice outside the temporary renderer; each boot starts with empty localStorage.
+  await boot(true);await page.waitForFunction(()=>!document.getElementById('setup-checklist')!.hidden);
+  await page.locator('#setup-checklist-hide').click();
+  await page.waitForFunction(()=>document.getElementById('setup-checklist')!.hidden);
+  for(let attempts=0;attempts<100&&!savedNativeMemory()?.dismissed;attempts++)await new Promise(done=>setTimeout(done,10));
+  assert.equal(savedNativeMemory()?.dismissed,true);
+  holdRead=true;await boot(true);await page.waitForTimeout(500);
+  assert.equal(await page.locator('#setup-checklist').isVisible(),false,'never flash before a slow app-owned preference read');
+  holdRead=false;assert.ok(releaseRead);(releaseRead as ()=>void)();
+  await page.waitForTimeout(200);assert.equal(await page.locator('#setup-checklist').isVisible(),false,'native Hide survives a fresh renderer');
+  await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).showModal());
+  await page.locator('#setup-checklist-show').click();await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).close());
+  assert.equal(await page.locator('#setup-checklist').isVisible(),true);
+  await page.evaluate(async()=>{const w=window as any;w.signedIn=true;w.studio=true;w.project='C:\\Games\\Obby';w.plugin='installed';await w.controller.refreshPlugin();w.notify();});
+  await page.waitForFunction(()=>document.getElementById('setup-checklist')!.hidden);
+  for(let attempts=0;attempts<100&&!savedNativeMemory()?.completed;attempts++)await new Promise(done=>setTimeout(done,10));
+  assert.equal(savedNativeMemory()?.completed,true);await boot(true);await page.waitForTimeout(200);
+  assert.equal(await page.locator('#setup-checklist').isVisible(),false,'native completion survives a new renderer');
+  await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).showModal());
+  await page.locator('#setup-checklist-show').click();await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).close());
+  assert.equal(await page.locator('#setup-checklist').isVisible(),true,'completed setup remains available on demand');
 
   // Status checks never spend model calls: only the fixture page, stylesheet and module were requested.
   assert.deepEqual([...new Set(requests)].sort(), ['/fixture', '/setup-checklist.js', '/studio.css'].concat(requests.includes('/favicon.ico') ? ['/favicon.ico'] : []).sort());
