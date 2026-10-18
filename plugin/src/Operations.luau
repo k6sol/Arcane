@@ -1520,7 +1520,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 		V.fields(args, {"ref", "bounds"}, "inspect arguments")
 		local instance = self.registry:resolve(args.ref)
 		local node = self.registry:node(instance)
-		node.properties = P.snapshot(instance)
+		node.properties = if LegacyProperties.GUI_SPECS[instance.ClassName] then LegacyProperties.snapshotGui(instance) else P.snapshot(instance)
 		if args.bounds ~= nil then
 			if args.bounds ~= true then V.fail("INPUT", "bounds must be true when present.") end
 			node.bounds = self:bounds(instance)

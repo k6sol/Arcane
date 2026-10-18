@@ -18,6 +18,8 @@ Use `ui` properties in `scene_build`. For example, a Frame can contain a horizon
 
 Restoration retains exact engine readbacks of the managed GUI/effect properties, attributes and tag set. A later change to these values returns `CONFLICT` and leaves the created element or build in place. Structurally equal immutable values, such as an unchanged NumberSequence, remain restorable. This guard covers the declared managed property set; it does not claim to observe every property in the engine.
 
+`scene_inspect` returns the managed GUI properties using exact native readbacks: tagged UDim/UDim2, vectors, colours and sequences; plain enum names, booleans, strings and numbers; and Font values with their full native family path, weight and style. Existing values are reported as observed even when they exceed new-write intake bounds. These observations are read-only and do not enable GUI writes.
+
 This feature covers creation and batch construction. Existing GUI property editing through `scene_update` requires a separate canonical snapshot, baseline and restoration implementation; it is not enabled by the flex capability.
 
 Verification includes strict compilation, complete TypeScript/Luau property-table parity, real SQLite queue admission, batch/prototype/stamp compatibility and the actual plugin modules in the pinned standalone Luau VM. Engine values and Instances in those VM checks are explicit test doubles. Native Studio rendering, layout, editor concurrency and restoration remain acceptance gates; no Studio operation or provider inference was used for this verification.

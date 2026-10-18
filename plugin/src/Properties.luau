@@ -494,4 +494,43 @@ function Properties.applyEffect(instance: any, className: string, decoded: {[str
 	end
 end
 
+
+-- Observed GUI values are exact engine readbacks, not values decoded through new-write bounds.
+-- Full Font family paths preserve custom faces; JSON arrays retain the protocol array marker.
+function Properties.encodeGui(className: string, name: string, value: any): any
+	if value == nil then return V.NULL end
+	if name == "Name" then return value end
+	local spec = Properties.GUI_SPECS[className][name]
+	if not spec then V.fail("PROPERTY", "Unknown GUI observation property.") end
+	local kind = spec[1]
+	if kind == "enum" then return value.Name end
+	if kind == "font" then return {type = "Font", family = value.Family, weight = value.Weight.Name, style = value.Style.Name} end
+	if kind == "udim" then return {type = "UDim", value = V.array({value.Scale, value.Offset})} end
+	if kind == "udim2" then return {type = "UDim2", value = V.array({value.X.Scale, value.X.Offset, value.Y.Scale, value.Y.Offset})} end
+	if kind == "color" then return {type = "Color3", value = V.array({value.R, value.G, value.B})} end
+	if kind == "vector2" then return {type = "Vector2", value = V.array({value.X, value.Y})} end
+	if kind == "vector3" then return {type = "Vector3", value = V.array({value.X, value.Y, value.Z})} end
+	if kind == "sequence" or kind == "colorSequence" then
+		local points = {}
+		for _, point in ipairs(value.Keypoints) do
+			if kind == "sequence" then table.insert(points, V.array({point.Time, point.Value, point.Envelope}))
+			else table.insert(points, V.array({point.Time, point.Value.R, point.Value.G, point.Value.B})) end
+		end
+		return {type = if kind == "sequence" then "NumberSequence" else "ColorSequence", value = V.array(points)}
+	end
+	return value
+end
+
+function Properties.snapshotGui(instance: any, names: {string}?): any
+	local className, selected = instance.ClassName, names
+	if not selected then
+		selected = {"Name"}
+		for name in pairs(Properties.GUI_SPECS[className]) do table.insert(selected, name) end
+		table.sort(selected)
+	end
+	local result = {}
+	for _, name in ipairs(selected) do result[name] = Properties.encodeGui(className, name, instance[name]) end
+	return result
+end
+
 return table.freeze(Properties)

@@ -351,6 +351,35 @@ button.Text = "Manual edit"; refusesResponsiveRestore(); button.Text = "Play"
 layout._attributes.ManualReview = true; refusesResponsiveRestore(); layout._attributes.ManualReview = nil
 layout._tags = {"ManualReview"}; refusesResponsiveRestore(); layout._tags = nil
 check(run("scene.restore", {receiptCommandId = responsiveReceipt, mutation = responsive.mutation}).restored and responsiveRoot.Parent == nil, "unchanged responsive hierarchy restores")
+
+-- 8. Inspection returns native GUI types as exact JSON values, without creation-time rounding.
+local observed = run("scene.inspect", {ref = panelRef}).properties
+check(observed.Size.type == "UDim2" and observed.Position.type == "UDim2", "GUI dimensions retain their native types")
+check(observed.Size.value[1] == panel.Size.X.Scale and observed.Size.value[2] == panel.Size.X.Offset, "GUI dimensions use exact engine readback")
+check(observed.AnchorPoint.type == "Vector2" and observed.BackgroundColor3.type == "Color3", "GUI vectors and colours are tagged")
+check(observed.Name == panel.Name, "GUI properties retain the observed name")
+local faceLabel = ops.registry:resolve(create("TextLabel", {Text = "Observed", Size = u2(0.25, 5, 0.1, 6), Position = u2(0, 0, 0, 0),
+  FontFace = {type = "Font", family = "BuilderSans", weight = "SemiBold", style = "Italic"}}, panelRef).ref)
+faceLabel.Font = Enum.Font.Gotham
+faceLabel.TextSize = 150.25 -- Existing native values are observations, not new-write intake.
+local face = run("scene.inspect", {ref = ops.registry:ref(faceLabel)}).properties
+check(face.TextSize == 150.25 and face.Font == "Gotham", "observations preserve numbers and enum names exactly")
+check(face.FontFace.type == "Font" and face.FontFace.family == faceLabel.FontFace.Family and face.FontFace.weight == "SemiBold" and face.FontFace.style == "Italic", "font observation retains the full native family")
+local observedGradient = ops.registry:resolve(create("UIGradient", {Offset = {type = "Vector2", value = V.array({0.25, -0.5})},
+  Color = {type = "ColorSequence", value = V.array({V.array({0, 0.1, 0.2, 0.3}), V.array({1, 0.8, 0.7, 0.6})})},
+  Transparency = {type = "NumberSequence", value = V.array({V.array({0, 0.125, 0}), V.array({1, 0.875, 0.05})})}}, panelRef).ref)
+local sequences = run("scene.inspect", {ref = ops.registry:ref(observedGradient)}).properties
+check(sequences.Color.type == "ColorSequence" and sequences.Transparency.type == "NumberSequence", "gradient sequences are tagged")
+check(sequences.Color.value[1][2] == observedGradient.Color.Keypoints[1].Value.R and sequences.Transparency.value[2][3] == observedGradient.Transparency.Keypoints[2].Envelope, "sequence channels and envelopes remain exact")
+local roundTrip = V.decode(V.encode(sequences, http), http)
+check(V.equal(roundTrip, sequences), "GUI observations survive actual protocol JSON encoding")
+local radius = run("scene.inspect", {ref = ops.registry:ref(corner)}).properties.CornerRadius
+check(radius.type == "UDim" and radius.value[1] == corner.CornerRadius.Scale and radius.value[2] == 12, "UDim observations retain scale and whole pixels")
+local flexObserved = run("scene.inspect", {ref = ops.registry:ref(flexList)}).properties
+check(flexObserved.Wraps == true and flexObserved.HorizontalFlex == "SpaceBetween", "boolean and enum observations remain plain JSON")
+local billboard = run("scene.inspect", {ref = world.refs.PlateA}).properties
+check(billboard.StudsOffset.type == "Vector3" and billboard.Size.type == "UDim2", "world GUI values retain their native types")
+
 print("Arcane GUI checks passed: " .. checks)
 `;
 
