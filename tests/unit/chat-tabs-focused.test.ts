@@ -595,3 +595,25 @@ test('F2: a throwing surface probe falls back to the Codex New chat',()=>{
   const tabs=new ChatTabs(doc.asDocument(),value=>value,{...callbacks,newChat:async()=>{created++;return true;}},options);
   tabs.sync(state());tabs.mount();tabs.render(false);newChatShortcut(doc);assert.equal(created,1);tabs.stop();
 });
+
+test('new chats inherit model and effort across tab closure and persisted workspace reloads',async()=>{
+  const storage=memoryStorage(),doc=new DocumentFixture();
+  const tabs=new ChatTabs(doc.asDocument(),value=>value,callbacks,{storage});
+  tabs.sync(state());
+  const choice={model:'gpt-6.1-sol',effort:'low'};
+  tabs.updateDraft('Unsent text stays in its own chat',choice);
+  const first=tabs.active()!;
+  assert.deepEqual(tabs.createDraft()!.selection,choice);
+  assert.equal(tabs.active()!.draft,'');
+  assert.equal(tabs.views().find(row=>row.key===first.key)!.draft,'Unsent text stays in its own chat');
+  tabs.remove(first.key);
+  const restored=new ChatTabs(new DocumentFixture().asDocument(),value=>value,callbacks,{storage});
+  restored.sync(state());
+  assert.deepEqual(restored.createDraft()!.selection,choice);
+  const other={model:'fixture-alt',effort:'high'};
+  restored.updateDraft('',other);
+  assert.deepEqual(restored.createDraft()!.selection,other);
+  restored.sync(state('C:/fixture/other-project'));
+  assert.equal(restored.active()!.selection,null,'project preferences stay separate');
+  tabs.stop();restored.stop();
+});

@@ -225,7 +225,9 @@ export class ChatTabs {
   createDraft(): ChatTabView | null {
     if (!this.projectPath || this.rows.length >= CHAT_TAB_LIMITS.open) return null;
     const localId=crypto.randomUUID();
-    const tab: Tab = {key:'draft:'+localId,localId,title:'Draft',tool:'all',previewOpen:false,kind:'draft',provider:'codex',projectPath:this.projectPath,threadId:null,sessionId:null,selection:null,draft:'',workflowDraft:false};
+    // Reuse the current chat's choice; native catalogue validation still owns admission.
+    const selection=this.active()?.selection??this.rows.findLast(row=>row.selection!==null)?.selection??null;
+    const tab: Tab = {key:'draft:'+localId,localId,title:'Draft',tool:'all',previewOpen:false,kind:'draft',provider:'codex',projectPath:this.projectPath,threadId:null,sessionId:null,selection:structuredClone(selection),draft:'',workflowDraft:false};
     this.rows.push(tab); this.activeKey = tab.key;this.presentationRevision++;this.persistenceDirty=true; this.persist(); return structuredClone(tab);
   }
   ensureSaved(threadId: string): ChatTabView | null {
