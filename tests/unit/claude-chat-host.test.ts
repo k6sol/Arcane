@@ -54,6 +54,7 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-claude-chat-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, 'project'), state = options.directory ?? join(root, 'state');
+  const command = join(root, 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   await mkdir(project); await mkdir(state, { recursive: true });
   const events: any[] = [], spawns: { command: string; args: string[]; options: any; child: FakeChild }[] = [], dialogs: any[] = [], prepared: any[] = [], released: string[] = [];
   const scripts: Script[] = [];
@@ -73,9 +74,9 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
     return child;
   };
   const host = chat.createClaudeChat({
-    projectPath: project, stateDirectory: state, getWindow: () => window, spawn, platform: 'win32',
+    projectPath: project, stateDirectory: state, getWindow: () => window, spawn, platform: process.platform,
     env: { SystemRoot: 'C:\\Windows', PATH: 'C:\\Windows\\System32', USERPROFILE: 'C:\\Users\\u', ANTHROPIC_API_KEY: 'sk-ant-never-forward', ARCANE_LOCAL_TOKEN: 'inherited-never' },
-    homedir: () => 'C:\\Users\\u', locate: async () => options.locate === undefined ? 'C:\\Users\\u\\.local\\bin\\claude.exe' : options.locate,
+    homedir: () => join(root, 'home'), locate: async () => options.locate === undefined ? command : options.locate,
     dialog: { showMessageBox: async (w: unknown, value: any) => { dialogs.push(value); assert.equal(w, window); return { response: options.response ?? 1 }; } },
     handoff: {
       prepare: async (selection: unknown) => {
@@ -91,7 +92,7 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
   });
   const turns = () => spawns.filter(s => s.args[0] === '-p');
   const done = (turnId: string) => waitFor(() => events.find(e => e.turnId === turnId && e.type === 'done'));
-  return { root, project, state, host, events, spawns, turns, scripts, dialogs, prepared, released, done, window };
+  return { root, project, state, command, host, events, spawns, turns, scripts, dialogs, prepared, released, done, window };
 }
 async function waitFor<T>(read: () => T | undefined, ms = 3000): Promise<T> {
   const deadline = Date.now() + ms;
@@ -165,7 +166,7 @@ test('turn lifecycle: exact argv, stdin prompt, scoped env, streamed events, too
   const done = await f.done(reply.turnId);
   assert.deepEqual(done, { turnId: reply.turnId, conversationId: reply.conversationId, type: 'done', ok: true, error: null, usage: { inputTokens: 3584, outputTokens: 4, costUsd: 0.0119654 }, usageLimit: null });
   const [run] = f.turns();
-  assert.equal(run!.command, 'C:\\Users\\u\\.local\\bin\\claude.exe'); assert.equal(run!.options.cwd, f.project);
+  assert.equal(run!.command, f.command); assert.equal(run!.options.cwd, f.project);
   assert.deepEqual(run!.args.slice(0, -2), ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--mcp-config', join(f.root, 'arcane.mcp.json'), '--strict-mcp-config', '--setting-sources', 'user', '--model', 'sonnet', '--effort', 'high', '--permission-mode', 'default',
     '--tools', '', '--allowedTools', 'mcp__arcane']);
@@ -244,7 +245,9 @@ test('stop kills only the spawned child tree and reports a stopped turn; one act
   assert.deepEqual([done.ok, done.error], [false, 'Stopped.']);
   const [run] = f.turns(); assert.equal(run!.child.killed, 1);
   const killer = f.spawns.find(s => s.command.toLowerCase().endsWith('taskkill.exe'));
-  assert.deepEqual(killer?.args, ['/T', '/F', '/PID', '4242']); assert.equal(killer?.command, 'C:\\Windows\\System32\\taskkill.exe');
+  if (process.platform === 'win32') {
+    assert.deepEqual(killer?.args, ['/T', '/F', '/PID', '4242']); assert.equal(killer?.command, 'C:\\Windows\\System32\\taskkill.exe');
+  } else assert.equal(killer, undefined, 'Non-Windows hosts stop only their owned child.');
   assert.equal(await f.host.stop(reply.turnId), false); assert.equal(await f.host.stop(randomUUID()), false);
   assert.deepEqual((await f.host.history(reply.conversationId)).messages.map((m: any) => m.role), ['user', 'error']);
 });

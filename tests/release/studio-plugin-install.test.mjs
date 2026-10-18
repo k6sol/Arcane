@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +18,7 @@ const pluginXml = body => '<?xml version="1.0" encoding="utf-8"?>\n<roblox versi
   '<ProtectedString name="Source">' + body + '</ProtectedString></Properties></Item></roblox>\n';
 
 async function fixture(t, { body = '-- fixture plugin v2', manifest: change } = {}) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'arcane-plugin-install-'));
+  const root = realpathSync.native(await fs.mkdtemp(join(realpathSync.native(tmpdir()), 'arcane-plugin-install-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const product = join(root, 'product'), plugins = join(root, 'LocalAppData', 'Roblox', 'Plugins'), backups = join(root, 'user', 'plugin-backups');
   const artifact = Buffer.from(pluginXml(body));
@@ -102,7 +102,7 @@ test('never writes credentials: a bundle carrying a key or session link is refus
 });
 
 test('the real bundled plugin installs into a temp folder byte-for-byte with no credential', { skip: !existsSync(join(repo, 'plugin/build/manifest.json')) }, async t => {
-  const root = await fs.mkdtemp(join(tmpdir(), 'arcane-plugin-real-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const root = realpathSync.native(await fs.mkdtemp(join(realpathSync.native(tmpdir()), 'arcane-plugin-real-'))); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const plugins = join(root, 'Plugins'), host = createStudioPluginInstaller({ productRoot: repo, pluginsDirectory: plugins, backupDirectory: join(root, 'backups'), platform: 'win32', confirm: async () => true });
   const status = await host.status();
   if (status.state === 'unavailable') { t.skip('Local plugin build is being rebuilt by another task.'); return; }
