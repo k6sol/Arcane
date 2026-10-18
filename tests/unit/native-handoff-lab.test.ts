@@ -53,7 +53,7 @@ async function fixture(t: TestContext) {
   const proposalWorker: ChatTaskProposalFactory = async () => ({
     propose: async () => ({ threadId: 'worker.thread', sessionId: null, turnId: 'worker.turn:' + randomUUID(), text: 'Suggestion: keep the change bounded.' }), close: async () => {} });
   const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
-    codexProposalWorker: proposalWorker,
+    codexProposalWorker: proposalWorker, codexAutomaticTaskPlanning: true,
     codexConnect: async hooks => {
       assert.ok(hooks); tokens.push(hooks.finalCredential());
       const client = new CodexSession({ command: process.execPath, args: ['-e', PEER, JSON.stringify({ thread: THREAD, session: SESSION, audit, gate, tools: ARCANE_NATIVE_TOOL_NAMES })], cwd: project, env: nativeEnvironment() },
