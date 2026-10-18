@@ -279,4 +279,54 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
   return Object.freeze({ install, status });
 }
 
+/** Verify the complete inventory already published by the installation engine. This checks pinned bytes rather than
+ * this running version's module allowlist, so a newer release can add host modules. It never imports target code. */
+export async function verifyInstalledRelease({ installRoot, expectedReleaseId }) {
+  const root = absolute(installRoot); await direct(root);
+  const unlocked = async () => { try { await fs.lstat(join(root, 'installation.lock')); fail('LOCKED'); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+  await unlocked();
+  const initial = await bounded(join(root, RECORD), 65536), record = installation(readJson(initial.bytes));
+  if (record.activeReleaseId !== expectedReleaseId) fail('CHANGED');
+  const entry = record.releases.find(row => row.id === expectedReleaseId); if (!entry) fail('RELEASE_MISSING');
+  const directory = join(root, 'releases', entry.id); await direct(directory);
+  const pinned = await bounded(join(directory, MANIFEST), LIMITS.manifestBytes);
+  const manifest = inventory(pinned.bytes, { manifestSha256: entry.manifestSha256, files: entry.files, bytes: entry.bytes });
+  const expected = new Map(manifest.files.map(file => [file.path, file]));
+  expected.set(MANIFEST, { path: MANIFEST, bytes: pinned.bytes.length, sha256: entry.manifestSha256 });
+  const directories = new Set();
+  for (const name of expected.keys()) { const parts = name.split('/'); for (let i = 1; i < parts.length; i++) directories.add(parts.slice(0, i).join('/')); }
+  const buffer = Buffer.alloc(65536); let files = 0, bytes = 0;
+  async function verifyFile(path, descriptor) {
+    const before = await direct(path, 'file'); if (before.size !== BigInt(descriptor.bytes)) fail('SOURCE_CHANGED');
+    const handle = await fs.open(path, 'r'), hash = createHash('sha256'); let offset = 0;
+    try {
+      if (!sameFile(before, await handle.stat({ bigint: true }))) fail('CHANGED');
+      while (offset <= descriptor.bytes) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, descriptor.bytes - offset + 1), offset);
+        if (!bytesRead) break; offset += bytesRead; if (offset > descriptor.bytes) fail('SOURCE_CHANGED'); hash.update(buffer.subarray(0, bytesRead));
+      }
+      if (offset !== descriptor.bytes || hash.digest('hex') !== descriptor.sha256 || !sameFile(before, await handle.stat({ bigint: true })) || !sameFile(before, await direct(path, 'file'))) fail('SOURCE_CHANGED');
+    } finally { await handle.close(); }
+    files++; if (descriptor.path !== MANIFEST) bytes += descriptor.bytes;
+  }
+  async function scan(path, prefix = '') {
+    const before = await direct(path), entries = await fs.opendir(path);
+    for await (const child of entries) {
+      const name = prefix + child.name, full = join(path, child.name);
+      if (!within(directory, full)) fail('PATH');
+      const descriptor = expected.get(name);
+      if (descriptor) await verifyFile(full, descriptor);
+      else if (directories.has(name)) await scan(full, name + '/');
+      else fail('MANIFEST');
+    }
+    if (!sameFile(before, await direct(path))) fail('CHANGED');
+  }
+  await scan(directory);
+  if (files !== expected.size || bytes !== entry.bytes || !sameFile(pinned.stat, await direct(join(directory, MANIFEST), 'file'))) fail('SOURCE_CHANGED');
+  await unlocked();
+  const current = await bounded(join(root, RECORD), 65536);
+  if (!sameFile(initial.stat, current.stat) || !initial.bytes.equals(current.bytes)) fail('CHANGED');
+  return Object.freeze({ files: manifest.files.length, bytes, manifestSha256: entry.manifestSha256, integrityOnly: true });
+}
+
 export const WINDOWS_INSTALLATION_LIMITS = LIMITS;

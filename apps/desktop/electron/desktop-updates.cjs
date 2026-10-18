@@ -1,7 +1,7 @@
 'use strict';
 const { open, lstat } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
-const { join } = require('node:path');
+const { join, basename } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const policy = require('./policy.cjs');
 const UNAVAILABLE = 'Updates are unavailable.';
@@ -43,8 +43,8 @@ function createDesktopUpdates(options) {
   let checking = null, verified = null, restarting = false;
   const unavailable = () => ({ version: 1, state: 'unavailable', buildId: null, message: UNAVAILABLE });
   const verify = options.verifyBundle ?? (async directory => {
-    const module = await import(pathToFileURL(join(options.productRoot, 'scripts/package-windows.mjs')).href);
-    return module.verifyWindowsBundle(directory);
+    const module = await import(pathToFileURL(join(options.productRoot, 'scripts/windows-installation.mjs')).href);
+    return module.verifyInstalledRelease({ installRoot: options.installRoot, expectedReleaseId: basename(directory) });
   });
   async function target() {
     const release = await readInstalledRelease(options.installRoot, options.productRoot);
