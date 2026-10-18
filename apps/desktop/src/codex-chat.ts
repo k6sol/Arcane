@@ -2024,10 +2024,15 @@ export class CodexChat {
       if(!this.surfaceYielded&&this.attachments&&(this.attachments.prepareReferences().length||this.attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
     };
     idle();this.flushDraft();this.tabs?.updatePresentation({});
-    if(!this.tabs?.active())return;
+    // A settings acknowledgement must not trap an idle workspace with no unsent text.
+    const hasDraft=()=>this.value('codex-composer').length>0||this.tabs?.views().some(tab=>tab.draft.length>0);
+    if(!this.tabs?.active()||!hasDraft())return;
     const project=this.state?.projectPath,key=this.tabs.active()?.key,deadline=Date.now()+10000;
+    let retryAt=Date.now()+500;
     while(!this.tabs.preferencesSaved()){
+      if(!hasDraft())return;
       if(Date.now()>=deadline)throw new Error('Your chat draft could not be saved. Keep this window open and try again.');
+      if(Date.now()>=retryAt){this.tabs.flushPreferences();retryAt=Date.now()+500;}
       await new Promise<void>(resolve=>setTimeout(resolve,25));
       if(project!==this.state?.projectPath||key!==this.tabs.active()?.key)throw new Error('The workspace changed. Review your draft before restarting.');
       idle();this.flushDraft();

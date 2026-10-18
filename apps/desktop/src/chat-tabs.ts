@@ -35,8 +35,8 @@ export interface ChatTabsCallbacks {
   newChat(): Promise<boolean>; openSaved(threadId: string): Promise<boolean>;
 }
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
-const uuid = (value: unknown): value is string => typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value);
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+const localIdentifier = (value: unknown): value is string => id(value)&&value.length<=128;
 function plain(v:unknown):v is Record<string,unknown> {
   try{return !!v&&typeof v==='object'&&!Array.isArray(v)&&[Object.prototype,null].includes(Object.getPrototypeOf(v))&&Reflect.ownKeys(v).every(k=>{
     const descriptor=Object.getOwnPropertyDescriptor(v,k);return typeof k==='string'&&!!descriptor?.enumerable&&Object.hasOwn(descriptor,'value');
@@ -117,12 +117,12 @@ export class ChatTabs {
       const value=await this.options.preferences.read();
       if(generation!==this.nativeGeneration)return;
       if(value!==null) {
-        if(!exact(value,['version','projectPath','provider','activeTabId','tabs'])||value.version!==1||!['codex','claude'].includes(String(value.provider))||value.projectPath!==projectPath||!(value.activeTabId===null||uuid(value.activeTabId))||!Array.isArray(value.tabs)||value.tabs.length>CHAT_TAB_LIMITS.open||bytes(JSON.stringify(value))>CHAT_TAB_LIMITS.preferencesBytes||this.clean(JSON.stringify(value))!==JSON.stringify(value))throw new Error('Invalid native chat preferences.');
+        if(!exact(value,['version','projectPath','provider','activeTabId','tabs'])||value.version!==1||!['codex','claude'].includes(String(value.provider))||value.projectPath!==projectPath||!(value.activeTabId===null||localIdentifier(value.activeTabId))||!Array.isArray(value.tabs)||value.tabs.length>CHAT_TAB_LIMITS.open||bytes(JSON.stringify(value))>CHAT_TAB_LIMITS.preferencesBytes||this.clean(JSON.stringify(value))!==JSON.stringify(value))throw new Error('Invalid native chat preferences.');
         this.preferredProvider=value.provider as 'codex'|'claude';
         const ids=new Set<string>(), rows:Tab[]=[];
         for(const row of value.tabs) {
           const flagged=plain(row)&&Object.hasOwn(row,'workflowDraft');
-          if(!exact(row,[...NATIVE_ROW,...(flagged?['workflowDraft']:[])])||flagged&&typeof row.workflowDraft!=='boolean'||!uuid(row.localId)||ids.has(row.localId)||row.provider!=='codex'||typeof row.title!=='string'||row.title.length>160||!tool(row.tool)||typeof row.previewOpen!=='boolean'||typeof row.draft!=='string'||bytes(row.draft)>CHAT_TAB_LIMITS.draftBytes||!(row.threadId===null||id(row.threadId))||!(row.sessionId===null||id(row.sessionId))||row.threadId===null&&row.sessionId!==null||!(row.modelId===null&&row.effort===null||pair({model:row.modelId,effort:row.effort})))throw new Error('Invalid native chat preference row.');
+          if(!exact(row,[...NATIVE_ROW,...(flagged?['workflowDraft']:[])])||flagged&&typeof row.workflowDraft!=='boolean'||!localIdentifier(row.localId)||ids.has(row.localId)||row.provider!=='codex'||typeof row.title!=='string'||row.title.length>512||!tool(row.tool)||typeof row.previewOpen!=='boolean'||typeof row.draft!=='string'||bytes(row.draft)>CHAT_TAB_LIMITS.draftBytes||!(row.threadId===null||id(row.threadId))||!(row.sessionId===null||id(row.sessionId))||row.threadId===null&&row.sessionId!==null||!(row.modelId===null&&row.effort===null||pair({model:row.modelId,effort:row.effort})))throw new Error('Invalid native chat preference row.');
           ids.add(row.localId);
           const selection=row.modelId===null?null:{model:row.modelId as string,effort:row.effort as string};
           const binding={projectPath,threadId:row.threadId as string,sessionId:row.sessionId as string|null};
@@ -281,6 +281,10 @@ export class ChatTabs {
     if (key===this.activeKey || !this.rows.some(row=>row.key===key)) return false;
     this.rows = this.rows.filter(row=>row.key!==key);this.presentationRevision++;this.persistenceDirty=true; this.persist(); return true;
   }
+  flushPreferences():void {
+    if(this.nativeReady&&!this.nativeError&&this.nativeProject===this.projectPath)this.persistenceDirty=true;
+    this.persist();
+  }
   private persist() {
     if(this.draftTimer!==null){clearTimeout(this.draftTimer);this.draftTimer=null;}
     if(!this.persistenceDirty){if(this.nativeSaveFailed&&this.nativeQueued)void this.saveNative();return;}
@@ -330,7 +334,7 @@ export class ChatTabs {
       if (!exact(value,['version','projectPath','provider','activeKey','tabs']) || value.version!==1 || !['codex','claude'].includes(String(value.provider)) || value.projectPath!==projectPath || !(value.activeKey===null||typeof value.activeKey==='string') || !Array.isArray(value.tabs) || value.tabs.length>CHAT_TAB_LIMITS.open) return;
       const seen = new Set<string>(),localIds=new Set<string>(), rows:Tab[]=[];
       for (const row of value.tabs) {
-        if (!exact(row,['key','localId','title','tool','previewOpen','kind','provider','projectPath','threadId','sessionId','selection','draft','workflowDraft']) || !uuid(row.localId)||localIds.has(row.localId)||typeof row.title!=='string'||row.title.length>160||!tool(row.tool)||typeof row.previewOpen!=='boolean'||row.projectPath!==projectPath || row.provider!=='codex' || typeof row.key!=='string' || seen.has(row.key) || typeof row.draft!=='string' || bytes(row.draft)>CHAT_TAB_LIMITS.draftBytes || typeof row.workflowDraft!=='boolean' || !(row.selection===null||pair(row.selection))) return;
+        if (!exact(row,['key','localId','title','tool','previewOpen','kind','provider','projectPath','threadId','sessionId','selection','draft','workflowDraft']) || !localIdentifier(row.localId)||localIds.has(row.localId)||typeof row.title!=='string'||row.title.length>512||!tool(row.tool)||typeof row.previewOpen!=='boolean'||row.projectPath!==projectPath || row.provider!=='codex' || typeof row.key!=='string' || seen.has(row.key) || typeof row.draft!=='string' || bytes(row.draft)>CHAT_TAB_LIMITS.draftBytes || typeof row.workflowDraft!=='boolean' || !(row.selection===null||pair(row.selection))) return;
         if (row.kind==='draft' ? row.key!=='draft:'+row.localId||row.threadId!==null||row.sessionId!==null : row.kind!=='native'||!id(row.threadId)||!(row.sessionId===null||id(row.sessionId))||row.key!==nativeChatKey(row as unknown as CodexSavedThread)) return;
         seen.add(row.key);localIds.add(row.localId); rows.push(row as unknown as Tab);
       }

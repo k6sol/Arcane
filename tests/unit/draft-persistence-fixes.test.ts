@@ -192,3 +192,26 @@ test('desktop update keeps a failed native draft save in the current window',asy
   await settle();clock+=10001;await rejected;
   assert.equal(input.value,'Keep this draft');assert.equal(chat.currentStateView().preferencesSaved,false);
 });
+
+test('an empty workspace can update when tab preference storage is unavailable',async t=>{
+  const doc=new DocumentFixture(),chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>Response.json({state:state(true)})));t.after(()=>chat.stop());
+  await chat.start();await chat.enableChatTabs({preferences:{read:async()=>{throw Error('Unavailable');},save:async()=>{throw Error('Unavailable');}}});
+  await chat.prepareForRestart();assert.equal(doc.getElementById('codex-composer').value,'');
+  assert.equal(chat.currentStateView().preferencesSaved,false,'allowing an empty restart does not pretend settings were saved');
+});
+
+test('restart retries a transient native save without needing another typed edit',async t=>{
+  const doc=new DocumentFixture();let failures=0,clock=1000;const writes:ChatTabPreferences[]=[];
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>Response.json({state:state(true)})));t.after(()=>chat.stop());
+  await chat.start();await chat.enableChatTabs({preferences:{read:async()=>plainRow('Saved').preferences,save:async value=>{if(failures>0){failures--;throw Error('Busy');}writes.push(structuredClone(value));}}});await settle();
+  failures=2;const input=doc.getElementById('codex-composer');input.value='Keep and retry this draft';input.dispatchEvent(new Event('input'));
+  t.mock.method(Date,'now',()=>clock);let done=false;const pending=chat.prepareForRestart().then(()=>{done=true;});
+  for(let count=0;count<8&&!done;count++){clock+=500;await new Promise<void>(resolve=>setTimeout(resolve,30));await settle();}
+  await pending;assert.equal(writes.at(-1)?.tabs[0]?.draft,'Keep and retry this draft');assert.equal(chat.currentStateView().preferencesSaved,true);
+});
+
+test('host-valid legacy tab identifiers preserve drafts and selection across updates',async t=>{
+  const record:ChatTabPreferences=plainRow('An older saved draft').preferences;record.tabs[0]!.localId='draft:legacy';record.activeTabId='draft:legacy';record.tabs[0]!.modelId='gpt-6.1-sol';record.tabs[0]!.effort='low';
+  const tabs=await restoredTabs(t,record);
+  assert.equal(tabs.persistenceStatus(),'native');assert.equal(tabs.active()!.draft,'An older saved draft');assert.deepEqual(tabs.active()!.selection,{model:'gpt-6.1-sol',effort:'low'});
+});
