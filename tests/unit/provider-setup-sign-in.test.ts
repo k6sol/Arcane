@@ -26,7 +26,7 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
-    'provider-setup-login', 'provider-setup-install', 'provider-setup-launch', 'workspace-stage', 'codex-connect'].map(id => [id, new Control()]));
+    'provider-setup-login', 'provider-setup-install', 'provider-setup-launch', 'workspace-stage', 'codex-connect', 'codex-disconnect'].map(id => [id, new Control()]));
   const doc = new EventTarget() as EventTarget & { getElementById(id: string): Control | null; defaultView: unknown };
   doc.getElementById = id => elements.get(id) ?? null;
   const stored = new Map<string, string>();
@@ -313,4 +313,68 @@ test('no switch happens when neither provider reports a saved sign-in', async t 
   for (let i = 0; i < 10; i++) await settled();
   assert.deepEqual(f.calls, ['status:codex', 'status:claude']);
   assert.equal(f.controller.chatSurface(), 'codex');
+});
+
+test('a temporary connection outage preserves the chat surface without presenting stale state as signed in',async t=>{
+  const f=fixture({state:{auth:'subscription'}});t.after(()=>f.controller.cleanup());await settled();
+  f.connection(connected);assert.equal(f.control('provider-login-gate').hidden,true);
+  f.connection({...connected,fresh:false});
+  assert.equal(f.controller.isSignedIn(),false,'stale state grants no authority');
+  assert.equal(f.control('provider-login-gate').hidden,true,'an interrupted read does not log the person out');
+  f.connection({...connected,auth:'signed-out'});
+  assert.equal(f.control('provider-login-gate').hidden,false,'a confirmed sign-out still closes the gate');
+});
+
+test('unknown native status offers a check instead of another login',async t=>{
+  const f=fixture({state:{auth:'unknown'}});t.after(()=>f.controller.cleanup());await settled();
+  assert.equal(f.control('provider-login-start').textContent,'Check sign-in');
+  assert.ok(f.calls.every(call=>call.startsWith('status:')));
+});
+
+test('saved sign-in retries metadata connection after an outage and stops once connected',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:100000});
+  let attempts=0;
+  const f=fixture({state:{auth:'subscription'},connectSavedLogin:async()=>{attempts++;if(attempts===1)throw Error('Temporary outage');f.connection(connected);}});
+  t.after(()=>f.controller.cleanup());await settled();assert.equal(attempts,1);
+  t.mock.timers.tick(5000);await settled();await settled();
+  assert.equal(attempts,2);assert.equal(f.control('provider-login-gate').hidden,true);
+  t.mock.timers.tick(120000);await settled();assert.equal(attempts,2);
+  f.controller.stop();t.mock.timers.tick(120000);await settled();assert.equal(attempts,2);
+  assert.ok(f.calls.every(call=>call==='status:codex'),'recovery never starts login or a model turn');
+});
+
+test('a transient Claude status failure preserves an already open chat but not handoff freshness',async t=>{
+  const f=fixture({preferred:'claude',state:{auth:'subscription'}});t.after(()=>f.controller.cleanup());await settled();
+  assert.equal(f.controller.chatSurface(),'claude');
+  f.reply(async()=>{throw Error('CLI temporarily unavailable');});f.control('provider-setup-refresh').emit('click');await settled();
+  assert.equal(f.controller.chatSurface(),'claude');assert.equal(f.controller.isSignedIn(),false);assert.equal(f.controller.handoffChoices(),null);
+  f.reply(async()=>({version:1,provider:'claude',installed:true,auth:'signed-out',busy:false,cliVersion:'1',message:null}));
+  f.control('provider-setup-refresh').emit('click');await settled();assert.equal(f.controller.chatSurface(),'codex');
+});
+
+test('unknown Claude status cannot open a chat without a prior subscription acknowledgement',async t=>{
+  const f=fixture({preferred:'claude',state:{auth:'unknown'}});t.after(()=>f.controller.cleanup());await settled();
+  assert.equal(f.controller.chatSurface(),'codex');assert.equal(f.controller.isSignedIn(),false);
+  assert.equal(f.control('provider-login-start').textContent,'Check sign-in');
+});
+
+test('confirmed sign-out cancels saved-login recovery and never starts browser login',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:100000});let attempts=0;
+  const f=fixture({state:{auth:'subscription'},connectSavedLogin:async()=>{attempts++;throw Error('Offline');}});
+  t.after(()=>f.controller.cleanup());await settled();assert.equal(attempts,1);
+  f.state({auth:'signed-out'});f.control('provider-setup-refresh').emit('click');await settled();
+  assert.equal(f.control('provider-login-start').textContent,'Sign in with ChatGPT');
+  t.mock.timers.tick(120000);await settled();assert.equal(attempts,1);
+  assert.equal(f.control('provider-login-start').textContent,'Check sign-in','expired evidence is checked again before another login');
+  assert.ok(f.calls.every(call=>call==='status:codex'));
+});
+
+test('explicit disconnect is retained across background status checks',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:100000});let attempts=0;
+  const f=fixture({state:{auth:'subscription'},connectSavedLogin:async()=>{attempts++;}});
+  t.after(()=>f.controller.cleanup());await settled();assert.equal(attempts,1);
+  f.connection(connected);f.control('codex-disconnect').emit('click');f.connection(null);
+  f.control('provider-setup-refresh').emit('click');await settled();
+  t.mock.timers.tick(120000);await settled();assert.equal(attempts,1);
+  assert.ok(f.calls.every(call=>call==='status:codex'));
 });

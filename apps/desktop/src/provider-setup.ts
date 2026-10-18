@@ -161,7 +161,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   let claudeSignInObserved: number | null = null;
   let pendingStatus = false, cancelStatus: (() => void) | null = null;
   let activeAction: 'status' | 'login' | 'install' | 'launch' | null = null;
-  let savedConnectionPending = false;
+  let savedConnectionPending = false, savedLoginObserved = false, reconnectAllowed = true;
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null, recoveryAttempt = 0;
+  const clearRecovery = () => { if(recoveryTimer!==null)clearTimeout(recoveryTimer);recoveryTimer=null; };
   // Sign in once: until the human explicitly picks a provider, a startup status that finds the selected provider
   // signed out may switch to the other provider when that one already reports a saved subscription sign-in.
   let autoSelect = options.autoSelectSignedIn === true;
@@ -232,7 +234,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     const state = status(), connection = options.chat.providerConnectionStatus();
     if (provider === 'codex' && (state?.auth === 'subscription' || connection?.fresh && connection.auth === 'subscription')) return 'connect';
     if (provider === 'claude' && state?.auth === 'subscription') return 'launch';
-    return awaitingStatus.has(provider) ? 'status' : 'login';
+    return awaitingStatus.has(provider) || !state || state.auth !== 'signed-out' ? 'status' : 'login';
   };
   const render = () => {
     const state = status(), connection = options.chat.providerConnectionStatus(), name = provider === 'codex' ? 'ChatGPT' : 'Claude Code';
@@ -240,7 +242,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     select.value = provider;
     panel.setAttribute('aria-busy', String(busy || connectingSavedLogin)); gate.setAttribute('aria-busy', String(busy || connectingSavedLogin));
     for (const [id, value] of [['provider-login-codex', 'codex'], ['provider-login-claude', 'claude']] as const) button(id)?.setAttribute('aria-pressed', String(provider === value));
-    gate.hidden = !!connected() || claudeChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
+    // Keep an authenticated workspace visible during a failed read. Native actions still require fresh state.
+    const retainedConnection = provider==='codex'&&connection?.connected&&connection.ready&&connection.auth==='subscription';
+    gate.hidden = !!retainedConnection || claudeChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
     const checking = busy && activeAction === 'status' || pendingStatus;
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
       state?.auth === 'signed-out' || provider === 'codex' && connection?.fresh && connection.auth === 'signed-out' ? 'Sign in with ' + name + '.' :
@@ -281,13 +285,14 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     }
     notifySignInChange();
     notifyChoices();
+    scheduleRecovery();
   };
   const requestSettings = (target: string) => { const Event = doc.defaultView?.CustomEvent; if (Event) doc.dispatchEvent(new Event('workspace:settingsrequest', { detail: { target } })); };
   const choose = (next: SetupProvider, publish = true) => {
     if (next !== provider) clearLoginWatch();
     if (stopped || disposed) return;
     const changed = next !== provider;
-    if (changed) { provider = next; epoch++; actionError = null; states.delete(next); claudeChatEvidence = false; if (next === 'claude') claudeSignInObserved = null; }
+    if (changed) { clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); provider = next; epoch++; actionError = null; states.delete(next); claudeChatEvidence = false; if (next === 'claude') claudeSignInObserved = null; }
     try { storage?.setItem(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider })); } catch { /* Only presentation is lost. */ }
     render();
     const Event = doc.defaultView?.CustomEvent;
@@ -311,9 +316,13 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       if (!stopped && !disposed && generation === epoch) {
         observed = value;
         states.set(target, { state: value, observed: Date.now() });
+        if(target==='codex'&&action==='status'&&!value.busy){
+          if(value.auth==='subscription')savedLoginObserved=true;
+          else if(value.auth==='signed-out'||value.auth==='api-or-cloud'||!value.installed)savedLoginObserved=false;
+        }
         if (target === 'claude') {
-          if (value.auth !== 'subscription') claudeChatEvidence = false;
-          else if (action === 'status' && !value.busy) claudeChatEvidence = true;
+          if (value.auth === 'signed-out' || value.auth === 'api-or-cloud' || !value.installed) claudeChatEvidence = false;
+          else if (value.auth === 'subscription' && action === 'status' && !value.busy) claudeChatEvidence = true;
           if (value.auth !== 'subscription') claudeSignInObserved = null;
           else if (action === 'status' && !value.busy) claudeSignInObserved = Date.now();
           // Install/launch snapshots and busy replies may contain cached auth.
@@ -328,7 +337,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         if (watching && !value.busy) clearLoginWatch();
       }
     } catch {
-      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; claudeChatEvidence = false; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Try again in Settings.'; }
+      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Try again in Settings.'; }
     } finally {
       busy = false; activeAction = null; cancelStatus = null; if (!disposed) render();
       if (!stopped && !disposed && generation === epoch && target === provider) {
@@ -337,7 +346,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         if (connectAfterLogin && !needsDisconnect() && !connected()) {
           const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click();
         }
-        if (connectSavedLogin && options.chat.connectForSavedLogin && !connected() && !savedConnectionPending) {
+        if (connectSavedLogin && reconnectAllowed && options.chat.connectForSavedLogin && !connected() && !savedConnectionPending) {
           const connection = options.chat.providerConnectionStatus();
           const snapshot = connection ? JSON.stringify([connection.connected, connection.ready, connection.fresh, connection.auth]) : 'none';
           if (!savedLoginConnections.has(snapshot)) {
@@ -363,7 +372,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         } else if (loginWatch && loginWatch.remaining <= 0) clearLoginWatch();
       }
       if (pendingStatus && !stopped && !disposed) requestStatus();
-      if (action === 'status' && observed && !observed.busy && observed.auth !== 'subscription' && autoSelect) void preferSignedIn(target, generation);
+      if (action === 'status' && observed && !observed.busy && (observed.auth === 'signed-out' || observed.auth === 'api-or-cloud') && autoSelect) void preferSignedIn(target, generation);
     }
   };
   const preferSignedIn = async (from: SetupProvider, generation: number) => {
@@ -381,6 +390,30 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     pendingStatus = false;
     void invoke('status');
   };
+  // Recovery checks native saved login again before each metadata connection. It never sends a prompt or starts login.
+  const scheduleRecovery = () => {
+    if(!native||!options.chat.connectForSavedLogin||stopped||disposed||provider!=='codex'||!savedLoginObserved||!reconnectAllowed||connected()){
+      clearRecovery();if(connected())recoveryAttempt=0;return;
+    }
+    if(busy||savedConnectionPending||pendingStatus||recoveryTimer!==null)return;
+    const delay=Math.min(30000,5000*2**Math.min(recoveryAttempt++,3));
+    recoveryTimer=setTimeout(()=>{
+      recoveryTimer=null;
+      if(stopped||disposed||provider!=='codex'||!savedLoginObserved||!reconnectAllowed||connected())return;
+      if(doc.hidden){scheduleRecovery();return;}
+      savedLoginConnections.clear();requestStatus();
+    },delay);
+  };
+  const checkOnReturn = () => {
+    if(!stopped&&!disposed&&!doc.hidden&&!connected()&&states.get(provider)?.state.auth!=='signed-out')requestStatus();
+  };
+  listen(doc,'visibilitychange',checkOnReturn);
+  if(typeof doc.defaultView?.addEventListener==='function')listen(doc.defaultView,'focus',checkOnReturn);
+  const disconnectIntent = () => { reconnectAllowed=false;clearRecovery(); };
+  const disconnect = button('codex-disconnect');
+  if(disconnect)listen(disconnect,'click',event=>{if(trusted(event)&&!disconnect.disabled)disconnectIntent();});
+  const connect = button('codex-connect');
+  if(connect)listen(connect,'click',event=>{if(trusted(event)&&!connect.disabled)reconnectAllowed=true;});
   for (const [id, action] of [['provider-setup-refresh', 'status'], ['provider-setup-login', 'login'], ['provider-setup-install', 'install'], ['provider-setup-launch', 'launch'], ['claude-chat-terminal', 'launch'], ['provider-login-refresh', 'status']] as const) {
     const control = button(id); if (control) listen(control, 'click', event => { if (trusted(event) && !control.disabled) void invoke(action); });
   }
@@ -392,8 +425,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   if (login) listen(login, 'click', event => {
     if (!trusted(event) || login.disabled || busy || stopped || disposed || !native || status()?.installed === false) return;
     const action = nextAction();
-    if (action === 'disconnect') { const disconnect = button('codex-disconnect'); if (disconnect && !disconnect.disabled) disconnect.click(); return; }
-    if (action === 'connect') { const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click(); else requestSettings('native-conversation-settings'); }
+    if (action === 'disconnect') { disconnectIntent(); const disconnect = button('codex-disconnect'); if (disconnect && !disconnect.disabled) disconnect.click(); return; }
+    if (action === 'connect') { reconnectAllowed=true; const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click(); else requestSettings('native-conversation-settings'); }
     else void invoke(action);
   });
   // Exact presentation event only. A changed preference requests native status,
@@ -441,8 +474,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       signInListeners.add(listener);
       return () => { signInListeners.delete(listener); };
     },
-    stop() { stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); render(); },
+    stop() { clearRecovery();savedLoginObserved=false;savedLoginConnections.clear();recoveryAttempt=0; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); render(); },
     resume() { if (disposed || !stopped) return; stopped = false; epoch++; render(); requestStatus(); },
-    cleanup() { if (disposed) return; disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
+    cleanup() { if (disposed) return; clearRecovery();savedLoginObserved=false;savedLoginConnections.clear(); disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
   };
 }

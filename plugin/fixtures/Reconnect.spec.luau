@@ -182,12 +182,16 @@ elseif mode == "status network bound" or mode == "status unsupported" or mode ==
 			commands = if fixture.reconnectMalformed == "commands" then v.array({}) else nil})
 	end
 	for _ = 1, 12 do cycle() end
-	assert(client.recovery == nil and intent.apiKey == nil and connectCount == 0 and client.pair == nil, "failed or exhausted status scrubs in-memory recovery and never handshakes")
 	if mode == "status network bound" then
-		assert(#seen == 8 and delays[1] == 4 and delays[2] == 8 and delays[3] == 16 and delays[4] == 30, "outage has eight bounded exponentially delayed probes")
+		assert(client.recovery == intent and intent.apiKey == key and client.pair == nil and connectCount == 0, "offline update retains the exact saved recovery intent without creating sessions")
+		assert(#seen == 12 and delays[1] == 4 and delays[2] == 8 and delays[3] == 16 and delays[4] == 30 and delays[12] == 30, "extended outage keeps one bounded worker with capped backoff")
+		fixture.uiHttpHook = nil -- Restore the fixture daemon: exact status followed by a fresh connect ACK.
+		ack()
+		assert(client.pair ~= nil and connectCount == 1 and fixture.pluginSettings[keySetting] == key, "app returning after a long update reconnects without entering the key again")
 	elseif mode == "status key rejected" then
+		assert(client.recovery == nil and intent.apiKey == nil and client.pair == nil and connectCount == 0, "rejected key stops recovery")
 		assert(#seen == 1 and control.Text == "Failed" and keyInput.Text == "" and fixture.pluginSettings[keySetting] == "", "key rejection stops once and clears only the rejected saved input")
-	else assert(#seen == 1 and fixture.pluginSettings[keySetting] == key and control.BackgroundColor3 ~= green, "unsupported or malformed status stops once with saved key and nongreen UI") end
+	else assert(client.recovery == nil and intent.apiKey == nil and connectCount == 0 and client.pair == nil and #seen == 1 and fixture.pluginSettings[keySetting] == key and control.BackgroundColor3 ~= green, "unsupported or malformed status stops once with saved key and nongreen UI") end
 	fixture.uiHttpHook = nil; unload()
 elseif string.sub(mode, 1, 12) == "late status " then
 	assert(client.recovery ~= nil, "saved key queues the yielding status")

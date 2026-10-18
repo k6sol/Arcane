@@ -660,13 +660,14 @@ function Transport:recover(): number
 			universeId = self.gameModel.GameId, name = V.string(self.gameModel.Name, "place name", 200), pluginVersion = V.VERSION})
 	end
 	if not self:observeIdentity(intent.fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
-	intent.attempts += 1
 	local payload = {protocolVersion = V.PROTOCOL, apiKey = intent.apiKey,
 		identity = intent.fence.identity, sessionId = intent.sessionId}
 	local ok, result = pcall(function() return self:post(intent.url, ROUTES.status, payload, nil) end)
 	payload.apiKey = nil
 	if self.stopped or self.recovery ~= intent or self.generation ~= intent.generation or self.disconnectRequested then return Transport.POLL_SECONDS end
 	if not ok then error(result, 0) end
+	-- Offline time does not consume the bounded reconciliation budget. Keep the saved key through app updates.
+	intent.attempts += 1
 	if not self:observeIdentity(intent.fence) then V.fail("IDENTITY", IDENTITY_CHANGED) end
 	V.fields(result, {"protocolVersion", "identity", "state", "sessionId"}, "session status")
 	if result.protocolVersion ~= V.PROTOCOL or not V.equal(result.identity, intent.fence.identity) then
