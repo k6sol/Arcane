@@ -303,6 +303,7 @@ export async function createConnectionLab(options: Options) {
           ['/playtest-toggle.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-toggle.js'), 'text/javascript']],
           ['/starter-gallery.js', [join(options.cwd, 'dist/apps/desktop/src/starter-gallery.js'), 'text/javascript']],
           ['/starter-prompts.js', [join(options.cwd, 'dist/apps/desktop/src/starter-prompts.js'), 'text/javascript']],
+          ['/welcome-tour.js', [join(options.cwd, 'dist/apps/desktop/src/welcome-tour.js'), 'text/javascript']],
           ['/glb-preflight.js', [join(options.cwd, 'dist/apps/desktop/src/glb-preflight.js'), 'text/javascript']],
           ['/asset-viewer-runtime.mjs', [join(options.cwd, 'apps/desktop/public/asset-viewer-runtime.mjs'), 'text/javascript']],
           ...[

@@ -85,6 +85,8 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
     headless: true, viewport: { width: 1440, height: 900 }, args: ['--disable-gpu'], serviceWorkers: 'block',
   });
   t.after(() => context.close());
+  // Returning-user key controls; the first-launch tour and Skip path have separate browser coverage.
+  await context.addInitScript(() => localStorage.setItem('arcane.welcome-tour.v1', JSON.stringify({ version: 1, seen: true, how: 'skipped' })));
   await context.route('**/*', async route => {
     if (new URL(route.request().url()).origin === origin) await route.continue();
     else { unexpected.push(route.request().url()); await route.abort(); }

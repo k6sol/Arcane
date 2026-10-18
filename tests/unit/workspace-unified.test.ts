@@ -414,7 +414,9 @@ test('markup has one composer, closed advanced settings, live review notices and
       ['guide-costs', 'Costs &amp; plans'], ['guide-shortcuts', 'Shortcuts and commands']]);
   for (const text of ['Install plugin', 'Pair Studio', 'Terrain &amp; lighting', 'Visual effects', 'Scripting', 'GUI', 'Gameplay systems', 'Creator Store', 'AI meshes',
     '@selection', 'Playtest', 'viewport', 'Auto-approve', 'receipt', 'Restore', 'tokens', 'Arcane action', 'Shift</kbd>+<kbd>Enter']) assert.ok(guide.includes(text), text);
-  assert.doesNotMatch(guide, /\bstyle=|<button|<script|class="guide/);
+  const replay = guide.match(/<button id="welcome-tour-replay" type="button" class="secondary">Replay tour<\/button>/g) ?? [];
+  assert.equal(replay.length, 1, 'The Guide offers one explicit tour replay.');
+  assert.doesNotMatch(guide.replace(replay[0]!, ''), /\bstyle=|<button|<script|class="guide/);
   const settingsAt = html.indexOf('id="workspace-settings"');
   for (const id of ['codex-unknown', 'codex-approval-section']) assert.ok(html.indexOf('id="' + id + '"') < settingsAt);
   assert.match(html, /id="asset-previews" class="asset-previews"><\/div>/);

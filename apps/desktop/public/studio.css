@@ -2093,5 +2093,28 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
   .arcane-app .claude-message-body th{background:Canvas}
 }
 /* ---- End chat markdown ---- */
+/* ---- Welcome tour: first-launch coach marks (welcome-tour.ts; owned block; keep before the reduced-motion reset; static, no transitions) ---- */
+.arcane-app .welcome-tour{position:fixed;inset:0;z-index:120;pointer-events:auto}
+.arcane-app .welcome-tour:not(:has(.welcome-tour-spotlight:not([hidden]))){background:var(--scrim)}
+.arcane-app .welcome-tour-spotlight{position:fixed;border:2px solid var(--accent);border-radius:var(--radius);box-shadow:0 0 0 9999px var(--scrim),0 0 0 6px var(--accent-tint);pointer-events:none}
+.arcane-app .welcome-tour-card{position:fixed;top:16px;left:16px;width:min(360px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:16px 18px 12px;border:1px solid var(--line-strong);border-radius:var(--radius-lg);background:var(--raised);color:var(--text);box-shadow:var(--shadow-lg)}
+.arcane-app .welcome-tour-card:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.arcane-app .welcome-tour-count{margin:0 0 4px;color:var(--accent-text);font-size:var(--fs-meta);font-weight:600;letter-spacing:.02em}
+.arcane-app .welcome-tour-card h2{margin:0 0 6px;font-family:var(--font-display);font-size:1.15rem;font-weight:650;line-height:1.3}
+.arcane-app #welcome-tour-body{margin:0 0 14px;color:var(--text-secondary);line-height:1.5}
+.arcane-app .welcome-tour-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.arcane-app .welcome-tour-spacer{flex:1}
+.arcane-app .welcome-tour-actions button{min-height:32px}
+.arcane-app .welcome-tour-keys{margin:10px 0 0;color:var(--muted);font-size:var(--fs-meta)}
+.arcane-app .welcome-tour-replay-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}
+.arcane-app .welcome-tour-replay-row .hint{margin:0}
+@media (max-width:520px){.arcane-app .welcome-tour-card{width:calc(100vw - 32px)}}
+@media (forced-colors:active){
+  .arcane-app .welcome-tour{background:transparent}
+  .arcane-app .welcome-tour-spotlight{border:3px solid Highlight;box-shadow:none;forced-color-adjust:none}
+  .arcane-app .welcome-tour-card{border:2px solid CanvasText;background:Canvas;color:CanvasText;box-shadow:none}
+  .arcane-app .welcome-tour-count,.arcane-app #welcome-tour-body,.arcane-app .welcome-tour-keys{color:CanvasText}
+}
+/* ---- End welcome tour ---- */
 /* Keep this universal preference reset last. */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

@@ -39,6 +39,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/playtest-toggle.ts', 'dist/apps/desktop/src/playtest-toggle.js', 'dist/apps/desktop/src/playtest-toggle.js.map',
   'apps/desktop/src/starter-gallery.ts', 'dist/apps/desktop/src/starter-gallery.js', 'dist/apps/desktop/src/starter-gallery.js.map',
   'apps/desktop/src/starter-prompts.ts', 'dist/apps/desktop/src/starter-prompts.js', 'dist/apps/desktop/src/starter-prompts.js.map',
+  'apps/desktop/src/welcome-tour.ts', 'dist/apps/desktop/src/welcome-tour.js', 'dist/apps/desktop/src/welcome-tour.js.map',
   'apps/desktop/src/project-memory.ts', 'dist/apps/desktop/src/project-memory.js', 'dist/apps/desktop/src/project-memory.js.map',
   'apps/desktop/src/script-sync.ts', 'dist/apps/desktop/src/script-sync.js', 'dist/apps/desktop/src/script-sync.js.map',
   'apps/desktop/src/script-diff.ts', 'dist/apps/desktop/src/script-diff.js', 'dist/apps/desktop/src/script-diff.js.map',

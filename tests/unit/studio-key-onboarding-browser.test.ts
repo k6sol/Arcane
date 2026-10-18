@@ -122,6 +122,9 @@ for (const storageAvailable of [true, false]) test('key onboarding: trusted rota
     assert.equal(await page.locator('#key-setup-gate').isVisible(), false, 'Presentation and stored choice cannot manufacture sign-in evidence.');
     signedIn = true; await page.locator('#key-setup-gate').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#provider-login-gate').isVisible(), false); assert.equal(await page.locator('#key-setup-generate').isEnabled(), true);
+    await page.locator('#welcome-tour').waitFor({ state: 'visible' });
+    await page.locator('#welcome-tour-skip').click();
+    await page.locator('#welcome-tour').waitFor({ state: 'hidden' });
     await page.locator('#codex-composer').fill(DRAFT);
     const before = await chatView(); assert.equal(before.draft, DRAFT); assert.equal(before.model, selection.model); assert.equal(before.effort, selection.effort);
     assert.match(before.scope ?? '', /fixture-thread/); assert.match(before.scope ?? '', new RegExp(CONNECTION));

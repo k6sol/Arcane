@@ -7,6 +7,7 @@ import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAsse
 import { startProviderSetup } from './provider-setup.js';
 import { startSetupChecklist } from './setup-checklist.js';
 import { startStarterGallery } from './starter-gallery.js';
+import { startWelcomeTour } from './welcome-tour.js';
 import { ClaudeChat, linkChatProviders } from './claude-chat.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
@@ -2181,6 +2182,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('pagehide', () => { setupChecklist.stop(); studioPairing.stop(); });
   // Quick-start gallery on the empty chat: a click only fills the composer for review.
   startStarterGallery(document);
+  // Optional welcome tour: once after sign-in on the desktop app's first launch, and from Settings › Guide › Replay tour.
+  const welcomeTour = startWelcomeTour(document, { storage: checklistStorage, autoStart: !!(window as unknown as { arcaneDesktop?: unknown }).arcaneDesktop });
+  window.addEventListener('pagehide', () => welcomeTour.close('paused'));
   window.addEventListener('pageshow', event => { if (event.persisted) { setupChecklist.resume(); studioPairing.resume(); } });
   let workflows: ReturnType<typeof startWorkflowPanel> | null = null;
   let workflowsStopped = false;
