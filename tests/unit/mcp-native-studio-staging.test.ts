@@ -330,3 +330,29 @@ test('definite daemon preflight refusals stay unknown/no-retry but keep their re
   const lost = unknown(await f.daemon.assetsStageStudioImport(JOB));
   assert.equal((lost.error as {code: string}).code, 'DAEMON_UNREACHABLE');
 });
+
+
+// A full-resolution transfer can exceed the generic 30-second wait.
+// Fake fetch and official in-memory MCP; no engine or real 40-second sleep.
+for(const viaMcp of [false,true])test('full-resolution staging keeps a 40-second response within its bounded default '+(viaMcp?'MCP':'client')+' wait',async t=>{
+  const f=fixture(t),client=viaMcp?await linked(t,f.daemon):null;
+  t.mock.timers.enable({apis:['setTimeout']});
+  let entered!:()=>void;const sent=new Promise<void>(resolve=>{entered=resolve;});
+  f.setResponder((_request,signal)=>new Promise<Response>((resolve,reject)=>{
+    const timer=setTimeout(()=>resolve(json(response())),40_000);
+    signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new Error('synthetic bounded wait'));},{once:true});entered();
+  }));
+  const pending=client?call(client):f.daemon.assetsStageStudioImport(JOB);await sent;
+  t.mock.timers.tick(40_000);const result=await pending;
+  assert.deepEqual(client?(result as {structuredContent:unknown}).structuredContent:result,response());
+  assert.equal(f.requests.length,1);assert.deepEqual(f.requests[0]!.body,{jobId:JOB});
+});
+
+test('default staging wait ends at 55 seconds as unknown with no retry',async t=>{
+  const f=fixture(t);t.mock.timers.enable({apis:['setTimeout']});
+  f.setResponder((_request,signal)=>new Promise<Response>((_resolve,reject)=>{signal.addEventListener('abort',()=>reject(new Error('synthetic bounded stage wait')),{once:true});}));
+  let settled=false;const pending=f.daemon.assetsStageStudioImport(JOB).then(value=>{settled=true;return value;});
+  assert.equal(f.requests.length,1);t.mock.timers.tick(54_999);for(let i=0;i<12;i++)await Promise.resolve();assert.equal(settled,false);
+  t.mock.timers.tick(1);const value=unknown(await pending);assert.equal(value.wait,'timeout');assert.equal(f.requests.length,1);
+  assert.equal(STUDIO_STAGING_LIMITS.totalDeadlineMs,120_000);
+});

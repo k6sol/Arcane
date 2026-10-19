@@ -348,10 +348,12 @@ export class DaemonClient {
     // The native route supplies the authoritative project from its captured
     // actor/binding. This client has only the job; it cannot invent a project.
     const schema = nativeStudioStagingResponse.refine(value => value.jobId === jobId, 'Wrong staged asset job.');
+    // Full-resolution PBR transfers get 55 seconds within the existing
+    // 60-second client bound. Explicit waits and the host deadline stay separate.
     return this.postOnce('/v1/assets/native/stage-studio-import', { jobId }, schema,
       { jobId, retry: false },
       'Inspect assets_studio_staging_status for this original jobId in the same native project and conversation scope. assets_jobs identifies the owned generation job but does not confirm staging. Staging may still be running or incomplete; never repeat this operation automatically. operationId is diagnostic, not an idempotency key. No upload or insertion is established.',
-      options, true);
+      {...options,timeoutMs:options.timeoutMs??55_000}, true);
   }
 
   async assetsStudioStagingStatus(jobId: string, options: WaitOptions = {}) {
