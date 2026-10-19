@@ -43,6 +43,8 @@ def failure_report(error):
     text = str(error)
     if text == "Request byte provenance gate failed":
         code = "REQUEST_PROVENANCE"
+    elif text == "Windows asset path has no verified short directory alias":
+        code = "WINDOWS_PATH_LIMIT"
     elif text.startswith("Asset mesh gate failed:") or text == "Saved scene failed structural audit":
         code = "MESH_AUDIT"
     elif text.endswith("mesh required repair") or text in ["Input mesh required structural repair", "Procedural mesh required structural repair"]:
@@ -93,6 +95,50 @@ def select(objects):
         obj.select_set(True)
     if objects:
         bpy.context.view_layer.objects.active = objects[0]
+
+
+def blender_path(path):
+    """Keep Blender's fixed file operations on the identical owned directory.
+    Extended paths work for Python I/O but Blender's scene rename and exporters
+    require ordinary short spelling. Existing aliases are queried, never created.
+    """
+    import os
+    value = str(path)
+    if os.name != "nt":
+        return value
+    namespace = "\\\\?\\"
+
+    def ordinary(value):
+        if value[:8].upper() == namespace + "UNC\\":
+            return "\\\\" + value[8:]
+        return value[4:] if value.startswith(namespace) else value
+
+    def windows_length(value):
+        return len(value.encode("utf-16-le")) // 2
+
+    value = ordinary(value)
+    # Scene saving appends '@' to its temporary filename before atomic rename.
+    if windows_length(value) < 259:
+        return value
+    try:
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        short_path = kernel.GetShortPathNameW
+        short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        short_path.restype = ctypes.c_uint
+        buffer = ctypes.create_unicode_buffer(32768)
+        count = short_path(str(path.parent), buffer, len(buffer))
+        if not count or count >= len(buffer):
+            raise ValueError()
+        alias = Path(buffer.value)
+        if not alias.is_absolute() or alias.resolve(strict=True) != path.parent.resolve(strict=True):
+            raise ValueError()
+        result = ordinary(str(alias / path.name))
+        if windows_length(result) >= 259:
+            raise ValueError()
+        return result
+    except (OSError, ValueError, AttributeError):
+        raise ValueError("Windows asset path has no verified short directory alias") from None
 
 
 def material(name, color, metallic, roughness):
@@ -262,7 +308,7 @@ def lookdev(main, request):
 def export_glb(path, objects, with_materials=True):
     event("export", path.name)
     select(objects)
-    bpy.ops.export_scene.gltf(filepath=str(path), export_format="GLB", use_selection=True,
+    bpy.ops.export_scene.gltf(filepath=blender_path(path), export_format="GLB", use_selection=True,
                               export_yup=True, export_extras=True, export_animations=False,
                               export_materials="EXPORT" if with_materials else "NONE")
 
@@ -369,9 +415,9 @@ def export_metrics(path, expected, recipe=None):
     bpy.context.window.scene = temp
     try:
         if path.suffix == ".glb":
-            bpy.ops.import_scene.gltf(filepath=str(path))
+            bpy.ops.import_scene.gltf(filepath=blender_path(path))
         else:
-            bpy.ops.import_scene.fbx(filepath=str(path), use_anim=False, use_custom_props=True, use_image_search=False)
+            bpy.ops.import_scene.fbx(filepath=blender_path(path), use_anim=False, use_custom_props=True, use_image_search=False)
         bpy.context.view_layer.update()
         objects = [obj for obj in temp.objects if obj.type == "MESH"]
         triangles = 0
@@ -421,7 +467,7 @@ def main():
         from assembly import build_assembly, assembly_evidence
     if args.mode == "audit":
         event("scene-reopen", "asset.blend")
-        bpy.ops.wm.open_mainfile(filepath=str(directory / "asset.blend"), use_scripts=False)
+        bpy.ops.wm.open_mainfile(filepath=blender_path(directory / "asset.blend"), use_scripts=False)
         objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
         meshes, totals, errors = audit_scene(objects, request)
         report = {"meshes": meshes, "totals": totals, "errors": errors}
@@ -453,7 +499,7 @@ def main():
     event("identity")
     stamp_import_identity(request, main_objects, lods, collision, sockets)
     event("checkpoint-save", "blockout.blend")
-    bpy.ops.wm.save_as_mainfile(filepath=str(directory / "blockout.blend"), check_existing=False)
+    bpy.ops.wm.save_as_mainfile(filepath=blender_path(directory / "blockout.blend"), check_existing=False)
     event("mesh-validation")
     for obj in main_objects + lods + collision:
         finalize(obj)
@@ -485,12 +531,12 @@ def main():
         bpy.ops.render.render(write_still=True)
         renders.append(render_metrics(directory / name))
     event("scene-save", "asset.blend")
-    bpy.ops.wm.save_as_mainfile(filepath=str(directory / "asset.blend"), check_existing=False)
+    bpy.ops.wm.save_as_mainfile(filepath=blender_path(directory / "asset.blend"), check_existing=False)
     event("export")
     export_glb(directory / "asset.glb", main_objects + sockets)
     event("export", "asset.fbx")
     select(main_objects + sockets)
-    bpy.ops.export_scene.fbx(filepath=str(directory / "asset.fbx"), use_selection=True, object_types={'MESH', 'EMPTY'}, use_custom_props=True,
+    bpy.ops.export_scene.fbx(filepath=blender_path(directory / "asset.fbx"), use_selection=True, object_types={'MESH', 'EMPTY'}, use_custom_props=True,
                               apply_unit_scale=True, apply_scale_options='FBX_SCALE_ALL', axis_forward='-Z', axis_up='Y',
                               bake_anim=False, add_leaf_bones=False)
     export_glb(directory / "collision.glb", collision, False)
@@ -509,7 +555,7 @@ def main():
     if lods:
         exports.append(export_metrics(directory / "asset-lod1.glb", totals["lod1Triangles"]))
     event("scene-reopen", "asset.blend")
-    bpy.ops.wm.open_mainfile(filepath=str(directory / "asset.blend"), use_scripts=False)
+    bpy.ops.wm.open_mainfile(filepath=blender_path(directory / "asset.blend"), use_scripts=False)
     reopened = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
     again, again_totals, again_errors = audit_scene(reopened, request)
     if again_errors or again_totals != totals or again != meshes:

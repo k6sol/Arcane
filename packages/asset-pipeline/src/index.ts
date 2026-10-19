@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { discoverExecutables } from './discovery.js';
 import { artifactPath, noLinks, prepareOutputRoot, regularFile, readRegularFile, within } from './paths.js';
 import { runBounded, workerEnvironment, type CommandOptions, type CommandResult, type CommandSpec } from './process.js';
+import { workerLaunchDirectory, workerFileArgument, workerDirectoryArgument } from './launch-paths.js';
 import { WorkerSupervision } from './worker-journal.js';
 import type { ProcessQueryHost, WorkerRole } from './worker-identity.js';
 import { normalizeRequest, readJson, record, sha256, validateAudit, validateManifestFiles, workerScripts } from './validation.js';
@@ -141,7 +142,7 @@ export class AssetPipeline {
     for (const executable of installed.blender) {
       if (bounded(executable)) break;
       try {
-        const process = await this.supervisedRun(operation, supervision, 'probe', { executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', probeScript], cwd: directory, env: workerEnvironment(directory) },
+        const process = await this.supervisedRun(operation, supervision, 'probe', { executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', workerFileArgument(probeScript)], cwd: workerLaunchDirectory(executable, directory), env: workerEnvironment(directory) },
           { ...(signal ? { signal } : {}), deadlineMs: Math.min(15000, remaining(end, signal)) });
         if (process.exitCode !== 0) throw new AssetError('BLENDER_PROBE', 'Installed Blender failed its runtime probe.');
         const result = resultLine(process.stdout), capabilities = record(result.capabilities, 'Blender capabilities');
@@ -157,7 +158,7 @@ export class AssetPipeline {
     for (const executable of installed.python) {
       if (bounded(executable)) break;
       try {
-        const process = await this.supervisedRun(operation, supervision, 'python-probe', { executable, args: ['-I', '-B', '-c', pythonCode], cwd: directory, env: workerEnvironment(directory) },
+        const process = await this.supervisedRun(operation, supervision, 'python-probe', { executable, args: ['-I', '-B', '-c', pythonCode], cwd: workerLaunchDirectory(executable, directory), env: workerEnvironment(directory) },
           { ...(signal ? { signal } : {}), deadlineMs: Math.min(5000, remaining(end, signal)) });
         if (process.exitCode !== 0) throw new AssetError('PYTHON_PROBE', 'Python runtime probe failed.');
         const result = resultLine(process.stdout);
@@ -230,8 +231,8 @@ export class AssetPipeline {
       const recipeArguments = request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(request.recipe, request.triangleBudget).estimatedTriangles)] : [];
       progress('generate');
       const process = await this.supervisedRun(operation, supervision, 'generate', { executable: evidence.blender.executable,
-        args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', artifactPath(directory, 'asset_worker.py'), '--', '--mode', 'generate', '--directory', directory, '--request-sha256', sha256(Buffer.from(requestText)), ...recipeArguments],
-        cwd: directory, env: workerEnvironment(environmentDirectory) }, { signal, deadlineMs: remaining(end, signal), onLine: line => {
+        args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', workerFileArgument(artifactPath(directory, 'asset_worker.py')), '--', '--mode', 'generate', '--directory', workerDirectoryArgument(directory), '--request-sha256', sha256(Buffer.from(requestText)), ...recipeArguments],
+        cwd: workerLaunchDirectory(evidence.blender.executable, directory), env: workerEnvironment(environmentDirectory) }, { signal, deadlineMs: remaining(end, signal), onLine: line => {
           if (!line.startsWith('ARCANE_EVENT ')) return;
           try { const e = JSON.parse(line.slice(13)) as { stage?: unknown }; if (typeof e.stage === 'string' && failureStage(e.stage) === e.stage) progress(e.stage); } catch { /* progress line is optional */ }
         } });
@@ -307,7 +308,7 @@ export class AssetPipeline {
       try {
         const probe = await this.probeIn(operation, directory, end, options.signal);
         if (!probe.blender) throw new AssetError('BLENDER_UNAVAILABLE', 'Deep validation requires an installed Blender runtime.');
-        const process = await this.supervisedRun(operation, undefined, 'generate', { executable: probe.blender.executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', await this.script('asset_worker.py'), '--', '--mode', 'audit', '--directory', directory, '--request-sha256', manifest.artifacts.find(a => a.path === 'request.json')!.sha256, ...(manifest.request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(manifest.request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(manifest.request.recipe, manifest.request.triangleBudget).estimatedTriangles)] : [])], cwd: directory, env: workerEnvironment(directory) },
+        const process = await this.supervisedRun(operation, undefined, 'generate', { executable: probe.blender.executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', workerFileArgument(await this.script('asset_worker.py')), '--', '--mode', 'audit', '--directory', workerDirectoryArgument(directory), '--request-sha256', manifest.artifacts.find(a => a.path === 'request.json')!.sha256, ...(manifest.request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(manifest.request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(manifest.request.recipe, manifest.request.triangleBudget).estimatedTriangles)] : [])], cwd: workerLaunchDirectory(probe.blender.executable, directory), env: workerEnvironment(directory) },
           { ...(options.signal ? { signal: options.signal } : {}), deadlineMs: remaining(end, options.signal) });
         if (process.exitCode !== 0) throw new AssetError('MESH', 'Saved scene failed the native Blender audit.');
         const audit = resultLine(process.stdout);

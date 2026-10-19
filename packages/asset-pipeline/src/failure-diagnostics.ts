@@ -7,6 +7,7 @@ const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeErro
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
   REQUEST_PROVENANCE: 'Request bytes failed their size or SHA-256 provenance check.',
+  WINDOWS_PATH_LIMIT: 'The installed Blender cannot use this long Windows asset path because no verified short directory alias is available; choose a shorter asset output directory.',
   MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',
   MESH_AUDIT: 'Structural mesh validation rejected the generated geometry; inspect the per-mesh audit.',
   RENDER_CONTENT: 'Review render was empty, uniform or contained nonfinite pixels.',
