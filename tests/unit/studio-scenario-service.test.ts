@@ -28,6 +28,26 @@ const text=(value:unknown):CallToolResult=>({content:[{type:'text',text:typeof v
 const signal=()=>new AbortController().signal;
 const gate=()=>{let release!:()=>void;const promise=new Promise<void>(resolve=>{release=resolve;});return{promise,release};};
 async function until(predicate:()=>boolean,timeout=10000){const end=Date.now()+timeout;while(!predicate()){if(Date.now()>end)throw new Error('Scenario fixture did not settle.');await new Promise(resolve=>setTimeout(resolve,10));}}
+function observationClock(wall=Date.now){
+  let advanced=0;
+  return{now:()=>wall()+advanced,advanced:()=>advanced,schedule(ms:number,callback:()=>void){
+    const observation=ms<=250;
+    const timer=setTimeout(()=>{if(observation)advanced+=ms;callback();},observation?0:ms);
+    return()=>clearTimeout(timer);
+  }};
+}
+async function taskSettled(task:ReturnType<typeof taskFixture>,f:Awaited<ReturnType<typeof fixture>>,jobId:string){
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{
+    await Promise.race([task.settled,new Promise<never>((_,reject)=>{
+      timer=setTimeout(()=>reject(new Error('Scenario task did not settle: '+JSON.stringify({
+        job:f.status(jobId),state:f.state,clockTime:f.clockTime(),observationAdvance:f.observationTime(),
+        calls:f.calls.slice(-6).map(call=>({name:call.name,datamodel:call.args.datamodel_type})),
+      }))),10000);
+    })]);
+    assert.equal(task.packets.length,1);
+  }finally{clearTimeout(timer);}
+}
 const scenarioTools:Tool[]=[...structuredClone(reviewedTestTools),
   {name:'execute_luau',inputSchema:{type:'object',properties:{studio_id:{type:'string'},datamodel_type:{type:'string',enum:['Edit','Client','Server']},code:{type:'string'}},required:['studio_id','datamodel_type','code']}},
   {name:'screen_capture',inputSchema:{type:'object',properties:{studio_id:{type:'string'},capture_id:{type:'string'}},required:['studio_id','capture_id']}}];
@@ -104,20 +124,28 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   };
   // Semantic task evidence uses controlled observation waits. Request/cleanup bounds and all
   // default service fixtures retain real timers; the real five-second lifecycle has separate coverage.
-  let observationTime=Date.now(),advanced=0;
-  const fixtureScheduler={now:()=>Math.max(observationTime,Date.now()),schedule(ms:number,callback:()=>void){
-    const observation=ms<=250;
-    const timer=setTimeout(()=>{if(observation){observationTime=Math.max(observationTime,Date.now())+ms;advanced+=ms;}callback();},observation?0:ms);
-    return()=>clearTimeout(timer);
-  }};
+  // Real elapsed time must continue contributing after an accelerated wait.
+  // A max(last virtual time, wall time) clock freezes during an unaccelerated
+  // observation tail and repeatedly schedules it until wall time catches up.
+  const fixtureScheduler=observationClock();
   const service=await createStudioTestService({directory,store,pluginArtifactHash:ARTIFACT,connect,
     ...(options.fixtureClock?{fixtureScheduler}:{}),...(options.taskPort?{taskPort:options.taskPort}:{})});
   t.after(async()=>{inputAck.release();setupAck.release();clearInterval(timer);try{await service.lifecycle.close();for(const connection of connections)await connection.close();assert.equal(pluginFailure,undefined);}finally{store.close();const inside=relative(fixtureTempDirectory(),root);assert.ok(!isAbsolute(inside)&&inside.startsWith('arcane-scenario-service-')&&!inside.startsWith('..'));rmSync(root,{recursive:true,force:true});}});
   const prepare=(durationMs=5000)=>service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs,observationIntervalMs:250,failOnRuntimeError:true,scenario:plan},ACTOR);
   const approve=(job:{id:string;displayDigest:string})=>service.humanControl.approve({id:job.id,displayDigest:job.displayDigest},()=>{});
   const status=(id:string)=>service.requests.status(id,ACTOR);
-  return{root,directory,store,service,state,pair,plan,prepare,approve,status,records,calls,inputEntered,inputAck,setupEntered,setupAck,observationTime:()=>advanced,clockTime:fixtureScheduler.now};
+  return{root,directory,store,service,state,pair,plan,prepare,approve,status,records,calls,inputEntered,inputAck,setupEntered,setupAck,observationTime:fixtureScheduler.advanced,clockTime:fixtureScheduler.now};
 }
+
+test('accelerated observation clock retains wall progress and real cleanup timer bounds',async()=>{
+  let wall=1000;const clock=observationClock(()=>wall);
+  await new Promise<void>(resolve=>clock.schedule(250,resolve));
+  assert.equal(clock.now(),1250);assert.equal(clock.advanced(),250);
+  wall+=500;assert.equal(clock.now(),1750,'an unaccelerated observation tail must advance effective time');
+  let fired=false;const cancel=clock.schedule(15000,()=>{fired=true;});
+  try{wall+=15000;await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(fired,false,'cleanup/request timers remain real');}
+  finally{cancel();}
+});
 
 test('fixture observation clocks require explicit fixture transport and cannot replace native timing',async t=>{
   // The native evidence label is a boundary double; no native process is opened.
@@ -147,7 +175,7 @@ test('production service runs approved read-only assertions without virtual inpu
 for(const failed of [false,true])test(`production service settles player attribute evidence with its original task and source digest: ${failed?'measured failure':'checkpoint changes'}`,{timeout:15000},async t=>{
   const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,taskPort:task.port,runtime:{inputUnavailable:true,attribute:{initial:1,...(failed?{}:{next:2,transition:'wait' as const})}}});
   Object.assign(f.plan,{version:1,runtimeBudgetMs:300,targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:2,withinMs:100,requireTransition:true}],capture:{required:false}});
-  const job=await f.prepare();assert.equal(f.state.clientCalls,0);await f.approve(job);await until(()=>task.packets.length===1);
+  const job=await f.prepare();assert.equal(f.state.clientCalls,0);await f.approve(job);await taskSettled(task,f,job.id);
   const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
   assert.equal(report.review.code,failed?'ASSERTION_FAILED':'OK');assert.equal(report.review.cleanup,'complete');assert.equal(row.observed,!failed);
   assert.deepEqual(row.attribute,{context:'Client',subject:'LocalPlayer',name:'Checkpoint',baseline:{present:true,value:1},observed:{present:true,value:failed?1:2}});
@@ -169,7 +197,7 @@ for(const mutation of ['missing','server','wrong-name','contradiction']as const)
     else row.attribute!.observed={present:true,value:2};
   }});
   Object.assign(f.plan,{version:1,runtimeBudgetMs:300,targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:2,withinMs:100,requireTransition:true}],capture:{required:false}});
-  const job=await f.prepare();await f.approve(job);await until(()=>task.packets.length===1);
+  const job=await f.prepare();await f.approve(job);await taskSettled(task,f,job.id);
   const report=f.status(job.id);assert.equal(report.review.code,'BAD_NATIVE_RESPONSE');assert.equal(report.review.scenario!.inputRelease,'unknown');
   assert.equal(task.packets[0]!.scenario!.outcome,'incomplete');assert.equal(task.packets[0]!.scenario!.requiredEvidence,'missing');
   assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(report.review.canStartAnotherOperation,false);
@@ -177,7 +205,7 @@ for(const mutation of ['missing','server','wrong-name','contradiction']as const)
 
 for(const failed of [false,true])test(`production service binds approved layout measurements to settled source-current task evidence: ${failed?'measured failure':'current layout passes'}`,{timeout:15000},async t=>{
     const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
-    const job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.equal(f.state.clientCalls,0);await f.approve(job);await until(()=>task.packets.length===1);
+    const job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.equal(f.state.clientCalls,0);await f.approve(job);await taskSettled(task,f,job.id);
     const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
     assert.equal(report.review.outcome,failed?'failed':'succeeded');assert.equal(report.review.code,failed?'ASSERTION_FAILED':'OK');assert.equal(report.review.cleanup,'complete');
     assert.equal(row.observed,!failed);assert.equal(row.layout!.target.right-row.layout!.target.left,failed?60:200);
@@ -197,7 +225,7 @@ for(const mutation of ['missing','null','string','contradiction','wrong-minimum'
       else if(mutation==='contradiction')row.layout!.target.right=row.layout!.target.left+200;
       else if(mutation==='wrong-minimum')row.expected='core-safe:1x1';
       else row.layout!.clips=Array.from({length:9},()=>row.layout!.safeArea);
-    }});Object.assign(f.plan,fixtureLayoutScenario());const job=await f.prepare();await f.approve(job);await until(()=>task.packets.length===1);
+    }});Object.assign(f.plan,fixtureLayoutScenario());const job=await f.prepare();await f.approve(job);await taskSettled(task,f,job.id);
     const report=f.status(job.id);assert.equal(report.review.code,'BAD_NATIVE_RESPONSE');assert.equal(report.review.scenario!.inputRelease,'unknown');
     assert.equal(task.packets[0]!.scenario!.outcome,'incomplete');assert.equal(task.packets[0]!.scenario!.requiredEvidence,'missing');
     assert.equal(f.state.clientCalls,1);assert.equal(f.state.mode,'Edit');assert.equal(report.review.canStartAnotherOperation,false);
@@ -276,17 +304,17 @@ test('restoration conflict preserves original measured scenario evidence and ret
 
 function taskFixture(){
   const origin:StudioTestTaskOrigin=Object.freeze({kind:'studio-test-task-origin',taskId:'fixture-task',projectId:'fixture-project',provider:'codex',threadId:'fixture-thread',sessionId:'fixture-session',incarnationId:'fixture-incarnation'});
-  let revoked=false;const prepared:StudioTestTaskPrepared[]=[],packets:StudioTestTaskSettled[]=[];
+  let revoked=false;const prepared:StudioTestTaskPrepared[]=[],packets:StudioTestTaskSettled[]=[],settled=gate();
   const port:StudioTestTaskPort=Object.freeze({capture(actor:string){assert.equal(actor,ACTOR);return origin;},assert(value:StudioTestTaskOrigin){if(value!==origin||revoked)throw new StudioTestError('HUMAN_AUTH_REQUIRED');},
     prepared(value:StudioTestTaskOrigin,packet:StudioTestTaskPrepared){assert.equal(value,origin);prepared.push(structuredClone(packet));},
-    terminal(value:StudioTestTaskOrigin,packet:StudioTestTaskSettled){assert.equal(value,origin);packets.push(structuredClone(packet));}});
-  return{origin,port,prepared,packets,revoke(){revoked=true;}};
+    terminal(value:StudioTestTaskOrigin,packet:StudioTestTaskSettled){assert.equal(value,origin);packets.push(structuredClone(packet));settled.release();}});
+  return{origin,port,prepared,packets,settled:settled.promise,revoke(){revoked=true;}};
 }
 
 test('private task evidence is settled once and revalidated from a fresh read-only connection after the requesting turn',{timeout:15000},async t=>{
   const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,taskPort:task.port}),job=await f.prepare();
   assert.equal(task.prepared.length,1);assert.deepEqual(task.prepared[0],{jobId:job.id,displayDigest:job.displayDigest,scenarioDigest:digest(f.plan),subjectDigest:job.display.proposal.subjectDigest});
-  await f.approve(job);await until(()=>task.packets.length===1);const report=f.status(job.id),packet=task.packets[0]!;
+  await f.approve(job);await taskSettled(task,f,job.id);const report=f.status(job.id),packet=task.packets[0]!;
   assert.equal(report.review.outcome,'succeeded');assert.equal(report.review.cleanup,'complete');assert.equal(packet.reportDigest,digest(report));
   assert.equal(report.review.deadline!-report.review.startedAt!,5000);
   assert.ok(f.observationTime()>0&&f.clockTime()>=report.review.deadline!,'task evidence includes the full admitted fixture observation window');
