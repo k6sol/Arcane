@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 const runtime=process.env.ARCANE_LUAU_BIN;
-const names=['Validation','Registry','Properties','Sha256Stream','AssetMesh','AssetTransfer','AssetUpload','AssetPlacement','TerrainGen','Operations'];
+const names=['Validation','Registry','Properties','Sha256Stream','AssetMesh','AssetTransfer','AssetUpload','AssetPlacement','TerrainGen','AssetMaterials','Operations'];
 
 // Isolated dispatcher boundary: real operation ownership and real engine binding, with a receiver and upload sink double.
 // AssetPlacement/AssetUpload behavior has separate VM coverage. This test never invokes a native upload service.

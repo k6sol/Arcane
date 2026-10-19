@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'Operations'];
+const modules = ['Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
 
 // Engine doubles owned by this harness: typed Color3, typed enums, Humanoid/AnimationController class checks and the
 // documented clamp of Humanoid.Health to MaxHealth. They do not certify Roblox.

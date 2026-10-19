@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'Operations'];
+const modules = ['Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
 
 // Engine doubles owned by this harness: float32 RGB8 colour storage and YXZ orientation
 // (as in properties.test.mjs), plus CFrame.new, a Terrain recorder, Raycast and Lighting values.

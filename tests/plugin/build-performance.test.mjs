@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
-const modules = ['Validation', 'Registry', 'Properties', 'Sha256Stream', 'AssetMesh', 'AssetTransfer', 'AssetUpload', 'AssetPlacement', 'TestProof', 'TerrainGen', 'Operations', 'Transport'];
+const modules = ['Validation', 'Registry', 'Properties', 'Sha256Stream', 'AssetMesh', 'AssetTransfer', 'AssetUpload', 'AssetPlacement', 'TestProof', 'TerrainGen', 'AssetMaterials','Operations', 'Transport'];
 
 async function runLuau(checks, marker) {
   const directory = await mkdtemp(path.join(tmpdir(), 'arcane-build-perf-'));

@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'TerrainGen', 'Operations'];
+const modules = ['Validation', 'Registry', 'Properties', 'TerrainGen', 'AssetMaterials','Operations'];
 
 // Engine doubles owned by this harness: Region3 boxes, the terrain Enum.Material items MockEngine lacks,
 // a recording Terrain:WriteVoxels and a counting task.wait. They do not certify Roblox behaviour.

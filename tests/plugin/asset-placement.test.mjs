@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'AssetPlacement', 'Operations'];
+const modules = ['Validation', 'Registry', 'Properties', 'AssetPlacement', 'AssetMaterials','Operations'];
 
 // Engine doubles owned by this harness (not native proof): translation+yaw CFrames, axis-aligned
 // Model bounding boxes, ScaleTo about the pivot, PivotTo, Clone, GetDescendants, FindFirstChild,
