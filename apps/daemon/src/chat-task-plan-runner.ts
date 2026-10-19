@@ -18,6 +18,7 @@ export interface ChatTaskPlanPorts {
   requestEvidence(plan: ChatTaskPlanRecord): Promise<{ runId: string }>;
 }
 export const CHAT_TASK_PLAN_INPUT_BYTES = 8192;
+export const CHAT_TASK_PLAN_WORKER_CONCURRENCY = 2;
 const roles = [
   ['implementation approach', 'edge cases and compatibility', 'verification and restoration'],
   ['review the implementation approach', 'review verification and remaining risks'],
@@ -87,21 +88,31 @@ export function startChatTaskPlan(options: {
       check(); await waitForInitial(); check();
       for (let round = 1; round <= CHAT_TASK_PLAN_POLICY.rounds; round++) {
         const proposed: ChatTaskProposalRecord[] = [];
-        for (const [index, role] of roles[round - 1]!.entries()) {
-          check();
-          const prompt = `Suggest a bounded ${role} for this original human task. Return a proposal only; the original parent owns implementation and evidence.\n` +
-            `Round ${round}; original input SHA-256 ${inputSha256}. Do not expand permissions, delegate, publish or claim acceptance.\nOriginal task:\n${objective}`;
-          const proposal = store.reserveProposal({ id: randomUUID(), taskId, requestId: randomUUID(), promptSha256: digest(prompt), promptBytes: Buffer.byteLength(prompt) });
-          // These two reservations are deliberately separate. Neither a factory nor any
-          // other effect may run until both succeed. An orphan remains a spent attempt.
-          const step = store.reservePlanStep({ planId: plan.id, kind: 'worker', round, index, live: { accountIdentity }, proposalId: proposal.id });
-          try { check(); await propose(proposal, prompt); }
-          catch { if (store.proposalById(proposal.id)?.state === 'reserved') store.settleProposal(proposal.id, { state: 'unknown', reason: 'dispatch_uncertain' }); }
-          if (store.proposalById(proposal.id)?.state === 'reserved') store.settleProposal(proposal.id, { state: 'unknown', reason: 'dispatch_uncertain' });
-          store.syncWorkerStep({ stepId: step.id });
-          check();
-          const result = store.proposalById(proposal.id)!;
-          if (result.state === 'proposed') proposed.push(result);
+        const roundRoles = roles[round - 1]!;
+        for (let offset = 0; offset < roundRoles.length; offset += CHAT_TASK_PLAN_WORKER_CONCURRENCY) {
+          // Join each bounded batch even when one role fails or the owner retires.
+          // Results enter fan-in in role order, independent of completion order.
+          const results = await Promise.allSettled(roundRoles.slice(offset, offset + CHAT_TASK_PLAN_WORKER_CONCURRENCY).map(async (role, batchIndex) => {
+            const index = offset + batchIndex;
+            check();
+            const prompt = `Suggest a bounded ${role} for this original human task. Return a proposal only; the original parent owns implementation and evidence.\n` +
+              `Round ${round}; original input SHA-256 ${inputSha256}. Do not expand permissions, delegate, publish or claim acceptance.\nOriginal task:\n${objective}`;
+            const proposal = store.reserveProposal({ id: randomUUID(), taskId, requestId: randomUUID(), promptSha256: digest(prompt), promptBytes: Buffer.byteLength(prompt) });
+            // These two reservations are deliberately separate. Neither a factory nor any
+            // other effect may run until both succeed. An orphan remains a spent attempt.
+            const step = store.reservePlanStep({ planId: plan.id, kind: 'worker', round, index, live: { accountIdentity }, proposalId: proposal.id });
+            try { check(); await propose(proposal, prompt); }
+            catch { if (store.proposalById(proposal.id)?.state === 'reserved') store.settleProposal(proposal.id, { state: 'unknown', reason: 'dispatch_uncertain' }); }
+            if (store.proposalById(proposal.id)?.state === 'reserved') store.settleProposal(proposal.id, { state: 'unknown', reason: 'dispatch_uncertain' });
+            store.syncWorkerStep({ stepId: step.id });
+            check();
+            const result = store.proposalById(proposal.id)!;
+            return result.state === 'proposed' ? result : null;
+          }));
+          for (const result of results) {
+            if (result.status === 'rejected') throw result.reason;
+            if (result.value) proposed.push(result.value);
+          }
         }
         let bytes = 0;
         const selected = proposed.filter(value => {

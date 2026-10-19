@@ -14,14 +14,14 @@ async function fixture(t: test.TestContext) {
   const boundary = await realpath(tmpdir()), root = await realpath(await mkdtemp(join(boundary, 'arcane-plan-integration-'))), project = join(root, 'project'); await mkdir(project);
   const budget = new ChatTaskProposalBudget(), coordinator = new ChatTaskCoordinator({ directory: join(root, 'journal'), projectPath: project, proposalBudget: budget });
   coordinator.attachCancellation(Object.freeze({ async cancelExact() {}, async revalidateExact() { return 'current' as const; } }));
-  t.after(async () => { await coordinator.close(); const part = relative(boundary, root);
+  t.after(async () => { closureGate.resolve(); await coordinator.close(); const part = relative(boundary, root);
     assert.ok(part.startsWith('arcane-plan-integration-') && !isAbsolute(part) && !part.includes(sep)); await rm(root, { recursive: true, force: true }); });
   const state: Snapshot = { connectionId: randomUUID(), provenance: 'spawned-node-fixture', mcpIsolation: 'arcane-only-verified', connected: true, ready: true,
     account: { auth: 'subscription', plan: null, requiresOpenaiAuth: true }, models: [], selection: { model: 'fixture', effort: 'low' }, operations: [], approvals: [], events: [], droppedEvents: 0, lastEventSeq: 0, failureCode: null,
     thread: { configured: true, threadId: 'original.thread', sessionId: 'original.session', selection: { model: 'fixture', effort: 'low' }, turnStatus: 'completed', turnId: 'initial.turn', writeGranted: false } };
   const taskId = randomUUID(), actorId = 'actor-' + randomUUID(), calls: string[] = [], scopes: ChatTaskProposalWorkerInput['owner'][] = [];
-  let liveAccount = account, corruptAck = false, closeFailure = false, held = false;
-  const workerEntered = deferred(); let workerRelease: (() => void) | null = null;
+  let liveAccount = account, corruptAck = false, closeFailure = false, held = false,heldClosures=false;
+  const workerEntered = deferred(),closureGate=deferred(); const workerReleases = new Set<()=>void>();
   const dispatch = () => {
     const operationId = randomUUID(), turnId = randomUUID(); coordinator.dispatched(taskId, operationId);
     state.thread!.turnId = turnId; state.thread!.turnStatus = 'completed';
@@ -43,16 +43,16 @@ async function fixture(t: test.TestContext) {
     const plan = coordinator.plan(taskId)!; const step = coordinator.planSteps(plan.id).at(-1)!;
     assert.equal(step.kind, 'worker'); assert.equal(step.state, 'reserved'); assert.ok(coordinator.proposals(taskId).some(p => p.id === step.proposalId && p.state === 'reserved'));
     return { async propose() { calls.push('worker'); workerEntered.resolve();
-      if (held) await new Promise<void>((resolve, reject) => { const abort = () => reject(Error('retired')); workerRelease = () => { input.owner.signal.removeEventListener('abort', abort); resolve(); };
+      if (held) await new Promise<void>((resolve, reject) => { const abort = () => reject(Error('retired')); const release = () => { input.owner.signal.removeEventListener('abort', abort);workerReleases.delete(release); resolve(); };workerReleases.add(release);
         if (input.owner.signal.aborted) abort(); else input.owner.signal.addEventListener('abort', abort, { once: true }); });
       input.owner.assertActive(); return { threadId: 'worker.thread', sessionId: null, turnId: 'worker.turn', text: 'A bounded suggestion.' }; },
-      async close() { calls.push('close'); if (closeFailure) throw Error('unconfirmed closure'); } };
+      async close() { calls.push('close');if(heldClosures)await closureGate.promise; if (closeFailure) throw Error('unconfirmed closure'); } };
   };
   const start = () => coordinator.startPlan({ taskId, objective, inputSha256: digest(objective), factory, async evidence(plan, scope) {
     scope.assertActive(); calls.push('evidence'); assert.equal(coordinator.planSteps(plan.id).at(-1)!.kind, 'evidence'); return { runId: randomUUID() };
   } });
   return { coordinator, budget, state, owner, taskId, actorId, calls, scopes, start, workerEntered,
-    corruptAck() { corruptAck = true; }, changeAccount() { liveAccount = 'b'.repeat(64); }, unconfirmedClose() { closeFailure = true; }, holdWorker() { held = true; }, releaseWorker() { workerRelease?.(); } };
+    corruptAck() { corruptAck = true; }, changeAccount() { liveAccount = 'b'.repeat(64); }, unconfirmedClose() { closeFailure = true; }, holdWorker() { held = true; }, releaseWorker() {held=false;for(const release of workerReleases)release();},holdClosures(){heldClosures=true;},releaseClosures(){closureGate.resolve();} };
 }
 
 test('the owned coordinator drives durable workers, exact native parent hooks and a review reference', { timeout: 10000 }, async t => {
@@ -73,15 +73,15 @@ test('a foreign parent acknowledgement cannot complete incorporation or request 
 test('cancelling a held planned worker aborts before revoke, joins closure and prevents every parent dispatch', { timeout: 10000 }, async t => {
   const f = await fixture(t); f.holdWorker(); const plan = f.start(); await f.workerEntered.promise;
   await f.coordinator.cancel(f.taskId, 'human_stop'); await f.coordinator.drain();
-  assert.ok(f.scopes.every(scope => scope.signal.aborted)); assert.equal(f.calls.filter(c => c === 'close').length, 1);
+  assert.ok(f.scopes.every(scope => scope.signal.aborted)); assert.equal(f.calls.filter(c => c === 'close').length, 2);
   assert.ok(!f.calls.includes('parent')); assert.ok(!f.calls.includes('evidence'));
   assert.equal(f.coordinator.list()[0]!.state, 'cancelled'); assert.notEqual(f.coordinator.planSteps(plan.id)[0]!.state, 'completed');
 });
 
 test('an uncertain planned worker closure quarantines its existing budget and stops later effects', { timeout: 10000 }, async t => {
   const f = await fixture(t); f.unconfirmedClose(); f.start(); await f.coordinator.drain();
-  assert.equal(f.budget.quarantined, 1); assert.equal(f.coordinator.plan(f.taskId)!.state, 'unknown');
-  assert.equal(f.calls.filter(c => c === 'factory').length, 1); assert.ok(!f.calls.includes('parent'));
+  assert.equal(f.budget.quarantined, 2); assert.equal(f.coordinator.plan(f.taskId)!.state, 'unknown');
+  assert.equal(f.calls.filter(c => c === 'factory').length, 2); assert.ok(!f.calls.includes('parent'));
 });
 
 test('repair reservation stops the planning lane while preserving the original one-repair capability', { timeout: 10000 }, async t => {
@@ -99,6 +99,27 @@ test('repair reservation stops the planning lane while preserving the original o
   assert.equal(f.coordinator.list()[0]!.repairDispatch, 'acknowledged');
   assert.deepEqual([f.coordinator.plan(f.taskId)!.state, f.coordinator.plan(f.taskId)!.reason], ['stopped', 'repair_reserved']);
   assert.ok(!f.calls.includes('parent')); assert.ok(!f.calls.includes('evidence'));
+});
+
+test('the optional plan uses both existing worker slots and retains its five-attempt budget',async t=>{
+  const f=await fixture(t);f.holdWorker();f.start();
+  for(let i=0;i<10&&f.calls.filter(call=>call==='worker').length<2;i++)await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(f.calls.filter(call=>call==='worker').length,2);assert.equal(f.budget.available(),false);
+  assert.ok(!f.calls.includes('parent'));f.releaseWorker();await f.coordinator.drain();
+  assert.equal(f.calls.filter(call=>call==='factory').length,5);assert.equal(f.calls.filter(call=>call==='close').length,5);
+  assert.equal(f.calls.filter(call=>call==='parent').length,2);assert.equal(f.coordinator.plan(f.taskId)!.state,'awaiting_review');
+});
+
+test('cancel waits for every parallel worker closure before returning and launches no later roles',async t=>{
+  const f=await fixture(t);f.holdWorker();f.holdClosures();f.start();
+  for(let i=0;i<10&&f.calls.filter(call=>call==='worker').length<2;i++)await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(f.calls.filter(call=>call==='worker').length,2);
+  let cancelled=false;const cancel=f.coordinator.cancel(f.taskId,'human_stop').then(()=>{cancelled=true;});
+  t.after(()=>f.releaseClosures());
+  for(let i=0;i<10&&f.calls.filter(call=>call==='close').length<2;i++)await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(f.calls.filter(call=>call==='close').length,2);assert.equal(cancelled,false,'Cancellation must join both native workers.');
+  assert.ok(f.scopes.every(scope=>scope.signal.aborted));f.releaseClosures();await cancel;await f.coordinator.drain();
+  assert.equal(f.calls.filter(call=>call==='factory').length,2);assert.ok(!f.calls.includes('parent'));assert.ok(!f.calls.includes('evidence'));
 });
 
 test('no unhandled coordinator plan rejections', async () => { await new Promise(resolve => setTimeout(resolve, 20)); assert.deepEqual(unhandled, []); });

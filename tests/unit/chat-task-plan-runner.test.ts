@@ -77,7 +77,7 @@ test('unsettled or failed worker responses never imply a usable proposal or auth
     } }).completion;
     assert.equal(done.state, kind === 'all refused' ? 'stopped' : 'unknown');
     assert.equal(done.reason, kind === 'all refused' ? 'no_usable_proposals' : 'step_unknown');
-    assert.equal(workers, kind === 'all refused' ? 3 : 1); assert.deepEqual(f.events, ['initial']);
+    assert.equal(workers, kind === 'all refused' ? 3 : 2); assert.deepEqual(f.events, ['initial']);
     const count = workers; await f.start({ async propose() { workers++; } }).completion; assert.equal(workers, count);
   });
 });
@@ -132,7 +132,7 @@ test('retirement during each asynchronous phase prevents every later effect', as
     if (phase === 'evidence') overrides.requestEvidence = async plan => { const reference = await f.ports.requestEvidence(plan); f.controller.abort(); return reference; };
     const done = await f.start(overrides).completion;
     assert.ok(['stopped', 'unknown'].includes(done.state)); assert.notEqual(done.state, 'awaiting_review');
-    assert.equal(f.events.filter(x => x === 'worker').length, phase === 'initial' ? 0 : phase === 'worker' ? 1 : phase === 'parent' ? 3 : 5);
+    assert.equal(f.events.filter(x => x === 'worker').length, phase === 'initial' ? 0 : phase === 'worker' ? 2 : phase === 'parent' ? 3 : 5);
     assert.equal(f.events.filter(x => x === 'parent').length, phase === 'initial' || phase === 'worker' ? 0 : 1);
   });
 });
@@ -175,6 +175,45 @@ test('port proxies/accessors and asynchronous ownership assertions are refused w
   assert.throws(() => f.start({ assertActive: (async () => { throw Error('private owner detail'); }) as () => void }), /synchronously/);
   assert.equal(f.store.plan(f.task.id), null); assert.deepEqual(f.events, []);
   assert.throws(() => startChatTaskPlan({ ...base, objective: 'x'.repeat(CHAT_TASK_PLAN_INPUT_BYTES + 1), ports: Object.freeze({ ...f.ports }) }), /bounded/);
+});
+
+test('independent roles overlap within the existing budget and reverse completion keeps deterministic fan-in and dependent rounds',async t=>{
+  const f=await fixture(t),gates=[deferred(),deferred()];let workers=0,active=0,peak=0,parents=0;
+  const done=f.start({async propose(record){
+    const index=workers++;active++;peak=Math.max(peak,active);
+    if(index<2)await gates[index]!.promise;
+    const text='role-result-'+index;
+    f.store.settleProposal(record.id,{state:'proposed',result:{threadId:'worker',sessionId:null,turnId:randomUUID(),text,textBytes:Buffer.byteLength(text),textSha256:hash(text)}});
+    active--;
+  },async incorporate(text,acknowledge){
+    assert.equal(active,0,'Every role is joined before parent dispatch.');
+    const expected=parents++===0?[0,1,2]:[3,4];
+    assert.deepEqual(expected.map(index=>text.indexOf('role-result-'+index)),expected.map(index=>text.indexOf('role-result-'+index)).sort((a,b)=>a-b));
+    assert.ok(expected.every(index=>text.includes('role-result-'+index)));
+    return f.ports.incorporate(text,acknowledge);
+  }}).completion;
+  t.after(()=>{for(const gate of gates)gate.resolve();});
+  for(let i=0;i<10&&workers<2;i++)await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(workers,2,'The first two independent roles run together.');assert.equal(peak,2);assert.equal(parents,0);
+  gates[1]!.resolve();await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(workers,2,'The next batch waits until every prior worker joins.');assert.equal(parents,0);
+  gates[0]!.resolve();assert.equal((await done).state,'awaiting_review');
+  assert.equal(workers,5);assert.equal(parents,2);assert.equal(peak,2);
+});
+
+test('one definitively rejected role is omitted while the successful roles keep their original order',async t=>{
+  const f=await fixture(t);let workers=0,parents=0;
+  const done=await f.start({async propose(record){
+    const index=workers++;
+    if(index===1){f.store.settleProposal(record.id,{state:'failed',reason:'worker_failed_before_dispatch'});return;}
+    const text='usable-role-'+index;
+    f.store.settleProposal(record.id,{state:'proposed',result:{threadId:'worker',sessionId:null,turnId:randomUUID(),text,textBytes:Buffer.byteLength(text),textSha256:hash(text)}});
+  },async incorporate(text,acknowledge){
+    if(parents++===0){assert.ok(text.indexOf('usable-role-0')<text.indexOf('usable-role-2'));assert.ok(!text.includes('usable-role-1'));}
+    return f.ports.incorporate(text,acknowledge);
+  }}).completion;
+  assert.equal(done.state,'awaiting_review');assert.equal(workers,5);assert.equal(parents,2);
+  assert.equal(f.store.planSteps(done.id).filter(step=>step.kind==='worker'&&step.state==='failed').length,1);
 });
 
 test('no unhandled plan-runner rejections', async () => { await new Promise(resolve => setTimeout(resolve, 20)); assert.deepEqual(unhandled, []); });

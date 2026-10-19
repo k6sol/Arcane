@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { z } from 'zod';
 import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, type ChatTaskPlanRecord, type ChatTaskPlanReason, type ChatTaskProposalReason, type ChatTaskProposalRecord, type ChatTaskProposalResult, type ChatTaskRecord } from '../../../packages/storage/src/chat-task-store.js';
-import { startChatTaskPlan } from './chat-task-plan-runner.js';
+import { startChatTaskPlan, CHAT_TASK_PLAN_WORKER_CONCURRENCY } from './chat-task-plan-runner.js';
 import type { Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskOrigin, StudioTestTaskPort, StudioTestTaskPrepared,
   StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
@@ -69,7 +69,7 @@ interface OwnedTask { origin: StudioTestTaskOrigin; admission: StudioTestTaskOri
   controller: AbortController;
   /** Exact original account captured at begin; never recaptured later. */
   accountIdentity: string | null;
-  proposal: Promise<void> | null; planController: AbortController | null; planDispatch: string | null; planCompletion: Promise<ChatTaskPlanRecord> | null }
+  proposal: Promise<void> | null; planProposals: Set<Promise<void>>; planController: AbortController | null; planDispatch: string | null; planCompletion: Promise<ChatTaskPlanRecord> | null }
 const PROPOSAL_ACCOUNT = /^[a-f0-9]{64}$/;
 const errorCode = (error: unknown) => error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : null;
 const wellFormedText = (value: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
@@ -146,7 +146,7 @@ export class ChatTaskCoordinator {
     const origin = Object.freeze({ kind: 'studio-test-task-origin' as const, taskId: task.id, projectId: task.projectId, provider: 'codex' as const,
       threadId: task.threadId, sessionId: task.sessionId, incarnationId });
     const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false, unstartedRetried: false,
-      controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planController: null, planDispatch: null, planCompletion: null };
+      controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planProposals: new Set(), planController: null, planDispatch: null, planCompletion: null };
     this.#owners.set(task.id, entry); this.#actors.set(input.actorId, entry); this.#origins.set(origin, entry);
     return origin;
   }
@@ -323,7 +323,10 @@ export class ChatTaskCoordinator {
           if(!this.#cancellation)throw new Error('Owned verification cancellation is unavailable.');
           await this.#cancellation.cancelExact(entry.currentJob.jobId,entry.jobOrigins.get(entry.currentJob.jobId)!);
         }
-      }finally{try{await entry.owner.cancel();}finally{if(entry.proposal)await entry.proposal;}}
+      }finally{try{await entry.owner.cancel();}finally{
+        const results=await Promise.allSettled([...(entry.proposal?[entry.proposal]:[]),...entry.planProposals]);
+        const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
+      }}
     })();
     this.#stopping.set(id,pending);return pending;
   }
@@ -396,14 +399,14 @@ export class ChatTaskCoordinator {
           waitForInitial: async () => { owner.assertActive(); await native.waitForInitial(); owner.assertActive(); },
           propose: async (record: ChatTaskProposalRecord, text: string) => {
             owner.assertActive();
-            if (entry.proposal || !this.#budget.available()) { this.#store.settleProposal(record.id, { state: 'failed', reason: 'worker_failed_before_dispatch' }); return; }
+            if (entry.proposal || entry.planProposals.size >= CHAT_TASK_PLAN_WORKER_CONCURRENCY || !this.#budget.available()) { this.#store.settleProposal(record.id, { state: 'failed', reason: 'worker_failed_before_dispatch' }); return; }
             this.#budget.acquire();
             const task = this.#store.get(input.taskId), workerInput = Object.freeze({ accountIdentity: entry.accountIdentity!,
               selection: Object.freeze({ model: task.model, effort: task.effort }), owner });
             const tracked = this.#runProposal(entry, record, text, input.factory, workerInput).finally(() => {
-              if (entry.proposal === tracked) entry.proposal = null; this.#pending.delete(tracked);
+              entry.planProposals.delete(tracked); this.#pending.delete(tracked);
             });
-            entry.proposal = tracked; this.#pending.add(tracked); void tracked.catch(() => {}); await tracked;
+            entry.planProposals.add(tracked); this.#pending.add(tracked); void tracked.catch(() => {}); await tracked;
           },
           incorporate: async (text: string, acknowledge: (value: { operationId: string; turnId: string }) => void) => {
             owner.assertActive();
@@ -449,7 +452,7 @@ export class ChatTaskCoordinator {
     if (!entry || !entry.accountIdentity || typeof entry.owner.accountIdentity !== 'function') throw new ChatTaskProposalError('TASK_SCOPE', 'This task has no live proposal authority.');
     try { this.#assertProposalParent(entry); }
     catch (error) { throw error instanceof ChatTaskProposalError ? error : new ChatTaskProposalError('TASK_SCOPE', 'The original task incarnation is unavailable.'); }
-    if (entry.proposal || this.#store.plan(input.taskId)?.state === 'active' || !this.#budget.available())
+    if (entry.proposal || entry.planProposals.size || this.#store.plan(input.taskId)?.state === 'active' || !this.#budget.available())
       throw new ChatTaskProposalError('BUSY', 'Wait for the current proposal to finish.');
     if (this.#store.proposals(input.taskId).length >= CHAT_TASK_PROPOSAL_LIMITS.perTask) throw new ChatTaskProposalError('BUSY', 'This task has no proposal capacity left.');
     const task = this.#store.get(input.taskId);
