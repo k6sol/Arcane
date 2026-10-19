@@ -87,6 +87,24 @@ async function atomicJson(directory: string, filename: string, value: unknown): 
     throw error;
   }
 }
+const COLLECTION_FILENAMES = new Set(['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'asset-lod1.glb',
+  'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'input.json', 'assembly.json',
+  'asset_worker.py', 'audit.py', 'probe.py', 'assembly.py', 'procedural.py', 'textures.py']);
+/** Only host-selected inventory filenames may appear in collection errors. */
+async function withArtifactFile<T>(name: string, action: () => Promise<T>): Promise<T> {
+  try { return await action(); }
+  catch (error) {
+    const label = COLLECTION_FILENAMES.has(name) ? name : 'Artifact';
+    if (error instanceof AssetError) {
+      if (!error.message.startsWith(label + ':') && !error.message.startsWith(label + ' ')) error.message = `${label}: ${error.message}`;
+      throw error;
+    }
+    const missing = error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ENOTDIR'].includes(String(error.code));
+    const failure = new AssetError('ARTIFACT', `${label}: ${missing ? 'Required artifact is missing.' : 'Artifact could not be read safely.'}`);
+    Object.defineProperty(failure, 'cause', { value: error });
+    throw failure;
+  }
+}
 
 /** Trusted in-process boundaries, injectable for synthetic tests only (never from HTTP, MCP or a model). */
 export interface PipelineInternals {
@@ -124,7 +142,9 @@ export class AssetPipeline {
     return result!;
   }
   private async script(name: string): Promise<string> {
-    const path = artifactPath(this.workerRoot, name); await regularFile(path, 256 * 1024); return realpath(path);
+    return withArtifactFile(name, async () => {
+      const path = artifactPath(this.workerRoot, name); await regularFile(path, 256 * 1024); return realpath(path);
+    });
   }
   private discoveryOptions() {
     return { ...(this.config.blenderExecutable ? { blenderExecutable: this.config.blenderExecutable } : {}),
@@ -225,7 +245,7 @@ export class AssetPipeline {
       remaining(end, signal); progress('probe');
       const evidence = await this.probeIn(operation, environmentDirectory, end, signal, supervision);
       if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.');
-      for (const name of workerScripts(request)) await copyFile(await this.script(name), artifactPath(directory, name), 1);
+      for (const name of workerScripts(request)) await withArtifactFile(name, async () => copyFile(await this.script(name), artifactPath(directory, name), 1));
       const requestText = JSON.stringify(request, null, request.recipe ? undefined : 2) + '\n';
       await writeFile(artifactPath(directory, 'request.json'), requestText, { flag: 'wx' });
       const recipeArguments = request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(request.recipe, request.triangleBudget).estimatedTriangles)] : [];
@@ -240,7 +260,7 @@ export class AssetPipeline {
       if (process.exitCode !== 0) throw workerFailure(process, stage);
       if (resultLine(process.stdout).audit !== 'audit.json') throw new AssetError('WORKER_PROTOCOL', 'Worker did not return its audit artifact.');
       progress('host-validation'); remaining(end, signal);
-      const audit = validateAudit(await readJson(artifactPath(directory, 'audit.json')), request);
+      const audit = await withArtifactFile('audit.json', async () => validateAudit(await readJson(artifactPath(directory, 'audit.json')), request));
       const artifacts: Artifact[] = [];
       const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
       files.push(['input.json', 'request']);
@@ -249,8 +269,11 @@ export class AssetPipeline {
       if (request.procedural) files.push(['procedural.py', 'worker']);
       if (audit.totals.lod1Triangles) files.push(['asset-lod1.glb', 'export']);
       for (const [name, role] of files) {
-        remaining(end, signal); const path = artifactPath(directory, name), size = await regularFile(path, 128 * 1024 * 1024);
-        artifacts.push({ path: name, role, bytes: size, sha256: sha256(await readRegularFile(path, 128 * 1024 * 1024)) });
+        remaining(end, signal);
+        artifacts.push(await withArtifactFile(name, async () => {
+          const path = artifactPath(directory, name), size = await regularFile(path, 128 * 1024 * 1024);
+          return { path: name, role, bytes: size, sha256: sha256(await readRegularFile(path, 128 * 1024 * 1024)) };
+        }));
       }
       const manifest: AssetManifest = { schemaVersion: 1, jobId: id, createdAt: new Date().toISOString(), request, runtime: evidence.blender,
         templateSha256: sha256(Buffer.from(workerScripts(request).map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
