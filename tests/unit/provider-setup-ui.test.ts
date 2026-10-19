@@ -89,6 +89,19 @@ test('real Edge setup: bounded startup status, explicit login/install, auth gate
  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false,'native authority still requires fresh state');
  assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
  assert.equal(await page.evaluate(()=>(window as any).calls.length),9,'displaying an update starts no sign-in or provider request');
+ // Native cancellation and model rotation may briefly publish no ready client.
+ await page.evaluate(()=>{const w=window as any;w.account={connected:false,ready:false,fresh:true,auth:'unknown'};w.subscriber();});
+ assert.equal(await page.locator('#provider-login-gate').isVisible(),false,'native handoff does not flash the login screen');
+ assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false,'handoff still cannot authorize native work');
+ assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
+ await page.evaluate(()=>{const w=window as any;w.account={connected:true,ready:false,fresh:true,auth:'subscription'};w.subscriber();});
+ assert.equal(await page.locator('#provider-login-gate').isVisible(),false,'model initialization retains the conversation');
+ assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false,'readiness remains required');
+ await page.evaluate(()=>{const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'signed-out'};w.subscriber();});
+ assert.equal(await page.locator('#provider-login-gate').isVisible(),true,'an explicit signed-out observation clears presentation evidence');
+ await page.evaluate(()=>{const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.subscriber();});
+ assert.equal(await page.locator('#provider-login-gate').isVisible(),false);
+ assert.equal(await page.evaluate(()=>(window as any).calls.length),9,'handoff rendering starts no login or native status call');
  await page.evaluate(()=>{(window as any).updater.stop();(window as any).controller.cleanup();});
  await page.evaluate(async()=>{
    const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.connections=0;

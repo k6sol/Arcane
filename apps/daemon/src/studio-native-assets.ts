@@ -38,6 +38,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
   const modelPolicyInput=z.strictObject({sessionId:z.string().min(1).max(128),allowModels:z.boolean().optional()});
   const binding=(session:Session)=>digest({scope:deps.identity(session),proof:session.proof&&{lifetime:session.proof.clientLifetimeId,epoch:session.proof.playEpoch,marker:session.proof.markerName,artifact:session.proof.pluginArtifactHash}});
   const modelsAllowed=(sessionId:string)=>{const s=deps.eligible(sessionId),choice=modelChoices.get(sessionId);return !!choice&&choice.expires>Date.now()&&choice.binding===binding(s)&&s.proof?.connected===true&&Date.parse(s.proof.expiresAt)>Date.now();};
+  const releasePolicy=deps.store.bindModelSourcePolicy(modelsAllowed);
   const requireModels=(sessionId:string)=>{if(!modelsAllowed(sessionId))throw new NativeAssetHostRefusal('TOOLBOX_MODELS_DISABLED');};
   const times={search:[] as number[],insert:[] as number[],generate:[] as number[]};
   const searched=new Map<string,number>(),jobs=new Map<string,Job>();
@@ -82,6 +83,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
   const prune=()=>{const now=Date.now();for(const [id,job] of jobs)if(now-job.createdAt>NATIVE_ASSET_RATE.jobTtlMs)jobs.delete(id);for(const [key,expires] of searched)if(expires<=now)searched.delete(key);};
   return Object.freeze({
     active:()=>active,
+    close(){releasePolicy();modelChoices.clear();},
     toolboxPolicy(input:unknown,guard:()=>void){
       guard();const a=modelPolicyInput.parse(input),s=deps.eligible(a.sessionId);
       if(a.allowModels!==undefined){

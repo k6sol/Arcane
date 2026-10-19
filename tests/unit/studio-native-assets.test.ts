@@ -357,6 +357,7 @@ test('policy: placement, material and clone items are bounded, scoped and need t
 test('store: placement and clone-build receipts are validated and restorable', t => {
   const root = makeFixtureDirectory('arcane-asset-receipts-');
   const store = new StudioStore({ directory: join(root, 'store') });
+  const releaseSourcePolicy=store.bindModelSourcePolicy(()=>true);t.after(releaseSourcePolicy); // explicit external-template fixture opt-in
   t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
   const pair = store.pair({ code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'receipt-window', placeId: 0, universeId: 0, name: 'Fixture', pluginVersion: '0.2.0' },
@@ -515,4 +516,31 @@ test('model source revocation: a changed choice before dispatch prevents insert;
   allowed=true;const after=await nativeFixture(t,{reply:(name,args)=>{if(name==='insert_asset')allowed=false;return defaultReply(name,args);}});
   await assert.rejects(insertNativeAsset({...context(after.client),authorize},request,AbortSignal.timeout(5000)),{code:'EFFECT_UNKNOWN'});
   assert.deepEqual(assetNames(after.state.calls),['insert_asset']);
+});
+
+const clonedForest=(sessionId:string,requestId:string)=>({sessionId,requestId,method:'scene.build',args:{parent:ROOT(sessionId),container:{className:'Model',name:'Forest'},prototypes:[],templates:[TEMPLATE(sessionId)],items:[{kind:'clone',template:1,name:'Tree',parent:0,at:[0,0,0],yaw:0,scale:1}]}});
+
+test('template sources: default rejects reuse of existing external models before queueing; explicit human opt-in is rechecked before dispatch',async t=>{
+ const f=await serviceFixture(t,{allowModels:false}),sessionId=f.pair.sessionId;
+ assert.throws(()=>f.store.enqueue(clonedForest(sessionId,'no-reuse')),{code:'TEMPLATE_SOURCE'});
+ assert.equal(f.store.commands(sessionId).length,0);assert.equal(f.natives().length,0);
+ f.service.humanControl.toolboxPolicy({sessionId,allowModels:true},()=>{});
+ const command=f.store.enqueue(clonedForest(sessionId,'opted-in'));
+ f.service.humanControl.toolboxPolicy({sessionId,allowModels:false},()=>{});
+ assert.deepEqual(f.store.poll(sessionId,f.proof),[]);
+ assert.equal(f.store.command(command.id).state,'cancelled');
+ assert.match(f.store.command(command.id).error!,/No objects were created/);
+ assert.throws(()=>f.store.enqueue(clonedForest(sessionId,'still-disabled')),{code:'TEMPLATE_SOURCE'});
+});
+
+test('template sources: an authenticated original-reconstruction placement receipt allows the exact template without enabling external models',async t=>{
+ const f=await serviceFixture(t,{allowModels:false}),sessionId=f.pair.sessionId,ref=TEMPLATE(sessionId);
+ const placed=f.store.enqueue({sessionId,requestId:'original-placement',method:'scene.place_asset',args:{watch:'editable-'+'a'.repeat(64),parent:ROOT(sessionId),name:'Original oak',position:[0,0,0],yaw:0,ground:true,anchor:true,allowScripts:false}});
+ f.store.poll(sessionId,f.proof);
+ f.store.result({sessionId,commandId:placed.id,state:'succeeded',result:{ref,removedScripts:{count:0,classes:{},names:[]},mutation:{kind:'scene.place_asset',ref,before:null,after:{descendants:3,removedScripts:0,keptScripts:0,scale:1}}}});
+ const command=f.store.enqueue(clonedForest(sessionId,'original-scatter'));
+ assert.equal(command.state,'queued');assert.equal(f.service.humanControl.toolboxPolicy({sessionId},()=>{}).allowModels,false);
+ assert.equal(f.store.poll(sessionId,f.proof)[0]!.id,command.id);
+ const other=clonedForest(sessionId,'forged-template');other.args.templates=[{...ref,instanceId:'other-model'}];
+ assert.throws(()=>f.store.enqueue(other),{code:'TEMPLATE_SOURCE'});
 });

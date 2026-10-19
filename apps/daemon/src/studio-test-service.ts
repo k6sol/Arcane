@@ -246,7 +246,7 @@ export async function createStudioTestService(options:Options){
         return view(j);
       }finally{humanContexts.delete(context);}
     }}),
-    lifecycle:Object.freeze({async close(){closed=true;try{if(current)await closeJob(current);}finally{await ledger.close();}}}),
+    lifecycle:Object.freeze({async close(){closed=true;nativeAssets.close();try{if(current)await closeJob(current);}finally{await ledger.close();}}}),
   });
 }
 type CreatedStudioTestService=Awaited<ReturnType<typeof createStudioTestService>>;

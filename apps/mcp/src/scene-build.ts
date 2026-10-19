@@ -108,7 +108,7 @@ export const sceneBuildShape = {
   })).optional().describe('Reusable templates. Part Position/Orientation are relative to the placement origin at ground level; Size scales with placement scale. ui trees are stamped by items with use.'),
   templates: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), ref).optional()
     .refine(value => !value || Object.keys(value).length <= ASSET_PLACE_LIMITS.templates, `At most ${ASSET_PLACE_LIMITS.templates} templates.`)
-    .describe('Existing script-free Model/BasePart refs (e.g. an asset adopted by studio_asset_insert into a hidden Folder) placed by name with "use" like a prototype: each placement is a full copy, scaled and yawed about its bottom pivot (tint does not apply).'),
+    .describe('Original Model/BasePart refs from assets_place_studio_import. Other templates need human Settings opt-in. Use by name; each placement is a full copy, scaled and yawed about its bottom pivot (tint does not apply).'),
   items: z.array(z.strictObject({
     key: key.optional().describe('Local id; returned with a real ref, and usable as "in" for later items.'),
     in: key.optional().describe('Key of an earlier group item (effects/GUI: also a part, Attachment or GUI host item); default is the build root.'),

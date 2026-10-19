@@ -234,6 +234,30 @@ export class StudioStore {
   #testCommandAdmissions = new WeakMap<object,TestCommandAdmission>();
   #diagnostics = new Map<string,{placeName:string;placeId:number;entries:Map<string,StudioDiagnostic>}>();
   #pairingOffer: PairingOfferRecord | null = null;
+  #modelSourcePolicy: ((sessionId:string)=>boolean)|null = null;
+  /** Trusted daemon composition only; no JSON route can install or invoke a policy callback. */
+  bindModelSourcePolicy(read:(sessionId:string)=>boolean):()=>void {
+    if(typeof read!=='function'||this.#modelSourcePolicy)throw new ArcaneError('POLICY','A model-source policy is already bound or invalid.');
+    this.#modelSourcePolicy=read;
+    return ()=>{if(this.#modelSourcePolicy===read)this.#modelSourcePolicy=null;};
+  }
+  private assertTemplateSources(sessionId:string,args:Record<string,Json>):void {
+    const templates=args.templates as InstanceRef[]|undefined;
+    if(!templates?.length)return;
+    try{if(this.#modelSourcePolicy?.(sessionId)===true)return;}catch{/* An unavailable choice never enables external models. */}
+    const current=this.session(sessionId);
+    for(const ref of templates){
+      // Only an authenticated placement receipt for a retained original reconstruction
+      // attests a default template. Search results, names and agent claims do not.
+      const row=this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state='succeeded' AND json_extract(payload,'$.method')='scene.place_asset' AND json_extract(payload,'$.result.mutation.ref.instanceId')=? ORDER BY created DESC,rowid DESC LIMIT 1").get(sessionId,ref.instanceId) as Row|undefined;
+      const command=row?JSON.parse(row.payload as string) as StudioCommand:null;
+      const mutation=(command?.result as {mutation?:{kind?:string;ref?:InstanceRef}}|null)?.mutation;
+      const source=mutation?.ref;
+      if(!command||command.clientSessionId!==current.clientSessionId||typeof command.args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(command.args.watch)
+        ||mutation?.kind!=='scene.place_asset'||!source||source.sessionId!==ref.sessionId||source.instanceId!==ref.instanceId||source.root!==ref.root||source.className!==ref.className)
+        throw new ArcaneError('TEMPLATE_SOURCE','This scene template is not recorded as an original Blender reconstruction. Create an original model with assets_procedural, inspect assets_preview, then prepare, stage, reconstruct and place it before scattering. Existing Toolbox or external templates require the user to enable them in Settings > Tools.');
+    }
+  }
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
@@ -620,6 +644,7 @@ export class StudioStore {
       const s = this.session(sessionId);
       if (!this.live(s)) throw new ArcaneError('SESSION_OFFLINE', 'Studio session is not live: its plugin has not polled within ' + STUDIO_SESSION_LIVE_MS / 1000 + ' s. No command was queued. List sessions and choose a live one; do not retry against this session.');
       const args = validateCommandArgs(method, a.args, s, internalRestore);
+      if(method==='scene.build')this.assertTemplateSources(sessionId,args);
       const activating = this.activationSource(method, args);
       const verification = admission ? this.#activationAdmissions.get(admission) : undefined;
       if (activating !== null && (!verification || verification.sourceSha256 !== hash(activating)))
@@ -1317,6 +1342,11 @@ export class StudioStore {
         if (!row) return [];
         const c = JSON.parse(row.payload as string) as StudioCommand;
         if (Date.parse(c.expiresAt) <= this.now()) { c.state = 'cancelled'; c.error = 'Undelivered command expired.'; c.finishedAt = this.iso(); this.saveCommand(c); continue; }
+        if(c.method==='scene.build'){
+          try{this.assertTemplateSources(sessionId,c.args);}
+          catch(error){if(!(error instanceof ArcaneError)||error.code!=='TEMPLATE_SOURCE')throw error;
+            c.state='cancelled';c.error='External template permission changed before dispatch. No objects were created.';c.finishedAt=this.iso();this.saveCommand(c);this.event('command_cancelled',c.id,{sessionId});continue;}
+        }
         if(!this.guardTestDispatch(c))return [];
         c.state = 'dispatched'; this.saveCommand(c); this.event('command_dispatched', c.id, { sessionId }); return [c];
       }
