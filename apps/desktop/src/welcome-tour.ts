@@ -41,7 +41,7 @@ export function tourSeen(storage: TourStorage | null): boolean {
 }
 
 /** Records completion. Storage failures are ignored: the tour simply shows again next launch. */
-export function markTourSeen(storage: TourStorage | null, how: 'finished' | 'skipped'): void {
+export function markTourSeen(storage: TourStorage | null, how: 'finished' | 'skipped' | 'shown'): void {
   try { storage?.setItem(WELCOME_TOUR_KEY, JSON.stringify({ version: 1, seen: true, how })); } catch { /* Private mode or full storage. */ }
 }
 
@@ -85,7 +85,7 @@ export interface WelcomeTourOptions {
 }
 export interface WelcomeTourPersistence {
   read(): Promise<{available: boolean; seen: boolean}>;
-  dismiss(input: {how: 'finished' | 'skipped'}): Promise<{saved: true}>;
+  dismiss(input: {how: 'finished' | 'skipped' | 'shown'}): Promise<{saved: true}>;
 }
 export interface WelcomeTour { start(): boolean; close(how: 'finished' | 'skipped' | 'paused'): void; active(): boolean; stop(): void }
 
@@ -105,6 +105,12 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
   let pending: number | null = null;
   let hydrated = !persistence, allowAuto = true, seen = tourSeen(storage);
   const wasSeen = () => seen || tourSeen(storage);
+  // Serialize presentation and completion so a quick Skip cannot race the host's file lock.
+  let pendingSave: Promise<void> = Promise.resolve();
+  function remember(how: 'finished' | 'skipped' | 'shown') {
+    seen = true; markTourSeen(storage, how);
+    if (persistence) pendingSave = pendingSave.then(() => persistence.dismiss({how})).then(() => {}, () => {});
+  }
 
   const visible = (node: Element | null): node is HTMLElement => {
     if (!(node instanceof view.HTMLElement) || node.closest('[hidden], [inert]')) return false;
@@ -178,8 +184,7 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
     doc.removeEventListener('keydown', onKey, true); doc.removeEventListener('focusin', onFocusIn);
     view!.removeEventListener('resize', onLayout); view!.removeEventListener('scroll', onLayout, true);
     if (how !== 'paused') {
-      seen = true; markTourSeen(storage, how);
-      void persistence?.dismiss({how}).catch(() => { /* Keep dismissal for this window even if the profile is unavailable. */ });
+      remember(how);
     }
     const to = returnFocus && returnFocus.isConnected && visible(returnFocus) ? returnFocus : doc.getElementById('codex-composer');
     returnFocus = null;
@@ -207,7 +212,10 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
   const tryAuto = () => {
     if (stopped || !hydrated || !allowAuto || index >= 0 || pending !== null || wasSeen()) return;
     // A short settle so the signed-in workspace (checklist, gallery) has rendered before measuring targets.
-    pending = view.setTimeout(() => { pending = null; if (!stopped && !wasSeen()) start(); }, 400);
+    pending = view.setTimeout(() => {
+      pending = null;
+      if (!stopped && !wasSeen() && start()) remember('shown');
+    }, 400);
   };
   // Pause (without marking seen) if the user is signed out while the tour is open.
   const onGate = () => { if (index >= 0 && signInShowing()) close('paused'); else if (options.autoStart !== false) tryAuto(); };

@@ -227,7 +227,7 @@ test('encrypted TEST DOUBLE: raw drafts/provider/tabs survive restart, reload an
 });
 
 test('welcome tour dismissal survives a fresh renderer, daemon port and project', async () => {
-  for (const how of ['finished', 'skipped']) {
+  for (const how of ['finished', 'skipped', 'shown']) {
     const f=fixture();
     assert.equal(Object.isFrozen(f.exposed.welcomeTour),true);
     assert.deepEqual(json(await f.exposed.welcomeTour.read()),{available:true,seen:false});

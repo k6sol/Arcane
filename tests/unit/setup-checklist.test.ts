@@ -147,11 +147,15 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'No horizontal overflow at phone width.');
   await page.setViewportSize({ width: 1280, height: 860 });
 
-  // Later hides only for this page; Hide checklist persists; all green completes and auto-hides for good.
+  // Both dismissal actions survive a new renderer; completed setup stays available in Settings.
   await page.locator('#setup-checklist-later').click();
   assert.equal(await page.locator('#setup-checklist').isVisible(), false);
-  assert.equal(await page.evaluate((k: string) => localStorage.getItem(k), SETUP_CHECKLIST_KEY), null);
+  assert.equal(JSON.parse(await page.evaluate((k: string) => localStorage.getItem(k), SETUP_CHECKLIST_KEY) ?? 'null').dismissed, true);
   await boot();
+  assert.equal(await page.locator('#setup-checklist').isVisible(), false, 'Later survives a reload.');
+  await page.evaluate(() => (document.getElementById('settings-drawer') as HTMLDialogElement).showModal());
+  await page.locator('#setup-checklist-show').click();
+  await page.evaluate(() => (document.getElementById('settings-drawer') as HTMLDialogElement).close());
   await page.waitForFunction(() => !document.getElementById('setup-checklist')!.hidden);
   await page.locator('#setup-checklist-hide').click();
   assert.deepEqual(JSON.parse(await page.evaluate((k: string) => localStorage.getItem(k), SETUP_CHECKLIST_KEY) ?? 'null'), { version: 1, completed: false, dismissed: true });
@@ -171,6 +175,13 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
 
   // The desktop bridge stores the choice outside the temporary renderer; each boot starts with empty localStorage.
   await boot(true);await page.waitForFunction(()=>!document.getElementById('setup-checklist')!.hidden);
+  await page.locator('#setup-checklist-later').click();
+  for(let attempts=0;attempts<100&&!savedNativeMemory()?.dismissed;attempts++)await new Promise(done=>setTimeout(done,10));
+  assert.equal(savedNativeMemory()?.dismissed,true,'Later is acknowledged by app-owned storage.');
+  await boot(true);await page.waitForTimeout(200);
+  assert.equal(await page.locator('#setup-checklist').isVisible(),false,'Later survives empty renderer storage.');
+  await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).showModal());
+  await page.locator('#setup-checklist-show').click();await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).close());
   await page.locator('#setup-checklist-hide').click();
   await page.waitForFunction(()=>document.getElementById('setup-checklist')!.hidden);
   for(let attempts=0;attempts<100&&!savedNativeMemory()?.dismissed;attempts++)await new Promise(done=>setTimeout(done,10));

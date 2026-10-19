@@ -255,7 +255,7 @@ const toolDrafts = Object.freeze({ version: 1,
 const welcomeTourInvoke = async (action, args) => {
   try {
     if (action === 'read') { if (args.length) workspacePreferenceError(); }
-    else if (args.length !== 1 || !['finished', 'skipped'].includes(workspacePreferenceFields(args[0], ['how']).how)) workspacePreferenceError();
+    else if (args.length !== 1 || !['finished', 'skipped', 'shown'].includes(workspacePreferenceFields(args[0], ['how']).how)) workspacePreferenceError();
     const value = await ipcRenderer.invoke('arcane:welcome-tour-' + action, ...(action === 'read' ? [] : [{ how: args[0].how }]));
     if (action === 'read') {
       workspacePreferenceFields(value, ['available', 'seen']);

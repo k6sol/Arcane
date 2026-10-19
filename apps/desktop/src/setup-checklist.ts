@@ -277,7 +277,7 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     const button = (event.target as Element | null)?.closest?.('button[data-setup-action]') as HTMLButtonElement | null;
     if (button && !button.disabled) act(button.dataset.setupAction ?? '', event);
   });
-  listen(el('setup-checklist-later'), 'click', event => { if (event.isTrusted) { forced = false; later = true; render(); } });
+  listen(el('setup-checklist-later'), 'click', event => { if (event.isTrusted) { forced = false; later = true; save({ ...memory, dismissed: true }); render(); } });
   listen(el('setup-checklist-hide'), 'click', event => { if (event.isTrusted) { forced = false; save({ ...memory, dismissed: true }); render(); } });
   listen(el('setup-checklist-show'), 'click', event => { if (event.isTrusted) { forced = memory.completed || !automatic; later = false; save({ ...memory, dismissed: false }); render(); } });
   listen(el('studio-plugin-install'), 'click', event => act('install-plugin', event));

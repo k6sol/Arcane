@@ -341,7 +341,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
         try {
           const scope = current(event);
           if (action === 'read') { if (args.length) fail(); }
-          else if (args.length !== 1 || !['finished', 'skipped'].includes(fields(args[0], ['how']).how)) fail();
+          else if (args.length !== 1 || !['finished', 'skipped', 'shown'].includes(fields(args[0], ['how']).how)) fail();
           if (tourBusy) fail(); tourBusy = true; ownsBusy = true;
           if (!available()) { if (action === 'read') return { available: false, seen: false }; fail(); }
           const chain = checkedPath(scope.userRoot);

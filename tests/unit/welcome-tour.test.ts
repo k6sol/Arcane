@@ -216,6 +216,21 @@ test('real Edge tour: waits for sign-in, spotlights real controls, traps focus, 
   await page.locator('#welcome-tour-skip').click();
   await page.evaluate(()=>document.getElementById('workspace-stage')!.classList.toggle('tour-fixture-refresh'));
   await page.waitForTimeout(700);assert.equal(await shown(),false);
-  assert.deepEqual(await page.evaluate(()=>(window as any).dismissals),['skipped']);
+  assert.deepEqual(await page.evaluate(()=>(window as any).dismissals),['shown','skipped']);
+
+  // Closing during the first step still counts as a first launch; empty browser storage cannot replay it.
+  await page.evaluate(async()=>{
+    const w=window as any,path='/welcome-tour.js',module=await import(path);w.tour.stop();w.nativeSeen=false;w.presentationWrites=[];
+    w.persistence={read:async()=>({available:true,seen:w.nativeSeen}),dismiss:async(input:any)=>{w.nativeSeen=true;w.presentationWrites.push(input.how);return{saved:true};}};
+    w.startTour=()=>module.startWelcomeTour(document,{storage:null,persistence:w.persistence});w.tour=w.startTour();
+  });
+  await page.waitForFunction(()=>!document.getElementById('welcome-tour')!.hidden);
+  await page.waitForFunction(()=>(window as any).nativeSeen===true);
+  await page.evaluate(()=>{const w=window as any;w.tour.stop();w.tour=w.startTour();});
+  await page.waitForTimeout(700);assert.equal(await shown(),false,'an interrupted first tour stays quiet on the next launch');
+  assert.deepEqual(await page.evaluate(()=>(window as any).presentationWrites),['shown']);
+  await page.locator('#welcome-tour-replay').evaluate((button:HTMLElement)=>button.click());
+  await page.waitForFunction(()=>!document.getElementById('welcome-tour')!.hidden);
+  await page.locator('#welcome-tour-skip').click();
   assert.deepEqual(errors, []);
 });
