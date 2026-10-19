@@ -95,13 +95,20 @@ export function normalizeProcedural(value: unknown): ProceduralSpec {
     height: num(r.height, PROCEDURAL_LIMITS.foliageHeight, 0.9, 'Foliage height (m)'), density: num(r.density, [0, 1], 0.7, 'density') });
 }
 
+/** Exact render membership from normalized parameters; never inferred from scene claims. */
+export function proceduralRenderSourceKeys(spec: ProceduralSpec, manifestVersion: 1 | 2 = 2): string[] {
+  return spec.kind === 'tree' ? (manifestVersion === 2 && spec.leafDensity === 0 ? ['bark'] : ['bark', 'leaves'])
+    : [spec.kind === 'column' ? 'stone' : spec.kind === 'rock' ? 'rock' : 'foliage'];
+}
+
 /** Exact opaque PBR authoring contract shared by generation, persisted audit and GLB verification. */
-export function proceduralSurfaceMaterials(spec: ProceduralSpec, primary: Vec3): AssemblyMaterial[] {
+export function proceduralSurfaceMaterials(spec: ProceduralSpec, primary: Vec3, manifestVersion: 1 | 2 = 2): AssemblyMaterial[] {
   if (spec.finish !== 'natural') return [];
   const rows: [string, MaterialSurface['profile'], Vec3, number][] = spec.kind === 'tree' ? [['Bark', 'bark', primary, .92], ['Leaves', 'leaf', spec.secondaryColor, .8]]
     : spec.kind === 'rock' ? [['Rock', 'stone', primary, .88]] : spec.kind === 'column' ? [['Stone', 'weathered', primary, .8]]
     : [['Foliage', 'leaf', primary, .8]];
-  return rows.map(([id, profile, color, roughness]) => ({ id, color: [...color] as Vec3, metallic: 0, roughness,
+  const keys = proceduralRenderSourceKeys(spec, manifestVersion);
+  return rows.filter(([id]) => keys.includes(id.toLowerCase())).map(([id, profile, color, roughness]) => ({ id, color: [...color] as Vec3, metallic: 0, roughness,
     surface: { profile, resolution: PROCEDURAL_SURFACE_RESOLUTION } }));
 }
 

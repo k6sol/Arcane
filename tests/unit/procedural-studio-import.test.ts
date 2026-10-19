@@ -55,7 +55,7 @@ function replaceModel(manifest: AssetManifest, exports: Exports, path: 'asset.gl
   const model = manifest.validation.studioImport!.models.find(m => m.path === path)!;
   model.byteLength = bytes.length; model.sha256 = artifact.sha256;
 }
-async function fixture(t: test.TestContext, kind: Kind, overrides: { renderKeys?: readonly string[]; collisionKey?: string } = {}) {
+async function fixture(t: test.TestContext, kind: Kind, overrides: { renderKeys?: readonly string[]; collisionKey?: string; leafDensity?: number; manifestVersion?: 1 | 2 } = {}) {
   const parent = tmpdir(), directory = await mkdtemp(join(parent, 'arcane-procedural-import-'));
   t.after(async () => {
     const part = relative(parent, directory);
@@ -63,13 +63,16 @@ async function fixture(t: test.TestContext, kind: Kind, overrides: { renderKeys?
     await rm(directory, { recursive: true, force: true });
   });
   const manifest = await saveStudioFixture(directory, JOB);
-  manifest.request = normalizeRequest({ template: 'procedural', name: 'procedural-' + kind, procedural: { kind } });
+  manifest.schemaVersion = overrides.manifestVersion ?? 1;
+  manifest.request = normalizeRequest({ template: 'procedural', name: 'procedural-' + kind,
+    procedural: { kind, ...(kind === 'tree' && overrides.leafDensity !== undefined ? { leafDensity: overrides.leafDensity } : {}) } });
   const request = Buffer.from(JSON.stringify(manifest.request)), requestHash = sha(request);
   manifest.sourceRequestSha256 = requestHash;
   for (const path of ['request.json', 'input.json']) {
     const row = manifest.artifacts.find(a => a.path === path)!; row.sha256 = requestHash; row.bytes = request.length;
   }
-  const evidence = manifest.validation.studioImport!, renderKeys = overrides.renderKeys ?? cases.find(c => c.kind === kind)!.keys;
+  const evidence = manifest.validation.studioImport!, renderKeys = overrides.renderKeys ??
+    (kind === 'tree' && overrides.leafDensity === 0 && manifest.schemaVersion === 2 ? ['bark'] : cases.find(c => c.kind === kind)!.keys);
   evidence.assetId = identity(manifest.request, 'asset', 'root'); evidence.requestSha256 = requestHash;
   const exports: Exports = new Map();
   for (const path of ['asset.glb', 'collision.glb'] as const) {
@@ -135,6 +138,22 @@ for (const { kind, keys } of cases) test('procedural ' + kind + ' adapts exact p
   assert.deepEqual(objects.filter(o => o.role === 'render').map(o => o.sourceObjectId).sort(), keys.map(k => identity(f.manifest.request, 'render', k)).sort());
   assert.deepEqual(objects.filter(o => o.role === 'collision').map(o => o.sourceObjectId), [identity(f.manifest.request, 'collision', 'proxy')]);
   assert.equal(result.payload.textures?.length ?? 0, 0);
+});
+
+for (const manifestVersion of [1, 2] as const) test('zero-density manifest v' + manifestVersion + ' retains its exact render set through sealed import', async t => {
+  const f = await fixture(t, 'tree', { leafDensity: 0, manifestVersion }), result = await stage(t, f.manifest, f.exports);
+  const keys = manifestVersion === 1 ? ['bark', 'leaves'] : ['bark'];
+  assert.deepEqual(result.prepared.manifest.objects.filter(o => o.role === 'render').map(o => o.sourceObjectId).sort(),
+    keys.map(k => identity(f.manifest.request, 'render', k)).sort());
+  assert.deepEqual(result.prepared.manifest.objects.find(o => o.role === 'collision')!.collisionFor,
+    keys.map(k => identity(f.manifest.request, 'render', k)).sort());
+  const rewritten = { ...f.manifest, schemaVersion: manifestVersion === 1 ? 2 : 1 } as AssetManifest;
+  assert.throws(() => adaptCompletedStudioImport(rewritten, f.exports, PROJECT, selection, null), evidenceFailure);
+});
+
+test('positive tiny density still requires leaves and cannot masquerade as a new bare tree', async t => {
+  const f = await fixture(t, 'tree', { leafDensity: 1e-8, manifestVersion: 2, renderKeys: ['bark'] });
+  assert.throws(() => adaptCompletedStudioImport(f.manifest, f.exports, PROJECT, selection, null), evidenceFailure);
 });
 
 for (const overrides of [{ renderKeys: ['body'] }, { renderKeys: ['bark'] }, { renderKeys: ['bark', 'leaves', 'extra'] }, { collisionKey: 'body_proxy' }])

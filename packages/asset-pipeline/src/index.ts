@@ -275,7 +275,7 @@ export class AssetPipeline {
           return { path: name, role, bytes: size, sha256: sha256(await readRegularFile(path, 128 * 1024 * 1024)) };
         }));
       }
-      const manifest: AssetManifest = { schemaVersion: 1, jobId: id, createdAt: new Date().toISOString(), request, runtime: evidence.blender,
+      const manifest: AssetManifest = { schemaVersion: 2, jobId: id, createdAt: new Date().toISOString(), request, runtime: evidence.blender,
         templateSha256: sha256(Buffer.from(workerScripts(request).map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
         sourceRequestSha256: artifacts.find(a => a.path === 'input.json')!.sha256, ...(audit.assembly ? { assembly: audit.assembly } : {}),
         coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false },

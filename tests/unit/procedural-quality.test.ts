@@ -33,19 +33,34 @@ test('original procedural surfaces use fixed profiles and resolution with one ex
   }
 });
 
-function measured(): AssetAudit {
-  const request = normalizeRequest(input('natural')), base = audit(), render = base.meshes[0]!, collision = base.meshes[1]!;
-  const materials = proceduralSurfaceMaterials(request.procedural!, request.color);
+function measured(leafDensity = .7, manifestVersion: 1 | 2 = 2): AssetAudit {
+  const request = normalizeRequest({ ...input('natural'), procedural: { kind: 'tree', finish: 'natural', leafDensity } }), base = audit(), render = base.meshes[0]!, collision = base.meshes[1]!;
+  const materials = proceduralSurfaceMaterials(request.procedural!, request.color, manifestVersion);
   return { ...base, template: 'procedural', meshes: [...materials.map(material => {
     const roles = ['baseColor', 'normal', 'metallicRoughness'] as const, suffix = ['BaseColor', 'Normal', 'MetallicRoughness'];
     const evidence: MaterialEvidence = { name: 'MAT_' + material.id, color: material.color, metallic: material.metallic!, roughness: material.roughness!,
       emission: { color: [1, 1, 1], strength: 0 }, surface: { profile: material.surface!.profile, resolution: 256, generator: 'arcane-tile-v1', texCoord: 0,
         images: roles.map((role, index) => ({ role, name: `T_${material.id}_${suffix[index]}`, width: 256, height: 256, colorSpace: role === 'baseColor' ? 'sRGB' : 'Non-Color', sha256: 'a'.repeat(64) })) } };
     return { ...render, name: 'SM_quality_' + material.id.toLowerCase(), materials: [evidence.name], materialProperties: [evidence] };
-  }), { ...collision, name: 'COL_quality' }], totals: { renderTriangles: 8, lod1Triangles: 0, collisionTriangles: 4, materials: 2 },
-  exports: [{ path: 'asset.glb', objects: 2, triangles: 8, materials: 2, finitePositions: true }, { path: 'asset.fbx', objects: 2, triangles: 8, materials: 2, finitePositions: true },
+  }), { ...collision, name: 'COL_quality' }], totals: { renderTriangles: materials.length * 4, lod1Triangles: 0, collisionTriangles: 4, materials: materials.length },
+  exports: [{ path: 'asset.glb', objects: materials.length, triangles: materials.length * 4, materials: materials.length, finitePositions: true }, { path: 'asset.fbx', objects: materials.length, triangles: materials.length * 4, materials: materials.length, finitePositions: true },
     { path: 'collision.glb', objects: 1, triangles: 4, materials: 0, finitePositions: true }] };
 }
+
+test('bare natural trees require only bark maps while historical version1 retains its exact leaf material', () => {
+  const request = normalizeRequest({ ...input('natural'), procedural: { kind: 'tree', finish: 'natural', leafDensity: 0 } });
+  assert.deepEqual(proceduralSurfaceMaterials(request.procedural!, request.color).map(m => m.id), ['Bark']);
+  assert.deepEqual(proceduralSurfaceMaterials(request.procedural!, request.color, 1).map(m => m.id), ['Bark', 'Leaves']);
+  assert.doesNotThrow(() => validateAudit(measured(0), request));
+  assert.doesNotThrow(() => validateAudit(measured(0, 1), request, 1));
+  assert.throws(() => validateAudit(measured(0, 1), request), /generator contract/);
+  assert.throws(() => validateAudit(measured(0), request, 1), /generator contract/);
+  for (const leafDensity of [1e-8, .25, .7, 1]) {
+    const positive = normalizeRequest({ ...input('natural'), procedural: { kind: 'tree', finish: 'natural', leafDensity } });
+    assert.deepEqual(proceduralSurfaceMaterials(positive.procedural!, positive.color).map(m => m.id), ['Bark', 'Leaves']);
+    assert.doesNotThrow(() => validateAudit(measured(leafDensity), positive));
+  }
+});
 
 test('natural procedural audit refuses missing, wrong or incomplete generated material evidence', () => {
   const request = normalizeRequest(input('natural'));

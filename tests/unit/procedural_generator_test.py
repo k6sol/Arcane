@@ -8,8 +8,10 @@ This is not Blender export, render or Studio acceptance evidence.
 import ast
 import collections
 import importlib.util
+import math
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -65,10 +67,46 @@ class GeneratorContract(unittest.TestCase):
         self.assertEqual([d.vertices for _, _, d in first], [d.vertices for _, _, d in again])
         self.assertNotEqual([d.vertices for _, _, d in first], [d.vertices for _, _, d in other])
 
-    def test_leaf_density_and_budget_scale_foliage(self):
-        sparse = procedural.plan(request(tree("birch", density=0.0), 16000))[1][2].triangles()
-        dense = procedural.plan(request(tree("birch", density=1.0), 16000))[1][2].triangles()
-        self.assertLess(sparse, dense)
+    def test_zero_density_emits_only_nonempty_closed_wood_for_every_tree_species(self):
+        for species in ("pine", "oak", "birch", "palm"):
+            with self.subTest(species=species):
+                params = tree(species, density=0.0)
+                parts = procedural.plan(request(params, 16000))
+                self.assertEqual([key for key, _, _ in parts], ["bark"])
+                mesh = parts[0][2]
+                self.assertTrue(mesh.faces)
+                edges = collections.Counter(tuple(sorted((a, b))) for face in mesh.faces
+                                            for a, b in zip(face, face[1:] + face[:1]))
+                self.assertTrue(all(count == 2 for count in edges.values()))
+                self.assertGreater(mesh.triangles(), 0)
+                self.assertLessEqual(mesh.triangles(), 16000)
+                params["finish"] = "natural"
+                self.assertEqual([m["id"] for m in procedural.surface_materials(request(params))], ["Bark"])
+
+    def test_positive_density_scales_complete_leaves_linearly_without_a_minimum_floor(self):
+        for species in ("pine", "oak", "birch"):
+            dense = procedural.plan(request(tree(species, density=1.0), 16000))[1][2]
+            capacity = dense.triangles() // procedural.leaf_triangles()
+            for density in (1e-8, .1, .25, .7, 1.0):
+                with self.subTest(species=species, density=density):
+                    parts = procedural.plan(request(tree(species, density=density), 16000))
+                    self.assertEqual([key for key, _, _ in parts], ["bark", "leaves"])
+                    self.assertEqual(parts[1][2].triangles(), math.ceil(capacity * density) * procedural.leaf_triangles())
+                    self.assertLessEqual(sum(mesh.triangles() for _, _, mesh in parts), 16000)
+
+    def test_palm_fronds_scale_from_zero_and_positive_tiny_density_remains_nonempty(self):
+        original = procedural.MeshData.tube
+        for density in (0., 1e-8, .25, .7, 1.):
+            fronds = []
+            def counted(mesh, spine, radii, sides, **kwargs):
+                if sides == 4 and len(spine) == 9:
+                    fronds.append(spine)
+                return original(mesh, spine, radii, sides, **kwargs)
+            with self.subTest(density=density), patch.object(procedural.MeshData, "tube", counted):
+                parts = procedural.plan(request(tree("palm", density=density), 16000))
+                self.assertEqual(len(fronds), math.ceil(16 * density))
+                self.assertEqual([key for key, _, _ in parts], ["bark"] if density == 0 else ["bark", "leaves"])
+                self.assertTrue(all(mesh.faces for _, _, mesh in parts))
 
     def test_rock_respects_requested_size_and_flat_base(self):
         (_, _, rock), = procedural.plan(request({"kind": "rock", "size": [3.0, 2.0, 1.0], "roughness": 0.7}, 6000))

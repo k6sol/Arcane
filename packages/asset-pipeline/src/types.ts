@@ -93,7 +93,8 @@ export interface Artifact {
   path: string; role: 'scene' | 'checkpoint' | 'export' | 'preview' | 'audit' | 'request' | 'worker'; bytes: number; sha256: string;
 }
 export interface AssetManifest {
-  schemaVersion: 1; jobId: string; createdAt: string; request: AssetRequest;
+  /** Version1 retained the legacy minimum foliage at leafDensity0; new jobs use2. */
+  schemaVersion: 1 | 2; jobId: string; createdAt: string; request: AssetRequest;
   runtime: RuntimeEvidence; templateSha256: string;
   sourceRequestSha256?: string; assembly?: AssemblyEvidence;
   coordinateSystem: { units: 'meters'; sceneUp: 'Z'; glbUp: 'Y'; fbxUp: 'Y'; pivot: 'floor'; robloxScaleVerified: false };

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { proceduralRenderSourceKeys } from '../../../packages/asset-pipeline/src/procedural.js';
 import { validateGlb } from '../../desktop/src/glb-preflight.js';
 import { AssetError, type AssetManifest, type AssetRequest } from '../../../packages/asset-pipeline/src/types.js';
 import { STUDIO_IMPORT_LIMITS, type HostGeneratedStudioImport, type StudioImportBaseline, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
@@ -87,11 +88,11 @@ function local(n: Node): number[] {
 function multiply(a: number[], b: number[]): number[] {
   return Array.from({ length: 16 }, (_, i) => [0, 1, 2, 3].reduce((sum, k) => sum + a[k*4 + i%4]! * b[Math.floor(i/4)*4 + k]!, 0));
 }
-function sourceKeys(request: AssetRequest, role: 'render' | 'collision'): string[] {
+function sourceKeys(request: AssetRequest, role: 'render' | 'collision', manifestVersion: AssetManifest['schemaVersion']): string[] {
   if (request.recipe) return request.recipe.parts.filter(p => p.role === role).map(p => p.name).sort();
   if (request.procedural) {
     if (role === 'collision') return ['proxy'];
-    return request.procedural.kind === 'tree' ? ['bark', 'leaves'] : [request.procedural.kind === 'column' ? 'stone' : request.procedural.kind === 'rock' ? 'rock' : 'foliage'];
+    return proceduralRenderSourceKeys(request.procedural, manifestVersion);
   }
   if (request.template === 'environment-kit') return ['floor', 'pillar', 'step', 'wall'];
   return role === 'collision' ? ['body_proxy'] : ['body', 'handle', 'handle_support0', 'handle_support1', 'lid', 'plaque', 'post0', 'post1', 'post2', 'post3'];
@@ -125,9 +126,9 @@ export function adaptCompletedStudioImport(manifest: AssetManifest, exports: Rea
     const doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(20, 20 + jsonSize))) as { asset: { generator?: string }; nodes?: Node[] };
     if (doc.asset.generator !== model.generator || evidence.models.some(m => m.generator !== model.generator)) evidenceFailure();
     const nodes = doc.nodes ?? [], role = model.path === 'asset.glb' ? 'render' : 'collision';
-    if (!same(model.objects.map(o => o.sourceKey).sort(), sourceKeys(request, role)) ||
+    if (!same(model.objects.map(o => o.sourceKey).sort(), sourceKeys(request, role, manifest.schemaVersion)) ||
         nodes.filter(n => n.mesh !== undefined).length !== model.objects.length || new Set(model.objects.map(o => o.nodeIndex)).size !== model.objects.length) evidenceFailure();
-    const renderIds = sourceKeys(request, 'render').map(k => expectedId(request, 'render', k)).sort();
+    const renderIds = sourceKeys(request, 'render', manifest.schemaVersion).map(k => expectedId(request, 'render', k)).sort();
     for (const obj of model.objects) {
       const node = nodes[obj.nodeIndex], extra = node?.extras;
       const collisions = role === 'render' ? [] : request.template === 'environment-kit' ? [expectedId(request, 'render', obj.sourceKey)] : renderIds;

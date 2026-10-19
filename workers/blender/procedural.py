@@ -365,7 +365,7 @@ def plan_tree(params, seed, budget_total):
     if species == "palm":
         # Crown of arching fronds: spine with leaflet pairs, no woody branches.
         crown = trunk[-1]
-        fronds = 10 + int(density * 6)
+        fronds = math.ceil(16 * density)
         for n in range(fronds):
             yaw = n * 2 * math.pi / fronds + rng.uniform(-0.2, 0.2)
             pitch = math.radians(rng.uniform(15, 45))
@@ -391,10 +391,15 @@ def plan_tree(params, seed, budget_total):
             for i in range(max(1, int(len(trunk) * .7)), len(trunk)):
                 anchors.append((trunk[i - 1], trunk[i], 0.8))
 
-    # Leaves fill the remaining budget, scaled by density.
+    # Zero means bare wood, including palms without frond stems or leaflets.
+    if density == 0:
+        return bark, leaves
+
+    # Complete leaves scale linearly with density; a positive fraction requests
+    # at least one leaf when capacity exists, with no hidden minimum percentage.
     remaining = max(0, budget_total - budget.used)
     capacity = remaining // leaf_triangles()
-    wanted = int(capacity * (0.35 + 0.65 * density))
+    wanted = math.ceil(capacity * density)
     if not anchors or wanted <= 0:
         raise ValueError("Tree has no foliage anchors within budget")
     leaf_length, leaf_width = spec["leaf"]
@@ -677,7 +682,9 @@ def plan(request):
         raise ValueError("Unknown procedural generator")
     if kind == "tree":
         bark, leaves = plan_tree(params, seed, budget)
-        parts = [("bark", "primary", bark), ("leaves", "secondary", leaves)]
+        parts = [("bark", "primary", bark)]
+        if params["leafDensity"] > 0:
+            parts.append(("leaves", "secondary", leaves))
     elif kind == "rock":
         parts = [("rock", "primary", plan_rock(params, seed, budget))]
     elif kind == "column":
@@ -766,7 +773,7 @@ def surface_materials(request):
     if request["procedural"].get("finish") != "natural":
         return []
     kind = request["procedural"]["kind"]
-    keys = ["bark", "leaves"] if kind == "tree" else ["stone" if kind == "column" else "rock" if kind == "rock" else "foliage"]
+    keys = (["bark"] if request["procedural"]["leafDensity"] == 0 else ["bark", "leaves"]) if kind == "tree" else ["stone" if kind == "column" else "rock" if kind == "rock" else "foliage"]
     profiles = {"bark": "bark", "leaves": "leaf", "rock": "stone", "stone": "weathered", "foliage": "leaf"}
     return [{"id": key.capitalize(), "color": request["procedural"]["secondaryColor"] if key == "leaves" else request["color"],
              "metallic": MATERIALS[key][0], "roughness": .8 if key in ("leaves", "foliage", "stone") else MATERIALS[key][1], "surface": {"profile": profiles[key], "resolution": 256}} for key in keys]

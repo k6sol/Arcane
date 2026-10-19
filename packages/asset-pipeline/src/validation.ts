@@ -3,7 +3,7 @@ import { jsonSnapshot, normalizeRecipe, preflightRecipe, preflightPart, checkSoc
 import { inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { AssetError } from './types.js';
-import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralSize, proceduralSurfaceMaterials, PROCEDURAL_LIMITS } from './procedural.js';
+import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralRenderSourceKeys, proceduralSize, proceduralSurfaceMaterials, PROCEDURAL_LIMITS } from './procedural.js';
 import type { AssemblyMaterial, AssetAudit, AssetManifest, AssetRequest } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
 import { decodeMaterialPng } from './material-png.js';
@@ -59,7 +59,7 @@ export async function readJson(path: string, max = 1024 * 1024): Promise<unknown
 }
 export const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
-export function validateAudit(value: unknown, request: AssetRequest): AssetAudit {
+export function validateAudit(value: unknown, request: AssetRequest, manifestVersion: AssetManifest['schemaVersion'] = 2): AssetAudit {
   const audit = record(value, 'asset audit');
   if (audit.schemaVersion !== 1 || audit.template !== request.template || audit.savedSceneReopened !== true || !Array.isArray(audit.errors) || audit.errors.length || !Array.isArray(audit.warnings)) throw new AssetError('MESH', 'Audit did not pass or saved scene was not reopened.');
   if (!Array.isArray(audit.meshes) || audit.meshes.length < 1 || audit.meshes.length > 128) throw new AssetError('MESH', 'Missing bounded mesh metrics.');
@@ -92,11 +92,11 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
   if (!totals.collisionTriangles || totals.collisionTriangles > (request.recipe?.collisionTriangleBudget ?? 256)) throw new AssetError('MESH', `audit.json: Collision triangles ${totals.collisionTriangles} must be within 1..${request.recipe?.collisionTriangleBudget ?? 256}.`);
   if (totals.materials > (request.recipe ? 8 : 3)) throw new AssetError('MESH', `audit.json: Material count ${totals.materials} exceeds ${request.recipe ? 8 : 3}.`);
   if (request.procedural) {
-    const keys = request.procedural.kind === 'tree' ? ['bark', 'leaves'] : [request.procedural.kind === 'column' ? 'stone' : request.procedural.kind === 'rock' ? 'rock' : 'foliage'];
+    const keys = proceduralRenderSourceKeys(request.procedural, manifestVersion);
     const render = (audit.meshes as Record<string, unknown>[]).filter(m => m.role === 'render').map(m => m.name).sort();
     if (!isDeepStrictEqual(render, keys.map(k => 'SM_' + request.name + '_' + k).sort()) || totals.lod1Triangles !== 0 || totals.renderTriangles > PROCEDURAL_LIMITS.maxTriangles) throw new AssetError('MESH', 'Procedural parts differ from the generator contract.');
     for (const raw of audit.meshes as Record<string, unknown>[]) if (raw.role === 'render' && (raw.materials as unknown[]).length !== 1) throw new AssetError('MESH', 'Procedural parts are joined per material (one material each).');
-    for (const wanted of proceduralSurfaceMaterials(request.procedural, request.color)) {
+    for (const wanted of proceduralSurfaceMaterials(request.procedural, request.color, manifestVersion)) {
       const mesh = (audit.meshes as Record<string, unknown>[]).find(raw => raw.role === 'render' && isDeepStrictEqual(raw.materials, ['MAT_' + wanted.id]));
       if (!mesh || !Array.isArray(mesh.materialProperties) || mesh.materialProperties.length !== 1) throw new AssetError('MESH', 'Procedural surface material evidence is missing.');
       const actual = record(mesh.materialProperties[0], 'procedural material'), emission = record(actual.emission, 'procedural emission');
@@ -355,10 +355,10 @@ function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial): voi
   }
 }
 /** Textured authoring must survive export as the same embedded PNG pixels and UV0 PBR bindings. */
-export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: AssetAudit, role: 'render' | 'lod1' = 'render'): void {
+export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: AssetAudit, role: 'render' | 'lod1' = 'render', manifestVersion: AssetManifest['schemaVersion'] = 2): void {
   const used = new Set(request.recipe?.parts.filter(part => part.role === role).map(part => part.material));
   const wanted = request.recipe?.materials.filter(material => material.surface && used.has(material.id)) ??
-    (request.procedural && role === 'render' ? proceduralSurfaceMaterials(request.procedural, request.color) : []);
+    (request.procedural && role === 'render' ? proceduralSurfaceMaterials(request.procedural, request.color, manifestVersion) : []);
   if (!wanted.length) return;
   const artifact = role === 'render' ? 'asset.glb' : 'asset-lod1.glb';
   try { inspectGlb(bytes); } catch (error) { artifactFailure(error, artifact); }
@@ -415,12 +415,12 @@ export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: 
 }
 export async function validateManifestFiles(directory: string, value: unknown): Promise<AssetManifest> {
   const m = record(value, 'manifest');
-  if (m.schemaVersion !== 1 || typeof m.jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(m.jobId) || typeof m.templateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.templateSha256)) throw new AssetError('MANIFEST', 'Unsupported manifest or worker digest.');
+  if ((m.schemaVersion !== 1 && m.schemaVersion !== 2) || typeof m.jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(m.jobId) || typeof m.templateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.templateSha256)) throw new AssetError('MANIFEST', 'Unsupported manifest or worker digest.');
   const runtime = record(m.runtime, 'runtime'), capabilities = record(runtime.capabilities, 'runtime capabilities'), coordinates = record(m.coordinateSystem, 'coordinates');
   if (typeof runtime.executable !== 'string' || runtime.executable.length > 4096 || typeof runtime.version !== 'string' || runtime.version.length > 128 || typeof runtime.pythonVersion !== 'string' || runtime.pythonVersion.length > 128 || runtime.background !== true || ['glbExport', 'glbImport', 'fbxExport', 'fbxImport', 'cycles'].some(key => capabilities[key] !== true)) throw new AssetError('MANIFEST', 'Invalid runtime evidence.');
   if (coordinates.units !== 'meters' || coordinates.sceneUp !== 'Z' || coordinates.glbUp !== 'Y' || coordinates.fbxUp !== 'Y' || coordinates.pivot !== 'floor' || coordinates.robloxScaleVerified !== false) throw new AssetError('MANIFEST', 'Invalid coordinate-system evidence.');
   if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
-  const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request);
+  const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request, m.schemaVersion);
   if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 32) throw new AssetError('MANIFEST', 'Invalid artifact list.');
   const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', 'textures.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
@@ -441,7 +441,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
       if (String(a.path).endsWith('.glb')) {
         const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);
         if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', `GLB triangle count ${geometry.triangles} disagrees with export audit ${measuredNumber(expected?.triangles)}.`);
-        if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render');
+        if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render', m.schemaVersion);
       } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
     } catch (error) { artifactFailure(error, name); }
   }

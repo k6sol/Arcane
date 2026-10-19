@@ -9,7 +9,7 @@ import { AssetError, normalizeRequest } from '../../packages/asset-pipeline/src/
 import { normalizeProcedural, proceduralSize, PROCEDURAL_LIMITS } from '../../packages/asset-pipeline/src/procedural.js';
 import { sha256, validateAudit, validateManifestFiles, workerScripts } from '../../packages/asset-pipeline/src/validation.js';
 import type { AssetAudit, AssetManifest, Artifact } from '../../packages/asset-pipeline/src/types.js';
-import { assetInput, assetRequest } from '../../apps/mcp/src/asset-schemas.js';
+import { assetInput, assetRequest, assetManifest } from '../../apps/mcp/src/asset-schemas.js';
 import { proceduralInput, proceduralStartBody, registerProceduralTools, registerProceduralPlaceTool, MESH_PARTS_CAPABILITY } from '../../apps/mcp/src/procedural-tools.js';
 import { ARCANE_NATIVE_TOOL_NAMES, ARCANE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -66,18 +66,24 @@ test('procedural audits require one mesh per material with the generator part na
   assert.throws(() => validateAudit(proceduralAudit(), rock), /generator contract/);
 });
 
-test('procedural manifests hash the bundled generator into the template digest', async t => {
+for (const { schemaVersion, leafDensity } of [{ schemaVersion: 1, leafDensity: .7 }, { schemaVersion: 1, leafDensity: 0 },
+  { schemaVersion: 2, leafDensity: 0 }, { schemaVersion: 2, leafDensity: .7 }] as const)
+test(`procedural manifest v${schemaVersion}/density${leafDensity} reads exact membership and hashes its bundled generator`, async t => {
   const root = join(resolve(process.cwd()), 'packages', 'asset-pipeline', '.runtime', 'tests'); await mkdir(root, { recursive: true });
   const dir = await mkdtemp(join(root, 'procedural-manifest-')); t.after(() => rm(dir, { recursive: true, force: true }));
-  const request = normalizeRequest({ template: 'procedural', name: 'oak-tree', renderResolution: 128, procedural: { kind: 'tree', species: 'oak' } });
+  const request = normalizeRequest({ template: 'procedural', name: 'oak-tree', renderResolution: 128, procedural: { kind: 'tree', species: 'oak', leafDensity } });
   assert.deepEqual(workerScripts(request), ['asset_worker.py', 'audit.py', 'probe.py', 'procedural.py']);
   const a = proceduralAudit();
+  if (schemaVersion === 2 && leafDensity === 0) a.meshes = a.meshes.filter(m => m.name !== 'SM_oak-tree_leaves');
+  const render = a.meshes.filter(m => m.role === 'render');
   const files: Record<string, Buffer | string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': glb(), 'asset.fbx': 'fbx', 'collision.glb': glb(),
     'preview-hero.png': png(), 'preview-side.png': png(), 'audit.json': JSON.stringify(a), 'request.json': JSON.stringify(request), 'input.json': JSON.stringify(request),
     'asset_worker.py': '#', 'audit.py': '#', 'probe.py': '#', 'procedural.py': '# generator' };
   // The synthetic GLB holds 4 triangles; align the export audit to the real bytes.
-  a.totals = { renderTriangles: 4, lod1Triangles: 0, collisionTriangles: 4, materials: 2 }; a.meshes[0]!.triangles = 2; a.meshes[1]!.triangles = 2;
-  a.exports = a.exports.map(e => ({ ...e, triangles: 4 })); files['audit.json'] = JSON.stringify(a);
+  a.totals = { renderTriangles: 4, lod1Triangles: 0, collisionTriangles: 4, materials: render.length };
+  render.forEach(mesh => { mesh.triangles = 4 / render.length; });
+  a.exports = a.exports.map(e => ({ ...e, triangles: 4, objects: e.path === 'collision.glb' ? 1 : render.length,
+    materials: e.path === 'collision.glb' ? 0 : render.length })); files['audit.json'] = JSON.stringify(a);
   const artifacts: Artifact[] = [];
   for (const [path, value] of Object.entries(files)) {
     const bytes = Buffer.from(value); await writeFile(join(dir, path), bytes);
@@ -85,11 +91,14 @@ test('procedural manifests hash the bundled generator into the template digest',
     artifacts.push({ path, role, bytes: bytes.length, sha256: sha256(bytes) });
   }
   const digest = (names: string[]) => sha256(Buffer.from(names.map(n => artifacts.find(x => x.path === n)!.sha256).join('\n')));
-  const manifest: AssetManifest = { schemaVersion: 1, jobId: '11111111-1111-4111-8111-111111111111', createdAt: '2026-01-01T00:00:00Z', request,
+  const manifest: AssetManifest = { schemaVersion, jobId: '11111111-1111-4111-8111-111111111111', createdAt: '2026-01-01T00:00:00Z', request,
     runtime: { executable: 'synthetic', version: 'synthetic', pythonVersion: 'synthetic', background: true, capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } },
     templateSha256: digest(workerScripts(request)), sourceRequestSha256: artifacts.find(x => x.path === 'input.json')!.sha256,
     coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false }, validation: a, artifacts, limitations: ['Synthetic.'] };
   await validateManifestFiles(dir, manifest);
+  assert.equal(assetManifest.safeParse(manifest).success, true, 'MCP accepts retained and new manifest response versions');
+  assert.equal(assetManifest.safeParse({ ...manifest, schemaVersion: 3 }).success, false);
+  if (leafDensity === 0) await assert.rejects(() => validateManifestFiles(dir, { ...manifest, schemaVersion: schemaVersion === 1 ? 2 : 1 }), /generator contract/);
   await assert.rejects(() => validateManifestFiles(dir, { ...manifest, templateSha256: digest(['asset_worker.py', 'audit.py', 'probe.py']) }), code('HASH'));
   await assert.rejects(() => validateManifestFiles(dir, { ...manifest, artifacts: artifacts.filter(x => x.path !== 'procedural.py') }), /procedural\.py/);
   assert.equal(assetRequest.safeParse(request).success, true, 'MCP request schema accepts normalized procedural requests');

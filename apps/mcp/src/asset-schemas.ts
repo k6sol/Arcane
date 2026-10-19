@@ -149,7 +149,7 @@ const audit = z.object({ schemaVersion: z.literal(1), template, meshes: z.array(
   savedSceneReopened: z.boolean(), errors: z.array(text).max(128), warnings: z.array(text).max(128), assembly: assemblyEvidence.optional(),
 }).transform(({ assembly, ...value }) => ({ ...value, ...(assembly === undefined ? {} : { assembly }) }));
 const generatedAssetManifest: z.ZodType<AssetManifest> = z.object({
-  schemaVersion: z.literal(1), jobId: assetJobId, createdAt: id, request: assetRequest, runtime, templateSha256: hash,
+  schemaVersion: z.union([z.literal(1), z.literal(2)]), jobId: assetJobId, createdAt: id, request: assetRequest, runtime, templateSha256: hash,
   sourceRequestSha256: hash.optional(), assembly: assemblyEvidence.optional(),
   coordinateSystem: z.object({ units: z.literal('meters'), sceneUp: z.literal('Z'), glbUp: z.literal('Y'), fbxUp: z.literal('Y'), pivot: z.literal('floor'), robloxScaleVerified: z.literal(false) }),
   validation: audit,
@@ -163,7 +163,7 @@ const generatedAssetManifest: z.ZodType<AssetManifest> = z.object({
     if (value.request.template !== 'custom-assembly') return;
     try {
       if (!value.sourceRequestSha256 || !value.assembly || !isDeepStrictEqual(value.assembly, value.validation.assembly)) throw new Error('Missing/mismatched provenance.');
-      validateAudit(value.validation, value.request);
+      validateAudit(value.validation, value.request, value.schemaVersion);
     } catch { context.addIssue({ code: 'custom', message: 'Custom manifest requires matching assembly, source digest, mesh bounds/digests, export sockets and shared audit evidence.' }); }
   });
 
