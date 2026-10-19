@@ -25,8 +25,65 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit import audit_scene, render_metrics
 
 
-def event(stage):
+_failure_stage = "request-validation"
+_failure_artifact = "request.json"
+_failure_metrics = None
+_failure_audit = False
+
+
+def event(stage, artifact=None):
+    global _failure_stage, _failure_artifact
+    _failure_stage = stage
+    _failure_artifact = artifact
     print("ARCANE_EVENT " + json.dumps({"stage": stage}), flush=True)
+
+
+def failure_report(error):
+    # Compare known bundled messages but never serialize exception text, tracebacks, paths or input.
+    text = str(error)
+    if text == "Request byte provenance gate failed":
+        code = "REQUEST_PROVENANCE"
+    elif text.startswith("Asset mesh gate failed:") or text == "Saved scene failed structural audit":
+        code = "MESH_AUDIT"
+    elif text.endswith("mesh required repair") or text in ["Input mesh required structural repair", "Procedural mesh required structural repair"]:
+        code = "MESH_REPAIR"
+    elif text == "Review render is empty, uniform or nonfinite":
+        code = "RENDER_CONTENT"
+    elif text == "Saved scene failed reopen validation":
+        code = "SCENE_REOPEN"
+    elif text.endswith(" export round trip failed"):
+        code = "EXPORT_ROUNDTRIP"
+    elif text in ["Tree has no foliage anchors within budget", "Column is too short for its base and capital",
+                  "Column exceeds its triangle budget; reduce flutes", "Procedural mesh exceeded its triangle budget or is empty"]:
+        code = "PROCEDURAL_LIMIT"
+    elif _failure_stage in ["identity", "export-identity"] and isinstance(error, ValueError):
+        code = "IMPORT_IDENTITY"
+    elif isinstance(error, FileNotFoundError):
+        code = "FILE_MISSING"
+    elif isinstance(error, (PermissionError, OSError)):
+        code = "FILE_ACCESS"
+    elif isinstance(error, MemoryError):
+        code = "MEMORY_LIMIT"
+    elif isinstance(error, (AttributeError, ImportError, NotImplementedError)):
+        code = "BLENDER_API"
+    elif isinstance(error, RuntimeError):
+        code = "BLENDER_CONTEXT" if "poll()" in text or "context is incorrect" in text else "BLENDER_OPERATION"
+    elif isinstance(error, (TypeError, KeyError, IndexError, ZeroDivisionError)):
+        code = "INTERNAL_TYPE"
+    else:
+        code = "INVALID_DATA"
+    known = {"ValueError", "RuntimeError", "TypeError", "AttributeError", "KeyError", "IndexError", "FileNotFoundError",
+             "PermissionError", "OSError", "MemoryError", "ImportError", "ModuleNotFoundError", "ZeroDivisionError", "NotImplementedError"}
+    name = type(error).__name__
+    result = {"schemaVersion": 1, "stage": _failure_stage, "reasonCode": code,
+              "exceptionType": name if name in known else "Exception"}
+    if _failure_artifact:
+        result["artifactPath"] = _failure_artifact
+    if code == "MESH_AUDIT" and _failure_metrics is not None:
+        result["metrics"] = _failure_metrics
+    if _failure_audit:
+        result["auditPath"] = "audit.json"
+    return result
 
 
 def select(objects):
@@ -203,6 +260,7 @@ def lookdev(main, request):
 
 
 def export_glb(path, objects, with_materials=True):
+    event("export", path.name)
     select(objects)
     bpy.ops.export_scene.gltf(filepath=str(path), export_format="GLB", use_selection=True,
                               export_yup=True, export_extras=True, export_animations=False,
@@ -247,6 +305,7 @@ def stamp_import_identity(request, main_objects, lods, collision, sockets):
 
 
 def exported_import_evidence(path, objects, sockets):
+    event("export-identity", path.name)
     # Read only our two fixed exports. Bound allocation before parsing actual GLB JSON.
     size = path.stat().st_size
     if not 20 <= size <= 128 * 1024 * 1024:
@@ -303,6 +362,7 @@ def exported_import_evidence(path, objects, sockets):
 
 
 def export_metrics(path, expected, recipe=None):
+    event("export-roundtrip", path.name)
     # Reimport actual exported bytes into a temporary scene. Original scene stays intact.
     old = bpy.context.scene
     temp = bpy.data.scenes.new("ExportAudit")
@@ -342,6 +402,7 @@ def write_json(path, value):
 
 
 def main():
+    global _failure_metrics, _failure_audit
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["generate", "audit"], required=True)
     parser.add_argument("--directory", required=True)
@@ -359,6 +420,7 @@ def main():
         request["_estimatedTriangles"] = json.loads(args.estimated_triangles)
         from assembly import build_assembly, assembly_evidence
     if args.mode == "audit":
+        event("scene-reopen", "asset.blend")
         bpy.ops.wm.open_mainfile(filepath=str(directory / "asset.blend"), use_scripts=False)
         objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
         meshes, totals, errors = audit_scene(objects, request)
@@ -388,14 +450,20 @@ def main():
                 material("MAT_Frame", (0.12, 0.15, 0.18), 0.8, 0.3),
                 material("MAT_Accent", (0.8, 0.43, 0.11), 0.45, 0.36)]
         main_objects, lods, collision = hero(request, mats) if request["template"] == "hero-prop" else environment(request, mats)
+    event("identity")
     stamp_import_identity(request, main_objects, lods, collision, sockets)
+    event("checkpoint-save", "blockout.blend")
     bpy.ops.wm.save_as_mainfile(filepath=str(directory / "blockout.blend"), check_existing=False)
     event("mesh-validation")
     for obj in main_objects + lods + collision:
         finalize(obj)
     meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
     if errors:
+        _failure_metrics = {"renderTriangles": totals["renderTriangles"], "triangleBudget": request["triangleBudget"],
+                            "collisionTriangles": totals["collisionTriangles"], "errorCount": len(errors),
+                            "invalidMeshes": sum(bool(mesh["errors"]) for mesh in meshes)}
         write_json(directory / "audit.json", {"errors": errors, "meshes": meshes, "totals": totals})
+        _failure_audit = True
         raise ValueError("Asset mesh gate failed: " + "; ".join(errors))
     event("review-render")
     for obj in lods + collision:
@@ -406,14 +474,17 @@ def main():
         scene.view_settings.exposure = -1.4
     renders = []
     for name, offset in [("preview-hero.png", (2.6, -3.5, 2.3)), ("preview-side.png", (-4.0, 0, 0.5))]:
+        event("review-render", name)
         camera.location = target + Vector(offset) * span
         camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
         scene.render.filepath = str(directory / name)
         bpy.ops.render.render(write_still=True)
         renders.append(render_metrics(directory / name))
+    event("scene-save", "asset.blend")
     bpy.ops.wm.save_as_mainfile(filepath=str(directory / "asset.blend"), check_existing=False)
     event("export")
     export_glb(directory / "asset.glb", main_objects + sockets)
+    event("export", "asset.fbx")
     select(main_objects + sockets)
     bpy.ops.export_scene.fbx(filepath=str(directory / "asset.fbx"), use_selection=True, object_types={'MESH', 'EMPTY'}, use_custom_props=True,
                               apply_unit_scale=True, apply_scale_options='FBX_SCALE_ALL', axis_forward='-Z', axis_up='Y',
@@ -421,6 +492,7 @@ def main():
     export_glb(directory / "collision.glb", collision, False)
     if lods:
         export_glb(directory / "asset-lod1.glb", lods)
+    event("export-identity")
     import_evidence = {"schemaVersion": 1, "identityScheme": "arcane-semantic-v1",
                        "assetId": semantic_id(request, "asset", "root"), "blenderVersion": bpy.app.version_string,
                        "requestSha256": args.request_sha256,
@@ -432,7 +504,7 @@ def main():
                export_metrics(directory / "collision.glb", totals["collisionTriangles"])]
     if lods:
         exports.append(export_metrics(directory / "asset-lod1.glb", totals["lod1Triangles"]))
-    event("scene-reopen")
+    event("scene-reopen", "asset.blend")
     bpy.ops.wm.open_mainfile(filepath=str(directory / "asset.blend"), use_scripts=False)
     reopened = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
     again, again_totals, again_errors = audit_scene(reopened, request)
@@ -445,9 +517,14 @@ def main():
     if request["template"] == "custom-assembly":
         report["assembly"] = assembly_evidence(request)
         write_json(directory / "assembly.json", report["assembly"])
+    event("audit-write", "audit.json")
     write_json(directory / "audit.json", report)
     print("ARCANE_RESULT " + json.dumps({"audit": "audit.json"}), flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        print("ARCANE_FAILURE " + json.dumps(failure_report(error), allow_nan=False), flush=True)
+        raise

@@ -1,6 +1,19 @@
 export class AssetError extends Error {
-  constructor(public readonly code: string, message: string) { super(message); this.name = 'AssetError'; }
+  constructor(public readonly code: string, message: string, public readonly diagnostic?: AssetFailureDiagnostic) { super(message); this.name = 'AssetError'; }
 }
+/** Bounded, host-decoded evidence. Never contains raw worker output or exception text. */
+export interface AssetFailureDiagnostic {
+  schemaVersion: 1;
+  stage: string;
+  reasonCode: string;
+  reason: string;
+  exceptionType: string | null;
+  metrics?: Record<string, number>;
+  artifactPath?: string;
+  auditPath?: 'audit.json';
+  logPath?: 'failure.json';
+}
+export interface AssetJobError { code: string; message: string; diagnostic?: AssetFailureDiagnostic }
 export type AssetTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' | 'procedural';
 /** Typed parameters for the bundled Blender generators (see procedural.ts). */
 export type ProceduralSpec =
@@ -90,7 +103,7 @@ export type AssetJobState = 'running' | 'succeeded' | 'failed' | 'cancelled' | '
 export interface AssetJobEvent { jobId: string; at: string; stage: string; state: AssetJobState }
 export interface AssetJobResult {
   jobId: string; directory: string; state: Exclude<AssetJobState, 'running'>;
-  manifestPath: string | null; error: { code: string; message: string } | null;
+  manifestPath: string | null; error: AssetJobError | null;
 }
 export interface AssetJob { id: string; directory: string; completion: Promise<AssetJobResult>; cancel(): void }
 export interface OperationOptions { signal?: AbortSignal; deadlineMs?: number }

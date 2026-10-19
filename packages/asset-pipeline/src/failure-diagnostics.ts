@@ -1,0 +1,98 @@
+import { AssetError, type AssetFailureDiagnostic, type AssetJobError } from './types.js';
+import type { CommandResult } from './process.js';
+
+const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validation', 'blockout', 'identity', 'checkpoint-save',
+  'mesh-validation', 'review-render', 'scene-save', 'export', 'export-identity', 'export-roundtrip', 'scene-reopen', 'audit-write', 'host-validation']);
+const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
+  'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
+const REASONS: Record<string, string> = {
+  REQUEST_PROVENANCE: 'Request bytes failed their size or SHA-256 provenance check.',
+  MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',
+  MESH_AUDIT: 'Structural mesh validation rejected the generated geometry; inspect the per-mesh audit.',
+  RENDER_CONTENT: 'Review render was empty, uniform or contained nonfinite pixels.',
+  SCENE_REOPEN: 'Reopened scene geometry differs from the validated generated scene.',
+  EXPORT_ROUNDTRIP: 'Reimported export geometry failed triangle-count or finite-position validation.',
+  IMPORT_IDENTITY: 'Exported object or anchor identities failed verification.',
+  PROCEDURAL_LIMIT: 'Procedural parameters cannot produce valid geometry within the requested dimensions or triangle budget.',
+  FILE_MISSING: 'A required local worker input or artifact was not found.',
+  FILE_ACCESS: 'The worker could not access a required local input or artifact.',
+  MEMORY_LIMIT: 'The worker ran out of memory while building or reviewing the asset.',
+  BLENDER_API: 'The installed Blender API lacks a property, module or operation required by the bundled worker.',
+  BLENDER_CONTEXT: 'A Blender operator rejected the current scene or object context.',
+  BLENDER_OPERATION: 'Blender rejected an operation in this stage.',
+  INVALID_DATA: 'The bundled worker rejected invalid geometry or parameter data in this stage.',
+  INTERNAL_TYPE: 'The bundled worker encountered an incompatible value or missing data member in this stage.',
+  WORKER_EXIT: 'The worker exited without a valid structured failure report.',
+  HOST_FAILURE: 'The host rejected the asset operation in this stage.',
+};
+const METRICS = new Set(['renderTriangles', 'triangleBudget', 'collisionTriangles', 'invalidMeshes', 'errorCount']);
+const ARTIFACTS = new Set(['request.json', 'blockout.blend', 'asset.blend', 'asset.glb', 'asset.fbx', 'collision.glb',
+  'asset-lod1.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'assembly.json']);
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AssetError('RECOVERY', 'Invalid failure diagnostic.');
+  return value as Record<string, unknown>;
+}
+export const failureStage = (value: string): string => STAGES.has(value) ? value : 'generate';
+function reason(code: string, metrics?: Record<string, number>): string {
+  if (code === 'MESH_AUDIT' && metrics?.renderTriangles !== undefined && metrics.triangleBudget !== undefined &&
+      (metrics.renderTriangles === 0 || metrics.renderTriangles > metrics.triangleBudget)) {
+    return `Render triangle count ${metrics.renderTriangles} is outside 1..${metrics.triangleBudget}; inspect the per-mesh audit.`;
+  }
+  return REASONS[code]!;
+}
+/** Wire reports contain enum tokens and bounded numbers only. Arbitrary exception text is never accepted. */
+function wireDiagnostic(value: unknown): AssetFailureDiagnostic {
+  const v = object(value);
+  if (Object.keys(v).some(k => !['schemaVersion', 'stage', 'reasonCode', 'exceptionType', 'metrics', 'artifactPath', 'auditPath'].includes(k)) ||
+      v.schemaVersion !== 1 || typeof v.stage !== 'string' || !STAGES.has(v.stage) ||
+      typeof v.reasonCode !== 'string' || !Object.hasOwn(REASONS, v.reasonCode) || v.reasonCode === 'HOST_FAILURE' ||
+      (v.exceptionType !== null && (typeof v.exceptionType !== 'string' || !TYPES.has(v.exceptionType))) ||
+      (v.auditPath !== undefined && v.auditPath !== 'audit.json') ||
+      (v.artifactPath !== undefined && (typeof v.artifactPath !== 'string' || !ARTIFACTS.has(v.artifactPath)))) throw new AssetError('RECOVERY', 'Invalid failure diagnostic.');
+  let metrics: Record<string, number> | undefined;
+  if (v.metrics !== undefined) {
+    const values = object(v.metrics); metrics = {};
+    for (const [key, n] of Object.entries(values)) {
+      if (!METRICS.has(key) || typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0 || n > 1_000_000_000) throw new AssetError('RECOVERY', 'Invalid failure metrics.');
+      metrics[key] = n;
+    }
+  }
+  return { schemaVersion: 1, stage: v.stage, reasonCode: v.reasonCode, reason: reason(v.reasonCode, metrics), exceptionType: v.exceptionType as string | null,
+    ...(metrics ? { metrics } : {}), ...(v.artifactPath ? { artifactPath: v.artifactPath as string } : {}), ...(v.auditPath ? { auditPath: 'audit.json' } : {}) };
+}
+export function workerFailure(result: CommandResult, stage: string): AssetError {
+  let diagnostic: AssetFailureDiagnostic = { schemaVersion: 1, stage: failureStage(stage), reasonCode: 'WORKER_EXIT', reason: REASONS.WORKER_EXIT!, exceptionType: null };
+  const lines = result.stdout.split(/\r?\n/).filter(line => line.startsWith('ARCANE_FAILURE '));
+  if (lines.length === 1 && lines[0]!.length <= 2048) {
+    try { diagnostic = wireDiagnostic(JSON.parse(lines[0]!.slice(15))); } catch { /* untrusted report falls back to host-observed exit */ }
+  }
+  const exit = result.signal ? ` Signal: ${result.signal}.` : ` Exit code: ${result.exitCode ?? 'unknown'}.`;
+  const classification = diagnostic.exceptionType ? ` (${diagnostic.exceptionType}; ${diagnostic.reasonCode}).` : '';
+  return new AssetError('BLENDER_FAILED', `${diagnostic.reason}${classification}${exit}`, diagnostic);
+}
+export function hostFailure(stage: string): AssetFailureDiagnostic {
+  return { schemaVersion: 1, stage: failureStage(stage), reasonCode: 'HOST_FAILURE', reason: REASONS.HOST_FAILURE!, exceptionType: null };
+}
+export function failureMessage(message: string, diagnostic: AssetFailureDiagnostic): string {
+  const reference = diagnostic.logPath ? ` See ${diagnostic.logPath}${diagnostic.auditPath ? ` and ${diagnostic.auditPath}` : ''}.` : '';
+  return `Asset failed at ${diagnostic.stage}${diagnostic.artifactPath ? ` (${diagnostic.artifactPath})` : ''}: ${message}${reference}`.slice(0, 1024);
+}
+/** Shared by journal recovery and MCP response decoding, so neither strips diagnostic evidence. */
+export function decodeAssetJobError(value: unknown): AssetJobError {
+  const error = object(value);
+  if (typeof error.code !== 'string' || !/^[A-Z_]{1,64}$/.test(error.code) || typeof error.message !== 'string' || error.message.length > 1024 ||
+      Object.keys(error).some(k => !['code', 'message', 'diagnostic'].includes(k))) throw new AssetError('RECOVERY', 'Invalid terminal journal error.');
+  let diagnostic: AssetFailureDiagnostic | undefined;
+  if (error.diagnostic !== undefined) {
+    const raw = object(error.diagnostic), { reason: savedReason, logPath, ...wire } = raw;
+    if (logPath !== undefined && logPath !== 'failure.json') throw new AssetError('RECOVERY', 'Invalid failure log reference.');
+    if (wire.reasonCode === 'HOST_FAILURE') {
+      if (Object.keys(wire).sort().join(',') !== 'exceptionType,reasonCode,schemaVersion,stage' || wire.schemaVersion !== 1 || wire.exceptionType !== null ||
+          typeof wire.stage !== 'string' || !STAGES.has(wire.stage)) throw new AssetError('RECOVERY', 'Invalid host failure diagnostic.');
+      diagnostic = hostFailure(wire.stage);
+    } else diagnostic = wireDiagnostic(wire);
+    if (savedReason !== diagnostic.reason) throw new AssetError('RECOVERY', 'Invalid failure reason.');
+    if (logPath) diagnostic.logPath = 'failure.json';
+  }
+  return { code: error.code, message: error.message, ...(diagnostic ? { diagnostic } : {}) };
+}

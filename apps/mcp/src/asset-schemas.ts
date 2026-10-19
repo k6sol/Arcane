@@ -6,6 +6,7 @@ import {parseAdoptGlbInput,parseAdoptedGlbRequest,parseAdoptedGlbManifest,type A
 import type {AssetPreviewManifest} from '../../daemon/src/asset-service.js';
 import { normalizeRequest, validateAudit } from '../../../packages/asset-pipeline/src/validation.js';
 import { jsonSnapshot, JOB_JOURNAL_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
+import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 import type { AssetInput, AssetRequest, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
 import { id, boundedText } from './schemas.js';
 import { HISTORY_PAGE_BYTES,HISTORY_RECORD_LIMIT, type AssetJobRecord, type AssetJobPage } from '../../daemon/src/asset-service.js';
@@ -62,9 +63,13 @@ export const assetProbe: z.ZodType<AssetProbe> = z.object({ observedAt: id, avai
   python: z.object({ executable: path, version: id }).nullable(), attempts: z.array(z.object({ executable: path, code: id.max(64) })).max(1000) });
 export const assetJobId = z.string().regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/);
 const jobState = z.enum(['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted']);
+const jobError = z.unknown().transform((value, context) => {
+  try { return decodeAssetJobError(value); }
+  catch { context.addIssue({ code: 'custom', message: 'Invalid asset failure evidence.' }); return z.NEVER; }
+});
 export const assetJob: z.ZodType<AssetJobRecord> = z.object({
   schemaVersion: z.literal(1), jobId: assetJobId, directory: path, state: jobState,
-  manifestPath: path.nullable(), error: z.object({ code: id.max(64), message: text }).nullable(), request: z.union([assetRequest,adoptedGlbRequest]),
+  manifestPath: path.nullable(), error: jobError.nullable(), request: z.union([assetRequest,adoptedGlbRequest]),
   stage: id.max(48), startedAt: id, updatedAt: id, manifestAvailable: z.boolean(),
   events: z.array(z.object({ jobId: assetJobId, at: id, stage: id.max(48), state: jobState })).max(64), finishedAt: id.optional(),
   retention:z.strictObject({status:z.literal('archived'),archivedAt:z.iso.datetime()}).optional(),

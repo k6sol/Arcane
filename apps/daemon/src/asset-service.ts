@@ -22,6 +22,8 @@ import { ConversationWorkStore } from '../../../packages/storage/src/conversatio
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
 import { createStudioImportTransfer, type StudioImportTransfer } from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
 import {AssetArchiveStore,type AssetArchiveScan,type AssetJobDirectory} from './asset-archive-store.js';
+import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
+import type { AssetJobError } from '../../../packages/asset-pipeline/src/types.js';
 import type {ArchiveHostFacts} from '../../../packages/asset-pipeline/src/archive-ledger.js';
 
 
@@ -87,7 +89,7 @@ export interface AssetJobRecord {
   updatedAt: string;
   events: AssetJobEvent[];
   manifestAvailable: boolean;
-  error: { code: string; message: string } | null;
+  error: AssetJobError | null;
   /** Display only for interrupted jobs; admission always re-validates the stored marker from disk. */
   resolution?: { status: 'resolved'; resolvedAt: string } | { status: 'invalid' | 'uncertain' };
   retention?:{status:'archived';archivedAt:string};
@@ -273,9 +275,7 @@ export async function createAssetService(options: AssetServiceOptions) {
         const recovered = await pipeline.recover(directory);
         state = recovered.result.state;
         if (recovered.result.error) {
-          const e = record(recovered.result.error, 'job error');
-          if (typeof e.code !== 'string' || e.code.length > 64 || typeof e.message !== 'string' || e.message.length > 1024) throw new AssetError('RECOVERY', 'Invalid job error.');
-          error = { code: e.code, message: e.message };
+          error = decodeAssetJobError(recovered.result.error);
         }
       } catch (e) {
         if (e instanceof AssetError && e.code === 'BUSY') throw e;
@@ -356,10 +356,8 @@ export async function createAssetService(options: AssetServiceOptions) {
     const startedAt=timestamp(journal.startedAt,retained.entry.archivedAt),finishedAt=timestamp(journal.finishedAt,startedAt);
     let originalError:AssetJobRecord['error']=null;
     if(journal.error!==undefined&&journal.error!==null){
-      const error=record(journal.error,'archived job error');
-      if(typeof error.code!=='string'||error.code.length>64||typeof error.message!=='string'||error.message.length>1024)
-        throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});
-      originalError={code:error.code,message:error.message};
+      try { originalError=decodeAssetJobError(journal.error); }
+      catch { throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'}); }
     }
     const job:AssetJobRecord={schemaVersion:1,jobId:requested,directory:retained.directory,request,state:retained.entry.state,
       stage:retained.entry.state==='interrupted'?'supervision-lost':'complete',startedAt,updatedAt:finishedAt,

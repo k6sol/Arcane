@@ -13,6 +13,7 @@ import type { ProcessQueryHost, WorkerRole } from './worker-identity.js';
 import { normalizeRequest, readJson, record, sha256, validateAudit, validateManifestFiles, workerScripts } from './validation.js';
 import { AssetError } from './types.js';
 import { atomicAssetJson, AtomicJsonFailure } from './atomic-json.js';
+import { decodeAssetJobError, failureMessage, failureStage, hostFailure, workerFailure } from './failure-diagnostics.js';
 import type { Artifact, AssetInput, AssetJob, AssetJobEvent, AssetJobResult, AssetManifest, AssetProbe, AssetRequest, JobOptions, OperationOptions, PipelineOptions, RuntimeEvidence } from './types.js';
 export * from './types.js';
 export { discoverExecutables } from './discovery.js';
@@ -172,6 +173,8 @@ export class AssetPipeline {
   }
   private async generate(id: string, directory: string, request: AssetRequest, sourceInput: unknown, end: number, signal: AbortSignal, emit: (stage: string, state?: AssetJobEvent['state']) => void): Promise<AssetJobResult> {
     let created = false;
+    let stage = 'prepare-output', workerOutput: CommandResult | undefined;
+    const progress = (next: string) => { stage = failureStage(next); emit(stage); };
     const startedAt = new Date().toISOString();
     const base = { jobId: id, directory, manifestPath: null, error: null };
     // Every job.json rewrite carries the supervisor's truthful worker records (reservation before each spawn).
@@ -182,23 +185,24 @@ export class AssetPipeline {
       await mkdir(join(directory, '.worker')); const environmentDirectory = join(directory, '.worker');
       await atomicJson(directory, 'job.json', { schemaVersion: 1, ...base, state: 'running', request, startedAt, workers: supervision.records });
       await writeFile(artifactPath(directory, 'input.json'), JSON.stringify(sourceInput) + '\n', { flag: 'wx' });
-      remaining(end, signal); emit('probe');
+      remaining(end, signal); progress('probe');
       const evidence = await this.probeIn(environmentDirectory, end, signal, supervision);
       if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.');
       for (const name of workerScripts(request)) await copyFile(await this.script(name), artifactPath(directory, name), 1);
       const requestText = JSON.stringify(request, null, request.recipe ? undefined : 2) + '\n';
       await writeFile(artifactPath(directory, 'request.json'), requestText, { flag: 'wx' });
       const recipeArguments = request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(request.recipe, request.triangleBudget).estimatedTriangles)] : [];
-      emit('generate');
+      progress('generate');
       const process = await this.supervisedRun(supervision, 'generate', { executable: evidence.blender.executable,
         args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', artifactPath(directory, 'asset_worker.py'), '--', '--mode', 'generate', '--directory', directory, '--request-sha256', sha256(Buffer.from(requestText)), ...recipeArguments],
         cwd: directory, env: workerEnvironment(environmentDirectory) }, { signal, deadlineMs: remaining(end, signal), onLine: line => {
           if (!line.startsWith('ARCANE_EVENT ')) return;
-          try { const e = JSON.parse(line.slice(13)) as { stage?: unknown }; if (typeof e.stage === 'string' && /^[a-z-]{1,48}$/.test(e.stage)) emit(e.stage); } catch { /* progress line is optional */ }
+          try { const e = JSON.parse(line.slice(13)) as { stage?: unknown }; if (typeof e.stage === 'string' && failureStage(e.stage) === e.stage) progress(e.stage); } catch { /* progress line is optional */ }
         } });
-      if (process.exitCode !== 0) throw new AssetError('BLENDER_FAILED', 'Blender worker failed. Partial files and any checkpoint remain in the job directory; inspect the audit there.');
+      workerOutput = process;
+      if (process.exitCode !== 0) throw workerFailure(process, stage);
       if (resultLine(process.stdout).audit !== 'audit.json') throw new AssetError('WORKER_PROTOCOL', 'Worker did not return its audit artifact.');
-      emit('host-validation'); remaining(end, signal);
+      progress('host-validation'); remaining(end, signal);
       const audit = validateAudit(await readJson(artifactPath(directory, 'audit.json')), request);
       const artifacts: Artifact[] = [];
       const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
@@ -226,8 +230,21 @@ export class AssetPipeline {
       const unresolved = supervision.records.some(r => r.state !== 'closed');
       const code = unresolved ? 'SUPERVISION_UNRESOLVED' : error instanceof AssetError ? error.code : 'ASSET_FAILED';
       const state = unresolved ? 'interrupted' : code === 'CANCELLED' ? 'cancelled' : code === 'DEADLINE' ? 'timed_out' : 'failed';
-      const result: AssetJobResult = { ...base, state, error: { code, message: unresolved ? 'Worker closure was not observed; the job stays fenced and no retry is permitted.'
-        : error instanceof AssetError ? error.message : 'Asset operation failed; partial output is preserved.' } };
+      const diagnostic = unresolved ? hostFailure(stage) : error instanceof AssetError && error.diagnostic ? error.diagnostic : hostFailure(stage);
+      const message = unresolved ? 'Worker closure was not observed; the job stays fenced and no retry is permitted.'
+        : error instanceof AssetError ? error.message : 'Asset operation failed; partial output is preserved.';
+      // Persist only decoded tokens, counters and hashes. Native output/tracebacks can contain paths or
+      // arbitrary data and are never copied into journals, diagnostic logs or API responses.
+      if (created) {
+        try {
+          await atomicJson(directory, 'failure.json', { schemaVersion: 1, jobId: id, code, diagnostic,
+            ...(workerOutput ? { output: { exitCode: workerOutput.exitCode, signal: workerOutput.signal,
+              stdoutBytes: Buffer.byteLength(workerOutput.stdout), stderrBytes: Buffer.byteLength(workerOutput.stderr),
+              stdoutSha256: sha256(Buffer.from(workerOutput.stdout)), stderrSha256: sha256(Buffer.from(workerOutput.stderr)) } } : {}) });
+          diagnostic.logPath = 'failure.json';
+        } catch { /* A failed evidence write cannot change cancellation, deadline or supervision truth. */ }
+      }
+      const result: AssetJobResult = { ...base, state, error: { code, message: failureMessage(message, diagnostic), diagnostic } };
       if (created) {
         try { await atomicJson(directory, 'job.json', { schemaVersion: 1, ...result, request, startedAt, finishedAt: new Date().toISOString(), workers: supervision.records }); }
         catch { result.error = { code: 'RECOVERY_STATE', message: 'Asset operation failed and its terminal journal could not be saved; inspect the job directory.' }; }
@@ -273,9 +290,7 @@ export class AssetPipeline {
     const state = journal.state === 'running' ? 'interrupted' : journal.state as AssetJobResult['state'];
     let savedError: AssetJobResult['error'] = null;
     if (journal.error !== null && journal.error !== undefined) {
-      const error = record(journal.error, 'journal error');
-      if (typeof error.code !== 'string' || !/^[A-Z_]{1,64}$/.test(error.code) || typeof error.message !== 'string' || error.message.length > 1024) throw new AssetError('RECOVERY', 'Invalid terminal journal error.');
-      savedError = { code: error.code, message: error.message };
+      savedError = decodeAssetJobError(journal.error);
     }
     if (state === 'succeeded' && savedError) throw new AssetError('RECOVERY', 'A succeeded journal cannot carry a failure.');
     const result: AssetJobResult = { jobId: journal.jobId, directory: target, state, manifestPath: null,
