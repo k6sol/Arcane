@@ -38,11 +38,11 @@ license: MIT
    - A Slate disc 14 in diameter and 0.8 thick.
    - Railing: 16-24 balusters (Cylinder 0.4 diameter, 2.5 tall) at radius 6.4.
    - Leave a 3-baluster gap where the stairs arrive.
-   - Rail: 10-12 short Blocks as chords on top of the balusters.
+   - Derive rail sections from adjacent support endpoints: midpoint at their average, length their actual distance plus a small join overlap, orientation along the segment. Unrelated short Blocks leave disconnected rails.
 6. **Access**
    - The spawn must be reachable, so add a spiral stair.
-   - Treads: Block 4 x 0.6 x 1.8 at radius (shaft radius + 2.4).
-   - Rise 1.0-1.2 per tread with a yaw step of 20 degrees (18 treads per turn), from the plinth top to the platform.
+   - Derive step count/rise from actual plinth and platform heights; keep a consistent comfortable rise.
+   - For radial tread width w, centre radius R and angle step a (radians), tangential depth must be at least 2 * (R + w/2) * tan(a/2), plus a small overlap. A fixed 1.8-stud depth can leave outer-edge gaps. Include risers/stringers or a continuous support so treads do not appear suspended.
    - Use one "Tread" prototype with placements at increasing `at` height and `yaw`.
 7. **SpawnLocation**
    - Size [6, 1, 6] Block. Never rotate it.
@@ -64,10 +64,12 @@ license: MIT
 - Never let foliage intersect the plinth or stair.
 
 ## Finish
-- Decorative columns (colonnades, ruins): Creator Store asset first, else `assets_procedural` column (radius, height, 0 or 8-32 flutes, base none/plinth/attic, capital doric/ionic/corinthian; check `assets_preview`; it vanishes in Play until the user uploads it, so say so), placed once with `assets_place_studio_import` and repeated with `scene_build` templates; else the primitive column above.
-- Dress the primitive structure with real assets: `studio_asset_search` + `studio_asset_insert` for props (lamps, statues, vases, benches, ivy); `studio_asset_generate` kind mesh for a carved hero ornament and kind material for bespoke stone applied to the parts. Check with `studio_viewport_capture`.
+- Original assets by default. Only if the user explicitly requests Toolbox models may studio_asset_search/studio_asset_insert supply them. Decorative columns (colonnades, ruins): original Blender geometry or `assets_procedural` column (radius, height, 0 or 8-32 flutes, base none/plinth/attic, capital doric/ionic/corinthian; check `assets_preview`; it vanishes in Play until the user uploads it, so say so), placed once with `assets_place_studio_import` and repeated with `scene_build` templates; else the primitive column above.
+- Dress structural geometry with original meshes/materials in one style and consistent scale; `studio_asset_generate` kind mesh for a carved hero ornament and kind material for bespoke stone applied to the parts. Check with `studio_viewport_capture`.
 - Realistic scale, weathering and lighting moods: `arcane-photoreal`. Torches, lamps and glow: `arcane-vfx`.
 
 ## Verify
 - Check the receipt instance count against the plan.
-- Inspect only the keyed spawn: confirm its Position y equals platform top + 0.5 and its Orientation is [0,0,0].
+- Inspect the keyed spawn, then the complete landmark and player approach: confirm its Position y equals platform top + 0.5 and its Orientation is [0,0,0].
+
+- Review stair outer edges, risers/stringers, rail joints and the top landing at eye height. Require a continuous route; an overhead image cannot establish walkability. A safe-zone boundary should read on the ground/platform without giant floating labels. Do not claim protection without testing its implementation.

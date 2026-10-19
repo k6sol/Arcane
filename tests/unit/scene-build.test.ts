@@ -192,12 +192,63 @@ test('instructions steer to batching, terrain, natural placement and DataStore s
   assert.ok(text.slice(0, 512).includes('scene_build'));
 });
 
-test('the forest-and-pillar brief routes to the natural-scene and architecture recipes within the default budget', async () => {
-  const result = await recommendSkills(new SkillRegistry(), { request: 'move the spawn point up, put it on a circle pillar high detail and build a forest around it',
+test('the full forest, caves and spawn-pillar brief receives original-asset recipes within the default budget', async () => {
+  const result = await recommendSkills(new SkillRegistry(), { request: 'build a full forest with caves and a spawn point on a detailed pillar in the middle. it should be super high quality. add a visible safe zone around the spawn point. it should be realistic and indistinguishable from real life. feel free to use blender if you must.',
     limit: 8, byteBudget: SKILL_ROUTER_LIMITS.defaultBytes, allowExperimental: true });
   assert.ok(result.ids.includes('arcane-natural-scenes'), result.ids.join());
   assert.ok(result.ids.includes('arcane-architectural-features'), result.ids.join());
   assert.match(result.context, /Never use rings, grids, rows/);
+  assert.match(result.context, /user explicitly requests Toolbox models/);
+  assert.match(result.context, /A cave needs an entrance, roof, continuous floor and traversable interior/);
+  assert.ok(result.ids.includes('arcane-photoreal') || result.deferredIds.includes('arcane-photoreal'));
   const data = await recommendSkills(new SkillRegistry(), { request: 'Add coin saving with DataStores to my game', limit: 8, byteBudget: SKILL_ROUTER_LIMITS.defaultBytes, allowExperimental: true });
   assert.ok(data.ids.includes('arcane-datastore-safety'), data.ids.join());
+});
+
+
+test('forest keeps scaled canopies clear of the spawn, approach bends and circular obstacles', () => {
+  const input = forestInput(60);
+  const trees = input.scatter[0]!;
+  trees.radius = 120; trees.clusters = 6; trees.scale = [0.6, 1.8];
+  trees.footprintRadius = 7;
+  trees.avoid = [{at: [50, -45], radius: 9}];
+  trees.avoidPaths = [{points: [[-90, 0], [0, 0], [0, 0], [0, 90]], width: 12}];
+  input.scatter = [trees];
+  const compiled = compileSceneBuild(input, ROOT_REF as unknown as Json);
+  assert.equal(compiled.scatter[0]!.placed, 60);
+  assert.equal(sceneBuildInstanceCount(validateCommandArgs('scene.build', compiled.args, session())), compiled.instances);
+  const placements = (compiled.args.items as any[]).filter(item => item.kind === 'place');
+  assert.equal(placements.length, 60);
+  const scales = new Set<number>();
+  for (const item of placements) {
+    const [x, , z] = item.at as number[], radius = item.scale * 7;
+    scales.add(item.scale);
+    assert.ok(Math.hypot(x!, z!) >= 30 + radius, 'the full canopy stays outside the circular spawn clearing');
+    assert.ok(Math.hypot(x! - 50, z! + 45) >= 9 + radius, 'scaled canopy clears an existing circular obstacle');
+    // Independent axis-aligned corridor checks include both rounded end caps and the repeated bend.
+    const horizontal = Math.hypot(x! - Math.max(-90, Math.min(0, x!)), z!);
+    const vertical = Math.hypot(x!, z! - Math.max(0, Math.min(90, z!)));
+    assert.ok(horizontal >= 6 + radius && vertical >= 6 + radius, 'both route segments stay open at their full width');
+  }
+  assert.ok(scales.size > 40, 'clearance respects varied scales rather than forcing identical trees');
+  assert.deepEqual(compileSceneBuild(input, ROOT_REF as unknown as Json).args, compiled.args);
+  assert.equal(JSON.stringify(compiled.args).includes('avoidPaths'), false, 'only validated explicit placements reach the plugin');
+});
+
+test('route protection preserves clearance when crowded and bounds malformed path input', () => {
+  const input = forestInput(10), trees = input.scatter[0]!;
+  trees.radius = 40; trees.footprintRadius = 10;
+  trees.avoidPaths = [{points: [[0, 0], [0, 0]], width: 100}];
+  input.scatter = [trees];
+  const compiled = compileSceneBuild(input, ROOT_REF as unknown as Json);
+  assert.deepEqual(compiled.scatter, [{requested: 10, placed: 0}], 'never fill a protected route just to hit the requested count');
+  assert.equal((compiled.args.items as any[]).some(item => item.kind === 'place'), false);
+  for (const patch of [
+    {avoidPaths: [{points: [[0, 0]], width: 8}]},
+    {avoidPaths: [{points: [[0, 0], [10, 20]], width: 0}]},
+    {avoidPaths: [{points: [[0, 0], [Infinity, 20]], width: 8}]},
+    {avoidPaths: [{points: [[0, 0], [1_000_001, 20]], width: 8}]},
+    {avoidPaths: [{points: [[0, 0], [10, 20]], width: 8, source: 'ignored?'}]},
+    {footprintRadius: -1}, {footprintRadius: 513},
+  ]) assert.throws(() => parse({name: 'InvalidRoute', scatter: [{use: 'Tree', count: 10, center: [0, 0, 0], radius: 80, minSpacing: 4, ...patch}]}));
 });

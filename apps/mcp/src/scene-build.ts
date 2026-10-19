@@ -131,6 +131,11 @@ export const sceneBuildShape = {
     clearing: z.strictObject({ center: z.tuple([n, n]).optional(), inner: z.number().min(0), outer: z.number().min(0) }).optional()
       .describe('Density falloff: no points within inner of the centre [x,z], ramping to full density at outer.'),
     avoid: z.array(z.strictObject({ at: z.tuple([n, n]), radius: z.number().positive() })).max(32).optional().describe('Keep-out circles [x,z].'),
+    avoidPaths: z.array(z.strictObject({
+      points: z.array(z.tuple([n.min(-1_000_000).max(1_000_000), n.min(-1_000_000).max(1_000_000)])).min(2).max(32),
+      width: z.number().positive().max(512),
+    })).max(8).optional().describe('Full-width [x,z] path corridors, including endpoints.'),
+    footprintRadius: z.number().min(0).max(512).optional().describe('Scale-1 canopy radius; pads clearing, avoid and avoidPaths.'),
     yaw: range.optional(), scale: range.optional().describe('Default [0.75, 1.25].'),
     tint: z.strictObject({ min: tint, max: tint }).optional(), seed: z.number().int().min(0).max(2 ** 31).default(1),
     ground: z.boolean().default(false),
@@ -164,6 +169,13 @@ function mulberry32(seed: number): () => number {
   return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 const round = (value: number, digits: number) => Number(value.toFixed(digits));
+
+/** Squared distance to a closed segment, including a repeated path point. */
+function segmentDistanceSquared(x: number, z: number, a: readonly number[], b: readonly number[]): number {
+  const dx = b[0]! - a[0]!, dz = b[1]! - a[1]!, length = dx * dx + dz * dz;
+  const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((x - a[0]!) * dx + (z - a[1]!) * dz) / length));
+  return (x - a[0]! - t * dx) ** 2 + (z - a[1]! - t * dz) ** 2;
+}
 
 /** Shared occupancy across scatter groups: natural spacing with no grid or ring structure. */
 class Occupancy {
@@ -321,6 +333,7 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
     const spread = spec.clusterSpread ?? (spec.radius ?? Math.max(...spec.size!) / 2) / Math.sqrt(spec.clusters ?? 1);
     const gauss = () => Math.sqrt(-2 * Math.log(1 - random())) * Math.cos(2 * Math.PI * random());
     const [fx, fz] = spec.clearing?.center ?? [cx, cz];
+    const corridors = spec.avoidPaths?.flatMap(path => path.points.slice(1).map((to, i) => ({from: path.points[i]!, to, radius: path.width / 2}))) ?? [];
     let placed = 0;
     for (let attempt = 0; attempt < spec.count * 60 && placed < spec.count; attempt++) {
       let x: number, z: number;
@@ -332,6 +345,13 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
         if (d < c0 || (d < c1 && random() > (d - c0) / Math.max(1e-6, c1 - c0))) continue;
       }
       const scale = smin + random() * (smax - smin), r = (spec.minSpacing / 2) * scale;
+      // Check the emitted coordinates and scale, so rounding cannot put a canopy back into a route.
+      if (spec.footprintRadius !== undefined || spec.avoidPaths?.length) {
+        const px = round(x, 2), pz = round(z, 2), footprint = (spec.footprintRadius ?? 0) * round(scale, 3);
+        if (spec.clearing && Math.hypot(px - fx, pz - fz) < spec.clearing.inner + footprint) continue;
+        if (spec.avoid?.some(a => Math.hypot(px - a.at[0], pz - a.at[1]) < a.radius + footprint)) continue;
+        if (corridors.some(path => segmentDistanceSquared(px, pz, path.from, path.to) < (path.radius + footprint) ** 2)) continue;
+      }
       if (!occupancy.ok(x, z, r)) continue;
       occupancy.add(x, z, r);
       const use = uses[Math.floor(random() * uses.length)]!;

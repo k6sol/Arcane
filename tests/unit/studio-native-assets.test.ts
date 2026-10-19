@@ -441,13 +441,18 @@ test('MCP: asset tools are registered with bounded schemas; insert arms a watch,
   assert.equal(posts.length, before, 'invalid inputs never reach the daemon');
 });
 
-test('instructions: realistic requests search assets first, clone templates, generate only when needed and verify inserts', () => {
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_search first for organic or complex objects/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_insert one free, preferably verified asset[^.]*scripts are stripped[^.]*scene_build templates/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_asset_generate only when nothing suitable exists; else assets_procedural[^;]*; primitive parts only for exact-dimension architecture/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /Never buy or publish assets, and check every insert with studio_viewport_capture/);
+test('instructions: original assets are the default and Toolbox models require explicit requests', () => {
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Original assets by default/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Do not search for or insert Toolbox\/Creator Store models unless the user explicitly requests them/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /realism or general permission to build is not that request/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /assets_procedural\/Blender with assets_preview, or studio_asset_generate/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Never buy or publish assets/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_viewport_capture, critique the image against the request, then fix what you see/);
+  assert.doesNotMatch(ARCANE_TASK_INSTRUCTIONS, /studio_asset_search first|studio_asset_generate only when nothing suitable exists/);
   for (const skill of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-photoreal', 'arcane-world-building']) {
     const body = readFileSync(join(process.cwd(), 'skills/arcane', skill, 'SKILL.md'), 'utf8');
+    assert.match(body, /user explicitly requests Toolbox models/, skill);
     assert.match(body, /studio_asset_search/, skill); assert.match(body, /studio_asset_insert/, skill); assert.match(body, /studio_viewport_capture/, skill);
+    assert.doesNotMatch(body, /Creator Store asset first|Real assets first/, skill);
   }
 });
