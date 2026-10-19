@@ -339,7 +339,8 @@ for (const ackSession of [SESSION, null]) {
       await assertFenced(f, ackSession);
     } finally { await f.close(); }
   });
-  test('post-seal conflict retires old actors without rewriting durable ACK scope ' + ackSession, OPTIONS, async t => {
+  // Native fixture startup, retirement and owned cleanup each retain their own bounds.
+  test('post-seal conflict retires old actors without rewriting durable ACK scope ' + ackSession, { ...OPTIONS, timeout: 30000 }, async t => {
     const f = await durableFixture(t, { ackSession });
     try {
       const opened = await f.action('thread-start');

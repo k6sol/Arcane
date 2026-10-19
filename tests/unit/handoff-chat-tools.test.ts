@@ -42,7 +42,7 @@ function png(width: number, height: number): Buffer {
 }
 type Reply = { status: number; body: Record<string, any>; text: string };
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, options: { heartbeat?: boolean } = {}) {
   const base = await realpath(tmpdir()), root = await realpath(await mkdtemp(join(base, 'arcane-handoff-chat-'))), project = join(root, 'project');
   await mkdir(project, { recursive: true });
   const studio = new StudioStore({ directory: join(root, 'studio') }), work = new WorkStore({ directory: join(root, 'work'), projectPath: project });
@@ -51,8 +51,12 @@ async function fixture(t: TestContext) {
   const pair = studio.pair({ code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'plugin-handoff-chat', placeId: 0, universeId: 0, name: NAME, pluginVersion: 'fixture-only' },
     capabilities: ['scene.children'] });
   studio.authenticate(pair.sessionId, pair.token);
-  studio.poll(pair.sessionId, { sessionId: pair.sessionId, clientLifetimeId: 'plugin-handoff-chat', pluginArtifactHash: ARTIFACT, markerName: MARKER,
+  const heartbeat = () => studio.poll(pair.sessionId, { sessionId: pair.sessionId, clientLifetimeId: 'plugin-handoff-chat', pluginArtifactHash: ARTIFACT, markerName: MARKER,
     placeId: 0, universeId: 0, placeName: NAME, mode: 'Edit', playEpoch: 1, continuitySupported: true, connected: true });
+  heartbeat();
+  // This viewport fixture represents a connected plugin, including its regular proof heartbeat.
+  const heartbeatTimer = options.heartbeat ? setInterval(heartbeat, 500) : null;
+  heartbeatTimer?.unref();
   const nativeCalls: string[] = [], peers: { close(): Promise<void> }[] = [];
   const connect = async (): Promise<NativeTestConnection> => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -80,6 +84,7 @@ async function fixture(t: TestContext) {
     studioTestService: tests, codexConnect: async () => { throw new Error('No provider in this fixture.'); } });
   const agents: Client[] = [];
   t.after(async () => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     for (const close of [...agents.map(a => () => a.close()), () => lab.close(), () => tests.lifecycle.close(), ...peers.map(p => () => p.close()), () => assets.close(), () => { work.close(); }, () => { studio.close(); }])
       try { await close(); } catch { /* best-effort owned cleanup */ }
     const part = relative(base, root); assert.ok(part.startsWith('arcane-handoff-chat-') && !isAbsolute(part) && !part.includes(sep)); await rm(root, { recursive: true, force: true });
@@ -104,7 +109,10 @@ async function fixture(t: TestContext) {
     const server = createMcpServer({ client: new DaemonClient({ url: lab.origin, token, pollIntervalMs: 10 }), projectRoot: project });
     const agent = new Client({ name: 'handoff-chat-fixture', version: 'fixture' });
     const [left, right] = InMemoryTransport.createLinkedPair(); await server.connect(right); await agent.connect(left); agents.push(agent);
-    return { agent, tool: async (name: string, args: Record<string, unknown>) => CallToolResultSchema.parse(await agent.callTool({ name, arguments: args })) };
+    return { agent, tool: async (name: string, args: Record<string, unknown>) => {
+      if (options.heartbeat) heartbeat();
+      return CallToolResultSchema.parse(await agent.callTool({ name, arguments: args }));
+    } };
   };
   return { lab, studio, sessionId: pair.sessionId, nativeCalls, call, human, sealed, revoke, workbench, mcp };
 }
@@ -112,7 +120,7 @@ const errorOf = (result: CallToolResult) => (result.structuredContent as { error
 const tokenFree = (raw: string, credential: string) => assert.ok(!raw.includes(credential), 'credential leaked');
 
 test('handoff MCP end to end: studio_viewport_capture returns the native image; revocation ends access', async t => {
-  const f = await fixture(t), { handoffId, credential } = await f.sealed(), { agent, tool } = await f.mcp(credential);
+  const f = await fixture(t, { heartbeat: true }), { handoffId, credential } = await f.sealed(), { agent, tool } = await f.mcp(credential);
   const listed = (await agent.listTools()).tools.map(item => item.name).sort();
   assert.deepEqual(listed, [...ARCANE_TOOL_NAMES].sort(), 'the chat sees the generic Arcane surface, never the native-hook asset delivery tools');
   const generic = new Set<string>(ARCANE_TOOL_NAMES), hookOnly = ARCANE_NATIVE_TOOL_NAMES.filter(item => !generic.has(item));
