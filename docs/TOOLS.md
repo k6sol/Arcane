@@ -653,7 +653,7 @@ Stage CPU transfer packets for this exact completed, conversation-bound asset jo
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
 | `jobId` | string | yes | ≤ 36 chars |
-| `timeoutMs` | integer | no | 100–60000, default 30000 |
+| `timeoutMs` | integer | no | 100–60000, default 55000 |
 
 ### `assets_studio_staging_status`
 
