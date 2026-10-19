@@ -169,6 +169,7 @@ async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
   assets.set('/task-usage-ui.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/task-usage-ui.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(build, 'apps/desktop/src/playtest-panel.js'));
+  assets.set('/toolbox-policy.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/toolbox-policy.js'));
   assets.set('/playtest-toggle.js', resolve(build, 'apps/desktop/src/playtest-toggle.js'));
   for(const [path,file] of await productDesktopModules(build))if(!assets.has(path))assets.set(path,file);
   let gets=0;
@@ -378,7 +379,7 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   await b.text('codex-unknown-requests','unknown');await b.refresh();assert.equal(latest.calls.filter(call=>call.method==='turn-start').length,1);assert.equal(await page.locator('#codex-acknowledge').isDisabled(),true);
   await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');await b.ready('codex-acknowledge');await (await visibleControl(page,'#codex-acknowledge')).click();
   await b.connect();await page.locator('[data-settings-close]').click();await page.locator('#workspace-new-chat').click();
-  assert.equal(await page.locator('#codex-model').inputValue(),'');assert.equal(await page.locator('#codex-thread-start').isDisabled(),true);await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
+  assert.equal(await page.locator('#codex-model').inputValue(),'fixture-sol','New chat preserves the previously selected model');await b.select();await (await visibleControl(page,'#codex-thread-start')).click();await b.text('codex-policy','Send enables workspace editing for the next task');
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-desktop.png'});
   await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('#codex-panel').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.codex-mobile.png'});

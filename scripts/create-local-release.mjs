@@ -37,6 +37,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/asset-viewer.ts', 'dist/apps/desktop/src/asset-viewer.js', 'dist/apps/desktop/src/asset-viewer.js.map',
   'apps/desktop/src/automatic-asset-previews.ts', 'dist/apps/desktop/src/automatic-asset-previews.js', 'dist/apps/desktop/src/automatic-asset-previews.js.map',
   'apps/desktop/src/playtest-panel.ts', 'dist/apps/desktop/src/playtest-panel.js', 'dist/apps/desktop/src/playtest-panel.js.map',
+  'apps/desktop/src/toolbox-policy.ts', 'dist/apps/desktop/src/toolbox-policy.js', 'dist/apps/desktop/src/toolbox-policy.js.map',
   'apps/desktop/src/playtest-toggle.ts', 'dist/apps/desktop/src/playtest-toggle.js', 'dist/apps/desktop/src/playtest-toggle.js.map',
   'apps/desktop/src/starter-gallery.ts', 'dist/apps/desktop/src/starter-gallery.js', 'dist/apps/desktop/src/starter-gallery.js.map',
   'apps/desktop/src/starter-prompts.ts', 'dist/apps/desktop/src/starter-prompts.js', 'dist/apps/desktop/src/starter-prompts.js.map',

@@ -156,6 +156,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/claude-preferences.js',['dist/apps/desktop/src/claude-preferences.js','text/javascript; charset=utf-8']],
     ['/setup-checklist.js',['dist/apps/desktop/src/setup-checklist.js','text/javascript; charset=utf-8']],
     ['/arcane-dialog.js',['dist/apps/desktop/src/arcane-dialog.js','text/javascript; charset=utf-8']],
+    ['/toolbox-policy.js',['dist/apps/desktop/src/toolbox-policy.js','text/javascript; charset=utf-8']],
     ['/playtest-toggle.js',['dist/apps/desktop/src/playtest-toggle.js','text/javascript; charset=utf-8']],
     ['/starter-gallery.js',['dist/apps/desktop/src/starter-gallery.js','text/javascript; charset=utf-8']],
     ['/starter-prompts.js',['dist/apps/desktop/src/starter-prompts.js','text/javascript; charset=utf-8']],

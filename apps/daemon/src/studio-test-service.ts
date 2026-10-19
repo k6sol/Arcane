@@ -224,7 +224,7 @@ export async function createStudioTestService(options:Options){
         await closeJob(j);return view(j);
       },
     }),
-    humanControl:Object.freeze({async approve(input:unknown,guard:()=>void){
+    humanControl:Object.freeze({toolboxPolicy:nativeAssets.toolboxPolicy,async approve(input:unknown,guard:()=>void){
       guard();const a=approval.parse(input),j=owned(a.id,'human');
       if(closed||j!==current||j.cancelled||j.view.state!=='needs_approval'||a.displayDigest!==j.view.displayDigest)rejected('HUMAN_AUTH_REQUIRED');
       if(j.origin)options.taskPort!.assert(j.origin);
@@ -251,4 +251,4 @@ export async function createStudioTestService(options:Options){
 }
 type CreatedStudioTestService=Awaited<ReturnType<typeof createStudioTestService>>;
 /** Capture is an optional extension for older trusted host/test integrations. */
-export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>>};
+export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'humanControl'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{humanControl:Omit<CreatedStudioTestService['humanControl'],'toolboxPolicy'>&Partial<Pick<CreatedStudioTestService['humanControl'],'toolboxPolicy'>>;requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>>};

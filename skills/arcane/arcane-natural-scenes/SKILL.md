@@ -8,7 +8,7 @@ license: MIT
 
 ## Plan and source
 Keep every clause of the brief. For a forest with caves and a detailed spawn pillar, plan the landmark, accessible cave entrances/interiors, approach, visible safe zone, foliage layers and lighting together. Use existing project style and sensible scale; 800-2500 parts is a planning example, not a target to fill with debris.
-Original assets are the default. Use original Blender/procedural meshes or studio_asset_generate when suitable. Use assets_preview before adoption; session-only meshes disappear in Play unless uploaded, so report that limit. Only if the user explicitly requests Toolbox models may studio_asset_search/studio_asset_insert supply them. A realism request is not import permission. Reuse original templates with scene_build.
+Original assets by default. For trees, rocks, foliage and columns use assets_procedural (local Blender), assets_jobs, assets_preview, then assets_prepare_studio_import -> assets_stage_studio_import -> assets_reconstruct_studio_import -> assets_place_studio_import. Reuse original scene_build templates. Do not stop after rendering/exporting: place the actual meshes. Session-only meshes disappear in Play unless uploaded; report it. Only if the user explicitly requests Toolbox models and enables Settings may studio_asset_search/studio_asset_insert supply them; realism grants neither.
 
 ## Ground and caves
 Preserve usable ground during local edits. When landforms are needed, terrain_generate first: seeded terrain and controlled amplitude at player routes. Never use a flat Part disc as a substitute for requested natural terrain; a circular architectural platform is valid.

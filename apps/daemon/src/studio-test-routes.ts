@@ -25,7 +25,7 @@ export interface StudioTestRouteService {
     viewport?: NonNullable<StudioTestService['requests']['viewport']>;
     nativeAssets?: NonNullable<StudioTestService['requests']['nativeAssets']>;
   };
-  humanControl: { approve(...args: Parameters<StudioTestService['humanControl']['approve']>): Promise<unknown> };
+  humanControl: { toolboxPolicy?: StudioTestService['humanControl']['toolboxPolicy']; approve(...args: Parameters<StudioTestService['humanControl']['approve']>): Promise<unknown> };
   lifecycle: { close(...args: Parameters<StudioTestService['lifecycle']['close']>): Promise<void> };
 }
 /** The human label is reserved for service-wide human visibility. Agent labels
@@ -48,7 +48,7 @@ const NATIVE_ASSET_ROUTES = new Map([
 export const STUDIO_NATIVE_ASSET_HTTP_LIMITS = Object.freeze({ deadlineMs: 32_000 });
 const ID = /^[A-Za-z0-9_-]{1,128}(?![\s\S])/;
 const DIGEST = /^[a-f0-9]{64}(?![\s\S])/;
-const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST'], [PREFIX + '/viewport', 'POST'], ...[...NATIVE_ASSET_ROUTES.keys()].map(path => [path, 'POST'] as [string, string])]);
+const METHODS = new Map([[PREFIX, 'GET'], [PREFIX + '/capture','GET'], [PREFIX + '/prepare', 'POST'], [PREFIX + '/approve', 'POST'], [PREFIX + '/cancel', 'POST'], [PREFIX + '/viewport', 'POST'], [NATIVE_ASSET_PREFIX + '/toolbox-policy', 'POST'], ...[...NATIVE_ASSET_ROUTES.keys()].map(path => [path, 'POST'] as [string, string])]);
 const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   AUTH: [401, 'An authenticated local caller is required.'],
   HOST: [403, 'The exact configured loopback host is required.'],
@@ -96,9 +96,10 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   NATIVE_ASSET_UNKNOWN: [409, 'The Roblox Studio operation may have applied but could not be confirmed. Inspect the scene (scene_search or studio_viewport_capture) before trying again.'],
   NATIVE_SIGN_IN: [424, 'Roblox Studio refused the request: sign in to Studio with an account that can use the Creator Store and AI generation, then retry once.'],
   NATIVE_QUOTA: [429, 'Roblox Studio refused the request because a usage limit was reached. Wait before retrying, or reuse already inserted assets.'],
-  NATIVE_UNAVAILABLE: [424, 'This Roblox Studio session cannot use the requested built-in tool (feature disabled, terms not accepted, or account/place not eligible). Enable the Studio Assistant features, or search assets instead of generating.'],
+  NATIVE_UNAVAILABLE: [424, 'This Roblox Studio session cannot use the requested built-in tool (feature disabled, terms not accepted, or account/place not eligible). Enable the Studio Assistant features, or use assets_procedural for original local Blender geometry.'],
   NATIVE_REJECTED: [424, 'Roblox Studio rejected this request (for example a moderated prompt or unsupported parameters). Rephrase plainly or use the original local asset pipeline.'],
   ASSET_INSERT_REFUSED: [424, 'Roblox Studio refused the insertion (the asset may be private, paid, removed or not insertable). Nothing was adopted; choose another free result.'],
+  TOOLBOX_MODELS_DISABLED: [403, 'Toolbox models are off. Build original geometry with assets_procedural in Blender, inspect assets_preview, then prepare, stage, reconstruct and place the result. Only the user can enable Toolbox models in Settings > Tools for this Studio session. Do not substitute free models.'],
   ASSET_NOT_SEARCHED: [409, 'Only free assets returned by studio_asset_search for this session in the last 30 minutes can be inserted. Search first.'],
   ASSET_WATCH_REQUIRED: [409, 'Insertion needs a fresh Arcane plugin watch for this session; use studio_asset_insert or studio_asset_generate, which arm it automatically.'],
   ASSET_JOB_NOT_FOUND: [404, 'The generation job is unknown, expired or owned by another caller.'],
@@ -327,7 +328,8 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
         if (!allowed.includes(key) || seen.has(key)) fail('QUERY');
         seen.add(key);
       }
-      const approving = url.pathname === PREFIX + '/approve';
+      const policy = url.pathname === NATIVE_ASSET_PREFIX + '/toolbox-policy';
+      const approving = url.pathname === PREFIX + '/approve' || policy;
       if (approving && initial.kind !== 'human') fail('HUMAN_AUTH_REQUIRED');
       if (approving && request.headers.origin !== origin) fail('ORIGIN');
       const guard = () => {
@@ -362,6 +364,11 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
         readingBody = true;
         const value = await readJson(request, controller.signal);
         readingBody = false; guard();
+        if (policy) {
+          if(!service.humanControl.toolboxPolicy)fail('UNAVAILABLE');
+          const input=record(value,['sessionId','allowModels'],['sessionId']);
+          try{return service.humanControl.toolboxPolicy(input,guard);}catch(error){throw nativeAssetRefusal(error);}
+        }
         if (nativeAsset) {
           if (!service.requests.nativeAssets) fail('UNAVAILABLE');
           const input = record(value, nativeAsset.keys, nativeAsset.required);

@@ -306,6 +306,7 @@ export async function createConnectionLab(options: Options) {
           ['/asset-viewer.js', [join(options.cwd, 'dist/apps/desktop/src/asset-viewer.js'), 'text/javascript']],
           ['/automatic-asset-previews.js', [join(options.cwd, 'dist/apps/desktop/src/automatic-asset-previews.js'), 'text/javascript']],
           ['/playtest-panel.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-panel.js'), 'text/javascript']],
+          ['/toolbox-policy.js', [join(options.cwd, 'dist/apps/desktop/src/toolbox-policy.js'), 'text/javascript']],
           ['/playtest-toggle.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-toggle.js'), 'text/javascript']],
           ['/starter-gallery.js', [join(options.cwd, 'dist/apps/desktop/src/starter-gallery.js'), 'text/javascript']],
           ['/starter-prompts.js', [join(options.cwd, 'dist/apps/desktop/src/starter-prompts.js'), 'text/javascript']],

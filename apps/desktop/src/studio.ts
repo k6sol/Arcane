@@ -19,6 +19,7 @@ import { ArtifactDownloads } from './asset-downloads.js';
 import { AssetViewerPanel } from './asset-viewer.js';
 import { AutomaticAssetPreviews } from './automatic-asset-previews.js';
 import { startPlaytestPanel } from './playtest-panel.js';
+import { startToolboxPolicy } from './toolbox-policy.js';
 import { startPlaytestToggle } from './playtest-toggle.js';
 import { StudioKeySettings, StudioPairing, trustedKeyAction } from './studio-key-settings.js';
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
@@ -2176,6 +2177,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const taskUsageFooter = startTaskUsageFooter(document, codexChat);
   const playtestRoot=document.getElementById('playtest-panel');
   // Composer Playtest switch (remembered per project); when on, the panel approves the managed chat's requests itself.
+  const toolboxPolicy=startToolboxPolicy(document,{token:()=>token});
+  window.addEventListener('pagehide',()=>toolboxPolicy.stop());
+  window.addEventListener('pageshow',event=>{if(event.persisted)toolboxPolicy.resume();});
   const playtestToggle=startPlaytestToggle(document,{projectKey:()=>workbench.getCurrentProduct()?.projectId??null});
   const startTests=()=>playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn(),autoApprove:()=>playtestToggle.enabled()}):null;
   let playtests=startTests();

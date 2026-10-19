@@ -211,7 +211,7 @@ test('native generation wait: bounded polls of wait_job_finished in seconds unti
   assert.ok(forever.state.calls.filter(call => call.name === 'wait_job_finished').length <= 8, 'bounded attempts');
 });
 
-async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play'; reply?: Reply } = {}) {
+async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play'; reply?: Reply; allowModels?:boolean } = {}) {
   const root = makeFixtureDirectory('arcane-studio-assets-');
   const store = new StudioStore({ directory: join(root, 'store') });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
@@ -230,6 +230,7 @@ async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play';
     }, async close() {} };
   };
   const service = await createStudioTestService({ directory: join(root, 'service'), store, pluginArtifactHash: ARTIFACT, connect });
+  if(options.allowModels!==false&&options.mode!=='Play')service.humanControl.toolboxPolicy({sessionId:pair.sessionId,allowModels:true},()=>{});
   t.after(async () => { await service.lifecycle.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
   /** Plugin side of scene.asset_watch: a succeeded read receipt carrying the token. */
   const watch = (token: string) => {
@@ -237,7 +238,7 @@ async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play';
     store.poll(pair.sessionId, proof);
     store.result({ sessionId: pair.sessionId, commandId: command.id, state: 'succeeded', result: { watch: token, expiresInSeconds: 600 } });
   };
-  return { service, store, pair, natives: () => natives, watch, assets: service.requests.nativeAssets };
+  return { service, store, pair, proof, natives: () => natives, watch, assets: service.requests.nativeAssets };
 }
 
 test('native asset service: search remembers free ids; insert needs a searched id and a fresh plugin watch', async t => {
@@ -256,7 +257,7 @@ test('native asset service: search remembers free ids; insert needs a searched i
 
 test('native asset service: Play mode is refused before any native call; searches are rate limited', async t => {
   const play = await serviceFixture(t, { mode: 'Play' });
-  await assert.rejects(play.assets.search({ sessionId: play.pair.sessionId, query: 'pine' }, 'agent-fixture'), { code: 'MODE_MISMATCH' });
+  await assert.rejects(play.assets.search({ sessionId: play.pair.sessionId, query: 'pine',category:'Audio' }, 'agent-fixture'), { code: 'MODE_MISMATCH' });
   assert.equal(play.natives().length, 0);
   const f = await serviceFixture(t);
   for (let index = 0; index < NATIVE_ASSET_RATE.search; index++) await f.assets.search({ sessionId: f.pair.sessionId, query: 'rock ' + index }, 'agent-fixture');
@@ -277,18 +278,18 @@ test('native asset service: generation jobs complete, report variants, map refus
   await assert.rejects(refusing.assets.generate({ sessionId: refusing.pair.sessionId, kind: 'material', prompt: 'moss', baseMaterial: 'Rock' }, 'agent-fixture'), { code: 'NATIVE_QUOTA' });
 });
 
-async function routeFixture(t: TestContext, nativeAssets: NonNullable<StudioTestRouteService['requests']['nativeAssets']>) {
+async function routeFixture(t: TestContext, nativeAssets: NonNullable<StudioTestRouteService['requests']['nativeAssets']>, toolboxPolicy?:StudioTestRouteService['humanControl']['toolboxPolicy']) {
   const refuse = async (): Promise<never> => { throw new Error('unused'); };
   const service: StudioTestRouteService = { requests: { prepare: refuse, status: refuse, list: refuse, cancel: refuse, nativeAssets },
-    humanControl: { approve: refuse }, lifecycle: { async close() {} } };
-  const route = studioTestRoutes(service, request => request.headers.authorization === 'Bearer agent-token' ? { kind: 'agent', id: 'agent-fixture' } : null);
+    humanControl: { approve: refuse,...(toolboxPolicy?{toolboxPolicy}:{}) }, lifecycle: { async close() {} } };
+  const route = studioTestRoutes(service, request => request.headers.authorization === 'Bearer agent-token' ? { kind: 'agent', id: 'agent-fixture' } : request.headers.authorization === 'Bearer human-token' ? {kind:'human',id:'human'} : null);
   let origin = '';
   const server = createServer((request, response) => { void route(request, response, new URL(request.url ?? '/', origin), origin); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = 'http://127.0.0.1:' + (server.address() as { port: number }).port;
   t.after(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
-  return (path: string, body: unknown) => new Promise<{ status: number; json: any }>((resolve, reject) => {
-    const outgoing = httpRequest(origin + path, { method: 'POST', agent: false, headers: { Authorization: 'Bearer agent-token', 'Content-Type': 'application/json' } }, response => {
+  return (path: string, body: unknown, human=false,withOrigin=true) => new Promise<{ status: number; json: any }>((resolve, reject) => {
+    const outgoing = httpRequest(origin + path, { method: 'POST', agent: false, headers: { Authorization: human?'Bearer human-token':'Bearer agent-token', 'Content-Type': 'application/json',...(human&&withOrigin?{Origin:origin}:{}) } }, response => {
       const chunks: Buffer[] = []; response.on('data', chunk => chunks.push(chunk)); response.once('end', () => resolve({ status: response.statusCode!, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
     });
     outgoing.once('error', reject); outgoing.end(JSON.stringify(body));
@@ -308,7 +309,7 @@ test('native asset routes: closed fields, fixed refusal messages and no native t
   const SECRET = 'native internal detail 8f2c';
   for (const [code, expected, status] of [['UNSUPPORTED_TOOL', 'NATIVE_ASSET_TOOL_UNSUPPORTED', 422], ['BAD_NATIVE_RESPONSE', 'NATIVE_ASSET_INVALID', 424],
     ['EFFECT_UNKNOWN', 'NATIVE_ASSET_UNKNOWN', 409], ['PLACE_DENIED', 'NATIVE_PLACE_DENIED', 403], ['NATIVE_SIGN_IN', 'NATIVE_SIGN_IN', 424],
-    ['RATE_LIMITED', 'RATE_LIMITED', 429], ['ASSET_NOT_SEARCHED', 'ASSET_NOT_SEARCHED', 409], ['MODE_MISMATCH', 'MODE_MISMATCH', 409], ['WEIRD', 'NATIVE_ASSET_FAILED', 424]] as const) {
+    ['TOOLBOX_MODELS_DISABLED','TOOLBOX_MODELS_DISABLED',403], ['TOOLBOX_MODELS_DISABLED','TOOLBOX_MODELS_DISABLED',403], ['RATE_LIMITED', 'RATE_LIMITED', 429], ['ASSET_NOT_SEARCHED', 'ASSET_NOT_SEARCHED', 409], ['MODE_MISMATCH', 'MODE_MISMATCH', 409], ['WEIRD', 'NATIVE_ASSET_FAILED', 424]] as const) {
     const failing = async () => { throw Object.assign(new Error(SECRET), { code }); };
     const refusing = await routeFixture(t, { search: failing, insert: failing, generate: failing, job: failing });
     const response = await refusing('/v1/studio-native/asset-search', { sessionId: 's1', query: 'pine' });
@@ -455,4 +456,63 @@ test('instructions: original assets are the default and Toolbox models require e
     assert.match(body, /studio_asset_search/, skill); assert.match(body, /studio_asset_insert/, skill); assert.match(body, /studio_viewport_capture/, skill);
     assert.doesNotMatch(body, /Creator Store asset first|Real assets first/, skill);
   }
+});
+
+// The default fixture above explicitly enables models for legacy native tool tests.
+// These cases exercise a fresh, original-assets-only host with no such choice.
+test('model sources: default refuses search and insert before any native connection, while original generation remains available',async t=>{
+  const f=await serviceFixture(t,{allowModels:false});
+  assert.deepEqual(f.service.humanControl.toolboxPolicy({sessionId:f.pair.sessionId},()=>{}),{sessionId:f.pair.sessionId,allowModels:false});
+  for(const category of ['Model','MeshPart'])await assert.rejects(f.assets.search({sessionId:f.pair.sessionId,query:'forest',category},'agent-fixture'),{code:'TOOLBOX_MODELS_DISABLED'});
+  await assert.rejects(f.assets.insert({sessionId:f.pair.sessionId,assetId:'1001',watch:'w'},'agent-fixture'),{code:'TOOLBOX_MODELS_DISABLED'});
+  assert.equal(f.natives().length,0);
+  const generated=await f.assets.generate({sessionId:f.pair.sessionId,kind:'material',prompt:'moss',baseMaterial:'Rock'},'agent-fixture');
+  assert.equal(generated.job.kind,'material');
+});
+
+test('model sources: human choice is guarded, scoped to proof epoch, revocable, and cannot be supplied in tool arguments',async t=>{
+  const f=await serviceFixture(t,{allowModels:false}),input={sessionId:f.pair.sessionId};
+  assert.throws(()=>f.service.humanControl.toolboxPolicy({...input,allowModels:true},()=>{throw Error('revoked');}),/revoked/);
+  assert.equal(f.service.humanControl.toolboxPolicy(input,()=>{}).allowModels,false);
+  assert.throws(()=>f.service.humanControl.toolboxPolicy({...input,allowModels:true,actor:'human'},()=>{}));
+  await assert.rejects(f.assets.search({...input,query:'pine',allowModels:true},'agent-fixture'));
+  let guards=0;f.service.humanControl.toolboxPolicy({...input,allowModels:true},()=>{guards++;});assert.equal(guards,2);
+  await f.assets.search({...input,query:'pine'},'agent-fixture');f.watch('policy-watch');
+  f.service.humanControl.toolboxPolicy({...input,allowModels:false},()=>{});
+  await assert.rejects(f.assets.insert({...input,assetId:'1001',watch:'policy-watch'},'agent-fixture'),{code:'TOOLBOX_MODELS_DISABLED'});
+  f.service.humanControl.toolboxPolicy({...input,allowModels:true},()=>{});
+  await assert.rejects(f.assets.insert({...input,assetId:'1001',watch:'policy-watch'},'agent-fixture'),{code:'ASSET_NOT_SEARCHED'});
+  f.store.poll(f.pair.sessionId,{...f.proof,playEpoch:f.proof.playEpoch+1});
+  assert.equal(f.service.humanControl.toolboxPolicy(input,()=>{}).allowModels,false);
+});
+
+test('model source route: agent cannot read or enable the human policy',async t=>{
+  const seen:unknown[]=[];const ok=async (...a:unknown[])=>{seen.push(a);return {};};
+  const post=await routeFixture(t,{search:ok as never,insert:ok as never,generate:ok as never,job:ok as never});
+  for(const input of [{sessionId:'s1'},{sessionId:'s1',allowModels:true}])assert.equal((await post('/v1/studio-native/toolbox-policy',input)).status,403);
+  assert.deepEqual(seen,[]);
+});
+
+
+test('model source route: only exact-origin human control changes the session policy',async t=>{
+  const seen:unknown[]=[];const unused=async()=>{throw Error('unused');};
+  const post=await routeFixture(t,{search:unused,insert:unused,generate:unused,job:unused},(input,guard)=>{guard();seen.push(input);return {sessionId:'s1',allowModels:!!(input as {allowModels?:boolean}).allowModels};});
+  const input={sessionId:'s1',allowModels:true};
+  assert.equal((await post('/v1/studio-native/toolbox-policy',input)).status,403);
+  assert.equal((await post('/v1/studio-native/toolbox-policy',input,true,false)).status,403);
+  assert.equal((await post('/v1/studio-native/toolbox-policy',{...input,actor:'human'},true)).status,400);
+  assert.deepEqual(seen,[]);
+  const enabled=await post('/v1/studio-native/toolbox-policy',input,true);assert.equal(enabled.status,200);assert.deepEqual(enabled.json,input);
+  assert.deepEqual(seen,[input]);
+});
+
+test('model source revocation: a changed choice before dispatch prevents insert; after dispatch preserves an unknown outcome',async t=>{
+  let allowed=true;const authorize=()=>{if(!allowed)throw Object.assign(Error('off'),{code:'TOOLBOX_MODELS_DISABLED'});};
+  const before=await nativeFixture(t);const ctx={...context(before.client),authorize,decodeMode:(r:CallToolResult)=>{allowed=false;return decodeTestMode(r);}};
+  const request=nativeAssetInsertSchema.parse({sessionId:'s1',assetId:'1001',watch:'w'});
+  await assert.rejects(insertNativeAsset(ctx,request,AbortSignal.timeout(5000)),{code:'TOOLBOX_MODELS_DISABLED'});
+  assert.deepEqual(assetNames(before.state.calls),[]);
+  allowed=true;const after=await nativeFixture(t,{reply:(name,args)=>{if(name==='insert_asset')allowed=false;return defaultReply(name,args);}});
+  await assert.rejects(insertNativeAsset({...context(after.client),authorize},request,AbortSignal.timeout(5000)),{code:'EFFECT_UNKNOWN'});
+  assert.deepEqual(assetNames(after.state.calls),['insert_asset']);
 });

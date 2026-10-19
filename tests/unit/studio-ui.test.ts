@@ -218,7 +218,7 @@ test('emitted browser workbench has no Node, store or daemon runtime imports', a
   const parsed=spawnSync(process.execPath,['--experimental-vm-modules','-e',"const {SourceTextModule}=require('node:vm');const fs=require('node:fs');const m=new SourceTextModule(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(m.dependencySpecifiers));"],{input:browserSource,encoding:'utf8',timeout:5000,maxBuffer:16384,windowsHide:true,shell:false});
   assert.ifError(parsed.error);assert.equal(parsed.status,0,parsed.stderr);
   const staticModules=JSON.parse(parsed.stdout) as string[];
-  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./claude-chat.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./editor-drafts.js','./learning-panel.js','./native-handoff.js','./playtest-panel.js','./playtest-toggle.js','./project-memory.js','./provider-setup.js','./runtime-recovery.js','./setup-checklist.js','./starter-gallery.js','./studio-key-settings.js','./task-usage-ui.js','./welcome-tour.js','./workspace-shell.js']);
+  assert.deepEqual([...new Set(staticModules)].sort(),['./asset-downloads.js','./asset-viewer.js','./automatic-asset-previews.js','./claude-chat.js','./codex-chat.js','./codex-history.js','./desktop-verification.js','./editor-drafts.js','./learning-panel.js','./native-handoff.js','./playtest-panel.js','./playtest-toggle.js','./project-memory.js','./provider-setup.js','./runtime-recovery.js','./setup-checklist.js','./starter-gallery.js','./studio-key-settings.js','./task-usage-ui.js','./toolbox-policy.js','./welcome-tour.js','./workspace-shell.js']);
   for(const [name,dependencies] of [['task-plan-boot',['./codex-task-plan.js']],['codex-task-plan',[]],['studio-diagnostics',[]],['welcome-tour',[]],['arcane-dialog',[]],['plans',[]],['editor-drafts',[]],['project-memory',[]],['script-sync',[]],['desktop-update',[]],['runtime-recovery',[]],['mesh-keep',[]],['notifications',[]]] as const){
     const source=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/'+name+'.js'),'utf8');
     assert.doesNotMatch(source,/\bimport\s*\(|\brequire\s*\(|from ['"]node:|\bprocess\./m,name+' stays browser-only');
@@ -448,6 +448,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   assets.set('/mesh-keep.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/mesh-keep.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/playtest-panel.js'));
+  assets.set('/toolbox-policy.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/toolbox-policy.js'));
   assets.set('/playtest-toggle.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/playtest-toggle.js'));
   assets.set('/starter-gallery.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/starter-gallery.js'));
   assets.set('/starter-prompts.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/starter-prompts.js'));
@@ -804,6 +805,7 @@ test('native diagnostics browser with real HTTP routes and SDK fixtures: explici
   assets.set('/mesh-keep.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/mesh-keep.js'));
   assets.set('/workflow-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workflow-panel.js'));
   assets.set('/playtest-panel.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/playtest-panel.js'));
+  assets.set('/toolbox-policy.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/toolbox-policy.js'));
   assets.set('/playtest-toggle.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/playtest-toggle.js'));
   assets.set('/starter-gallery.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/starter-gallery.js'));
   assets.set('/starter-prompts.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/starter-prompts.js'));

@@ -205,6 +205,8 @@ export interface NativeAssetContext {
   /** Trusted host check that the exact paired session still maps to this native Studio in Edit mode. */
   verifyBinding(signal: AbortSignal): Promise<string>;
   decodeMode(result: CallToolResult): { mode: 'Edit' | 'Play' };
+  /** Host-owned model-source choice, checked immediately before dispatch and after the call. */
+  authorize?:()=>void;
   scheduler?: Scheduler; requestTimeoutMs?: number;
 }
 export interface NativeAssetCall { result: CallToolResult | null; text: string; outcome: 'ok' | 'error' | 'timeout' }
@@ -240,6 +242,7 @@ export async function callNativeAssetTool(context: NativeAssetContext, name: Nat
   };
   const before = await context.verifyBinding(signal);
   await editMode(signal);
+  context.authorize?.();
   let call: NativeAssetCall;
   try {
     const raw = await bounded(scheduler, options.timeoutMs, signal, inner => context.client.callTool({ name, arguments: { ...args, studio_id: context.nativeStudioId } },
@@ -252,8 +255,11 @@ export async function callNativeAssetTool(context: NativeAssetContext, name: Nat
   }
   // The bracket closes even after an uncertain mutation; caller cancellation no longer applies.
   const independent = options.mutation ? new AbortController().signal : signal;
-  await editMode(independent);
-  if (await context.verifyBinding(independent) !== before) fail(options.mutation ? 'EFFECT_UNKNOWN' : 'BINDING_CHANGED');
+  try {
+    await editMode(independent);
+    if (await context.verifyBinding(independent) !== before) fail('BINDING_CHANGED');
+    context.authorize?.();
+  } catch(error) { if(options.mutation)fail('EFFECT_UNKNOWN');throw error; }
   return call;
 }
 
