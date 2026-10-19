@@ -1,3 +1,4 @@
+import { SpatialMathError, matrixFromTrs, multiplyMatrix4 } from '../../core/src/spatial-math.js';
 import { createHash } from 'node:crypto';
 import { types } from 'node:util';
 import { z } from 'zod';
@@ -269,14 +270,13 @@ function readModel(model: z.infer<typeof sourceModel>, files: Map<string, z.infe
   return { doc, bin };
 }
 function multiply(a: number[], b: number[]): number[] {
-  return Array.from({ length: 16 }, (_, i) => [0, 1, 2, 3].reduce((n, k) => n + a[k * 4 + i % 4]! * b[Math.floor(i / 4) * 4 + k]!, 0));
+  try { return multiplyMatrix4(a, b); }
+  catch (error) { if (error instanceof SpatialMathError) fail('SCHEMA', 'Invalid affine import transform.'); throw error; }
 }
 function localMatrix(node: Obj): number[] {
   if (node.matrix) return node.matrix;
-  const [x, y, z, w] = node.rotation ?? [0, 0, 0, 1], s = node.scale ?? [1, 1, 1], t = node.translation ?? [0, 0, 0];
-  return [(1 - 2 * (y * y + z * z)) * s[0], (2 * (x * y + z * w)) * s[0], (2 * (x * z - y * w)) * s[0], 0,
-    (2 * (x * y - z * w)) * s[1], (1 - 2 * (x * x + z * z)) * s[1], (2 * (y * z + x * w)) * s[1], 0,
-    (2 * (x * z + y * w)) * s[2], (2 * (y * z - x * w)) * s[2], (1 - 2 * (x * x + y * y)) * s[2], 0, ...t, 1];
+  try { return matrixFromTrs(node.translation, node.rotation, node.scale); }
+  catch (error) { if (error instanceof SpatialMathError) fail('SCHEMA', 'Invalid affine import transform.'); throw error; }
 }
 function imageSize(bytes: Buffer, mimeType: string): [number, number] {
   if (mimeType === 'image/png') return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];

@@ -138,15 +138,46 @@ ops:retireAssetContinuity({sessionId=target.sessionId,mode='Play',playEpoch=1})
 assert(destroyed==8)
 `,true));
 const meshParts=`
-local made={}
+local made,images,surfaces,instances={},{},{},{}
+local imageCreates,surfaceCreates,imageDestroyed,surfaceDestroyed=0,0,0,0
 local env=getfenv(Operations.materializeReconstruction)
-local function inst(class) local t={ClassName=class};function t:IsA(c) return c==class end;function t:Destroy() t.destroyed=true end;return t end
-env.Instance={new=function(c) return inst(c) end}
+local function inst(class)
+ local t={ClassName=class};instances[#instances+1]=t
+ local meta={__index=function(self,key) if key=='Parent' then return rawget(self,'_parent') end return nil end,
+  __newindex=function(self,key,value) if key=='Parent' then rawset(self,'_parent',value);if class=='SurfaceAppearance' and value then value.appearance=self end else rawset(self,key,value) end end}
+ setmetatable(t,meta)
+ function t:IsA(c) return c==class end
+ function t:Destroy()
+  if self.destroyed then return end;self.destroyed=true
+  if class=='SurfaceAppearance' then surfaceDestroyed+=1 end
+  for _,child in ipairs(instances) do if child.Parent==self then child:Destroy() end end
+  self.Parent=nil
+ end
+ function t:Clone() local clone=inst(class);for k,v in pairs(self) do if k~='_parent' and k~='destroyed' and type(v)~='function' then clone[k]=v end end;return clone end
+ return t
+end
+getfenv(Operations.materializeReconstruction).Instance={new=function(c) return inst(c) end}
 env.Content={fromObject=function(o) return {object=o} end}
-env.Enum={CollisionFidelity={Hull='Hull',Box='Box'},RenderFidelity={Precise='Precise'},Material={Wood='Wood',Grass='Grass',Slate='Slate',Marble='Marble'}}
+env.Enum={CollisionFidelity={Hull='Hull',Box='Box'},RenderFidelity={Precise='Precise'},Material={SmoothPlastic='SmoothPlastic',Wood='Wood',Grass='Grass',Slate='Slate',Marble='Marble'}}
 env.Color3={new=function(r,g,b) return {r,g,b} end}
+env.Vector2={new=function(x,y) return {X=x,Y=y} end}
 env.CFrame={new=function(x,y,z) return {x,y,z} end}
 function service:CreateMeshPartAsync(content,options) local p=inst('MeshPart');p.content=content;p.options=options;made[#made+1]=p;return p end
+function service:CreateEditableImage(options)
+ imageCreates+=1;if self.imageNilAt==imageCreates then return nil end
+ local image={Size=options.Size};images[#images+1]=image
+ function image:WritePixelsBuffer(origin,size,pixels)
+  assert(origin.X==0 and origin.Y==0 and size.X==1 and size.Y==1 and buffer.len(pixels)==4)
+  self.bytes={buffer.readu8(pixels,0),buffer.readu8(pixels,1),buffer.readu8(pixels,2),buffer.readu8(pixels,3)}
+ end
+ function image:Destroy() if not self.destroyed then self.destroyed=true;imageDestroyed+=1 end end
+ return image
+end
+function service:CreateSurfaceAppearanceAsync(maps)
+ surfaceCreates+=1;local surface=inst('SurfaceAppearance');surface.maps=maps;surfaces[#surfaces+1]=surface
+ if self.onSurface then self.onSurface(surface) end
+ return surface
+end
 `;
 test('retained reconstruction becomes MeshParts once, from the exact owned meshes, with no upload',options,t=>run(t,setup+meshParts+`
 stage();local input=args()
@@ -175,4 +206,62 @@ local ok,e=pcall(function() return ops:materializeReconstruction(expected.digest
 assert(not ok and e.code=='ENGINE' and #made==3)
 service.CreateMeshPartAsync=create
 local model=ops:materializeReconstruction(expected.digest,guard);assert(model and #made==11)
+`,true));
+
+test('authored scalar PBR reaches placed render meshes; collision gets no surface; repeat placement shares bounded image resources',options,t=>run(t,setup+meshParts+`
+stage();ops:reconstructAsset(args(),guard)
+local model=ops:materializeReconstruction(expected.digest,guard)
+local expectedMaterials={};local unique={};local renderCount=0
+for _,json in ipairs(packets) do local p=decode(json);if p.kind=='object' and p.object.role~='collision' then
+ expectedMaterials[p.object.name]=p.material or {baseColor={1,1,1,1},metallic=1,roughness=1,doubleSided=false};unique[if p.material then p.material.sha256 else 'default']=true;renderCount+=1
+end end
+local uniqueCount=0;for _ in pairs(unique) do uniqueCount+=1 end
+assert(imageCreates==uniqueCount*2 and surfaceCreates==uniqueCount)
+for _,part in ipairs(made) do
+ if part.Transparency==1 then assert(part.appearance==nil)
+ else
+  local source=expectedMaterials[part.Name];local appearance=part.appearance
+  assert(source and appearance and appearance.Parent==part and part.Material=='SmoothPlastic')
+  assert(part.DoubleSided==source.doubleSided and part.Transparency==0 and appearance.EmissiveStrength==0)
+  for i=1,3 do local v=source.baseColor[i];local expected=if v<=0.0031308 then v*12.92 else 1.055*v^(1/2.4)-0.055;assert(math.abs(part.Color[i]-expected)<1e-9) end
+  local m=appearance.maps.MetalnessMap.object;local r=appearance.maps.RoughnessMap.object
+  assert(m.bytes[1]==math.floor(source.metallic*255+0.5) and r.bytes[1]==math.floor(source.roughness*255+0.5))
+  assert(m.bytes[4]==255 and r.bytes[4]==255 and m~=r)
+ end
+end
+local again=ops:materializeReconstruction(expected.digest,guard)
+assert(again~=model and imageCreates==uniqueCount*2 and surfaceCreates==uniqueCount,'restored retries do not accumulate GPU maps')
+ops:cancelAssetTransfers();assert(destroyed==8 and imageDestroyed==uniqueCount*2)
+for _,surface in ipairs(surfaces) do assert(surface.destroyed) end
+ops:cancelAssetTransfers();assert(imageDestroyed==uniqueCount*2)
+`,true));
+
+test('PBR image budget refusal leaves no placed model, retains source meshes and allows a later attempt',options,t=>run(t,setup+meshParts+`
+stage();ops:reconstructAsset(args(),guard);service.imageNilAt=2
+local ok,e=pcall(function() ops:materializeReconstruction(expected.digest,guard) end)
+assert(not ok and e.code=='MEMORY' and imageDestroyed==1 and destroyed==0)
+for _,p in ipairs(made) do assert(p.destroyed and p.Parent==nil) end
+service.imageNilAt=nil;local model=ops:materializeReconstruction(expected.digest,guard);assert(model and destroyed==0)
+ops:cancelAssetTransfers();assert(destroyed==8)
+`,true));
+
+test('retirement while the surface factory yields releases both material and mesh resources',options,t=>run(t,setup+meshParts+`
+stage();ops:reconstructAsset(args(),guard)
+service.onSurface=function() ops:cancelAssetTransfers() end
+local ok,e=pcall(function() ops:materializeReconstruction(expected.digest,guard) end)
+assert(not ok and e.code=='CANCELLED' and destroyed==8 and imageDestroyed==2)
+assert(surfaces[1].destroyed)
+for _,p in ipairs(made) do assert(p.destroyed and p.Parent==nil) end
+rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'WATCH')
+`,true));
+
+test('model allocation refusal releases the materializing latch and permits a safe retry',options,t=>run(t,setup+meshParts+`
+stage();ops:reconstructAsset(args(),guard)
+local allocate=env.Instance.new
+local refused=false
+env.Instance.new=function(class) if class=='Model' and not refused then refused=true;error({code='ENGINE',message='injected allocation refusal'}) end;return allocate(class) end
+rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'ENGINE')
+assert(#made==0 and imageCreates==0 and destroyed==0)
+local model=ops:materializeReconstruction(expected.digest,guard);assert(model and #made==8)
+ops:cancelAssetTransfers();assert(destroyed==8)
 `,true));

@@ -1,3 +1,4 @@
+import { SpatialMathError, matrixFromTrs, multiplyMatrix4 } from '../../core/src/spatial-math.js';
 import { createHash } from 'node:crypto';
 import { types } from 'node:util';
 import { validateGlb } from '../../../apps/desktop/src/glb-preflight.js';
@@ -104,14 +105,13 @@ function keys(o: Json, allowed: string[], path = '$', code: StudioImportPayloadE
 }
 const I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 function multiply(a: number[], b: number[]): number[] {
-  return Array.from({ length: 16 }, (_, i) => [0, 1, 2, 3].reduce((n, k) => n + a[k * 4 + i % 4]! * b[Math.floor(i / 4) * 4 + k]!, 0));
+  try { return multiplyMatrix4(a, b); }
+  catch (error) { if (error instanceof SpatialMathError) fail('UNSUPPORTED_TRANSFORM', 'Invalid affine import transform.'); throw error; }
 }
 function local(n: Json): number[] {
   if (n.matrix) return n.matrix;
-  const [x, y, z, w] = n.rotation ?? [0, 0, 0, 1], s = n.scale ?? [1, 1, 1], t = n.translation ?? [0, 0, 0];
-  return [(1-2*(y*y+z*z))*s[0], 2*(x*y+z*w)*s[0], 2*(x*z-y*w)*s[0], 0,
-    2*(x*y-z*w)*s[1], (1-2*(x*x+z*z))*s[1], 2*(y*z+x*w)*s[1], 0,
-    2*(x*z+y*w)*s[2], 2*(y*z-x*w)*s[2], (1-2*(x*x+y*y))*s[2], 0, ...t, 1];
+  try { return matrixFromTrs(n.translation, n.rotation, n.scale); }
+  catch (error) { if (error instanceof SpatialMathError) fail('UNSUPPORTED_TRANSFORM', 'Invalid affine import transform.'); throw error; }
 }
 function rigid(m: readonly number[]): number[] {
   if (m.length !== 16 || m.some(n => !Number.isFinite(n) || Math.abs(n) > 1_000_000) || m[3] !== 0 || m[7] !== 0 || m[11] !== 0 || m[15] !== 1) fail('UNSUPPORTED_TRANSFORM', 'Invalid bounded affine transform.');

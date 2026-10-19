@@ -43,10 +43,20 @@ function AssetPlacement.bottomCenter(c: {number}, extents: {number}): {number}
 	return {c[1], c[2] - extents[2] / 2, c[3]}
 end
 
-local function boxOf(root: any): ({number}, {number})
+-- Exact extents of the same oriented box after the requested world Y rotation.
+function AssetPlacement.worldExtentsAtYaw(c: {number}, size: any, yaw: number): {number}
+	local angle = math.rad(yaw)
+	local cosine, sine = math.cos(angle), math.sin(angle)
+	return AssetPlacement.worldExtents({c[1], c[2], c[3],
+		cosine * c[4] + sine * c[10], cosine * c[5] + sine * c[11], cosine * c[6] + sine * c[12],
+		c[7], c[8], c[9],
+		-sine * c[4] + cosine * c[10], -sine * c[5] + cosine * c[11], -sine * c[6] + cosine * c[12]}, size)
+end
+
+local function boxOf(root: any, yaw: number): ({number}, {number}, {number})
 	local cframe, size = root:GetBoundingBox()
 	local components = {cframe:GetComponents()}
-	return components, AssetPlacement.worldExtents(components, size)
+	return components, AssetPlacement.worldExtents(components, size), AssetPlacement.worldExtentsAtYaw(components, size, yaw)
 end
 
 -- One-shot watch: records top-level instances added under Workspace after it is armed.
@@ -230,11 +240,11 @@ function AssetPlacement.adopt(ops: any, command: any, args: any, guard: () -> ()
 				if item:IsA("BasePart") then item.Anchored = true; anchored += 1 end
 			end
 		end
-		local components, extents = boxOf(root)
-		local scale = AssetPlacement.fitScale(extents, maxSize)
+		local components, extents, placedExtents = boxOf(root, yaw)
+		local scale = AssetPlacement.fitScale(placedExtents, maxSize)
 		if scale ~= 1 then
 			root:ScaleTo(root:GetScale() * scale)
-			components, extents = boxOf(root)
+			components, extents, placedExtents = boxOf(root, yaw)
 		end
 		local bottom = AssetPlacement.bottomCenter(components, extents)
 		root.WorldPivot = CFrame.new(bottom[1], bottom[2], bottom[3])
@@ -255,7 +265,7 @@ function AssetPlacement.adopt(ops: any, command: any, args: any, guard: () -> ()
 		local rounded = math.floor(scale * 10000 + 0.5) / 10000
 		return {ref = ref, adopted = {name = string.sub(asset.Name, 1, 100), className = asset.ClassName},
 			removedScripts = {count = removed, classes = classes, names = names}, keptScripts = kept, anchored = anchored,
-			scale = rounded, size = V.array({extents[1], extents[2], extents[3]}), grounded = grounded,
+			scale = rounded, size = V.array({placedExtents[1], placedExtents[2], placedExtents[3]}), grounded = grounded,
 			mutation = {kind = "scene.place_asset", ref = ref, before = V.NULL,
 				after = {descendants = count, removedScripts = removed, keptScripts = kept, scale = rounded}}}
 	end)
@@ -441,7 +451,7 @@ local function clipName(name: string, suffix: string): string
 	return name .. suffix
 end
 
-local SWAP_FIELDS = table.freeze({"Name", "Size", "CFrame", "Anchored", "CanCollide", "CanQuery", "CanTouch", "CastShadow", "Transparency", "Material", "Color"})
+local SWAP_FIELDS = table.freeze({"Name", "Size", "CFrame", "Anchored", "CanCollide", "CanQuery", "CanTouch", "CastShadow", "Transparency", "Material", "Color", "DoubleSided"})
 
 function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, guard: () -> (), engine: any): any
 	V.fields(args, {"source", "attemptId", "name", "description", "creatorId", "continuity", "finish", "assetIds"}, "keep-mesh arguments")
@@ -545,16 +555,17 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 	for _, entry in ipairs(entries) do if entry.assetId == V.NULL then complete = false end end
 	local swapped = 0
 	if complete then
+		local fresh: {any}, copies: {any} = {}, {}
 		pcall(function()
 			guard()
 			if model.Parent == nil then V.fail("STATE", "The placed model was removed.") end
-			local fresh: {any} = {}
 			for index, resource in ipairs(meshes) do
 				local old, id = resource.part, entries[index].assetId
 				if resource.keptAssetId == id and old ~= nil and old.Parent ~= nil then fresh[index] = false -- already persistent (earlier finish)
 				else
 					if old == nil or old.Parent == nil or not old:IsDescendantOf(model) then V.fail("STATE", "A session part was removed from the model.") end
 					local part = engine.service:CreateMeshPartAsync(engine.content(id), {CollisionFidelity = old.CollisionFidelity, RenderFidelity = old.RenderFidelity})
+					if part ~= nil then fresh[index] = part end -- Own late allocations before the guard.
 					guard()
 					if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
 					fresh[index] = part
@@ -568,9 +579,17 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					if part then
 						local old = resource.part
 						for _, field in ipairs(SWAP_FIELDS) do (part :: any)[field] = old[field] end
+						local appearance = resource.appearance
+						if appearance ~= nil and appearance.Parent == old then
+							local copy = appearance:Clone()
+							if copy == nil then V.fail("ENGINE", "SurfaceAppearance could not be copied to the kept mesh.") end
+							copies[index] = copy
+							copy.Parent = part
+						end
 						part.Parent = old.Parent
 						old.Parent = nil
 						resource.part, resource.keptAssetId = part, entries[index].assetId
+						if copies[index] then resource.appearance = copies[index] end
 					end
 					entries[index].swapped = true
 				end
@@ -578,6 +597,17 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 			pcall(function() ops.history:FinishRecording(recording, Enum.FinishRecordingOperation.Commit) end)
 			if not done then V.fail("ENGINE", "The part swap stopped part-way.") end
 		end)
+		-- Preserve uploaded IDs while retiring only unswapped detached replacements.
+		for index, part in pairs(fresh) do
+			if part and meshes[index].part ~= part and part.Parent == nil then
+				if not pcall(function() part:Destroy() end) then ops.assetCleanupFailed = true end
+			end
+		end
+		for index, copy in pairs(copies) do
+			if meshes[index].appearance ~= copy and copy.Parent == nil then
+				if not pcall(function() copy:Destroy() end) then ops.assetCleanupFailed = true end
+			end
+		end
 		for _, entry in ipairs(entries) do if entry.swapped then swapped += 1 end end
 		-- The placement receipt stays restorable: same model, same instance count after a 1:1 swap.
 		local owned = if swapped == #entries then ops.registry.owned[model] else nil

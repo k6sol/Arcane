@@ -49,7 +49,8 @@ function keepQuestion(prepared) {
     title: 'Keep this mesh',
     message: 'Upload “' + prepared.name + '” to your Roblox account?',
     detail: 'Account: Roblox user ID ' + prepared.userId + ' (signed in to Roblox Studio)\nAsset name: ' + prepared.name + '\nUploads: ' + uploads + '\nPlace: ' + prepared.placeName +
-      '\n\nThis uses your Roblox upload quota. New assets can wait for Roblox moderation before they load. The model then uses the uploaded meshes, so it stays after reconnecting, Play and reopening once you save the place.' +
+      '\n\nThis uses your Roblox upload quota. New assets can wait for Roblox moderation before they load. Uploaded mesh geometry stays after reconnecting, Play and reopening once you save the place.' +
+      '\n\nGenerated texture maps stay in this Studio session unless saved separately as assets. This action uploads mesh geometry only.' +
       '\n\nArcane never uploads without this confirmation and cannot undo an upload.',
     confirmLabel: 'Upload and keep',
   });

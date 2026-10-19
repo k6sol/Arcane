@@ -4,6 +4,7 @@ local LegacyProperties = require(script.Parent.Properties)
 local P = V.geometryProperties(LegacyProperties)
 local Registry = require(script.Parent.Registry)
 local AssetTransfer = require(script.Parent.AssetTransfer)
+local AssetMaterials = require(script.Parent.AssetMaterials)
 local AssetPlacement = require(script.Parent.AssetPlacement)
 local TerrainGen = require(script.Parent.TerrainGen)
 local AssetUpload = require(script.Parent.AssetUpload)
@@ -15,7 +16,7 @@ type Operations = any
 local assetOwners: {[any]: any} = setmetatable({}, {__mode = "k"})
 
 local function cleanupFailure(): never
-	error(table.freeze({code = "CLEANUP", message = "Owned editable meshes may remain; reconnect cannot establish cleanup.",
+	error(table.freeze({code = "CLEANUP", message = "Owned editable resources may remain; reconnect cannot establish cleanup.",
 		unsafe = true, recovery = table.freeze({partial = true, imported = false, engineVerification = "pending"})}), 0)
 end
 
@@ -103,6 +104,14 @@ function Operations:cancelAssetTransfers(): ()
 	if owners then
 		for id, owner in pairs(owners.resources) do
 			owner.retired = true
+			-- Templates and image objects stay alive while placed/scattered surfaces reference them.
+			-- Detach each cache entry before engine callbacks can re-enter cancellation.
+			for key, material in pairs(owner.materials or {}) do
+				owner.materials[key] = nil
+				for _, resource in ipairs({material.surfaceAppearance, material.editableImages.MetalnessMap, material.editableImages.RoughnessMap}) do
+					if not pcall(function() resource:Destroy() end) then failures += 1 end
+				end
+			end
 			for _, resource in ipairs(owner.meshes) do
 				if not resource.disposed then
 					resource.disposed = true -- Detach BEFORE a reentrant engine callback.
@@ -202,7 +211,7 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	end
 	current()
 	owners.consumed[runId] = true; owners.count += 1 -- BEFORE resolving/allocating an engine service.
-	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, target = owned.target, continuity = owned.continuity, service = nil}
+	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, materials = {}, target = owned.target, continuity = owned.continuity, service = nil}
 	owners.resources[identity.digest] = owner
 	owned.guard = function(): ()
 		current()
@@ -250,7 +259,6 @@ end
 -- MeshParts reference the in-memory EditableMeshes owned by this plugin lifetime.
 -- API (create.roblox.com AssetService.CreateMeshPartAsync, checked 2026-10-18): meshContent = Content.fromObject(editableMesh).
 local STUDS_PER_METER = 1 / 0.28
-local PART_MATERIALS = table.freeze({bark = "Wood", leaves = "Grass", rock = "Slate", stone = "Marble", foliage = "Grass"})
 local function srgb(linear: number): number
 	local c = math.clamp(if linear == linear then linear else 0, 0, 1)
 	return if c <= 0.0031308 then c * 12.92 else 1.055 * c ^ (1 / 2.4) - 0.055
@@ -265,11 +273,25 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	if owner.materializing or (owner.placed and owner.placed.Parent ~= nil) then
 		V.fail("STATE", "This reconstruction is already placed; clone it with scene_build templates or restore its receipt first.")
 	end
-	local current = self:assetTargetGuard(owner.target, guard)
+	local targetCurrent = self:assetTargetGuard(owner.target, guard)
+	local function current(): ()
+		targetCurrent()
+		if owner.retired then V.fail("SCOPE", "Materialization owner was retired.") end
+	end
+	current()
+	-- Validate every material before allocating parts or image resources.
+	for _, resource in ipairs(owner.meshes) do
+		if resource.object.role ~= "collision" then
+			local plan = AssetMaterials.plan(resource.material)
+			if not plan.supported then V.fail("UNSUPPORTED_MATERIAL", "Nonzero emission cannot be mapped faithfully.") end
+		end
+	end
 	current()
 	owner.materializing = true
-	local model = Instance.new("Model")
+	local model: any = nil
+	local parts, appearances = {}, {}
 	local ok, err = pcall(function()
+		model = Instance.new("Model")
 		for index, resource in ipairs(owner.meshes) do
 			current()
 			if owner.retired or resource.disposed or resource.mesh == nil then V.fail("STATE", "Retained meshes were released before placement.") end
@@ -279,11 +301,12 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 			local part = owner.service:CreateMeshPartAsync(Content.fromObject(resource.mesh), {
 				CollisionFidelity = if collision then Enum.CollisionFidelity.Hull else Enum.CollisionFidelity.Box,
 				RenderFidelity = Enum.RenderFidelity.Precise})
+			-- Own the returned part before a post-yield guard can refuse it.
+			if part ~= nil then parts[index] = part end
 			current()
 			if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
 			part.Parent = model
 			-- Keep this mesh swaps exactly these session parts (AssetPlacement.keep).
-			resource.part, resource.keptAssetId = part, nil
 			local low, high = object.worldBounds.min, object.worldBounds.max
 			local size = {}
 			for axis = 1, 3 do size[axis] = math.max(0.05, (high[axis] - low[axis]) * STUDS_PER_METER) end
@@ -295,20 +318,44 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 				part.Transparency, part.CanCollide, part.CastShadow, part.CanQuery = 1, true, false, false
 			else
 				part.CanCollide = false
-				local key = string.match(name, "_([%a]+)$")
-				local material = key and PART_MATERIALS[string.lower(key)]
-				if material then part.Material = (Enum.Material :: any)[material] end
-				local color = resource.material and resource.material.baseColor
-				if type(color) == "table" then part.Color = Color3.new(srgb(color[1]), srgb(color[2]), srgb(color[3])) end
+				local key = if resource.material == nil then "default" else resource.material.sha256
+				local material = owner.materials[key]
+				if material == nil then
+					material = AssetMaterials.create(resource.material, {
+						createEditableImage = function(options: any): any return owner.service:CreateEditableImage(options) end,
+						createSurfaceAppearanceAsync = function(maps: any): any return owner.service:CreateSurfaceAppearanceAsync(maps) end,
+						contentFromObject = function(image: any): any return Content.fromObject(image) end,
+						vector2 = function(x: number, y: number): any return Vector2.new(x, y) end,
+						colorFromLinear = function(r: number, g: number, b: number): any return Color3.new(srgb(r), srgb(g), srgb(b)) end,
+					}, current)
+					owner.materials[key] = material -- Ownership before any further guard or engine call.
+				end
+				current()
+				-- Neutral substrate: preserve authored PBR instead of guessing from filenames.
+				part.Material = Enum.Material.SmoothPlastic
+				part.Color, part.Transparency, part.DoubleSided = material.meshPartProperties.Color, material.meshPartProperties.Transparency, material.meshPartProperties.DoubleSided
+				local appearance = material.surfaceAppearance:Clone()
+				if appearance == nil then V.fail("ENGINE", "SurfaceAppearance could not be cloned.") end
+				appearances[index] = appearance
+				current()
+				if not appearance:IsA("SurfaceAppearance") or appearance.Parent ~= nil then V.fail("ENGINE", "Expected a detached SurfaceAppearance clone.") end
+				appearance.Parent = part
+				current()
 			end
 		end
 		current()
 	end)
 	owner.materializing = false
 	if not ok then
-		pcall(function() model:Destroy() end)
+		local failed = type(err) == "table" and err.field == "cleanup"
+		if model ~= nil and not pcall(function() model:Destroy() end) then failed = true end
+		for _, appearance in pairs(appearances) do if not pcall(function() appearance:Destroy() end) then failed = true end end
+		for _, part in pairs(parts) do if not pcall(function() part:Destroy() end) then failed = true end end
+		if failed then self.assetCleanupFailed = true; cleanupFailure() end
 		error(err, 0)
 	end
+	-- No yielding callbacks between final validation and the part ownership update.
+	for index, resource in ipairs(owner.meshes) do resource.part, resource.appearance, resource.keptAssetId = parts[index], appearances[index], nil end
 	model.Name = "ArcaneProcedural"
 	-- AssetPlacement calls this once the adopted Model is parented.
 	return model, function() owner.placed = model end

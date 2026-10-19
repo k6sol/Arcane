@@ -32,7 +32,7 @@ local enums = {AssetType = category("AssetType", {"Mesh", "Image"}), AssetCreato
 local function editable(): any return {ClassName = "EditableMesh", IsA = function(_self: any, name: string): boolean return name == "EditableMesh" end} end
 
 local function setup(meshCount: number): any
-  local s: any = {uploads = {}, parts = 0, commits = 0, userId = 78, nextId = 9000, rejectAt = nil, throwAt = nil, partFails = false}
+  local s: any = {uploads = {}, parts = 0, freshParts = {}, commits = 0, userId = 78, nextId = 9000, rejectAt = nil, throwAt = nil, partFails = false}
   local folder = Instance.new("Folder")
   local model = Instance.new("Model"); model.Parent = folder
   local owner: any = {meshes = {}, placed = model, retired = false}
@@ -52,6 +52,7 @@ local function setup(meshCount: number): any
     if s.partFails then error("asset not ready") end
     s.parts += 1
     local part = Instance.new("MeshPart"); part._properties.MeshContent = content; part._properties.Options = options
+    table.insert(s.freshParts, part)
     return part
   end
   s.engine = {service = service, AssetUpload = AssetUpload, enums = enums,
@@ -75,6 +76,40 @@ end
 local guardCalls = 0
 local function guard(): () guardCalls += 1 end
 local digest = string.rep("cd", 32)
+
+-- Opaque image Content values are shared resources, not image copies or uploaded image IDs.
+-- The double clones a SurfaceAppearance instance while retaining those exact Content references.
+local function scalarMaterial(s: any): any
+  local metal, rough = Instance.new("EditableImage"), Instance.new("EditableImage")
+  local maps = {MetalnessMapContent = {Object = metal}, RoughnessMapContent = {Object = rough}}
+  local template = Instance.new("SurfaceAppearance")
+  s.cloneCalls = 0
+  local function clone(self: any): any
+    s.cloneCalls += 1
+    if s.failCloneAt == s.cloneCalls then error("injected appearance clone failure") end
+    local copy = Instance.new("SurfaceAppearance")
+    copy.MetalnessMapContent, copy.RoughnessMapContent = self.MetalnessMapContent, self.RoughnessMapContent
+    copy.Clone = clone
+    return copy
+  end
+  template.MetalnessMapContent, template.RoughnessMapContent, template.Clone = maps.MetalnessMapContent, maps.RoughnessMapContent, clone
+  local material = {surfaceAppearance = template, editableImages = {MetalnessMap = metal, RoughnessMap = rough}}
+  s.owner.materials = {scalar = material}
+  s.model.GetDescendants = function(self: any): {any}
+    local result = {}
+    local function visit(instance: any): ()
+      for _, child in ipairs(instance:GetChildren()) do table.insert(result, child); visit(child) end
+    end
+    visit(self)
+    return result
+  end
+  for index, resource in ipairs(s.owner.meshes) do
+    resource.part.DoubleSided = index % 2 == 1
+    resource.appearance = template:Clone(); resource.appearance.Parent = resource.part
+  end
+  s.ops.registry.owned[s.model] = {parent = s.model.Parent, placed = {count = #s.model:GetDescendants()}}
+  return material
+end
 
 -- 1. Both meshes upload to the confirmed user and every session part is swapped in one recording.
 local s = setup(2)
@@ -137,6 +172,41 @@ check(#s.uploads == 1 and receipt.meshes[1].upload == "failed" and receipt.meshe
 -- 6. The capability probe fails closed on a Studio without the upload API.
 check(AssetPlacement.keepSupported(game) == false, "probe fails closed")
 check(AssetPlacement.keepSupported({GetService = function(): any return {CreateAssetAsync = function() end} end}) == false, "partial API is not enough")
+
+-- 7. Keeping changes geometry IDs while retaining scalar PBR resource ownership in this session.
+s = setup(2)
+local material = scalarMaterial(s)
+local materialOwner, placedOwner = s.owner.materials, s.ops.registry.owned[s.model]
+local originals = {s.owner.meshes[1].appearance, s.owner.meshes[2].appearance}
+local originalParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(receipt.state == "kept" and #s.uploads == 2 and s.cloneCalls == 4, "only geometry uploads and one appearance clone per replacement")
+check(s.owner.materials == materialOwner and s.owner.materials.scalar == material and s.ops.registry.owned[s.model] == placedOwner, "material and placement ownership maps remain exact")
+check(placedOwner.placed.count == #s.model:GetDescendants() and placedOwner.placed.count == 4, "placement ownership counts follow appearance clones")
+for index, resource in ipairs(s.owner.meshes) do
+  check(s.uploads[index].assetType == enums.AssetType.Mesh and s.uploads[index].resource == resource.mesh, "no EditableImage is uploaded")
+  check(resource.part.DoubleSided == (index % 2 == 1), "true and false DoubleSided survive geometry replacement")
+  check(resource.appearance ~= originals[index] and resource.appearance:IsA("SurfaceAppearance") and resource.appearance.Parent == resource.part, "replacement owns a distinct appearance clone")
+  check(resource.appearance.MetalnessMapContent == material.surfaceAppearance.MetalnessMapContent
+    and resource.appearance.RoughnessMapContent == material.surfaceAppearance.RoughnessMapContent, "cloned appearance retains exact editable image Content")
+  check(originals[index].Parent == originalParts[index] and originalParts[index].Parent == nil, "original appearance is not moved or destroyed")
+end
+check(not material.surfaceAppearance._destroyed and not material.editableImages.MetalnessMap._destroyed and not material.editableImages.RoughnessMap._destroyed, "template and backing images stay alive")
+local clonesBeforeFinish = s.cloneCalls
+AssetPlacement.keep(s.ops, s.owner, digest, args({finish = true, assetIds = V.array({9001, 9002})}), guard, s.engine)
+check(#s.uploads == 2 and s.cloneCalls == clonesBeforeFinish, "finish neither uploads maps nor replaces retained appearances")
+
+-- 8. A failed appearance clone leaves the original ownership intact and retires the detached replacement.
+s = setup(1); material = scalarMaterial(s)
+local oldPart, oldAppearance = s.owner.meshes[1].part, s.owner.meshes[1].appearance
+materialOwner, placedOwner = s.owner.materials, s.ops.registry.owned[s.model]
+s.failCloneAt = s.cloneCalls + 1
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(receipt.state == "uploaded" and receipt.swapped == 0 and receipt.meshes[1].assetId == 9001, "failed clone retains uploaded geometry ID without claiming a swap")
+check(s.owner.meshes[1].part == oldPart and s.owner.meshes[1].appearance == oldAppearance and oldAppearance.Parent == oldPart and oldPart.Parent == s.model, "failed clone preserves source part and appearance")
+check(s.owner.materials == materialOwner and s.ops.registry.owned[s.model] == placedOwner and placedOwner.placed.count == 2, "failed clone preserves owner records")
+check(#s.uploads == 1 and s.uploads[1].assetType == enums.AssetType.Mesh and not material.editableImages.MetalnessMap._destroyed and not material.editableImages.RoughnessMap._destroyed, "failed clone never uploads or disposes backing images")
+check(#s.freshParts == 1 and s.freshParts[1]._destroyed and s.freshParts[1].Parent == nil, "failed clone destroys unused replacement part")
 print("Arcane mesh keep checks passed: " .. count)
 `;
 
