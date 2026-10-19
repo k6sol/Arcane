@@ -8,7 +8,7 @@ export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest;
 import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
-import { AssetError, AssetPipeline, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
+import { AssetError, AssetPipeline, MAX_CONCURRENT_ASSET_JOBS, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
 import type { ProcessQueryHost } from '../../../packages/asset-pipeline/src/worker-identity.js';
 import { RESOLUTION_RECORD_BYTES, assessJobForResolution, validateResolution,
   type ResolutionEvidence, type ResolutionReason, type WorkerResolutionRecord } from '../../../packages/asset-pipeline/src/worker-resolution.js';
@@ -759,12 +759,12 @@ export async function createAssetService(options: AssetServiceOptions) {
       admitting = true;
       try {
         await flushed(); ensureOpen();
-        if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+        if (probeActive || active.size >= MAX_CONCURRENT_ASSET_JOBS || adoption) throw new AssetError('BUSY', 'Blender generation capacity is already reserved.');
         // Coarse project fence: every interrupted job must hold a currently valid, confirmed marker (re-read now).
         const fence = await fenced();
         if (fence.blocked) throw new ArcaneError('RECONCILIATION', 'An interrupted asset job still needs a confirmed worker status check before new asset work can start.');
         ensureOpen();
-        if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+        if (probeActive || active.size >= MAX_CONCURRENT_ASSET_JOBS || adoption) throw new AssetError('BUSY', 'Blender generation capacity is already reserved.');
         await ensureHistoryRoom(()=>{
           ensureOpen();if(admission?.signal?.aborted){
             // Preserve the original host's definitive authority refusal before
@@ -789,7 +789,7 @@ export async function createAssetService(options: AssetServiceOptions) {
           throw new ArcaneError('RECONCILIATION', 'An interrupted job changed while new asset work was being admitted; check its worker status again.');
         }
         ensureOpen();
-        if (probeActive || active.size || adoption) throw new AssetError('BUSY', 'A Blender operation is already running.');
+        if (probeActive || active.size >= MAX_CONCURRENT_ASSET_JOBS || adoption) throw new AssetError('BUSY', 'Blender generation capacity is already reserved.');
         if (admission) synchronousAdmissionResult(admission.beforeCreate());
         const handle = pipeline.start(originalInput, operation);
         const job: AssetJobRecord = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };

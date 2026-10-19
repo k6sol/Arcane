@@ -38,7 +38,7 @@ class World {
     } };
   }
 }
-type Step = { exitBeforeCapture?: boolean; spawnFails?: boolean; exitCode?: number; stdout?: string; ignoreStop?: boolean; noClose?: boolean };
+type Step = { exitBeforeCapture?: boolean; spawnFails?: boolean; exitCode?: number; stdout?: string; ignoreStop?: boolean; noClose?: boolean; onUnresolved?: (close: () => void) => void };
 /** Injected runner obeying the runBounded contract: hooks.spawned right after creation, hooks.closed only on close. */
 function runner(world: World, steps: Step[], seen: { spec: CommandSpec; pid?: number }[] = [], onSpawn?: (pid: number) => Promise<void>) {
   return async (spec: CommandSpec, options: CommandOptions = {}): Promise<CommandResult> => {
@@ -52,7 +52,10 @@ function runner(world: World, steps: Step[], seen: { spec: CommandSpec; pid?: nu
       if (step.ignoreStop) return new Promise<never>(() => { /* No close is ever observed. */ });
       world.stop(pid); hooks?.closed(); throw new AssetError('SUPERVISION_UNRECORDED', 'stopped');
     }
-    if (step.noClose) return { stdout: step.stdout ?? '', stderr: '', exitCode: step.exitCode ?? 0, signal: null }; // Contract violation: settled without close.
+    if (step.noClose) {
+      step.onUnresolved?.(() => { world.stop(pid); hooks?.closed(); });
+      return { stdout: step.stdout ?? '', stderr: '', exitCode: step.exitCode ?? 0, signal: null }; // Contract violation: settled without close.
+    }
     world.stop(pid); hooks?.closed();
     return { stdout: step.stdout ?? '', stderr: '', exitCode: step.exitCode ?? 0, signal: null };
   };
@@ -274,25 +277,33 @@ test('standalone probe scratch: only the scratch of this invocation is removed, 
   assert.equal(probe.available, true); assert.equal(world.queries, 0, 'scratch supervision never queries identity');
   assert.deepEqual((await readdir(temp)).sort(), ['arcane-blender-probe-finished-closed', 'arcane-blender-probe-legacy']);
   // A runner that settles without an observed close: this invocation's scratch is retained, never assumed clean.
+  let closeUnresolved!: () => void;
   const stuck = new AssetPipeline({ workspaceRoot: root, outputRoot: join(root, 'assets'), workerRoot: workers },
-    { run: runner(new World(), [{ noClose: true }]), discover: async () => ({ blender: [BLENDER], python: [] }) });
+    { run: runner(new World(), [{ noClose: true, onUnresolved: close => { closeUnresolved = close; } }]), discover: async () => ({ blender: [BLENDER], python: [] }) });
   await assert.rejects(stuck.probe(), code('SUPERVISION_UNRESOLVED'));
   assert.equal((await readdir(temp)).length, 3);
+  assert.throws(() => pipeline.start(request), code('BUSY'));
+  closeUnresolved();
 });
 
 test('unresolved stage closure ends the job as interrupted (fenced), persisted and kept on restart', async t => {
   const world = new World();
-  const f = await pipelineFixture(t, world, [blenderOk, pythonOk, { noClose: true }]);
+  let closeUnresolved!: () => void;
+  const f = await pipelineFixture(t, world, [blenderOk, pythonOk, { noClose: true, onUnresolved: close => { closeUnresolved = close; } }]);
   const handle = f.pipeline.start(request); const result = await handle.completion;
   assert.equal(result.state, 'interrupted'); assert.equal(result.error?.code, 'SUPERVISION_UNRESOLVED');
   const saved = await job(handle.directory);
   assert.equal(saved.state, 'interrupted');
   assert.deepEqual(roles(saved.workers), ['probe:closed:exit-observed', 'python-probe:closed:exit-observed', 'generate:captured']);
+  await assert.rejects(f.pipeline.recover(handle.directory), code('BUSY'));
+  assert.equal(world.alive(), true);
+  assert.deepEqual(await attestJobWorkers(saved.workers, world.host()), { verdict: 'same-worker-running', reason: 'identity-matched' });
+  closeUnresolved();
   const recovered = await f.pipeline.recover(handle.directory);
   assert.equal(recovered.result.state, 'interrupted');
   assert.deepEqual(roles((await job(handle.directory)).workers), roles(saved.workers));
-  // The generation worker the fake runner never closed is still alive in the simulated table: never gone.
-  assert.deepEqual(await attestJobWorkers(saved.workers, world.host()), { verdict: 'same-worker-running', reason: 'identity-matched' });
+  // Only the eventual observed close releases live ownership. Saved unresolved evidence stays unchanged.
+  assert.deepEqual(await attestJobWorkers(saved.workers, world.host()), { verdict: 'recorded-worker-gone', reason: 'pid-absent' });
 });
 
 test('runBounded contract: closed fires on close before settling; stop decision kills and still awaits close', async () => {

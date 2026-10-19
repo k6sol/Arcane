@@ -175,7 +175,7 @@ test('a throwing created callback retains active supervision, persistence, cance
   const f = await fixture(t), service = await f.open(), entered = f.gate(), release = f.gate();
   let block = true, witnessed = '';
   mockWrites(t, async (path, _data, write) => {
-    if (block && typeof path === 'string' && dirname(path) !== f.outputRoot && basename(path).startsWith('state-')) {
+    if (typeof path === 'string' && dirname(path) !== f.outputRoot && basename(path).startsWith('state-') && (block || basename(dirname(path)).startsWith('second-active-'))) {
       block = false; entered.release(); await release.promise;
     }
     return write();
@@ -187,13 +187,15 @@ test('a throwing created callback retains active supervision, persistence, cance
   assert.equal(service.jobs()[0]?.jobId, witnessed);
   const index = JSON.parse(await realFs.readFile(join(f.outputRoot, 'index.json'), 'utf8'));
   assert.equal(index.jobs[0].jobId, witnessed);
+  const second = await service.start({ ...input, name: 'second-active' });
   await assert.rejects(() => service.start({ ...input, name: 'still-busy' }), code('BUSY'));
   let settled = false;
   const cancelling = service.cancel(witnessed).then(job => { settled = true; return job; });
   await nextTurn(); assert.equal(settled, false);
   release.release(); assert.equal((await cancelling).state, 'cancelled');
+  await service.cancel(second.jobId);
   const later = await service.start({ ...input, name: 'later' });
-  await service.cancel(later.jobId); assert.equal(f.starts.mock.callCount(), 2);
+  await service.cancel(later.jobId); assert.equal(f.starts.mock.callCount(), 3);
   await service.close();
   const reopened = await f.open();
   assert.equal(reopened.jobs().find(job => job.jobId === witnessed)?.state, 'cancelled');
@@ -238,16 +240,18 @@ test('generic starts and existing input, busy and closed guards do not acquire a
   assert.equal(calls, 0); assert.equal(f.starts.mock.callCount(), 0);
   const entered = f.gate(), release = f.gate(); let block = true;
   mockWrites(t, async (path, _data, write) => {
-    if (block && typeof path === 'string' && dirname(path) !== f.outputRoot && basename(path).startsWith('state-')) {
+    if (typeof path === 'string' && dirname(path) !== f.outputRoot && basename(path).startsWith('state-') && (block || basename(dirname(path)).startsWith('second-active-'))) {
       block = false; entered.release(); await release.promise;
     }
     return write();
   });
   const starting = service.start(input); await entered.promise; const job = await starting;
+  const second = await service.start({ ...input, name: 'second-active' });
   await assert.rejects(() => service.start({ ...input, name: 'busy' }, admission), code('BUSY'));
   release.release();
   const terminal = await service.cancel(job.jobId);
-  assert.equal(terminal.state, 'cancelled'); assert.equal(calls, 0); assert.equal(f.starts.mock.callCount(), 1);
+  await service.cancel(second.jobId);
+  assert.equal(terminal.state, 'cancelled'); assert.equal(calls, 0); assert.equal(f.starts.mock.callCount(), 2);
   await service.close();
   await assert.rejects(() => service.start(input, admission), code('CLOSED')); assert.equal(calls, 0);
 });

@@ -21,13 +21,46 @@ export { normalizeRecipe, preflightRecipe, RECIPE_LIMITS, CUSTOM_REQUEST_BYTES }
 export { normalizeRequest } from './validation.js';
 export { normalizeProcedural, PROCEDURAL_KINDS, PROCEDURAL_LIMITS, PROCEDURAL_PART_MATERIALS } from './procedural.js';
 
-// One supervised Blender operation per Node worker, including across pipeline instances.
-let busy = false;
+// Two independent generation jobs per Node worker, including across pipeline instances.
+// Maintenance operations remain exclusive. A cancelled or unresolved child still owns its slot
+// until its own close is observed, even if an injected/failed runner has already returned.
+export const MAX_CONCURRENT_ASSET_JOBS = 2;
+interface OperationClaim {
+  readonly exclusive: boolean;
+  supervise(hooks?: CommandOptions['supervise']): NonNullable<CommandOptions['supervise']>;
+  finish(): void;
+}
+const operations = new Set<OperationClaim>();
 const activeDirectories = new Set<string>();
 const directoryKey = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
-function claim(): () => void {
-  if (busy) throw new AssetError('BUSY', 'A Blender operation is already running in this worker.');
-  busy = true; return () => { busy = false; };
+function claim(exclusive = true, onRelease?: () => void): OperationClaim {
+  if ([...operations].some(operation => operation.exclusive) || operations.size >= MAX_CONCURRENT_ASSET_JOBS || (exclusive && operations.size)) {
+    throw new AssetError('BUSY', 'Blender operation capacity is already reserved in this worker.');
+  }
+  let finished = false, workers = 0;
+  const release = () => {
+    if (finished && !workers && operations.delete(operation)) onRelease?.();
+  };
+  const operation: OperationClaim = {
+    exclusive,
+    supervise(hooks) {
+      let spawned = false, closed = false;
+      return {
+        async spawned(info) {
+          if (!spawned && !closed && info.pid !== undefined) { spawned = true; workers++; }
+          return hooks ? hooks.spawned(info) : 'continue';
+        },
+        closed() {
+          if (closed) return;
+          closed = true;
+          try { hooks?.closed(); }
+          finally { if (spawned) workers--; release(); }
+        }
+      };
+    },
+    finish() { finished = true; release(); }
+  };
+  operations.add(operation); return operation;
 }
 function deadline(options: OperationOptions, fallback: number): number {
   const ms = options.deadlineMs ?? fallback;
@@ -78,11 +111,13 @@ export class AssetPipeline {
   }
   /** Reserve durably, run, then record closure only from the runner's observed close. A failed reservation
    * starts nothing; a supervision failure after the run supersedes the run's own outcome. */
-  private async supervisedRun(supervision: WorkerSupervision | undefined, role: WorkerRole, spec: CommandSpec, options: CommandOptions): Promise<CommandResult> {
-    if (!supervision) return this.run(spec, options);
-    const launch = await supervision.begin(role, spec.executable);
+  private async supervisedRun(operation: OperationClaim, supervision: WorkerSupervision | undefined, role: WorkerRole, spec: CommandSpec, options: CommandOptions): Promise<CommandResult> {
+    // Deep inspection has no durable job transition, but must still join each observed child close
+    // before trying another executable or releasing its exclusive operation.
+    const owner = supervision ?? new WorkerSupervision({ capture: false, persist: async () => undefined });
+    const launch = await owner.begin(role, spec.executable);
     let result: CommandResult | undefined, failure: unknown, failed = false;
-    try { result = await this.run(spec, { ...options, supervise: launch.hooks }); } catch (error) { failure = error; failed = true; }
+    try { result = await this.run(spec, { ...options, supervise: operation.supervise(launch.hooks) }); } catch (error) { failure = error; failed = true; }
     await launch.finish();
     if (failed) throw failure;
     return result!;
@@ -95,7 +130,7 @@ export class AssetPipeline {
       ...(this.config.pythonExecutable ? { pythonExecutable: this.config.pythonExecutable } : {}) };
   }
   /** With `supervision`, every attempt is reserved before spawn and one record stays free for generation. */
-  private async probeIn(directory: string, end: number, signal?: AbortSignal, supervision?: WorkerSupervision): Promise<AssetProbe> {
+  private async probeIn(operation: OperationClaim, directory: string, end: number, signal?: AbortSignal, supervision?: WorkerSupervision): Promise<AssetProbe> {
     const installed = await this.discover(this.discoveryOptions());
     const evidence: AssetProbe = { observedAt: new Date().toISOString(), available: false, blender: null, python: null, attempts: [] };
     const probeScript = await this.script('probe.py');
@@ -106,7 +141,7 @@ export class AssetPipeline {
     for (const executable of installed.blender) {
       if (bounded(executable)) break;
       try {
-        const process = await this.supervisedRun(supervision, 'probe', { executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', probeScript], cwd: directory, env: workerEnvironment(directory) },
+        const process = await this.supervisedRun(operation, supervision, 'probe', { executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', probeScript], cwd: directory, env: workerEnvironment(directory) },
           { ...(signal ? { signal } : {}), deadlineMs: Math.min(15000, remaining(end, signal)) });
         if (process.exitCode !== 0) throw new AssetError('BLENDER_PROBE', 'Installed Blender failed its runtime probe.');
         const result = resultLine(process.stdout), capabilities = record(result.capabilities, 'Blender capabilities');
@@ -122,7 +157,7 @@ export class AssetPipeline {
     for (const executable of installed.python) {
       if (bounded(executable)) break;
       try {
-        const process = await this.supervisedRun(supervision, 'python-probe', { executable, args: ['-I', '-B', '-c', pythonCode], cwd: directory, env: workerEnvironment(directory) },
+        const process = await this.supervisedRun(operation, supervision, 'python-probe', { executable, args: ['-I', '-B', '-c', pythonCode], cwd: directory, env: workerEnvironment(directory) },
           { ...(signal ? { signal } : {}), deadlineMs: Math.min(5000, remaining(end, signal)) });
         if (process.exitCode !== 0) throw new AssetError('PYTHON_PROBE', 'Python runtime probe failed.');
         const result = resultLine(process.stdout);
@@ -139,13 +174,13 @@ export class AssetPipeline {
    * are tracked in memory (no identity, no persistent recovery claim). The scratch is removed only once every
    * owned worker's close was observed and it is still the exact direct child created here; otherwise it is kept. */
   async probe(options: OperationOptions = {}): Promise<AssetProbe> {
-    const end = deadline(options, 30000), release = claim();
+    const end = deadline(options, 30000), operation = claim();
     let temp: string | undefined, directory: string | undefined, supervision: WorkerSupervision | undefined;
     try {
       temp = await realpath(tmpdir());
       directory = await mkdtemp(join(temp, PROBE_SCRATCH_PREFIX));
       supervision = new WorkerSupervision({ capture: false, persist: async () => undefined });
-      return await this.probeIn(directory, end, options.signal, supervision);
+      return await this.probeIn(operation, directory, end, options.signal, supervision);
     } finally {
       try {
         if (temp && directory && supervision && supervision.records.every(r => r.state === 'closed')) {
@@ -154,24 +189,25 @@ export class AssetPipeline {
             await noLinks(actual); await rm(actual, { recursive: true, force: true });
           }
         }
-      } finally { release(); }
+      } finally { operation.finish(); }
     }
   }
   start(input: AssetInput, options: JobOptions = {}): AssetJob {
-    const sourceInput = jsonSnapshot(input), request = normalizeRequest(sourceInput), end = deadline(options, 180000), release = claim();
+    const sourceInput = jsonSnapshot(input), request = normalizeRequest(sourceInput), end = deadline(options, 180000);
     const id = randomUUID(), directory = join(this.outputRoot, request.name + '-' + id), controller = new AbortController();
+    const operation = claim(false, () => activeDirectories.delete(directoryKey(directory)));
     const abort = () => controller.abort(); options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) controller.abort();
     const emit = (stage: string, state: AssetJobEvent['state'] = 'running') => {
       try { options.onEvent?.({ jobId: id, at: new Date().toISOString(), stage, state }); } catch { /* telemetry observer only */ }
     };
     activeDirectories.add(directoryKey(directory));
-    const completion = this.generate(id, directory, request, sourceInput, end, controller.signal, emit).finally(() => {
-      options.signal?.removeEventListener('abort', abort); activeDirectories.delete(directoryKey(directory)); release();
+    const completion = this.generate(id, directory, request, sourceInput, end, controller.signal, emit, operation).finally(() => {
+      options.signal?.removeEventListener('abort', abort); operation.finish();
     });
     return { id, directory, completion, cancel: abort };
   }
-  private async generate(id: string, directory: string, request: AssetRequest, sourceInput: unknown, end: number, signal: AbortSignal, emit: (stage: string, state?: AssetJobEvent['state']) => void): Promise<AssetJobResult> {
+  private async generate(id: string, directory: string, request: AssetRequest, sourceInput: unknown, end: number, signal: AbortSignal, emit: (stage: string, state?: AssetJobEvent['state']) => void, operation: OperationClaim): Promise<AssetJobResult> {
     let created = false;
     let stage = 'prepare-output', workerOutput: CommandResult | undefined;
     const progress = (next: string) => { stage = failureStage(next); emit(stage); };
@@ -186,14 +222,14 @@ export class AssetPipeline {
       await atomicJson(directory, 'job.json', { schemaVersion: 1, ...base, state: 'running', request, startedAt, workers: supervision.records });
       await writeFile(artifactPath(directory, 'input.json'), JSON.stringify(sourceInput) + '\n', { flag: 'wx' });
       remaining(end, signal); progress('probe');
-      const evidence = await this.probeIn(environmentDirectory, end, signal, supervision);
+      const evidence = await this.probeIn(operation, environmentDirectory, end, signal, supervision);
       if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.');
       for (const name of workerScripts(request)) await copyFile(await this.script(name), artifactPath(directory, name), 1);
       const requestText = JSON.stringify(request, null, request.recipe ? undefined : 2) + '\n';
       await writeFile(artifactPath(directory, 'request.json'), requestText, { flag: 'wx' });
       const recipeArguments = request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(request.recipe, request.triangleBudget).estimatedTriangles)] : [];
       progress('generate');
-      const process = await this.supervisedRun(supervision, 'generate', { executable: evidence.blender.executable,
+      const process = await this.supervisedRun(operation, supervision, 'generate', { executable: evidence.blender.executable,
         args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', artifactPath(directory, 'asset_worker.py'), '--', '--mode', 'generate', '--directory', directory, '--request-sha256', sha256(Buffer.from(requestText)), ...recipeArguments],
         cwd: directory, env: workerEnvironment(environmentDirectory) }, { signal, deadlineMs: remaining(end, signal), onLine: line => {
           if (!line.startsWith('ARCANE_EVENT ')) return;
@@ -262,13 +298,15 @@ export class AssetPipeline {
     const end = deadline(options, 60000);
     if (!isAbsolute(manifestPath) || basename(manifestPath) !== 'manifest.json') throw new AssetError('OUTPUT_PATH', 'Pass an absolute job manifest.json path.');
     const directory = await this.jobDirectory(dirname(manifestPath)); remaining(end, options.signal);
+    if (activeDirectories.has(directoryKey(directory))) throw new AssetError('BUSY', 'This job is still supervised.');
     const manifest = await validateManifestFiles(directory, await readJson(manifestPath, 4 * 1024 * 1024)); remaining(end, options.signal);
     if (options.deep) {
-      const release = claim();
+      const operation = claim(true, () => activeDirectories.delete(directoryKey(directory)));
+      activeDirectories.add(directoryKey(directory));
       try {
-        const probe = await this.probeIn(directory, end, options.signal);
+        const probe = await this.probeIn(operation, directory, end, options.signal);
         if (!probe.blender) throw new AssetError('BLENDER_UNAVAILABLE', 'Deep validation requires an installed Blender runtime.');
-        const process = await this.run({ executable: probe.blender.executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', await this.script('asset_worker.py'), '--', '--mode', 'audit', '--directory', directory, '--request-sha256', manifest.artifacts.find(a => a.path === 'request.json')!.sha256, ...(manifest.request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(manifest.request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(manifest.request.recipe, manifest.request.triangleBudget).estimatedTriangles)] : [])], cwd: directory, env: workerEnvironment(directory) },
+        const process = await this.supervisedRun(operation, undefined, 'generate', { executable: probe.blender.executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', await this.script('asset_worker.py'), '--', '--mode', 'audit', '--directory', directory, '--request-sha256', manifest.artifacts.find(a => a.path === 'request.json')!.sha256, ...(manifest.request.recipe ? ['--recipe-sha256', sha256(Buffer.from(JSON.stringify(manifest.request.recipe))), '--estimated-triangles', JSON.stringify(preflightRecipe(manifest.request.recipe, manifest.request.triangleBudget).estimatedTriangles)] : [])], cwd: directory, env: workerEnvironment(directory) },
           { ...(options.signal ? { signal: options.signal } : {}), deadlineMs: remaining(end, options.signal) });
         if (process.exitCode !== 0) throw new AssetError('MESH', 'Saved scene failed the native Blender audit.');
         const audit = resultLine(process.stdout);
@@ -276,7 +314,7 @@ export class AssetPipeline {
         if (!Array.isArray(audit.errors) || audit.errors.length || !isDeepStrictEqual(audit.totals, manifest.validation.totals) || !Array.isArray(audit.meshes) || audit.meshes.length !== manifest.validation.meshes.length) throw new AssetError('MESH', 'Saved scene disagrees with manifest metrics.');
         const actualMeshes = new Map(audit.meshes.map(raw => { const m = record(raw, 'native mesh audit'); return [m.name, m]; }));
         for (const mesh of manifest.validation.meshes) if (!isDeepStrictEqual(actualMeshes.get(mesh.name), mesh)) throw new AssetError('MESH', 'Saved mesh changed since the original audit.');
-      } finally { release(); }
+      } finally { operation.finish(); }
     }
     return manifest;
   }

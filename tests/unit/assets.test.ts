@@ -128,7 +128,9 @@ test('job cancellation/busy/failed-runtime states are truthful and recoverable w
   const dir=await temporary(t),output=join(dir,'assets'),config={workspaceRoot:ROOT,outputRoot:output,blenderExecutable:join(dir,'missing-blender'),pythonExecutable:join(dir,'missing-python')};
   const p=createAssetPipeline(config),events:string[]=[];
   const job=p.start({template:'hero-prop',name:'unavailable'},{onEvent:e=>events.push(e.stage)});
-  assert.throws(()=>createAssetPipeline(config).start({template:'hero-prop',name:'second'}),code('BUSY'));
+  const second=createAssetPipeline(config).start({template:'hero-prop',name:'second'});
+  assert.throws(()=>createAssetPipeline(config).start({template:'hero-prop',name:'third'}),code('BUSY'));
+  await second.completion;
   const result=await job.completion;assert.equal(result.state,'failed');assert.equal(result.error?.code,'BLENDER_UNAVAILABLE');assert.equal(result.manifestPath,null);
   assert.ok(events.includes('complete'));const recovery=await p.recover(job.directory);assert.equal(recovery.result.state,'failed');assert.equal(recovery.checkpointPath,null);
   const cancelled=p.start({template:'hero-prop',name:'cancelled'});cancelled.cancel();assert.equal((await cancelled.completion).state,'cancelled');
