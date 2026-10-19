@@ -26,6 +26,7 @@ let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
 let claudePreferences;
+let toolDrafts;
 let runtimeRecovery;
 let recoveryWindow = null, recoveryWindowFailure = null, deferWindowShow = false;
 let claudeChat;
@@ -403,6 +404,7 @@ async function checkSmoke() {
   })()`);
   const workspacePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.workspacePreferences.read()');
   const claudePreferenceRead = await window.webContents.executeJavaScript('window.arcaneDesktop.claudePreferences.read()');
+  const toolDraftRead = await window.webContents.executeJavaScript('window.arcaneDesktop.toolDrafts.read()');
   const runtimeRecoveryRead = await window.webContents.executeJavaScript('(async()=>{const bridge=window.arcaneDesktop.runtimeRecovery;return {frozen:Object.isFrozen(bridge),status:await bridge.status()};})()');
   // Newer desktop bridges: frozen shape plus the verification-mode answer of each read-only or disabled call. In smoke the
   // hosts are disabled, so no Claude process, folder picker, browser, checkout or system notification can start.
@@ -478,6 +480,7 @@ async function checkSmoke() {
     workspacePreferencesDisabledAndEmpty: workspacePreferenceRead?.available === false && workspacePreferenceRead.preferences === null,
     runtimeRecoveryDisabledAndEmpty: runtimeRecoveryRead?.frozen === true && runtimeRecoveryRead.status?.version === 1 && runtimeRecoveryRead.status.state === 'unavailable' && runtimeRecoveryRead.status.message === '',
     claudePreferencesDisabledAndEmpty: claudePreferenceRead?.available === false && claudePreferenceRead.projectPath === null && claudePreferenceRead.preferences === null,
+    toolDraftsDisabledAndEmpty: toolDraftRead?.available === false && toolDraftRead.projectPath === null && toolDraftRead.preferences === null,
     localChatDraftSwitching: localChat.draftsSeparate === true && localChat.stableComposer === true && localChat.cleaned === true,
     taskUsageHiddenWithoutTask: localChat.taskUsageInactive === true,
     localChatIntentsStartNoNativeLifecycle: afterChatResponse.ok && afterChat.state?.snapshot === null && afterChat.state.actions?.length === 0,
@@ -561,6 +564,11 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       claudePreferences.installIpc(ipcMain);
+      toolDrafts = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'tools', getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      toolDrafts.installIpc(ipcMain);
       // One-click Studio plugin install/update: verified bundled artifact only, after a native confirm dialog.
       studioPlugin = require('./plugin-install.cjs').createStudioPluginInstaller({ enabled: !smoke, productRoot: () => productRoot,
         backupDirectory: () => userRoot ? join(userRoot, 'plugin-backups') : null,

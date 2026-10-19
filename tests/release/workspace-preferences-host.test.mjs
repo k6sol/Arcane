@@ -95,7 +95,7 @@ function encryptedTestDouble() {
   };
 }
 
-function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false } = {}) {
+function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false, includeTools = false } = {}) {
   const userRoot = 'C:\\Owned', projectId = hash(projectPath.toLowerCase());
   const stateRoot = win32.join(userRoot, 'runtime', 'projects', projectId), handlers = new Map(), ipcCalls = [];
   disk.ensure(projectPath); disk.ensure(stateRoot);
@@ -126,7 +126,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
   });
   // Execute the actual main-owned session accessor and actual installIpc, not a substitute gate.
-  vm.runInContext('let workspacePreferences, claudePreferences, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
+  vm.runInContext('let workspacePreferences, claudePreferences, toolDrafts, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
     'globalThis.setState = next => {' + ['closing', 'switching', 'window', 'origin', 'userRoot', 'token', 'projectSession']
       .map(name => `if(Object.hasOwn(next,'${name}')) ${name}=next.${name};`).join('') + '};\n' +
     mainSource.slice(begin, end), mainContext, { filename: 'workspace-preferences-main-wiring.cjs' });
@@ -135,6 +135,12 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     const endClaude = mainSource.indexOf('claudePreferences.installIpc(ipcMain);', beginClaude) + 'claudePreferences.installIpc(ipcMain);'.length;
     assert.ok(beginClaude > 0 && endClaude > beginClaude, 'Production Claude preference wiring exists.');
     vm.runInContext(mainSource.slice(beginClaude, endClaude), mainContext, { filename: 'claude-preferences-main-wiring.cjs' });
+  }
+  if (includeTools) {
+    const beginTools = mainSource.indexOf("toolDrafts = require('./workspace-preferences.cjs').createWorkspacePreferences(");
+    const endTools = mainSource.indexOf('toolDrafts.installIpc(ipcMain);', beginTools) + 'toolDrafts.installIpc(ipcMain);'.length;
+    assert.ok(beginTools > 0 && endTools > beginTools, 'Production tool draft wiring exists.');
+    vm.runInContext(mainSource.slice(beginTools, endTools), mainContext, { filename: 'tool-drafts-main-wiring.cjs' });
   }
   let exposed, activeEvent = event, invokeError, replyOverride;
   const preloadContext = vm.createContext({ TextEncoder, require(name) {
@@ -168,6 +174,14 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     claude(action, ...args) {
       preloadContext.serializedArgs = JSON.stringify(args);
       return exposed.claudePreferences[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
+    },
+    tools(action, ...args) {
+      preloadContext.serializedArgs = JSON.stringify(args);
+      return exposed.toolDrafts[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
+    },
+    rawTools(action, ...args) {
+      hostContext.serialized = JSON.stringify(args);
+      return handlers.get('arcane:tool-drafts-' + action)(activeEvent, ...vm.runInContext('JSON.parse(serialized)', hostContext));
     },
     tour(action, ...args) {
       preloadContext.serializedArgs = JSON.stringify(args);
@@ -708,4 +722,90 @@ test('Claude preferences preserve reported model aliases without changing the Co
  const f=fixture({includeClaude:true}),value=claudeSnapshot({tabs:[tab(1,{provider:'claude',modelId:'sonnet[1m]',draft:'Model alias draft'})]});
  await f.claude('save',value);assert.deepEqual(json((await f.claude('read')).preferences),value);
  await assert.rejects(f.call('save',snapshot({tabs:[tab(1,{modelId:'sonnet[1m]'})]})),ERROR);
+});
+
+const toolSnapshot = (values = {}) => ({version: 1, projectPath: 'C:\\Project', drafts: [
+  {id: 'project-memory', kind: 'project-memory', title: 'Project memory', context: 'project-memory', baseline: 'Saved note', text: '  Unsaved note\n\n\u{1f332}  '},
+  {id: 'script:1', kind: 'script-source', title: 'Workspace / Main', context: JSON.stringify({sessionId: 'fixture-session', instanceId: 'fixture-script', receiptId: 'fixture-source'}), baseline: 'print("old")', text: '  print("new")\n\n'},
+], ...values});
+
+test('tool drafts retain encrypted text, baseline and target context across host restarts', async () => {
+  const f = fixture({includeTools: true}), value = toolSnapshot();
+  assert.ok(Object.isFrozen(f.exposed.toolDrafts));
+  assert.deepEqual(json(await f.tools('read')), {available: true, projectPath: f.projectPath, preferences: null});
+  await f.tools('save', value);
+  const full = win32.join(f.stateRoot, 'tool-drafts.v1.json'), bytes = f.disk.node(full).bytes;
+  for (const draft of value.drafts) { assert.equal(bytes.includes(Buffer.from(draft.text)), false); assert.equal(bytes.includes(Buffer.from(draft.context)), false); }
+  assert.equal(bytes.includes(Buffer.from('print')), false);
+  const restarted = fixture({disk: f.disk, safeStorage: f.safeStorage, includeTools: true});
+  assert.deepEqual(json(await restarted.tools('read')), {available: true, projectPath: f.projectPath, preferences: value});
+  assert.equal(f.disk.descriptors.size, 0);
+});
+
+test('tool draft ciphertext cannot be substituted with either chat record', async () => {
+  const f = fixture({includeTools: true, includeClaude: true}), full = win32.join(f.stateRoot, 'tool-drafts.v1.json');
+  await f.call('save', snapshot()); await f.claude('save', claudeSnapshot()); await f.tools('save', toolSnapshot());
+  const original = Buffer.from(f.disk.node(full).bytes);
+  for (const other of [f.full, win32.join(f.stateRoot, 'claude-preferences.v1.json')]) {
+    const foreign = Buffer.from(f.disk.node(other).bytes); f.disk.put(full, {kind: 'file', bytes: foreign});
+    await assert.rejects(f.tools('read'), ERROR); assert.deepEqual(f.disk.node(full).bytes, foreign, 'Rejected records are retained.');
+  }
+  f.disk.put(full, {kind: 'file', bytes: original});
+  assert.deepEqual(json((await f.tools('read')).preferences), toolSnapshot()); assert.equal(f.disk.descriptors.size, 0);
+});
+
+test('tool draft host and preload reject foreign scope, malformed rows, duplicates and oversized text', async () => {
+  const f = fixture({includeTools: true}), row = toolSnapshot().drafts[0], script = toolSnapshot().drafts[1];
+  const bad = [snapshot(), toolSnapshot({projectPath: 'C:\\Other'}), toolSnapshot({version: 2}), toolSnapshot({drafts: [{...row, credential: 'forbidden-field'}]}),
+    toolSnapshot({drafts: [{...row, kind: 'api-key'}]}), toolSnapshot({drafts: [{...row, context: 'another-project-memory'}]}),
+    toolSnapshot({drafts: [{...row, text: '\u{1f332}'.repeat(4097)}]}), toolSnapshot({drafts: [{...script, baseline: 'x'.repeat(100 * 1024 + 1)}]}),
+    toolSnapshot({drafts: [{...row, title: 'bad\nlabel'}]}), toolSnapshot({drafts: [row, row]}), toolSnapshot({drafts: [row, {...row, id: 'different-id'}]}),
+    toolSnapshot({drafts: Array.from({length: 17}, (_, i) => ({...script, id: 'script:' + i, context: 'context:' + i}))}),
+    toolSnapshot({drafts: Array.from({length: 3}, (_, i) => ({...script, id: 'script:' + i, context: 'context:' + i, text: 'x'.repeat(100 * 1024), baseline: 'y'.repeat(100 * 1024)}))})];
+  for (const value of bad) { await assert.rejects(f.tools('save', value), ERROR); await assert.rejects(f.rawTools('save', value), ERROR); }
+  assert.equal(f.disk.writes.length, 0); assert.equal(f.safeStorage.calls.includes('encrypt'), false);
+  const exact = toolSnapshot({drafts: [{...script, text: 'x'.repeat(100 * 1024), baseline: 'y'.repeat(100 * 1024)}]});
+  await f.tools('save', exact); assert.deepEqual(json((await f.tools('read')).preferences), exact);
+});
+
+test('tool draft saves copy input and reject stale main-frame, profile and project ownership', async () => {
+  const f = fixture({includeTools: true}), value = toolSnapshot(), expected = json(value), pending = f.tools('save', value);
+  value.drafts[0].text = 'Late caller mutation'; await pending; assert.deepEqual(json((await f.tools('read')).preferences), expected);
+  for (const invalidate of [g => g.setState({token: ''}), g => g.setState({window: null}), g => g.setState({userRoot: 'C:\\Other'}), g => g.setState({projectSession: {projectId: g.projectId, projectPath: g.projectPath, stateRoot: g.stateRoot}}),
+    g => { g.event.senderFrame.url = origin + '/studio#changed'; }]) {
+    const g = fixture({includeTools: true}), saving = g.rawTools('save', toolSnapshot()); invalidate(g);
+    await assert.rejects(saving, ERROR); assert.equal(g.disk.writes.length, 0);
+  }
+  const foreign = fixture({includeTools: true}); foreign.setEvent({...foreign.event, senderFrame: {url: origin + '/studio#fixture'}});
+  await assert.rejects(foreign.tools('read'), ERROR); assert.equal(foreign.disk.writes.length, 0);
+});
+
+test('tool draft storage is inert without encryption and failed encryption retains the previous record', async () => {
+  for (const disabled of [fixture({includeTools: true, smoke: true}), fixture({includeTools: true, platform: 'linux'})]) {
+    assert.deepEqual(json(await disabled.tools('read')), {available: false, projectPath: null, preferences: null});
+    await assert.rejects(disabled.tools('save', toolSnapshot()), ERROR); assert.equal(disabled.disk.writes.length, 0);
+  }
+  const f = fixture({includeTools: true}); await f.tools('save', toolSnapshot());
+  const full = win32.join(f.stateRoot, 'tool-drafts.v1.json'), original = Buffer.from(f.disk.node(full).bytes);
+  f.safeStorage.encryptString = () => { throw Error('Private draft text must never appear in an IPC failure.'); };
+  await assert.rejects(f.tools('save', toolSnapshot({drafts: []})), ERROR); assert.deepEqual(f.disk.node(full).bytes, original);
+  assert.equal(f.disk.descriptors.size, 0);
+});
+
+test('tool draft replies are strict, bounded and redacted independently from chat channels', async () => {
+  const f = fixture({includeTools: true});
+  await assert.rejects(f.tools('read', 'invented-path'), ERROR); await assert.rejects(f.tools('save'), ERROR);
+  for (const reply of [{available: false, projectPath: f.projectPath, preferences: null}, {available: true, projectPath: 'C:\\Other', preferences: toolSnapshot()},
+    {available: true, projectPath: f.projectPath, preferences: toolSnapshot(), extra: true}, {saved: false}]) {
+    f.setReply(reply); await assert.rejects(f.tools('read'), ERROR);
+  }
+  f.setReply(undefined); f.setInvokeError('private text C:\\private-project'); await assert.rejects(f.tools('read'), ERROR);
+});
+
+test('independent tool and chat records can checkpoint together without sharing locks', async () => {
+  const f = fixture({includeTools: true, includeClaude: true});
+  await Promise.all([f.tools('save', toolSnapshot()), f.call('save', snapshot()), f.claude('save', claudeSnapshot())]);
+  assert.deepEqual(json((await f.tools('read')).preferences), toolSnapshot());
+  assert.deepEqual(json((await f.call('read')).preferences), snapshot()); assert.deepEqual(json((await f.claude('read')).preferences), claudeSnapshot());
+  assert.equal(f.disk.descriptors.size, 0);
 });

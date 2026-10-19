@@ -211,6 +211,47 @@ const workspacePreferences = Object.freeze({ version: 1,
 const claudePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args, 'claude'), save: (...args) => workspacePreferenceInvoke('save', args, 'claude'),
 });
+const toolDraftSnapshot = value => {
+  workspacePreferenceFields(value, ['version', 'projectPath', 'drafts']);
+  const projectPath = workspacePreferenceText(value.projectPath, 4096);
+  if (value.version !== 1 || !Array.isArray(value.drafts) || Object.getPrototypeOf(value.drafts) !== Array.prototype ||
+      value.drafts.length > 16 || Reflect.ownKeys(value.drafts).length !== value.drafts.length + 1) workspacePreferenceError();
+  const drafts = [], ids = new Set(), contexts = new Set();
+  for (let i = 0; i < value.drafts.length; i++) {
+    const descriptor = Object.getOwnPropertyDescriptor(value.drafts, String(i));
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) workspacePreferenceError();
+    const row = workspacePreferenceFields(descriptor.value, ['id', 'kind', 'title', 'context', 'baseline', 'text']);
+    if (!['project-memory', 'script-source'].includes(row.kind)) workspacePreferenceError();
+    const id = workspacePreferenceText(row.id, 128, true), title = workspacePreferenceText(row.title, 512), context = workspacePreferenceText(row.context, 4096);
+    const limit = row.kind === 'project-memory' ? 16 * 1024 : 100 * 1024;
+    if (!context || /[\x00-\x1f\x7f]/.test(title) || row.kind === 'project-memory' && context !== 'project-memory' ||
+        ids.has(id) || contexts.has(row.kind + ':' + context)) workspacePreferenceError();
+    ids.add(id); contexts.add(row.kind + ':' + context);
+    drafts.push({ id, kind: row.kind, title, context, baseline: row.baseline === null ? null : workspacePreferenceText(row.baseline, limit), text: workspacePreferenceText(row.text, limit) });
+  }
+  const result = { version: 1, projectPath, drafts };
+  if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 511 * 1024) workspacePreferenceError();
+  return result;
+};
+const toolDraftInvoke = async (action, args) => {
+  try {
+    if (action === 'read' ? args.length !== 0 : args.length !== 1) workspacePreferenceError();
+    const input = action === 'save' ? toolDraftSnapshot(args[0]) : null;
+    const value = await ipcRenderer.invoke('arcane:tool-drafts-' + action, ...(input ? [input] : []));
+    if (action === 'read') {
+      workspacePreferenceFields(value, ['available', 'projectPath', 'preferences']);
+      if (typeof value.available !== 'boolean' || (value.available ? typeof value.projectPath !== 'string' || !value.projectPath.length : value.projectPath !== null || value.preferences !== null)) workspacePreferenceError();
+      const preferences = value.preferences === null ? null : toolDraftSnapshot(value.preferences);
+      if (preferences && preferences.projectPath !== value.projectPath) workspacePreferenceError();
+      return { available: value.available, projectPath: value.available ? workspacePreferenceText(value.projectPath, 4096) : null, preferences };
+    }
+    workspacePreferenceFields(value, ['saved']); if (value.saved !== true) workspacePreferenceError();
+    return { saved: true };
+  } catch { workspacePreferenceError(); }
+};
+const toolDrafts = Object.freeze({ version: 1,
+  read: (...args) => toolDraftInvoke('read', args), save: (...args) => toolDraftInvoke('save', args),
+});
 const welcomeTourInvoke = async (action, args) => {
   try {
     if (action === 'read') { if (args.length) workspacePreferenceError(); }
@@ -614,4 +655,4 @@ const runtimeRecovery = Object.freeze({ version: 1,
   onState: listener => recoveryListen('arcane:runtime-recovery-state', listener),
   onCheckpoint: listener => recoveryListen('arcane:runtime-recovery-checkpoint', listener, true),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));

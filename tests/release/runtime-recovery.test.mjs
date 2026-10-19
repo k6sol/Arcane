@@ -10,7 +10,7 @@ function fixture({choice=1}={}){
  const calls=[],handlers=new Map(),emitter=new EventEmitter(),preferences=new Map();let exposed,preloadContext;
  const frame={url:'http://127.0.0.1:45871/studio#fixture'},contents={mainFrame:frame,isDestroyed:()=>false,send:(channel,value)=>{calls.push(['send',channel,value]);if(preloadContext){preloadContext.serialized=JSON.stringify(value);emitter.emit(channel,{},vm.runInContext('JSON.parse(serialized)',preloadContext));}}};
  const window={webContents:contents,isDestroyed:()=>false},project=Object.freeze({projectId:'a'.repeat(64),projectPath:'C:\\Project',stateRoot:'C:\\Profile\\runtime\\projects\\'+'a'.repeat(64)}),event={sender:contents,senderFrame:frame};
- const context=vm.createContext({window,projectSession:project,projectPath:project.projectPath,userRoot:'C:\\Profile',origin:'http://127.0.0.1:45871',token:'fixture-token',child:null,closing:false,switching:false,smoke:false,runtimeRecovery:null,workspacePreferences:null,claudePreferences:null,studioKeyVault:null,safeStorage:{},clipboard:{},appDialogs:null,policy,URL,console,
+ const context=vm.createContext({window,projectSession:project,projectPath:project.projectPath,userRoot:'C:\\Profile',origin:'http://127.0.0.1:45871',token:'fixture-token',child:null,closing:false,switching:false,smoke:false,runtimeRecovery:null,workspacePreferences:null,claudePreferences:null,toolDrafts:null,studioKeyVault:null,safeStorage:{},clipboard:{},appDialogs:null,policy,URL,console,
   ipcMain:{handle:(channel,handler)=>handlers.set(channel,handler)},sleep:async ms=>calls.push(['sleep',ms]),
   stopClaudeChat:reason=>{calls.push(['stopClaudeChat',reason]);return Promise.resolve();},stopDaemon:async()=>{context.origin='';context.token='';context.child=null;calls.push(['stopDaemon']);return true;},
   startDaemon:async path=>{calls.push(['startDaemon',path]);context.origin='http://127.0.0.1:45871';context.token='replacement-token';context.child={exitCode:null,signalCode:null};},startClaudeChat:async()=>calls.push(['startClaudeChat']),loadWorkspace:async()=>calls.push(['loadWorkspace']),reloadRecoveredWorkspace:async()=>{context.switching=false;calls.push(['loadWorkspace']);},
@@ -19,7 +19,7 @@ function fixture({choice=1}={}){
   createStudioKeyVault:options=>({installIpc:()=>preferences.set('keys',options.getSession)})});
  context.dialog=context.nativeDialog;
  vm.runInContext(eventGate+factory,context);
- for(const slot of['studioKeyVault','workspacePreferences','claudePreferences']){
+ for(const slot of['studioKeyVault','workspacePreferences','claudePreferences','toolDrafts']){
   const start=slot==='studioKeyVault'?'studioKeyVault = createStudioKeyVault(':slot+" = require('./workspace-preferences.cjs').createWorkspacePreferences(";
   vm.runInContext(between(start,slot+'.installIpc(ipcMain);'),context);
  }
@@ -32,11 +32,11 @@ function fixture({choice=1}={}){
 test('actual main wiring retains only presentation saves after the runtime credential is retired',async()=>{
  const f=fixture();assert.equal(f.preferences.get('workspace')().epoch,f.project);assert.ok(f.preferences.get('keys')());const done=f.stop();await settle();
  assert.equal(f.context.origin,'');assert.equal(f.context.token,'');assert.equal(f.context.switching,true);assert.equal(f.preferences.get('keys')(),null,'The key vault never gains offline authority.');
- for(const slot of['workspace','claude']){const scope=f.preferences.get(slot)();assert.equal(scope.window,f.window);assert.equal(scope.origin,'http://127.0.0.1:45871');assert.equal(scope.projectPath,f.project.projectPath);assert.notEqual(scope.epoch,f.project);assert.equal(Object.hasOwn(scope,'token'),false);}
+ for(const slot of['workspace','claude','tools']){const scope=f.preferences.get(slot)();assert.equal(scope.window,f.window);assert.equal(scope.origin,'http://127.0.0.1:45871');assert.equal(scope.projectPath,f.project.projectPath);assert.notEqual(scope.epoch,f.project);assert.equal(Object.hasOwn(scope,'token'),false);}
  assert.equal(f.calls.some(row=>row[0]==='startDaemon'),false);await f.ack(true);await done;assert.equal(f.calls.filter(row=>row[0]==='loadWorkspace').length,1);assert.equal(f.context.switching,false);
 });
 test('ordinary token revocation does not create offline presentation access',()=>{
- const f=fixture();f.context.token='';for(const slot of['workspace','claude','keys'])assert.equal(f.preferences.get(slot)(),null);
+ const f=fixture();f.context.token='';for(const slot of['workspace','claude','tools','keys'])assert.equal(f.preferences.get(slot)(),null);
 });
 test('native confirmation can keep the original workspace open without claiming its drafts were saved',async()=>{
  const f=fixture({choice:0});await f.stop({code:0});assert.equal(f.calls.some(row=>row[0]==='loadWorkspace'),false);assert.equal(f.calls.some(row=>row[0]==='startDaemon'),false);assert.equal(f.context.window,f.window);

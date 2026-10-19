@@ -66,6 +66,29 @@ function preferences(value, scope, claude = false) {
   if (Buffer.byteLength(JSON.stringify(result)) > MAX_PLAIN_BYTES) fail();
   return result;
 }
+function toolDraftPreferences(value, scope) {
+  fields(value, ['version', 'projectPath', 'drafts']);
+  const projectPath = text(value.projectPath, 4096);
+  if (value.version !== 1 || !samePath(projectPath, scope.projectPath) || types.isProxy(value.drafts) ||
+      !Array.isArray(value.drafts) || Object.getPrototypeOf(value.drafts) !== Array.prototype || value.drafts.length > 16 ||
+      Reflect.ownKeys(value.drafts).length !== value.drafts.length + 1) fail();
+  const drafts = [], ids = new Set(), contexts = new Set();
+  for (let i = 0; i < value.drafts.length; i++) {
+    const descriptor = Object.getOwnPropertyDescriptor(value.drafts, String(i));
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail();
+    const row = fields(descriptor.value, ['id', 'kind', 'title', 'context', 'baseline', 'text']);
+    if (!['project-memory', 'script-source'].includes(row.kind)) fail();
+    const id = text(row.id, 128, true), title = text(row.title, 512), context = text(row.context, 4096);
+    const limit = row.kind === 'project-memory' ? 16 * 1024 : 100 * 1024;
+    if (!context || /[\x00-\x1f\x7f]/.test(title) || row.kind === 'project-memory' && context !== 'project-memory' ||
+        ids.has(id) || contexts.has(row.kind + ':' + context)) fail();
+    ids.add(id); contexts.add(row.kind + ':' + context);
+    drafts.push({ id, kind: row.kind, title, context, baseline: row.baseline === null ? null : text(row.baseline, limit), text: text(row.text, limit) });
+  }
+  const result = { version: 1, projectPath, drafts };
+  if (Buffer.byteLength(JSON.stringify(result)) > MAX_PLAIN_BYTES - 1024) fail();
+  return result;
+}
 function checkedPath(value, kind = 'directory') {
   const full = policy.localPath(value);
   if (!samePath(full, value)) fail();
@@ -119,10 +142,11 @@ function checkPin(pin) {
 }
 
 function createWorkspacePreferences({ safeStorage, getSession, enabled = true, record = 'workspace' }) {
-  if (record !== 'workspace' && record !== 'claude') fail();
-  const recordFile = record === 'claude' ? 'claude-preferences.v1.json' : FILE;
-  const recordChannel = record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
+  if (!['workspace', 'claude', 'tools'].includes(record)) fail();
+  const recordFile = record === 'tools' ? 'tool-drafts.v1.json' : record === 'claude' ? 'claude-preferences.v1.json' : FILE;
+  const recordChannel = record === 'tools' ? 'arcane:tool-drafts-' : record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
   function recordPreferences(value, scope) {
+    if (record === 'tools') return toolDraftPreferences(value, scope);
     const parsed = preferences(value, scope, record === 'claude');
     if (record === 'claude' && (parsed.provider !== 'claude' || parsed.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) fail();
     return parsed;
@@ -163,9 +187,9 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
     if (snapshot.pin) checkPin(snapshot.pin); else if (!missing(snapshot.full)) fail();
   }
   function payload(value, scope) {
-    fields(value, record === 'claude' ? ['version', 'projectId', 'record', 'preferences'] : ['version', 'projectId', 'preferences']);
-    if (value.version !== 1 || value.projectId !== scope.projectId || record === 'claude' && value.record !== 'claude') fail();
-    return { version: 1, projectId: value.projectId, ...(record === 'claude' ? { record: 'claude' } : {}), preferences: recordPreferences(value.preferences, scope) };
+    fields(value, record !== 'workspace' ? ['version', 'projectId', 'record', 'preferences'] : ['version', 'projectId', 'preferences']);
+    if (value.version !== 1 || value.projectId !== scope.projectId || record !== 'workspace' && value.record !== record) fail();
+    return { version: 1, projectId: value.projectId, ...(record !== 'workspace' ? { record } : {}), preferences: recordPreferences(value.preferences, scope) };
   }
   function unlocked(snapshot) { if (!missing(snapshot.full + '.lock')) fail(); }
   function readSnapshot(scope, event, paths) {
@@ -191,7 +215,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
   }
   function persist(scope, event, snapshot, input) {
     // Presentation data and the host's project identity are sealed together.
-    const plain = JSON.stringify(payload({ version: 1, projectId: scope.projectId, ...(record === 'claude' ? { record: 'claude' } : {}), preferences: input }, scope));
+    const plain = JSON.stringify(payload({ version: 1, projectId: scope.projectId, ...(record !== 'workspace' ? { record } : {}), preferences: input }, scope));
     if (Buffer.byteLength(plain) > MAX_PLAIN_BYTES) fail();
     guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot); if (!available()) fail();
     const encrypted = safeStorage.encryptString(plain);
@@ -352,13 +376,13 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
           }
           if (busy) fail(); busy = true; ownsBusy = true;
           const usable = available(); guard(scope, event);
-          if (!usable) { if (action === 'read') return { available: false, ...(record === 'claude' ? { projectPath: null } : {}), preferences: null }; fail(); }
+          if (!usable) { if (action === 'read') return { available: false, ...(record !== 'workspace' ? { projectPath: null } : {}), preferences: null }; fail(); }
           const paths = projectScope(scope);
           // Pin paths before yielding; recheck owner/main frame/project/origin before access.
           await Promise.resolve(); guard(scope, event);
           if (!available()) fail(); guard(scope, event);
           snapshot = readSnapshot(scope, event, paths); guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
-          if (action === 'read') return { available: true, ...(record === 'claude' ? { projectPath: scope.projectPath } : {}), preferences: snapshot.preferences };
+          if (action === 'read') return { available: true, ...(record !== 'workspace' ? { projectPath: scope.projectPath } : {}), preferences: snapshot.preferences };
           persist(scope, event, snapshot, input); guard(scope, event);
           return { saved: true };
         } catch { fail(); }
