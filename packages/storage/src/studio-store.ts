@@ -1451,6 +1451,13 @@ export class StudioStore {
           ? guiEditReceiptMatches(r.className, c.args, mutation)
           : nativePropertiesMatch(object(c.args.properties) as Record<string, Json>, after.properties, r.className as string) && canonical(object(mutation.before).properties) === canonical(c.args.expected))) throw new ArcaneError('RECEIPT', 'Property receipt does not match the intended change.');
         if (c.method === 'script.set_enabled' && (!sameReceiptRef(mutation.ref,c.args.ref) || canonical(mutation.before) !== canonical({ source:c.args.expectedSource,enabled:c.args.expectedEnabled }) || canonical(after) !== canonical({source:c.args.expectedSource,enabled:c.args.enabled}))) throw new ArcaneError('RECEIPT', 'Execution-state receipt does not match the exact source/state baseline.');
+        if(c.method==='scene.remove'){
+          const before=object(mutation.before);const workspace=c.args.mode==='workspace';
+          if(!Number.isSafeInteger(after.removed)||(after.removed as number)<0||(after.removed as number)>10000||!Number.isSafeInteger(after.descendants)||(after.descendants as number)<(after.removed as number)||(after.descendants as number)>100000
+            ||after.undo!=='studio'||after.terrainCleared!==workspace||before.targetCount!==after.removed||before.descendants!==after.descendants||!Array.isArray(r.pathSegments)||r.pathSegments.length!==0
+            ||workspace&&r.root!=='Workspace'||!workspace&&after.removed!==(c.args.refs as Json[]).length)
+            throw new ArcaneError('RECEIPT','Removal receipt does not match its bounded targets and restoration contract.');
+        }
         if (c.method === 'scene.create' && mutation.before !== null) throw new ArcaneError('RECEIPT', 'Creation receipt must have a null baseline.');
         // Clone items copy a template's whole subtree, so a build with clones creates at least the planned count.
         const cloned = c.method === 'scene.build' && (c.args.items as {kind?:unknown}[]).some(item => item.kind === 'clone');
@@ -1476,6 +1483,7 @@ export class StudioStore {
     const a = object(input); const prior = this.command(textField(a.commandId, 'command ID'));
     if(this.db.prepare('SELECT 1 FROM studio_test_commands WHERE command_id=?').get(prior.id))throw new ArcaneError('TEST_RESERVATION','Temporary setup receipts require their original private restoration owner.');
     if (prior.method === 'environment.apply') throw new ArcaneError('RESTORE', 'Terrain and lighting changes are reverted with Studio Undo (one recording); the receipt lists the prior lighting values.');
+    if (prior.method === 'scene.remove') throw new ArcaneError('RESTORE','Scene removal is reverted with Studio Undo (one recording); receipt_restore cannot reconstruct deleted instances or terrain.');
     if (prior.method === 'terrain.generate') throw new ArcaneError('RESTORE', 'Generated terrain is reverted with Studio Undo (one recording); receipt_restore is refused.');
     if (prior.method === 'asset.keep_mesh') throw new ArcaneError('RESTORE', 'An upload to your Roblox account cannot be undone from Arcane. The part swap is one Studio Undo step; the uploaded asset stays in your inventory.');
     if (prior.state !== 'succeeded' || !isWrite(prior.method) || prior.method === 'scene.restore' || prior.method === 'asset.stage_packet'||prior.method==='asset.reconstruct') throw new ArcaneError('RESTORE', 'This receipt does not contain a succeeded reversible mutation.');

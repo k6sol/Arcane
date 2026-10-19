@@ -20,7 +20,7 @@ export interface StudioContinuityProof {
   connected: boolean; observedAt: string; expiresAt: string;
 }
 export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context', 'scene.asset_watch'] as const;
-export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.build', 'environment.apply', 'scene.place_asset', 'scene.apply_material', 'terrain.generate'] as const;
+export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.remove', 'scene.build', 'environment.apply', 'scene.place_asset', 'scene.apply_material', 'terrain.generate'] as const;
 /** Native asset adoption (plugin side). scene.asset_watch arms a one-shot Workspace insertion watch;
  * scene.place_asset adopts exactly one natively inserted/generated instance, strips scripts by default,
  * fits, grounds, anchors and parents it under one receipt; scene.apply_material applies a generated
@@ -28,6 +28,7 @@ export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', '
 export const ASSET_PLACE_LIMITS = Object.freeze({ descendants: 5000, templateDescendants: 2000, templates: 16, materialTargets: 64, watchSeconds: 600, arrivalSeconds: 10 });
 /** One atomic hierarchy per scene.build command: one undo recording and one receipt.
  * instances counts every created Instance, including the root, placement Models and welds. */
+export const SCENE_REMOVE_LIMITS = Object.freeze({ targets: 64, topLevel: 10000, descendants: 100000 });
 export const SCENE_BUILD_LIMITS = Object.freeze({ items: 2000, prototypes: 32, prototypeParts: 64, instances: 4000, keys: 32 });
 /** environment.apply: bounded terrain fills plus Lighting/effect settings in one undo recording.
  * Terrain is undone with Studio Undo; receipts record the prior lighting values. */
@@ -118,7 +119,7 @@ export interface StudioUploadContextObservation extends StudioImportContextObser
     | {status: 'unavailable'; id: null; provenance: 'StudioService:GetUserId'};
 }
 export interface MutationReceipt {
-  kind: 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply' | 'scene.place_asset' | 'scene.apply_material' | 'terrain.generate'; ref: InstanceRef;
+  kind: 'scene.remove' | 'scene.create' | 'scene.update' | 'script.update' | 'script.set_enabled' | 'scene.build' | 'environment.apply' | 'scene.place_asset' | 'scene.apply_material' | 'terrain.generate'; ref: InstanceRef;
   before: Record<string, Json> | null; after: Record<string, Json>;
 }
 export interface PluginPairInput { code: string; protocolVersion: 1; identity: StudioIdentity; capabilities: string[] }

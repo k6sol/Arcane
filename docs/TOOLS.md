@@ -2,7 +2,7 @@
 
 # Arcane MCP tools
 
-Arcane's MCP server (`arcane-studio`) exposes 39 tools to every connected client. Arcane's in-app ChatGPT chat also gets 7 asset-delivery tools (46 in total). This reference is generated from the tool definitions in `apps/mcp/src`; descriptions are the exact text the model receives.
+Arcane's MCP server (`arcane-studio`) exposes 40 tools to every connected client. Arcane's in-app ChatGPT chat also gets 7 asset-delivery tools (47 in total). This reference is generated from the tool definitions in `apps/mcp/src`; descriptions are the exact text the model receives.
 
 Regenerate after changing any tool:
 
@@ -32,6 +32,7 @@ node scripts/generate-tool-docs.mjs
 - **Blender assets:** `assets_probe`, `assets_jobs`, `assets_start`, `assets_cancel`, `assets_manifest`, `assets_procedural`, `assets_preview`
 - **Bundled skills:** `skills_recommend`, `skills_list`, `skills_get`
 - **Work graph:** `work_runs`, `work_ready`, `work_create`, `work_claim`, `work_progress`, `work_submit`
+- **Other:** `scene_delete`
 - **In-app asset delivery:** `assets_adopt_glb`, `assets_prepare_studio_import`, `assets_stage_studio_import`, `assets_studio_staging_status`, `assets_reconstruct_studio_import`, `assets_studio_reconstruction_status`, `assets_place_studio_import`
 
 ## Studio connection and reading
@@ -601,6 +602,21 @@ Write: submit 1–20 local project evidence paths and notes under your task leas
 | `leaseToken` | string | yes | ≤ 128 chars |
 | `evidence` | object[] | yes | 1–20 items |
 | `timeoutMs` | integer | no | 100–60000, default 30000 |
+
+## Other
+
+### `scene_delete`
+
+**Safety:** Writes (may change or remove existing state)
+
+Write: remove objects the user asked to delete. Supply 1..64 exact refs in targets, or clearWorkspace:true to reset Workspace objects and all Terrain. The active Studio camera, engine roots and connection witness are protected. Works on existing scene content, including content Arcane did not create. Needs this session write grant and the updated plugin in Edit mode. One Studio Undo recording restores the removal; receipt_restore cannot. Large resets are bounded to 10000 top-level objects/100000 descendants. No automatic retry after an ambiguous outcome; check receipt_status and the scene.
+
+| Parameter | Type | Required | Limits |
+|---|---|---|---|
+| `sessionId` | string | yes |  |
+| `timeoutMs` | integer | no | 100–60000, default 30000 |
+| `targets` | instance ref[] | no | 1–64 items |
+| `clearWorkspace` | true | no |  |
 
 ## In-app asset delivery
 

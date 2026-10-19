@@ -1535,6 +1535,80 @@ function Operations:bounds(instance: any): any
 		size = V.array({high[1] - low[1], high[2] - low[2], high[3] - low[3]}), space = "world-aabb"}
 end
 
+-- Remove exact instances or reset Workspace through one Studio Undo recording.
+-- No arbitrary code, root destruction, uploads or automatic broad undo.
+function Operations:remove(command: any, args: any, guard: () -> ()): any
+	V.fields(args, {"mode", "refs"}, "scene removal")
+	if args.mode ~= "refs" and args.mode ~= "workspace" then V.fail("INPUT", "Choose refs or workspace removal.") end
+	local workspace = self.registry.services.Workspace
+	if args.mode == "workspace" then workspace = self.registry:root("Workspace") end
+	local camera = if workspace then workspace.CurrentCamera else nil
+	local terrain: any = nil
+	local targets, parents = {}, {}
+	if args.mode == "workspace" then
+		if args.refs ~= nil then V.fail("INPUT", "Workspace reset does not take refs.") end
+		terrain = workspace:FindFirstChildOfClass("Terrain")
+		if terrain == nil or type(terrain.Clear) ~= "function" then V.fail("CAPABILITY", "Workspace Terrain.Clear is unavailable.") end
+		for _, instance in ipairs(workspace:GetChildren()) do
+			if instance ~= terrain and instance ~= camera then targets[#targets + 1] = instance end
+		end
+		if #targets > V.REMOVE_LIMITS.topLevel then V.fail("BODY_LIMIT", "Workspace reset exceeds the top-level instance limit.") end
+	else
+		local refs = V.list(args.refs, V.REMOVE_LIMITS.targets, "removal refs")
+		if #refs == 0 then V.fail("INPUT", "Choose at least one removal target.") end
+		for _, ref in ipairs(refs) do targets[#targets + 1] = self.registry:resolve(ref) end
+	end
+	local seen, count = {}, 0
+	local slice = self:slicer(guard)
+	local function protected(instance: any): boolean
+		local root = self.registry:rootOf(instance)
+		return (workspace ~= nil and instance == workspace.CurrentCamera) or instance:IsA("Terrain") or root == nil or instance == self.registry:root(root)
+			or (instance.ClassName == "Folder" and string.sub(instance.Name, 1, 16) == "ArcaneTestProof_")
+	end
+	for index, instance in ipairs(targets) do
+		guard()
+		if seen[instance] then V.fail("INPUT", "Removal targets must be distinct.") end
+		seen[instance] = true
+		if protected(instance) then V.fail("PROTECTED", "A removal target is an engine root, active camera, Terrain or connection witness.") end
+		local children = instance:GetDescendants()
+		count += #children + 1
+		if count > V.REMOVE_LIMITS.descendants then V.fail("BODY_LIMIT", "Removal exceeds the instance limit.") end
+		for _, child in ipairs(children) do
+			if protected(child) then V.fail("PROTECTED", "A removal target contains protected connection or engine state.") end
+			slice(1)
+		end
+		parents[index] = instance.Parent
+		slice(#children + 1)
+	end
+	if args.mode == "refs" then for index, instance in ipairs(targets) do
+		for other = index + 1, #targets do
+			if instance:IsDescendantOf(targets[other]) or targets[other]:IsDescendantOf(instance) then V.fail("INPUT", "Remove an ancestor once; do not repeat its descendants.") end
+		end
+	end
+	end
+	local anchor = if args.mode == "workspace" then workspace else self.registry:root(self.registry:rootOf(targets[1]))
+	local ref = self.registry:ref(anchor)
+	local result = {ref = ref, removed = #targets, descendants = count, terrainCleared = terrain ~= nil, undo = "studio",
+		mutation = {kind = "scene.remove", ref = ref, before = {targetCount = #targets, descendants = count},
+			after = {removed = #targets, descendants = count, terrainCleared = terrain ~= nil, undo = "studio"}}}
+	if #V.encode(result, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Removal receipt exceeds its bound.") end
+	return self:record(command, guard, function(progress: any): any
+		for index, instance in ipairs(targets) do
+			guard()
+			if instance.Parent ~= parents[index] or protected(instance) then V.fail("CONFLICT", "A removal target moved or became protected before the change.") end
+			for _, child in ipairs(instance:GetDescendants()) do
+				if protected(child) then V.fail("CONFLICT", "A removal target gained protected state before the change.") end
+			end
+			progress.touched = true
+			instance:Destroy()
+			if instance.Parent ~= nil then V.fail("VERIFY", "A removal target remained parented.") end
+			slice(1)
+		end
+		if terrain then guard(); progress.touched = true; terrain:Clear(); guard() end
+		return result
+	end)
+end
+
 function Operations:restore(command: any, args: any, guard: () -> ()): any
 	V.fields(args, {"receiptCommandId", "mutation"}, "restore arguments")
 	local receiptId = V.string(args.receiptCommandId, "receipt command ID", 256)
@@ -1542,6 +1616,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 	if not original or self.restored[receiptId] then V.fail("RECEIPT", "Receipt is unknown or already restored in this session.") end
 	-- Do not trust a caller-supplied inverse, even on the paired daemon route.
 	if not V.equal(original, args.mutation) then V.fail("RECEIPT", "Restoration payload differs from the immutable local receipt.") end
+	if original.kind == "scene.remove" then V.fail("RESTORE", "Use Studio Undo to restore deleted instances and terrain.") end
 	local instance = self.registry:resolve(original.ref)
 	if self.registry:isService(instance) then V.fail("SERVICE", "Services cannot be restored by mutation.") end
 	if original.kind == "scene.create" then
@@ -1638,6 +1713,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 		result = {ref = self.registry:ref(instance), source = self:source(instance)}
 		if instance:IsA("BaseScript") then result.enabled = not instance.Disabled end
 	elseif method == "scene.create" then result = self:create(command, args, guard)
+	elseif method == "scene.remove" then result = self:remove(command, args, guard)
 	elseif method == "scene.build" then result = self:build(command, args, guard)
 	elseif method == "environment.apply" then result = self:environment(command, args, guard)
 	elseif method == "terrain.generate" then result = self:terrainGenerate(command, args, guard)

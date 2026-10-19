@@ -2942,6 +2942,7 @@ export class CodexChat {
     };
     if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
     this.render();this.publishState();
+    let acknowledgedStateApplied=false;
     try {
       const outcome=await this.api.action(input,imageRequest?.signal);
       const current=this.snapshot()?.connectionId;
@@ -2951,6 +2952,7 @@ export class CodexChat {
         this.state?.chatTasks?.some(task=>task.taskId===input.taskId&&task.retained===true&&task.threadId===input.threadId&&task.sessionId===outcome.state.snapshot?.thread?.sessionId&&task.connectionId===outcome.record.nextConnectionId);
       const fenced=this.stopped||epoch!==this.generation||((input.action==='grant-assets'||input.action==='revoke-assets')&&assetScope!==this.assetScope())||(input.action!=='connect'&&input.action!=='disconnect'&&current!==input.connectionId&&!freshTask&&!focusedTask)||(input.action==='disconnect'&&!!current&&current!==input.connectionId)||(input.action==='connect'&&!!current&&current!==outcome.record.connectionId);
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;
+        acknowledgedStateApplied=outcome.record.state==='acknowledged';
         const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
         this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
@@ -2964,7 +2966,13 @@ export class CodexChat {
     } finally {
         if(this.imageRequest===imageRequest)this.imageRequest=null;
       this.pending.delete(input.requestId);
-      if(!this.stopped){this.render();this.publishProviderState();this.publishState();await this.refresh();}
+      if(!this.stopped){
+        this.render();this.publishProviderState();this.publishState();
+        // A validated acknowledgement already includes the current native state.
+        // Let setup actions hand that state to the next action without an extra
+        // blocking GET. Uncertain, failed and fenced outcomes still reconcile.
+        if(!acknowledgedStateApplied)await this.refresh();
+      }
     }
   }
   private populateEfforts() {

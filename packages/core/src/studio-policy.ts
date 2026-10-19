@@ -799,6 +799,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   if (!session.capabilities.includes(method)) {
     if (isAssetMethod(method)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates native asset placement. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
     if (method === 'asset.keep_mesh') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `Keep this mesh is unavailable in this Studio connection: the connected Arcane Studio plugin (${session.pluginVersion}) predates it, or this Roblox Studio does not let plugins upload meshes (its capability probe failed closed). Update Roblox Studio and the Arcane plugin, restart Studio and connect again. Nothing was uploaded.`);
+    if (method === 'scene.remove') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', 'Scene deletion needs the updated Arcane Studio plugin. Install the plugin update from Arcane and reload it in Studio; no removal was queued.');
     if (method === 'terrain.generate') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates procedural terrain. Update the Studio plugin from Arcane, restart Studio and connect again; until then use environment_apply terrain fills. No command was queued.`);
     if (method === 'scene.build' || method === 'environment.apply') throw new ArcaneError('PLUGIN_UPDATE_REQUIRED', `The connected Arcane Studio plugin (${session.pluginVersion}) predates batch building and environment tools. Update the Studio plugin from Arcane, restart Studio and connect again; until then use scene_create. No command was queued.`);
     throw new ArcaneError('CAPABILITY', 'This exact plugin session does not support this method.');
@@ -897,6 +898,15 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       }
       if (!SAFE_CREATE_CLASSES.includes(a.className as typeof SAFE_CREATE_CLASSES[number])) throw new ArcaneError('CLASS', 'Unsupported creation class.');
       a.properties = engineProperties(validateProperties(a.properties ?? {}, a.className as string, false)); break;
+    }
+    case 'scene.remove': {
+      keys(a,['mode','refs']);
+      if(a.mode==='workspace'){if(a.refs!==undefined)throw new ArcaneError('INPUT','Workspace reset does not take refs.');if(!session.allowedRoots.includes('Workspace'))throw new ArcaneError('SCOPE','Workspace is not granted.');}
+      else if(a.mode==='refs'){
+        if(!Array.isArray(a.refs)||a.refs.length<1||a.refs.length>64)throw new ArcaneError('INPUT','Choose 1..64 removal refs.');
+        const seen=new Set<string>();for(const value of a.refs){const r=ref(value,session);if(!r.pathSegments.length||r.className==='Terrain')throw new ArcaneError('SCOPE','Engine roots and Terrain cannot be removed by ref.');if(seen.has(r.instanceId))throw new ArcaneError('INPUT','Removal refs must be distinct.');seen.add(r.instanceId);}
+      }else throw new ArcaneError('INPUT','Choose refs or workspace removal.');
+      break;
     }
     case 'scene.build': return validateSceneBuild(a, session);
     case 'scene.asset_watch': case 'scene.place_asset': case 'scene.apply_material': return validateAssetCommand(method, a, session);
