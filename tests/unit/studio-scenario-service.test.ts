@@ -284,10 +284,12 @@ function taskFixture(){
 }
 
 test('private task evidence is settled once and revalidated from a fresh read-only connection after the requesting turn',{timeout:15000},async t=>{
-  const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port}),job=await f.prepare();
+  const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,taskPort:task.port}),job=await f.prepare();
   assert.equal(task.prepared.length,1);assert.deepEqual(task.prepared[0],{jobId:job.id,displayDigest:job.displayDigest,scenarioDigest:digest(f.plan),subjectDigest:job.display.proposal.subjectDigest});
   await f.approve(job);await until(()=>task.packets.length===1);const report=f.status(job.id),packet=task.packets[0]!;
   assert.equal(report.review.outcome,'succeeded');assert.equal(report.review.cleanup,'complete');assert.equal(packet.reportDigest,digest(report));
+  assert.equal(report.review.deadline!-report.review.startedAt!,5000);
+  assert.ok(f.observationTime()>0&&f.clockTime()>=report.review.deadline!,'task evidence includes the full admitted fixture observation window');
   assert.deepEqual(packet.scenario,{outcome:'passed',requiredEvidence:'complete',inputRelease:'complete',restoration:'not_required',subjects:'current'});
   const effects=f.calls.filter(call=>call.name==='start_stop_play'||call.name==='screen_capture'||call.name==='execute_luau'&&call.args.datamodel_type==='Client').length;
   await assert.rejects(f.service.revalidateExact(job.id,structuredClone(task.origin),packet.reportDigest),{code:'HUMAN_AUTH_REQUIRED'});
