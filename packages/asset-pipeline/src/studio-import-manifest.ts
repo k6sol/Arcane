@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { types } from 'node:util';
 import { z } from 'zod';
 import { validateGlb } from '../../../apps/desktop/src/glb-preflight.js';
+import { decodeMaterialPng, MaterialPngError } from './material-png.js';
 
 /** Host-only preparation; no filesystem, upload, Studio, Blender or provider calls.
  * Reuses the existing data-only GLB gate, then adds static import policy and revisions.
@@ -322,6 +323,15 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
       const [width, height] = imageSize(encoded, image.mimeType);
       bound(width, limits.textureDimension, 'Texture width'); bound(height, limits.textureDimension, 'Texture height');
       pixels += width * height; bound(pixels, limits.texturePixels, 'Texture pixels');
+      if (image.mimeType === 'image/png') {
+        try {
+          const decoded = decodeMaterialPng(encoded);
+          if (decoded.width !== width || decoded.height !== height) fail('EXPORT', 'Material PNG dimensions disagree.');
+        } catch (error) {
+          if (error instanceof MaterialPngError) fail(error.code === 'LIMIT' ? 'BUDGET' : 'EXPORT', 'Material PNG pixel validation failed.');
+          throw error;
+        }
+      }
       const sha256 = byteHash(encoded), location = { fileId: model.fileId, imageIndex };
       const old = textures.get(sha256);
       if (old) old.locations.push(location);

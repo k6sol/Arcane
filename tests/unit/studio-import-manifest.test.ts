@@ -14,6 +14,19 @@ const sha = (v: Uint8Array | string) => createHash('sha256').update(v).digest('h
 const H = sha('source');
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
+
+test('CRC-valid PNG resources require decodable pixels before preparation succeeds', async () => {
+  const corrupt = Buffer.from(PNG);
+  const data = corrupt.indexOf(Buffer.from('IDAT'));
+  assert.ok(data >= 0); corrupt[data + 4]! ^= 1;
+  const length = corrupt.readUInt32BE(data - 4); let crc = 0xffffffff;
+  for (const byte of corrupt.subarray(data, data + 4 + length)) {
+    crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+  }
+  corrupt.writeUInt32BE((crc ^ 0xffffffff) >>> 0, data + 4 + length);
+  const input = fixture({ texture: corrupt }).input;
+  await assert.rejects(prepare(input), value => value instanceof Error && 'code' in value && value.code === 'EXPORT' && /PNG pixel validation/.test(value.message));
+});
 function pack(doc: Doc, bin: Buffer): Buffer {
   const json = Buffer.from(JSON.stringify(doc)), jsonSize = Math.ceil(json.length / 4) * 4, binSize = Math.ceil(bin.length / 4) * 4;
   const bytes = Buffer.alloc(28 + jsonSize + binSize); bytes.writeUInt32LE(0x46546c67); bytes.writeUInt32LE(2, 4); bytes.writeUInt32LE(bytes.length, 8);
