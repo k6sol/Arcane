@@ -242,6 +242,22 @@ export class StudioStore {
   #assetDispatchGuards=new Map<string,()=>void>();
   #commandResultWaiters=new Map<string,Set<()=>void>>();
   #commandResultWaiterCount=0;
+  #stageHashRun:string|null=null;
+  #stageHashBytes=0;
+  #stageHashes=new Map<string,{raw:string;key:string;fingerprint:string;argsSha256:string;bytes:number}>();
+  private clearStageContentHashes():void {this.#stageHashRun=null;this.#stageHashBytes=0;this.#stageHashes.clear();}
+  private rememberStageContentHashes(id:string,raw:string,key:string,fingerprint:string,argsSha256:string):void {
+    // UTF16 string storage plus a conservative fixed per-entry header charge.
+    // One hot run only. Eviction is a cold verification path, never a refusal.
+    const bytes=2*(id.length+raw.length+key.length+fingerprint.length+argsSha256.length)+1024,limit=64*1024*1024;
+    const prior=this.#stageHashes.get(id);if(prior){this.#stageHashBytes-=prior.bytes;this.#stageHashes.delete(id);}
+    if(bytes>limit)return;
+    while(this.#stageHashes.size>=512||this.#stageHashBytes+bytes>limit){
+      const oldest=this.#stageHashes.keys().next().value;if(oldest===undefined)break;
+      this.#stageHashBytes-=this.#stageHashes.get(oldest)!.bytes;this.#stageHashes.delete(oldest);
+    }
+    this.#stageHashes.set(id,{raw,key,fingerprint,argsSha256,bytes});this.#stageHashBytes+=bytes;
+  }
   /** Trusted product composition; a serialized review reference grants no authority. */
   bindAssetModelReview(read:(intent:StageRunIntent)=>void):()=>void {
     if(typeof read!=='function'||this.#assetModelReview)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review is already bound or invalid.');
@@ -378,13 +394,13 @@ export class StudioStore {
   private transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
     try { const value = work(); this.db.exec('COMMIT'); return value; }
-    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    catch (error) { this.clearStageContentHashes();this.db.exec('ROLLBACK'); throw error; }
   }
   private event(kind: string, entityId: string, detail: unknown): void {
     this.db.prepare('INSERT INTO events(occurred_at,kind,entity_id,detail) VALUES(?,?,?,?)').run(this.iso(), kind, entityId, JSON.stringify(detail));
   }
   private saveSession(s: StudioSession): void { this.db.prepare('UPDATE sessions SET payload=? WHERE id=?').run(JSON.stringify(s), s.id); }
-  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued')this.#assetDispatchGuards.delete(c.id); }
+  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued')this.#assetDispatchGuards.delete(c.id); if(c.state==='needs_reconciliation')this.clearStageContentHashes(); }
   sessions(): ListedStudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => { const s = JSON.parse(r.payload as string) as StudioSession; return { ...s, live: this.live(s) }; }); }
   /** Unrevoked and heard from recently. The single plugin worker does not poll while it executes a
    * delivered command, so an unexpired dispatched lease also counts as a heartbeat. */
@@ -770,6 +786,14 @@ export class StudioStore {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return this.expired(JSON.parse(row.payload as string) as StudioCommand);
   }
+  private stageCommandSnapshot(id:string):{command:StudioCommand;raw:string;cacheable:boolean} {
+    const row=this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row|undefined;
+    if(!row)throw new ArcaneError('COMMAND','Unknown command receipt.');
+    const raw=row.payload as string,parsed=JSON.parse(raw) as StudioCommand,state=parsed.state,command=this.expired(parsed);
+    // Expiry can mutate the parsed record or re-read it in a transaction. Only
+    // the unchanged object actually parsed from THIS raw string may be memoized.
+    return {command,raw,cacheable:command===parsed&&command.state===state};
+  }
   /** Process-local wake hint only. Callers must re-read the command and all
    * current authority after every wake. The original <=25ms timer remains the
    * fallback for cancellation, expiry and non-result state changes. */
@@ -991,7 +1015,7 @@ export class StudioStore {
   /** Outcome recording survives actor retirement; this handle permits no new effect. */
   closeStageRun(handle:StageRunHandle):StageRunRecord {
     const runId=this.stageHandle(handle);
-    return this.transaction(()=>{
+    try{return this.transaction(()=>{
       const run=this.stageRunById(runId);
       if(run.closedAt===null){
         for(const {command}of run.commands){
@@ -1002,7 +1026,7 @@ export class StudioStore {
         const at=this.iso();this.saveStageRun({runId,intent:run.intent,intentSha256:run.intentSha256,createdAt:run.createdAt,updatedAt:at,closedAt:at});
       }
       return this.stageRunById(runId);
-    });
+    });}finally{this.clearStageContentHashes();}
   }
   /** Local historical evidence only. Caller scope must be checked by the host. */
   readStageRun(projectId:string,jobId:string,runId?:string):StageRunRecord|null {
@@ -1014,6 +1038,7 @@ export class StudioStore {
     return row?this.stageRunById(row.run_id as string):null;
   }
   private stageRunById(runId:string):StageRunRecord {
+    try{
     const row=this.db.prepare('SELECT * FROM asset_stage_attempts WHERE run_id=?').get(runId) as Row|undefined;
     if(!row)throw new ArcaneError('STUDIO_STAGE_NOT_FOUND','Unknown stage run.');
     const run=JSON.parse(row.payload as string) as StageRunStored,intent=stageIntent(run.intent);
@@ -1023,21 +1048,29 @@ export class StudioStore {
         ||!this.db.prepare('SELECT 1 FROM asset_stage_attempts WHERE run_id=? AND project_id=? AND job_id=? AND attempt_no=?').get(row.previous_run_id,intent.projectId,intent.jobId,Number(row.attempt_no)-1)))throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage attempt metadata differs.');
     const rows=this.db.prepare('SELECT * FROM asset_stage_attempt_commands WHERE run_id=? ORDER BY ordinal LIMIT 513').all(runId) as Row[];
     if(rows.length>intent.plan.length)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage association exceeds its plan.');
+    if(this.#stageHashRun!==runId){this.clearStageContentHashes();this.#stageHashRun=runId;}
     let invalidReceipt=false;
     const commands:StageRunCommandAssociation[]=rows.map((member,ordinal)=>{
-      const command=this.command(member.command_id as string),plan=intent.plan[ordinal]!;
+      const {command,raw,cacheable}=this.stageCommandSnapshot(member.command_id as string),plan=intent.plan[ordinal]!;
       const original=this.db.prepare('SELECT fingerprint,state FROM commands WHERE id=?').get(command.id) as Row;
-      const fingerprint=hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args}));
       if(member.ordinal!==ordinal||command.id!==member.command_id||command.requestId!==member.request_id||command.leaseEpoch!==member.lease_epoch
         ||command.method!=='asset.stage_packet'||command.sessionId!==intent.target.sessionId||command.clientSessionId!==intent.continuity.clientLifetimeId
-        ||fingerprint!==member.fingerprint||original.fingerprint!==member.fingerprint||original.state!==command.state||hash(JSON.stringify(command.args))!==plan.argsSha256)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original stage command differs from the pinned association.');
+        ||!original||original.fingerprint!==member.fingerprint||original.state!==command.state)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original stage command differs from the pinned association.');
+      const key=JSON.stringify([runId,run.intentSha256,ordinal,member.ordinal,member.command_id,member.request_id,member.lease_epoch,member.fingerprint,original.fingerprint,original.state,plan.argsSha256]);
+      const saved=cacheable?this.#stageHashes.get(command.id):undefined,hit=saved?.raw===raw&&saved.key===key;
+      const fingerprint=hit?saved.fingerprint:hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args}));
+      const argsSha256=hit?saved.argsSha256:hash(JSON.stringify(command.args));
+      if(fingerprint!==member.fingerprint||argsSha256!==plan.argsSha256)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original stage command differs from the pinned association.');
+      if(cacheable&&!hit)this.rememberStageContentHashes(command.id,raw,key,fingerprint,argsSha256);
       if(command.state==='succeeded'&&canonical(command.result)!==canonical(plan.expectedReceipt))invalidReceipt=true;
       return {ordinal,commandId:command.id,requestId:command.requestId,leaseEpoch:command.leaseEpoch,fingerprint,command};
     });
     const complete=!invalidReceipt&&commands.length===intent.plan.length&&commands.every(c=>c.command.state==='succeeded');
     const unresolved=invalidReceipt||commands.some(c=>c.command.state==='needs_reconciliation'||run.closedAt!==null&&(c.command.state==='dispatched'||c.command.state==='succeeded'));
     const phase=complete?'cpu-staged':unresolved?'needs_reconciliation':run.closedAt!==null||commands.some(c=>['failed','cancelled'].includes(c.command.state))?'stopped':'running';
+    if(phase==='needs_reconciliation'||commands.some(c=>!['queued','dispatched','succeeded','failed','cancelled'].includes(c.command.state)))this.clearStageContentHashes();
     return {...run,intent,attempt:Number(row.attempt_no),previousRunId:row.previous_run_id as string|null,phase,commands,receipt:complete?structuredClone(intent.plan.at(-1)!.expectedReceipt):null};
+    }catch(error){this.clearStageContentHashes();throw error;}
   }
   /** Host-only archival pin for one exact project/job (no actor, model or HTTP exposure).
    * True unless EVERY retained stage attempt is provably ended and every upload for the job has a
@@ -1571,5 +1604,5 @@ export class StudioStore {
   }
   counts(): Record<string, number> { return Object.fromEntries((this.db.prepare('SELECT state,count(*) AS n FROM commands GROUP BY state').all() as Row[]).map(r => [r.state, Number(r.n)])); }
   events(limit = 100): Json[] { return (this.db.prepare('SELECT sequence,occurred_at,kind,entity_id,detail FROM events ORDER BY sequence DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))) as Row[]).map(r => ({ sequence: Number(r.sequence), occurredAt: r.occurred_at as string, kind: r.kind as string, entityId: r.entity_id as string, detail: JSON.parse(r.detail as string) as Json })); }
-  close(): void { if (!this.closed) { this.closed = true; this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
+  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
 }
