@@ -76,15 +76,15 @@ function createNativeHandoff(options = {}) {
   /** A direct path: canonical (realpath identical), not a link, files with exactly one link. */
   async function direct(path, kind) {
     let real, stat;
-    try { real = await fs.realpath(path); stat = await fs.lstat(path); } catch { fail('PATH'); }
-    if (real !== path || stat.isSymbolicLink() || (kind === 'directory' ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) fail('PATH');
+    try { real = await fs.realpath(path); stat = await fs.lstat(path, { bigint: true }); } catch { fail('PATH'); }
+    if (real !== path || stat.isSymbolicLink() || (kind === 'directory' ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1n)) fail('PATH');
     return stat;
   }
   /** The owned directory is still exactly runtimeDirectory/<name>: same direct, canonical parent identity and a canonical child.
    * Cooperative check-then-use only; it narrows but cannot close a filesystem race window. */
   async function located(record) {
     try {
-      const parent = await fs.lstat(record.parent);
+      const parent = await fs.lstat(record.parent, { bigint: true });
       if (parent.isSymbolicLink() || !parent.isDirectory() || parent.dev !== record.parentDev || parent.ino !== record.parentIno) return false;
       return await fs.realpath(record.parent) === record.parent && await fs.realpath(record.directory) === record.directory;
     } catch { return false; }
@@ -93,13 +93,13 @@ function createNativeHandoff(options = {}) {
   async function removeOwned(record) {
     try {
       if (!await located(record)) return 'changed';
-      const directory = await fs.lstat(record.directory);
+      const directory = await fs.lstat(record.directory, { bigint: true });
       if (directory.isSymbolicLink() || !directory.isDirectory() || directory.dev !== record.directoryDev || directory.ino !== record.directoryIno) return 'changed';
       const names = await fs.readdir(record.directory);
       if (record.fileIno === null) { if (names.length) return 'changed'; await fs.rmdir(record.directory); return 'removed'; }
       if (names.length !== 1 || names[0] !== CONFIG_NAME) return 'changed';
-      const file = await fs.lstat(record.configPath);
-      if (file.isSymbolicLink() || !file.isFile() || file.nlink !== 1 || file.dev !== record.fileDev || file.ino !== record.fileIno || file.size !== record.bytes) return 'changed';
+      const file = await fs.lstat(record.configPath, { bigint: true });
+      if (file.isSymbolicLink() || !file.isFile() || file.nlink !== 1n || file.dev !== record.fileDev || file.ino !== record.fileIno || file.size !== BigInt(record.bytes)) return 'changed';
       if (digest(await fs.readFile(record.configPath, 'utf8')) !== record.sha256) return 'changed';
       await fs.unlink(record.configPath);
       await fs.rmdir(record.directory);
@@ -138,13 +138,13 @@ function createNativeHandoff(options = {}) {
     try { await fs.mkdir(directory, { mode: 0o700 }); } catch { fail('FILESYSTEM'); }
     let handle = null;
     try {
-      const made = await fs.lstat(directory);
+      const made = await fs.lstat(directory, { bigint: true });
       if (made.isSymbolicLink() || !made.isDirectory()) fail('PATH');
       record.directoryDev = made.dev; record.directoryIno = made.ino;
       if (!await located(record)) fail('PATH'); // never write a config into a replaced or redirected parent
       current(assertCurrent);
       handle = await fs.open(configPath, 'wx', 0o600);
-      const opened = await handle.stat(); record.fileDev = opened.dev; record.fileIno = opened.ino;
+      const opened = await handle.stat({ bigint: true }); record.fileDev = opened.dev; record.fileIno = opened.ino;
       if (!await located(record)) fail('PATH');
       current(assertCurrent);
       await handle.writeFile(config, 'utf8');

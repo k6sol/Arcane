@@ -133,6 +133,39 @@ test('cleanup retains changed, replaced or extra owned-directory content and rep
   assert.equal((await host.cleanup(changed)).state, 'unavailable', 'a refused cleanup is not marked complete');
 });
 
+test('cleanup distinguishes replacement file IDs above Number precision', async t => {
+  const f = await fixture(t), originalId = 2n ** 60n;
+  let configPath, replaced = false;
+  const identity = (stat, options, file) => {
+    if (file === configPath) {
+      const id = originalId + (replaced ? 1n : 0n);
+      stat.ino = options?.bigint ? id : Number(id);
+    }
+    return stat;
+  };
+  // Real files and I/O, with a deterministic native file-ID width double.
+  // Adjacent 64-bit IDs round to the same Number on every test platform.
+  assert.equal(Number(originalId), Number(originalId + 1n));
+  const fs = Object.fromEntries(['realpath', 'lstat', 'mkdir', 'open', 'readdir', 'readFile', 'unlink', 'rmdir'].map(name => [name, (...args) => fsp[name](...args)]));
+  fs.lstat = async (file, options) => identity(await fsp.lstat(file, options), options, file);
+  fs.open = async (...args) => {
+    const handle = await fsp.open(...args);
+    configPath = args[0];
+    const stat = handle.stat.bind(handle);
+    handle.stat = async options => identity(await stat(options), options, args[0]);
+    return handle;
+  };
+  const host = createNativeHandoff({ fs }), receipt = await host.prepare(f.options());
+  const text = await fsp.readFile(receipt.configPath, 'utf8');
+  const original = join(f.root, 'retained-wide-id-config.json');
+  await fsp.rename(receipt.configPath, original);
+  await fsp.writeFile(receipt.configPath, text);
+  replaced = true;
+  assert.deepEqual(await host.cleanup(receipt), { state: 'unavailable', reason: 'owned_material_changed' });
+  assert.equal(await fsp.readFile(receipt.configPath, 'utf8'), text);
+  assert.equal(await fsp.readFile(original, 'utf8'), text);
+});
+
 test('the helper performs only bounded owned filesystem operations and has no process or native lifecycle seam', async t => {
   const f = await fixture(t), calls = [];
   const fs = Object.fromEntries(['realpath', 'lstat', 'mkdir', 'open', 'readdir', 'readFile', 'unlink', 'rmdir'].map(name => [name, (...args) => { calls.push(name); return fsp[name](...args); }]));
