@@ -14,7 +14,7 @@ const DEADLINE=Object.freeze({search:18_000,insert:23_000,generate:28_000,job:28
 const jobInput=z.strictObject({jobId:z.string().uuid()});
 /** Host refusals with fixed route messages (never native text). */
 export class NativeAssetHostRefusal extends Error {
-  constructor(readonly code:'RATE_LIMITED'|'ASSET_NOT_SEARCHED'|'ASSET_WATCH_REQUIRED'|'ASSET_JOB_NOT_FOUND'|'TOOLBOX_MODELS_DISABLED'){super(code);this.name='NativeAssetHostRefusal';}
+  constructor(readonly code:'RATE_LIMITED'|'ASSET_NOT_SEARCHED'|'ASSET_WATCH_REQUIRED'|'ASSET_JOB_NOT_FOUND'|'TOOLBOX_MODELS_DISABLED'|'BLENDER_REQUIRED'){super(code);this.name='NativeAssetHostRefusal';}
 }
 type Session=ReturnType<StudioStore['session']>;
 function rejected(code:'BUSY'|'STALE_PROOF'|'BINDING_CHANGED'|'HUMAN_AUTH_REQUIRED'|'INVALID_REQUEST'):never{throw new StudioTestError(code);}
@@ -116,20 +116,11 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
         return {insert:{sessionId:session.id,nativeStudioId,assetId:a.assetId,assetName:inserted.assetName,acknowledgement:inserted.outcome}};
       },()=>requireModels(a.sessionId));
     },
-    async generate(input:unknown,actor:string){
-      actorOk(actor);const a=nativeAssetGenerateSchema.parse(input);prune();
-      if(a.kind==='mesh'&&!watched(deps.eligible(a.sessionId),a.watch!))throw new NativeAssetHostRefusal('ASSET_WATCH_REQUIRED');
-      if(jobs.size>=NATIVE_ASSET_RATE.jobs)throw new NativeAssetHostRefusal('RATE_LIMITED');
-      idle();admit('generate');
-      return withNative(a.sessionId,a.nativeStudioId,DEADLINE.generate,async(context,session,nativeStudioId,signal)=>{
-        const id=randomUUID(),started=await startNativeGeneration(context,a,id,signal);
-        const job:Job={id,actor,sessionId:session.id,nativeStudioId,kind:a.kind,nativeJobId:started.nativeJobId,state:started.state,refusal:started.refusal,
-          watch:a.watch??null,materialVariant:started.materialVariant,baseMaterial:a.baseMaterial??null,createdAt:Date.now()};
-        jobs.set(id,job);
-        if(job.state==='running'&&job.nativeJobId){const waited=await waitNativeJob(context,job.nativeJobId,10_000,signal);job.state=waited.state;job.refusal=waited.refusal;}
-        if(job.state==='failed'&&job.refusal)throw new NativeAssetRefusal(NATIVE_REFUSAL_CODES[job.refusal]);
-        return view(job);
-      });
+    async generate(input:unknown,actor:string):Promise<never>{
+      actorOk(actor);nativeAssetGenerateSchema.parse(input);
+      // Geometry, UVs, textures and PBR are authored locally; this policy is
+      // enforced before connecting to Studio, including direct HTTP callers.
+      throw new NativeAssetHostRefusal('BLENDER_REQUIRED');
     },
     /** Bounded wait on one caller-owned generation job; never restarts it. */
     async job(input:unknown,actor:string){

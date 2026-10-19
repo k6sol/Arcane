@@ -31,3 +31,6 @@ Compare scatter placed/requested counts. Reduce density or expand the unprotecte
 Use environment_apply for coherent light, ClockTime and atmosphere. Inspect the landmark/forest composition, player approach and cave access with studio_viewport_capture. Repair floating props, stair/rail gaps, repetitive silhouettes and clipped foliage. Give the safe zone a grounded perimeter or material boundary; oversized floating labels are not a substitute. Verify spawn function and any claimed damage protection separately. State actual results and limits; do not claim photographic indistinguishability.
 
 Read arcane-photoreal for materials/light and arcane-architectural-features for connected landmark geometry.
+
+## Blender authoring boundary
+- Models, UVs, textures and PBR are authored in local Blender. Do not use Studio AI generation. Check the actual exported materials and preview before import; on a failure give its stage and reason. A local export, flat color or reconstructed mesh alone does not prove a finished textured Studio asset.

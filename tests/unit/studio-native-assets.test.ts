@@ -264,18 +264,14 @@ test('native asset service: Play mode is refused before any native call; searche
   await assert.rejects(f.assets.search({ sessionId: f.pair.sessionId, query: 'one more' }, 'agent-fixture'), { code: 'RATE_LIMITED' });
 });
 
-test('native asset service: generation jobs complete, report variants, map refusals and stay caller-owned', async t => {
-  const f = await serviceFixture(t);
-  f.watch('watch-mesh');
-  const mesh = await f.assets.generate({ sessionId: f.pair.sessionId, kind: 'mesh', prompt: 'carved stone pillar', size: [4, 16, 4], watch: 'watch-mesh' }, 'agent-fixture');
-  assert.equal(mesh.job.state, 'completed'); assert.equal(mesh.job.watch, 'watch-mesh');
-  await assert.rejects(f.assets.generate({ sessionId: f.pair.sessionId, kind: 'mesh', prompt: 'pillar', watch: 'never-armed' }, 'agent-fixture'), { code: 'ASSET_WATCH_REQUIRED' });
-  const material = await f.assets.generate({ sessionId: f.pair.sessionId, kind: 'material', prompt: 'mossy cobble', baseMaterial: 'Cobblestone' }, 'agent-fixture');
-  assert.match(material.job.materialVariant!, /^Arcane_MossyCobble_[A-Za-z0-9]{8}$/); assert.equal(material.job.baseMaterial, 'Cobblestone');
-  assert.deepEqual(await f.assets.job({ jobId: material.job.jobId }, 'agent-fixture'), material, 'a finished job is read without native calls');
-  await assert.rejects(f.assets.job({ jobId: material.job.jobId }, 'agent-other'), { code: 'ASSET_JOB_NOT_FOUND' });
-  const refusing = await serviceFixture(t, { reply: (name, args) => name === 'generate_material' ? text('Quota exceeded: too many generations today', true) : defaultReply(name, args) });
-  await assert.rejects(refusing.assets.generate({ sessionId: refusing.pair.sessionId, kind: 'material', prompt: 'moss', baseMaterial: 'Rock' }, 'agent-fixture'), { code: 'NATIVE_QUOTA' });
+test('native asset service: Blender authoring policy refuses every Studio AI kind before any native connection',async t=>{
+ const f=await serviceFixture(t);
+ for(const actor of ['agent-fixture','human'])for(const input of [
+  {kind:'mesh',prompt:'carved pillar',watch:'watch-mesh'},
+  {kind:'material',prompt:'mossy cobble',baseMaterial:'Rock'},
+  {kind:'texture',prompt:'weathered bark',target:{root:'Workspace',path:['Tree']}}
+ ])await assert.rejects(f.assets.generate({sessionId:f.pair.sessionId,...input},actor),{code:'BLENDER_REQUIRED'});
+ assert.equal(f.natives().length,0,'refusal cannot connect to Studio or consume a native generation');
 });
 
 async function routeFixture(t: TestContext, nativeAssets: NonNullable<StudioTestRouteService['requests']['nativeAssets']>, toolboxPolicy?:StudioTestRouteService['humanControl']['toolboxPolicy']) {
@@ -309,7 +305,7 @@ test('native asset routes: closed fields, fixed refusal messages and no native t
   const SECRET = 'native internal detail 8f2c';
   for (const [code, expected, status] of [['UNSUPPORTED_TOOL', 'NATIVE_ASSET_TOOL_UNSUPPORTED', 422], ['BAD_NATIVE_RESPONSE', 'NATIVE_ASSET_INVALID', 424],
     ['EFFECT_UNKNOWN', 'NATIVE_ASSET_UNKNOWN', 409], ['PLACE_DENIED', 'NATIVE_PLACE_DENIED', 403], ['NATIVE_SIGN_IN', 'NATIVE_SIGN_IN', 424],
-    ['TOOLBOX_MODELS_DISABLED','TOOLBOX_MODELS_DISABLED',403], ['TOOLBOX_MODELS_DISABLED','TOOLBOX_MODELS_DISABLED',403], ['RATE_LIMITED', 'RATE_LIMITED', 429], ['ASSET_NOT_SEARCHED', 'ASSET_NOT_SEARCHED', 409], ['MODE_MISMATCH', 'MODE_MISMATCH', 409], ['WEIRD', 'NATIVE_ASSET_FAILED', 424]] as const) {
+    ['BLENDER_REQUIRED','BLENDER_REQUIRED',403], ['TOOLBOX_MODELS_DISABLED','TOOLBOX_MODELS_DISABLED',403], ['RATE_LIMITED', 'RATE_LIMITED', 429], ['ASSET_NOT_SEARCHED', 'ASSET_NOT_SEARCHED', 409], ['MODE_MISMATCH', 'MODE_MISMATCH', 409], ['WEIRD', 'NATIVE_ASSET_FAILED', 424]] as const) {
     const failing = async () => { throw Object.assign(new Error(SECRET), { code }); };
     const refusing = await routeFixture(t, { search: failing, insert: failing, generate: failing, job: failing });
     const response = await refusing('/v1/studio-native/asset-search', { sessionId: 's1', query: 'pine' });
@@ -447,7 +443,7 @@ test('instructions: original assets are the default and Toolbox models require e
   assert.match(ARCANE_TASK_INSTRUCTIONS, /Original assets by default/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /Do not search for or insert Toolbox\/Creator Store models unless the user explicitly requests them/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /realism or general permission to build is not that request/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /assets_procedural\/Blender with assets_preview, or studio_asset_generate/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Author models, UVs and PBR in Blender/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /Never buy or publish assets/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_viewport_capture, critique the image against the request, then fix what you see/);
   assert.doesNotMatch(ARCANE_TASK_INSTRUCTIONS, /studio_asset_search first|studio_asset_generate only when nothing suitable exists/);
@@ -461,14 +457,14 @@ test('instructions: original assets are the default and Toolbox models require e
 
 // The default fixture above explicitly enables models for legacy native tool tests.
 // These cases exercise a fresh, original-assets-only host with no such choice.
-test('model sources: default refuses search and insert before any native connection, while original generation remains available',async t=>{
+test('model sources: default refuses search and insert before any native connection, and directs generation to local Blender',async t=>{
   const f=await serviceFixture(t,{allowModels:false});
   assert.deepEqual(f.service.humanControl.toolboxPolicy({sessionId:f.pair.sessionId},()=>{}),{sessionId:f.pair.sessionId,allowModels:false});
   for(const category of ['Model','MeshPart'])await assert.rejects(f.assets.search({sessionId:f.pair.sessionId,query:'forest',category},'agent-fixture'),{code:'TOOLBOX_MODELS_DISABLED'});
   await assert.rejects(f.assets.insert({sessionId:f.pair.sessionId,assetId:'1001',watch:'w'},'agent-fixture'),{code:'TOOLBOX_MODELS_DISABLED'});
   assert.equal(f.natives().length,0);
-  const generated=await f.assets.generate({sessionId:f.pair.sessionId,kind:'material',prompt:'moss',baseMaterial:'Rock'},'agent-fixture');
-  assert.equal(generated.job.kind,'material');
+  await assert.rejects(f.assets.generate({sessionId:f.pair.sessionId,kind:'material',prompt:'moss',baseMaterial:'Rock'},'agent-fixture'),{code:'BLENDER_REQUIRED'});
+  assert.equal(f.natives().length,0);
 });
 
 test('model sources: human choice is guarded, scoped to proof epoch, revocable, and cannot be supplied in tool arguments',async t=>{

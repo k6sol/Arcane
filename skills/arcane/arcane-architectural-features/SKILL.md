@@ -4,72 +4,29 @@ description: "Build detailed Roblox architecture such as classical columns, step
 license: MIT
 ---
 
-# Architectural features: columns, plinths, spawn pedestals
+# Architectural features and spawn landmarks
 
-## Process
-- Build one landmark with one `scene_build` call (roughly 120-220 parts).
-- Group it in a Model with keyed sub-Models: Plinth, Column, Capital, Stair, Top.
-- Key the spawn so its ref comes back.
-- Structure players stand on (plinth, stairs, platform, spawn) is always primitive parts; assets only dress it.
+## Design from the brief
+- Define a distinct silhouette, proportions, palette and player approach. A pillar request does not request a spiral stair, classical column, flutes or floating labels. Do not repeat an earlier landmark as a new design.
+- Author finished visual geometry in Blender with UVs, textures and PBR; keep Studio for placement, gameplay, terrain and simple collision. A primitive blockout is not a finished realistic model.
+- Use assets_start/custom assembly for bespoke architecture, or assets_procedural only when its supported shape fits. Inspect assets_preview before adoption; preserve editable source and measured exports. Only if the user explicitly requests Toolbox models may studio_asset_search/studio_asset_insert supply them.
+- Follow assets_jobs, then prepare, stage, reconstruct and assets_place_studio_import. A render or local GLB is not Studio placement. Do not use studio_asset_generate: models, UVs and materials belong in Blender. Report the exact failing stage; do not silently substitute engine primitives or free models.
 
-## Geometry rules
-- Discs and columns are Part Shape Cylinder with Size [length, d, d] and Orientation [0,0,90], which makes the axis vertical.
-- Stack with a running height. A piece of thickness t sitting on surface y has centre y + t/2.
-- Use materials with subtle tint contrast:
-  - Marble: #e6e2da shaft, #d4cfc4 core.
-  - Limestone: #cfc6b0 trims.
-  - Slate: #5f6366 steps and bands.
-- Use a prototype plus yawed placements for every repeated ring element (flutes, balusters, treads). The prototype part sits at a relative Position [radius, y, 0], and the placement `yaw` swings it around the centre.
+## Spatial and traversal rules
+- Use meters in Blender and the import's explicit studs-per-meter conversion once. Establish a floor pivot and measure final rotated bounds; avoid a second ad-hoc scale conversion.
+- A piece of thickness t on surface y has center y+t/2. Derive rails from adjacent support endpoints, with midpoint at their average and length equal to their distance plus a small overlap.
+- Choose access from gameplay: path, ramp, bridge or conventional steps. Add a spiral stair only when requested or deliberately justified by the design, never by default.
+- For appropriate radial stairs derive count/rise from endpoint heights. With width w, radius R and angle a, tread depth is at least 2*(R+w/2)*tan(a/2) plus overlap. Include support, risers and a continuous landing.
+- Keep collision separate from visual mesh detail. No claimed walkability from an overhead image alone.
 
-## Classical column on a stepped plinth (centre C at ground g)
-1. **Plinth**
-   - 3 steps, 1.2 high each, diameters 26 / 22 / 18.
-   - Alternate Slate and Marble.
-   - Add a 0.3-thick Limestone trim disc 0.6 wider at each step top.
-2. **Base torus**: 3 discs, 0.4 thick, diameters 9.6 / 9.2 / 8.8.
-3. **Shaft**
-   - Core cylinder 8 studs in diameter and 18-26 tall.
-   - Fluting: 20 thin cylinders (0.7 diameter) at radius 3.85, as 20 placements of one "Flute" prototype, yaw step 18 degrees.
-4. **Necking and capital**
-   - Necking: a 0.3 Slate band.
-   - Echinus: 3 flared discs (diameters 9 / 10 / 11, 0.5 thick).
-   - Abacus: a square Limestone Block 12 x 1.2 x 12.
-5. **Top platform**
-   - A Slate disc 14 in diameter and 0.8 thick.
-   - Railing: 16-24 balusters (Cylinder 0.4 diameter, 2.5 tall) at radius 6.4.
-   - Leave a 3-baluster gap where the stairs arrive.
-   - Derive rail sections from adjacent support endpoints: midpoint at their average, length their actual distance plus a small join overlap, orientation along the segment. Unrelated short Blocks leave disconnected rails.
-6. **Access**
-   - The spawn must be reachable, so add a spiral stair.
-   - Derive step count/rise from actual plinth and platform heights; keep a consistent comfortable rise.
-   - For radial tread width w, centre radius R and angle step a (radians), tangential depth must be at least 2 * (R + w/2) * tan(a/2), plus a small overlap. A fixed 1.8-stud depth can leave outer-edge gaps. Include risers/stringers or a continuous support so treads do not appear suspended.
-   - Use one "Tread" prototype with placements at increasing `at` height and `yaw`.
-7. **SpawnLocation**
-   - Size [6, 1, 6] Block. Never rotate it.
-   - Centred, with its bottom flush on the platform top (centre y = top + 0.5).
-   - Anchored true, CanCollide true. Neutral stays true by default.
-   - It must not overlap the railing or capital.
+## Spawn and surroundings
+- Moving a spawn: scene_inspect then scene_update on the existing SpawnLocation with exact baselines. Keep it upright, anchored and collidable, with its bottom on the platform top and clear of rails.
+- Avoid duplicate spawns; use scene_delete when removal is requested. Deletion uses Studio Undo, not receipt_restore.
+- Size the clearing and foliage exclusion from the final footprint. Blend the ground around it instead of making a huge flat disc. Keep the approach and cave route unobstructed.
+- Make the safe-zone boundary visible at ground/platform level. A decorative ring is not functioning protection; implement and verify server-side behavior if requested.
 
-## Moving an existing spawn
-- When asked to move the spawn, prefer `scene_update` on the existing SpawnLocation:
-  - Read Position and Size with scene_inspect.
-  - Set them in one update with exact expected values.
-- Creating a second SpawnLocation makes spawning random between them. If one is created anyway, say so explicitly, because deletion is not exposed.
-
-## Integration with surroundings
-- Leave a clearing of 20-30 studs radius around the plinth.
-- Lead a terrain path (Pebble/Cobblestone, 6-8 wide) to the stair foot.
-- Blend a Ground/Mud ring around the plinth base.
-- Add a few mossy rocks and flowers at the base.
-- Never let foliage intersect the plinth or stair.
-
-## Finish
-- Original assets by default. Only if the user explicitly requests Toolbox models may studio_asset_search/studio_asset_insert supply them. Decorative columns (colonnades, ruins): original Blender geometry or `assets_procedural` column (radius, height, 0 or 8-32 flutes, base none/plinth/attic, capital doric/ionic/corinthian; check `assets_preview`; it vanishes in Play until the user uploads it, so say so), placed once with `assets_place_studio_import` and repeated with `scene_build` templates; else the primitive column above.
-- Dress structural geometry with original meshes/materials in one style and consistent scale; `studio_asset_generate` kind mesh for a carved hero ornament and kind material for bespoke stone applied to the parts. Check with `studio_viewport_capture`.
-- Realistic scale, weathering and lighting moods: `arcane-photoreal`. Torches, lamps and glow: `arcane-vfx`.
-
-## Verify
-- Check the receipt instance count against the plan.
-- Inspect the keyed spawn, then the complete landmark and player approach: confirm its Position y equals platform top + 0.5 and its Orientation is [0,0,0].
-
-- Review stair outer edges, risers/stringers, rail joints and the top landing at eye height. Require a continuous route; an overhead image cannot establish walkability. A safe-zone boundary should read on the ground/platform without giant floating labels. Do not claim protection without testing its implementation.
+## Review and delivery
+- Check silhouette, bevels, texture scale, UV seams, topology and collision separately. Export success does not establish visual quality or photorealism.
+- Inspect studio_viewport_capture from the player approach and at eye height; fix gaps, intersections, unsupported structure and repeated shapes. Verify actual spawn height and a continuous route.
+- Reuse original scene_build templates only when intended by the brief. Session-only meshes and image resources require supported persistence; state the actual import boundary rather than implying an upload occurred.
+- Related guidance: arcane-photoreal for materials/scale; arcane-vfx for lighting/effects.

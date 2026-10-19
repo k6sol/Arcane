@@ -10,7 +10,7 @@ license: MIT
 - One `environment_apply` call sets the look: `preset` (one word) + `technology: "Future"` + `terrainDecoration: true` when the ground uses Grass. The host expands the preset to exact Lighting, Atmosphere, Bloom, ColorCorrection and SunRays values; add only the section fields you want to change. Never leave default Lighting on a finished scene.
 - That call is one undo step, verified and rolled back as a whole. If Studio refuses a setting the error names the manual step (for example Lighting.Technology = Future or Terrain Decoration = true in the Properties window); tell the user that one line and continue.
 - MaterialService.Use2022Materials stays a manual Properties-window setting; mention it once if materials look flat.
-- Original assets by default: authored Blender/procedural meshes, original materials and `studio_asset_generate` when suitable. Review `assets_preview`; session-only MeshParts vanish in Play unless uploaded. Only if the user explicitly requests Toolbox models may `studio_asset_search`/`studio_asset_insert` supply them. Reuse original `scene_build` templates. Primitive collision/blockout geometry is not a finished realistic asset. Never buy or publish.
+- Original assets by default: authored Blender/procedural meshes, original materials. Review `assets_preview`; session-only MeshParts vanish in Play unless uploaded. Only if the user explicitly requests Toolbox models may `studio_asset_search`/`studio_asset_insert` supply them. Reuse original `scene_build` templates. Primitive collision/blockout geometry is not a finished realistic asset. Never buy or publish.
 - Order: `terrain_generate` first (seeded landforms, a `flatten` clearing under the focal structure, river/path polylines, snowLine for peaks), then assets or procedural meshes, then `scene_build` geometry (one batch per layer); `environment_apply` sets the look. DepthOfField only through a client script: `scene_create` a LocalScript under StarterPlayer.StarterPlayerScripts, `script_update` it to create a `DepthOfFieldEffect` under the Camera, then enable it with `script_read` + `script_set_enabled`.
 - When Atmosphere exists, FogStart/FogEnd are ignored. Use Atmosphere Density and Haze for distance fog.
 - Verify with `studio_viewport_capture`: `frame {ref: main subject, views: ["three_quarter","low_angle"]}` (one sheet) plus one eye-level camera down the main path. Fix floating objects, plastic surfaces, repetition and blown highlights before reporting.
@@ -35,7 +35,7 @@ license: MIT
 - Colour range 0.08-0.92 per channel, saturation under 70% except emissive. No pure white or black.
 - Reflectance 0 on most parts, at most 0.2; Glass Transparency 0.3-0.5.
 - MaterialVariant directly: `environment_apply` `materials: [{name, baseMaterial, studsPerTile, override: true, ColorMap, NormalMap, RoughnessMap, MetalnessMap}]`. Maps are a user-given or existing rbxassetid, or a built-in rbxasset://textures path. `override` restyles every part and terrain of that base material. StudsPerTile 8-16 for walls and floors, 20-40 for ground.
-- `studio_asset_generate` kind material creates a MaterialVariant from baseMaterial + prompt and applies it to parts with a receipt; kind texture retextures an inserted MeshPart.
+- Author textures and PBR in Blender; inspect UV coverage and the actual exported maps. If the import path refuses a map, report its exact unsupported stage instead of claiming textured placement.
 - Decal/Texture (direct, `scene_create`/`scene_build` fx) for signs, grime and stains: Texture StudsPerTileU/V matches the surface; Transparency 0.2-0.6 for dirt.
 - SurfaceAppearance maps are not settable by plugins: only on MeshParts from the asset pipeline or set by the user. ColorMap + NormalMap (OpenGL, +Y) + RoughnessMap + MetalnessMap; roughness never pure 0 or 1; metalness 0 or 1.
 
@@ -51,3 +51,6 @@ Door 4 x 7.5; floor-to-floor 12-14; stair riser 0.75-1 with tread 1.5-2; railing
 - One dominant key light. Practical lights are warmer (ffb46b-ffd2a1) than the cool sky fill.
 - Natural layouts and forests: `arcane-natural-scenes`; detailed architecture: `arcane-architectural-features`.
 - Realistic sound (ambience, reverb, music): `arcane-audio`.
+
+## Blender authoring boundary
+- Models, UVs, textures and PBR are authored in local Blender. Do not use Studio AI generation. Check the actual exported materials and preview before import; on a failure give its stage and reason. A local export, flat color or reconstructed mesh alone does not prove a finished textured Studio asset.

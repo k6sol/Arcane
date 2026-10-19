@@ -375,9 +375,9 @@ Toolbox models require an explicit user request and the human-controlled Setting
 
 ### `studio_asset_generate`
 
-**Safety:** Writes (additive)
+**Safety:** Read-only
 
-Write: Roblox Studio's built-in AI generators with bounded prompts. kind mesh: a new mesh (size, maxTriangles) adopted like studio_asset_insert via placement (scripts stripped, fitted, grounded, receipt). kind material: a MaterialVariant from baseMaterial/pattern, optionally applied to apply refs with a receipt. kind texture: retextures the target MeshPart/Model in place (revert with Studio Undo or restore the target's placement receipt). Use for original assets when appropriate; never fall back to Toolbox models without an explicit user request. Generation can outlast one call: a running result returns jobId; call again with the same fields plus jobId to finish, never start a second job. Budget: 8 generations per 10 minutes. Clear errors explain missing sign-in, quota or disabled features.
+Compatibility refusal: model, UV, texture and PBR authoring uses local Blender, not Studio AI. Use assets_start for a custom assembly or assets_procedural, then assets_jobs and assets_preview before the Studio import tools. This tool returns BLENDER_REQUIRED without any Studio call or generation.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|

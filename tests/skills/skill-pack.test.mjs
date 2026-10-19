@@ -217,7 +217,7 @@ test('scene recipes are prescriptive: terrain ground, natural Poisson placement,
   const nature = await read('arcane-natural-scenes'), architecture = await read('arcane-architectural-features'), world = await read('arcane-world-building');
   for (const text of ['environment_apply', 'terrain', 'terrain_generate', '`flatten` the clearing', '`river`', '`path`', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
     'Pine', 'Oak', 'Birch', 'tint', 'scale [0.75,1.25]', 'CastShadow false', 'ClockTime', 'atmosphere', '800-2500']) assert.ok(nature.includes(text), text);
-  for (const text of ['scene_build', 'Fluting', 'capital', 'spiral stair', 'SpawnLocation', 'Never rotate it', 'flush', 'Marble', 'Slate', 'Limestone', 'scene_update'])
+  for (const text of ['Blender', 'UVs, textures and PBR', 'assets_preview', 'scene_delete', 'SpawnLocation', 'scene_update', 'Add a spiral stair only when requested', 'exact failing stage'])
     assert.ok(architecture.includes(text), text);
   assert.match(world, /Never place foliage in rings, grids or rows/);
   assert.match(world, /Poisson-disk/);
