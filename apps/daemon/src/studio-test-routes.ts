@@ -97,7 +97,7 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   NATIVE_SIGN_IN: [424, 'Roblox Studio refused the request: sign in to Studio with an account that can use the Creator Store and AI generation, then retry once.'],
   NATIVE_QUOTA: [429, 'Roblox Studio refused the request because a usage limit was reached. Wait before retrying, or reuse already inserted assets.'],
   NATIVE_UNAVAILABLE: [424, 'This Roblox Studio session cannot use the requested built-in tool (feature disabled, terms not accepted, or account/place not eligible). Enable the Studio Assistant features, or search assets instead of generating.'],
-  NATIVE_REJECTED: [424, 'Roblox Studio rejected this request (for example a moderated prompt or unsupported parameters). Rephrase plainly or choose a searched asset.'],
+  NATIVE_REJECTED: [424, 'Roblox Studio rejected this request (for example a moderated prompt or unsupported parameters). Rephrase plainly or use the original local asset pipeline.'],
   ASSET_INSERT_REFUSED: [424, 'Roblox Studio refused the insertion (the asset may be private, paid, removed or not insertable). Nothing was adopted; choose another free result.'],
   ASSET_NOT_SEARCHED: [409, 'Only free assets returned by studio_asset_search for this session in the last 30 minutes can be inserted. Search first.'],
   ASSET_WATCH_REQUIRED: [409, 'Insertion needs a fresh Arcane plugin watch for this session; use studio_asset_insert or studio_asset_generate, which arm it automatically.'],

@@ -58,11 +58,11 @@ export const placeInput = z.strictObject({
   ground: z.boolean().default(true), anchor: z.boolean().default(true), timeoutMs: wait(45_000),
 });
 
-const PROCEDURAL = 'Write: generate a realistic, detailed mesh in the local Blender worker from a bundled parameterised generator (no code accepted): ' +
+const PROCEDURAL = 'Write: generate an original bounded mesh in the local Blender worker from a bundled parameterised generator (no code accepted): ' +
   'tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; branching limbs and closed leaf cards), rock (size, roughness; noise + chiselled facets, flat base), ' +
   'column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian) or foliage clump (bush/grass/fern). ' +
   'Output: one optimised GLB, one mesh per material (≤20,000 triangles total, UVs, flat PBR colours), a box/trunk collision proxy, and two preview renders. Deterministic per seed. ' +
-  'Use for hero/organic assets when studio_asset_search has nothing suitable. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. ' +
+  'Use for original hero/organic assets. Toolbox models require an explicit user request; inspect the actual preview before calling any result realistic. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. ' +
   'Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.';
 const PREVIEW = 'Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). ' +
   'Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence.';

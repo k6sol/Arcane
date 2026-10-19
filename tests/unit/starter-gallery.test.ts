@@ -10,6 +10,10 @@ import { composerWithStarter, starterFocusTarget, STARTER_ICONS } from '../../ap
 const TOOLS = ['scene_build', 'environment_apply', 'studio_asset_search', 'studio_asset_insert', 'studio_asset_generate', 'assets_procedural', 'studio_viewport_capture', 'playtest_request', 'script_read'];
 const PRESETS = ['clear_day', 'golden_hour', 'foggy_forest', 'night', 'horror', 'sci_fi'];
 
+test('starter prompts preserve the original-assets default without injecting Toolbox requests', () => {
+  for (const starter of STARTER_PROMPTS) assert.doesNotMatch(starter.prompt, /studio_asset_search|studio_asset_insert|Creator Store/, starter.id);
+});
+
 test('starter data: 8-12 unique, complete, lean prompts that name real Arcane tools and skills', async () => {
   assert.ok(STARTER_PROMPTS.length >= 8 && STARTER_PROMPTS.length <= 12);
   assert.equal(new Set(STARTER_PROMPTS.map(s => s.id)).size, STARTER_PROMPTS.length);
@@ -25,9 +29,9 @@ test('starter data: 8-12 unique, complete, lean prompts that name real Arcane to
     for (const skill of s.prompt.match(/\barcane-[a-z-]+\b/g) ?? []) assert.ok(skills.has(skill), s.id + ' unknown skill ' + skill);
     assert.ok(!/\b(send|submit) (it|this) (now|automatically)\b/i.test(s.prompt));
   }
-  // The gallery covers Creator Store first, procedural hero assets, VFX, viewport critique, playtest and DataStore safety.
+  // The gallery covers original assets, VFX, viewport critique, playtest and DataStore safety.
   const all = STARTER_PROMPTS.map(s => s.prompt).join('\n');
-  for (const needle of ['studio_asset_search', 'assets_procedural', 'scene_build', 'environment_apply', 'ParticleEmitter', 'studio_viewport_capture', 'playtest_request', 'arcane-datastore-safety']) assert.ok(all.includes(needle), needle);
+  for (const needle of ['original meshes', 'assets_procedural', 'scene_build', 'environment_apply', 'ParticleEmitter', 'studio_viewport_capture', 'playtest_request', 'arcane-datastore-safety']) assert.ok(all.includes(needle), needle);
 });
 
 test('composer fill replaces an empty box or an unedited starter and keeps a typed draft', () => {
