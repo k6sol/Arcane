@@ -116,7 +116,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           }
           if(['failed','cancelled','needs_reconciliation'].includes(command.state))fail('STUDIO_RECONSTRUCT_TARGET');
           if(now()>=contextDeadline)fail('STUDIO_STAGE_TIMEOUT');
-          await new Promise<void>(resolve=>setTimeout(resolve,25));
+          await studio.waitForCommandResult(contextCommand.id,Math.min(25,Math.max(1,contextDeadline-now())));
         }
         boundary();admitted=true;
         const queued=studio.enqueueStageReconstruction(scope.projectId,jobId,run.runId,boundary);
@@ -125,7 +125,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           if(!record||record.command.id!==queued.id)fail('STUDIO_RECONSTRUCT_RECEIPT');
           if(record.receipt){boundary();return {...record.receipt,commandId:queued.id};}
           if(['failed','cancelled','needs_reconciliation'].includes(record.command.state))fail('STUDIO_RECONSTRUCT_RECEIPT');
-          await new Promise<void>(resolve=>setTimeout(resolve,25));
+          await studio.waitForCommandResult(queued.id,Math.min(25,Math.max(1,expires-now())));
         }
       } finally {
         try{if(admitted)studio.abandonStageReconstruction(scope.projectId,jobId,run.runId);}finally{busy=false;}
@@ -226,7 +226,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
             }
             if (['failed', 'cancelled', 'needs_reconciliation'].includes(command.state)) fail('STUDIO_STAGE_RECEIPT');
             if (now() >= deadline) fail('STUDIO_STAGE_TIMEOUT');
-            await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - now()))));
+            await studio.waitForCommandResult(queued.id,Math.min(25,Math.max(1,deadline-now())));
           }
         }
         boundary(); if (!last || last.state !== 'sealed') fail('STUDIO_STAGE_RECEIPT');

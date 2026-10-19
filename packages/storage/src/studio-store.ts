@@ -240,6 +240,8 @@ export class StudioStore {
   #modelSourcePolicy: ((sessionId:string)=>boolean)|null = null;
   #assetModelReview:((intent:StageRunIntent)=>void)|null=null;
   #assetDispatchGuards=new Map<string,()=>void>();
+  #commandResultWaiters=new Map<string,Set<()=>void>>();
+  #commandResultWaiterCount=0;
   /** Trusted product composition; a serialized review reference grants no authority. */
   bindAssetModelReview(read:(intent:StageRunIntent)=>void):()=>void {
     if(typeof read!=='function'||this.#assetModelReview)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review is already bound or invalid.');
@@ -767,6 +769,36 @@ export class StudioStore {
   command(id: string): StudioCommand {
     const row = this.db.prepare('SELECT payload FROM commands WHERE id=?').get(id) as Row | undefined;
     if (!row) throw new ArcaneError('COMMAND', 'Unknown command receipt.'); return this.expired(JSON.parse(row.payload as string) as StudioCommand);
+  }
+  /** Process-local wake hint only. Callers must re-read the command and all
+   * current authority after every wake. The original <=25ms timer remains the
+   * fallback for cancellation, expiry and non-result state changes. */
+  waitForCommandResult(commandId:string,ms:number):Promise<void> {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Command journal is closed.');
+    if(!stageJob.safeParse(commandId).success||!Number.isFinite(ms)||ms<1||ms>25)throw new ArcaneError('INPUT','Expected an exact command ID and a 1..25ms receipt wait.');
+    const existing=this.#commandResultWaiters.get(commandId);
+    if(this.#commandResultWaiterCount>=128||(existing?.size??0)>=8)throw new ArcaneError('BUSY','Command receipt wait capacity is full.');
+    return new Promise<void>((resolve,reject)=>{
+      let done=false,timer:ReturnType<typeof setTimeout>|undefined;
+      const cleanup=()=>{
+        if(done)return false;done=true;
+        if(timer!==undefined)clearTimeout(timer);
+        const waiters=this.#commandResultWaiters.get(commandId);waiters?.delete(finish);
+        if(waiters?.size===0)this.#commandResultWaiters.delete(commandId);
+        this.#commandResultWaiterCount--;return true;
+      };
+      const finish=()=>{if(cleanup())resolve();};
+      const waiters=existing??new Set<()=>void>();waiters.add(finish);
+      this.#commandResultWaiters.set(commandId,waiters);this.#commandResultWaiterCount++;
+      try{
+        timer=setTimeout(finish,ms);
+        // Subscribe BEFORE the fresh terminal recheck. This read is a hint,
+        // never a substitute for command()/receipt/dispatch validation.
+        const row=this.db.prepare("SELECT state,CASE WHEN state IN ('succeeded','failed','cancelled','needs_reconciliation') THEN json_extract(payload,'$.state') END AS payload_state FROM commands WHERE id=?").get(commandId) as Row|undefined;
+        if(!row)throw new ArcaneError('COMMAND','Unknown command receipt.');
+        if(['succeeded','failed','cancelled','needs_reconciliation'].includes(String(row.state))&&row.payload_state===row.state)finish();
+      }catch(error){cleanup();reject(error);}
+    });
   }
   /** Read-only: the exact before/after source of one succeeded script.update receipt, for the human "View changes" diff.
    * Both sources were validated against the request when the receipt completed (each at most 100 KiB). */
@@ -1515,6 +1547,10 @@ export class StudioStore {
       c.result = result; c.error = error; c.finishedAt = this.iso(); this.saveCommand(c);
       this.event('command_' + c.state, c.id, { sessionId, method: c.method });
     });
+    // result() and its COMMIT have completed. Resolving only internal promises
+    // schedules fresh controller reads before the next plugin I/O turn. A
+    // rejected ACK or rolled-back transaction never reaches this notification.
+    for(const finish of this.#commandResultWaiters.get(commandId)??[])finish();
   }
   restore(input: unknown): StudioCommand {
     return this.enqueue(this.restoreInput(input), true);
@@ -1535,5 +1571,5 @@ export class StudioStore {
   }
   counts(): Record<string, number> { return Object.fromEntries((this.db.prepare('SELECT state,count(*) AS n FROM commands GROUP BY state').all() as Row[]).map(r => [r.state, Number(r.n)])); }
   events(limit = 100): Json[] { return (this.db.prepare('SELECT sequence,occurred_at,kind,entity_id,detail FROM events ORDER BY sequence DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))) as Row[]).map(r => ({ sequence: Number(r.sequence), occurredAt: r.occurred_at as string, kind: r.kind as string, entityId: r.entity_id as string, detail: JSON.parse(r.detail as string) as Json })); }
-  close(): void { if (!this.closed) { this.closed = true; this.#assetDispatchGuards.clear(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
+  close(): void { if (!this.closed) { this.closed = true; this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
 }
