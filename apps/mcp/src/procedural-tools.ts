@@ -67,7 +67,7 @@ const PROCEDURAL = 'Write: generate an original bounded mesh in the local Blende
 const PREVIEW = 'Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). ' +
   'Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence.';
 const PLACE = 'Write: turn the reconstructed meshes of this exact job (after assets_reconstruct_studio_import succeeded in the same Studio session) into MeshParts via AssetService:CreateMeshPartAsync, ' +
-  'then adopt them like studio_asset_insert in one undo step: authored opaque base colour, double-sided setting and scalar PBR roughness/metalness through bounded SurfaceAppearance maps (not textures), invisible collision proxy, ' +
+  'then adopt them like studio_asset_insert in one undo step: authored UV0 and bounded embedded PNG colour, tangent normal, roughness and metalness through SurfaceAppearance, plus flat material factors when no maps were authored; invisible collision proxy, ' +
   'anchored, fitted (maxSize) or true scale (1 m ≈ 3.57 studs), bottom-centre pivot, grounded, parented; returns a receipt (receipt_restore removes it). ' +
   'For scattering, place ONE copy into a hidden template Folder, then scene_build templates + clone items/scatter. No upload, publication or asset ID: the meshes live in this Studio Edit session ' +
   '(they vanish on reconnect, Play or reopening; to keep them the user clicks Keep this mesh on the asset card, confirms in an Arcane dialog and it uploads geometry to their own Roblox account; PBR maps remain session-only. You can suggest that button but can never upload). Never auto-retry.';

@@ -55,6 +55,61 @@ def rotation(degrees):
     return Euler(tuple(math.radians(n) for n in degrees), 'XYZ').to_matrix().to_4x4()
 
 
+def unwrap_surface(obj, part, select):
+    """Primitive UV0 in part-local space; tile overlap is intentional on planar faces.
+    Curved surfaces have a single longitude seam and planar end caps. User meshes
+    use marked angle seams and an angle-based unwrap, never Smart UV projection.
+    """
+    mesh, kind = obj.data, part["geometry"]["kind"]
+    if kind == "mesh":
+        select([obj])
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(mesh)
+            for edge in bm.edges:
+                edge.seam = len(edge.link_faces) != 2 or edge.calc_face_angle() > math.radians(66)
+            # A closed smooth input still needs a cut: mark its lowest-X meridian.
+            if not any(edge.seam for edge in bm.edges):
+                for edge in bm.edges:
+                    edge.seam = all(vert.co.x <= 0 for vert in edge.verts) and edge.verts[0].co.y * edge.verts[1].co.y <= 0
+            bm.to_mesh(mesh)
+        finally:
+            bm.free()
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.uv.unwrap(method="ANGLE_BASED", margin=.01)
+        bpy.ops.object.mode_set(mode="OBJECT")
+    else:
+        uv = mesh.uv_layers.new(name="UVMap")
+        dimensions = part["dimensions"]
+        for polygon in mesh.polygons:
+            points = [mesh.vertices[mesh.loops[index].vertex_index].co for index in polygon.loop_indices]
+            curved = kind == "sphere" or (kind in ("cylinder", "cone") and abs(polygon.normal.z) < .9)
+            if curved:
+                coordinates = []
+                for point in points:
+                    x, y, z = (point[index] / dimensions[index] for index in range(3))
+                    u = math.atan2(y, x) / math.tau + .5
+                    v = math.asin(max(-1, min(1, z * 2))) / math.pi + .5 if kind == "sphere" else z + .5
+                    coordinates.append([u, v])
+                longitudes = [coord[0] for point, coord in zip(points, coordinates) if abs(point.x) + abs(point.y) > 1e-8]
+                if longitudes and max(longitudes) - min(longitudes) > .5:
+                    for coord in coordinates:
+                        if coord[0] > .5:
+                            coord[0] = max(0, coord[0] - 1)
+                for point, coord in zip(points, coordinates):
+                    if abs(point.x) + abs(point.y) < 1e-8:
+                        others = [other[0] for other_point, other in zip(points, coordinates) if abs(other_point.x) + abs(other_point.y) > 1e-8]
+                        coord[0] = sum(others) / len(others)
+            else:
+                axis = max(range(3), key=lambda index: abs(polygon.normal[index]))
+                axes = [index for index in range(3) if index != axis]
+                coordinates = [[point[index] / dimensions[index] + .5 for index in axes] for point in points]
+            for index, coordinate in zip(polygon.loop_indices, coordinates):
+                uv.data[index].uv = [max(0, min(1, value)) for value in coordinate]
+    obj["arcane_surface_uv"] = True
+
+
 def socket_metrics(scene):
     bpy.context.view_layer.update()
     result = []
@@ -111,6 +166,8 @@ def build_assembly(request, make_material, make_collection, select):
             bpy.ops.object.modifier_apply(modifier=bevel.name)
         for polygon in obj.data.polygons:
             polygon.use_smooth = part["geometry"]["kind"] == "sphere" or (part["geometry"]["kind"] in ("cylinder", "cone") and abs(polygon.normal.z) < .9)
+        if part.get("material") and any(data["id"] == part["material"] and data.get("surface") for data in recipe["materials"]):
+            unwrap_surface(obj, part, select)
         obj.data.transform(Matrix.Translation(Vector(part["position"])) @ rotation(part["rotationDegrees"]))
         obj.data.update()
         objects[part["role"]].append(obj)

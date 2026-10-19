@@ -151,7 +151,7 @@ def finalize(obj):
     bpy.ops.object.modifier_apply(modifier=mod.name)
     if obj.data.validate(verbose=False):
         raise ValueError(obj.name + " mesh required repair")
-    if obj["arcane_role"] != "collision":
+    if obj["arcane_role"] != "collision" and not obj.get("arcane_surface_uv"):
         unwrap(obj)
 
 
@@ -457,6 +457,10 @@ def main():
     event("mesh-validation")
     for obj in main_objects + lods + collision:
         finalize(obj)
+    if any(data.get("surface") for data in request.get("recipe", {}).get("materials", [])):
+        event("texture-authoring")
+        from textures import author_surfaces
+        author_surfaces(request, directory, main_objects + lods)
     meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
     if errors:
         _failure_metrics = {"renderTriangles": totals["renderTriangles"], "triangleBudget": request["triangleBudget"],

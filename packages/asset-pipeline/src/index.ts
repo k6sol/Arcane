@@ -244,6 +244,7 @@ export class AssetPipeline {
       const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
       files.push(['input.json', 'request']);
       if (request.recipe) files.push(['assembly.py', 'worker'], ['assembly.json', 'audit']);
+      if (request.recipe?.materials.some(material => material.surface)) files.push(['textures.py', 'worker']);
       if (request.procedural) files.push(['procedural.py', 'worker']);
       if (audit.totals.lod1Triangles) files.push(['asset-lod1.glb', 'export']);
       for (const [name, role] of files) {

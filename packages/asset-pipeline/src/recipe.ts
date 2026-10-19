@@ -117,11 +117,17 @@ export function normalizeRecipe(value: unknown, triangleBudget: number): Assembl
   if (r.schemaVersion !== 1) fail('Unsupported assembly recipe version.');
   const materialIds = new Set<string>();
   const materials = list(r.materials, 1, RECIPE_LIMITS.materials, 'materials').map(raw => {
-    const m = object(raw, ['id', 'color', 'metallic', 'roughness', 'emission'], ['id', 'color'], 'material'), id = name(m.id);
+    const m = object(raw, ['id', 'color', 'metallic', 'roughness', 'emission', 'surface'], ['id', 'color'], 'material'), id = name(m.id);
     if (materialIds.has(id)) fail('Duplicate material ID.'); materialIds.add(id);
     const emission = m.emission === undefined ? undefined : object(m.emission, ['color', 'strength'], ['color', 'strength'], 'emission');
+    let surface: import('./types.js').MaterialSurface | undefined;
+    if (m.surface !== undefined) {
+      const s = object(m.surface, ['profile', 'resolution'], ['profile'], 'material surface');
+      if (!['bark', 'stone', 'leaf', 'weathered'].includes(String(s.profile)) || ![128, 256, 512].includes(Number(s.resolution ?? 256))) fail('Unsupported material surface profile or resolution.');
+      surface = { profile: s.profile as import('./types.js').MaterialSurface['profile'], resolution: int(s.resolution ?? 256, 128, 512, 'texture resolution') as 128 | 256 | 512 };
+    }
     return { id, color: vec(m.color, 0, 1, 'material color'), metallic: num(m.metallic ?? 0, 0, 1, 'metallic'), roughness: num(m.roughness ?? 0.5, 0, 1, 'roughness'),
-      ...(emission ? { emission: { color: vec(emission.color, 0, 1, 'emission color'), strength: num(emission.strength, 0, 10, 'emission strength') } } : {}) };
+      ...(emission ? { emission: { color: vec(emission.color, 0, 1, 'emission color'), strength: num(emission.strength, 0, 10, 'emission strength') } } : {}), ...(surface ? { surface } : {}) };
   });
   const ids = new Set<string>();
   const parts = list(r.parts, 2, RECIPE_LIMITS.parts, 'parts').map(raw => {

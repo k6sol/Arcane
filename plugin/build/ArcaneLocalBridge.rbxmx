@@ -1913,11 +1913,17 @@ function Operations:cancelAssetTransfers(): ()
 			owner.retired = true
 			-- Templates and image objects stay alive while placed/scattered surfaces reference them.
 			-- Detach each cache entry before engine callbacks can re-enter cancellation.
-			for key, material in pairs(owner.materials or {}) do
-				owner.materials[key] = nil
-				for _, resource in ipairs({material.surfaceAppearance, material.editableImages.MetalnessMap, material.editableImages.RoughnessMap}) do
+			local released: {[any]: boolean} = {}
+			local function destroyMaterialResource(resource: any): ()
+				if resource ~= nil and not released[resource] then
+					released[resource] = true
 					if not pcall(function() resource:Destroy() end) then failures += 1 end
 				end
+			end
+			for key, material in pairs(owner.materials or {}) do
+				owner.materials[key] = nil
+				destroyMaterialResource(material.surfaceAppearance)
+				for _, image in pairs(material.editableImages) do destroyMaterialResource(image) end
 			end
 			for _, resource in ipairs(owner.meshes) do
 				if not resource.disposed then
@@ -2028,9 +2034,9 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		if self.assetProgress then self.assetProgress() end -- Fresh authenticated progress BEFORE allocation.
 		local service = self.gameModel:GetService("AssetService")
 		owned.guard()
-		local entries = owned.receiver:reconstruct(service)
+		local entries = owned.receiver:reconstruct(service, AssetMaterials.admitTextures)
 		-- No guard/yield between receiving ownership and registering EVERY mesh.
-		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false, object = entry.object, material = entry.material} end
+		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false, object = entry.object, material = entry.material, textures = entry.textures} end
 		owner.service = service -- Retained for materialization; never re-acquired elsewhere.
 		owned.guard()
 		local summary = {}
@@ -2089,7 +2095,7 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	-- Validate every material before allocating parts or image resources.
 	for _, resource in ipairs(owner.meshes) do
 		if resource.object.role ~= "collision" then
-			local plan = AssetMaterials.plan(resource.material)
+			local plan = AssetMaterials.plan(resource.material, resource.textures)
 			if not plan.supported then V.fail("UNSUPPORTED_MATERIAL", "Nonzero emission cannot be mapped faithfully.") end
 		end
 	end
@@ -2134,7 +2140,7 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 						contentFromObject = function(image: any): any return Content.fromObject(image) end,
 						vector2 = function(x: number, y: number): any return Vector2.new(x, y) end,
 						colorFromLinear = function(r: number, g: number, b: number): any return Color3.new(srgb(r), srgb(g), srgb(b)) end,
-					}, current)
+					}, current, resource.textures)
 					owner.materials[key] = material -- Ownership before any further guard or engine call.
 				end
 				current()
@@ -5275,6 +5281,7 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 	local objectIds: {[string]: boolean} = {}
 	local streams: {[string]: any} = {}
 	local streamCount = 0
+	local textures, textureCount, materialSlots = {}, 0, {}
 	local contentHashes, packetHashes = Sha256Stream.new(), Sha256Stream.new()
 	local resources: {any} = {}
 	local function check(): ()
@@ -5291,12 +5298,34 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		table.clear(resources)
 		table.clear(streams)
 		table.clear(objects)
+		table.clear(textures)
 		if failures > 0 then fail("CLEANUP", "Transfer failed; owned unparented resources may remain.") end
 	end
 	local receiver = {}
 	function receiver:cancel(): () abort() end
 	function receiver:status(): any
 		return table.freeze({state = state, packetCount = ordinal, byteLength = bytes, engineVerification = "pending"})
+	end
+	local function declare(descriptor: any, objectId: string, primitiveIndex: number, semantic: string): ()
+		descriptor = plain(descriptor, "Stream descriptor")
+		local id = digest(descriptor.streamId)
+		if streams[id] or descriptor.semantic ~= semantic then fail("IDENTITY", "Duplicate/mismatched stream.") end
+		streamCount = integer(streamCount + 1, 1, LIMITS.streams)
+		local length = integer(descriptor.byteLength, 1, LIMITS.binaryBytes)
+		binaryBytes = integer(binaryBytes + length, 1, LIMITS.binaryBytes)
+		digest(descriptor.sha256)
+		plain(descriptor.chunks, "Declared chunks")
+		local offset = 0
+		for _, chunk in ipairs(descriptor.chunks) do
+			plain(chunk, "Declared chunk")
+			if chunk.offset ~= offset then fail("CHECKSUM", "Declared chunk gap/overlap.") end
+			offset += integer(chunk.byteLength, 1, 180 * 1024)
+			if offset > length then fail("CHECKSUM", "Declared chunks overrun stream.") end
+			digest(chunk.sha256)
+		end
+		if offset ~= length then fail("CHECKSUM", "Declared chunks do not cover stream.") end
+		streams[id] = {objectId = objectId, primitiveIndex = primitiveIndex, descriptor = descriptor,
+			offset = 0, chunkIndex = 1, parts = {}, hasher = Sha256Stream.new(), complete = false}
 	end
 	function receiver:accept(json: string): any
 		if state ~= "receiving" then fail("STATE", "Transfer is not receiving.") end
@@ -5313,39 +5342,43 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 			if packet.kind == "begin" then
 				if ordinal ~= 0 or begin ~= nil then fail("STATE", "Begin must be first and unique.") end
 				integer(packet.objectCount, 1, LIMITS.objects)
+				integer(packet.textureCount or 0, 0, 256)
 				begin = packet
+			elseif packet.kind == "texture" then
+				if begin == nil or #objects ~= 0 then fail("STATE", "Textures must follow begin and precede objects.") end
+				textureCount = integer(textureCount + 1, 1, begin.textureCount or 0)
+				local texture = plain(packet.texture, "Texture")
+				local imageId = digest(texture.imageId)
+				if textures[imageId] then fail("IDENTITY", "Duplicate texture identity.") end
+				local semantic = texture.semantic
+				if semantic ~= "ColorMap" and semantic ~= "NormalMap" and semantic ~= "RoughnessMap" and semantic ~= "MetalnessMap" then fail("INPUT", "Unsupported texture map slot.") end
+				local materialSlot = digest(texture.materialSha256) .. ":" .. semantic
+				if materialSlots[materialSlot] then fail("IDENTITY", "A material slot cannot declare multiple images.") end
+				materialSlots[materialSlot] = imageId
+				local width, height = integer(texture.width, 1, 1024), integer(texture.height, 1, 1024)
+				digest(texture.materialSha256); digest(texture.sourceSha256); digest(texture.sourceRgbaSha256); digest(texture.sha256)
+				if texture.orientation ~= "top-left" or texture.colorSpace ~= (if semantic == "ColorMap" then "srgb" else "linear")
+					or (semantic == "NormalMap" and texture.normalConvention ~= "OpenGL")
+					or texture.componentType ~= 5121 or texture.type ~= "VEC4" or texture.normalized ~= false
+					or texture.count ~= width * height or texture.byteLength ~= width * height * 4 then fail("INPUT", "Texture layout differs from RGBA8 pixels.") end
+				local stream = plain(texture.stream, "Texture stream")
+				for _, key in ipairs({"semantic", "componentType", "type", "normalized", "count", "byteLength", "sha256"}) do
+					if stream[key] ~= texture[key] then fail("IDENTITY", "Texture and declared stream disagree.") end
+				end
+				declare(stream, "texture-" .. imageId, -1, semantic)
+				textures[imageId] = texture
 			elseif packet.kind == "object" then
-				if begin == nil then fail("STATE", "Object precedes begin.") end
+				if begin == nil or textureCount ~= (begin.textureCount or 0) then fail("STATE", "Object precedes complete texture declarations.") end
 				integer(#objects + 1, 1, begin.objectCount)
 				local object = plain(packet.object, "Object")
 				local objectId = object.sourceObjectId
 				if type(objectId) ~= "string" or #objectId > 128 or objectIds[objectId] then fail("IDENTITY", "Invalid/duplicate object identity.") end
 				local primitives = plain(packet.primitives, "Primitives")
-				local function declare(descriptor: any, primitiveIndex: number, semantic: string): ()
-					descriptor = plain(descriptor, "Stream descriptor")
-					local id = digest(descriptor.streamId)
-					if streams[id] or descriptor.semantic ~= semantic then fail("IDENTITY", "Duplicate/mismatched stream.") end
-					streamCount = integer(streamCount + 1, 1, LIMITS.streams)
-					local length = integer(descriptor.byteLength, 1, LIMITS.binaryBytes)
-					binaryBytes = integer(binaryBytes + length, 1, LIMITS.binaryBytes)
-					digest(descriptor.sha256)
-					plain(descriptor.chunks, "Declared chunks")
-					local offset = 0
-					for _, chunk in ipairs(descriptor.chunks) do
-						plain(chunk, "Declared chunk")
-						if chunk.offset ~= offset then fail("CHECKSUM", "Declared chunk gap/overlap.") end
-						offset += integer(chunk.byteLength, 1, 180 * 1024)
-						if offset > length then fail("CHECKSUM", "Declared chunks overrun stream.") end
-						digest(chunk.sha256)
-					end
-					if offset ~= length then fail("CHECKSUM", "Declared chunks do not cover stream.") end
-					streams[id] = {objectId = objectId, primitiveIndex = primitiveIndex, descriptor = descriptor,
-						offset = 0, chunkIndex = 1, parts = {}, hasher = Sha256Stream.new(), complete = false}
-				end
+
 				for index, primitive in ipairs(primitives) do
 					plain(primitive, "Primitive")
-					for semantic, descriptor in pairs(plain(primitive.attributes, "Attributes")) do declare(descriptor, index - 1, semantic) end
-					declare(primitive.indices, index - 1, "indices")
+					for semantic, descriptor in pairs(plain(primitive.attributes, "Attributes")) do declare(descriptor, objectId, index - 1, semantic) end
+					declare(primitive.indices, objectId, index - 1, "indices")
 				end
 				objectIds[objectId] = true
 				objects[#objects + 1] = packet
@@ -5369,9 +5402,25 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 					stream.complete = true
 				end
 			elseif packet.kind == "seal" then
-				if begin == nil or #objects ~= begin.objectCount or packet.precedingPacketCount ~= ordinal
+				if begin == nil or #objects ~= begin.objectCount or textureCount ~= (begin.textureCount or 0) or packet.precedingPacketCount ~= ordinal
 					or packet.precedingByteLength ~= bytes or packet.contentDigest ~= contentHashes:digest() then fail("CHECKSUM", "Incomplete/mismatched seal.") end
 				for _, stream in pairs(streams) do if not stream.complete then fail("CHECKSUM", "Seal contains incomplete streams.") end end
+				local used = {}
+				for _, entry in ipairs(objects) do
+					if entry.textureBindings ~= nil then
+						if entry.object.role == "collision" or type(entry.material) ~= "table" then fail("INPUT", "Only render materials can bind textures.") end
+						for slot, imageId in pairs(plain(entry.textureBindings, "Texture bindings")) do
+							local texture = textures[imageId]
+							if not texture or texture.semantic ~= slot or texture.materialSha256 ~= entry.material.sha256 then fail("IDENTITY", "Texture belongs to another material or slot.") end
+							used[imageId] = true
+						end
+						for slot, field in pairs({ColorMap = "colorMap", NormalMap = "normalMap", RoughnessMap = "roughnessMap", MetalnessMap = "metalnessMap"}) do
+							local reference, imageId = entry.material[field], entry.textureBindings[slot]
+							if (reference ~= nil) ~= (imageId ~= nil) or (reference ~= nil and (type(reference) ~= "table" or textures[imageId].sourceSha256 ~= reference.sha256)) then fail("IDENTITY", "Material texture reference coverage differs.") end
+						end
+					end
+				end
+				for imageId in pairs(textures) do if not used[imageId] then fail("IDENTITY", "Unbound texture cannot be silently discarded.") end end
 			else fail("INPUT", "Unknown packet kind.") end
 			packetHashes:update((if ordinal == 0 then "" else "\n") .. packetHash)
 			if packet.kind == "seal" then
@@ -5388,7 +5437,7 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		if not ok then abort(); error(result, 0) end
 		return result
 	end
-	function receiver:reconstruct(assetService: any): any
+	function receiver:reconstruct(assetService: any, textureIntake: ((any, any, () -> ()) -> any)?): any
 		if state ~= "sealed" then fail("STATE", "Only a completely sealed transfer may reconstruct.") end
 		state = "reconstructing"
 		local ok, result = pcall(function(): any
@@ -5400,7 +5449,30 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 					count = descriptor.count, normalized = descriptor.normalized, byteLength = descriptor.byteLength,
 					bytes = buffer.fromstring(table.concat(stream.parts))}
 			end
-			for _, entry in ipairs(objects) do
+			local handles, objectHandles = {}, {}
+			-- Admit every image bundle before the first mesh/engine allocation. Only
+			-- the caller's trusted intake can mint private material texture handles.
+			for index, entry in ipairs(objects) do
+				if entry.textureBindings ~= nil then
+					if type(textureIntake) ~= "function" then fail("INPUT", "Trusted material texture intake is required.") end
+					local materialId = entry.material.sha256
+					if handles[materialId] == nil then
+						local maps = {}
+						for slot, imageId in pairs(entry.textureBindings) do
+							local texture = textures[imageId]
+							local copy = table.clone(texture)
+							copy.stream = nil
+							copy.bytes = materialize(texture.stream).bytes
+							maps[slot] = copy
+						end
+						handles[materialId] = (textureIntake :: any)(entry.material, maps, check)
+						check()
+						if handles[materialId] == nil then fail("INPUT", "Material intake returned no texture ownership.") end
+					end
+					objectHandles[index] = handles[materialId]
+				end
+			end
+			for index, entry in ipairs(objects) do
 				local primitives = {}
 				for _, primitive in ipairs(entry.primitives) do
 					local attributes = {}
@@ -5411,13 +5483,14 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 				local mesh = AssetMesh.create({primitives = primitives}, assetService, check, yieldBatch)
 				resources[#resources + 1] = mesh.editableMesh
 				check()
-				reconstructed[#reconstructed + 1] = {object = entry.object, material = entry.material, mesh = mesh}
+				reconstructed[#reconstructed + 1] = {object = entry.object, material = entry.material, mesh = mesh, textures = objectHandles[index]}
 			end
 			check()
 			state = "taken"
 			table.clear(resources) -- Ownership transferred exactly once to caller.
 			table.clear(streams)
 			table.clear(objects)
+			table.clear(textures)
 			return reconstructed
 		end)
 		if not ok then abort(); error(result, 0) end
@@ -5457,9 +5530,9 @@ return table.freeze(AssetTransfer)
 <string name="Name">AssetMaterials</string>
 <bool name="Archivable">true</bool>
 <ProtectedString name="Source"><![CDATA[--!strict
--- Scalar-only sidecar for the decoder's material manifest (not raw glTF JSON).
+-- Scalar and privately admitted texture sidecar for the decoder's material manifest (not raw glTF JSON).
 -- No services/globals are resolved; only injected factories create resources.
--- Exactly two constant 1x1 RGBA maps; no source image decoding or uploads.
+-- Decoded RGBA8 pixels arrive only from a sealed receiver intake; no PNG decoding or uploads.
 -- Checked 2026-10-14 against primary docs:
 -- https://create.roblox.com/docs/reference/engine/classes/SurfaceAppearance
 -- https://create.roblox.com/docs/reference/engine/classes/MeshPart
@@ -5496,14 +5569,14 @@ export type Plan = {
 -- a renderer's color space or substitutes a built-in material/Reflectance/Neon.
 export type Factories = {
 	createEditableImage: ({Size: Vector2}) -> EditableImage?,
-	createSurfaceAppearanceAsync: ({MetalnessMap: Content, RoughnessMap: Content}) -> SurfaceAppearance?,
+	createSurfaceAppearanceAsync: ({[string]: Content}) -> SurfaceAppearance?,
 	contentFromObject: (EditableImage) -> Content,
 	vector2: (number, number) -> Vector2,
 	colorFromLinear: (number, number, number) -> Color3,
 }
 export type Result = {
 	surfaceAppearance: SurfaceAppearance,
-	editableImages: {MetalnessMap: EditableImage, RoughnessMap: EditableImage},
+	editableImages: {[string]: EditableImage},
 	meshPartProperties: {Color: Color3, Transparency: number, DoubleSided: boolean},
 	plan: Plan, engineVerification: "pending",
 }
@@ -5519,9 +5592,15 @@ local EMISSION_LIMITATION = "Nonzero additive glTF emission needs verified emiss
 local LIMITATIONS = table.freeze({
 	"Metallic and roughness use nearest RGBA8 values; original factors and quantization errors are preserved. Engine rendering is pending.",
 	EMISSION_LIMITATION,
-	"Source texture decoding and non-opaque alpha are unsupported. Color-space conversion is injected.",
+	"Texture delivery requires privately admitted RGBA8 maps; only UV0 repeat sampling and opaque alpha are supported. Engine sampling is pending.",
 })
-local AssetMaterials = {LIMITS = LIMITS}
+local TEXTURE_LIMITS = table.freeze({width = 1024, height = 1024, maps = 4, bytes = 16 * 1024 * 1024})
+local AssetMaterials = {LIMITS = LIMITS, TEXTURE_LIMITS = TEXTURE_LIMITS}
+-- This process-local handle never serializes pixel ownership. Raw metadata or a
+-- JSON lookalike cannot be passed to plan/create as a verified texture bundle.
+local textureHandles: {[any]: any} = setmetatable({}, {__mode = "k"})
+local SLOT_FIELDS = table.freeze({ColorMap = "colorMap", NormalMap = "normalMap", RoughnessMap = "roughnessMap", MetalnessMap = "metalnessMap"})
+local CHANNELS = table.freeze({ColorMap = "rgba", NormalMap = "rgb", RoughnessMap = "g", MetalnessMap = "b"})
 local internalErrors: {[any]: boolean} = setmetatable({}, {__mode = "k"})
 
 local function fail(code: string, field: string, message: string): never
@@ -5575,15 +5654,35 @@ local function constantMap(factor: number): ScalarMap
 		rounding = "nearest-half-up", engineVerification = "pending"})
 end
 
+local function sameData(a: any, b: any, depth: number): boolean
+	if type(a) ~= type(b) then return false end
+	if type(a) ~= "table" then return a == b end
+	if depth > 8 or getmetatable(a) ~= nil or getmetatable(b) ~= nil then return false end
+	for key, value in pairs(a) do if not sameData(value, b[key], depth + 1) then return false end end
+	for key in pairs(b) do if a[key] == nil then return false end end
+	return true
+end
+
 -- Pure, bounded validation and detached frozen snapshot. Throws {code,field,
 -- message}; never defaults missing decoded fields or clamps unsupported values.
 -- A nil material denotes glTF's default metallic=1, roughness=1, white opaque.
 -- A valid nonzero emission plan exposes supported=false; create rejects it.
-function AssetMaterials.plan(material: Material?): Plan
+function AssetMaterials.plan(material: Material?, textures: any?): Plan
 	local value = record(if material == nil then {baseColor = {1, 1, 1, 1}, metallic = 1, roughness = 1,
 		alphaMode = "OPAQUE", alphaCutoff = 0.5, doubleSided = false, normalScale = 1} else material, MATERIAL_FIELDS, "material")
-	for _, field in ipairs(MAP_FIELDS) do
-		if value[field] ~= nil then fail("UNSUPPORTED_TEXTURE", field, "Texture mapping requires decoded images.") end
+	local bundle = if textures == nil then nil else textureHandles[textures]
+	if textures ~= nil and (bundle == nil or bundle.materialSha256 ~= value.sha256) then fail("INPUT", "textures", "Expected an original private texture bundle for this material.") end
+	if bundle ~= nil and bundle.source ~= nil and not sameData(value, bundle.source, 0) then fail("INPUT", "textures", "Material data changed after private texture intake.") end
+	local sourceMaps = {}
+	for slot, field in pairs(SLOT_FIELDS) do
+		if value[field] ~= nil then
+			if bundle == nil or bundle.maps[slot] == nil then fail("UNSUPPORTED_TEXTURE", field, "Texture mapping requires privately admitted decoded images.") end
+			local reference = value[field]
+			if type(reference) ~= "table" or getmetatable(reference) ~= nil or reference.sha256 ~= bundle.references[field].sha256
+				or reference.channel ~= bundle.references[field].channel or reference.texCoord ~= 0 then fail("INPUT", field, "Material reference changed after texture intake.") end
+			for key in pairs(reference) do if key ~= "sha256" and key ~= "channel" and key ~= "texCoord" then fail("INPUT", field, "Unexpected texture reference field.") end end
+			sourceMaps[field] = bundle.references[field]
+		elseif bundle ~= nil and bundle.maps[slot] ~= nil then fail("INPUT", field, "Unexpected texture map for a scalar material.") end
 	end
 	local baseColor = channels(value.baseColor, 4, "baseColor")
 	local metallic = scalar(value.metallic, 1, "metallic")
@@ -5616,24 +5715,86 @@ function AssetMaterials.plan(material: Material?): Plan
 	end
 	local source: Material = table.freeze({baseColor = baseColor, metallic = metallic, roughness = roughness,
 		alphaMode = "OPAQUE", alphaCutoff = cutoff, doubleSided = value.doubleSided,
-		normalScale = normalScale, emission = emission, sha256 = value.sha256})
-	return table.freeze({source = source, baseColorLinear = table.freeze({baseColor[1], baseColor[2], baseColor[3]}),
+		normalScale = normalScale, emission = emission, sha256 = value.sha256,
+		colorMap = sourceMaps.colorMap, normalMap = sourceMaps.normalMap, roughnessMap = sourceMaps.roughnessMap, metalnessMap = sourceMaps.metalnessMap})
+	return table.freeze({source = source, baseColorLinear = if bundle ~= nil and bundle.maps.ColorMap ~= nil then table.freeze({1, 1, 1}) else table.freeze({baseColor[1], baseColor[2], baseColor[3]}),
 		constantMaps = table.freeze({MetalnessMap = constantMap(metallic), RoughnessMap = constantMap(roughness)}),
 		metallic = metallic, roughness = roughness, doubleSided = source.doubleSided, transparency = 0,
 		emissiveStrength = if emissionSupported then 0 else nil, supported = emissionSupported,
 		emissionSupport = "zero-only", limitations = LIMITATIONS, requiresSurfaceAppearance = true, engineVerification = "pending"})
 end
 
+
+-- Internal trusted callback for AssetTransfer.reconstruct AFTER exact stream and
+-- seal verification. No engine resources are allocated here. Caller conveniences
+-- are copied before any later yielding engine callback can observe them.
+function AssetMaterials.admitTextures(material: any, maps: any, guard: () -> ()): any
+	material = record(material, MATERIAL_FIELDS, "material")
+	local materialId = material.sha256
+	if type(materialId) ~= "string" or #materialId ~= 64 or string.find(materialId, "[^0-9a-f]") ~= nil then fail("INPUT", "material", "Expected exact material identity.") end
+	if type(maps) ~= "table" or getmetatable(maps) ~= nil or type(guard) ~= "function" then fail("INPUT", "textures", "Trusted texture intake requires plain maps and guard.") end
+	local function check(): ()
+		local ok, result = pcall(guard)
+		if not ok or (result ~= nil and result ~= true) then fail("CANCELLED", "guard", "Texture ownership guard revoked.") end
+	end
+	local owned, references, count, bytes = {}, {}, 0, 0
+	local baseColor = channels(material.baseColor, 4, "baseColor")
+	local metallic, roughness = scalar(material.metallic, 1, "metallic"), scalar(material.roughness, 1, "roughness")
+	check()
+	for slot, map in pairs(maps) do
+		local field = SLOT_FIELDS[slot]
+		if field == nil or type(map) ~= "table" or getmetatable(map) ~= nil then fail("INPUT", "textures", "Unsupported texture slot or data.") end
+		local reference = material[field]
+		if type(reference) ~= "table" or getmetatable(reference) ~= nil then fail("INPUT", field, "Missing source texture reference.") end
+		for key in pairs(reference) do if key ~= "sha256" and key ~= "channel" and key ~= "texCoord" then fail("INPUT", field, "Unexpected source texture field.") end end
+		if reference.sha256 ~= map.sourceSha256 or reference.channel ~= CHANNELS[slot] or reference.texCoord ~= 0
+			or map.materialSha256 ~= materialId or map.semantic ~= slot or map.channel ~= CHANNELS[slot]
+			or map.orientation ~= "top-left" or map.colorSpace ~= (if slot == "ColorMap" then "srgb" else "linear")
+			or (slot == "NormalMap" and (map.normalConvention ~= "OpenGL" or material.normalScale ~= 1)) then fail("INPUT", field, "Texture provenance differs from material.") end
+		for _, key in ipairs({"imageId", "sourceSha256", "sourceRgbaSha256", "sha256"}) do
+			if type(map[key]) ~= "string" or #map[key] ~= 64 or string.find(map[key], "[^0-9a-f]") ~= nil then fail("INPUT", field, "Expected texture digest.") end
+		end
+		local width, height = map.width, map.height
+		if type(width) ~= "number" or type(height) ~= "number" or width % 1 ~= 0 or height % 1 ~= 0 or width < 1 or height < 1
+			or width > TEXTURE_LIMITS.width or height > TEXTURE_LIMITS.height or typeof(map.bytes) ~= "buffer"
+			or buffer.len(map.bytes) ~= width * height * 4 or map.byteLength ~= width * height * 4 then fail("INPUT", field, "Expected bounded RGBA8 image bytes.") end
+		local expected = if slot == "ColorMap" then {baseColor[1], baseColor[2], baseColor[3]}
+			elseif slot == "NormalMap" then {material.normalScale} elseif slot == "RoughnessMap" then {roughness} else {metallic}
+		if type(map.factors) ~= "table" or getmetatable(map.factors) ~= nil or #map.factors ~= #expected then fail("INPUT", field, "Expected baked material factors.") end
+		for index, factor in ipairs(expected) do if map.factors[index] ~= factor then fail("INPUT", field, "Baked factor differs from material.") end end
+		count += 1; bytes += width * height * 4
+		if count > TEXTURE_LIMITS.maps or bytes > TEXTURE_LIMITS.bytes then fail("INPUT", field, "Texture bundle exceeds bounds.") end
+		local copy = buffer.create(width * height * 4)
+		buffer.copy(copy, 0, map.bytes, 0, buffer.len(copy))
+		for index = 3, buffer.len(copy) - 1, 4 do
+			if buffer.readu8(copy, index) ~= 255 then fail("INPUT", field, "Delivered opaque map pixels require alpha 255.") end
+			if index % 16384 == 16383 then check() end
+		end
+		owned[slot] = table.freeze({width = width, height = height, bytes = copy})
+		references[field] = table.freeze({sha256 = reference.sha256, channel = reference.channel, texCoord = 0})
+		check()
+	end
+	for slot, field in pairs(SLOT_FIELDS) do if (material[field] ~= nil) ~= (owned[slot] ~= nil) then fail("INPUT", field, "Texture coverage differs from material.") end end
+	if count == 0 then fail("INPUT", "textures", "An empty texture bundle is not ownership.") end
+	local handle = table.freeze({kind = "arcane-private-material-textures"})
+	textureHandles[handle] = {materialSha256 = materialId, maps = table.freeze(owned), references = table.freeze(references)}
+	local ok, plan = pcall(AssetMaterials.plan, material, handle)
+	if not ok then textureHandles[handle] = nil; error(plan, 0) end
+	textureHandles[handle].source = plan.source
+	check()
+	return handle
+end
+
 -- Adapters wrap CreateEditableImage({Size=...}), Content.fromObject(image),
 -- Vector2.new(x,y), and CreateSurfaceAppearanceAsync({MetalnessMap=Content,
 -- RoughnessMap=Content}). These are injected callbacks, not live services.
 -- Factories must return NEW resources; EditableImage is a non-parentable Object.
--- Ownership of appearance AND BOTH IMAGES transfers only on success. Keep the
+-- Ownership of appearance AND ALL IMAGES transfers only on success. Keep the
 -- images alive with the appearance; engine packing/lifetime is unverified here.
 -- No caller MeshPart is mutated.
 -- Main applies meshPartProperties and parents the appearance under its own
 -- live authorization/rollback boundary; a plan or hash never authorizes that.
-function AssetMaterials.create(material: Material?, factories: Factories, guard: () -> boolean?): Result
+function AssetMaterials.create(material: Material?, factories: Factories, guard: () -> boolean?, textures: any?): Result
 	local owned: {any} = {}
 	local ok, result = pcall(function(): Result
 		if type(guard) ~= "function" or type(factories) ~= "table"
@@ -5649,7 +5810,8 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 			end
 		end
 		check()
-		local plan = AssetMaterials.plan(material)
+		local plan = AssetMaterials.plan(material, textures)
+		local bundle = if textures == nil then nil else textureHandles[textures]
 		if not plan.supported then fail("UNSUPPORTED_MATERIAL", "emission", EMISSION_LIMITATION) end
 		-- Snapshot callback references before any callback can yield/change them.
 		local makeColor, makeAppearance = factories.colorFromLinear, factories.createSurfaceAppearanceAsync
@@ -5670,15 +5832,16 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 		local color = makeColor(rgb[1], rgb[2], rgb[3])
 		check()
 		if color == nil then fail("INPUT", "colorFromLinear", "Color adapter returned nil.") end
-		local function image(map: ScalarMap, field: string): (EditableImage, Content)
+		local function image(map: any, field: string): (EditableImage, Content)
 			check()
 			local size = makeVector(map.width, map.height)
 			check()
 			local editable = own(makeImage({Size = size}), field) :: EditableImage
-			if editable.Size.X ~= 1 or editable.Size.Y ~= 1 then fail("INPUT", field, "Factory image must be exactly 1x1.") end
+			if editable.Size.X ~= map.width or editable.Size.Y ~= map.height then fail("INPUT", field, "Factory image dimensions differ from admitted pixels.") end
 			check()
-			local pixels = buffer.create(4)
-			for index = 1, 4 do buffer.writeu8(pixels, index - 1, map.rgba[index]) end
+			local pixels = buffer.create(map.width * map.height * 4)
+			if map.bytes ~= nil then buffer.copy(pixels, 0, map.bytes, 0, buffer.len(map.bytes))
+			else for index = 1, 4 do buffer.writeu8(pixels, index - 1, map.rgba[index]) end end
 			local origin = makeVector(0, 0)
 			check()
 			editable:WritePixelsBuffer(origin, size, pixels)
@@ -5688,18 +5851,22 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 			if content == nil then fail("INPUT", "contentFromObject", "Content adapter returned nil.") end
 			return editable, content
 		end
-		local metalnessImage, metalnessContent = image(plan.constantMaps.MetalnessMap, "MetalnessMap")
-		local roughnessImage, roughnessContent = image(plan.constantMaps.RoughnessMap, "RoughnessMap")
+		local images, contents = {}, {}
+		for _, slot in ipairs({"MetalnessMap", "RoughnessMap", "ColorMap", "NormalMap"}) do
+			local map = if bundle ~= nil and bundle.maps[slot] ~= nil then bundle.maps[slot] else plan.constantMaps[slot]
+			if map ~= nil then images[slot], contents[slot] = image(map, slot) end
+		end
 		check()
-		local appearance = own(makeAppearance({MetalnessMap = metalnessContent, RoughnessMap = roughnessContent}), "surfaceAppearance") :: SurfaceAppearance
+		local appearance = own(makeAppearance(contents), "surfaceAppearance") :: SurfaceAppearance
 		if not appearance:IsA("SurfaceAppearance") or appearance.Parent ~= nil then
 			fail("INPUT", "surfaceAppearance", "Factory must return a new detached SurfaceAppearance.")
 		end
 		check()
 		appearance.EmissiveStrength = plan.emissiveStrength :: number
+		if bundle ~= nil and bundle.maps.ColorMap ~= nil then appearance.Color = color end
 		check()
 		return table.freeze({surfaceAppearance = appearance,
-			editableImages = table.freeze({MetalnessMap = metalnessImage, RoughnessMap = roughnessImage}),
+			editableImages = table.freeze(images),
 			meshPartProperties = table.freeze({Color = color, Transparency = plan.transparency, DoubleSided = plan.doubleSided}),
 			plan = plan, engineVerification = "pending"})
 	end)

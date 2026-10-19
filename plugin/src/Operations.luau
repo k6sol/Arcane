@@ -106,11 +106,17 @@ function Operations:cancelAssetTransfers(): ()
 			owner.retired = true
 			-- Templates and image objects stay alive while placed/scattered surfaces reference them.
 			-- Detach each cache entry before engine callbacks can re-enter cancellation.
-			for key, material in pairs(owner.materials or {}) do
-				owner.materials[key] = nil
-				for _, resource in ipairs({material.surfaceAppearance, material.editableImages.MetalnessMap, material.editableImages.RoughnessMap}) do
+			local released: {[any]: boolean} = {}
+			local function destroyMaterialResource(resource: any): ()
+				if resource ~= nil and not released[resource] then
+					released[resource] = true
 					if not pcall(function() resource:Destroy() end) then failures += 1 end
 				end
+			end
+			for key, material in pairs(owner.materials or {}) do
+				owner.materials[key] = nil
+				destroyMaterialResource(material.surfaceAppearance)
+				for _, image in pairs(material.editableImages) do destroyMaterialResource(image) end
 			end
 			for _, resource in ipairs(owner.meshes) do
 				if not resource.disposed then
@@ -221,9 +227,9 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		if self.assetProgress then self.assetProgress() end -- Fresh authenticated progress BEFORE allocation.
 		local service = self.gameModel:GetService("AssetService")
 		owned.guard()
-		local entries = owned.receiver:reconstruct(service)
+		local entries = owned.receiver:reconstruct(service, AssetMaterials.admitTextures)
 		-- No guard/yield between receiving ownership and registering EVERY mesh.
-		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false, object = entry.object, material = entry.material} end
+		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false, object = entry.object, material = entry.material, textures = entry.textures} end
 		owner.service = service -- Retained for materialization; never re-acquired elsewhere.
 		owned.guard()
 		local summary = {}
@@ -282,7 +288,7 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	-- Validate every material before allocating parts or image resources.
 	for _, resource in ipairs(owner.meshes) do
 		if resource.object.role ~= "collision" then
-			local plan = AssetMaterials.plan(resource.material)
+			local plan = AssetMaterials.plan(resource.material, resource.textures)
 			if not plan.supported then V.fail("UNSUPPORTED_MATERIAL", "Nonzero emission cannot be mapped faithfully.") end
 		end
 	end
@@ -327,7 +333,7 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 						contentFromObject = function(image: any): any return Content.fromObject(image) end,
 						vector2 = function(x: number, y: number): any return Vector2.new(x, y) end,
 						colorFromLinear = function(r: number, g: number, b: number): any return Color3.new(srgb(r), srgb(g), srgb(b)) end,
-					}, current)
+					}, current, resource.textures)
 					owner.materials[key] = material -- Ownership before any further guard or engine call.
 				end
 				current()

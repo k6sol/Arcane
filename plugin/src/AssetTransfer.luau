@@ -87,6 +87,7 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 	local objectIds: {[string]: boolean} = {}
 	local streams: {[string]: any} = {}
 	local streamCount = 0
+	local textures, textureCount, materialSlots = {}, 0, {}
 	local contentHashes, packetHashes = Sha256Stream.new(), Sha256Stream.new()
 	local resources: {any} = {}
 	local function check(): ()
@@ -103,12 +104,34 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		table.clear(resources)
 		table.clear(streams)
 		table.clear(objects)
+		table.clear(textures)
 		if failures > 0 then fail("CLEANUP", "Transfer failed; owned unparented resources may remain.") end
 	end
 	local receiver = {}
 	function receiver:cancel(): () abort() end
 	function receiver:status(): any
 		return table.freeze({state = state, packetCount = ordinal, byteLength = bytes, engineVerification = "pending"})
+	end
+	local function declare(descriptor: any, objectId: string, primitiveIndex: number, semantic: string): ()
+		descriptor = plain(descriptor, "Stream descriptor")
+		local id = digest(descriptor.streamId)
+		if streams[id] or descriptor.semantic ~= semantic then fail("IDENTITY", "Duplicate/mismatched stream.") end
+		streamCount = integer(streamCount + 1, 1, LIMITS.streams)
+		local length = integer(descriptor.byteLength, 1, LIMITS.binaryBytes)
+		binaryBytes = integer(binaryBytes + length, 1, LIMITS.binaryBytes)
+		digest(descriptor.sha256)
+		plain(descriptor.chunks, "Declared chunks")
+		local offset = 0
+		for _, chunk in ipairs(descriptor.chunks) do
+			plain(chunk, "Declared chunk")
+			if chunk.offset ~= offset then fail("CHECKSUM", "Declared chunk gap/overlap.") end
+			offset += integer(chunk.byteLength, 1, 180 * 1024)
+			if offset > length then fail("CHECKSUM", "Declared chunks overrun stream.") end
+			digest(chunk.sha256)
+		end
+		if offset ~= length then fail("CHECKSUM", "Declared chunks do not cover stream.") end
+		streams[id] = {objectId = objectId, primitiveIndex = primitiveIndex, descriptor = descriptor,
+			offset = 0, chunkIndex = 1, parts = {}, hasher = Sha256Stream.new(), complete = false}
 	end
 	function receiver:accept(json: string): any
 		if state ~= "receiving" then fail("STATE", "Transfer is not receiving.") end
@@ -125,39 +148,43 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 			if packet.kind == "begin" then
 				if ordinal ~= 0 or begin ~= nil then fail("STATE", "Begin must be first and unique.") end
 				integer(packet.objectCount, 1, LIMITS.objects)
+				integer(packet.textureCount or 0, 0, 256)
 				begin = packet
+			elseif packet.kind == "texture" then
+				if begin == nil or #objects ~= 0 then fail("STATE", "Textures must follow begin and precede objects.") end
+				textureCount = integer(textureCount + 1, 1, begin.textureCount or 0)
+				local texture = plain(packet.texture, "Texture")
+				local imageId = digest(texture.imageId)
+				if textures[imageId] then fail("IDENTITY", "Duplicate texture identity.") end
+				local semantic = texture.semantic
+				if semantic ~= "ColorMap" and semantic ~= "NormalMap" and semantic ~= "RoughnessMap" and semantic ~= "MetalnessMap" then fail("INPUT", "Unsupported texture map slot.") end
+				local materialSlot = digest(texture.materialSha256) .. ":" .. semantic
+				if materialSlots[materialSlot] then fail("IDENTITY", "A material slot cannot declare multiple images.") end
+				materialSlots[materialSlot] = imageId
+				local width, height = integer(texture.width, 1, 1024), integer(texture.height, 1, 1024)
+				digest(texture.materialSha256); digest(texture.sourceSha256); digest(texture.sourceRgbaSha256); digest(texture.sha256)
+				if texture.orientation ~= "top-left" or texture.colorSpace ~= (if semantic == "ColorMap" then "srgb" else "linear")
+					or (semantic == "NormalMap" and texture.normalConvention ~= "OpenGL")
+					or texture.componentType ~= 5121 or texture.type ~= "VEC4" or texture.normalized ~= false
+					or texture.count ~= width * height or texture.byteLength ~= width * height * 4 then fail("INPUT", "Texture layout differs from RGBA8 pixels.") end
+				local stream = plain(texture.stream, "Texture stream")
+				for _, key in ipairs({"semantic", "componentType", "type", "normalized", "count", "byteLength", "sha256"}) do
+					if stream[key] ~= texture[key] then fail("IDENTITY", "Texture and declared stream disagree.") end
+				end
+				declare(stream, "texture-" .. imageId, -1, semantic)
+				textures[imageId] = texture
 			elseif packet.kind == "object" then
-				if begin == nil then fail("STATE", "Object precedes begin.") end
+				if begin == nil or textureCount ~= (begin.textureCount or 0) then fail("STATE", "Object precedes complete texture declarations.") end
 				integer(#objects + 1, 1, begin.objectCount)
 				local object = plain(packet.object, "Object")
 				local objectId = object.sourceObjectId
 				if type(objectId) ~= "string" or #objectId > 128 or objectIds[objectId] then fail("IDENTITY", "Invalid/duplicate object identity.") end
 				local primitives = plain(packet.primitives, "Primitives")
-				local function declare(descriptor: any, primitiveIndex: number, semantic: string): ()
-					descriptor = plain(descriptor, "Stream descriptor")
-					local id = digest(descriptor.streamId)
-					if streams[id] or descriptor.semantic ~= semantic then fail("IDENTITY", "Duplicate/mismatched stream.") end
-					streamCount = integer(streamCount + 1, 1, LIMITS.streams)
-					local length = integer(descriptor.byteLength, 1, LIMITS.binaryBytes)
-					binaryBytes = integer(binaryBytes + length, 1, LIMITS.binaryBytes)
-					digest(descriptor.sha256)
-					plain(descriptor.chunks, "Declared chunks")
-					local offset = 0
-					for _, chunk in ipairs(descriptor.chunks) do
-						plain(chunk, "Declared chunk")
-						if chunk.offset ~= offset then fail("CHECKSUM", "Declared chunk gap/overlap.") end
-						offset += integer(chunk.byteLength, 1, 180 * 1024)
-						if offset > length then fail("CHECKSUM", "Declared chunks overrun stream.") end
-						digest(chunk.sha256)
-					end
-					if offset ~= length then fail("CHECKSUM", "Declared chunks do not cover stream.") end
-					streams[id] = {objectId = objectId, primitiveIndex = primitiveIndex, descriptor = descriptor,
-						offset = 0, chunkIndex = 1, parts = {}, hasher = Sha256Stream.new(), complete = false}
-				end
+
 				for index, primitive in ipairs(primitives) do
 					plain(primitive, "Primitive")
-					for semantic, descriptor in pairs(plain(primitive.attributes, "Attributes")) do declare(descriptor, index - 1, semantic) end
-					declare(primitive.indices, index - 1, "indices")
+					for semantic, descriptor in pairs(plain(primitive.attributes, "Attributes")) do declare(descriptor, objectId, index - 1, semantic) end
+					declare(primitive.indices, objectId, index - 1, "indices")
 				end
 				objectIds[objectId] = true
 				objects[#objects + 1] = packet
@@ -181,9 +208,25 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 					stream.complete = true
 				end
 			elseif packet.kind == "seal" then
-				if begin == nil or #objects ~= begin.objectCount or packet.precedingPacketCount ~= ordinal
+				if begin == nil or #objects ~= begin.objectCount or textureCount ~= (begin.textureCount or 0) or packet.precedingPacketCount ~= ordinal
 					or packet.precedingByteLength ~= bytes or packet.contentDigest ~= contentHashes:digest() then fail("CHECKSUM", "Incomplete/mismatched seal.") end
 				for _, stream in pairs(streams) do if not stream.complete then fail("CHECKSUM", "Seal contains incomplete streams.") end end
+				local used = {}
+				for _, entry in ipairs(objects) do
+					if entry.textureBindings ~= nil then
+						if entry.object.role == "collision" or type(entry.material) ~= "table" then fail("INPUT", "Only render materials can bind textures.") end
+						for slot, imageId in pairs(plain(entry.textureBindings, "Texture bindings")) do
+							local texture = textures[imageId]
+							if not texture or texture.semantic ~= slot or texture.materialSha256 ~= entry.material.sha256 then fail("IDENTITY", "Texture belongs to another material or slot.") end
+							used[imageId] = true
+						end
+						for slot, field in pairs({ColorMap = "colorMap", NormalMap = "normalMap", RoughnessMap = "roughnessMap", MetalnessMap = "metalnessMap"}) do
+							local reference, imageId = entry.material[field], entry.textureBindings[slot]
+							if (reference ~= nil) ~= (imageId ~= nil) or (reference ~= nil and (type(reference) ~= "table" or textures[imageId].sourceSha256 ~= reference.sha256)) then fail("IDENTITY", "Material texture reference coverage differs.") end
+						end
+					end
+				end
+				for imageId in pairs(textures) do if not used[imageId] then fail("IDENTITY", "Unbound texture cannot be silently discarded.") end end
 			else fail("INPUT", "Unknown packet kind.") end
 			packetHashes:update((if ordinal == 0 then "" else "\n") .. packetHash)
 			if packet.kind == "seal" then
@@ -200,7 +243,7 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		if not ok then abort(); error(result, 0) end
 		return result
 	end
-	function receiver:reconstruct(assetService: any): any
+	function receiver:reconstruct(assetService: any, textureIntake: ((any, any, () -> ()) -> any)?): any
 		if state ~= "sealed" then fail("STATE", "Only a completely sealed transfer may reconstruct.") end
 		state = "reconstructing"
 		local ok, result = pcall(function(): any
@@ -212,7 +255,30 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 					count = descriptor.count, normalized = descriptor.normalized, byteLength = descriptor.byteLength,
 					bytes = buffer.fromstring(table.concat(stream.parts))}
 			end
-			for _, entry in ipairs(objects) do
+			local handles, objectHandles = {}, {}
+			-- Admit every image bundle before the first mesh/engine allocation. Only
+			-- the caller's trusted intake can mint private material texture handles.
+			for index, entry in ipairs(objects) do
+				if entry.textureBindings ~= nil then
+					if type(textureIntake) ~= "function" then fail("INPUT", "Trusted material texture intake is required.") end
+					local materialId = entry.material.sha256
+					if handles[materialId] == nil then
+						local maps = {}
+						for slot, imageId in pairs(entry.textureBindings) do
+							local texture = textures[imageId]
+							local copy = table.clone(texture)
+							copy.stream = nil
+							copy.bytes = materialize(texture.stream).bytes
+							maps[slot] = copy
+						end
+						handles[materialId] = (textureIntake :: any)(entry.material, maps, check)
+						check()
+						if handles[materialId] == nil then fail("INPUT", "Material intake returned no texture ownership.") end
+					end
+					objectHandles[index] = handles[materialId]
+				end
+			end
+			for index, entry in ipairs(objects) do
 				local primitives = {}
 				for _, primitive in ipairs(entry.primitives) do
 					local attributes = {}
@@ -223,13 +289,14 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 				local mesh = AssetMesh.create({primitives = primitives}, assetService, check, yieldBatch)
 				resources[#resources + 1] = mesh.editableMesh
 				check()
-				reconstructed[#reconstructed + 1] = {object = entry.object, material = entry.material, mesh = mesh}
+				reconstructed[#reconstructed + 1] = {object = entry.object, material = entry.material, mesh = mesh, textures = objectHandles[index]}
 			end
 			check()
 			state = "taken"
 			table.clear(resources) -- Ownership transferred exactly once to caller.
 			table.clear(streams)
 			table.clear(objects)
+			table.clear(textures)
 			return reconstructed
 		end)
 		if not ok then abort(); error(result, 0) end

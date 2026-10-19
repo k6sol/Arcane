@@ -181,13 +181,13 @@ test('supported preparation attributes TANGENT/COLOR_0 are explicitly refused in
     const n=replaceExport(p,f.doc,f.bin);refuse(()=>decodeStudioImportPayload(n.prepared,n.files),'UNSUPPORTED_ATTRIBUTE',new RegExp(semantic));
   }
 });
-test('valid embedded input textures have a precise unsupported-texture reason before any effects',async()=>{
+test('unprepared embedded textures fail exact prepared-image identity before any effects',async()=>{
   const f=fixture(),p=await prepare(f.generated());
   const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=','base64');
   const offset=Math.ceil(f.bin.length/4)*4, view=f.doc.bufferViews.length;
   f.doc.bufferViews.push({buffer:0,byteOffset:offset,byteLength:png.length});f.bin=Buffer.concat([f.bin,Buffer.alloc(offset-f.bin.length),png]);
   f.doc.images=[{bufferView:view,mimeType:'image/png'}];f.doc.textures=[{source:0}];f.doc.materials[0].pbrMetallicRoughness.baseColorTexture={index:0};
-  const n=replaceExport(p,f.doc,f.bin);refuse(()=>decodeStudioImportPayload(n.prepared,n.files),'UNSUPPORTED_TEXTURE',/decode|decoded/i);
+  const n=replaceExport(p,f.doc,f.bin);refuse(()=>decodeStudioImportPayload(n.prepared,n.files),'CHECKSUM',/prepared|identity/i);
 });
 test('finite tiled UV0 preserved exactly; engine sampling remains pending',async()=>{
   const f=fixture(),p=await prepare(f.generated()), next=structuredClone(p) as unknown as Doc;

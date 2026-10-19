@@ -16,6 +16,7 @@ export const assemblyRecipe = z.strictObject({
   materials: z.array(z.strictObject({
     id: assetSlug, color: boundedVector(0, 1), metallic: z.number().min(0).max(1).optional(), roughness: z.number().min(0).max(1).optional(),
     emission: z.strictObject({ color: boundedVector(0, 1), strength: z.number().min(0).max(10) }).optional(),
+    surface: z.strictObject({ profile: z.enum(['bark', 'stone', 'leaf', 'weathered']), resolution: z.union([z.literal(128), z.literal(256), z.literal(512)]).optional() }).optional(),
   })).min(1).max(RECIPE_LIMITS.materials),
   parts: z.array(z.strictObject({
     name: assetSlug, role: z.enum(['render', 'collision', 'lod1']),
@@ -46,7 +47,10 @@ export const socketEvidence: z.ZodType<SocketEvidence> = z.strictObject({
 export const materialEvidence: z.ZodType<MaterialEvidence> = z.strictObject({
   name: boundedText(256), color: boundedVector(0, 1), metallic: z.number().min(0).max(1), roughness: z.number().min(0).max(1),
   emission: z.strictObject({ color: boundedVector(0, 1), strength: z.number().min(0).max(10) }),
-});
+  surface: z.strictObject({ profile: z.enum(['bark', 'stone', 'leaf', 'weathered']), resolution: z.union([z.literal(128), z.literal(256), z.literal(512)]),
+    generator: z.literal('arcane-tile-v1'), texCoord: z.literal(0), images: z.array(z.strictObject({ role: z.enum(['baseColor', 'normal', 'metallicRoughness']),
+      name: boundedText(128), width: z.number().int().min(128).max(512), height: z.number().int().min(128).max(512), sha256: hash, colorSpace: z.enum(['sRGB', 'Non-Color']) })).length(3) }).optional(),
+}).transform(({surface,...value})=>({...value,...(surface===undefined?{}:{surface})}));
 export const assemblyEvidence: z.ZodType<AssemblyEvidence> = z.strictObject({
   recipeSha256: hash,
   estimatedTriangles: z.strictObject({ render: z.number().int().min(0).max(RECIPE_LIMITS.triangles),

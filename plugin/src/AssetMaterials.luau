@@ -1,7 +1,7 @@
 --!strict
--- Scalar-only sidecar for the decoder's material manifest (not raw glTF JSON).
+-- Scalar and privately admitted texture sidecar for the decoder's material manifest (not raw glTF JSON).
 -- No services/globals are resolved; only injected factories create resources.
--- Exactly two constant 1x1 RGBA maps; no source image decoding or uploads.
+-- Decoded RGBA8 pixels arrive only from a sealed receiver intake; no PNG decoding or uploads.
 -- Checked 2026-10-14 against primary docs:
 -- https://create.roblox.com/docs/reference/engine/classes/SurfaceAppearance
 -- https://create.roblox.com/docs/reference/engine/classes/MeshPart
@@ -38,14 +38,14 @@ export type Plan = {
 -- a renderer's color space or substitutes a built-in material/Reflectance/Neon.
 export type Factories = {
 	createEditableImage: ({Size: Vector2}) -> EditableImage?,
-	createSurfaceAppearanceAsync: ({MetalnessMap: Content, RoughnessMap: Content}) -> SurfaceAppearance?,
+	createSurfaceAppearanceAsync: ({[string]: Content}) -> SurfaceAppearance?,
 	contentFromObject: (EditableImage) -> Content,
 	vector2: (number, number) -> Vector2,
 	colorFromLinear: (number, number, number) -> Color3,
 }
 export type Result = {
 	surfaceAppearance: SurfaceAppearance,
-	editableImages: {MetalnessMap: EditableImage, RoughnessMap: EditableImage},
+	editableImages: {[string]: EditableImage},
 	meshPartProperties: {Color: Color3, Transparency: number, DoubleSided: boolean},
 	plan: Plan, engineVerification: "pending",
 }
@@ -61,9 +61,15 @@ local EMISSION_LIMITATION = "Nonzero additive glTF emission needs verified emiss
 local LIMITATIONS = table.freeze({
 	"Metallic and roughness use nearest RGBA8 values; original factors and quantization errors are preserved. Engine rendering is pending.",
 	EMISSION_LIMITATION,
-	"Source texture decoding and non-opaque alpha are unsupported. Color-space conversion is injected.",
+	"Texture delivery requires privately admitted RGBA8 maps; only UV0 repeat sampling and opaque alpha are supported. Engine sampling is pending.",
 })
-local AssetMaterials = {LIMITS = LIMITS}
+local TEXTURE_LIMITS = table.freeze({width = 1024, height = 1024, maps = 4, bytes = 16 * 1024 * 1024})
+local AssetMaterials = {LIMITS = LIMITS, TEXTURE_LIMITS = TEXTURE_LIMITS}
+-- This process-local handle never serializes pixel ownership. Raw metadata or a
+-- JSON lookalike cannot be passed to plan/create as a verified texture bundle.
+local textureHandles: {[any]: any} = setmetatable({}, {__mode = "k"})
+local SLOT_FIELDS = table.freeze({ColorMap = "colorMap", NormalMap = "normalMap", RoughnessMap = "roughnessMap", MetalnessMap = "metalnessMap"})
+local CHANNELS = table.freeze({ColorMap = "rgba", NormalMap = "rgb", RoughnessMap = "g", MetalnessMap = "b"})
 local internalErrors: {[any]: boolean} = setmetatable({}, {__mode = "k"})
 
 local function fail(code: string, field: string, message: string): never
@@ -117,15 +123,35 @@ local function constantMap(factor: number): ScalarMap
 		rounding = "nearest-half-up", engineVerification = "pending"})
 end
 
+local function sameData(a: any, b: any, depth: number): boolean
+	if type(a) ~= type(b) then return false end
+	if type(a) ~= "table" then return a == b end
+	if depth > 8 or getmetatable(a) ~= nil or getmetatable(b) ~= nil then return false end
+	for key, value in pairs(a) do if not sameData(value, b[key], depth + 1) then return false end end
+	for key in pairs(b) do if a[key] == nil then return false end end
+	return true
+end
+
 -- Pure, bounded validation and detached frozen snapshot. Throws {code,field,
 -- message}; never defaults missing decoded fields or clamps unsupported values.
 -- A nil material denotes glTF's default metallic=1, roughness=1, white opaque.
 -- A valid nonzero emission plan exposes supported=false; create rejects it.
-function AssetMaterials.plan(material: Material?): Plan
+function AssetMaterials.plan(material: Material?, textures: any?): Plan
 	local value = record(if material == nil then {baseColor = {1, 1, 1, 1}, metallic = 1, roughness = 1,
 		alphaMode = "OPAQUE", alphaCutoff = 0.5, doubleSided = false, normalScale = 1} else material, MATERIAL_FIELDS, "material")
-	for _, field in ipairs(MAP_FIELDS) do
-		if value[field] ~= nil then fail("UNSUPPORTED_TEXTURE", field, "Texture mapping requires decoded images.") end
+	local bundle = if textures == nil then nil else textureHandles[textures]
+	if textures ~= nil and (bundle == nil or bundle.materialSha256 ~= value.sha256) then fail("INPUT", "textures", "Expected an original private texture bundle for this material.") end
+	if bundle ~= nil and bundle.source ~= nil and not sameData(value, bundle.source, 0) then fail("INPUT", "textures", "Material data changed after private texture intake.") end
+	local sourceMaps = {}
+	for slot, field in pairs(SLOT_FIELDS) do
+		if value[field] ~= nil then
+			if bundle == nil or bundle.maps[slot] == nil then fail("UNSUPPORTED_TEXTURE", field, "Texture mapping requires privately admitted decoded images.") end
+			local reference = value[field]
+			if type(reference) ~= "table" or getmetatable(reference) ~= nil or reference.sha256 ~= bundle.references[field].sha256
+				or reference.channel ~= bundle.references[field].channel or reference.texCoord ~= 0 then fail("INPUT", field, "Material reference changed after texture intake.") end
+			for key in pairs(reference) do if key ~= "sha256" and key ~= "channel" and key ~= "texCoord" then fail("INPUT", field, "Unexpected texture reference field.") end end
+			sourceMaps[field] = bundle.references[field]
+		elseif bundle ~= nil and bundle.maps[slot] ~= nil then fail("INPUT", field, "Unexpected texture map for a scalar material.") end
 	end
 	local baseColor = channels(value.baseColor, 4, "baseColor")
 	local metallic = scalar(value.metallic, 1, "metallic")
@@ -158,24 +184,86 @@ function AssetMaterials.plan(material: Material?): Plan
 	end
 	local source: Material = table.freeze({baseColor = baseColor, metallic = metallic, roughness = roughness,
 		alphaMode = "OPAQUE", alphaCutoff = cutoff, doubleSided = value.doubleSided,
-		normalScale = normalScale, emission = emission, sha256 = value.sha256})
-	return table.freeze({source = source, baseColorLinear = table.freeze({baseColor[1], baseColor[2], baseColor[3]}),
+		normalScale = normalScale, emission = emission, sha256 = value.sha256,
+		colorMap = sourceMaps.colorMap, normalMap = sourceMaps.normalMap, roughnessMap = sourceMaps.roughnessMap, metalnessMap = sourceMaps.metalnessMap})
+	return table.freeze({source = source, baseColorLinear = if bundle ~= nil and bundle.maps.ColorMap ~= nil then table.freeze({1, 1, 1}) else table.freeze({baseColor[1], baseColor[2], baseColor[3]}),
 		constantMaps = table.freeze({MetalnessMap = constantMap(metallic), RoughnessMap = constantMap(roughness)}),
 		metallic = metallic, roughness = roughness, doubleSided = source.doubleSided, transparency = 0,
 		emissiveStrength = if emissionSupported then 0 else nil, supported = emissionSupported,
 		emissionSupport = "zero-only", limitations = LIMITATIONS, requiresSurfaceAppearance = true, engineVerification = "pending"})
 end
 
+
+-- Internal trusted callback for AssetTransfer.reconstruct AFTER exact stream and
+-- seal verification. No engine resources are allocated here. Caller conveniences
+-- are copied before any later yielding engine callback can observe them.
+function AssetMaterials.admitTextures(material: any, maps: any, guard: () -> ()): any
+	material = record(material, MATERIAL_FIELDS, "material")
+	local materialId = material.sha256
+	if type(materialId) ~= "string" or #materialId ~= 64 or string.find(materialId, "[^0-9a-f]") ~= nil then fail("INPUT", "material", "Expected exact material identity.") end
+	if type(maps) ~= "table" or getmetatable(maps) ~= nil or type(guard) ~= "function" then fail("INPUT", "textures", "Trusted texture intake requires plain maps and guard.") end
+	local function check(): ()
+		local ok, result = pcall(guard)
+		if not ok or (result ~= nil and result ~= true) then fail("CANCELLED", "guard", "Texture ownership guard revoked.") end
+	end
+	local owned, references, count, bytes = {}, {}, 0, 0
+	local baseColor = channels(material.baseColor, 4, "baseColor")
+	local metallic, roughness = scalar(material.metallic, 1, "metallic"), scalar(material.roughness, 1, "roughness")
+	check()
+	for slot, map in pairs(maps) do
+		local field = SLOT_FIELDS[slot]
+		if field == nil or type(map) ~= "table" or getmetatable(map) ~= nil then fail("INPUT", "textures", "Unsupported texture slot or data.") end
+		local reference = material[field]
+		if type(reference) ~= "table" or getmetatable(reference) ~= nil then fail("INPUT", field, "Missing source texture reference.") end
+		for key in pairs(reference) do if key ~= "sha256" and key ~= "channel" and key ~= "texCoord" then fail("INPUT", field, "Unexpected source texture field.") end end
+		if reference.sha256 ~= map.sourceSha256 or reference.channel ~= CHANNELS[slot] or reference.texCoord ~= 0
+			or map.materialSha256 ~= materialId or map.semantic ~= slot or map.channel ~= CHANNELS[slot]
+			or map.orientation ~= "top-left" or map.colorSpace ~= (if slot == "ColorMap" then "srgb" else "linear")
+			or (slot == "NormalMap" and (map.normalConvention ~= "OpenGL" or material.normalScale ~= 1)) then fail("INPUT", field, "Texture provenance differs from material.") end
+		for _, key in ipairs({"imageId", "sourceSha256", "sourceRgbaSha256", "sha256"}) do
+			if type(map[key]) ~= "string" or #map[key] ~= 64 or string.find(map[key], "[^0-9a-f]") ~= nil then fail("INPUT", field, "Expected texture digest.") end
+		end
+		local width, height = map.width, map.height
+		if type(width) ~= "number" or type(height) ~= "number" or width % 1 ~= 0 or height % 1 ~= 0 or width < 1 or height < 1
+			or width > TEXTURE_LIMITS.width or height > TEXTURE_LIMITS.height or typeof(map.bytes) ~= "buffer"
+			or buffer.len(map.bytes) ~= width * height * 4 or map.byteLength ~= width * height * 4 then fail("INPUT", field, "Expected bounded RGBA8 image bytes.") end
+		local expected = if slot == "ColorMap" then {baseColor[1], baseColor[2], baseColor[3]}
+			elseif slot == "NormalMap" then {material.normalScale} elseif slot == "RoughnessMap" then {roughness} else {metallic}
+		if type(map.factors) ~= "table" or getmetatable(map.factors) ~= nil or #map.factors ~= #expected then fail("INPUT", field, "Expected baked material factors.") end
+		for index, factor in ipairs(expected) do if map.factors[index] ~= factor then fail("INPUT", field, "Baked factor differs from material.") end end
+		count += 1; bytes += width * height * 4
+		if count > TEXTURE_LIMITS.maps or bytes > TEXTURE_LIMITS.bytes then fail("INPUT", field, "Texture bundle exceeds bounds.") end
+		local copy = buffer.create(width * height * 4)
+		buffer.copy(copy, 0, map.bytes, 0, buffer.len(copy))
+		for index = 3, buffer.len(copy) - 1, 4 do
+			if buffer.readu8(copy, index) ~= 255 then fail("INPUT", field, "Delivered opaque map pixels require alpha 255.") end
+			if index % 16384 == 16383 then check() end
+		end
+		owned[slot] = table.freeze({width = width, height = height, bytes = copy})
+		references[field] = table.freeze({sha256 = reference.sha256, channel = reference.channel, texCoord = 0})
+		check()
+	end
+	for slot, field in pairs(SLOT_FIELDS) do if (material[field] ~= nil) ~= (owned[slot] ~= nil) then fail("INPUT", field, "Texture coverage differs from material.") end end
+	if count == 0 then fail("INPUT", "textures", "An empty texture bundle is not ownership.") end
+	local handle = table.freeze({kind = "arcane-private-material-textures"})
+	textureHandles[handle] = {materialSha256 = materialId, maps = table.freeze(owned), references = table.freeze(references)}
+	local ok, plan = pcall(AssetMaterials.plan, material, handle)
+	if not ok then textureHandles[handle] = nil; error(plan, 0) end
+	textureHandles[handle].source = plan.source
+	check()
+	return handle
+end
+
 -- Adapters wrap CreateEditableImage({Size=...}), Content.fromObject(image),
 -- Vector2.new(x,y), and CreateSurfaceAppearanceAsync({MetalnessMap=Content,
 -- RoughnessMap=Content}). These are injected callbacks, not live services.
 -- Factories must return NEW resources; EditableImage is a non-parentable Object.
--- Ownership of appearance AND BOTH IMAGES transfers only on success. Keep the
+-- Ownership of appearance AND ALL IMAGES transfers only on success. Keep the
 -- images alive with the appearance; engine packing/lifetime is unverified here.
 -- No caller MeshPart is mutated.
 -- Main applies meshPartProperties and parents the appearance under its own
 -- live authorization/rollback boundary; a plan or hash never authorizes that.
-function AssetMaterials.create(material: Material?, factories: Factories, guard: () -> boolean?): Result
+function AssetMaterials.create(material: Material?, factories: Factories, guard: () -> boolean?, textures: any?): Result
 	local owned: {any} = {}
 	local ok, result = pcall(function(): Result
 		if type(guard) ~= "function" or type(factories) ~= "table"
@@ -191,7 +279,8 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 			end
 		end
 		check()
-		local plan = AssetMaterials.plan(material)
+		local plan = AssetMaterials.plan(material, textures)
+		local bundle = if textures == nil then nil else textureHandles[textures]
 		if not plan.supported then fail("UNSUPPORTED_MATERIAL", "emission", EMISSION_LIMITATION) end
 		-- Snapshot callback references before any callback can yield/change them.
 		local makeColor, makeAppearance = factories.colorFromLinear, factories.createSurfaceAppearanceAsync
@@ -212,15 +301,16 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 		local color = makeColor(rgb[1], rgb[2], rgb[3])
 		check()
 		if color == nil then fail("INPUT", "colorFromLinear", "Color adapter returned nil.") end
-		local function image(map: ScalarMap, field: string): (EditableImage, Content)
+		local function image(map: any, field: string): (EditableImage, Content)
 			check()
 			local size = makeVector(map.width, map.height)
 			check()
 			local editable = own(makeImage({Size = size}), field) :: EditableImage
-			if editable.Size.X ~= 1 or editable.Size.Y ~= 1 then fail("INPUT", field, "Factory image must be exactly 1x1.") end
+			if editable.Size.X ~= map.width or editable.Size.Y ~= map.height then fail("INPUT", field, "Factory image dimensions differ from admitted pixels.") end
 			check()
-			local pixels = buffer.create(4)
-			for index = 1, 4 do buffer.writeu8(pixels, index - 1, map.rgba[index]) end
+			local pixels = buffer.create(map.width * map.height * 4)
+			if map.bytes ~= nil then buffer.copy(pixels, 0, map.bytes, 0, buffer.len(map.bytes))
+			else for index = 1, 4 do buffer.writeu8(pixels, index - 1, map.rgba[index]) end end
 			local origin = makeVector(0, 0)
 			check()
 			editable:WritePixelsBuffer(origin, size, pixels)
@@ -230,18 +320,22 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 			if content == nil then fail("INPUT", "contentFromObject", "Content adapter returned nil.") end
 			return editable, content
 		end
-		local metalnessImage, metalnessContent = image(plan.constantMaps.MetalnessMap, "MetalnessMap")
-		local roughnessImage, roughnessContent = image(plan.constantMaps.RoughnessMap, "RoughnessMap")
+		local images, contents = {}, {}
+		for _, slot in ipairs({"MetalnessMap", "RoughnessMap", "ColorMap", "NormalMap"}) do
+			local map = if bundle ~= nil and bundle.maps[slot] ~= nil then bundle.maps[slot] else plan.constantMaps[slot]
+			if map ~= nil then images[slot], contents[slot] = image(map, slot) end
+		end
 		check()
-		local appearance = own(makeAppearance({MetalnessMap = metalnessContent, RoughnessMap = roughnessContent}), "surfaceAppearance") :: SurfaceAppearance
+		local appearance = own(makeAppearance(contents), "surfaceAppearance") :: SurfaceAppearance
 		if not appearance:IsA("SurfaceAppearance") or appearance.Parent ~= nil then
 			fail("INPUT", "surfaceAppearance", "Factory must return a new detached SurfaceAppearance.")
 		end
 		check()
 		appearance.EmissiveStrength = plan.emissiveStrength :: number
+		if bundle ~= nil and bundle.maps.ColorMap ~= nil then appearance.Color = color end
 		check()
 		return table.freeze({surfaceAppearance = appearance,
-			editableImages = table.freeze({MetalnessMap = metalnessImage, RoughnessMap = roughnessImage}),
+			editableImages = table.freeze(images),
 			meshPartProperties = table.freeze({Color = color, Transparency = plan.transparency, DoubleSided = plan.doubleSided}),
 			plan = plan, engineVerification = "pending"})
 	end)

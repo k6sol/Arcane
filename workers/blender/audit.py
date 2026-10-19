@@ -8,9 +8,13 @@ from mathutils import Vector
 
 def material_metrics(mat):
     shader = next(node for node in mat.node_tree.nodes if node.type == "BSDF_PRINCIPLED")
-    return {"name": mat.name, "color": list(shader.inputs["Base Color"].default_value)[:3],
+    result = {"name": mat.name, "color": list(shader.inputs["Base Color"].default_value)[:3],
             "metallic": float(shader.inputs["Metallic"].default_value), "roughness": float(shader.inputs["Roughness"].default_value),
             "emission": {"color": list(shader.inputs["Emission Color"].default_value)[:3], "strength": float(shader.inputs["Emission Strength"].default_value)}}
+    if mat.get("arcane_surface"):
+        from textures import surface_evidence
+        result["surface"] = surface_evidence(mat)
+    return result
 
 
 def mesh_metrics(obj, role, imported=False):

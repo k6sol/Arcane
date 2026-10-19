@@ -121,7 +121,8 @@ export interface PipelineOptions {
 
 export type Vec3 = [number, number, number];
 export type AssemblyRole = 'render' | 'collision' | 'lod1';
-export interface AssemblyMaterial { id: string; color: Vec3; metallic?: number; roughness?: number; emission?: { color: Vec3; strength: number } }
+export interface MaterialSurface { profile: 'bark' | 'stone' | 'leaf' | 'weathered'; resolution?: 128 | 256 | 512 }
+export interface AssemblyMaterial { id: string; color: Vec3; metallic?: number; roughness?: number; emission?: { color: Vec3; strength: number }; surface?: MaterialSurface }
 export type AssemblyGeometry =
   | { kind: 'box' }
   | { kind: 'cylinder' | 'cone'; segments?: number }
@@ -137,7 +138,11 @@ export interface AssemblyRecipe {
   schemaVersion: 1; materials: AssemblyMaterial[]; parts: AssemblyPart[]; sockets?: AssemblySocket[];
   collisionTriangleBudget?: number; lodTriangleBudget?: number;
 }
-export interface MaterialEvidence { name: string; color: Vec3; metallic: number; roughness: number; emission: { color: Vec3; strength: number } }
+export interface SurfaceEvidence {
+  profile: MaterialSurface['profile']; resolution: number; generator: 'arcane-tile-v1'; texCoord: 0;
+  images: { role: 'baseColor' | 'normal' | 'metallicRoughness'; name: string; width: number; height: number; sha256: string; colorSpace: 'sRGB' | 'Non-Color' }[];
+}
+export interface MaterialEvidence { name: string; color: Vec3; metallic: number; roughness: number; emission: { color: Vec3; strength: number }; surface?: SurfaceEvidence }
 export interface SocketEvidence { name: string; kind: 'socket' | 'attachment'; part: string; nodeName: string; matrix: number[] }
 export interface AssemblyEvidence {
   recipeSha256: string; estimatedTriangles: { render: number; collision: number; lod1: number };

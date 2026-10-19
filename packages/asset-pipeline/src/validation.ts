@@ -6,6 +6,7 @@ import { AssetError } from './types.js';
 import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralSize, PROCEDURAL_LIMITS } from './procedural.js';
 import type { AssetAudit, AssetManifest, AssetRequest } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
+import { decodeMaterialPng } from './material-png.js';
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AssetError('VALIDATION', `${label} must be an object.`);
@@ -134,6 +135,19 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
               typeof actual.metallic !== 'number' || !close(actual.metallic, wanted.metallic!) || typeof actual.roughness !== 'number' || !close(actual.roughness, wanted.roughness!) ||
               !vector(emission.color, 0, 1, 'PBR emission').every((n, i) => close(n, (wanted.emission?.color ?? [1, 1, 1])[i]!)) ||
               typeof emission.strength !== 'number' || !close(emission.strength, wanted.emission?.strength ?? 0)) throw new AssetError('MESH', 'Measured custom PBR values differ from recipe.');
+          if (wanted.surface) {
+            const surface = record(actual.surface, 'generated surface');
+            if (surface.profile !== wanted.surface.profile || surface.resolution !== wanted.surface.resolution || surface.generator !== 'arcane-tile-v1' || surface.texCoord !== 0 ||
+                !Array.isArray(surface.images) || surface.images.length !== 3) throw new AssetError('MESH', 'Generated surface differs from the requested profile.');
+            const roles = new Set<string>();
+            for (const rawImage of surface.images) {
+              const image = record(rawImage, 'generated texture'), suffix = ({baseColor:'BaseColor',normal:'Normal',metallicRoughness:'MetallicRoughness'} as Record<string,string>)[String(image.role)];
+              if (!suffix || roles.has(String(image.role)) || image.name !== `T_${wanted.id}_${suffix}` || image.width !== surface.resolution || image.height !== surface.resolution ||
+                  image.colorSpace !== (image.role === 'baseColor' ? 'sRGB' : 'Non-Color') || typeof image.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(image.sha256))
+                throw new AssetError('MESH', 'Generated texture evidence is incomplete.');
+              roles.add(String(image.role));
+            }
+          } else if (actual.surface !== undefined) throw new AssetError('MESH', 'Flat recipe material unexpectedly contains generated textures.');
         }
       }
       if (!part || mesh.role !== part.role || !isDeepStrictEqual(mesh.materials, part.material ? ['MAT_' + part.material] : [])) throw new AssetError('MESH', 'Recipe mesh identity, role or material differs.');
@@ -282,7 +296,48 @@ export function inspectPng(bytes: Buffer, expectedResolution: number): void {
 
 /** Bundled worker files hashed into a job's template digest, in fixed order. */
 export function workerScripts(request: AssetRequest): string[] {
-  return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : [])];
+  return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []),
+    ...(request.recipe?.materials.some(material => material.surface) ? ['textures.py'] : [])];
+}
+/** Textured authoring must survive export as the same embedded PNG pixels and UV0 PBR bindings. */
+export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: AssetAudit, role: 'render' | 'lod1' = 'render'): void {
+  const used = new Set(request.recipe?.parts.filter(part => part.role === role).map(part => part.material));
+  const wanted = request.recipe?.materials.filter(material => material.surface && used.has(material.id)) ?? [];
+  if (!wanted.length) return;
+  inspectGlb(bytes);
+  const size = bytes.readUInt32LE(12), doc = record(JSON.parse(bytes.toString('utf8', 20, 20 + size).trim()), 'textured GLB'), bin = bytes.subarray(28 + size);
+  const list = (value: unknown, maximum: number): unknown[] => { if (!Array.isArray(value) || value.length > maximum) throw new AssetError('EXPORT', 'Generated texture export list is invalid.'); return value; };
+  const materials = list(doc.materials, 8), textures = list(doc.textures, 24), images = list(doc.images, 24), views = list(doc.bufferViews, 4096), samplers = list(doc.samplers ?? [], 24);
+  const fail = (): never => { throw new AssetError('EXPORT', 'Generated PNG textures or UV0 PBR bindings changed during GLB export.'); };
+  const at = (values: unknown[], index: unknown): Record<string, unknown> => {
+    if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 || index >= values.length) return fail();
+    return record(values[index], 'generated texture export');
+  };
+  for (const material of wanted) {
+    const raw = materials.find(raw => record(raw, 'GLB material').name === 'MAT_' + material.id);
+    if (!raw) fail(); const actual = record(raw, 'textured material'), pbr = record(actual.pbrMetallicRoughness, 'textured PBR');
+    const materialIndex = materials.indexOf(raw);
+    for (const rawMesh of list(doc.meshes, 128)) for (const rawPrimitive of list(record(rawMesh, 'textured mesh').primitives, 16)) {
+      const primitive = record(rawPrimitive, 'textured primitive');
+      if (primitive.material === materialIndex && record(primitive.attributes, 'textured attributes').TEXCOORD_0 === undefined) fail();
+    }
+    if (!isDeepStrictEqual(pbr.baseColorFactor ?? [1,1,1,1], [1,1,1,1]) || (pbr.metallicFactor ?? 1) !== 1 || (pbr.roughnessFactor ?? 1) !== 1) fail();
+    const evidence = audit.meshes.flatMap(mesh => mesh.materialProperties ?? []).find(item => item.name === actual.name)?.surface;
+    if (!evidence) fail();
+    for (const [role, rawUse] of [['baseColor', pbr.baseColorTexture], ['normal', actual.normalTexture], ['metallicRoughness', pbr.metallicRoughnessTexture]] as const) {
+      const use = record(rawUse, 'generated texture binding');
+      if ((use.texCoord ?? 0) !== 0 || use.extensions !== undefined || (role === 'normal' && (use.scale ?? 1) !== 1)) fail();
+      const texture = at(textures, use.index), image = at(images, texture.source);
+      if (texture.sampler !== undefined) { const sampler = at(samplers, texture.sampler); if ((sampler.wrapS ?? 10497) !== 10497 || (sampler.wrapT ?? 10497) !== 10497 ||
+          (sampler.magFilter ?? 9729) !== 9729 || ![9729,9987].includes(Number(sampler.minFilter ?? 9987))) fail(); }
+      if (image.uri !== undefined || image.mimeType !== 'image/png') fail();
+      const view = at(views, image.bufferView), start = Number(view.byteOffset ?? 0), length = Number(view.byteLength);
+      if (view.buffer !== 0 || !Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 1 || start + length > bin.length) fail();
+      const encoded = bin.subarray(start, start + length), expected = evidence!.images.find(image => image.role === role);
+      let decoded; try { decoded = decodeMaterialPng(encoded); } catch { return fail(); }
+      if (!expected || decoded.width !== expected.width || decoded.height !== expected.height || decoded.sourceSha256 !== expected.sha256 || image.name !== expected.name) fail();
+    }
+  }
 }
 export async function validateManifestFiles(directory: string, value: unknown): Promise<AssetManifest> {
   const m = record(value, 'manifest');
@@ -293,7 +348,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
   const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request);
   if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 32) throw new AssetError('MANIFEST', 'Invalid artifact list.');
-  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
+  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', 'textures.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
   const names = new Set<string>(), hashes = new Map<string, string>();
   let totalBytes = 0;
@@ -309,8 +364,10 @@ export async function validateManifestFiles(directory: string, value: unknown): 
     if (String(a.path).endsWith('.glb')) {
       const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);
       if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', 'GLB geometry disagrees with export audit.');
+      if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render');
     } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
   }
+  if (request.recipe?.materials.some(material => material.surface) && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
   for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : [])]) {
     if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
   }
