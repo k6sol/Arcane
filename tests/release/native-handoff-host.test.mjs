@@ -119,14 +119,15 @@ test('cleanup retains changed, replaced or extra owned-directory content and rep
   // Keep the old inode allocated: unlink/recreate may immediately reuse it on Linux.
   const originalFile = join(f.root, 'retained-original-config.json');
   await fsp.rename(replaced.configPath, originalFile); await fsp.writeFile(replaced.configPath, same);
-  const originalIdentity=await fsp.stat(originalFile),replacementIdentity=await fsp.stat(replaced.configPath);
+  // Windows file IDs can exceed Number.MAX_SAFE_INTEGER; preserve every bit in identity assertions.
+  const originalIdentity=await fsp.stat(originalFile, {bigint: true}),replacementIdentity=await fsp.stat(replaced.configPath, {bigint: true});
   assert.notDeepEqual([replacementIdentity.dev,replacementIdentity.ino],[originalIdentity.dev,originalIdentity.ino],'the replacement fixture has a distinct file identity');
   assert.equal((await host.cleanup(replaced)).reason, 'owned_material_changed', 'identical content in a different file is not owned'); assert.equal(await fsp.readFile(replaced.configPath, 'utf8'), same);
   const linked = await host.prepare(f.options()); await fsp.link(linked.configPath, join(f.root, 'outside-link.json'));
   assert.equal((await host.cleanup(linked)).reason, 'owned_material_changed', 'a hardlinked owned file is retained');
   const moved = await host.prepare(f.options()), originalDirectory=join(f.root,'retained-original-directory');
   await fsp.rename(moved.handoffDirectory,originalDirectory); await fsp.mkdir(moved.handoffDirectory);
-  const oldDirectoryIdentity=await fsp.stat(originalDirectory),newDirectoryIdentity=await fsp.stat(moved.handoffDirectory);
+  const oldDirectoryIdentity=await fsp.stat(originalDirectory, {bigint: true}),newDirectoryIdentity=await fsp.stat(moved.handoffDirectory, {bigint: true});
   assert.notDeepEqual([newDirectoryIdentity.dev,newDirectoryIdentity.ino],[oldDirectoryIdentity.dev,oldDirectoryIdentity.ino],'the replacement fixture has a distinct directory identity');
   assert.equal((await host.cleanup(moved)).reason, 'owned_material_changed', 'a replaced directory is not owned'); assert.ok((await fsp.stat(moved.handoffDirectory)).isDirectory());
   assert.equal((await host.cleanup(changed)).state, 'unavailable', 'a refused cleanup is not marked complete');
