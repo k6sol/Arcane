@@ -16,7 +16,7 @@ export interface StudioImportStagingConfiguration {
   projectPath: string;
   workAssociations: ConversationWorkStore;
   studio: StudioStore;
-  assets: Pick<AssetService, 'prepareStudioImportPayload'>;
+  assets: Pick<AssetService, 'prepareStudioImportPayload'|'reviewImport'>;
   host: StudioImportHostOptions;
   pluginArtifactHash: string;
   now?: () => number;
@@ -44,7 +44,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
   const {projectPath, workAssociations, studio, assets, host, pluginArtifactHash} = config;
   if (!(studio instanceof StudioStore) || !(workAssociations instanceof ConversationWorkStore)
     || workAssociations.projectPath !== projectPath || host.workAssociations !== workAssociations
-    || typeof assets.prepareStudioImportPayload !== 'function' || typeof host.validateTarget !== 'function'
+    || typeof assets.prepareStudioImportPayload !== 'function' || typeof assets.reviewImport !== 'function' || typeof host.validateTarget !== 'function'
     || typeof host.releaseTarget !== 'function' || typeof host.beginPreparationAttempt !== 'function' || !/^[a-f0-9]{64}$/.test(pluginArtifactHash)) fail('STUDIO_STAGE_CONFIGURATION');
   const now = config.now ?? Date.now;
   let busy = false, closed = false;
@@ -84,9 +84,11 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       const run=studio.readStageRun(scope.projectId,jobId);
       if(!run||run.phase!=='cpu-staged'||run.closedAt===null||!run.receipt||!isDeepStrictEqual(run.intent.conversation,scope.conversation))fail('STUDIO_RECONSTRUCT_STATE');
       if(studio.readStageReconstruction(scope.projectId,jobId,run.runId))fail('STUDIO_RECONSTRUCT_EXISTS');
+      if(!run.intent.modelReview)fail('ASSET_REVIEW_REQUIRED');
       const {target,continuity}=run.intent,expires=now()+STUDIO_STAGING_LIMITS.totalDeadlineMs;
+      let reviewCheck:(()=>void)|undefined;
       const boundary=()=>{
-        guard();if(closed||!isDeepStrictEqual(assertStudioImportJobScope(projectPath,workAssociations,actor,jobId),scope))fail('STUDIO_STAGE_SCOPE');
+        guard();reviewCheck?.();if(closed||!isDeepStrictEqual(assertStudioImportJobScope(projectPath,workAssociations,actor,jobId),scope))fail('STUDIO_STAGE_SCOPE');
         if(now()>=expires)fail('STUDIO_STAGE_TIMEOUT');
         const session=studio.session(target.sessionId),proof=session.proof;
         if(session.revokedAt||!session.allowWrites||!session.allowedRoots.includes('Workspace')||!session.capabilities.includes('asset.reconstruct')
@@ -97,7 +99,8 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       };
       busy=true;let admitted=false;
       try {
-        boundary();
+        const review=await assets.reviewImport(jobId,actor,run.intent.modelReview,guard);
+        reviewCheck=()=>review.assertCurrent();boundary();
         // Observe the ORIGINAL target, never select/capture another live place.
         const contextCommand=studio.enqueue({sessionId:target.sessionId,requestId:'reconstruct_context_'+randomUUID().replaceAll('-',''),method:'scene.import_context',args:{}});
         const contextDeadline=Math.min(expires,now()+STUDIO_STAGING_LIMITS.packetDeadlineMs);
@@ -142,8 +145,9 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       assertNativeAssetStageOperationAvailable(actor, jobId);
       busy = true;
       const expires = now() + STUDIO_STAGING_LIMITS.totalDeadlineMs;
+      let reviewCheck:(()=>void)|undefined;
       const base = () => {
-        guard();
+        guard();reviewCheck?.();
         const current = assertStudioImportJobScope(projectPath, workAssociations, actor, jobId);
         if (closed || !isDeepStrictEqual(current, scope)) fail('STUDIO_STAGE_SCOPE');
         if (now() >= expires) fail('STUDIO_STAGE_TIMEOUT');
@@ -153,7 +157,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         base();
         const preparationAttempt = host.beginPreparationAttempt!(scope,jobId,actor,base);
         const data = await assets.prepareStudioImportPayload(jobId, actor, preparationAttempt);
-        base(); assertDecodedStudioImportPayload(data.payload);
+        reviewCheck=()=>data.review.assertCurrent();base(); assertDecodedStudioImportPayload(data.payload);
         // Rebuild from process-branded immutable decoded chunks. Serialized
         // lookalikes and caller-mutated convenience buffers grant nothing.
         const transfer = createStudioImportTransfer(data.prepared, data.payload);
@@ -184,7 +188,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         if (argumentsList.length > STUDIO_STAGING_LIMITS.packets || sizes.some(size => size > 256 * 1024)
           || sizes.reduce((sum, size) => sum + size, 0) > STUDIO_STAGING_LIMITS.envelopeBytes) fail('STUDIO_STAGE_BUDGET');
         let cumulativeBytes=0;
-        const intent={projectId:scope.projectId,jobId,conversation:scope.conversation,preparationAttemptId:preparationAttempt.id,
+        const intent={projectId:scope.projectId,jobId,conversation:scope.conversation,preparationAttemptId:preparationAttempt.id,modelReview:data.review.reference,
           transferDigest:transfer.digest,payloadDigest:transfer.payloadDigest,manifestDigest:data.prepared.manifest.digest,preparedDigest:data.prepared.digest,
           target:selection.target,continuity,plan:argumentsList.map((args,ordinal)=>{
             const packetByteLength=transfer.packets[ordinal]!.byteLength;cumulativeBytes+=packetByteLength;

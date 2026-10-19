@@ -85,6 +85,8 @@ export interface StageRunIntent {
   transferDigest:string;payloadDigest:string;manifestDigest:string;preparedDigest:string;
   target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];
   preparationAttemptId?:string;
+  /** Absent only in historical runs created before model review enforcement. */
+  modelReview?:Readonly<{reviewId:string;subjectDigest:string;revision:number}>;
   plan:readonly {ordinal:number;argsSha256:string;packetByteLength:number;envelopeByteLength:number;expectedReceipt:StudioAssetStageReceipt}[];
 }
 export interface StageRunCommandAssociation {
@@ -155,6 +157,7 @@ const stageReceiptSchema=z.strictObject({transferDigest:stageHash,packetCount:z.
   byteLength:z.number().int().min(1).max(8*1024*1024),state:z.enum(['receiving','sealed']),engineVerification:z.literal('pending')});
 const stageIntentSchema=z.strictObject({projectId:stageHash,jobId:stageJob,
   preparationAttemptId:stageJob.optional(),
+  modelReview:z.strictObject({reviewId:stageJob,subjectDigest:stageHash,revision:z.number().int().min(1).max(4096)}).optional(),
   conversation:z.strictObject({provider:z.literal('codex'),threadId:stageId,sessionId:stageId.nullable()}),
   transferDigest:stageHash,payloadDigest:stageHash,manifestDigest:stageHash,preparedDigest:stageHash,
   target:z.strictObject({sessionId:stageId,placeId:stageNumber,universeId:stageNumber,root:z.literal('Workspace'),parentRef:stageId,
@@ -189,8 +192,8 @@ function stageSnapshot(value:unknown):unknown {
 function stageIntent(value:unknown):StageRunIntent {
   const parsed=stageIntentSchema.safeParse(stageSnapshot(value));
   if(!parsed.success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid bounded stage intent.');
-  const {preparationAttemptId,...rest}=parsed.data;
-  const intent:StageRunIntent=preparationAttemptId===undefined?rest:{...rest,preparationAttemptId};let packets=0,envelopes=0;
+  const {preparationAttemptId,modelReview,...rest}=parsed.data;
+  const intent:StageRunIntent={...rest,...(preparationAttemptId===undefined?{}:{preparationAttemptId}),...(modelReview===undefined?{}:{modelReview})};let packets=0,envelopes=0;
   for(const [ordinal,p]of intent.plan.entries()){
     packets+=p.packetByteLength;envelopes+=p.envelopeByteLength;
     if(p.ordinal!==ordinal||p.envelopeByteLength<p.packetByteLength||p.expectedReceipt.transferDigest!==intent.transferDigest
@@ -235,6 +238,43 @@ export class StudioStore {
   #diagnostics = new Map<string,{placeName:string;placeId:number;entries:Map<string,StudioDiagnostic>}>();
   #pairingOffer: PairingOfferRecord | null = null;
   #modelSourcePolicy: ((sessionId:string)=>boolean)|null = null;
+  #assetModelReview:((intent:StageRunIntent)=>void)|null=null;
+  #assetDispatchGuards=new Map<string,()=>void>();
+  /** Trusted product composition; a serialized review reference grants no authority. */
+  bindAssetModelReview(read:(intent:StageRunIntent)=>void):()=>void {
+    if(typeof read!=='function'||this.#assetModelReview)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review is already bound or invalid.');
+    this.#assetModelReview=read;return ()=>{if(this.#assetModelReview===read)this.#assetModelReview=null;};
+  }
+  private assertRunModelReview(intent:StageRunIntent):void {
+    if(!intent.modelReview||!this.#assetModelReview)throw new ArcaneError('ASSET_REVIEW_REQUIRED','Review this exact model before importing it.');
+    if(this.#assetModelReview(intent)!==undefined)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review must complete synchronously.');
+  }
+  private assertEditableModelReview(sessionId:string,args:Record<string,Json>):void {
+    if(typeof args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(args.watch))return;
+    const session=this.session(sessionId),proof=session.proof;
+    if(!proof||proof.mode!=='Edit'||!proof.connected)throw new ArcaneError('ASSET_REVIEW_REQUIRED','The reviewed model requires its original connected Edit session.');
+    const rows=this.db.prepare("SELECT run_id FROM asset_stage_attempts WHERE json_extract(payload,'$.intent.transferDigest')=? AND json_extract(payload,'$.intent.target.sessionId')=? ORDER BY attempt_no DESC LIMIT 64").all(args.watch.slice(9),sessionId) as Row[];
+    const runs=rows.map(row=>this.stageRunById(row.run_id as string)).filter(run=>run.intent.continuity.clientLifetimeId===session.clientSessionId&&run.intent.continuity.playEpoch===proof.playEpoch);
+    if(runs.length!==1)throw new ArcaneError('ASSET_REVIEW_REQUIRED','The exact reviewed reconstruction is unavailable.');
+    const run=runs[0]!,reconstruction=this.readStageReconstruction(run.intent.projectId,run.intent.jobId,run.runId);
+    if(!reconstruction||reconstruction.command.state!=='succeeded'||!reconstruction.receipt)throw new ArcaneError('ASSET_REVIEW_REQUIRED','Review and reconstruct this exact model before placing it.');
+    try{this.stageTarget(run.intent);}catch{throw new ArcaneError('ASSET_REVIEW_TARGET','The original model target or continuity changed.');}
+    this.assertRunModelReview(run.intent);
+  }
+  private assertCommandModelReview(command:StudioCommand):void {
+    if(command.method==='scene.place_asset')this.assertEditableModelReview(command.sessionId,command.args);
+    if(command.method==='asset.stage_packet'||command.method==='asset.reconstruct'){
+      const live=this.#assetDispatchGuards.get(command.id);
+      if(!live)throw new ArcaneError('ASSET_REVIEW_AUTHORITY','The original native import authority is unavailable.');
+      try{this.stageGuard(live);}catch{throw new ArcaneError('ASSET_REVIEW_AUTHORITY','The original native import authority changed.');}
+      const table=command.method==='asset.stage_packet'?'asset_stage_attempt_commands':'asset_stage_reconstructions';
+      const row=this.db.prepare('SELECT run_id FROM '+table+' WHERE command_id=?').get(command.id) as Row|undefined;
+      if(!row)throw new ArcaneError('ASSET_REVIEW_REQUIRED','Original model review association is unavailable.');
+      const intent=this.stageRunById(row.run_id as string).intent;
+      try{this.stageTarget(intent);}catch{throw new ArcaneError('ASSET_REVIEW_TARGET','The original import target or continuity changed.');}
+      this.assertRunModelReview(intent);
+    }
+  }
   /** Trusted daemon composition only; no JSON route can install or invoke a policy callback. */
   bindModelSourcePolicy(read:(sessionId:string)=>boolean):()=>void {
     if(typeof read!=='function'||this.#modelSourcePolicy)throw new ArcaneError('POLICY','A model-source policy is already bound or invalid.');
@@ -244,18 +284,21 @@ export class StudioStore {
   private assertTemplateSources(sessionId:string,args:Record<string,Json>):void {
     const templates=args.templates as InstanceRef[]|undefined;
     if(!templates?.length)return;
-    try{if(this.#modelSourcePolicy?.(sessionId)===true)return;}catch{/* An unavailable choice never enables external models. */}
+    let externalAllowed=false;
+    try{externalAllowed=this.#modelSourcePolicy?.(sessionId)===true;}catch{/* An unavailable choice never enables external models. */}
     const current=this.session(sessionId);
     for(const ref of templates){
       // Only an authenticated placement receipt for a retained original reconstruction
       // attests a default template. Search results, names and agent claims do not.
       const row=this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state='succeeded' AND json_extract(payload,'$.method')='scene.place_asset' AND json_extract(payload,'$.result.mutation.ref.instanceId')=? ORDER BY created DESC,rowid DESC LIMIT 1").get(sessionId,ref.instanceId) as Row|undefined;
       const command=row?JSON.parse(row.payload as string) as StudioCommand:null;
+      if(externalAllowed&&(!command||typeof command.args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(command.args.watch)))continue;
       const mutation=(command?.result as {mutation?:{kind?:string;ref?:InstanceRef}}|null)?.mutation;
       const source=mutation?.ref;
       if(!command||command.clientSessionId!==current.clientSessionId||typeof command.args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(command.args.watch)
         ||mutation?.kind!=='scene.place_asset'||!source||source.sessionId!==ref.sessionId||source.instanceId!==ref.instanceId||source.root!==ref.root||source.className!==ref.className)
         throw new ArcaneError('TEMPLATE_SOURCE','This scene template is not recorded as an original Blender reconstruction. Create an original model with assets_procedural, inspect assets_preview, then prepare, stage, reconstruct and place it before scattering. Existing Toolbox or external templates require the user to enable them in Settings > Tools.');
+      this.assertEditableModelReview(sessionId,command.args);
     }
   }
   constructor(options: Options) {
@@ -339,7 +382,7 @@ export class StudioStore {
     this.db.prepare('INSERT INTO events(occurred_at,kind,entity_id,detail) VALUES(?,?,?,?)').run(this.iso(), kind, entityId, JSON.stringify(detail));
   }
   private saveSession(s: StudioSession): void { this.db.prepare('UPDATE sessions SET payload=? WHERE id=?').run(JSON.stringify(s), s.id); }
-  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); }
+  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued')this.#assetDispatchGuards.delete(c.id); }
   sessions(): ListedStudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => { const s = JSON.parse(r.payload as string) as StudioSession; return { ...s, live: this.live(s) }; }); }
   /** Unrevoked and heard from recently. The single plugin worker does not poll while it executes a
    * delivered command, so an unexpired dispatched lease also counts as a heartbeat. */
@@ -644,6 +687,7 @@ export class StudioStore {
       const s = this.session(sessionId);
       if (!this.live(s)) throw new ArcaneError('SESSION_OFFLINE', 'Studio session is not live: its plugin has not polled within ' + STUDIO_SESSION_LIVE_MS / 1000 + ' s. No command was queued. List sessions and choose a live one; do not retry against this session.');
       const args = validateCommandArgs(method, a.args, s, internalRestore);
+      if(method==='scene.place_asset')this.assertEditableModelReview(sessionId,args);
       if(method==='scene.build')this.assertTemplateSources(sessionId,args);
       const activating = this.activationSource(method, args);
       const verification = admission ? this.#activationAdmissions.get(admission) : undefined;
@@ -909,7 +953,7 @@ export class StudioStore {
       const command=this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,false,admission);
       this.db.prepare('INSERT INTO asset_stage_attempt_commands(run_id,ordinal,command_id,request_id,lease_epoch,fingerprint) VALUES(?,?,?,?,?,?)').run(runId,ordinal,command.id,command.requestId,command.leaseEpoch,fingerprint);
       const stored:StageRunStored={runId,intent,intentSha256:run.intentSha256,createdAt:run.createdAt,updatedAt:this.iso(),closedAt:null};this.saveStageRun(stored);
-      this.stageGuard(guard);return command;
+      this.stageGuard(guard);this.#assetDispatchGuards.set(command.id,guard);return command;
     });}finally{this.#assetStageAdmissions.delete(admission);}
   }
   /** Outcome recording survives actor retirement; this handle permits no new effect. */
@@ -1038,7 +1082,7 @@ export class StudioStore {
       const fingerprint=hash(canonical({sessionId,method,args}));
       const command=this.enqueueInTransaction(object({sessionId,requestId,method,args}),sessionId,requestId,method,fingerprint,false,admission);
       this.db.prepare('INSERT INTO asset_stage_reconstructions VALUES(?,?,?,?,?)').run(runId,command.id,command.requestId,command.leaseEpoch,fingerprint);
-      this.stageGuard(guard);return command;
+      this.stageGuard(guard);this.#assetDispatchGuards.set(command.id,guard);return command;
     });}finally{this.#assetStageAdmissions.delete(admission);}
   }
   /** Historical facts only; this cannot observe current plugin resource life. */
@@ -1342,12 +1386,11 @@ export class StudioStore {
         if (!row) return [];
         const c = JSON.parse(row.payload as string) as StudioCommand;
         if (Date.parse(c.expiresAt) <= this.now()) { c.state = 'cancelled'; c.error = 'Undelivered command expired.'; c.finishedAt = this.iso(); this.saveCommand(c); continue; }
-        if(c.method==='scene.build'){
-          try{this.assertTemplateSources(sessionId,c.args);}
-          catch(error){if(!(error instanceof ArcaneError)||error.code!=='TEMPLATE_SOURCE')throw error;
-            c.state='cancelled';c.error='External template permission changed before dispatch. No objects were created.';c.finishedAt=this.iso();this.saveCommand(c);this.event('command_cancelled',c.id,{sessionId});continue;}
-        }
+        try{this.assertCommandModelReview(c);if(c.method==='scene.build')this.assertTemplateSources(sessionId,c.args);}
+        catch(error){if(!(error instanceof ArcaneError)||error.code!=='TEMPLATE_SOURCE'&&!error.code.startsWith('ASSET_REVIEW_'))throw error;
+          this.#assetDispatchGuards.delete(c.id);c.state='cancelled';c.error='Import authority, model approval or source permission changed. This operation was not sent.';c.finishedAt=this.iso();this.saveCommand(c);this.event('command_cancelled',c.id,{sessionId});continue;}
         if(!this.guardTestDispatch(c))return [];
+        this.#assetDispatchGuards.delete(c.id);
         c.state = 'dispatched'; this.saveCommand(c); this.event('command_dispatched', c.id, { sessionId }); return [c];
       }
     });
@@ -1492,5 +1535,5 @@ export class StudioStore {
   }
   counts(): Record<string, number> { return Object.fromEntries((this.db.prepare('SELECT state,count(*) AS n FROM commands GROUP BY state').all() as Row[]).map(r => [r.state, Number(r.n)])); }
   events(limit = 100): Json[] { return (this.db.prepare('SELECT sequence,occurred_at,kind,entity_id,detail FROM events ORDER BY sequence DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))) as Row[]).map(r => ({ sequence: Number(r.sequence), occurredAt: r.occurred_at as string, kind: r.kind as string, entityId: r.entity_id as string, detail: JSON.parse(r.detail as string) as Json })); }
-  close(): void { if (!this.closed) { this.closed = true; this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
+  close(): void { if (!this.closed) { this.closed = true; this.#assetDispatchGuards.clear(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
 }

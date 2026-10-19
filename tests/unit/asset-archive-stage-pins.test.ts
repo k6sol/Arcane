@@ -12,12 +12,15 @@ import type { StudioAssetStageArgs, Json } from '../../packages/protocol/src/stu
 // No Studio/SDK/provider/Blender process; no shared dist.
 const projectId = 'a'.repeat(64), otherProject = '9'.repeat(64), jobId = '11111111-1111-4111-8111-111111111111', otherJob = '22222222-2222-4222-8222-222222222222';
 const guard = () => {};
+// Trusted synthetic model-only review port; the real human gate is exercised by asset-review-boundaries.test.ts.
+const fixtureModelReview={reviewId:'99999999-9999-4999-8999-999999999999',subjectDigest:'9'.repeat(64),revision:1};
+const bindFixtureReview=(value:StudioStore)=>value.bindAssetModelReview(intent=>{assert.deepEqual(intent.modelReview,fixtureModelReview);});
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const refused = (code: string) => (error: unknown) => (error as { code?: string }).code === code;
 
 function fixture(t: test.TestContext, count = 2) {
   const base = realpathSync(tmpdir()), directory = mkdtempSync(join(base, 'arcane-archive-stage-pins-')), now = Date.now();
-  let store = new StudioStore({ directory, now: () => now });
+  let store = new StudioStore({ directory, now: () => now });bindFixtureReview(store);
   t.after(() => { try { store.close(); } catch { /* already closed */ }
     const child = relative(base, realpathSync(directory)); assert.ok(!isAbsolute(child) && child.startsWith('arcane-archive-stage-pins-') && !child.includes(sep) && !child.includes('..'));
     rmSync(directory, { recursive: true, force: true }); });
@@ -31,7 +34,7 @@ function fixture(t: test.TestContext, count = 2) {
   let bytes = 0;
   const intent = (forJob = jobId, forProject = projectId): StageRunIntent => {
     bytes = 0;
-    return { projectId: forProject, jobId: forJob, conversation: { provider: 'codex', threadId: 'fixture-thread', sessionId: null }, transferDigest: expected.digest, payloadDigest: expected.payloadDigest, manifestDigest: expected.manifestDigest, preparedDigest: 'f'.repeat(64), target, continuity,
+    return { projectId: forProject, jobId: forJob, modelReview:fixtureModelReview, conversation: { provider: 'codex', threadId: 'fixture-thread', sessionId: null }, transferDigest: expected.digest, payloadDigest: expected.payloadDigest, manifestDigest: expected.manifestDigest, preparedDigest: 'f'.repeat(64), target, continuity,
       plan: args.map((a, ordinal) => { const packetByteLength = Buffer.byteLength(a.packet); bytes += packetByteLength; return { ordinal, argsSha256: sha(JSON.stringify(a)), packetByteLength, envelopeByteLength: Buffer.byteLength(JSON.stringify(a)), expectedReceipt: { transferDigest: expected.digest, packetCount: ordinal + 1, byteLength: bytes, state: ordinal === count - 1 ? 'sealed' : 'receiving', engineVerification: 'pending' } }; }) };
   };
   const ack = (id: string, ordinal: number) => { assert.equal(store.poll(pair.sessionId)[0]?.id, id); store.result({ sessionId: pair.sessionId, commandId: id, state: 'succeeded', result: intent().plan[ordinal]!.expectedReceipt as unknown as Json }); };
@@ -45,7 +48,7 @@ function fixture(t: test.TestContext, count = 2) {
       return tables.map(name => name + ':' + sha(JSON.stringify(db.prepare('SELECT * FROM "' + name + '"').all()))).join('|');
     } finally { db.close(); }
   };
-  return { directory, pair, args, intent, ack, upload, state, get store() { return store; }, restart() { store.close(); store = new StudioStore({ directory, now: () => now }); } };
+  return { directory, pair, args, intent, ack, upload, state, get store() { return store; }, restart() { store.close(); store = new StudioStore({ directory, now: () => now });bindFixtureReview(store); } };
 }
 
 test('invalid identifiers and closed storage refuse instead of implying absence', t => {

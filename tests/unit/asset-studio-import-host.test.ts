@@ -10,6 +10,7 @@ import { createNativeAssetRegistry, type NativeAssetActor } from '../../apps/dae
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { StudioImportManifestError, STUDIO_IMPORT_LIMITS, type PreparedStudioImport, type StudioImportBaseline, type StudioImportSelection } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { saveStudioFixture, saveFixtureManifest, fixtureId } from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
+import {assetReviewDigest,type AssetReviewSubject,type AssetReviewReference} from '../../apps/daemon/src/asset-review.js';
 import { sha256 } from '../../packages/asset-pipeline/src/validation.js';
 
 // Real AssetService, file readers, manifest validation, native registry, SQLite
@@ -19,6 +20,9 @@ const JOB = '11111111-1111-4111-8111-111111111111', NEXT = '22222222-2222-4222-8
 const conversation = { provider: 'codex' as const, threadId: 'fixture-thread', sessionId: null };
 const selection: StudioImportSelection = { target: { sessionId: 'synthetic-studio-session', placeId: 0, universeId: 0,
   root: 'Workspace', parentRef: 'synthetic-parent', creator: { kind: 'user', id: '1234' } }, placement: { mode: 'bottom-centre' }, studsPerMeter: 1/0.28 };
+// Explicit trusted model-only fixture port; real human review is tested separately.
+const fixtureReference=(subject:AssetReviewSubject):AssetReviewReference=>({reviewId:'99999999-9999-4999-8999-999999999999',subjectDigest:assetReviewDigest(subject),revision:1});
+const fixtureModelReview={assertApproved:fixtureReference,assertReference(subject:AssetReviewSubject,reference:AssetReviewReference){assert.deepEqual(reference,fixtureReference(subject));}};
 const code = (expected: string) => (error: unknown) => !!error && typeof error === 'object' && (error as { code?: string }).code === expected;
 function deferred() { let release!: () => void; const promise = new Promise<void>(r => { release = r; }); return { promise, release }; }
 async function harness(t: test.TestContext, old = false) {
@@ -50,7 +54,7 @@ async function harness(t: test.TestContext, old = false) {
       await rm(directory, { recursive: true, force: true });
     }
   });
-  service = await createAssetService({ cwd: project, projectPath: project, outputRoot, studioImport: { workAssociations: store,
+  service = await createAssetService({ cwd: project, projectPath: project, outputRoot, modelReview:fixtureModelReview,studioImport: { workAssociations: store,
     selectTarget: async () => { selections++; return choose(); }, loadObservedBaseline: async () => { baselines++; return load(); },
     recordPrepared: async () => persist() } });
   return { service, store, registry, incarnation, actor, manifest, jobDirectory, nextDirectory,

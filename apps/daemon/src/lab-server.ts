@@ -25,6 +25,8 @@ import type { WorkStore } from '../../../packages/storage/src/work-store.js';
 import type { AssetService } from './asset-service.js';
 import type {createStudioImportStagingController} from './studio-import-staging-controller.js';
 import { assetRoutes } from './asset-routes.js';
+import {assetReviewRoutes} from './asset-review-routes.js';
+import type {AssetReviewHost} from './asset-review-host.js';
 import { nativeRoutes } from './native-routes.js';
 import { createCodexService, type CodexService, type CodexServiceOptions } from './codex-service.js';
 import { codexRoutes } from './codex-routes.js';
@@ -84,6 +86,8 @@ interface Options {
   projectPath?: string;
   port?: number;
   assetService?: AssetService;
+  /** Trusted launcher factory, created after current conversation binding exists. */
+  assetReviewHostFactory?:(conversation:ReturnType<typeof createAssetConversationHost>)=>AssetReviewHost;
   studioImportStaging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'>>;
   /** Owned by the product launcher; absent in metadata-only labs. */
   learningService?: LearningService;
@@ -169,6 +173,7 @@ export async function createConnectionLab(options: Options) {
   let ownsAssociations = false;
   let workflow: ReturnType<typeof createWorkflowHost> | null = null;
   let conversationAssets: ReturnType<typeof createAssetConversationHost> | null = null;
+  let modelReviews:AssetReviewHost|null=null;
   try {
     if (options.studioStore && options.workflowCodeVerification && !options.scriptSourceVerifier) {
       const directory = join(options.stateDirectory, 'studio-source-verification');
@@ -250,6 +255,7 @@ export async function createConnectionLab(options: Options) {
       startNative: async (request,admission) => (await options.assetService!.start(request,admission)).jobId,
       ...(typeof options.assetService.adoptProjectGlb === 'function' ? {adoptNative: async (request,actor,admission) => (await options.assetService!.adoptProjectGlb(request,actor,admission)).jobId} satisfies Pick<import('./asset-conversation-host.js').AssetConversationHostOptions,'adoptNative'> : {}),
     }) : null;
+    if(options.assetReviewHostFactory){if(!conversationAssets)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review requires the current asset conversation.');modelReviews=options.assetReviewHostFactory(conversationAssets);}
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
@@ -257,12 +263,14 @@ export async function createConnectionLab(options: Options) {
     handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
+    try { modelReviews?.close(); } catch { /* Preserve original failure. */ }
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
     try { if (ownsAssociations) associations?.close(); } catch { /* Preserve original failure. */ }
     try { await codex?.close(); } catch { /* Preserve original failure. */ }
     throw error;
   }
   const assets = options.assetService ? assetRoutes(options.assetService, conversationAssets ?? undefined) : null;
+  const modelReviewApi=modelReviews?assetReviewRoutes(modelReviews):null;
   const scopedAssets = options.assetService && conversationAssets && nativeAssetRegistry
     ? nativeAssetRoutes(options.assetService,conversationAssets,nativeAssetRegistry,options.studioImportStaging) : null;
   const workflowApi = workflow ? workflowRoutes(workflow) : null;
@@ -303,6 +311,7 @@ export async function createConnectionLab(options: Options) {
           ['/task-usage-ui.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage-ui.js'), 'text/javascript']],
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
+          ['/asset-review.js', [join(options.cwd, 'dist/apps/desktop/src/asset-review.js'), 'text/javascript']],
           ['/asset-viewer.js', [join(options.cwd, 'dist/apps/desktop/src/asset-viewer.js'), 'text/javascript']],
           ['/automatic-asset-previews.js', [join(options.cwd, 'dist/apps/desktop/src/automatic-asset-previews.js'), 'text/javascript']],
           ['/playtest-panel.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-panel.js'), 'text/javascript']],
@@ -358,6 +367,7 @@ export async function createConnectionLab(options: Options) {
       if (scopedAssets && await scopedAssets(request,response,url,origin)) return;
       // A sealed handoff (in-app Claude chat) is admitted only on its allowlisted generic asset routes;
       // native-hook bearers stay on /v1/assets/native via scopedAssets.
+      if(modelReviewApi&&await modelReviewApi(request,response,url,token,origin,handoffs?.agentToken(request,origin)||agentToken))return;
       if (assets && await assets(request, response, url, token, origin, handoffs?.agentToken(request,origin) || agentToken)) return;
       if (bridge && await bridge(request, response, url, token, origin)) return;
       const supplied = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
@@ -396,6 +406,7 @@ export async function createConnectionLab(options: Options) {
     handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
+    try { modelReviews?.close(); } catch { /* Preserve listener failure. */ }
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
     try { if (ownsAssociations) associations?.close(); } catch { /* Preserve listener failure. */ }
     try { await codex?.close(); } catch { /* Preserve listener failure. */ }
@@ -417,6 +428,7 @@ export async function createConnectionLab(options: Options) {
         server.closeAllConnections();
         const errors: unknown[] = [...fenceErrors];
         try { await ownedTests?.lifecycle.close(); } catch (error) { errors.push(error); }
+        try { modelReviews?.close(); } catch (error) { errors.push(error); }
         try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
         try { if (ownsAssociations) associations?.close(); } catch (error) { errors.push(error); }
         try { await codex?.close(); } catch (error) { errors.push(error); }

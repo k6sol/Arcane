@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { validateGlb } from '../../desktop/src/glb-preflight.js';
 import { AssetError, type AssetManifest, type AssetRequest } from '../../../packages/asset-pipeline/src/types.js';
 import { STUDIO_IMPORT_LIMITS, type HostGeneratedStudioImport, type StudioImportBaseline, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
-import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
+import { ConversationWorkStore,type ConversationWorkBindingWitness } from '../../../packages/storage/src/conversation-work-store.js';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor, type NativeAssetScope } from './native-asset-authority.js';
 
@@ -50,6 +50,7 @@ function evidenceFailure(): never { throw new AssetError('STUDIO_IMPORT_EVIDENCE
 function expectedId(request: AssetRequest, role: string, sourceKey: string): string {
   return 'arcane_' + sha(['arcane-semantic-v1', request.template, request.name, role, sourceKey].join('\0'));
 }
+const nativeJobBindings=new WeakMap<NativeAssetActor,WeakMap<ConversationWorkStore,Map<string,ConversationWorkBindingWitness>>>();
 /** Recheck SAME native capture and exact durable job attribution, including null session. */
 export function assertStudioImportJobScope(projectPath: string, store: ConversationWorkStore, actor: NativeAssetActor, jobId: string): NativeAssetScope {
   assertNativeAssetActor(actor, 'mutate');
@@ -57,7 +58,17 @@ export function assertStudioImportJobScope(projectPath: string, store: Conversat
   if (!(store instanceof ConversationWorkStore) || store.projectPath !== projectPath || scope.projectPath !== projectPath || scope.projectId !== store.projectId) {
     throw new ArcaneError('STUDIO_IMPORT_SCOPE', 'Studio import preparation requires the exact native project scope.');
   }
-  const binding = store.binding('asset-job', jobId);
+  let stores=nativeJobBindings.get(actor),jobs=stores?.get(store),witness=jobs?.get(jobId);
+  if(!witness){
+    if(jobs&&jobs.size>=64)throw new ArcaneError('STUDIO_IMPORT_SCOPE','This native operation has reached its bounded job admission capacity.');
+    witness=store.captureBinding('asset-job',jobId)??undefined;
+    if(witness){
+      if(!stores){stores=new WeakMap();nativeJobBindings.set(actor,stores);}
+      if(!jobs){jobs=new Map();stores.set(store,jobs);}jobs.set(jobId,witness);
+    }
+  }
+  witness?.assertCurrent();
+  const binding = witness?.binding;
   if (!binding || binding.projectId !== scope.projectId || binding.conversation.provider !== scope.conversation.provider ||
       binding.conversation.threadId !== scope.conversation.threadId || binding.conversation.sessionId !== scope.conversation.sessionId) {
     throw new ArcaneError('NOT_FOUND', 'No completed asset job is bound to this native conversation.');

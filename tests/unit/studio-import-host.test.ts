@@ -15,6 +15,7 @@ import { saveStudioFixture } from '../../packages/asset-pipeline/testing/studio-
 import {createServer} from 'node:http';
 import {createAssetConversationHost} from '../../apps/daemon/src/asset-conversation-host.js';
 import {nativeAssetRoutes} from '../../apps/daemon/src/native-asset-routes.js';
+import {assetReviewDigest,type AssetReviewSubject,type AssetReviewReference} from '../../apps/daemon/src/asset-review.js';
 import {DaemonClient} from '../../apps/mcp/src/daemon-client.js';
 
 // Production host, stores, queue receipts, completed-byte service and pending
@@ -23,6 +24,10 @@ import {DaemonClient} from '../../apps/mcp/src/daemon-client.js';
 const JOB = '11111111-1111-4111-8111-111111111111', HASH = 'a'.repeat(64);
 const SECOND_JOB = '22222222-2222-4222-8222-222222222222';
 const conversation = { provider: 'codex' as const, threadId: 'fixture.import-host', sessionId: null };
+// Explicit trusted fixture model port. Human decision authentication is tested
+// with the real signed store in asset-review-boundaries.test.ts.
+const fixtureReference=(subject:AssetReviewSubject):AssetReviewReference=>({reviewId:'99999999-9999-4999-8999-999999999999',subjectDigest:assetReviewDigest(subject),revision:1});
+const fixtureModelReview={assertApproved:fixtureReference,assertReference(subject:AssetReviewSubject,reference:AssetReviewReference){assert.deepEqual(reference,fixtureReference(subject));}};
 const refused = (code: string) => (error: unknown) => !!error && typeof error === 'object' && 'code' in error && error.code === code;
 async function fixture(t: test.TestContext, local = false, hostNow: () => number = Date.now, jobIds: readonly string[] = [JOB]) {
   const boundary = await realpath(tmpdir()), root = await mkdtemp(join(boundary, 'arcane-import-host-'));
@@ -62,6 +67,7 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
   let host = makeHost();
   const sourcesCreated = new Set<string>();
   let service: AssetService | undefined;
+  let releaseReview:(()=>void)|undefined;
   let staging: ReturnType<typeof createStudioImportStagingController> | undefined;
   const received = new Map<string, {count: number; bytes: number}>();
   let stageHook: ((command: StudioCommand) => boolean) | null = null;
@@ -96,7 +102,7 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
     } catch (error) { failures.push(error); }
   }, 100);
   t.after(async () => {
-    clearInterval(pump); staging?.close(); host.close(); await service?.close(); await ledger.close(); registry.close(); work.close(); studio.close();
+    clearInterval(pump); staging?.close(); releaseReview?.(); host.close(); await service?.close(); await ledger.close(); registry.close(); work.close(); studio.close();
     const part = relative(boundary, root); assert.ok(part.startsWith('arcane-import-host-') && !isAbsolute(part) && !part.includes(sep));
     await rm(root, { recursive: true, force: true }); assert.deepEqual(failures, []);
   });
@@ -108,7 +114,8 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
       const directory = join(outputRoot, 'test-kit-' + id);
       await mkdir(directory, {recursive: true}); await saveStudioFixture(directory, id); sourcesCreated.add(id);
     }
-    service = await createAssetService({cwd: root, projectPath, outputRoot, studioImport: host.hooks});
+    service = await createAssetService({cwd: root, projectPath, outputRoot, studioImport: host.hooks,modelReview:fixtureModelReview});
+    releaseReview=studio.bindAssetModelReview(intent=>{assert.ok(intent.modelReview);service!.assertReviewedImport(intent.jobId,{projectId:intent.projectId,conversation:intent.conversation},intent.modelReview);});
     return service;
   }
   const controller=async()=>{
@@ -128,7 +135,7 @@ async function fixture(t: test.TestContext, local = false, hostNow: () => number
     // same Transport/TestProof lifetime and play epoch during genuine re-pair.
     rePair(freshOperation = true) { studio.revoke(paired.sessionId, 'synthetic plugin re-pair'); paired = pair('fixture-plugin'); received.clear(); studio.poll(paired.sessionId, proof()); return freshOperation ? newActor() : registry.capture(incarnation.credential(), 'mutate'); },
     async restartBackend() {
-      held = true; staging?.close(); staging = undefined; host.close(); await service?.close(); service = undefined;
+      held = true; staging?.close(); staging = undefined; releaseReview?.();releaseReview=undefined;host.close(); await service?.close(); service = undefined;
       await ledger.close(); registry.close(); work.close(); studio.close();
       studio = new StudioStore({directory: join(root, 'studio')});
       work = new ConversationWorkStore({directory: join(root, 'work'), projectPath});

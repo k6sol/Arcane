@@ -16,7 +16,8 @@ import { studioTestRoutes, type StudioTestRouteService } from '../../apps/daemon
 import { NATIVE_ASSET_RATE } from '../../apps/daemon/src/studio-native-assets.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { validateCommandArgs, sceneBuildInstanceCount } from '../../packages/core/src/studio-policy.js';
-import { READ_METHODS, WRITE_METHODS, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
+import {recordReviewedOriginalRun} from '../helpers/asset-review-boundary-fixture.js';
+import { READ_METHODS, WRITE_METHODS,ASSET_STAGE_METHODS, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
 import { compileSceneBuild, sceneBuildShape, type SceneBuildInput } from '../../apps/mcp/src/scene-build.js';
 import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
@@ -211,12 +212,12 @@ test('native generation wait: bounded polls of wait_job_finished in seconds unti
   assert.ok(forever.state.calls.filter(call => call.name === 'wait_job_finished').length <= 8, 'bounded attempts');
 });
 
-async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play'; reply?: Reply; allowModels?:boolean } = {}) {
+async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play'; reply?: Reply; allowModels?:boolean;reviewedOriginal?:boolean } = {}) {
   const root = makeFixtureDirectory('arcane-studio-assets-');
   const store = new StudioStore({ directory: join(root, 'store') });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
   const pair = store.pair({ code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'plugin-asset-lifetime', placeId: 0, universeId: 0, name: NAME, pluginVersion: '0.2.0' },
-    capabilities: [...READ_METHODS, ...WRITE_METHODS] });
+    capabilities: [...READ_METHODS, ...WRITE_METHODS,...(options.reviewedOriginal?ASSET_STAGE_METHODS:[])] });
   store.authenticate(pair.sessionId, pair.token);
   const proof = { sessionId: pair.sessionId, clientLifetimeId: 'plugin-asset-lifetime', pluginArtifactHash: ARTIFACT, markerName: MARKER,
     placeId: 0, universeId: 0, placeName: NAME, mode: options.mode ?? 'Edit', playEpoch: 2, continuitySupported: true, connected: true };
@@ -525,12 +526,13 @@ test('template sources: default rejects reuse of existing external models before
  f.service.humanControl.toolboxPolicy({sessionId,allowModels:false},()=>{});
  assert.deepEqual(f.store.poll(sessionId,f.proof),[]);
  assert.equal(f.store.command(command.id).state,'cancelled');
- assert.match(f.store.command(command.id).error!,/No objects were created/);
+ assert.match(f.store.command(command.id).error!,/This operation was not sent/);
  assert.throws(()=>f.store.enqueue(clonedForest(sessionId,'still-disabled')),{code:'TEMPLATE_SOURCE'});
 });
 
 test('template sources: an authenticated original-reconstruction placement receipt allows the exact template without enabling external models',async t=>{
- const f=await serviceFixture(t,{allowModels:false}),sessionId=f.pair.sessionId,ref=TEMPLATE(sessionId);
+ const f=await serviceFixture(t,{allowModels:false,reviewedOriginal:true}),sessionId=f.pair.sessionId,ref=TEMPLATE(sessionId);
+ recordReviewedOriginalRun(f.store,sessionId,'a'.repeat(64),ROOT(sessionId).instanceId,f.proof);
  const placed=f.store.enqueue({sessionId,requestId:'original-placement',method:'scene.place_asset',args:{watch:'editable-'+'a'.repeat(64),parent:ROOT(sessionId),name:'Original oak',position:[0,0,0],yaw:0,ground:true,anchor:true,allowScripts:false}});
  f.store.poll(sessionId,f.proof);
  f.store.result({sessionId,commandId:placed.id,state:'succeeded',result:{ref,removedScripts:{count:0,classes:{},names:[]},mutation:{kind:'scene.place_asset',ref,before:null,after:{descendants:3,removedScripts:0,keptScripts:0,scale:1}}}});

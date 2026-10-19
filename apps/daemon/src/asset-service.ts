@@ -1,5 +1,6 @@
 import { JOB_JOURNAL_BYTES, CUSTOM_REQUEST_BYTES,jsonSnapshot } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { Stats } from 'node:fs';
+import {lstatSync,realpathSync} from 'node:fs';
 import { lstat, opendir, mkdir, writeFile, rename } from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
@@ -25,12 +26,15 @@ import {AssetArchiveStore,type AssetArchiveScan,type AssetJobDirectory} from './
 import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 import type { AssetJobError } from '../../../packages/asset-pipeline/src/types.js';
 import type {ArchiveHostFacts} from '../../../packages/asset-pipeline/src/archive-ledger.js';
+import {assetReviewCanonical,assetReviewFailure,modelReviewSubject,snapshotAssetReviewScope,snapshotAssetReviewReference,
+  type AssetReviewGate,type AssetReviewImportGuard,type AssetReviewReference,type AssetReviewScope,type AssetReviewSubject} from './asset-review.js';
 
 
 export interface PreparedStudioImportPayload {
   readonly prepared: PreparedStudioImport;
   readonly payload: StudioImportPayload;
   readonly transfer: StudioImportTransfer;
+  readonly review:AssetReviewImportGuard;
 }
 interface StudioImportReaders {
   manifest(jobId: unknown): Promise<AssetPreviewManifest>;
@@ -48,6 +52,10 @@ export interface AssetServiceOptions {
   jobDeadlineMs?: number;
   /** Trusted daemon composition only. Never populated from an HTTP/tool payload. */
   studioImport?: StudioImportHostOptions;
+  /** Trusted human-review host only. Missing review authority denies payload/staging admission. */
+  modelReview?:AssetReviewGate;
+  /** Optional borrowed exact project store for human review before Studio is configured. */
+  modelReviewAssociations?:ConversationWorkStore;
   /** Trusted daemon composition/fixtures only: the fixed exact-PID worker query host. */
   workerQueryHost?: ProcessQueryHost;
   /** Trusted fixtures only: replaces the atomic resolution-marker write to exercise commit faults. */
@@ -135,6 +143,8 @@ export async function createAssetService(options: AssetServiceOptions) {
   if (options.jobDeadlineMs !== undefined && (!Number.isSafeInteger(options.jobDeadlineMs) || options.jobDeadlineMs < 1 || options.jobDeadlineMs > 600000)) throw new ArcaneError('INPUT', 'Job deadline must be 1..600000 ms.');
   const projectPath = resolve(options.projectPath ?? options.cwd);
   const importHost = options.studioImport ? Object.freeze({ ...options.studioImport }) : null;
+  const reviewAssociations=options.modelReviewAssociations??importHost?.workAssociations;
+  if(reviewAssociations&&(!(reviewAssociations instanceof ConversationWorkStore)||reviewAssociations.projectPath!==projectPath))assetReviewFailure('CONFIGURATION');
   if (importHost && (!(importHost.workAssociations instanceof ConversationWorkStore) || importHost.workAssociations.projectPath !== projectPath ||
       typeof importHost.selectTarget !== 'function' || (importHost.loadObservedBaseline !== undefined && typeof importHost.loadObservedBaseline !== 'function'))) {
     throw new ArcaneError('STUDIO_IMPORT_SCOPE', 'Studio import host configuration must borrow the exact project store and host callbacks.');
@@ -155,6 +165,7 @@ export async function createAssetService(options: AssetServiceOptions) {
   const unclassifiedHistory=new Map<string,AssetJobDirectory>();
   const active = new Map<string, { handle: AssetJob; completion: Promise<void> }>();
   const historyReads=new Set<Promise<unknown>>();
+  const reviewedImports=new Map<string,{subject:AssetReviewSubject;reference:AssetReviewReference;assertSourceCurrent():void}>();
   let probeActive: AbortController | null = null;
   let adoption: Promise<AssetJobRecord> | null = null;
   let artifactReadActive = false;
@@ -469,6 +480,58 @@ export async function createAssetService(options: AssetServiceOptions) {
     archiveScan=await archives.scan();ensureOpen();synchronousAdmissionResult(guard());
   }
 
+  function reviewScope(input:AssetReviewScope,jobId:string,guard:()=>void):AssetReviewScope {
+    ensureOpen();guard();const scope=snapshotAssetReviewScope(input);
+    if(!reviewAssociations||reviewAssociations.projectPath!==projectPath||reviewAssociations.projectId!==scope.projectId)assetReviewFailure('SCOPE');
+    const binding=reviewAssociations.binding('asset-job',jobId);
+    if(!binding||binding.projectId!==scope.projectId||!isDeepStrictEqual(binding.conversation,scope.conversation))assetReviewFailure('SCOPE');
+    return scope;
+  }
+  async function readModelReview(jobId:unknown,inputScope:AssetReviewScope,guard:()=>void):Promise<{subject:AssetReviewSubject;assertCurrent():void;assertSourceCurrent():void}> {
+    const requested=id(jobId),scope=reviewScope(inputScope,requested,guard),end=Date.now()+ARTIFACT_DOWNLOAD_TIMEOUT_MS;
+    const binding=reviewAssociations!.captureBinding('asset-job',requested);
+    if(!binding||binding.binding.projectId!==scope.projectId||!isDeepStrictEqual(binding.binding.conversation,scope.conversation))assetReviewFailure('SCOPE');
+    const currentBinding=()=>{ensureOpen();try{binding.assertCurrent();}catch{assetReviewFailure('SCOPE');}};
+    const check=()=>{guard();currentBinding();if(Date.now()>=end)assetReviewFailure('TIMEOUT');};
+    const entry=await loadEntry(requested);check();
+    if(entry.job.state!=='succeeded'||!entry.job.manifestAvailable||active.has(requested)||isAdoptedGlbRequest(entry.job.request))assetReviewFailure('JOB_STATE');
+    const first=await verifiedSavedManifest(entry.directory,requested,entry.job.request);check();
+    if(isAdoptedGlbManifest(first))assetReviewFailure('JOB_STATE');
+    const paths=[join(entry.directory,'manifest.json'),...first.artifacts.map(a=>artifactPath(entry.directory,a.path))];
+    const fingerprint=(path:string):string=>{
+      try{
+        const stat=lstatSync(path,{bigint:true}),actual=process.platform==='win32'?realpathSync.native(path):realpathSync(path),same=process.platform==='win32'?actual.toLowerCase()===path.toLowerCase():actual===path;
+        if(!stat.isFile()||stat.nlink!==1n||stat.isSymbolicLink()||!same)assetReviewFailure('SOURCE');
+        return [stat.dev,stat.ino,stat.size,stat.mtimeNs,stat.ctimeNs].join(':');
+      }catch{assetReviewFailure('SOURCE');}
+    };
+    const witnesses=new Map(paths.map(path=>[path,fingerprint(path)]));
+    const sourceCurrent=()=>{currentBinding();for(const[path,saved]of witnesses)if(fingerprint(path)!==saved)assetReviewFailure('SOURCE');};
+    const unchanged=()=>{guard();sourceCurrent();};
+    // Verify once more INSIDE the captured metadata window. A source replaced
+    // between the first proof and capture cannot become a valid new witness.
+    const manifest=await verifiedSavedManifest(entry.directory,requested,entry.job.request);check();unchanged();
+    if(isAdoptedGlbManifest(manifest)||assetReviewCanonical(manifest)!==assetReviewCanonical(first))assetReviewFailure('SOURCE');
+    const exports=new Map<'asset.glb'|'collision.glb',Buffer>();
+    for(const name of ['asset.glb','collision.glb'] as const){
+      const bytes=await readRegularFile(artifactPath(entry.directory,name),STUDIO_IMPORT_LIMITS.fileBytes);check();unchanged();exports.set(name,bytes);
+    }
+    const subject=modelReviewSubject(scope,manifest,exports);unchanged();
+    return Object.freeze({subject,assertCurrent:unchanged,assertSourceCurrent:sourceCurrent});
+  }
+  async function reviewImport(jobId:unknown,actor:NativeAssetActor,expected:AssetReviewReference|undefined,guard:()=>void):Promise<AssetReviewImportGuard> {
+    if(!options.modelReview)assetReviewFailure('REQUIRED');
+    const requested=id(jobId);
+    const check=()=>{guard();assertStudioImportJobScope(projectPath,reviewAssociations!,actor,requested);};
+    check();const scope=nativeAssetActorScope(actor),source=await readModelReview(requested,{projectId:scope.projectId,conversation:scope.conversation},check);check();
+    const reference=snapshotAssetReviewReference(options.modelReview.assertApproved(source.subject,expected));
+    const assertCurrent=()=>{source.assertCurrent();const result=options.modelReview!.assertReference(source.subject,reference);if(result!==undefined)assetReviewFailure('CONFIGURATION');};
+    assertCurrent();
+    const key=assetReviewCanonical({projectId:scope.projectId,conversation:scope.conversation,jobId:requested});
+    if(!reviewedImports.has(key)&&reviewedImports.size>=64)assetReviewFailure('CAPACITY');
+    reviewedImports.set(key,{subject:source.subject,reference,assertSourceCurrent:source.assertSourceCurrent});
+    return Object.freeze({subject:source.subject,reference,assertCurrent});
+  }
   function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: false): Promise<PreparedStudioImport>;
   function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: true, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImportPayload>;
   async function prepareImport(jobId: unknown, actor: NativeAssetActor, readers: StudioImportReaders, includePayload: boolean, attempt?: StudioImportPreparationAttempt): Promise<PreparedStudioImport | PreparedStudioImportPayload> {
@@ -477,6 +540,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     const requested = id(jobId);
     const end = Date.now() + ARTIFACT_DOWNLOAD_TIMEOUT_MS;
     let selected: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').StudioImportSelection | undefined;
+    let review:AssetReviewImportGuard|undefined;
     // Child host/store operations validate their own exact durable binding
     // around every await. Pass only the service lifetime/actor/target guard to
     // them, rather than performing the same expensive store scan twice at
@@ -488,7 +552,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       const scope = nativeAssetActorScope(actor);
       if (selected && importHost.validateTarget) synchronousAdmissionResult(importHost.validateTarget(scope, requested, selected));
     };
-    const check = () => { guard(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
+    const check = () => { guard();review?.assertCurrent(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
     const originalScope = check();
     const e = await loadEntry(requested);check();
     if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB origin requires safe conversion and observed source mapping; engine import is unavailable.');
@@ -538,6 +602,9 @@ export async function createAssetService(options: AssetServiceOptions) {
       return { ...generated, baseline };
     } });
     try {
+      // The returned review outlives this preparation's target capture and deadline.
+      // reviewImport independently retains exact native actor/job/service checks.
+      if(includePayload)review=await reviewImport(requested,actor,undefined,()=>{});
       const admission = await wait(authority.admit(requested));
       check();
       const prepared = authority.prepare(admission);
@@ -548,8 +615,8 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard, attempt),true);
       check();
       if (includePayload) {
-        if (!payload || !transfer) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
-        return Object.freeze({ prepared, payload, transfer });
+        if (!payload || !transfer || !review) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
+        review.assertCurrent();return Object.freeze({ prepared, payload, transfer,review });
       }
       return prepared;
     } finally {
@@ -906,6 +973,23 @@ export async function createAssetService(options: AssetServiceOptions) {
 
       });
     },
+    /** Read-only canonical subject from current verified files and exact durable attribution. */
+    async modelReviewSubject(jobId:unknown,scope:AssetReviewScope,guard:()=>void=()=>{}):Promise<AssetReviewSubject> {
+      return retainedRead([id(jobId)],async()=>(await readModelReview(jobId,scope,guard)).subject);
+    },
+    /** Rebuild a process-local source/decision guard; durable JSON references alone never authorize effects. */
+    async reviewImport(jobId:unknown,actor:NativeAssetActor,expected?:AssetReviewReference,guard:()=>void=()=>{}):Promise<AssetReviewImportGuard> {
+      return retainedRead([id(jobId)],()=>reviewImport(jobId,actor,expected,guard));
+    },
+    /** Model witness only. The parent queue must separately enforce its CURRENT
+     * opaque native actor, exact target/continuity and original stage binding. */
+    assertReviewedImport(jobId:unknown,inputScope:AssetReviewScope,expected:AssetReviewReference):void {
+      ensureOpen();const requested=id(jobId),scope=snapshotAssetReviewScope(inputScope),reference=snapshotAssetReviewReference(expected);
+      if(!reviewAssociations||reviewAssociations.projectPath!==projectPath||reviewAssociations.projectId!==scope.projectId)assetReviewFailure('SCOPE');
+      const owned=reviewedImports.get(assetReviewCanonical({...scope,jobId:requested}));
+      if(!owned||assetReviewCanonical(owned.reference)!==assetReviewCanonical(reference)||!options.modelReview)assetReviewFailure('REQUIRED');
+      owned.assertSourceCurrent();const result=options.modelReview.assertReference(owned.subject,reference);if(result!==undefined)assetReviewFailure('CONFIGURATION');
+    },
     /** Production host preparation. Only a completed owned job UUID and the SAME
      * native actor enter here; files, target and baseline come from host evidence.
      * Host context reads and pending metadata persistence do not upload, import,
@@ -995,7 +1079,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     },
     close(): Promise<void> {
       if (closing) return closing;
-      closed = true;lifetime.abort(); probeActive?.abort(); resolution?.controller.abort();retentionOperation?.controller.abort();
+      closed = true;reviewedImports.clear();lifetime.abort(); probeActive?.abort(); resolution?.controller.abort();retentionOperation?.controller.abort();
       closing = (async () => {
         for (const run of active.values()) run.handle.cancel();
         if (adoption) await adoption.catch(() => {});

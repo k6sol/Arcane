@@ -10,10 +10,13 @@ import type {StudioAssetStageArgs,Json} from '../../packages/protocol/src/studio
 
 // Real temporary SQLite stores; all plugin identities/ACKs are synthetic.
 const projectId='a'.repeat(64),jobId='11111111-1111-4111-8111-111111111111',guard=()=>{};
+// Trusted synthetic model-only review port; the real human gate is exercised by asset-review-boundaries.test.ts.
+const fixtureModelReview={reviewId:'99999999-9999-4999-8999-999999999999',subjectDigest:'9'.repeat(64),revision:1};
+const bindFixtureReview=(value:StudioStore)=>value.bindAssetModelReview(intent=>{assert.deepEqual(intent.modelReview,fixtureModelReview);});
 const sha=(text:string)=>createHash('sha256').update(text).digest('hex');
 function fixture(t:test.TestContext,count=2){
   const directory=mkdtempSync(join(tmpdir(),'arcane-stage-journal-')),now=Date.now();
-  let store=new StudioStore({directory,now:()=>now});
+  let store=new StudioStore({directory,now:()=>now});bindFixtureReview(store);
   t.after(()=>{store.close();assert.ok(resolve(directory).startsWith(resolve(tmpdir())+sep));rmSync(directory,{recursive:true,force:true});});
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=store.pair({code:grant.code,protocolVersion:1,capabilities:['asset.stage_packet'],identity:{clientSessionId:'fixture-client',placeId:12,universeId:34,name:'Fixture',pluginVersion:'0.1.7'}});
@@ -23,9 +26,9 @@ function fixture(t:test.TestContext,count=2){
   const continuity={clientLifetimeId:'fixture-client',pluginArtifactHash:'b'.repeat(64),playEpoch:0};
   const args:StudioAssetStageArgs[]=Array.from({length:count},(_,ordinal)=>({expected,packet:JSON.stringify({formatVersion:1,payloadDigest:expected.payloadDigest,manifestDigest:expected.manifestDigest,ordinal,kind:ordinal===count-1?'seal':ordinal===0?'begin':'object'}),target,continuity}));
   let bytes=0;
-  const intent:StageRunIntent={projectId,jobId,conversation:{provider:'codex',threadId:'fixture-thread',sessionId:null},transferDigest:expected.digest,payloadDigest:expected.payloadDigest,manifestDigest:expected.manifestDigest,preparedDigest:'f'.repeat(64),target,continuity,
+  const intent:StageRunIntent={projectId,jobId,modelReview:fixtureModelReview,conversation:{provider:'codex',threadId:'fixture-thread',sessionId:null},transferDigest:expected.digest,payloadDigest:expected.payloadDigest,manifestDigest:expected.manifestDigest,preparedDigest:'f'.repeat(64),target,continuity,
     plan:args.map((a,ordinal)=>{const packetByteLength=Buffer.byteLength(a.packet);bytes+=packetByteLength;return {ordinal,argsSha256:sha(JSON.stringify(a)),packetByteLength,envelopeByteLength:Buffer.byteLength(JSON.stringify(a)),expectedReceipt:{transferDigest:expected.digest,packetCount:ordinal+1,byteLength:bytes,state:ordinal===count-1?'sealed':'receiving',engineVerification:'pending'}};})};
-  return {directory,pair,args,intent,get store(){return store;},restart(){store.close();store=new StudioStore({directory,now:()=>now});},
+  return {directory,pair,args,intent,get store(){return store;},restart(){store.close();store=new StudioStore({directory,now:()=>now});bindFixtureReview(store);},
     ack(id:string,ordinal:number){assert.equal(store.poll(pair.sessionId)[0]?.id,id);store.result({sessionId:pair.sessionId,commandId:id,state:'succeeded',result:intent.plan[ordinal]!.expectedReceipt as unknown as Json});}};
 }
 test('begin is durable before commands, unique per project/job and returns detached evidence',t=>{

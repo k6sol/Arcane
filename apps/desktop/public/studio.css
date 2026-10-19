@@ -927,6 +927,9 @@ body.arcane-app {
 .viewer-animation select:first-child{max-width:180px}
 .viewer-loop{display:flex;flex-direction:row;align-items:center;gap:4px;font-size:12px}
 .viewer-loop input{width:14px;height:14px;accent-color:var(--accent)}
+.viewer-review{border-top:1px solid var(--line);padding-top:4px;background:var(--panel)}
+.viewer-review h3,.viewer-review strong.viewer-status{display:block;color:var(--text);font-size:13px;font-weight:600}
+.viewer-review .viewer-animation{border-top:0;padding-top:2px}
 .artifact-stage:has(.asset-viewer:not([hidden])) .artifact-empty{display:none}
 .artifact-stage:has(.asset-viewer:not([hidden])) .asset-previews{margin-top:12px;grid-template-columns:repeat(2,minmax(0,1fr))}
 .artifact-stage:has(.asset-viewer:not([hidden])) .asset-previews figure.is-selected{grid-column:auto;order:0}

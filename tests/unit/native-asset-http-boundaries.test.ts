@@ -71,6 +71,9 @@ async function fixture(t: test.TestContext) {
     },
     async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in the native HTTP fixture.'); },
+    async modelReviewSubject() { throw new Error('Model review must not be called by this metadata fixture.'); },
+    async reviewImport() { throw new Error('Reviewed import must not be called by this metadata fixture.'); },
+    assertReviewedImport() { throw new Error('Reviewed placement must not be called by this metadata fixture.'); },
     async prepareStudioImportPayload() { throw new Error('Payload staging must not be called by this public service fixture.'); },
     async preview() { throw new Error('No fixture previews'); }, async artifact() { throw new Error('No fixture artifacts'); }, async close() {},
   };

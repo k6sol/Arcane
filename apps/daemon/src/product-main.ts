@@ -9,6 +9,8 @@ import { WorkStore } from '../../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { createConnectionLab } from './lab-server.js';
 import { createAssetService } from './asset-service.js';
+import {createAssetReviewHost,type AssetReviewHost} from './asset-review-host.js';
+import {assetReviewFailure,type AssetReviewGate} from './asset-review.js';
 import { createStudioImportHost } from './studio-import-host.js';
 import {createStudioImportStagingController} from './studio-import-staging-controller.js';
 import { createStudioImportPreparationStore } from './studio-import-preparation-store.js';
@@ -57,6 +59,8 @@ try {
   associations = new ConversationWorkStore({ directory: join(connectionDirectory, 'conversation-work'), projectPath });
 } catch (error) { await startupFailed('services', error, [() => work.close(), () => store.close()]); throw error; }
 let assets: Awaited<ReturnType<typeof createAssetService>>;
+let modelReviewHost:AssetReviewHost|null=null;
+const modelReview:AssetReviewGate={assertApproved(subject,expected){if(!modelReviewHost)assetReviewFailure('REQUIRED');return modelReviewHost.assertApproved(subject,expected);},assertReference(subject,reference){if(!modelReviewHost)assetReviewFailure('REQUIRED');modelReviewHost.assertReference(subject,reference);}};
 let preparations: Awaited<ReturnType<typeof createStudioImportPreparationStore>>;
 let importHost: ReturnType<typeof createStudioImportHost>;
 let importStaging: ReturnType<typeof createStudioImportStagingController>;
@@ -70,7 +74,7 @@ try {
       pluginArtifactHash, persistPreparation: (...args) => preparations.save(...args) });
   } catch (error) { await cleanupStartup([() => preparations.close()]); throw error; }
 } catch (error) { await startupFailed('services', error, [() => associations.close(), () => work.close(), () => store.close()]); throw error; }
-try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,studioImport:importHost.hooks,retentionPins:{preparationRecord:jobId=>preparations.hasRecordForJob(jobId),pendingStage:jobId=>store.hasPendingStageWork(associations.projectId,jobId),importCaptured:jobId=>importHost.hasCapturedJob(jobId)},...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await startupFailed('services', error, [() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
+try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,modelReview,modelReviewAssociations:associations,studioImport:importHost.hooks,retentionPins:{preparationRecord:jobId=>preparations.hasRecordForJob(jobId),pendingStage:jobId=>store.hasPendingStageWork(associations.projectId,jobId),importCaptured:jobId=>importHost.hasCapturedJob(jobId)},...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await startupFailed('services', error, [() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 try {importStaging=createStudioImportStagingController({projectPath: associations.projectPath, workAssociations: associations, studio: store,
   assets, host: importHost.hooks, pluginArtifactHash});}
 catch(error){await startupFailed('services', error, [() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
@@ -78,7 +82,13 @@ let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
 catch (error) { await startupFailed('services', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
-try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
+try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, assetReviewHostFactory:conversation=>{
+  const host=createAssetReviewHost({directory:join(directory,'asset-reviews'),projectPath:associations.projectPath,workAssociations:associations,bindingHuman:jobId=>conversation.bindingHuman(jobId),readSubject:(jobId,scope,guard)=>assets.modelReviewSubject(jobId,scope,guard)});
+  modelReviewHost=host;let release:()=>void;
+  try{release=store.bindAssetModelReview(intent=>{if(!intent.modelReview)assetReviewFailure('REQUIRED');assets.assertReviewedImport(intent.jobId,{projectId:intent.projectId,conversation:intent.conversation},intent.modelReview);});}
+  catch(error){modelReviewHost=null;host.close();throw error;}
+  return Object.freeze({...host,close(){release();host.close();if(modelReviewHost===host)modelReviewHost=null;}});
+}, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
 catch (error) { await startupFailed('listen', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 const descriptor = join(directory, 'daemon.json');
 try {

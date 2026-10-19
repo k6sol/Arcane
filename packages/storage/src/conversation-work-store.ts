@@ -18,6 +18,11 @@ export interface ConversationWorkBinding {
   kind: ConversationWorkKind;
   id: string;
 }
+/** Host-owned continuity witness, never a serialized association grant. */
+export interface ConversationWorkBindingWitness {
+  readonly binding: Readonly<Omit<ConversationWorkBinding, 'conversation'>> & { readonly conversation: Readonly<NativeConversation> };
+  assertCurrent(): void;
+}
 export interface ConversationWorkPagination { limit?: number; after?: string }
 export interface ConversationWorkPage { items: ConversationWorkBinding[]; nextCursor: string | null }
 export const CONVERSATION_WORK_LIMITS = Object.freeze({
@@ -144,6 +149,7 @@ export class ConversationWorkStore {
   readonly #directory: string;
   readonly #databasePath: string;
   #fileIdentity: { dev: number; ino: number } | undefined;
+  #writeEpoch = 0n;
 
   get projectId(): string { return this.#projectId; }
   get projectPath(): string { return this.#projectPath; }
@@ -222,6 +228,9 @@ export class ConversationWorkStore {
   }
   #access<T>(write: boolean, work: () => T): T {
     if (this.#closed) fail('CLOSED', 'Conversation work storage is closed.');
+    // data_version reports other SQLite connections, not writes on this one.
+    // Invalidate witnesses before ANY write attempt, including an unknown outcome.
+    if (write) this.#writeEpoch++;
     try {
       this.#checkPaths();
       const result = this.#transaction(write, () => {
@@ -285,6 +294,68 @@ export class ConversationWorkStore {
   binding(workKind: ConversationWorkKind, id: string): ConversationWorkBinding | null {
     const namespace = kind(workKind), identity = workId(id);
     return this.#access(false, () => this.#binding(namespace, identity));
+  }
+  /** Capture one fully validated, immutable association. Unchanged effect checks
+   * inspect fixed endpoints/files and SQLite's change counter; a changed store
+   * must pass the complete legacy validation again. Actor and operation authority
+   * remain the caller's separate, current host checks. */
+  captureBinding(workKind: ConversationWorkKind, id: string): ConversationWorkBindingWitness | null {
+    const namespace = kind(workKind), identity = workId(id);
+    type State = { paths: string; main: string; files: string; version: number; epoch: bigint };
+    const endpoint = (path: string): string => {
+      const stat = lstatSync(path, { bigint: true });
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !isDirectPath(path)) fail('PATH', 'The witnessed directory path changed.');
+      return [stat.dev, stat.ino].join(':');
+    };
+    const state = (): State => {
+      if (this.#closed) fail('CLOSED', 'Conversation work storage is closed.');
+      // Canonical endpoint lookup also fences linked ancestors. It avoids the
+      // repeated JS ancestor walks retained by full admission/path validation.
+      const paths = endpoint(this.#projectPath) + '|' + endpoint(this.#directory);
+      const files: string[] = []; let main = '';
+      for (const suffix of ['', '-wal', '-shm', '-journal']) {
+        try {
+          const stat = lstatSync(this.#databasePath + suffix, { bigint: true });
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) fail('PATH', 'SQLite files must be direct single-link regular files.');
+          if (stat.size > BigInt(CONVERSATION_WORK_LIMITS.fileBytes)) fail('CAPACITY', 'SQLite file exceeds the storage size bound.');
+          if (!suffix && this.#fileIdentity && (Number(stat.dev) !== this.#fileIdentity.dev || Number(stat.ino) !== this.#fileIdentity.ino)) fail('PATH', 'The open SQLite file was replaced.');
+          if (!suffix) main = [stat.dev, stat.ino].join(':');
+          files.push([suffix, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':'));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          if (!suffix) fail('PATH', 'The SQLite file is missing.');
+          files.push(suffix + ':missing');
+        }
+      }
+      const version = Number(this.#db.prepare('PRAGMA data_version').get()?.data_version);
+      if (!Number.isSafeInteger(version) || version < 0) fail('CORRUPT', 'Invalid SQLite change counter.');
+      return { paths, main, files: files.join('|'), version, epoch: this.#writeEpoch };
+    };
+    const sameState = (a: State, b: State): boolean => a.paths === b.paths && a.files === b.files && a.version === b.version && a.epoch === b.epoch;
+    const refresh = (before: State, expected?: ConversationWorkBinding): { binding: ConversationWorkBinding | null; state: State } => {
+      const binding = this.#access(false, () => this.#binding(namespace, identity));
+      const after = state();
+      // Never adopt a new baseline captured after a source changed during its
+      // validation. An ambiguous window is a refusal, not permission to retry.
+      if (!sameState(before, after)) fail('CHANGED', 'Conversation work changed during witness validation.');
+      if (expected && (!binding || binding.projectId !== expected.projectId || binding.kind !== expected.kind || binding.id !== expected.id || !equalConversation(binding.conversation, expected.conversation))) {
+        fail('CONFLICT', 'The witnessed exact conversation binding changed.');
+      }
+      return { binding, state: after };
+    };
+    try {
+      const initial = refresh(state());
+      if (!initial.binding) return null;
+      const binding = Object.freeze({ ...initial.binding, conversation: Object.freeze({ ...initial.binding.conversation }) });
+      let saved = initial.state;
+      return Object.freeze({ binding, assertCurrent: (): void => {
+        try {
+          const current = state();
+          if (current.paths !== saved.paths || current.main !== saved.main) fail('PATH', 'A witnessed directory or SQLite file was replaced.');
+          if (!sameState(current, saved)) saved = refresh(current, binding).state;
+        } catch (error) { this.#error(error); }
+      } });
+    } catch (error) { return this.#error(error); }
   }
   list(nativeConversation: NativeConversation, workKind?: ConversationWorkKind, pagination?: ConversationWorkPagination): ConversationWorkPage {
     const native = conversation(nativeConversation), namespace = workKind === undefined ? undefined : kind(workKind);

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {ASSET_STAGE_METHODS} from '../../packages/protocol/src/studio.js';
+import {recordReviewedOriginalRun} from '../helpers/asset-review-boundary-fixture.js';
 import type { Json } from '../../packages/protocol/src/studio.js';
 import { validateCommandArgs } from '../../packages/core/src/studio-policy.js';
 import { validateMeshKeepReceipt } from '../../packages/core/src/mesh-keep-policy.js';
@@ -19,7 +21,7 @@ function fixture(t: test.TestContext, capabilities = ['scene.upload_context', 's
   const store = new StudioStore({ directory, now });
   t.after(() => { store.close(); assert.ok(resolve(directory).startsWith(resolve(fixtureTempDirectory()) + sep)); rmSync(directory, { recursive: true, force: true }); });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
-  const paired = store.pair({ code: grant.code, protocolVersion: 1, capabilities, identity: { clientSessionId: 'keep-client', placeId: 12, universeId: 34, name: 'Keep place', pluginVersion: '0.2.0' } });
+  const paired = store.pair({ code: grant.code, protocolVersion: 1, capabilities:[...capabilities,...ASSET_STAGE_METHODS], identity: { clientSessionId: 'keep-client', placeId: 12, universeId: 34, name: 'Keep place', pluginVersion: '0.2.0' } });
   const sessionId = paired.sessionId;
   const proof = { sessionId, clientLifetimeId: 'keep-client', pluginArtifactHash: 'a'.repeat(64), markerName: 'ArcaneTestProof_keep', placeId: 12, universeId: 34, placeName: 'Keep place', mode: 'Edit', playEpoch: 0, continuitySupported: true, connected: true };
   const { observation } = importContextFixture();
@@ -36,6 +38,7 @@ function fixture(t: test.TestContext, capabilities = ['scene.upload_context', 's
   };
   pump();
   const parent = { instanceId: 'w', sessionId, root: 'Workspace', pathSegments: [], className: 'Workspace' };
+  recordReviewedOriginalRun(store,sessionId,digest,parent.instanceId,proof);
   const placed = store.enqueue({ sessionId, requestId: 'place-request-1', method: 'scene.place_asset', args: { watch: 'editable-' + digest, parent, name: 'OakTemplate', position: [0, 0, 0], yaw: 0, ground: true, anchor: true, allowScripts: false } });
   store.poll(sessionId, proof);
   store.result({ sessionId, commandId: placed.id, state: 'succeeded', result: { ref: { ...parent, instanceId: 'm', pathSegments: ['OakTemplate'], className: 'Model' },
@@ -49,7 +52,7 @@ function fixture(t: test.TestContext, capabilities = ['scene.upload_context', 's
     store.result({ sessionId, commandId: commands[0]!.id, state, ...(result === undefined ? {} : { result: result as Json }), ...(error ? { error } : {}) });
     return commands[0]!;
   };
-  return { store, keep, sessionId, plugin, answer, directory, proof, advance: (ms: number) => { clock += ms; } };
+  return { store, keep, sessionId, plugin, answer, directory, proof,initialCommandIds:store.commands(sessionId).map(c=>c.id), advance: (ms: number) => { clock += ms; } };
 }
 const mesh = (index: number, assetId: number | null, upload: string, swapped: boolean, reason: string | null = null) => ({ index, name: 'SM_oak_' + index, assetId, upload, reason, swapped });
 
@@ -103,7 +106,7 @@ test('duplicate, oversized and hardlinked receipt files refuse before an account
     const before = readFileSync(file); f.keep.enableConsentChannel();
     await assert.rejects(f.keep.prepare({ digest, sessionId: f.sessionId }), { code: 'MESH_KEEP_RECEIPTS' });
     assert.deepEqual(readFileSync(file), before);
-    assert.equal(f.plugin.contexts, 0); assert.equal(f.store.commands(f.sessionId).length, 1);
+    assert.equal(f.plugin.contexts, 0); assert.deepEqual(f.store.commands(f.sessionId).map(c=>c.id),f.initialCommandIds);
   }
 });
 
@@ -142,7 +145,7 @@ test('keep: refused without the desktop consent channel; prepare names the signe
   await assert.rejects(f.keep.prepare({ digest, sessionId: f.sessionId }), { code: 'STUDIO_ACCOUNT' });
   f.plugin.uploaderId = 78;
   const prepared = await f.keep.prepare({ digest, sessionId: f.sessionId, name: 'Old oak' });
-  assert.deepEqual({ ...prepared, prepareId: 'x', expiresAt: 'x' }, { prepareId: 'x', account: { kind: 'user', userId: 78 }, name: 'Old oak', meshCount: null, placeName: 'Keep place', expiresAt: 'x' });
+  assert.deepEqual({ ...prepared, prepareId: 'x', expiresAt: 'x' }, { prepareId: 'x', account: { kind: 'user', userId: 78 }, name: 'Old oak', meshCount: 1, placeName: 'Keep place', expiresAt: 'x' });
   // Without the IPC consent (or with another one) nothing is queued.
   await assert.rejects(f.keep.start({ prepareId: prepared.prepareId, consent }), { code: 'MESH_KEEP_CONSENT' });
   assert.equal(f.store.commands(f.sessionId).some(c => c.method === 'asset.keep_mesh'), false);

@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import { fetchVerifiedArtifact, readDownloadArtifacts } from './asset-downloads.js';
 import { validateGlb } from './glb-preflight.js';
+import { AssetReviewCard } from './asset-review.js';
 
 export interface ViewerRuntime {
   reset(): void;
@@ -21,7 +22,7 @@ export interface ViewerRuntime {
 export interface ViewerModule {
   createAssetViewer(options: { host: HTMLElement; bytes: ArrayBuffer; label: string; signal: AbortSignal; onStatus: (message: string) => void }): Promise<ViewerRuntime>;
 }
-interface ViewerOptions { transport?: typeof fetch; loadRuntime?: () => Promise<ViewerModule>; deadlineMs?: number }
+interface ViewerOptions { transport?: typeof fetch; loadRuntime?: () => Promise<ViewerModule>; deadlineMs?: number; tokenOrigin?: string }
 const runtimePath = '/asset-viewer-runtime.mjs';
 const loadRuntime = (): Promise<ViewerModule> => import(runtimePath);
 const clean = (value: string): string => value.replace(/[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 120);
@@ -47,9 +48,13 @@ export class AssetViewerPanel {
   private runtime: ViewerRuntime | null = null;
   private removeControls: (() => void)[] = [];
   private clock: ReturnType<typeof setTimeout> | null = null;
-  constructor(private readonly doc: Document, private readonly token: string, private readonly options: ViewerOptions = {}) {}
+  private readonly review: AssetReviewCard;
+  constructor(private readonly doc: Document, private readonly token: string, private readonly options: ViewerOptions = {}) {
+    this.review = new AssetReviewCard(doc, token, { ...(options.transport ? { transport: options.transport } : {}), ...(options.tokenOrigin ? { tokenOrigin: options.tokenOrigin } : {}) });
+  }
   clear(): void {
     this.epoch++;
+    this.review.clear();
     this.controller?.abort(); this.controller = null;
     this.runtime?.dispose(); this.runtime = null;
     for (const remove of this.removeControls.splice(0)) remove();
@@ -73,6 +78,7 @@ export class AssetViewerPanel {
         message === 'Drag to orbit · Right-drag to pan · Scroll to zoom' ? message :
         message.startsWith('WebGL context lost.') ? '3D preview interrupted. Reload the asset to continue.' :
         message.startsWith('3D preview stopped:') ? '3D preview stopped. Check the export’s validation report.' : 'Loading 3D preview…';
+      if (message.startsWith('WebGL context lost.') || message.startsWith('3D preview stopped:')) this.review.clear();
     };
     const host = this.make('div', undefined, 'viewer-canvas'); host.setAttribute('aria-label', 'Interactive asset preview');
     root.append(host, status); root.hidden = false;
@@ -93,6 +99,7 @@ export class AssetViewerPanel {
       if (!active()) { runtime.dispose(); return; }
       this.runtime = runtime;
       this.controls(root, host, runtime, active);
+      void this.review.show(root, { jobId, sha256: artifact.sha256, bytes: artifact.bytes }, controller.signal, active);
       setStatus('Drag to orbit · Right-drag to pan · Scroll to zoom');
       const EventType = this.doc.defaultView?.CustomEvent;
       if (EventType) this.doc.dispatchEvent(new EventType('workspace:assetactivity', { detail: { jobId, state: 'succeeded' } }));

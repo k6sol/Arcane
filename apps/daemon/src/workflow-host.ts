@@ -2,6 +2,7 @@ import { prepareWorkflowFileEvidence } from './workflow-evidence-builder.js';
 import { homedir } from 'node:os';
 import { ConversationWorkStore, type NativeConversation } from '../../../packages/storage/src/conversation-work-store.js';
 import { privateWorkflowReceiptStorage } from './workflow-private-storage.js';
+import type {AssetReviewReceiptAuthority} from './asset-review.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
@@ -262,7 +263,33 @@ class ReceiptKey {
     if (typeof receipt !== 'string' || !HASH.test(receipt)) return false;
     return timingSafeEqual(Buffer.from(this.tag(prepared, receipt.slice(0, 16), conversation), 'hex'), Buffer.from(receipt.slice(16), 'hex'));
   }
+  private modelReviewTag(value:unknown,nonce:string):string {
+    const current=this.read(!this.inSnapshot);
+    try{if(!timingSafeEqual(current,this.key))fail('WORKFLOW_RECEIPT_STORAGE');}finally{current.fill(0);}
+    return createHmac('sha256',this.key).update('arcane.asset-model-review.human-decision.v1\0')
+      .update(nonce).update('\0').update(canonical(value)).digest('hex').slice(0,48);
+  }
+  signModelReview(value:unknown):string {const nonce=randomBytes(8).toString('hex');return nonce+this.modelReviewTag(value,nonce);}
+  verifyModelReview(value:unknown,receipt:unknown):boolean {
+    if(typeof receipt!=='string'||!HASH.test(receipt))return false;
+    return timingSafeEqual(Buffer.from(this.modelReviewTag(value,receipt.slice(0,16)),'hex'),Buffer.from(receipt.slice(16),'hex'));
+  }
+  modelReviewDirectory():string {return this.directory;}
   close(): void { this.key.fill(0); }
+}
+
+/** Fixed domain and private storage only. No receipt format, caller-supplied key
+ * or signing operation is exposed by an HTTP/native/agent route. Existing
+ * workflow receipts keep their original domain and byte representation. */
+export function createAssetReviewReceiptAuthority(directory:string,projectId:string):AssetReviewReceiptAuthority {
+  const key=new ReceiptKey(directory,projectId);let closed=false;
+  const check=()=>{if(closed)fail('WORKFLOW_CLOSED');};
+  return Object.freeze({directory:key.modelReviewDirectory(),
+    sign(value:unknown){check();return key.signModelReview(value);},
+    verify(value:unknown,signature:unknown){check();return key.verifyModelReview(value,signature);},
+    withSnapshot<T>(evaluate:()=>T):T {check();return key.withSnapshot(evaluate);},
+    close(){if(!closed){closed=true;key.close();}},
+  });
 }
 function representation(command: Readonly<WorkflowHumanCommand>): WorkflowHumanRequest {
   const { receiptHash: _receipt, recipeGate, ...rest } = command;
