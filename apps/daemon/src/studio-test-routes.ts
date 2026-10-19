@@ -291,7 +291,7 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
     if (url.pathname !== PREFIX && !url.pathname.startsWith(PREFIX + '/') && !url.pathname.startsWith(NATIVE_ASSET_PREFIX + '/')) return false;
     const authorization = request.headers.authorization;
     const credential = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
-    let expired = false, disconnected = false, readingBody = false;
+    let expired = false, disconnected = false, readingBody = false, nativeInsertDispatched = false;
     const viewing = url.pathname === PREFIX + '/viewport';
     const nativeAsset = NATIVE_ASSET_ROUTES.get(url.pathname);
     const controller = new AbortController();
@@ -374,7 +374,10 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
           if (!service.requests.nativeAssets) fail('UNAVAILABLE');
           const input = record(value, nativeAsset.keys, nativeAsset.required);
           let result: unknown;
-          try { result = await service.requests.nativeAssets[nativeAsset.kind](input, initial.id); } catch (error) { throw nativeAssetRefusal(error); }
+          // Only the internal actual-call boundary marks a possible effect;
+          // entering the service or a pre-dispatch refusal does not mark it.
+          const scope={guard,signal:controller.signal,dispatched:()=>{if(nativeAsset.kind==='insert')nativeInsertDispatched=true;}};
+          try { result = await service.requests.nativeAssets[nativeAsset.kind](input, initial.id, scope); } catch (error) { throw nativeAssetRefusal(error); }
           guard();
           return result;
         }
@@ -400,7 +403,8 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
     } catch (error) {
       request.pause();
       const candidate = error instanceof Error && 'code' in error ? error.code : undefined;
-      const code = typeof candidate === 'string' && Object.hasOwn(ERRORS, candidate) ? candidate : 'UNAVAILABLE';
+      const known = typeof candidate === 'string' && Object.hasOwn(ERRORS, candidate) ? candidate : 'UNAVAILABLE';
+      const code = nativeInsertDispatched && (known === 'AUTH' || known === 'SCOPE' || known === 'TIMEOUT') ? 'NATIVE_ASSET_UNKNOWN' : known;
       const [status, message] = ERRORS[code]!;
       send(status, { error: code, message });
     } finally {

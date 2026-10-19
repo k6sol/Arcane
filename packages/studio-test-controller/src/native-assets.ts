@@ -207,6 +207,8 @@ export interface NativeAssetContext {
   decodeMode(result: CallToolResult): { mode: 'Edit' | 'Play' };
   /** Host-owned model-source choice, checked immediately before dispatch and after the call. */
   authorize?:()=>void;
+  /** Internal effect-boundary observation only; never supplied by model JSON. */
+  dispatched?:()=>void;
   scheduler?: Scheduler; requestTimeoutMs?: number;
 }
 export interface NativeAssetCall { result: CallToolResult | null; text: string; outcome: 'ok' | 'error' | 'timeout' }
@@ -242,11 +244,16 @@ export async function callNativeAssetTool(context: NativeAssetContext, name: Nat
   };
   const before = await context.verifyBinding(signal);
   await editMode(signal);
-  context.authorize?.();
   let call: NativeAssetCall;
   try {
-    const raw = await bounded(scheduler, options.timeoutMs, signal, inner => context.client.callTool({ name, arguments: { ...args, studio_id: context.nativeStudioId } },
-      CallToolResultSchema, { signal: inner, timeout: options.timeoutMs, maxTotalTimeout: options.timeoutMs, resetTimeoutOnProgress: false }));
+    const raw = await bounded(scheduler, options.timeoutMs, signal, inner => {
+      // bounded schedules its action in a microtask: retain fresh authority
+      // here, at the actual call boundary rather than before scheduling it.
+      context.authorize?.();
+      if(options.mutation)context.dispatched?.();
+      return context.client.callTool({ name, arguments: { ...args, studio_id: context.nativeStudioId } },
+        CallToolResultSchema, { signal: inner, timeout: options.timeoutMs, maxTotalTimeout: options.timeoutMs, resetTimeoutOnProgress: false });
+    });
     const result = parse(CallToolResultSchema, raw, 'BAD_NATIVE_RESPONSE');
     call = { result, text: resultText(result), outcome: result.isError ? 'error' : 'ok' };
   } catch (error) {

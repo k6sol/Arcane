@@ -53,7 +53,8 @@ const defaultReply: Reply = name => {
   if (name === 'wait_job_finished') return text(JSON.stringify({ status: 'completed' }));
   throw new Error('unexpected ' + name);
 };
-type Native = { mode: 'Edit' | 'Play'; calls: { name: string; args: Record<string, unknown> }[]; tools: Tool[]; reply: Reply; hang: string | null };
+type Native = { mode: 'Edit' | 'Play'; calls: { name: string; args: Record<string, unknown> }[]; tools: Tool[]; reply: Reply; hang: string | null;
+  beforeCall?: (name: string) => Promise<void> | void };
 async function nativeFixture(t: TestContext, changes: Partial<Native> = {}) {
   const state: Native = { mode: 'Edit', calls: [], tools: structuredClone(RECORDED), reply: defaultReply, hang: null, ...changes };
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -62,6 +63,7 @@ async function nativeFixture(t: TestContext, changes: Partial<Native> = {}) {
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: structuredClone(state.tools) }));
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const call = { name: request.params.name, args: request.params.arguments ?? {} }; state.calls.push(structuredClone(call));
+    await state.beforeCall?.(call.name);
     assert.ok(!['execute_luau', 'start_stop_play', 'upload_image', 'store_image'].includes(call.name), 'asset tools never run Luau, Play or uploads');
     if (call.name === 'list_roblox_studios') return text(JSON.stringify({ studios: [{ id: STUDIO, name: NAME }] }));
     assert.equal(call.args.studio_id, STUDIO);
@@ -212,7 +214,8 @@ test('native generation wait: bounded polls of wait_job_finished in seconds unti
   assert.ok(forever.state.calls.filter(call => call.name === 'wait_job_finished').length <= 8, 'bounded attempts');
 });
 
-async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play'; reply?: Reply; allowModels?:boolean;reviewedOriginal?:boolean } = {}) {
+async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play'; reply?: Reply; allowModels?:boolean;reviewedOriginal?:boolean;
+  beforeCall?: Native['beforeCall']; afterNativeClose?: () => void } = {}) {
   const root = makeFixtureDirectory('arcane-studio-assets-');
   const store = new StudioStore({ directory: join(root, 'store') });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
@@ -224,11 +227,11 @@ async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play';
   store.poll(pair.sessionId, proof);
   const natives: Awaited<ReturnType<typeof nativeFixture>>[] = [];
   const connect = async (): Promise<NativeTestConnection> => {
-    const native = await nativeFixture(t, options.reply ? { reply: options.reply } : {}); natives.push(native);
+    const native = await nativeFixture(t, { ...(options.reply ? { reply: options.reply } : {}), ...(options.beforeCall ? { beforeCall: options.beforeCall } : {}) }); natives.push(native);
     return { client: native.client, evidence: 'fixture', async witness() {
       const s = store.session(pair.sessionId);
       return { placeId: 0, universeId: 0, placeName: s.name, sessionId: s.id, clientLifetimeId: s.clientSessionId, pluginArtifactHash: ARTIFACT };
-    }, async close() {} };
+    }, async close() { options.afterNativeClose?.(); } };
   };
   const service = await createStudioTestService({ directory: join(root, 'service'), store, pluginArtifactHash: ARTIFACT, connect });
   if(options.allowModels!==false&&options.mode!=='Play')service.humanControl.toolboxPolicy({sessionId:pair.sessionId,allowModels:true},()=>{});
@@ -275,18 +278,18 @@ test('native asset service: Blender authoring policy refuses every Studio AI kin
  assert.equal(f.natives().length,0,'refusal cannot connect to Studio or consume a native generation');
 });
 
-async function routeFixture(t: TestContext, nativeAssets: NonNullable<StudioTestRouteService['requests']['nativeAssets']>, toolboxPolicy?:StudioTestRouteService['humanControl']['toolboxPolicy']) {
+async function routeFixture(t: TestContext, nativeAssets: NonNullable<StudioTestRouteService['requests']['nativeAssets']>, toolboxPolicy?:StudioTestRouteService['humanControl']['toolboxPolicy'], lifecycle: { actorCurrent?: () => boolean; closed?: () => void } = {}) {
   const refuse = async (): Promise<never> => { throw new Error('unused'); };
   const service: StudioTestRouteService = { requests: { prepare: refuse, status: refuse, list: refuse, cancel: refuse, nativeAssets },
     humanControl: { approve: refuse,...(toolboxPolicy?{toolboxPolicy}:{}) }, lifecycle: { async close() {} } };
-  const route = studioTestRoutes(service, request => request.headers.authorization === 'Bearer agent-token' ? { kind: 'agent', id: 'agent-fixture' } : request.headers.authorization === 'Bearer human-token' ? {kind:'human',id:'human'} : null);
+  const route = studioTestRoutes(service, request => lifecycle.actorCurrent?.() === false ? null : request.headers.authorization === 'Bearer agent-token' ? { kind: 'agent', id: 'agent-fixture' } : request.headers.authorization === 'Bearer human-token' ? {kind:'human',id:'human'} : null);
   let origin = '';
-  const server = createServer((request, response) => { void route(request, response, new URL(request.url ?? '/', origin), origin); });
+  const server = createServer((request, response) => { response.once('close',()=>lifecycle.closed?.()); void route(request, response, new URL(request.url ?? '/', origin), origin); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = 'http://127.0.0.1:' + (server.address() as { port: number }).port;
   t.after(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
-  return (path: string, body: unknown, human=false,withOrigin=true) => new Promise<{ status: number; json: any }>((resolve, reject) => {
-    const outgoing = httpRequest(origin + path, { method: 'POST', agent: false, headers: { Authorization: human?'Bearer human-token':'Bearer agent-token', 'Content-Type': 'application/json',...(human&&withOrigin?{Origin:origin}:{}) } }, response => {
+  return (path: string, body: unknown, human=false,withOrigin=true,signal?:AbortSignal) => new Promise<{ status: number; json: any }>((resolve, reject) => {
+    const outgoing = httpRequest(origin + path, { method: 'POST', agent: false, ...(signal?{signal}:{}), headers: { Authorization: human?'Bearer human-token':'Bearer agent-token', 'Content-Type': 'application/json',...(human&&withOrigin?{Origin:origin}:{}) } }, response => {
       const chunks: Buffer[] = []; response.on('data', chunk => chunks.push(chunk)); response.once('end', () => resolve({ status: response.statusCode!, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
     });
     outgoing.once('error', reject); outgoing.end(JSON.stringify(body));
@@ -541,4 +544,100 @@ test('template sources: an authenticated original-reconstruction placement recei
  assert.equal(f.store.poll(sessionId,f.proof)[0]!.id,command.id);
  const other=clonedForest(sessionId,'forged-template');other.args.templates=[{...ref,instanceId:'other-model'}];
  assert.throws(()=>f.store.enqueue(other),{code:'TEMPLATE_SOURCE'});
+});
+
+// These use real route/service/controller/MCP code with disposable HTTP and
+// scripted native peers. They do not start Studio or assert engine acceptance.
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const fence of ['retirement', 'disconnect'] as const) test(`native lifecycle: ${fence} before dispatch prevents insertion`, {timeout: 10_000}, async t => {
+  const entered = deferred(), release = deferred(), settled = deferred(), disconnected = deferred();
+  let inserting = false, paused = false, actorCurrent = true;
+  t.after(() => release.resolve());
+  const f = await serviceFixture(t, { beforeCall: async name => {
+    if (inserting && !paused && name === 'get_studio_state') { paused = true; entered.resolve(); await release.promise; }
+  } });
+  await f.assets.search({sessionId:f.pair.sessionId,query:'oak'}, 'agent-fixture');
+  f.watch('lifecycle-before-' + fence);
+  const assets = { ...f.assets, async insert(...args: Parameters<typeof f.assets.insert>) {
+    try { return await f.assets.insert(...args); } finally { settled.resolve(); }
+  } };
+  const post = await routeFixture(t, assets, undefined, {actorCurrent:()=>actorCurrent,closed:()=>disconnected.resolve()});
+  const abort = new AbortController();
+  inserting = true;
+  const response = post('/v1/studio-native/asset-insert', {sessionId:f.pair.sessionId,assetId:'1001',watch:'lifecycle-before-' + fence}, false, true, abort.signal)
+    .then(value => ({value,error:null}), error => ({value:null,error}));
+  await entered.promise;
+  if (fence === 'retirement') actorCurrent = false;
+  else { abort.abort(); await disconnected.promise; }
+  release.resolve();
+  const outcome = await response;
+  await settled.promise;
+  assert.equal(f.natives().flatMap(n=>assetNames(n.state.calls)).filter(name=>name==='insert_asset').length, 0);
+  assert.equal(f.store.commands(f.pair.sessionId).filter(c=>c.method==='scene.place_asset').length, 0);
+  if (fence === 'retirement') {
+    assert.equal(outcome.value?.status, 401);
+    assert.equal(outcome.value?.json.error, 'AUTH', 'a refused pre-dispatch request stays definite because the native call never began');
+  } else assert.ok(outcome.error, 'the disposable client observed its own abort');
+});
+
+for (const fence of ['after-dispatch', 'during-close'] as const) test(`native lifecycle: retirement ${fence} preserves an unknown insertion outcome`, {timeout: 10_000}, async t => {
+  let inserting = false, actorCurrent = true;
+  const f = await serviceFixture(t, {
+    reply: (name,args) => { if (inserting && fence === 'after-dispatch' && name === 'insert_asset') actorCurrent = false; return defaultReply(name,args); },
+    afterNativeClose: () => { if (inserting && fence === 'during-close') actorCurrent = false; },
+  });
+  await f.assets.search({sessionId:f.pair.sessionId,query:'oak'}, 'agent-fixture');
+  f.watch('lifecycle-after-' + fence);
+  const post = await routeFixture(t, f.assets, undefined, {actorCurrent:()=>actorCurrent});
+  inserting = true;
+  const outcome = await post('/v1/studio-native/asset-insert', {sessionId:f.pair.sessionId,assetId:'1001',watch:'lifecycle-after-' + fence});
+  assert.equal(outcome.status, 409);
+  assert.equal(outcome.json.error, 'NATIVE_ASSET_UNKNOWN');
+  assert.equal(f.natives().flatMap(n=>assetNames(n.state.calls)).filter(name=>name==='insert_asset').length, 1);
+  assert.equal(f.store.commands(f.pair.sessionId).filter(c=>c.method==='scene.place_asset').length, 0);
+});
+
+for (const refusal of ['unknown', 'denied'] as const) test(`MCP native lifecycle: ${refusal} insertion never replays or adopts without a live receipt`, async t => {
+  const posts: {path:string;method?:string}[] = [];
+  const sessionId = 'paired-lifecycle', parent = {instanceId:'lifecycle-parent',sessionId,root:'ServerStorage',pathSegments:['Templates'],className:'Folder'};
+  const daemon = createServer((request,response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk=>chunks.push(chunk));
+    request.once('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      posts.push({path:request.url!,method:body.method});
+      let status = 200, reply: unknown;
+      if (request.url === '/v1/studio/commands' && body.method === 'scene.asset_watch') reply = {command:{protocolVersion:1,id:'lifecycle-watch-command',requestId:body.requestId,sessionId,clientSessionId:'lifecycle-plugin',method:body.method,args:body.args,
+        allowedRoots:['Workspace','ServerStorage'],allowWrites:true,leaseEpoch:1,expiresAt:new Date(Date.now()+60_000).toISOString(),state:'succeeded',createdAt:new Date().toISOString(),finishedAt:new Date().toISOString(),result:{watch:'lifecycle-watch',expiresInSeconds:600},error:null}};
+      else if (request.url === '/v1/studio-native/asset-insert') {
+        status = refusal === 'unknown' ? 409 : 403;
+        reply = {error:refusal === 'unknown'?'NATIVE_ASSET_UNKNOWN':'TOOLBOX_MODELS_DISABLED',message:refusal === 'unknown'?'The native insert may have applied.':'Toolbox models are off.'};
+      } else { status = 500; reply = {error:'UNEXPECTED',message:'No adoption or replay is authorized in this fixture.'}; }
+      response.writeHead(status, {'Content-Type':'application/json'}); response.end(JSON.stringify(reply));
+    });
+  });
+  await new Promise<void>(resolve=>daemon.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise<void>(resolve=>{daemon.closeAllConnections();daemon.close(()=>resolve());}));
+  const client = new DaemonClient({url:'http://127.0.0.1:'+(daemon.address() as {port:number}).port,token:'lifecycle-fixture-agent',pollIntervalMs:5});
+  const server = createMcpServer({client,projectRoot:process.cwd()});
+  const [clientTransport,serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({name:'fixture-native-lifecycle',version:'fixture-only'},{capabilities:{}});
+  await server.connect(serverTransport); await mcp.connect(clientTransport);
+  t.after(async()=>{await mcp.close();await server.close();});
+  const result = CallToolResultSchema.parse(await mcp.callTool({name:'studio_asset_insert',arguments:{sessionId,assetId:'1001',parent,name:'Oak',position:[0,0,0]}}));
+  assert.equal(result.isError,true);
+  const value = result.structuredContent as {error:{code:string};insert?:{sessionId:string;assetId:string;watch:string;acknowledgement:string};adoption?:string;nextStep?:string};
+  assert.equal(value.error.code,refusal==='unknown'?'NATIVE_ASSET_UNKNOWN':'TOOLBOX_MODELS_DISABLED');
+  if (refusal === 'unknown') {
+    assert.equal(value.insert?.acknowledgement,'unknown');
+    assert.deepEqual(value.insert,{sessionId,assetId:'1001',watch:'lifecycle-watch',acknowledgement:'unknown'});
+    assert.equal(value.adoption,'not_started');
+    assert.match(value.nextStep!,/Do not repeat insertion or adopt automatically/);
+  } else assert.equal(value.insert,undefined,'a definite pre-effect refusal remains definite');
+  assert.deepEqual(posts,[{path:'/v1/studio/commands',method:'scene.asset_watch'},{path:'/v1/studio-native/asset-insert',method:undefined}]);
 });

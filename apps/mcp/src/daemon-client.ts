@@ -226,14 +226,18 @@ export class DaemonClient {
     } finally { deadline.dispose(); }
   }
 
-  /** Native Studio asset tools (search/insert/generate/job). A 4xx is a definite daemon refusal with a
-   * fixed message; any other failure after sending leaves the native effect unknown. Never retried here. */
+  /** Native Studio asset tools. Explicit unknown insertion outcomes remain
+   * ambiguous even when the bounded daemon error uses HTTP409. Never retried. */
   async nativeAsset<T>(kind: 'search' | 'insert' | 'generate' | 'job', body: object, schema: z.ZodType<T>, options: WaitOptions = {}): Promise<T> {
     const deadline = this.deadline(options);
     try {
       const parsed = schema.safeParse(await this.http('/v1/studio-native/asset-' + kind, deadline.signal, body));
       if (!parsed.success) throw new BridgeError('PROTOCOL', 'Daemon returned an invalid native asset record.');
       return parsed.data;
+    } catch (error) {
+      if (kind === 'insert' && error instanceof BridgeError && error.code === 'NATIVE_ASSET_UNKNOWN')
+        throw new BridgeError(error.code, error.message, false);
+      throw error;
     } finally { deadline.dispose(); }
   }
 

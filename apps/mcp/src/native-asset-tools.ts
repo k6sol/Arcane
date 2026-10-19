@@ -118,8 +118,13 @@ export function registerNativeAssetTools(server: McpServer, client: DaemonClient
         insert = (await client.nativeAsset('insert', { sessionId: a.sessionId, ...(a.nativeStudioId ? { nativeStudioId: a.nativeStudioId } : {}), assetId: a.assetId, category: a.category, watch },
           insertResponse(a.sessionId, a.assetId), { timeoutMs: Math.min(35_000, Math.max(5000, deadlineLeft(started, a.timeoutMs) - 15_000)), signal: extra.signal })).insert;
       } catch (error) {
-        // A definite daemon refusal means nothing was inserted; anything else may have inserted, so still try to adopt it.
+        // A definite refusal is distinct from an uncertain native effect. An
+        // uncertain reply may reflect revoked request authority: never adopt
+        // broadly or repeat insertion after losing the original live receipt.
         if (error instanceof BridgeError && error.rejected) throw error;
+        return success(client, { insert: { sessionId:a.sessionId,assetId:a.assetId,watch,acknowledgement: 'unknown' }, adoption: 'not_started',
+          error: { code: 'NATIVE_ASSET_UNKNOWN', message: 'The native insertion may have applied, but no live insertion receipt was confirmed.' },
+          nextStep: 'Inspect the scene with scene_search or studio_viewport_capture before deciding what to do. Do not repeat insertion or adopt automatically; the original request authority may have ended.' }, true);
       }
       const expectName = (insert as { assetName?: string } | null)?.assetName;
       const outcome = await client.execute(a.sessionId, 'scene.place_asset', placementArgs(watch, a, expectName),

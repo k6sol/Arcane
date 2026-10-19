@@ -27,6 +27,8 @@ export interface NativeAssetDependencies{
   /** True while a playtest, preparation or viewport capture owns the native connection. */
   busy():boolean;
 }
+/** Internal HTTP lifecycle only. No field is accepted in tool/request JSON. */
+export interface NativeAssetRequestScope { guard():void; signal:AbortSignal; dispatched():void }
 
 /** Native asset search/insert/generation for the exact paired Edit session. The built-in tools
  * run only after a fresh mapping witness and Edit-mode check, which are repeated afterwards. */
@@ -49,10 +51,12 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
   };
   const idle=()=>{if(active||deps.busy())rejected('BUSY');};
   const actorOk=(actor:string)=>{if(!/^[A-Za-z0-9_-]{1,128}$/.test(actor))rejected('HUMAN_AUTH_REQUIRED');};
+  const current=(request?:NativeAssetRequestScope)=>{request?.guard();request?.signal.throwIfAborted();};
   const watched=(session:Session,watch:string)=>deps.store.commands(session.id).some(command=>command.method==='scene.asset_watch'&&command.state==='succeeded'
     &&command.finishedAt!==null&&Date.now()-Date.parse(command.finishedAt)<=600_000&&(command.result as {watch?:unknown}|null)?.watch===watch);
   /** Bracket one operation with the exact paired session's native binding. */
-  const withNative=async<T>(sessionId:string,requested:string|undefined,deadlineMs:number,action:(context:NativeAssetContext,session:Session,nativeStudioId:string,signal:AbortSignal)=>Promise<T>,policy:()=>void=()=>{}):Promise<T>=>{
+  const withNative=async<T>(sessionId:string,requested:string|undefined,deadlineMs:number,action:(context:NativeAssetContext,session:Session,nativeStudioId:string,signal:AbortSignal)=>Promise<T>,policy:()=>void=()=>{},request?:NativeAssetRequestScope):Promise<T>=>{
+    current(request);
     if(active||deps.busy())rejected('BUSY');
     const session=deps.eligible(sessionId),p=session.proof;
     if(!p||!p.connected||p.pluginArtifactHash!==deps.pluginArtifactHash||Date.parse(p.expiresAt)<=Date.now())rejected('STALE_PROOF');
@@ -60,9 +64,10 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
     active=true;let connection:NativeTestConnection|undefined;
     try{
       connection=await deps.connect();
+      current(request);
       if(deps.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');
-      const native=connection,signal=AbortSignal.timeout(deadlineMs);
-      const inventory=decodeTestInventory(await native.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{timeout:5000,maxTotalTimeout:5000})) as {id:string;name:string}[];
+      const native=connection,timeout=AbortSignal.timeout(deadlineMs),signal=request?AbortSignal.any([timeout,request.signal]):timeout;
+      const inventory=decodeTestInventory(await native.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{signal,timeout:5000,maxTotalTimeout:5000})) as {id:string;name:string}[];
       const candidates=requested?inventory.filter(s=>s.id===requested):inventory.filter(s=>s.name===session.name);
       if(candidates.length!==1)rejected('BINDING_CHANGED');
       const nativeStudioId=candidates[0]!.id,scope=deps.identity(session);
@@ -73,7 +78,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
         if(witness.placeId!==0||witness.universeId!==s.universeId||witness.sessionId!==s.id||witness.clientLifetimeId!==s.clientSessionId||witness.pluginArtifactHash!==deps.pluginArtifactHash)rejected('BINDING_CHANGED');
         return digest({scope,nativeStudioId,clientLifetimeId:proof.clientLifetimeId,playEpoch:proof.playEpoch,markerName:proof.markerName});
       };
-      const context:NativeAssetContext={client:native.client,nativeStudioId,verifyBinding,authorize:policy,decodeMode:decodeTestMode,...(deps.fixtureScheduler?{scheduler:deps.fixtureScheduler}:{})};
+      const context:NativeAssetContext={client:native.client,nativeStudioId,verifyBinding,authorize:()=>{current(request);policy();},...(request?{dispatched:request.dispatched}:{}),decodeMode:decodeTestMode,...(deps.fixtureScheduler?{scheduler:deps.fixtureScheduler}:{})};
       return await action(context,session,nativeStudioId,signal);
     }finally{active=false;if(connection)await connection.close().catch(()=>{});}
   };
@@ -93,8 +98,8 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
       return {sessionId:s.id,allowModels:modelsAllowed(s.id)};
     },
     /** Read-only Creator Store/inventory search: free results only, bounded pages. */
-    async search(input:unknown,actor:string){
-      actorOk(actor);const a=nativeAssetSearchSchema.parse(input);if(a.category!=='Audio')requireModels(a.sessionId);prune();idle();admit('search');
+    async search(input:unknown,actor:string,request?:NativeAssetRequestScope){
+      actorOk(actor);current(request);const a=nativeAssetSearchSchema.parse(input);if(a.category!=='Audio')requireModels(a.sessionId);prune();idle();admit('search');
       return withNative(a.sessionId,a.nativeStudioId,DEADLINE.search,async(context,session,nativeStudioId,signal)=>{
         const found=await searchNativeAssets(context,a,signal);
         // Audio ids are Sound.SoundId values only; they never become insertable.
@@ -103,28 +108,28 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
           while(searched.size>NATIVE_ASSET_RATE.searchedIds)searched.delete(searched.keys().next().value!);
         }
         return {search:{sessionId:session.id,nativeStudioId,query:a.query,category:a.category,page:a.page,pageSize:a.pageSize,results:found.results,hasMore:found.hasMore}};
-      },()=>{if(a.category!=='Audio')requireModels(a.sessionId);});
+      },()=>{if(a.category!=='Audio')requireModels(a.sessionId);},request);
     },
     /** Insert one previously searched free asset; the plugin adopts it under the armed watch. */
-    async insert(input:unknown,actor:string){
-      actorOk(actor);const a=nativeAssetInsertSchema.parse(input);requireModels(a.sessionId);prune();
+    async insert(input:unknown,actor:string,request?:NativeAssetRequestScope){
+      actorOk(actor);current(request);const a=nativeAssetInsertSchema.parse(input);requireModels(a.sessionId);prune();
       if((searched.get(a.sessionId+':'+actor+':'+a.assetId)??0)<=Date.now())throw new NativeAssetHostRefusal('ASSET_NOT_SEARCHED');
       if(!watched(deps.eligible(a.sessionId),a.watch))throw new NativeAssetHostRefusal('ASSET_WATCH_REQUIRED');
       idle();admit('insert');
       return withNative(a.sessionId,a.nativeStudioId,DEADLINE.insert,async(context,session,nativeStudioId,signal)=>{
         const inserted=await insertNativeAsset(context,a,signal);
         return {insert:{sessionId:session.id,nativeStudioId,assetId:a.assetId,assetName:inserted.assetName,acknowledgement:inserted.outcome}};
-      },()=>requireModels(a.sessionId));
+      },()=>requireModels(a.sessionId),request);
     },
-    async generate(input:unknown,actor:string):Promise<never>{
-      actorOk(actor);nativeAssetGenerateSchema.parse(input);
+    async generate(input:unknown,actor:string,request?:NativeAssetRequestScope):Promise<never>{
+      actorOk(actor);current(request);nativeAssetGenerateSchema.parse(input);
       // Geometry, UVs, textures and PBR are authored locally; this policy is
       // enforced before connecting to Studio, including direct HTTP callers.
       throw new NativeAssetHostRefusal('BLENDER_REQUIRED');
     },
     /** Bounded wait on one caller-owned generation job; never restarts it. */
-    async job(input:unknown,actor:string){
-      actorOk(actor);const a=jobInput.parse(input);prune();
+    async job(input:unknown,actor:string,request?:NativeAssetRequestScope){
+      actorOk(actor);current(request);const a=jobInput.parse(input);prune();
       const job=jobs.get(a.jobId);
       if(!job||!(actor==='human'||actor===job.actor))throw new NativeAssetHostRefusal('ASSET_JOB_NOT_FOUND');
       if(job.state!=='running'||!job.nativeJobId)return view(job);
@@ -132,7 +137,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
         if(nativeStudioId!==job.nativeStudioId)rejected('BINDING_CHANGED');
         const waited=await waitNativeJob(context,job.nativeJobId!,18_000,signal);job.state=waited.state;job.refusal=waited.refusal;
         return view(job);
-      });
+      },()=>{},request);
     },
   });
 }
