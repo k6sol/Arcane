@@ -20,6 +20,10 @@ For realism use authored meshes with branch structure, irregular crowns and cohe
 For explicitly stylized/blockout work, multi-part prototypes can express Pine (tapered trunk, layered crown), Oak (branching trunk, broad irregular crown), and Birch (slender pale trunk, dark marks, light crown).
 Keep trunks collidable and decorative foliage non-colliding; small leaves CastShadow false. Use original fern, grass, log and rock variants for realistic undergrowth, concentrated by ecology and routes rather than uniform debris.
 
+## Tree anatomy review
+Review the leafless model in neutral front, side and three-quarter views, plus root and fork closeups. Match the reference silhouette with a gradually tapered, crooked trunk, staggered boughs, intermediate branches and finer terminal twigs. Keep branch thickness continuous through forks and blend grounded, uneven root flares into the trunk. Repair sharp junction lips, abrupt cone bases, repeated tiers and hair-thin branches at their source before adding leaves or bark detail.
+Keep the tree alone in these previews; do not add people, mannequins or human scale figures. Then review the actual textured canopy and exported mesh at the intended viewing distance. Technical validation and attractive lighting do not establish reference fidelity.
+
 ## Placement
 Use scene_build prototypes/templates + scatter (Poisson-disk) per layer and a fixed seed. Group Trees, Undergrowth and Rocks separately; budget includes every clone's contents.
 Never use rings, grids, rows, evenly stepped angles or one shared radius.
