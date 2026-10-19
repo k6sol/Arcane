@@ -40,7 +40,10 @@ def pattern(profile, phases, u, v):
     return height, clamp(.6 * height + .25 * broad + .15 * fine)
 
 
-def author_surfaces(request, directory, objects):
+def author_surfaces(request, directory, objects, *, normal_relief=.035):
+    # Trusted generator composition only; public recipes expose bounded profiles/resolutions.
+    if isinstance(normal_relief, bool) or not isinstance(normal_relief, (int, float)) or not math.isfinite(normal_relief) or not .001 <= normal_relief <= .035:
+        raise ValueError("Generated normal relief is outside its trusted bound")
     for obj in objects:
         if not obj.data.uv_layers or len(obj.data.uv_layers) != 1:
             raise ValueError("Textured parts require exactly one generated UV layer")
@@ -63,7 +66,7 @@ def author_surfaces(request, directory, objects):
                 height, variation = pattern(profile, phases, u, v)
                 dx = (pattern(profile, phases, u + step, v)[0] - pattern(profile, phases, u - step, v)[0]) / (2 * step)
                 dy = (pattern(profile, phases, u, v + step)[0] - pattern(profile, phases, u, v - step)[0]) / (2 * step)
-                nx, ny = -dx * .035, -dy * .035
+                nx, ny = -dx * normal_relief, -dy * normal_relief
                 length = math.sqrt(nx * nx + ny * ny + 1)
                 pixels["baseColor"].extend([srgb(clamp(channel * (.65 + .5 * variation))) for channel in data["color"]] + [1])
                 pixels["normal"].extend([nx / length * .5 + .5, ny / length * .5 + .5, .5 / length + .5, 1])

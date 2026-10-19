@@ -78,6 +78,10 @@ function multiply(a: number[], b: number[]): number[] {
 }
 function sourceKeys(request: AssetRequest, role: 'render' | 'collision'): string[] {
   if (request.recipe) return request.recipe.parts.filter(p => p.role === role).map(p => p.name).sort();
+  if (request.procedural) {
+    if (role === 'collision') return ['proxy'];
+    return request.procedural.kind === 'tree' ? ['bark', 'leaves'] : [request.procedural.kind === 'column' ? 'stone' : request.procedural.kind === 'rock' ? 'rock' : 'foliage'];
+  }
   if (request.template === 'environment-kit') return ['floor', 'pillar', 'step', 'wall'];
   return role === 'collision' ? ['body_proxy'] : ['body', 'handle', 'handle_support0', 'handle_support1', 'lid', 'plaque', 'post0', 'post1', 'post2', 'post3'];
 }

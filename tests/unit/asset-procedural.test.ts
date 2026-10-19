@@ -98,9 +98,12 @@ test('procedural manifests hash the bundled generator into the template digest',
 test('assets_procedural maps typed generator input onto the shared start body', () => {
   const input = proceduralInput.parse({ name: 'pine-a', generator: { kind: 'tree', species: 'pine', height: 14, leafDensity: 0.9 }, seed: 3 });
   const body = proceduralStartBody(input);
-  assert.deepEqual(body, { template: 'procedural', name: 'pine-a', seed: 3, procedural: { kind: 'tree', species: 'pine', height: 14, leafDensity: 0.9 } });
+  assert.deepEqual(body, { template: 'procedural', name: 'pine-a', seed: 3, procedural: { kind: 'tree', finish: 'natural', species: 'pine', height: 14, leafDensity: 0.9 } });
   assert.equal(assetInput.safeParse(body).success, true);
   assert.equal(normalizeRequest(body).procedural!.kind, 'tree');
+  assert.equal(normalizeRequest(body).procedural!.finish, 'natural');
+  assert.equal(proceduralInput.parse({name:'plain-rock',generator:{kind:'rock',finish:'flat'}}).generator.finish,'flat');
+  assert.equal(proceduralInput.safeParse({name:'external-rock',generator:{kind:'rock',finish:'download'}}).success,false);
   for (const bad of [{ name: 'x', generator: { kind: 'tree', code: 'import os' } }, { name: 'x', generator: { kind: 'python' } }, { name: 'x', generator: { kind: 'rock' }, triangleBudget: 30000 }])
     assert.equal(proceduralInput.safeParse(bad).success, false, JSON.stringify(bad));
 });

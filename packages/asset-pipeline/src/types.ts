@@ -16,11 +16,12 @@ export interface AssetFailureDiagnostic {
 export interface AssetJobError { code: string; message: string; diagnostic?: AssetFailureDiagnostic }
 export type AssetTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' | 'procedural';
 /** Typed parameters for the bundled Blender generators (see procedural.ts). */
-export type ProceduralSpec =
+export type ProceduralFinish = 'natural' | 'flat';
+export type ProceduralSpec = (
   | { kind: 'tree'; species: 'pine' | 'oak' | 'birch' | 'palm'; height: number; trunkTaper: number; branchLevels: number; leafDensity: number; trunkRadius: number | null; secondaryColor: Vec3 }
   | { kind: 'rock'; size: Vec3; roughness: number }
   | { kind: 'column'; radius: number; height: number; flutes: number; base: 'none' | 'plinth' | 'attic'; capital: 'none' | 'doric' | 'ionic' | 'corinthian' }
-  | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number };
+  | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number }) & { finish?: ProceduralFinish };
 export interface AssetInput {
   template: AssetTemplate;
   name: string;

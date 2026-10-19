@@ -91,7 +91,9 @@ class GeneratorContract(unittest.TestCase):
         self.assertFalse(names & {"eval", "exec", "compile", "open", "__import__", "getattr", "globals"})
         imported = {alias.name.split(".")[0] for node in ast.walk(tree_ast) if isinstance(node, (ast.Import, ast.ImportFrom))
                     for alias in node.names} | {node.module for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module}
-        self.assertLessEqual(imported, {"math", "random", "bpy", "bmesh"})
+        self.assertLessEqual(imported, {"math", "random", "bpy", "bmesh", "textures", "author_surfaces"})
+        texture_imports = [node for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module == "textures"]
+        self.assertEqual([[alias.name for alias in node.names] for node in texture_imports], [["author_surfaces"]])
 
 
 if __name__ == "__main__":

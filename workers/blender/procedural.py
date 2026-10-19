@@ -22,7 +22,7 @@ def tube_triangles(sides, rings, tip):
 
 
 def leaf_triangles():
-    return 8
+    return 12
 
 
 def lathe_triangles(segments, rings):
@@ -90,14 +90,25 @@ class MeshData:
         self.vertices = []
         self.faces = []
         self.smooth = []
+        self.uvs = []
 
     def vertex(self, co):
         self.vertices.append((float(co[0]), float(co[1]), float(co[2])))
         return len(self.vertices) - 1
 
-    def face(self, indices, smooth=True):
+    def face(self, indices, smooth=True, uvs=None):
         self.faces.append(tuple(indices))
         self.smooth.append(smooth)
+        if uvs is None:
+            # Planar caps/boxes: pick the projection with the largest signed area.
+            points = [self.vertices[index] for index in indices]
+            normal = cross(sub(points[1], points[0]), sub(points[2], points[0]))
+            axis = max(range(3), key=lambda k: abs(normal[k]))
+            a, b = [k for k in range(3) if k != axis]
+            low = [min(p[k] for p in points) for k in (a, b)]
+            span = [max(p[k] for p in points) - low[n] for n, k in enumerate((a, b))]
+            uvs = [((p[a] - low[0]) / max(span[0], 1e-9), (p[b] - low[1]) / max(span[1], 1e-9)) for p in points]
+        self.uvs.append(tuple(uvs))
 
     def triangles(self):
         return sum(len(f) - 2 for f in self.faces)
@@ -112,6 +123,10 @@ class MeshData:
             b = spine[min(len(spine) - 1, i + 1)]
             tangents.append(norm(sub(b, a)))
         normal = perpendicular(tangents[0])
+        distances = [0.0]
+        for a, b in zip(spine, spine[1:]):
+            distances.append(distances[-1] + math.dist(a, b))
+        distance = max(distances[-1], 1e-9)
         rings = []
         last = len(spine) - (1 if tip else 0)
         for i in range(last):
@@ -131,37 +146,44 @@ class MeshData:
                 offset = add(mul(normal, math.cos(theta) * r), mul(binormal, math.sin(theta) * r))
                 ring.append(self.vertex(add(spine[i], offset)))
             rings.append(ring)
-        for a, b in zip(rings, rings[1:]):
+        for index, (a, b) in enumerate(zip(rings, rings[1:])):
             for j in range(sides):
                 k = (j + 1) % sides
-                self.face((a[j], a[k], b[k], b[j]))
+                self.face((a[j], a[k], b[k], b[j]), uvs=((j / sides, distances[index] / distance), ((j + 1) / sides, distances[index] / distance),
+                          ((j + 1) / sides, distances[index + 1] / distance), (j / sides, distances[index + 1] / distance)))
         self.face(tuple(reversed(rings[0])), smooth=False)
         if tip:
             apex = self.vertex(spine[-1])
             top = rings[-1]
             for j in range(sides):
-                self.face((top[j], top[(j + 1) % sides], apex))
+                self.face((top[j], top[(j + 1) % sides], apex), uvs=((j / sides, distances[len(rings) - 1] / distance),
+                          ((j + 1) / sides, distances[len(rings) - 1] / distance), ((j + .5) / sides, 1.0)))
         else:
             self.face(tuple(rings[-1]), smooth=False)
 
     def leaf(self, base, axis, face_normal, length, width, thickness):
-        """Thin closed diamond slab (8 triangles): a leaf or needle-spray card."""
+        """Closed curved lanceolate leaf, with a continuous rim and explicit mirrored vein UVs.
+
+        Six rim samples replace the old four-corner diamond. A cupped centre and gently
+        curled tip read in silhouette; front/back share UV0 and remain opaque/manifold.
+        """
         axis = norm(axis)
         side = cross(axis, face_normal)
         side = norm(side) if dot(side, side) > 1e-6 else perpendicular(axis)
         up = norm(cross(side, axis))
-        mid = add(base, mul(axis, length * 0.42))
-        tip = add(base, mul(axis, length))
-        left = add(mid, mul(side, width * 0.5))
-        right = add(mid, mul(side, -width * 0.5))
-        # Gentle cup: the centre ridge rises, so the card reads as curved.
-        top = add(add(base, mul(axis, length * 0.45)), mul(up, thickness * 0.5 + length * 0.04))
-        bottom = add(add(base, mul(axis, length * 0.45)), mul(up, -thickness * 0.5 + length * 0.04))
-        v = [self.vertex(p) for p in (base, left, tip, right, top, bottom)]
-        b, l, t, r, hi, lo = v
-        for a, c in ((b, l), (l, t), (t, r), (r, b)):
-            self.face((a, c, hi))
-            self.face((c, a, lo))
+        rim = [(0, 0), (.32, .5), (.72, .38), (1, 0), (.72, -.38), (.32, -.5)]
+        indices, uv = [], []
+        for t, across in rim:
+            curl = length * (.025 * t ** 3 - .008 * math.sin(math.pi * t))
+            point = add(add(add(base, mul(axis, length * t)), mul(side, width * across)), mul(up, curl))
+            indices.append(self.vertex(point))
+            uv.append((abs(across), t))
+        centre = add(add(base, mul(axis, length * .46)), mul(up, length * .012))
+        hi, lo = self.vertex(add(centre, mul(up, thickness * .5))), self.vertex(add(centre, mul(up, -thickness * .5)))
+        for n, a in enumerate(indices):
+            k = (n + 1) % len(indices)
+            self.face((a, indices[k], hi), uvs=(uv[n], uv[k], (0, .46)))
+            self.face((indices[k], a, lo), uvs=(uv[k], uv[n], (0, .46)))
 
     def lathe(self, profile, segments, modulate=None):
         """Closed surface of revolution around +Z; profile is [(radius, z)] bottom->top."""
@@ -173,10 +195,12 @@ class MeshData:
                 r = radius * (modulate(index, z, theta) if modulate else 1.0)
                 ring.append(self.vertex((math.cos(theta) * r, math.sin(theta) * r, z)))
             rings.append(ring)
-        for a, b in zip(rings, rings[1:]):
+        z0, z1 = profile[0][1], profile[-1][1]
+        for index, (a, b) in enumerate(zip(rings, rings[1:])):
             for j in range(segments):
                 k = (j + 1) % segments
-                self.face((a[j], a[k], b[k], b[j]))
+                v0, v1 = (profile[index][1] - z0) / max(z1 - z0, 1e-9), (profile[index + 1][1] - z0) / max(z1 - z0, 1e-9)
+                self.face((a[j], a[k], b[k], b[j]), uvs=((j / segments, v0), ((j + 1) / segments, v0), ((j + 1) / segments, v1), (j / segments, v1)))
         self.face(tuple(reversed(rings[0])), smooth=False)
         self.face(tuple(rings[-1]), smooth=False)
 
@@ -253,7 +277,7 @@ def plan_tree(params, seed, budget_total):
     trunk_sides = 12
     lean = (rng.uniform(-1, 1) * (0.18 if species == "palm" else 0.04), rng.uniform(-1, 1) * (0.18 if species == "palm" else 0.04), 1)
     if species == "oak":
-        trunk_length = height * rng.uniform(0.42, 0.5)
+        trunk_length = height * rng.uniform(0.43, 0.48)
     else:
         trunk_length = height * (0.98 if species != "palm" else 0.94)
     trunk = spine_points((0.0, 0.0, 0.0), lean, trunk_length, trunk_steps, rng, 0.05 if species != "pine" else 0.015, 0.0)
@@ -265,7 +289,7 @@ def plan_tree(params, seed, budget_total):
     trunk_radii = [radius_at(base_radius, i / trunk_steps) for i in range(trunk_steps + 1)]
     if species == "palm":
         trunk_radii = [r * (1.0 + 0.06 * ((i % 2) * 2 - 1)) for i, r in enumerate(trunk_radii)]
-    tip = species in ("pine", "birch")
+    tip = species != "palm"
 
     def flare(i, theta):
         # Buttress roots at the base: lobed and widened over the first rings.
@@ -284,34 +308,39 @@ def plan_tree(params, seed, budget_total):
             return children
         count = {1: 9, 2: 5, 3: 4}[level] if species != "pine" else {1: 22, 2: 4, 3: 3}[level]
         if species == "oak" and level == 1:
-            count = rng.randint(4, 6)
+            count = 7
         start_t = spec["crown"] if level == 1 else 0.25
         sides = {1: 7, 2: 5, 3: 4}[level]
         steps = {1: 5, 2: 4, 3: 3}[level]
         for n in range(count):
             t = start_t + (1 - start_t) * ((n + rng.uniform(0.15, 0.85)) / count)
             if species == "oak" and level == 1:
-                t = 1.0 - rng.uniform(0.0, 0.12)
+                # Stagger substantial limbs along the upper trunk, rather than a single umbrella joint.
+                t = .48 + .5 * ((n + rng.uniform(.2, .8)) / count)
             index = min(len(points) - 2, int(t * (len(points) - 1)))
             frac = t * (len(points) - 1) - index
             origin = add(points[index], mul(sub(points[index + 1], points[index]), frac))
             parent_dir = norm(sub(points[index + 1], points[index]))
             parent_radius = radii[index] * (1 - frac) + radii[index + 1] * frac
-            yaw = (n * 2.39996 + rng.uniform(-0.4, 0.4)) if level == 1 else rng.uniform(0, 2 * math.pi)
+            yaw = (n * 2.39996 + seed * .37 + rng.uniform(-0.22, 0.22)) if level == 1 else (n * 2.39996 + rng.uniform(-.5, .5))
             low, high = spec["pitch"]
+            if species == "oak":
+                low, high = 28, 65
             pitch = math.radians(rng.uniform(low, high))
             if level == 1:
                 heading = direction(yaw, pitch)
             else:
                 side = perpendicular(parent_dir)
                 side = rotate(side, parent_dir, yaw)
-                heading = norm(add(mul(parent_dir, 0.6), mul(side, 0.8)))
+                heading = norm(add(add(mul(parent_dir, 0.72), mul(side, 0.62)), (0, 0, .12 if species == "oak" else 0)))
                 if species == "pine":
                     heading = norm(add(heading, (0, 0, -0.15)))
             if species == "pine" and level == 1:
                 length = height * spec["spread"] * (1 - t) ** 0.9 * rng.uniform(0.8, 1.1) + height * 0.04
             elif level == 1:
-                length = height * spec["spread"] * rng.uniform(0.38, 0.55) * scale
+                length = height * spec["spread"] * rng.uniform(0.4, 0.56) * scale
+                if species == "oak":
+                    length *= 1.08 - .36 * t
             else:
                 length = sum(math.dist(a, b) for a, b in zip(points, points[1:])) * rng.uniform(0.35, 0.6)
             radius = max(TUBE_MIN_RADIUS * 1.5, min(parent_radius * 0.72, parent_radius * (0.55 if level == 1 else 0.6)))
@@ -319,7 +348,7 @@ def plan_tree(params, seed, budget_total):
                 radius = parent_radius * rng.uniform(0.5, 0.68)
             gravity = 0.06 if species in ("pine", "birch") else 0.02
             spine = spine_points(origin, heading, length, steps, rng, 0.12, gravity * (1 if level < 3 else 2))
-            child_radii = [radius * (1 - 0.85 * (i / steps)) for i in range(steps + 1)]
+            child_radii = [radius * max(.06, (1 - i / steps) ** 1.15) for i in range(steps + 1)]
             cost = tube_triangles(sides, len(spine), True)
             if not budget.take(cost):
                 return children
@@ -327,7 +356,10 @@ def plan_tree(params, seed, budget_total):
             children.append((spine, child_radii, level + 1))
             for i in range(1, len(spine)):
                 if i / len(spine) >= (0.25 if species == "pine" else 0.4):
-                    anchors.append((spine[i], norm(sub(spine[i], spine[i - 1])), 1.0))
+                    # Keep leaves attached to the terminal branch spans. Save the segment, not an
+                    # unconnected cloud centre; lower-level woody limbs stay readable through the crown.
+                    if level == levels or level >= 2:
+                        anchors.append((spine[i - 1], spine[i], 1.0))
         return children
 
     if species == "palm":
@@ -344,7 +376,7 @@ def plan_tree(params, seed, budget_total):
                 break
             leaves.tube(spine, radii, 4, tip=True)
             for i in range(1, len(spine)):
-                anchors.append((spine[i], norm(sub(spine[i], spine[i - 1])), 1.0 - 0.6 * (i / len(spine))))
+                anchors.append((spine[i - 1], spine[i], 1.0 - 0.6 * (i / len(spine))))
     else:
         # Level by level, shuffled, so an exhausted budget thins every limb evenly.
         current = [(trunk, trunk_radii, 1)]
@@ -355,8 +387,9 @@ def plan_tree(params, seed, budget_total):
             rng.shuffle(following)
             current = following
         # The trunk top is also foliage for broadleaf crowns.
-        for i in range(int(len(trunk) * spec["crown"]), len(trunk)):
-            anchors.append((trunk[i], (0, 0, 1), 0.8))
+        if not anchors or species in ("pine", "birch"):
+            for i in range(max(1, int(len(trunk) * .7)), len(trunk)):
+                anchors.append((trunk[i - 1], trunk[i], 0.8))
 
     # Leaves fill the remaining budget, scaled by density.
     remaining = max(0, budget_total - budget.used)
@@ -365,11 +398,13 @@ def plan_tree(params, seed, budget_total):
     if not anchors or wanted <= 0:
         raise ValueError("Tree has no foliage anchors within budget")
     leaf_length, leaf_width = spec["leaf"]
-    # Cards stand for leaf clusters: grow with the tree so the crown reads full within budget.
-    leaf_length *= max(0.8, min(3.0, height / 5.0))
-    leaf_width *= max(0.8, min(3.0, height / 5.0))
+    # A bounded geometric leaf stands for a small leaf spray at game viewing distances.
+    leaf_length *= max(.8, min(2.8, height / 5.0))
+    leaf_width *= max(.8, min(2.8, height / 5.0))
     for n in range(wanted):
-        position, along, scale = anchors[rng.randrange(len(anchors))]
+        start, end, scale = anchors[n % len(anchors)]
+        along = norm(sub(end, start))
+        position = add(start, mul(sub(end, start), rng.uniform(.1, 1.0)))
         if species == "palm":
             side = norm(cross(along, (0, 0, 1)))
             sign = 1 if n % 2 else -1
@@ -377,19 +412,18 @@ def plan_tree(params, seed, budget_total):
             base = add(position, mul(along, rng.uniform(-0.15, 0.15) * leaf_length))
             leaves.leaf(base, axis, (0, 0, 1), leaf_length * scale * rng.uniform(0.75, 1.1), leaf_width, leaf_width * 0.12)
             continue
-        jitter = (rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-0.6, 1))
-        spread = leaf_length * (0.35 if species == "pine" else 1.6)
-        base = add(position, mul(norm(jitter), spread * rng.random() ** 0.5))
+        base = position
         if species == "pine":
             # Needle sprays: flat, near-horizontal cards fanned out along the bough.
             flat = norm((along[0], along[1], 0.0)) if abs(along[0]) + abs(along[1]) > 1e-3 else (1.0, 0.0, 0.0)
             axis = norm(add(rotate(flat, (0.0, 0.0, 1.0), rng.uniform(-1.1, 1.1)), (0.0, 0.0, rng.uniform(-0.25, 0.08))))
             face = norm((rng.uniform(-0.15, 0.15), rng.uniform(-0.15, 0.15), 1))
         else:
-            axis = norm(add(mul(along, 0.4), (rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-0.7, 0.5))))
+            side = rotate(perpendicular(along), along, n * 2.39996 + rng.uniform(-.3, .3))
+            axis = norm(add(add(mul(along, .35), mul(side, .9)), (0, 0, -.16)))
             face = norm((rng.uniform(-0.3, 0.3), rng.uniform(-0.3, 0.3), 1))
         size = rng.uniform(0.75, 1.2) * scale
-        leaves.leaf(base, axis, face, leaf_length * size, leaf_width * size, max(0.004, leaf_width * 0.06))
+        leaves.leaf(base, axis, face, leaf_length * size, leaf_width * size, max(0.0008, leaf_width * 0.012))
     return bark, leaves
 
 
@@ -479,7 +513,21 @@ def plan_rock(params, seed, budget_total):
     for p in flattened:
         rock.vertex(((p[0] - cx) * scale[0], (p[1] - cy) * scale[1], (p[2] - min(zs)) * scale[2]))
     for f in faces:
-        rock.face(f)
+        points = [rock.vertices[i] for i in f]
+        normal = cross(sub(points[1], points[0]), sub(points[2], points[0]))
+        axis = max(range(3), key=lambda k: abs(normal[k]))
+        a, b = [k for k in range(3) if k != axis]
+        bounds = [(-sx / 2, sx), (-sy / 2, sy), (0, sz)]
+        uv = []
+        for p in points:
+            u, v = (p[a] - bounds[a][0]) / bounds[a][1], (p[b] - bounds[b][0]) / bounds[b][1]
+            coordinate = (p[0] / sx + .5, p[1] / sy + .5, p[2] / sz)
+            # Smooth bounded domain warping breaks the tile's regular alignment on a natural rock.
+            # The fade preserves unit-square boundaries and keeps every UV inside the audited range.
+            u += .09 * 4 * u * (1 - u) * noise(add(mul(coordinate, 4.7), (17, 3, 29)))
+            v += .09 * 4 * v * (1 - v) * noise(add(mul(coordinate, 4.7), (37, 23, 7)))
+            uv.append((u, v))
+        rock.face(f, uvs=uv)
     return rock
 
 
@@ -662,6 +710,8 @@ def build(request, make_material, make_collection, select, make_box):
     main = []
     for key, color_key, data in plan(request):
         metallic, roughness = MATERIALS[key]
+        if params.get("finish") == "natural" and key in ("leaves", "foliage", "stone"):
+            roughness = .8
         mat = make_material("MAT_" + key.capitalize(), colors[color_key], metallic, roughness)
         mesh = bpy.data.meshes.new("SM_" + request["name"] + "_" + key + "_Mesh")
         mesh.from_pydata(data.vertices, [], data.faces)
@@ -669,10 +719,21 @@ def build(request, make_material, make_collection, select, make_box):
             raise ValueError("Procedural mesh required structural repair")
         for polygon, smooth in zip(mesh.polygons, data.smooth):
             polygon.use_smooth = smooth
+        uv = mesh.uv_layers.new(name="UVMap")
+        for polygon, points in zip(mesh.polygons, data.uvs):
+            for loop, point in zip(polygon.loop_indices, points):
+                uv.data[loop].uv = point
         bm = bmesh.new()
         try:
             bm.from_mesh(mesh)
             bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+            if key in ("leaves", "foliage"):
+                # Split the front/back rim normal: averaging opposite faces makes a thin
+                # leaf read like an inflated diamond even when its physical thickness is low.
+                bm.normal_update()
+                for edge in bm.edges:
+                    if len(edge.link_faces) == 2 and edge.calc_face_angle(0) > math.radians(80):
+                        edge.smooth = False
             bm.to_mesh(mesh)
         finally:
             bm.free()
@@ -680,6 +741,7 @@ def build(request, make_material, make_collection, select, make_box):
         group.objects.link(obj)
         obj["arcane_role"] = "render"
         obj["arcane_source_key"] = key
+        obj["arcane_surface_uv"] = True
         mesh.materials.append(mat)
         main.append(obj)
     bpy.context.view_layer.update()
@@ -697,3 +759,20 @@ def build(request, make_material, make_collection, select, make_box):
         center = ((low[0] + high[0]) / 2, (low[1] + high[1]) / 2, (low[2] + high[2]) / 2)
     proxy = make_box(collisions, "COL_" + request["name"], size, center, role="collision", source_key="proxy")
     return main, [], [proxy], []
+
+
+def surface_materials(request):
+    """Trusted adapter into the shared opaque PNG author, never a public recipe/code payload."""
+    if request["procedural"].get("finish") != "natural":
+        return []
+    kind = request["procedural"]["kind"]
+    keys = ["bark", "leaves"] if kind == "tree" else ["stone" if kind == "column" else "rock" if kind == "rock" else "foliage"]
+    profiles = {"bark": "bark", "leaves": "leaf", "rock": "stone", "stone": "weathered", "foliage": "leaf"}
+    return [{"id": key.capitalize(), "color": request["procedural"]["secondaryColor"] if key == "leaves" else request["color"],
+             "metallic": MATERIALS[key][0], "roughness": .8 if key in ("leaves", "foliage", "stone") else MATERIALS[key][1], "surface": {"profile": profiles[key], "resolution": 256}} for key in keys]
+
+
+def author_finish(request, directory, objects):
+    from textures import author_surfaces
+    relief = {"tree": .008, "rock": .005, "column": .006, "foliage": .007}[request["procedural"]["kind"]]
+    author_surfaces({"seed": request["seed"], "recipe": {"materials": surface_materials(request)}}, directory, objects, normal_relief=relief)

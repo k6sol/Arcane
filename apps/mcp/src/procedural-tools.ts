@@ -7,7 +7,7 @@ import { BridgeError, type CommandOutcome, type DaemonClient } from './daemon-cl
 import { assetSlug, boundedVector } from './assembly-schemas.js';
 import { assetJobId, nativeAssetJobId } from './asset-schemas.js';
 import { id, ref } from './schemas.js';
-import { COLUMN_BASES, COLUMN_CAPITALS, FOLIAGE_STYLES, PROCEDURAL_LIMITS as L, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
+import { COLUMN_BASES, COLUMN_CAPITALS, FOLIAGE_STYLES, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
 
 /** Procedural Blender meshes: start (assets_procedural), look (assets_preview) and, for native
  * sessions, place the reconstructed meshes as MeshParts (assets_place_studio_import). */
@@ -22,19 +22,20 @@ const n = z.number().finite();
 const between = (low: number, high: number) => n.min(low).max(high);
 const wait = (fallback: number) => z.number().int().min(1000).max(60_000).default(fallback).describe('Total wait for this tool call (ms).');
 const color = boundedVector(0, 1);
+const finish = z.enum(PROCEDURAL_FINISHES).default('natural').describe('Original 256px opaque UV/PBR finish; flat uses solid material factors.');
 
-const tree = z.strictObject({ kind: z.literal('tree'), species: z.enum(TREE_SPECIES).default('oak'),
+const tree = z.strictObject({ kind: z.literal('tree'), finish, species: z.enum(TREE_SPECIES).default('oak'),
   height: between(...L.treeHeight).default(9).describe('Metres (1 m ≈ 3.57 studs).'),
   trunkTaper: between(0.2, 0.95).optional().describe('Top/base trunk radius ratio (default 0.55).'),
   branchLevels: z.number().int().min(1).max(3).optional().describe('Branch recursion depth (palm ignores).'),
   leafDensity: between(0, 1).optional(), trunkRadius: between(...L.trunkRadius).optional().describe('Metres; default from species and height.'),
   secondaryColor: color.optional().describe('Leaf colour, linear RGB 0..1 (default per species).') });
-const rock = z.strictObject({ kind: z.literal('rock'), size: z.tuple([between(...L.rockSize), between(...L.rockSize), between(...L.rockSize)]).default([1.6, 1.2, 0.9]).describe('[x,y,z] metres; z is height.'),
+const rock = z.strictObject({ kind: z.literal('rock'), finish, size: z.tuple([between(...L.rockSize), between(...L.rockSize), between(...L.rockSize)]).default([1.6, 1.2, 0.9]).describe('[x,y,z] metres; z is height.'),
   roughness: between(0, 1).optional().describe('0 smooth boulder .. 1 jagged, faceted crag.') });
-const column = z.strictObject({ kind: z.literal('column'), radius: between(...L.columnRadius).default(0.35), height: between(...L.columnHeight).default(4),
+const column = z.strictObject({ kind: z.literal('column'), finish, radius: between(...L.columnRadius).default(0.35), height: between(...L.columnHeight).default(4),
   flutes: z.number().int().min(0).max(L.flutes[1]).optional().describe('0 smooth or 8..32 flutes (default 20).'),
   base: z.enum(COLUMN_BASES).optional(), capital: z.enum(COLUMN_CAPITALS).optional() });
-const foliage = z.strictObject({ kind: z.literal('foliage'), style: z.enum(FOLIAGE_STYLES).default('bush'),
+const foliage = z.strictObject({ kind: z.literal('foliage'), finish, style: z.enum(FOLIAGE_STYLES).default('bush'),
   radius: between(...L.foliageRadius).default(0.8), height: between(...L.foliageHeight).default(0.9), density: between(0, 1).optional() });
 
 export const proceduralInput = z.strictObject({
@@ -59,9 +60,9 @@ export const placeInput = z.strictObject({
 });
 
 const PROCEDURAL = 'Write: generate an original bounded mesh in the local Blender worker from a bundled parameterised generator (no code accepted): ' +
-  'tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; branching limbs and closed leaf cards), rock (size, roughness; noise + chiselled facets, flat base), ' +
+  'tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; tapered branching limbs and thin curved closed leaves), rock (size, roughness; noise + chiselled facets, flat base), ' +
   'column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian) or foliage clump (bush/grass/fern). ' +
-  'Output: one optimised GLB, one mesh per material (≤20,000 triangles total, UVs, flat PBR colours), a box/trunk collision proxy, and two preview renders. Deterministic per seed. ' +
+  'Output: one optimised GLB, one mesh per material (≤20,000 triangles total, analytic UV0, original 256px opaque colour/normal/roughness/metalness maps; finish flat selects solid materials), a box/trunk collision proxy, and two preview renders. Deterministic per seed. ' +
   'Use for original hero/organic assets. Toolbox models require an explicit user request; inspect the actual preview before calling any result realistic. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. ' +
   'Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.';
 const PREVIEW = 'Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). ' +

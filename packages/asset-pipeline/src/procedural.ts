@@ -1,5 +1,5 @@
 import { AssetError } from './types.js';
-import type { ProceduralSpec, Vec3 } from './types.js';
+import type { AssemblyMaterial, MaterialSurface, ProceduralSpec, Vec3 } from './types.js';
 
 /** Bounded parameters for the bundled Blender generators (workers/blender/procedural.py).
  * Data only: typed numbers/enums, never code, paths or imports. Normalization is
@@ -10,6 +10,8 @@ export const TREE_SPECIES = ['pine', 'oak', 'birch', 'palm'] as const;
 export const COLUMN_BASES = ['none', 'plinth', 'attic'] as const;
 export const COLUMN_CAPITALS = ['none', 'doric', 'ionic', 'corinthian'] as const;
 export const FOLIAGE_STYLES = ['bush', 'grass', 'fern'] as const;
+export const PROCEDURAL_FINISHES = ['natural', 'flat'] as const;
+export const PROCEDURAL_SURFACE_RESOLUTION = 256;
 export const PROCEDURAL_LIMITS = Object.freeze({
   minTriangles: 2500, maxTriangles: 20000,
   defaultTriangles: { tree: 16000, rock: 6000, column: 12000, foliage: 8000 } as const,
@@ -62,30 +64,45 @@ function vec(v: unknown, range: readonly [number, number], fallback: Vec3, label
 
 export function normalizeProcedural(value: unknown): ProceduralSpec {
   const kind = choice((value as { kind?: unknown } | null)?.kind, PROCEDURAL_KINDS, 'tree', 'procedural.kind');
+  // Omitted legacy requests keep their exact canonical bytes and flat-material meaning.
+  // The reviewed assets_procedural tool explicitly selects the natural finish by default.
+  const finished = <T extends ProceduralSpec>(r: Record<string, unknown>, spec: T): T => r.finish === undefined ? spec
+    : { ...spec, finish: typeof r.finish === 'string' && (PROCEDURAL_FINISHES as readonly string[]).includes(r.finish)
+      ? r.finish as typeof PROCEDURAL_FINISHES[number] : fail('procedural.finish must be natural or flat.') };
   if (kind === 'tree') {
-    const r = fields(value, ['kind', 'species', 'height', 'trunkTaper', 'branchLevels', 'leafDensity', 'trunkRadius', 'secondaryColor']);
+    const r = fields(value, ['kind', 'species', 'height', 'trunkTaper', 'branchLevels', 'leafDensity', 'trunkRadius', 'secondaryColor', 'finish']);
     const height = num(r.height, PROCEDURAL_LIMITS.treeHeight, 9, 'Tree height (m)'), species = choice(r.species, TREE_SPECIES, 'oak', 'Tree species');
-    return { kind, species, height,
+    return finished(r, { kind, species, height,
       trunkTaper: num(r.trunkTaper, [0.2, 0.95], 0.55, 'trunkTaper'), branchLevels: int(r.branchLevels, [1, 3], 2, 'branchLevels'),
       leafDensity: num(r.leafDensity, [0, 1], 0.7, 'leafDensity'),
       trunkRadius: r.trunkRadius === null || r.trunkRadius === undefined ? null : num(r.trunkRadius, PROCEDURAL_LIMITS.trunkRadius, 0, 'trunkRadius (m)'),
-      secondaryColor: color(r.secondaryColor, 'secondaryColor') ?? [...SPECIES[species].leaves] as Vec3 };
+      secondaryColor: color(r.secondaryColor, 'secondaryColor') ?? [...SPECIES[species].leaves] as Vec3 });
   }
   if (kind === 'rock') {
-    const r = fields(value, ['kind', 'size', 'roughness']);
-    return { kind, size: vec(r.size, PROCEDURAL_LIMITS.rockSize, [1.6, 1.2, 0.9], 'Rock size (m)'), roughness: num(r.roughness, [0, 1], 0.5, 'roughness') };
+    const r = fields(value, ['kind', 'size', 'roughness', 'finish']);
+    return finished(r, { kind, size: vec(r.size, PROCEDURAL_LIMITS.rockSize, [1.6, 1.2, 0.9], 'Rock size (m)'), roughness: num(r.roughness, [0, 1], 0.5, 'roughness') });
   }
   if (kind === 'column') {
-    const r = fields(value, ['kind', 'radius', 'height', 'flutes', 'base', 'capital']);
+    const r = fields(value, ['kind', 'radius', 'height', 'flutes', 'base', 'capital', 'finish']);
     const radius = num(r.radius, PROCEDURAL_LIMITS.columnRadius, 0.35, 'Column radius (m)'), height = num(r.height, PROCEDURAL_LIMITS.columnHeight, 4, 'Column height (m)');
     const flutes = int(r.flutes, [0, PROCEDURAL_LIMITS.flutes[1]], 20, 'flutes');
     if (flutes !== 0 && flutes < PROCEDURAL_LIMITS.flutes[0]) fail('flutes must be 0 (smooth) or 8..32.');
     if (height < radius * 4) fail('Column height must be at least four times its radius.');
-    return { kind, radius, height, flutes, base: choice(r.base, COLUMN_BASES, 'attic', 'Column base'), capital: choice(r.capital, COLUMN_CAPITALS, 'doric', 'Column capital') };
+    return finished(r, { kind, radius, height, flutes, base: choice(r.base, COLUMN_BASES, 'attic', 'Column base'), capital: choice(r.capital, COLUMN_CAPITALS, 'doric', 'Column capital') });
   }
-  const r = fields(value, ['kind', 'style', 'radius', 'height', 'density']);
-  return { kind, style: choice(r.style, FOLIAGE_STYLES, 'bush', 'Foliage style'), radius: num(r.radius, PROCEDURAL_LIMITS.foliageRadius, 0.8, 'Foliage radius (m)'),
-    height: num(r.height, PROCEDURAL_LIMITS.foliageHeight, 0.9, 'Foliage height (m)'), density: num(r.density, [0, 1], 0.7, 'density') };
+  const r = fields(value, ['kind', 'style', 'radius', 'height', 'density', 'finish']);
+  return finished(r, { kind, style: choice(r.style, FOLIAGE_STYLES, 'bush', 'Foliage style'), radius: num(r.radius, PROCEDURAL_LIMITS.foliageRadius, 0.8, 'Foliage radius (m)'),
+    height: num(r.height, PROCEDURAL_LIMITS.foliageHeight, 0.9, 'Foliage height (m)'), density: num(r.density, [0, 1], 0.7, 'density') });
+}
+
+/** Exact opaque PBR authoring contract shared by generation, persisted audit and GLB verification. */
+export function proceduralSurfaceMaterials(spec: ProceduralSpec, primary: Vec3): AssemblyMaterial[] {
+  if (spec.finish !== 'natural') return [];
+  const rows: [string, MaterialSurface['profile'], Vec3, number][] = spec.kind === 'tree' ? [['Bark', 'bark', primary, .92], ['Leaves', 'leaf', spec.secondaryColor, .8]]
+    : spec.kind === 'rock' ? [['Rock', 'stone', primary, .88]] : spec.kind === 'column' ? [['Stone', 'weathered', primary, .8]]
+    : [['Foliage', 'leaf', primary, .8]];
+  return rows.map(([id, profile, color, roughness]) => ({ id, color: [...color] as Vec3, metallic: 0, roughness,
+    surface: { profile, resolution: PROCEDURAL_SURFACE_RESOLUTION } }));
 }
 
 const clamp = (n: number) => Math.min(20, Math.max(0.1, Math.round(n * 1e4) / 1e4));

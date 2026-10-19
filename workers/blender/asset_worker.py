@@ -507,6 +507,10 @@ def main():
         event("texture-authoring")
         from textures import author_surfaces
         author_surfaces(request, directory, main_objects + lods)
+    elif request.get("procedural", {}).get("finish") == "natural":
+        event("texture-authoring")
+        from procedural import author_finish
+        author_finish(request, directory, main_objects + lods)
     meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
     if errors:
         _failure_metrics = {"renderTriangles": totals["renderTriangles"], "triangleBudget": request["triangleBudget"],

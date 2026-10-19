@@ -245,7 +245,7 @@ export class AssetPipeline {
       const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
       files.push(['input.json', 'request']);
       if (request.recipe) files.push(['assembly.py', 'worker'], ['assembly.json', 'audit']);
-      if (request.recipe?.materials.some(material => material.surface)) files.push(['textures.py', 'worker']);
+      if (request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') files.push(['textures.py', 'worker']);
       if (request.procedural) files.push(['procedural.py', 'worker']);
       if (audit.totals.lod1Triangles) files.push(['asset-lod1.glb', 'export']);
       for (const [name, role] of files) {
@@ -256,7 +256,9 @@ export class AssetPipeline {
         templateSha256: sha256(Buffer.from(workerScripts(request).map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
         sourceRequestSha256: artifacts.find(a => a.path === 'input.json')!.sha256, ...(audit.assembly ? { assembly: audit.assembly } : {}),
         coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', fbxUp: 'Y', pivot: 'floor', robloxScaleVerified: false },
-        validation: audit, artifacts, limitations: [...(request.procedural ? ['Procedural mesh from a bundled, parameter-only Blender generator; materials are flat PBR colours (no textures or vertex colours).'] : []), 'Supervised native process; not a sandbox for arbitrary Python.', 'Artistic fidelity, UV overlap/texel density and inter-object intersections require review.', 'No Roblox import, scale/collision verification, upload, install or publication has run.'] };
+        validation: audit, artifacts, limitations: [...(request.procedural ? [request.procedural.finish === 'natural'
+          ? 'Original procedural geometry with generated opaque UV0 PBR images; photographic fidelity and in-engine appearance require visual review.'
+          : 'Procedural mesh from a bundled, parameter-only Blender generator; the selected flat or legacy finish has no image textures.'] : []), 'Supervised native process; not a sandbox for arbitrary Python.', 'Artistic fidelity, UV overlap/texel density and inter-object intersections require review.', 'No Roblox import, scale/collision verification, upload, install or publication has run.'] };
       await validateManifestFiles(directory, manifest); remaining(end, signal);
       await atomicJson(directory, 'manifest.json', manifest);
       const result: AssetJobResult = { ...base, state: 'succeeded', manifestPath: artifactPath(directory, 'manifest.json') };

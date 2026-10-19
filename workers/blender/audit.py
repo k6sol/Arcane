@@ -80,6 +80,8 @@ def mesh_metrics(obj, role, imported=False):
             result["position"] = list(obj.location)
             result["materialProperties"] = [material_metrics(mat) for mat in mesh.materials if mat]
             result["geometrySha256"] = hashlib.sha256(json.dumps(geometry, separators=(',', ':')).encode()).hexdigest()
+        elif obj.get("arcane_surface_uv") and obj.get("arcane_source_key") and role != "collision":
+            result["materialProperties"] = [material_metrics(mat) for mat in mesh.materials if mat]
         errors = result["errors"]
         if not finite or any(not math.isfinite(d) or d <= 1e-6 for d in obj.dimensions):
             errors.append("Nonfinite coordinates or empty dimensions")

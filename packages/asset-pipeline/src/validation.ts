@@ -3,8 +3,8 @@ import { jsonSnapshot, normalizeRecipe, preflightRecipe, preflightPart, checkSoc
 import { inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { AssetError } from './types.js';
-import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralSize, PROCEDURAL_LIMITS } from './procedural.js';
-import type { AssetAudit, AssetManifest, AssetRequest } from './types.js';
+import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralSize, proceduralSurfaceMaterials, PROCEDURAL_LIMITS } from './procedural.js';
+import type { AssemblyMaterial, AssetAudit, AssetManifest, AssetRequest } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
 import { decodeMaterialPng } from './material-png.js';
 
@@ -94,6 +94,16 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
     const render = (audit.meshes as Record<string, unknown>[]).filter(m => m.role === 'render').map(m => m.name).sort();
     if (!isDeepStrictEqual(render, keys.map(k => 'SM_' + request.name + '_' + k).sort()) || totals.lod1Triangles !== 0 || totals.renderTriangles > PROCEDURAL_LIMITS.maxTriangles) throw new AssetError('MESH', 'Procedural parts differ from the generator contract.');
     for (const raw of audit.meshes as Record<string, unknown>[]) if (raw.role === 'render' && (raw.materials as unknown[]).length !== 1) throw new AssetError('MESH', 'Procedural parts are joined per material (one material each).');
+    for (const wanted of proceduralSurfaceMaterials(request.procedural, request.color)) {
+      const mesh = (audit.meshes as Record<string, unknown>[]).find(raw => raw.role === 'render' && isDeepStrictEqual(raw.materials, ['MAT_' + wanted.id]));
+      if (!mesh || !Array.isArray(mesh.materialProperties) || mesh.materialProperties.length !== 1) throw new AssetError('MESH', 'Procedural surface material evidence is missing.');
+      const actual = record(mesh.materialProperties[0], 'procedural material'), emission = record(actual.emission, 'procedural emission');
+      if (actual.name !== 'MAT_' + wanted.id || !vector(actual.color, 0, 1, 'procedural color').every((n, i) => Math.abs(n - wanted.color[i]!) <= .00001) ||
+          typeof actual.metallic !== 'number' || Math.abs(actual.metallic - wanted.metallic!) > .00001 || typeof actual.roughness !== 'number' || Math.abs(actual.roughness - wanted.roughness!) > .00001 ||
+          emission.strength !== 0 || !isDeepStrictEqual(vector(emission.color, 0, 1, 'procedural emission color'), [1, 1, 1]))
+        throw new AssetError('MESH', 'Measured procedural PBR values differ from the selected finish.');
+      validateGeneratedSurface(actual.surface, wanted);
+    }
   }
   if (request.template === 'hero-prop' && (!totals.lod1Triangles || totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Hero LOD must reduce geometry.');
   if (!Array.isArray(audit.renders) || audit.renders.length !== 2) throw new AssetError('RENDER', 'Two review renders are required.');
@@ -297,12 +307,26 @@ export function inspectPng(bytes: Buffer, expectedResolution: number): void {
 /** Bundled worker files hashed into a job's template digest, in fixed order. */
 export function workerScripts(request: AssetRequest): string[] {
   return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []),
-    ...(request.recipe?.materials.some(material => material.surface) ? ['textures.py'] : [])];
+    ...(request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural' ? ['textures.py'] : [])];
+}
+function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial): void {
+  const surface = record(value, 'generated procedural surface'), expected = wanted.surface!;
+  if (surface.profile !== expected.profile || surface.resolution !== expected.resolution || surface.generator !== 'arcane-tile-v1' || surface.texCoord !== 0 ||
+      !Array.isArray(surface.images) || surface.images.length !== 3) throw new AssetError('MESH', 'Generated procedural surface differs from the selected finish.');
+  const roles = new Set<string>();
+  for (const raw of surface.images) {
+    const image = record(raw, 'procedural PNG'), suffix = ({baseColor:'BaseColor',normal:'Normal',metallicRoughness:'MetallicRoughness'} as Record<string,string>)[String(image.role)];
+    if (!suffix || roles.has(String(image.role)) || image.name !== `T_${wanted.id}_${suffix}` || image.width !== expected.resolution || image.height !== expected.resolution ||
+        image.colorSpace !== (image.role === 'baseColor' ? 'sRGB' : 'Non-Color') || typeof image.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(image.sha256))
+      throw new AssetError('MESH', 'Generated procedural PNG evidence is incomplete.');
+    roles.add(String(image.role));
+  }
 }
 /** Textured authoring must survive export as the same embedded PNG pixels and UV0 PBR bindings. */
 export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: AssetAudit, role: 'render' | 'lod1' = 'render'): void {
   const used = new Set(request.recipe?.parts.filter(part => part.role === role).map(part => part.material));
-  const wanted = request.recipe?.materials.filter(material => material.surface && used.has(material.id)) ?? [];
+  const wanted = request.recipe?.materials.filter(material => material.surface && used.has(material.id)) ??
+    (request.procedural && role === 'render' ? proceduralSurfaceMaterials(request.procedural, request.color) : []);
   if (!wanted.length) return;
   inspectGlb(bytes);
   const size = bytes.readUInt32LE(12), doc = record(JSON.parse(bytes.toString('utf8', 20, 20 + size).trim()), 'textured GLB'), bin = bytes.subarray(28 + size);
@@ -367,7 +391,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
       if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render');
     } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
   }
-  if (request.recipe?.materials.some(material => material.surface) && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
+  if ((request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
   for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : [])]) {
     if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
   }
