@@ -65,15 +65,15 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
   if (!Array.isArray(audit.meshes) || audit.meshes.length < 1 || audit.meshes.length > 128) throw new AssetError('MESH', 'Missing bounded mesh metrics.');
   const totals = { renderTriangles: 0, lod1Triangles: 0, collisionTriangles: 0, materials: 0 };
   const materials = new Set<string>(), names = new Set<string>();
-  for (const raw of audit.meshes) {
+  for (const [meshIndex, raw] of audit.meshes.entries()) {
     const m = record(raw, 'mesh');
     if (typeof m.name !== 'string' || names.has(m.name) || !['render', 'lod1', 'collision'].includes(String(m.role)) || !m.name.startsWith(m.role === 'collision' ? 'COL_' : 'SM_')) throw new AssetError('MESH', 'Invalid or duplicate mesh identity.');
     names.add(m.name);
     for (const field of ['vertices', 'edges', 'faces', 'triangles']) integer(m[field], 1, 200000, 'mesh ' + field);
     for (const field of ['nonManifoldEdges', 'looseVertices', 'looseEdges', 'duplicateVertices', 'duplicateFaces', 'degenerateFaces', 'inconsistentNormals', 'invertedComponents', 'invalidUVs', 'degenerateUVFaces']) {
-      if (m[field] !== 0) throw new AssetError('MESH', `${m.name} failed ${field}.`);
+      if (m[field] !== 0) throw new AssetError('MESH', `audit.json mesh[${meshIndex}]: ${field} is ${measuredNumber(m[field])}; required 0.`);
     }
-    if (m.finitePositions !== true || !Array.isArray(m.errors) || m.errors.length) throw new AssetError('MESH', 'Mesh reported structural errors.');
+    if (m.finitePositions !== true || !Array.isArray(m.errors) || m.errors.length) throw new AssetError('MESH', `audit.json mesh[${meshIndex}]: Mesh reported structural errors or nonfinite positions.`);
     vector(m.dimensions, 1e-6, 100, 'mesh dimensions');
     if (vector(m.scale, 0, 2, 'mesh scale').some(n => Math.abs(n - 1) > 1e-5) || vector(m.rotation, -7, 7, 'mesh rotation').some(n => Math.abs(n) > 1e-5)) throw new AssetError('MESH', 'Mesh transforms were not applied.');
     if (!Array.isArray(m.materials) || m.materials.some(s => typeof s !== 'string' || !s.startsWith('MAT_'))) throw new AssetError('MESH', 'Invalid named mesh materials.');
@@ -87,8 +87,10 @@ export function validateAudit(value: unknown, request: AssetRequest): AssetAudit
   }
   totals.materials = materials.size;
   const reported = record(audit.totals, 'audit totals');
-  for (const key of Object.keys(totals) as (keyof typeof totals)[]) if (reported[key] !== totals[key]) throw new AssetError('MESH', 'Mesh metrics disagree with totals.');
-  if (!totals.renderTriangles || totals.renderTriangles > request.triangleBudget || !totals.collisionTriangles || totals.collisionTriangles > (request.recipe?.collisionTriangleBudget ?? 256) || totals.materials > (request.recipe ? 8 : 3)) throw new AssetError('MESH', 'Mesh budget failed.');
+  for (const key of Object.keys(totals) as (keyof typeof totals)[]) if (reported[key] !== totals[key]) throw new AssetError('MESH', `audit.json: ${key} total ${measuredNumber(reported[key])} must equal measured mesh sum ${totals[key]}.`);
+  if (!totals.renderTriangles || totals.renderTriangles > request.triangleBudget) throw new AssetError('MESH', `audit.json: Render triangles ${totals.renderTriangles} must be within 1..${request.triangleBudget}.`);
+  if (!totals.collisionTriangles || totals.collisionTriangles > (request.recipe?.collisionTriangleBudget ?? 256)) throw new AssetError('MESH', `audit.json: Collision triangles ${totals.collisionTriangles} must be within 1..${request.recipe?.collisionTriangleBudget ?? 256}.`);
+  if (totals.materials > (request.recipe ? 8 : 3)) throw new AssetError('MESH', `audit.json: Material count ${totals.materials} exceeds ${request.recipe ? 8 : 3}.`);
   if (request.procedural) {
     const keys = request.procedural.kind === 'tree' ? ['bark', 'leaves'] : [request.procedural.kind === 'column' ? 'stone' : request.procedural.kind === 'rock' ? 'rock' : 'foliage'];
     const render = (audit.meshes as Record<string, unknown>[]).filter(m => m.role === 'render').map(m => m.name).sort();
@@ -190,71 +192,97 @@ export function pngCrc(bytes: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 export interface GlbMetrics { triangles: number; primitives: number; vertices: number }
+/** Add host-owned locations without replacing domain errors or exposing native filesystem messages. */
+function artifactFailure(error: unknown, name: string): never {
+  if (error instanceof AssetError) {
+    if (!error.message.startsWith(name + ':')) error.message = `${name}: ${error.message}`;
+    throw error;
+  }
+  const missing = error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ENOTDIR'].includes(String(error.code));
+  const failure = new AssetError('ARTIFACT', `${name}: ${missing ? 'Required artifact is missing.' : 'Artifact could not be read safely.'}`);
+  Object.defineProperty(failure, 'cause', { value: error });
+  throw failure;
+}
+const measuredNumber = (value: unknown): string => typeof value === 'number' && Number.isFinite(value) ? String(value) : 'invalid';
 /** Parse the actual GLB buffers, not just extension or exporter metadata. */
 export function inspectGlb(bytes: Buffer): GlbMetrics {
-  const bad = () => { throw new AssetError('EXPORT', 'GLB contains invalid geometry or external data.'); };
-  if (bytes.length < 28 || bytes.readUInt32LE(0) !== 0x46546c67 || bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length) bad();
+  let location = 'GLB';
+  const bad = (reason: string, cause?: unknown): never => {
+    const error = new AssetError('EXPORT', `${location}: ${reason}`);
+    if (cause !== undefined) Object.defineProperty(error, 'cause', { value: cause });
+    throw error;
+  };
+  const object = (value: unknown, label: string) => { try { return record(value, label); } catch (error) { return artifactFailure(error, location); } };
+  if (bytes.length < 28 || bytes.readUInt32LE(0) !== 0x46546c67 || bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length) bad(`Invalid version-2 header or declared file length; observed ${bytes.length} bytes.`);
   let offset = 12, json: Record<string, unknown> | undefined, binary: Buffer | undefined;
   while (offset < bytes.length) {
-    if (offset + 8 > bytes.length) bad();
+    if (offset + 8 > bytes.length) bad('Truncated chunk header.');
     const length = bytes.readUInt32LE(offset), kind = bytes.readUInt32LE(offset + 4); offset += 8;
-    if (!length || length % 4 || offset + length > bytes.length) bad();
+    if (!length || length % 4 || offset + length > bytes.length) bad(`Chunk at byte ${offset - 8} has invalid length ${length}; it must be nonzero, aligned and within the file.`);
     const chunk = bytes.subarray(offset, offset + length); offset += length;
-    if (kind === 0x4e4f534a && !json && !binary) { try { json = record(JSON.parse(chunk.toString('utf8').trim()), 'GLB JSON'); } catch { bad(); } }
+    if (kind === 0x4e4f534a && !json && !binary) { try { json = record(JSON.parse(chunk.toString('utf8').trim()), 'GLB JSON'); } catch (error) { bad('JSON chunk is not a valid object.', error); } }
     else if (kind === 0x004e4942 && json && !binary) binary = chunk;
-    else bad();
+    else bad('Expected one JSON chunk followed by one embedded BIN chunk.');
   }
-  if (!json || !binary) bad();
+  if (!json || !binary) bad('Required JSON or embedded BIN chunk is missing.');
   const doc = json!, bin = binary!;
-  if (record(doc.asset, 'GLB asset').version !== '2.0' || !Array.isArray(doc.buffers) || doc.buffers.length !== 1) bad();
-  const buffer = record((doc.buffers as unknown[])[0], 'GLB buffer');
-  if (buffer.uri !== undefined || typeof buffer.byteLength !== 'number' || buffer.byteLength > bin.length || bin.length - buffer.byteLength > 3) bad();
-  if (!Array.isArray(doc.accessors) || !Array.isArray(doc.bufferViews) || !Array.isArray(doc.meshes) || doc.meshes.length < 1 || doc.meshes.length > 128) bad();
+  if (object(doc.asset, 'GLB asset').version !== '2.0' || !Array.isArray(doc.buffers) || doc.buffers.length !== 1) bad('Requires glTF 2.0 and exactly one embedded buffer.');
+  const buffer = object((doc.buffers as unknown[])[0], 'GLB buffer');
+  if (buffer.uri !== undefined || typeof buffer.byteLength !== 'number' || buffer.byteLength > bin.length || bin.length - buffer.byteLength > 3) bad(`Buffer must be embedded with at most 3 padding bytes; declared ${measuredNumber(buffer.byteLength)}, BIN ${bin.length} bytes.`);
+  if (!Array.isArray(doc.accessors) || !Array.isArray(doc.bufferViews) || !Array.isArray(doc.meshes) || doc.meshes.length < 1 || doc.meshes.length > 128) bad('Requires accessor and buffer-view arrays and 1..128 meshes.');
   const accessors = doc.accessors as unknown[], views = doc.bufferViews as unknown[];
-  const accessor = (index: unknown, type: 'VEC3' | 'VEC2' | 'SCALAR', allowed: number[]): { count: number; values: number[][] } => {
-    if (!Number.isSafeInteger(index) || Number(index) < 0 || Number(index) >= accessors.length) return bad();
-    const a = record(accessors[Number(index)], 'GLB accessor');
-    if (a.type !== type || a.sparse !== undefined || !allowed.includes(Number(a.componentType)) || a.normalized === true || !Number.isSafeInteger(a.count) || Number(a.count) < 1 || Number(a.count) > 200000) return bad();
-    if (!Number.isSafeInteger(a.bufferView) || Number(a.bufferView) < 0 || Number(a.bufferView) >= views.length) return bad();
-    const view = record(views[Number(a.bufferView)], 'GLB buffer view');
-    if (view.buffer !== 0) return bad();
+  const accessor = (index: unknown, type: 'VEC3' | 'VEC2' | 'SCALAR', allowed: number[], attribute: string): { count: number; values: number[][] } => {
+    if (!Number.isSafeInteger(index) || Number(index) < 0 || Number(index) >= accessors.length) return bad(`${attribute} accessor is missing or outside 0..${accessors.length - 1}.`);
+    const a = object(accessors[Number(index)], `${attribute} accessor[${Number(index)}]`), label = `${attribute} accessor[${Number(index)}]`;
+    if (a.type !== type || a.sparse !== undefined || !allowed.includes(Number(a.componentType)) || a.normalized === true || !Number.isSafeInteger(a.count) || Number(a.count) < 1 || Number(a.count) > 200000) return bad(`${label} requires dense, unnormalized ${type}, component type ${allowed.join('/')}, count 1..200000; observed count ${measuredNumber(a.count)}.`);
+    if (!Number.isSafeInteger(a.bufferView) || Number(a.bufferView) < 0 || Number(a.bufferView) >= views.length) return bad(`${label} buffer view is missing or outside 0..${views.length - 1}.`);
+    const view = object(views[Number(a.bufferView)], `${label} buffer view`);
+    if (view.buffer !== 0) return bad(`${label} must reference embedded buffer 0.`);
     const width = a.componentType === 5126 || a.componentType === 5125 ? 4 : a.componentType === 5123 ? 2 : 1;
     const components = type === 'SCALAR' ? 1 : type === 'VEC2' ? 2 : 3;
     const start = Number(view.byteOffset ?? 0) + Number(a.byteOffset ?? 0), stride = Number(view.byteStride ?? width * components);
     const viewStart = Number(view.byteOffset ?? 0), viewLength = Number(view.byteLength), localStart = Number(a.byteOffset ?? 0), count = Number(a.count);
-    if (![start, stride, viewStart, viewLength, localStart].every(n => Number.isSafeInteger(n) && n >= 0) || stride < width * components || stride > 252 || stride % width || localStart + stride * (count - 1) + width * components > viewLength || viewStart + viewLength > Number(buffer.byteLength)) return bad();
+    if (![start, stride, viewStart, viewLength, localStart].every(n => Number.isSafeInteger(n) && n >= 0) || stride < width * components || stride > 252 || stride % width || localStart + stride * (count - 1) + width * components > viewLength || viewStart + viewLength > Number(buffer.byteLength)) return bad(`${label} byte range or stride is invalid; count ${count}, stride ${measuredNumber(stride)}, view length ${measuredNumber(viewLength)} bytes.`);
     const values: number[][] = [];
     for (let i = 0; i < count; i++) {
       const row: number[] = [];
       for (let c = 0; c < components; c++) {
         const p = start + i * stride + c * width;
         const n = a.componentType === 5126 ? bin.readFloatLE(p) : width === 4 ? bin.readUInt32LE(p) : width === 2 ? bin.readUInt16LE(p) : bin.readUInt8(p);
-        if (!Number.isFinite(n)) bad(); row.push(n);
+        if (!Number.isFinite(n)) bad(`${label} element[${i}] component[${c}] must be finite.`); row.push(n);
       }
       values.push(row);
     }
     return { count, values };
   };
   let triangles = 0, primitives = 0, vertices = 0;
-  for (const raw of doc.meshes as unknown[]) {
-    const mesh = record(raw, 'GLB mesh'); if (!Array.isArray(mesh.primitives) || mesh.primitives.length < 1 || mesh.primitives.length > 16) bad();
-    for (const rawPrimitive of mesh.primitives as unknown[]) {
-      const p = record(rawPrimitive, 'GLB primitive'), attributes = record(p.attributes, 'GLB attributes');
-      if ((p.mode ?? 4) !== 4 || p.extensions !== undefined || p.targets !== undefined) bad();
-      const position = accessor(attributes.POSITION, 'VEC3', [5126]);
-      const normal = accessor(attributes.NORMAL, 'VEC3', [5126]);
-      if (position.count !== normal.count || normal.values.some(n => Math.abs(Math.hypot(...n) - 1) > 0.05)) bad();
+  for (const [meshIndex, raw] of (doc.meshes as unknown[]).entries()) {
+    location = `GLB mesh[${meshIndex}]`;
+    const mesh = object(raw, 'GLB mesh'); if (!Array.isArray(mesh.primitives) || mesh.primitives.length < 1 || mesh.primitives.length > 16) bad('Requires 1..16 primitives.');
+    for (const [primitiveIndex, rawPrimitive] of (mesh.primitives as unknown[]).entries()) {
+      location = `GLB mesh[${meshIndex}] primitive[${primitiveIndex}]`;
+      const p = object(rawPrimitive, 'GLB primitive'), attributes = object(p.attributes, 'GLB attributes');
+      if ((p.mode ?? 4) !== 4 || p.extensions !== undefined || p.targets !== undefined) bad('Requires TRIANGLES mode 4 without primitive extensions or morph targets.');
+      const position = accessor(attributes.POSITION, 'VEC3', [5126], 'POSITION');
+      const normal = accessor(attributes.NORMAL, 'VEC3', [5126], 'NORMAL');
+      if (position.count !== normal.count) bad(`NORMAL count ${normal.count} must match POSITION count ${position.count}.`);
+      const invalidNormal = normal.values.findIndex(n => Math.abs(Math.hypot(...n) - 1) > 0.05);
+      if (invalidNormal !== -1) bad(`NORMAL element[${invalidNormal}] length ${Math.hypot(...normal.values[invalidNormal]!)} must be within 0.05 of 1.`);
       if (attributes.TEXCOORD_0 !== undefined) {
-        const uv = accessor(attributes.TEXCOORD_0, 'VEC2', [5126]);
-        if (uv.count !== position.count || uv.values.some(row => row.some(n => n < -1e-5 || n > 1.00001))) bad();
+        const uv = accessor(attributes.TEXCOORD_0, 'VEC2', [5126], 'TEXCOORD_0');
+        if (uv.count !== position.count) bad(`TEXCOORD_0 count ${uv.count} must match POSITION count ${position.count}.`);
+        const invalidUv = uv.values.findIndex(row => row.some(n => n < -1e-5 || n > 1.00001));
+        if (invalidUv !== -1) bad(`TEXCOORD_0 element[${invalidUv}] is outside -0.00001..1.00001; observed ${uv.values[invalidUv]!.join(', ')}.`);
       }
-      const indices = accessor(p.indices, 'SCALAR', [5121, 5123, 5125]);
-      if (indices.count % 3 || indices.values.some(n => n[0]! >= position.count)) bad();
+      const indices = accessor(p.indices, 'SCALAR', [5121, 5123, 5125], 'indices');
+      if (indices.count % 3) bad(`Index count ${indices.count} must be divisible by 3.`);
+      const invalidIndex = indices.values.findIndex(n => n[0]! >= position.count);
+      if (invalidIndex !== -1) bad(`Index element[${invalidIndex}] is ${indices.values[invalidIndex]![0]}; required 0..${position.count - 1}.`);
       for (let i = 0; i < indices.count; i += 3) {
         const a = position.values[indices.values[i]![0]!]!, b = position.values[indices.values[i + 1]![0]!]!, c = position.values[indices.values[i + 2]![0]!]!;
         const u = b.map((n, k) => n - a[k]!), v = c.map((n, k) => n - a[k]!);
         const cross = [u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!];
-        if (Math.hypot(...cross) <= 1e-10) bad();
+        if (Math.hypot(...cross) <= 1e-10) bad(`Triangle[${i / 3}] is degenerate; doubled area must exceed 1e-10.`);
       }
       triangles += indices.count / 3; vertices += position.count; primitives++;
     }
@@ -264,8 +292,12 @@ export function inspectGlb(bytes: Buffer): GlbMetrics {
 
 /** Decode the worker's 8-bit RGB/RGBA PNGs and reject empty/uniform previews. */
 export function inspectPng(bytes: Buffer, expectedResolution: number): void {
-  const bad = () => { throw new AssetError('RENDER', 'Review PNG is malformed, empty or uniform.'); };
-  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) bad();
+  const bad = (reason = 'Malformed, empty or uniform review PNG.', cause?: unknown): never => {
+    const error = new AssetError('RENDER', `Review PNG: ${reason}`);
+    if (cause !== undefined) Object.defineProperty(error, 'cause', { value: cause });
+    throw error;
+  };
+  if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) bad('Invalid PNG signature.');
   let offset = 8, width = 0, height = 0, channels = 0, ended = false;
   const chunks: Buffer[] = [];
   while (offset < bytes.length) {
@@ -273,26 +305,26 @@ export function inspectPng(bytes: Buffer, expectedResolution: number): void {
     const chunkOffset = offset;
     const size = bytes.readUInt32BE(offset), kind = bytes.toString('ascii', offset + 4, offset + 8); offset += 8;
     if (offset + size + 4 > bytes.length) bad();
-    if (pngCrc(bytes.subarray(chunkOffset + 4, offset + size)) !== bytes.readUInt32BE(offset + size)) bad();
+    if (pngCrc(bytes.subarray(chunkOffset + 4, offset + size)) !== bytes.readUInt32BE(offset + size)) bad(`Chunk at byte ${chunkOffset} failed CRC integrity.`);
     if (!width && kind !== 'IHDR') bad();
     const data = bytes.subarray(offset, offset + size); offset += size + 4;
     if (kind === 'IHDR') {
       if (width || size !== 13) bad(); width = data.readUInt32BE(0); height = data.readUInt32BE(4);
-      if (data[8] !== 8 || ![2, 6].includes(data[9]!) || data[10] !== 0 || data[11] !== 0 || data[12] !== 0) bad();
+      if (data[8] !== 8 || ![2, 6].includes(data[9]!) || data[10] !== 0 || data[11] !== 0 || data[12] !== 0) bad('Requires noninterlaced 8-bit RGB or RGBA.');
       channels = data[9] === 6 ? 4 : 3;
     } else if (kind === 'IDAT') chunks.push(data);
     else if (kind === 'IEND') { if (size !== 0) bad(); ended = true; break; }
     else if (/^[A-Z]/.test(kind) && kind !== 'PLTE') bad();
   }
-  if (!ended || offset !== bytes.length || width !== expectedResolution || height !== expectedResolution || !channels || !chunks.length) bad();
+  if (!ended || offset !== bytes.length || width !== expectedResolution || height !== expectedResolution || !channels || !chunks.length) bad(`Incomplete image or dimensions differ; observed ${width}x${height}, required ${expectedResolution}x${expectedResolution}.`);
   const stride = width * channels;
   let decoded: Buffer;
-  try { decoded = inflateSync(Buffer.concat(chunks), { maxOutputLength: (stride + 1) * height }); } catch { return bad(); }
-  if (decoded.length !== (stride + 1) * height) bad();
+  try { decoded = inflateSync(Buffer.concat(chunks), { maxOutputLength: (stride + 1) * height }); } catch (error) { return bad('Pixel data failed bounded decompression.', error); }
+  if (decoded.length !== (stride + 1) * height) bad(`Decoded pixel bytes ${decoded.length} must equal ${(stride + 1) * height}.`);
   let previous = Buffer.alloc(stride), min = 255, max = 0;
   for (let row = 0; row < height; row++) {
     const filter = decoded[row * (stride + 1)]!, line = Buffer.from(decoded.subarray(row * (stride + 1) + 1, (row + 1) * (stride + 1)));
-    if (filter > 4) bad();
+    if (filter > 4) bad(`Row[${row}] filter ${filter} must be 0..4.`);
     for (let i = 0; i < stride; i++) {
       const a = i >= channels ? line[i - channels]! : 0, b = previous[i]!, c = i >= channels ? previous[i - channels]! : 0;
       const paeth = () => { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
@@ -301,7 +333,7 @@ export function inspectPng(bytes: Buffer, expectedResolution: number): void {
     for (let i = 0; i < stride; i += channels) { const lum = 0.2126 * line[i]! + 0.7152 * line[i + 1]! + 0.0722 * line[i + 2]!; min = Math.min(min, lum); max = Math.max(max, lum); }
     previous = line;
   }
-  if (max - min < 12) bad();
+  if (max - min < 12) bad(`Image is uniform or empty; luminance range ${max - min} must be at least 12.`);
 }
 
 /** Bundled worker files hashed into a job's template digest, in fixed order. */
@@ -328,38 +360,56 @@ export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: 
   const wanted = request.recipe?.materials.filter(material => material.surface && used.has(material.id)) ??
     (request.procedural && role === 'render' ? proceduralSurfaceMaterials(request.procedural, request.color) : []);
   if (!wanted.length) return;
-  inspectGlb(bytes);
+  const artifact = role === 'render' ? 'asset.glb' : 'asset-lod1.glb';
+  try { inspectGlb(bytes); } catch (error) { artifactFailure(error, artifact); }
   const size = bytes.readUInt32LE(12), doc = record(JSON.parse(bytes.toString('utf8', 20, 20 + size).trim()), 'textured GLB'), bin = bytes.subarray(28 + size);
-  const list = (value: unknown, maximum: number): unknown[] => { if (!Array.isArray(value) || value.length > maximum) throw new AssetError('EXPORT', 'Generated texture export list is invalid.'); return value; };
-  const materials = list(doc.materials, 8), textures = list(doc.textures, 24), images = list(doc.images, 24), views = list(doc.bufferViews, 4096), samplers = list(doc.samplers ?? [], 24);
-  const fail = (): never => { throw new AssetError('EXPORT', 'Generated PNG textures or UV0 PBR bindings changed during GLB export.'); };
-  const at = (values: unknown[], index: unknown): Record<string, unknown> => {
-    if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 || index >= values.length) return fail();
-    return record(values[index], 'generated texture export');
+  let location = 'Generated texture export';
+  const fail = (reason: string, cause?: unknown): never => {
+    const error = new AssetError('EXPORT', `${artifact}: ${location}: ${reason}`);
+    if (cause !== undefined) Object.defineProperty(error, 'cause', { value: cause });
+    throw error;
   };
-  for (const material of wanted) {
-    const raw = materials.find(raw => record(raw, 'GLB material').name === 'MAT_' + material.id);
-    if (!raw) fail(); const actual = record(raw, 'textured material'), pbr = record(actual.pbrMetallicRoughness, 'textured PBR');
+  const object = (value: unknown, label: string) => { try { return record(value, label); } catch (error) { return artifactFailure(error, `${artifact}: ${location}`); } };
+  const list = (value: unknown, maximum: number, label: string): unknown[] => { if (!Array.isArray(value) || value.length > maximum) return fail(`${label} must be an array with at most ${maximum} entries.`); return value; };
+  const materials = list(doc.materials, 8, 'materials'), textures = list(doc.textures, 24, 'textures'), images = list(doc.images, 24, 'images'), views = list(doc.bufferViews, 4096, 'bufferViews'), samplers = list(doc.samplers ?? [], 24, 'samplers');
+  const at = (values: unknown[], index: unknown, label: string): Record<string, unknown> => {
+    if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 || index >= values.length) return fail(`${label} index ${measuredNumber(index)} must be within 0..${values.length - 1}.`);
+    return object(values[index], label);
+  };
+  for (const [wantedIndex, material] of wanted.entries()) {
+    location = `Requested generated material[${wantedIndex}]`;
+    const raw = materials.find(raw => object(raw, 'GLB material').name === 'MAT_' + material.id);
+    if (!raw) fail('Named material from the request is missing.');
     const materialIndex = materials.indexOf(raw);
-    for (const rawMesh of list(doc.meshes, 128)) for (const rawPrimitive of list(record(rawMesh, 'textured mesh').primitives, 16)) {
-      const primitive = record(rawPrimitive, 'textured primitive');
-      if (primitive.material === materialIndex && record(primitive.attributes, 'textured attributes').TEXCOORD_0 === undefined) fail();
+    location = `Generated material[${materialIndex}]`;
+    const actual = object(raw, 'textured material'), pbr = object(actual.pbrMetallicRoughness, 'textured PBR');
+    for (const [meshIndex, rawMesh] of list(doc.meshes, 128, 'meshes').entries()) for (const [primitiveIndex, rawPrimitive] of list(object(rawMesh, 'textured mesh').primitives, 16, 'primitives').entries()) {
+      const primitive = object(rawPrimitive, 'textured primitive');
+      if (primitive.material === materialIndex && object(primitive.attributes, 'textured attributes').TEXCOORD_0 === undefined) fail(`Mesh[${meshIndex}] primitive[${primitiveIndex}] is missing required TEXCOORD_0.`);
     }
-    if (!isDeepStrictEqual(pbr.baseColorFactor ?? [1,1,1,1], [1,1,1,1]) || (pbr.metallicFactor ?? 1) !== 1 || (pbr.roughnessFactor ?? 1) !== 1) fail();
+    if (!isDeepStrictEqual(pbr.baseColorFactor ?? [1,1,1,1], [1,1,1,1])) fail('baseColorFactor must equal [1,1,1,1] for baked PNG values.');
+    if ((pbr.metallicFactor ?? 1) !== 1) fail(`metallicFactor ${measuredNumber(pbr.metallicFactor)} must equal 1 for the packed PNG.`);
+    if ((pbr.roughnessFactor ?? 1) !== 1) fail(`roughnessFactor ${measuredNumber(pbr.roughnessFactor)} must equal 1 for the packed PNG.`);
     const evidence = audit.meshes.flatMap(mesh => mesh.materialProperties ?? []).find(item => item.name === actual.name)?.surface;
-    if (!evidence) fail();
+    if (!evidence) fail('Generated surface audit evidence is missing.');
     for (const [role, rawUse] of [['baseColor', pbr.baseColorTexture], ['normal', actual.normalTexture], ['metallicRoughness', pbr.metallicRoughnessTexture]] as const) {
-      const use = record(rawUse, 'generated texture binding');
-      if ((use.texCoord ?? 0) !== 0 || use.extensions !== undefined || (role === 'normal' && (use.scale ?? 1) !== 1)) fail();
-      const texture = at(textures, use.index), image = at(images, texture.source);
-      if (texture.sampler !== undefined) { const sampler = at(samplers, texture.sampler); if ((sampler.wrapS ?? 10497) !== 10497 || (sampler.wrapT ?? 10497) !== 10497 ||
-          (sampler.magFilter ?? 9729) !== 9729 || ![9729,9987].includes(Number(sampler.minFilter ?? 9987))) fail(); }
-      if (image.uri !== undefined || image.mimeType !== 'image/png') fail();
-      const view = at(views, image.bufferView), start = Number(view.byteOffset ?? 0), length = Number(view.byteLength);
-      if (view.buffer !== 0 || !Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 1 || start + length > bin.length) fail();
+      location = `Generated material[${materialIndex}] ${role} map`;
+      const use = object(rawUse, 'generated texture binding');
+      if ((use.texCoord ?? 0) !== 0) fail(`texCoord ${measuredNumber(use.texCoord)} must be 0 (TEXCOORD_0).`);
+      if (use.extensions !== undefined) fail('Texture binding extensions or transforms are unsupported.');
+      if (role === 'normal' && (use.scale ?? 1) !== 1) fail(`Normal scale ${measuredNumber(use.scale)} must equal 1.`);
+      const texture = at(textures, use.index, 'texture'), image = at(images, texture.source, 'image');
+      if (texture.sampler !== undefined) { const sampler = at(samplers, texture.sampler, 'sampler'); if ((sampler.wrapS ?? 10497) !== 10497 || (sampler.wrapT ?? 10497) !== 10497 ||
+          (sampler.magFilter ?? 9729) !== 9729 || ![9729,9987].includes(Number(sampler.minFilter ?? 9987))) fail('Sampler requires REPEAT (10497), linear magFilter (9729) and linear minFilter (9729 or 9987).'); }
+      if (image.uri !== undefined || image.mimeType !== 'image/png') fail('Image must be an embedded image/png; external images are forbidden.');
+      const view = at(views, image.bufferView, 'image buffer view'), start = Number(view.byteOffset ?? 0), length = Number(view.byteLength);
+      if (view.buffer !== 0 || !Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 1 || start + length > bin.length) fail('PNG byte range must be nonempty and within embedded buffer 0.');
       const encoded = bin.subarray(start, start + length), expected = evidence!.images.find(image => image.role === role);
-      let decoded; try { decoded = decodeMaterialPng(encoded); } catch { return fail(); }
-      if (!expected || decoded.width !== expected.width || decoded.height !== expected.height || decoded.sourceSha256 !== expected.sha256 || image.name !== expected.name) fail();
+      let decoded; try { decoded = decodeMaterialPng(encoded); } catch (error) { return fail('Embedded PNG failed bounded image decoding.', error); }
+      if (!expected) fail('PNG audit evidence is missing.');
+      if (decoded.width !== expected!.width || decoded.height !== expected!.height) fail(`PNG dimensions ${decoded.width}x${decoded.height} must match audit ${expected!.width}x${expected!.height}.`);
+      if (decoded.sourceSha256 !== expected!.sha256) fail('PNG SHA-256 differs from the audited image bytes.');
+      if (image.name !== expected!.name) fail('PNG identity differs from the audited image name.');
     }
   }
 }
@@ -380,16 +430,20 @@ export async function validateManifestFiles(directory: string, value: unknown): 
     const a = record(raw, 'artifact'), path = artifactPath(directory, a.path);
     if (names.has(String(a.path)) || typeof a.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(a.sha256)) throw new AssetError('MANIFEST', 'Duplicate artifact or invalid hash.');
     if (roles[String(a.path)] !== a.role || !roles[String(a.path)]) throw new AssetError('MANIFEST', 'Artifact name/role is outside the fixed templates.');
+    // Only fixed own filenames may be reflected into a diagnostic.
+    const name = Object.hasOwn(roles, String(a.path)) ? String(a.path) : 'Artifact';
     names.add(String(a.path));
-    const size = await regularFile(path, 128 * 1024 * 1024); totalBytes += size;
-    if (totalBytes > 256 * 1024 * 1024 || a.bytes !== size) throw new AssetError('MANIFEST', 'Artifact size changed or exceeded total bound.');
-    const bytes = await readRegularFile(path, 128 * 1024 * 1024), hash = sha256(bytes); hashes.set(String(a.path), hash);
-    if (a.sha256 !== hash) throw new AssetError('HASH', 'Artifact hash no longer matches its manifest.');
-    if (String(a.path).endsWith('.glb')) {
-      const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);
-      if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', 'GLB geometry disagrees with export audit.');
-      if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render');
-    } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
+    try {
+      const size = await regularFile(path, 128 * 1024 * 1024); totalBytes += size;
+      if (totalBytes > 256 * 1024 * 1024 || a.bytes !== size) throw new AssetError('MANIFEST', `Artifact size changed or exceeded 268435456 total bytes; observed ${size}, manifest ${measuredNumber(a.bytes)}, total ${totalBytes}.`);
+      const bytes = await readRegularFile(path, 128 * 1024 * 1024), hash = sha256(bytes); hashes.set(String(a.path), hash);
+      if (a.sha256 !== hash) throw new AssetError('HASH', 'Artifact SHA-256 no longer matches its manifest.');
+      if (String(a.path).endsWith('.glb')) {
+        const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);
+        if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', `GLB triangle count ${geometry.triangles} disagrees with export audit ${measuredNumber(expected?.triangles)}.`);
+        if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render');
+      } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
+    } catch (error) { artifactFailure(error, name); }
   }
   if ((request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
   for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : [])]) {
