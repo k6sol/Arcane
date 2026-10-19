@@ -58,6 +58,12 @@ export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOf
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
 export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
+/** Raw serialized sender packets and COMPLETE staging arguments are independent
+ * budgets. The envelope allowance uses 4096 bytes per possible packet, matching
+ * the chunk encoder's reserve; metadata/escaping still requires actual measured
+ * per-packet and aggregate checks. A near-limit raw transfer may not fit. */
+export const STUDIO_ASSET_TRANSFER_LIMITS = Object.freeze({packets:512,packetBytes:256*1024,
+  rawBytes:48*1024*1024,envelopeReserveBytes:4096,envelopeBytes:48*1024*1024+512*4096});
 /** "Keep this mesh": uploads the retained procedural EditableMeshes of one placement to the signed-in Studio user's own
  * Roblox account (AssetService:CreateAssetAsync) and swaps the session MeshParts for persistent ones. Host-owned only:
  * the store admits it solely from the mesh-keep service after a human-confirmed trusted-dialog consent (docs/build/MESH_KEEP.md).

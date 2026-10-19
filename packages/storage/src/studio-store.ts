@@ -6,7 +6,7 @@ import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeE
 import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { STUDIO_ASSET_TRANSFER_LIMITS, isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs, sceneBuildInstanceCount, isGuiClass } from '../../core/src/studio-policy.js';
 import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
 import { terrainVoxelCount } from '../../core/src/terrain-policy.js';
@@ -78,7 +78,7 @@ export interface StudioDiagnostic {
   count:number;firstAt:string;lastAt:string;
 }
 export interface StudioDiagnosticGroup {sessionId:string;placeName:string;placeId:number;live:boolean;entries:StudioDiagnostic[]}
-export const STUDIO_STAGE_RUN_LIMITS = Object.freeze({packets:512,envelopeBytes:8*1024*1024,argumentBytes:256*1024,runs:64});
+export const STUDIO_STAGE_RUN_LIMITS = Object.freeze({packets:STUDIO_ASSET_TRANSFER_LIMITS.packets,rawBytes:STUDIO_ASSET_TRANSFER_LIMITS.rawBytes,envelopeBytes:STUDIO_ASSET_TRANSFER_LIMITS.envelopeBytes,argumentBytes:STUDIO_ASSET_TRANSFER_LIMITS.packetBytes,runs:64});
 export interface StageRunHandle {readonly kind:'studio-stage-run-handle'}
 export interface StageRunIntent {
   projectId:string;jobId:string;conversation:Readonly<NativeConversation>;
@@ -154,7 +154,7 @@ const uploadJournalSchema=z.strictObject({attemptId:stageJob,resourceKey:stageHa
 const uploadContextPinSchema=z.strictObject({sessionId:stageId,clientLifetimeId:stageId,pluginArtifactHash:stageHash,
   playEpoch:stageNumber,placeId:stageNumber,universeId:stageNumber});
 const stageReceiptSchema=z.strictObject({transferDigest:stageHash,packetCount:z.number().int().min(1).max(512),
-  byteLength:z.number().int().min(1).max(8*1024*1024),state:z.enum(['receiving','sealed']),engineVerification:z.literal('pending')});
+  byteLength:z.number().int().min(1).max(STUDIO_ASSET_TRANSFER_LIMITS.rawBytes),state:z.enum(['receiving','sealed']),engineVerification:z.literal('pending')});
 const stageIntentSchema=z.strictObject({projectId:stageHash,jobId:stageJob,
   preparationAttemptId:stageJob.optional(),
   modelReview:z.strictObject({reviewId:stageJob,subjectDigest:stageHash,revision:z.number().int().min(1).max(4096)}).optional(),
@@ -200,7 +200,7 @@ function stageIntent(value:unknown):StageRunIntent {
       ||p.expectedReceipt.packetCount!==ordinal+1||p.expectedReceipt.byteLength!==packets
       ||p.expectedReceipt.state!==(ordinal===intent.plan.length-1?'sealed':'receiving'))throw new ArcaneError('STUDIO_STAGE_INPUT','Stage accounting is inconsistent.');
   }
-  if(envelopes>STUDIO_STAGE_RUN_LIMITS.envelopeBytes)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage envelopes exceed 8 MiB.');
+  if(packets>STUDIO_STAGE_RUN_LIMITS.rawBytes||envelopes>STUDIO_STAGE_RUN_LIMITS.envelopeBytes)throw new ArcaneError('STUDIO_STAGE_BUDGET','Stage exceeds its raw-transfer or complete-envelope byte bound.');
   return intent;
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');

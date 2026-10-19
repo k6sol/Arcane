@@ -1,10 +1,11 @@
 import {createHash} from 'node:crypto';
+import {STUDIO_ASSET_TRANSFER_LIMITS} from '../../protocol/src/studio.js';
 import {assertDecodedStudioImportPayload, type StudioImportPayload, type StudioImportPayloadBuffer} from './studio-import-payload.js';
 import {parseNativeStudioImportResponse} from './studio-import-wire.js';
 import type {PreparedStudioImport} from './studio-import-manifest.js';
 
 /** Internal transport data, not registered Studio commands or upload consent. */
-export const STUDIO_IMPORT_TRANSFER_LIMITS = Object.freeze({argumentBytes: 256 * 1024, totalBytes: 48 * 1024 * 1024, packets: 8192});
+export const STUDIO_IMPORT_TRANSFER_LIMITS = Object.freeze({argumentBytes: 256 * 1024, totalBytes: STUDIO_ASSET_TRANSFER_LIMITS.rawBytes, packets: 8192});
 export interface StudioImportTransferPacket {
   readonly ordinal: number;
   readonly kind: 'begin' | 'texture' | 'object' | 'chunk' | 'seal';

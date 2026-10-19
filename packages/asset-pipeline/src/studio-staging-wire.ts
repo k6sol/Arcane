@@ -1,6 +1,7 @@
 import {types} from 'node:util';
 import {z} from 'zod';
 import {ArcaneError} from '../../protocol/src/providers.js';
+import {STUDIO_ASSET_TRANSFER_LIMITS} from '../../protocol/src/studio.js';
 
 // Shared data-only wire gate. The route supplies job/project from its captured
 // native actor and canonical binding; these strings do not establish authority.
@@ -16,7 +17,7 @@ const receipt = z.strictObject({
   runId: z.string().length(36).regex(UUID),
   state: z.literal('sealed'), transferDigest: z.string().length(64).regex(HASH),
   packetCount: z.number().int().min(1).max(512),
-  byteLength: z.number().int().min(1).max(8 * 1024 * 1024),
+  byteLength: z.number().int().min(1).max(STUDIO_ASSET_TRANSFER_LIMITS.rawBytes),
   commandIds: z.array(z.string().length(36).regex(UUID)).min(1).max(512),
 }).refine(value => value.commandIds.length === value.packetCount
   && new Set(value.commandIds).size === value.commandIds.length && value.byteLength >= value.packetCount,

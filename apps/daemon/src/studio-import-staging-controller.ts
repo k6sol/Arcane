@@ -1,7 +1,7 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
-import {studioImportContextObservation, type Json, type StudioAssetStageArgs, type StudioAssetStageReceipt, type StudioCommand, type StudioAssetReconstructReceipt} from '../../../packages/protocol/src/studio.js';
+import {STUDIO_ASSET_TRANSFER_LIMITS, studioImportContextObservation, type Json, type StudioAssetStageArgs, type StudioAssetStageReceipt, type StudioCommand, type StudioAssetReconstructReceipt} from '../../../packages/protocol/src/studio.js';
 import {StudioStore, type StageRunHandle} from '../../../packages/storage/src/studio-store.js';
 import {ConversationWorkStore} from '../../../packages/storage/src/conversation-work-store.js';
 import {snapshotStudioImportSelection} from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
@@ -21,7 +21,7 @@ export interface StudioImportStagingConfiguration {
   pluginArtifactHash: string;
   now?: () => number;
 }
-export const STUDIO_STAGING_LIMITS = Object.freeze({packets: 512, envelopeBytes: 8 * 1024 * 1024, packetDeadlineMs: 10_000, totalDeadlineMs: 120_000});
+export const STUDIO_STAGING_LIMITS = Object.freeze({packets: STUDIO_ASSET_TRANSFER_LIMITS.packets, rawBytes: STUDIO_ASSET_TRANSFER_LIMITS.rawBytes, envelopeBytes: STUDIO_ASSET_TRANSFER_LIMITS.envelopeBytes, packetDeadlineMs: 10_000, totalDeadlineMs: 120_000});
 export interface NativeStageStatus {
   jobId:string;projectId:string;
   stage:null|{runId:string;phase:'running'|'cpu-staged'|'stopped'|'needs_reconciliation';transferDigest:string;
@@ -185,8 +185,10 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           packet: packet.json, target: selection.target, continuity,
         }));
         const sizes = argumentsList.map(args => Buffer.byteLength(JSON.stringify(args)));
-        if (argumentsList.length > STUDIO_STAGING_LIMITS.packets || sizes.some(size => size > 256 * 1024)
-          || sizes.reduce((sum, size) => sum + size, 0) > STUDIO_STAGING_LIMITS.envelopeBytes) fail('STUDIO_STAGE_BUDGET');
+        const envelopeBytes=sizes.reduce((sum,size)=>sum+size,0),largestEnvelopeBytes=Math.max(0,...sizes);
+        if (transfer.byteLength > STUDIO_STAGING_LIMITS.rawBytes || argumentsList.length > STUDIO_STAGING_LIMITS.packets || largestEnvelopeBytes > STUDIO_ASSET_TRANSFER_LIMITS.packetBytes
+          || envelopeBytes > STUDIO_STAGING_LIMITS.envelopeBytes) throw new ArcaneError('STUDIO_STAGE_BUDGET',
+            `Native asset staging budget exceeded before admission: packets ${argumentsList.length}/${STUDIO_STAGING_LIMITS.packets}, raw bytes ${transfer.byteLength}/${STUDIO_STAGING_LIMITS.rawBytes}, complete-envelope bytes ${envelopeBytes}/${STUDIO_STAGING_LIMITS.envelopeBytes}, largest envelope ${largestEnvelopeBytes}/${STUDIO_ASSET_TRANSFER_LIMITS.packetBytes}. No stage command was queued.`);
         let cumulativeBytes=0;
         const intent={projectId:scope.projectId,jobId,conversation:scope.conversation,preparationAttemptId:preparationAttempt.id,modelReview:data.review.reference,
           transferDigest:transfer.digest,payloadDigest:transfer.payloadDigest,manifestDigest:data.prepared.manifest.digest,preparedDigest:data.prepared.digest,

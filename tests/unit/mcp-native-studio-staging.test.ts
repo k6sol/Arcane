@@ -7,6 +7,7 @@ import {DaemonClient, BridgeError, type AssetAudience} from '../../apps/mcp/src/
 import {createMcpServer} from '../../apps/mcp/src/server.js';
 import {NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse, parseNativeStudioStagingResponse,
   type NativeStudioStagingResponse} from '../../packages/asset-pipeline/src/studio-staging-wire.js';
+import {STUDIO_ASSET_TRANSFER_LIMITS} from '../../packages/protocol/src/studio.js';
 import {STUDIO_STAGING_LIMITS} from '../../apps/daemon/src/studio-import-staging-controller.js';
 import {ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES, missingArcaneTools} from '../../packages/protocol/src/arcane-tools.js';
 
@@ -92,13 +93,13 @@ test('shared stage codec detaches the authoritative scope envelope and exact sea
   assert.equal(result.jobId, JOB); assert.equal(result.projectId, PROJECT);
   assert.deepEqual(Object.keys(result.staged).sort(), Object.keys(input.staged).sort());
   input.staged.commandIds[0] = commandId(99); assert.equal(result.staged.commandIds[0], commandId(1));
-  const boundary = {...response(), staged: {...staged(), packetCount: 512, byteLength: 8 * 1024 * 1024,
+  const boundary = {...response(), staged: {...staged(), packetCount: 512, byteLength: STUDIO_ASSET_TRANSFER_LIMITS.rawBytes,
     commandIds: Array.from({length: 512}, (_, index) => commandId(index + 1))}};
   assert.equal(nativeStudioStagingResponse.safeParse(boundary).success, true);
-  assert.equal(STUDIO_STAGING_LIMITS.packets, 512); assert.equal(STUDIO_STAGING_LIMITS.envelopeBytes, 8 * 1024 * 1024);
+  assert.equal(STUDIO_STAGING_LIMITS.packets, 512); assert.equal(STUDIO_STAGING_LIMITS.envelopeBytes, STUDIO_ASSET_TRANSFER_LIMITS.envelopeBytes);
   assert.equal(NATIVE_STUDIO_STAGING_RESPONSE_BYTES, 64 * 1024);
   assert.equal(nativeStudioStagingResponse.safeParse({...boundary, staged: {...boundary.staged, packetCount: STUDIO_STAGING_LIMITS.packets + 1}}).success, false);
-  assert.equal(nativeStudioStagingResponse.safeParse({...boundary, staged: {...boundary.staged, byteLength: STUDIO_STAGING_LIMITS.envelopeBytes + 1}}).success, false);
+  assert.equal(nativeStudioStagingResponse.safeParse({...boundary, staged: {...boundary.staged, byteLength: STUDIO_ASSET_TRANSFER_LIMITS.rawBytes + 1}}).success, false);
 });
 
 test('shared parser checks exact expected job and optional trusted project without treating hashes as authority', () => {
@@ -117,7 +118,7 @@ test('stage codec rejects false completion, extra scope/authority and mismatched
     {...staged(), engineVerification: 'verified'}, {...staged(), jobId: JOB}, {...staged(), projectId: 'b'.repeat(64)},
     {...staged(), uploadAccepted: true}, {...staged(), target: {sessionId: 'forged'}}, {...staged(), authority: true},
     {...staged(), packetCount: 0}, {...staged(), packetCount: 4}, {...staged(), packetCount: 513},
-    {...staged(), byteLength: 0}, {...staged(), byteLength: 1}, {...staged(), byteLength: 8 * 1024 * 1024 + 1},
+    {...staged(), byteLength: 0}, {...staged(), byteLength: 1}, {...staged(), byteLength: STUDIO_ASSET_TRANSFER_LIMITS.rawBytes + 1},
     {...staged(), byteLength: Number.NaN}, {...staged(), byteLength: Number.POSITIVE_INFINITY},
     {...staged(), transferDigest: 'A'.repeat(64)}, {...staged(), transferDigest: 'a'.repeat(64) + '\n'},
     {...staged(), commandIds: [commandId(1), commandId(1), commandId(3)]},

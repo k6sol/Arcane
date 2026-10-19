@@ -6,6 +6,7 @@ import {join,resolve,sep} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {StudioStore,type StageRunIntent} from '../../packages/storage/src/studio-store.js';
+import {STUDIO_ASSET_TRANSFER_LIMITS} from '../../packages/protocol/src/studio.js';
 import type {StudioAssetStageArgs,Json} from '../../packages/protocol/src/studio.js';
 
 // Real temporary SQLite stores; all plugin identities/ACKs are synthetic.
@@ -98,10 +99,10 @@ test('forged handles, changed pins and malformed digests never create journal co
   assert.throws(()=>f.store.beginStageRun(value,guard),{code:'STUDIO_STAGE_INPUT'});assert.equal(reads,0);
   assert.equal(f.store.commands().length,0);
 });
-test('caps reject 513 ordinals, over-8-MiB plans and over-256-KiB actual argument envelopes',t=>{
+test('caps reject 513 ordinals, over-50-MiB envelopes and over-256-KiB actual argument envelopes',t=>{
   const f=fixture(t),started=f.store.beginStageRun(f.intent,guard);assert.ok(started.created);
   assert.throws(()=>f.store.beginStageRun({...f.intent,plan:Array(513).fill(f.intent.plan[0])},guard),{code:'STUDIO_STAGE_BUDGET'});
-  const big=fixture(t,33);for(const p of big.intent.plan)p.envelopeByteLength=256*1024;
+  const big=fixture(t,Math.floor(STUDIO_ASSET_TRANSFER_LIMITS.envelopeBytes/STUDIO_ASSET_TRANSFER_LIMITS.packetBytes)+1);for(const p of big.intent.plan)p.envelopeByteLength=256*1024;
   assert.throws(()=>big.store.beginStageRun(big.intent,guard),{code:'STUDIO_STAGE_BUDGET'});
   assert.throws(()=>f.store.enqueueStagePacket(started.handle,0,{...f.args[0]!,packet:'x'.repeat(256*1024)},guard),{code:'STUDIO_STAGE_BUDGET'});
 });
