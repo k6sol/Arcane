@@ -59,14 +59,16 @@ async function until(predicate: () => boolean, timeoutMs = 8_000): Promise<void>
 async function fixture(t: TestContext, options: {
   allowedRoots?: ('Workspace' | 'ServerStorage')[]; allowWrites?: boolean;
   placeId?: number; universeId?: number; publish?: boolean;
-  storeTimeOffset?: number; proof?: Partial<Observation>;
+  storeTimeOffset?: number; proof?: Partial<Observation>; heartbeat?: boolean;
 } = {}) {
   const root = makeFixtureDirectory('arcane-studio-test-service-');
   const directory = join(root, 'service'), storeDirectory = join(root, 'store');
   let storeTimeOffset = options.storeTimeOffset ?? 0;
   const store = new StudioStore({ directory: storeDirectory, now: () => Date.now() + storeTimeOffset });
   const services: StudioTestService[] = [], connections: NativeTestConnection[] = [];
+  let heartbeat: ReturnType<typeof setInterval> | undefined, heartbeatCount = 0;
   t.after(async () => {
+    clearInterval(heartbeat);
     try {
       for (const service of services) await service.lifecycle.close();
       for (const connection of connections) await connection.close();
@@ -103,6 +105,9 @@ async function fixture(t: TestContext, options: {
   };
   const publish = (changes: Partial<Observation> = {}) => poll(observation(changes));
   if (options.publish !== false) publish(options.proof);
+  // Real plugin polls refresh six-second proofs throughout a five-second run.
+  // Opt in only for live-heartbeat cases; stale/negative fixtures stay unchanged.
+  if (options.heartbeat) heartbeat = setInterval(() => { assert.deepEqual(publish(), []); heartbeatCount++; }, 250);
   const records = () => readTestLedger(join(directory, 'ledger'), directory);
   const connect = async (): Promise<NativeTestConnection> => {
     state.connects++;
@@ -172,6 +177,7 @@ async function fixture(t: TestContext, options: {
       },
       async close() {
         if (closed) return;
+        clearInterval(heartbeat);
         closed = true; state.closes++;
         await client.close(); await server.close();
       },
@@ -194,7 +200,7 @@ async function fixture(t: TestContext, options: {
     method: 'scene.children', args: { root: 'Workspace' } });
   return { root, directory, storeDirectory, store, pair, state, hooks, calls, witnesses, transitions,
     connections, observation, poll, publish, records, service, openService, request, prepare, status,
-    effects, scene, moveStoreTime: (ms: number) => { storeTimeOffset += ms; } };
+    effects, scene, heartbeats: () => heartbeatCount, moveStoreTime: (ms: number) => { storeTimeOffset += ms; } };
 }
 
 // Serial cases retain their own 30-second budgets. Their cumulative fixture and
@@ -204,6 +210,28 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
   function serviceCase(name: string, body: (sub: TestContext) => Promise<void>): void {
     test(name, { timeout: 30_000 }, body);
   }
+  for (const heartbeat of [false, true]) serviceCase(`real cleanup tail requires a current authenticated heartbeat: ${heartbeat ? 'refreshed proof' : 'expired proof stays fenced'}`, async sub => {
+    const f = await fixture(sub, { heartbeat }), job = await f.prepare();
+    let delayed = false;
+    f.hooks.witness = async value => {
+      if (!delayed && f.status(job).review.phase === 'stopping') { delayed = true; await new Promise(resolve => setTimeout(resolve, 1250)); }
+      return value;
+    };
+    await f.service.humanControl.approve(approval(job), () => {});
+    await until(() => f.status(job).review.phase === 'done' && f.state.closes === 1);
+    const complete = f.status(job), journal = await f.records();
+    assert.equal(delayed, true); assert.equal(complete.review.deadline! - complete.review.startedAt!, 5000);
+    assert.equal(complete.review.outcome, 'succeeded'); assert.equal(complete.review.code, 'OK');
+    assert.equal(complete.review.cleanup, heartbeat ? 'complete' : 'unknown');
+    assert.equal(complete.review.requiresHumanReview, !heartbeat); assert.equal(complete.review.canStartAnotherOperation, heartbeat);
+    assert.equal(journal.filter(row => row.event.kind === 'terminal').length, 1);
+    assert.equal(journal.at(-1)?.event.cleanup, heartbeat ? 'complete' : 'unknown');
+    assert.deepEqual(f.effects().map(call => call.args.is_start), heartbeat ? [true, false] : [true]);
+    const proof = f.store.session(f.pair.sessionId).proof!;
+    assert.equal(Date.parse(proof.expiresAt) - Date.parse(proof.observedAt), 6000);
+    if (heartbeat) { assert.ok(f.heartbeats() > 0); assert.equal(proof.playEpoch, 22); assert.equal(f.scene('tail-released-scene').state, 'queued'); }
+    else { assert.equal(f.heartbeats(), 0); assert.ok(Date.parse(proof.expiresAt) <= Date.now()); assert.throws(() => f.scene('tail-fenced-scene'), { code: 'BUSY' }); }
+  });
   serviceCase('prepare needs approval without effects; model port cannot approve and trusted guard must pass', async sub => {
     const f = await fixture(sub);
     const job = await f.prepare();
@@ -242,7 +270,7 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
   });
 
   serviceCase('exact scoped approval runs a real five-second bound, observes, stops and releases scene queue', async sub => {
-    const f = await fixture(sub);
+    const f = await fixture(sub, { heartbeat: true });
     const proof = f.store.session(f.pair.sessionId).proof!;
     assert.equal(Object.keys(f.observation()).length, 11);
     assert.equal(Date.parse(proof.expiresAt) - Date.parse(proof.observedAt), 6_000);
@@ -272,7 +300,10 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     assert.equal(complete.state, 'complete');
     assert.equal(complete.review.outcome, 'succeeded');
     assert.equal(complete.review.code, 'OK');
-    assert.equal(complete.review.cleanup, 'complete');
+    assert.equal(complete.review.cleanup, 'complete', JSON.stringify({ review: complete.review,
+      proof: f.store.session(f.pair.sessionId).proof, transitions: f.transitions,
+      journal: (await f.records()).map(row => ({ kind: row.event.kind, code: row.event.code, at: row.event.at, cleanup: row.event.cleanup })) }));
+    assert.ok(f.heartbeats() > 0, 'authenticated real-time heartbeats ran without advancing the controller clock');
     assert.equal(complete.review.requiresHumanReview, false);
     assert.equal(complete.review.canStartAnotherOperation, true);
     assert.equal(complete.review.watchdog.armed, false);
