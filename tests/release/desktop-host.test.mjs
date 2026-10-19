@@ -484,7 +484,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     closeIdleConnections() {},
   };
   const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
-    server, workflow: null, associations: null, ownsAssociations: false, ArcaneError: Error,
+    server, workflow: null, modelReviews: null, associations: null, ownsAssociations: false, ArcaneError: Error,
     fenceTasks() { taskAdmissionFenced = true; return []; },
     handoffs: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before handoff retirement'); handoffsFenced = true; } },
     ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before test cleanup'); } } },
@@ -552,8 +552,11 @@ test('regression: normal packaged asset state is accepted outside resources and 
   const options = await vm.runInNewContext('(async () => capture(' + constructor[1] + '))()', {
     capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', associations, stateOverride: directory,
     resourceOverride: resources, directory, join: win32.join, importHost: { hooks:importHooks },
+    modelReview:Object.freeze({assertApproved(){assert.fail('Path fixture must not approve a model.');},assertReference(){assert.fail('Path fixture must not inspect a decision.');}}),
   });
   assert.equal(options.studioImport, importHooks, 'Packaged assets use the same owned production host hooks.');
+  assert.equal(options.modelReviewAssociations,associations,'Review uses the same conversation binding store.');
+  assert.equal(typeof options.modelReview.assertApproved,'function');
   assert.equal(options.studioImport.workAssociations, associations, 'The asset scope borrows the same conversation store.');
   const serviceSource = source('apps/daemon/src/asset-service.ts');
   const begin = serviceSource.indexOf('export async function createAssetService(');

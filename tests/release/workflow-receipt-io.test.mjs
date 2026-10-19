@@ -11,13 +11,18 @@ const HOST_URL = new URL('../../apps/daemon/src/workflow-host.ts', import.meta.u
 const ACL_URL = new URL('../../apps/daemon/src/workflow-private-storage.ts', import.meta.url);
 const hostSource = readFileSync(HOST_URL, 'utf8');
 const begin = hostSource.indexOf('class ReceiptKey {');
-const end = hostSource.indexOf('function representation(', begin);
+const end = hostSource.indexOf('/** Fixed domain and private storage only.', begin);
+const authorityBegin = hostSource.indexOf('export function createAssetReviewReceiptAuthority(', end);
+const authorityEnd = hostSource.indexOf('function representation(', authorityBegin);
+assert.ok(authorityBegin > end && authorityEnd > authorityBegin, 'exact fixed-domain authority extraction boundaries must exist');
+assert.equal(hostSource.indexOf('export function createAssetReviewReceiptAuthority(', authorityBegin + 1), -1);
+const authoritySource = hostSource.slice(authorityBegin, authorityEnd);
 assert.ok(begin >= 0 && end > begin, 'exact private class extraction boundaries must exist');
 assert.equal(hostSource.indexOf('class ReceiptKey {', begin + 1), -1);
 const classSource = hostSource.slice(begin, end);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const sourcePin = Object.freeze({
-  host: sha256(hostSource), receiptClass: sha256(classSource),
+  host: sha256(hostSource), receiptClass: sha256(classSource), reviewAuthority: sha256(authoritySource),
   privateStorage: sha256(readFileSync(ACL_URL)),
 });
 const HELPER_DEADLINE_MS = 3000;
@@ -27,7 +32,8 @@ const HELPER_OPTIONS = Object.freeze({
 });
 
 // This is a boundary harness, not an alternative ReceiptKey implementation.
-// The exact extracted class is only transformed by Node 24's type stripper.
+// The exact extracted class uses Node 24's type stripper. The separately pinned
+// adjacent authority drops only its module export keyword for VM evaluation.
 async function receiptBoundaryWorker(input) {
   const { default: assert } = await import('node:assert/strict');
   const { createHash, createHmac, timingSafeEqual } = await import('node:crypto');
@@ -36,14 +42,16 @@ async function receiptBoundaryWorker(input) {
   const { win32, posix } = await import('node:path');
   const hash = value => createHash('sha256').update(value).digest('hex');
   assert.equal(hash(input.classSource), input.sourcePin.receiptClass, 'immutable helper source pin');
-  const compiled = new Script(stripTypeScriptTypes(input.classSource, { mode: 'strip' }) + '\nReceiptKey;',
+  assert.equal(hash(input.authoritySource), input.sourcePin.reviewAuthority, 'immutable fixed-domain authority pin');
+  const source = input.classSource + '\n' + input.authoritySource.replace(/^export (?=function createAssetReviewReceiptAuthority\()/, '');
+  const compiled = new Script(stripTypeScriptTypes(source, { mode: 'strip' }) + '\n({ReceiptKey,createAssetReviewReceiptAuthority});',
     { filename: 'workflow-host.ts:exact-private-ReceiptKey' });
   const path = input.platform === 'win32' ? win32 : posix;
   const parent = input.platform === 'win32' ? 'C:\\receipt-boundary-fixture' : '/receipt-boundary-fixture';
   const directory = path.join(parent, 'workflow-human-receipts');
   const file = path.join(directory, 'key-v1');
   const unrelated = path.join(parent, 'unrelated-sentinel');
-  const refusal = () => Object.assign(new Error('synthetic storage refusal'), { code: 'WORKFLOW_RECEIPT_STORAGE' });
+  const refusal = (code = 'WORKFLOW_RECEIPT_STORAGE') => Object.assign(new Error('synthetic storage refusal'), { code });
   const ioError = () => Object.assign(new Error('synthetic I/O refusal'), { code: 'EIO' });
   const invalidNames = ['zero', 'negative', 'nan', 'infinity', 'negative-infinity',
     'fractional', 'oversized', 'unsafe-integer', 'string', 'undefined'];
@@ -109,7 +117,7 @@ async function receiptBoundaryWorker(input) {
       join: path.join, dirname: path.dirname, createHmac, timingSafeEqual,
       HASH: /^[a-f0-9]{64}$/, DOMAIN: 'synthetic-receipt-test-domain\0',
       canonical: value => JSON.stringify(value),
-      fail: code => { assert.equal(code, 'WORKFLOW_RECEIPT_STORAGE'); throw refusal(); },
+      fail: code => { assert.ok(['WORKFLOW_RECEIPT_STORAGE','WORKFLOW_CLOSED'].includes(code)); throw refusal(code); },
       workflowReceiptParent: (selected, projectId) => {
         record('receiptParent', { selected, projectId }); assert.equal(selected, parent); return parent;
       },
@@ -228,8 +236,9 @@ async function receiptBoundaryWorker(input) {
       },
       closeSync: fd => { const entry = owned(fd); entry.closed = true; entry.closes++; record('close', { fd }); },
     };
-    const ReceiptKey = compiled.runInNewContext(context);
+    const {ReceiptKey,createAssetReviewReceiptAuthority} = compiled.runInNewContext(context);
     const construct = () => new ReceiptKey(parent, 'synthetic-project-id');
+    const authority = () => createAssetReviewReceiptAuthority(parent, 'synthetic-project-id');
     const operations = name => events.filter(event => event.op === name);
     const untouched = expected => assert.equal(store(), expected ?? initialStore, 'all synthetic storage bytes/metadata retained');
     const closed = () => {
@@ -261,7 +270,7 @@ async function receiptBoundaryWorker(input) {
       cases.push(item);
     };
     return { state, nodes, node, descriptors, events, directDenied, store, initialStore, construct,
-      operations, untouched, closed, noRegeneration, noKeyIo, rejects, summary, constants };
+      operations, untouched, closed, noRegeneration, noKeyIo, rejects, summary, constants, authority };
   }
   const fullBeforeOpen = f => {
     const acl = f.operations('acl');
@@ -481,6 +490,49 @@ async function receiptBoundaryWorker(input) {
       }
       break;
     }
+    case 'model-domain': {
+      const value = {subjectDigest: 'a'.repeat(64), decision: 'approved', revision: 2};
+      const f = fixture(); const key = f.construct(); f.events.length = 0;
+      const workflow = key.sign(value), model = key.signModelReview(value);
+      const nonce = Buffer.alloc(8, 0xab).toString('hex');
+      const expected = nonce + createHmac('sha256', initialBytes).update('arcane.asset-model-review.human-decision.v1\0')
+        .update(nonce).update('\0').update(JSON.stringify(value)).digest('hex').slice(0,48);
+      assert.equal(model, expected, 'exact fixed model-review domain/nonce/canonical bytes');
+      assert.notEqual(model, workflow, 'workflow and model decisions cannot share a MAC domain');
+      assert.equal(key.verifyModelReview(value, model), true); assert.equal(key.verify(value, workflow), true);
+      assert.equal(key.verifyModelReview(value, workflow), false); assert.equal(key.verify(value, model), false);
+      assert.equal(key.verifyModelReview({...value, decision: 'rejected'}, model), false);
+      assert.equal(key.verifyModelReview({...value, revision: 3}, model), false);
+      assert.equal(key.signModelReview(value, 'caller-selected-domain'), expected, 'no caller-selectable signing domain');
+      assert.equal(f.operations('acl').length, 9, 'every independent model/workflow MAC retains a full ACL check');
+      f.noRegeneration(); f.untouched(); key.close(); f.summary('fixed-review-domain-and-cross-domain-refusal');
+      const closed = fixture(); const closedKey = closed.construct(); closedKey.close();
+      closed.rejects(() => closedKey.signModelReview(value));
+      closed.rejects(() => closedKey.verifyModelReview(value, model));
+      closed.noRegeneration(); closed.untouched(); closed.summary('closed-private-key-refuses-model-sign-and-verify');
+      const changed = fixture(); const changedKey = changed.construct(); changed.nodes.get(file).bytes[0] ^= 1;
+      const retained = changed.store(); changed.rejects(() => changedKey.signModelReview(value));
+      changed.rejects(() => changedKey.verifyModelReview(value, model));
+      changed.noRegeneration(); changed.untouched(retained); changedKey.close(); changed.summary('changed-key-refuses-model-mac');
+      break;
+    }
+    case 'model-authority': {
+      const f = fixture(); const authority = f.authority(), value = {reviewId:'fixture',revision:1};
+      assert.ok(Object.isFrozen(authority)); assert.equal(authority.directory, directory);
+      assert.deepEqual(Object.keys(authority).sort(), ['close','directory','sign','verify','withSnapshot']);
+      f.events.length = 0;
+      const result = authority.withSnapshot(() => {
+        const token = authority.sign(value); assert.equal(authority.verify(value, token), true); return 'model-snapshot';
+      });
+      assert.equal(result, 'model-snapshot'); assert.equal(f.operations('acl').length, 2, 'full ACL checks bracket model assessment');
+      assert.equal(f.operations('open').length, 4, 'every assessment still pins exact key bytes');
+      const token = authority.sign(value); authority.close(); authority.close(); f.events.length = 0;
+      for (const run of [() => authority.sign(value), () => authority.verify(value, token), () => authority.withSnapshot(() => {throw new Error('closed callback ran');})])
+        f.rejects(run, 'WORKFLOW_CLOSED');
+      assert.equal(f.events.length, 0, 'closed authority refuses before callbacks or filesystem/native ACL access');
+      f.noRegeneration(); f.untouched(); f.summary('opaque-authority-snapshot-and-durable-close');
+      break;
+    }
     default: throw new Error('Unknown synthetic boundary group: ' + input.group);
   }
   return { kind: 'filesystem/native ACL boundary DOUBLES', platform: input.platform, group: input.group,
@@ -493,7 +545,7 @@ const helperProgram = "let input='';process.stdin.setEncoding('utf8');process.st
 
 function boundedGroup(platform, group) {
   const child = spawnSync(process.execPath, ['--no-warnings', '-e', helperProgram], {
-    ...HELPER_OPTIONS, input: JSON.stringify({ platform, group, classSource, sourcePin }),
+    ...HELPER_OPTIONS, input: JSON.stringify({ platform, group, classSource, authoritySource, sourcePin }),
   });
   assert.equal(child.error, undefined, group + ': external helper deadline/error: ' + child.error);
   assert.equal(child.signal, null, group + ': helper unexpectedly terminated');
@@ -507,6 +559,8 @@ function boundedGroup(platform, group) {
 
 test('receipt source pin: exact private class, no production exports or compiler', t => {
   assert.ok(classSource.startsWith('class ReceiptKey {'));
+  assert.doesNotMatch(classSource, /export function|createAssetReviewReceiptAuthority/);
+  assert.ok(authoritySource.startsWith('export function createAssetReviewReceiptAuthority('));
   assert.match(classSource, /close\(\): void \{ this\.key\.fill\(0\); \}\s*\}\s*$/);
   t.diagnostic('SHA-256 pins: ' + JSON.stringify(sourcePin));
 });
@@ -522,7 +576,7 @@ const groups = [
   ['existing', 2, 2], ['acl-denial', 3, null], ['existing-damage', 10, 14],
   ['replacement-races', 9, 9], ['new-success', 2, 2], ['prepare-denial', 9, null],
   ['new-full-denial', 3, null], ['write-counts', 20, 20], ['read-counts', 20, 20],
-  ['eof', 2, 2], ['io-errors', 7, 8], ['snapshot', 3, 2],
+  ['eof', 2, 2], ['io-errors', 7, 8], ['snapshot', 3, 2], ['model-domain', 3, 3], ['model-authority', 1, 1],
 ];
 for (const [group, windowsCases, posixCases] of groups) for (const platform of ['win32', 'linux']) {
   const expectedCases = platform === 'win32' ? windowsCases : posixCases;

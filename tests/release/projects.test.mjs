@@ -66,7 +66,7 @@ async function fixture(t) {
   // Execute the unchanged product entry/configuration with services and compiler configuration replaced
   // by metadata-only fixtures. No HTTP listener, SQLite engine, compiler, provider or Studio.
   let productFixture = productSource;
-  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js', './studio-import-host.js', './studio-import-preparation-store.js', './studio-import-plugin-artifact.js', './studio-import-staging-controller.js']) {
+  for (const path of ['../../../packages/storage/src/studio-store.js', '../../../packages/storage/src/work-store.js', '../../../packages/storage/src/conversation-work-store.js', './lab-server.js', './asset-service.js', './learning-service.js', './workflow-code-host.js', './studio-import-host.js', './studio-import-preparation-store.js', './studio-import-plugin-artifact.js', './studio-import-staging-controller.js', './asset-review-host.js', './asset-review.js']) {
     assert.ok(productFixture.includes("from '" + path + "'"));
     productFixture = productFixture.replace("from '" + path + "'", "from './product-services.fixture.mjs'");
   }
@@ -157,9 +157,13 @@ async function fixture(t) {
       }),close() { assert.equal(this,sharedImportHost); closed('host'); }});
       return sharedImportHost;
     }
+    export function createAssetReviewHost() { assert.fail('Metadata fixture must not open human model review.'); }
+    export function assetReviewFailure(code) { throw Object.assign(new Error('Synthetic model review refusal'),{code:'ASSET_REVIEW_'+code}); }
     export async function createAssetService(options) {
       assert.equal(options.projectPath, sharedConversationStore.projectPath);
       assert.equal(options.studioImport, sharedImportHost.hooks, 'Assets receive the exact owned host hooks.');
+      assert.equal(options.modelReviewAssociations,sharedConversationStore);
+      assert.equal(typeof options.modelReview.assertApproved,'function');assert.equal(typeof options.modelReview.assertReference,'function');
       assert.equal(options.studioImport.workAssociations, sharedConversationStore);
       assert.ok(options.studioImport.workAssociations instanceof ConversationWorkStore);
       const args = [Object.freeze({fixture:'actor'}), 'synthetic-job', Object.freeze({fixture:'plan'}), Object.freeze({fixture:'witness'}), () => assert.fail('Forward the guard without invoking it.')];
@@ -188,7 +192,7 @@ async function fixture(t) {
     export async function createConnectionLab(options) {
       assert.equal(options.conversationWorkStore, sharedConversationStore, 'LAB borrows the exact product store.');
       assert.equal(options.studioImportStaging,sharedStaging,'LAB borrows the exact owned staging controller.');
-      assert.equal(options.studioStore, sharedStudioStore); created('lab');
+      assert.equal(options.studioStore, sharedStudioStore); assert.equal(typeof options.assetReviewHostFactory,'function'); created('lab');
       if (process.env.FIXTURE_SHUTDOWN === '1') process.once('beforeExit', () => process.emit('SIGTERM'));
       mkdirSync(options.stateDirectory,{recursive:true});
       console.log('fixture-product:' + JSON.stringify({cwd:options.cwd,projectPath:options.projectPath,port:options.port,
