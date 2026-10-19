@@ -8,7 +8,7 @@ export interface RuntimeRecoveryBridge {
   onCheckpoint(listener:(value:CheckpointRequest)=>void):()=>void;
 }
 export interface RuntimeRecoveryOptions {checkpoint:()=>Promise<void>;bridge?:RuntimeRecoveryBridge|null}
-const UNSAVED='Chat drafts could not be saved. Keep this window open, review your drafts and try again.';
+const UNSAVED='Workspace drafts could not be saved. Keep this window open, review your drafts and try again.';
 function state(value:unknown):RuntimeState|null {
   if(!value||typeof value!=='object')return null;const row=value as Record<string,unknown>;
   return row.version===1&&['ready','stopped','saving','starting','unavailable'].includes(String(row.state))&&typeof row.message==='string'&&row.message.length<=400&&!/[\x00-\x1f\x7f]/.test(row.message)?row as unknown as RuntimeState:null;
@@ -41,7 +41,7 @@ export function startRuntimeRecovery(doc:Document,options:RuntimeRecoveryOptions
     completed.add(request.requestId);if(completed.size>32)completed.delete(completed.values().next().value!);
     const generation=epoch;revision++;
     if(working){try{await bridge.acknowledge({requestId:request.requestId,saved:false});}catch{}return;}
-    working=true;pause();current={version:1,state:'saving',message:'Saving chat drafts before restarting local services…'};render();
+    working=true;pause();current={version:1,state:'saving',message:'Saving workspace drafts before restarting local services…'};render();
     let saved=false;
     try{await options.checkpoint();saved=true;}catch{}
     if(stopped||generation!==epoch)return;

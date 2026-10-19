@@ -161,6 +161,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/starter-prompts.js',['dist/apps/desktop/src/starter-prompts.js','text/javascript; charset=utf-8']],
     ['/welcome-tour.js',['dist/apps/desktop/src/welcome-tour.js','text/javascript; charset=utf-8']],
     ['/mesh-keep.js',['dist/apps/desktop/src/mesh-keep.js','text/javascript; charset=utf-8']],
+    ['/editor-drafts.js',['dist/apps/desktop/src/editor-drafts.js','text/javascript; charset=utf-8']],
     ['/project-memory.js',['dist/apps/desktop/src/project-memory.js','text/javascript; charset=utf-8']],
     ['/script-sync.js',['dist/apps/desktop/src/script-sync.js','text/javascript; charset=utf-8']],
     ['/script-diff.js',['dist/apps/desktop/src/script-diff.js','text/javascript; charset=utf-8']],

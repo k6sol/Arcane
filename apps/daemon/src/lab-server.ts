@@ -327,6 +327,7 @@ export async function createConnectionLab(options: Options) {
           ['/runtime-recovery.js',[join(options.cwd,'dist/apps/desktop/src/runtime-recovery.js'),'text/javascript']],
     ['/desktop-update.js',[join(options.cwd,'dist/apps/desktop/src/desktop-update.js'),'text/javascript']],
           ['/mesh-keep.js',[join(options.cwd,'dist/apps/desktop/src/mesh-keep.js'),'text/javascript']],
+          ['/editor-drafts.js',[join(options.cwd,'dist/apps/desktop/src/editor-drafts.js'),'text/javascript']],
           ['/project-memory.js',[join(options.cwd,'dist/apps/desktop/src/project-memory.js'),'text/javascript']],
           ['/script-sync.js',[join(options.cwd,'dist/apps/desktop/src/script-sync.js'),'text/javascript']],
           ['/script-diff.js',[join(options.cwd,'dist/apps/desktop/src/script-diff.js'),'text/javascript']],

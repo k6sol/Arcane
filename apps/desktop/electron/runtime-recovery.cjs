@@ -4,9 +4,9 @@ const policy = require('./policy.cjs');
 const LIMITS = Object.freeze({ healthyUptimeMs: 60000, backoffMs: 2000, checkpointMs: 10000, automaticRestarts: 1 });
 const MESSAGES = Object.freeze({
   stopped: 'Local services stopped. Your workspace remains open. Restart services to continue.',
-  saving: 'Saving chat drafts before restarting local services…',
+  saving: 'Saving workspace drafts before restarting local services…',
   starting: 'Restarting local services…',
-  unsaved: 'Chat drafts could not be saved. Keep this window open, review your drafts and try again.',
+  unsaved: 'Workspace drafts could not be saved. Keep this window open, review your drafts and try again.',
   failed: 'Local services could not restart. Your saved records were retained. Keep this window open and try again.',
 });
 const fields = (value, names) => !!value && Object.getPrototypeOf(value) === Object.prototype &&

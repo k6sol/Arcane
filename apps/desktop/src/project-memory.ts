@@ -7,6 +7,7 @@
  * The file is read only when the Project memory page is shown (or a note is appended), never at workspace start.
  */
 
+import type { EditorDraftStore } from './editor-drafts.js';
 export const PROJECT_MEMORY_SECTION_ID = 'settings-memory';
 export const PROJECT_MEMORY_LIMIT_BYTES = 16 * 1024;
 
@@ -15,11 +16,14 @@ export interface ProjectMemoryOptions {
   token: () => string;
   /** Test seam; defaults to the page's fetch. */
   fetch?: typeof fetch;
+  drafts?: EditorDraftStore | null;
 }
 export interface ProjectMemoryController {
   /** Appends one suggested note to ARCANE.md (explicit user click only). */
   append(note: string): Promise<{ ok: boolean; message: string }>;
   reload(): Promise<void>;
+  prepareForRestart(): Promise<void>;
+  readyForRuntimeRecovery(): Promise<boolean>;
   stop(): void;
   resume(): void;
 }
@@ -64,7 +68,8 @@ export function startProjectMemory(doc: Document, options: ProjectMemoryOptions)
   const el = <T extends HTMLElement = HTMLElement>(id: string) => doc.getElementById(id) as T | null;
   const input = el<HTMLTextAreaElement>('project-memory-input'), save = el<HTMLButtonElement>('project-memory-save');
   const count = el('project-memory-count'), status = el('project-memory-status');
-  let saved = '', loaded = false, busy = false, stopped = false;
+  let saved = '', loaded = false, busy = false, stopped = false, revision = 0, lifecycle = 0, draftError = false, pendingAppends = 0;
+  let draftTimer: ReturnType<typeof setTimeout> | null = null;
   const cleanups: (() => void)[] = [];
   const headers = (json = false): Record<string, string> => ({ Authorization: 'Bearer ' + options.token(), ...(json ? { 'Content-Type': 'application/json' } : {}) });
   const say = (text: string, kind: 'info' | 'error' | 'ready' = 'info') => { if (status) { status.textContent = text; status.dataset.kind = kind; } };
@@ -76,6 +81,21 @@ export function startProjectMemory(doc: Document, options: ProjectMemoryOptions)
     input.disabled = !loaded || stopped;
     input.setAttribute('aria-invalid', String(over));
     save.disabled = !loaded || busy || stopped || over || text === saved;
+  }
+  function clearDraftTimer(): void { if (draftTimer !== null) clearTimeout(draftTimer); draftTimer = null; }
+  async function persistDraft(): Promise<void> {
+    if (!options.drafts || !input || !loaded) return;
+    const value = {kind: 'project-memory' as const, title: 'Project memory', context: 'project-memory', baseline: saved, text: input.value};
+    const generation = lifecycle, captured = revision;
+    try { await options.drafts.save(value); }
+    catch (error) {
+      if (!stopped && generation === lifecycle && captured === revision) say('Your notes remain in this window. Their draft could not be stored; keep the window open and try again.', 'error');
+      throw error;
+    }
+  }
+  function scheduleDraft(): void {
+    if (!options.drafts) return;
+    clearDraftTimer(); draftTimer = setTimeout(() => { draftTimer = null; void persistDraft().catch(() => {}); }, 200);
   }
   async function request(method: 'GET' | 'PUT' | 'POST', path: string, text?: string): Promise<{ view: ProjectMemoryView | null; message: string }> {
     try {
@@ -95,41 +115,58 @@ export function startProjectMemory(doc: Document, options: ProjectMemoryOptions)
     render();
   }
   async function reload(): Promise<void> {
+    await draftReady;
     if (stopped || busy) return;
     // Never overwrite unsaved edits with a background reload.
     if (loaded && input && input.value !== saved) return;
+    const generation = lifecycle, captured = revision;
     busy = true; render();
     const { view, message } = await request('GET', '/v1/project-memory');
+    if (generation !== lifecycle) return;
     busy = false;
     if (stopped) return;
+    if (captured !== revision) { render(); return; }
     if (view) show(view); else { say(message, 'error'); render(); }
   }
   async function submit(): Promise<void> {
+    await draftReady;
     if (!input || busy || stopped || !loaded) return;
     const text = input.value;
     if (bytes(text) > PROJECT_MEMORY_LIMIT_BYTES) { say('Project memory is limited to 16 KB. Shorten it before saving.', 'error'); return; }
+    const generation = lifecycle;
     busy = true; render(); say('Saving…');
     const { view, message } = await request('PUT', '/v1/project-memory', text);
+    if (generation !== lifecycle) return;
     busy = false;
-    if (view) { saved = view.text; if (input.value === text) input.value = view.text; say('Saved. New chats and the next reply use these notes.', 'ready'); }
+    if (view) {
+      saved = view.text; if (input.value === text) input.value = view.text;
+      say('Saved. New chats and the next reply use these notes.', 'ready');
+      clearDraftTimer(); await persistDraft().catch(() => {});
+    }
     else say(message, 'error');
     render();
   }
   async function append(note: string): Promise<{ ok: boolean; message: string }> {
     if (stopped || typeof note !== 'string' || !note.trim()) return { ok: false, message: 'There is nothing to save.' };
-    const { view, message } = await request('POST', '/v1/project-memory/append', note);
-    if (!view) return { ok: false, message };
-    // Keep the editor in step unless it holds unsaved edits, which are never discarded silently.
-    if (input && (!loaded || input.value === saved)) { saved = view.text; loaded = true; input.value = view.text; render(); }
-    else say('A note from chat was added to ARCANE.md. Saving your unsaved edits here would replace it.', 'error');
-    return { ok: true, message: 'Saved to ARCANE.md.' };
+    const generation = lifecycle; pendingAppends++;
+    try {
+      const { view, message } = await request('POST', '/v1/project-memory/append', note);
+      if (!view) return { ok: false, message };
+      if (stopped || generation !== lifecycle) return { ok: true, message: 'Saved to ARCANE.md.' };
+      // Keep the editor in step unless it holds unsaved edits, which are never discarded silently.
+      if (input && (!loaded || input.value === saved)) {
+        saved = view.text; loaded = true; input.value = view.text; render();
+        clearDraftTimer(); await persistDraft().catch(() => {});
+      } else say('A note from chat was added to ARCANE.md. Saving your unsaved edits here would replace it.', 'error');
+      return { ok: true, message: 'Saved to ARCANE.md.' };
+    } finally { pendingAppends--; }
   }
   function bind(): void {
     if (!input || !save || cleanups.length) return;
     const on = (target: EventTarget, type: string, handler: (event: Event) => void) => {
       target.addEventListener(type, handler); cleanups.push(() => target.removeEventListener(type, handler));
     };
-    on(input, 'input', () => render());
+    on(input, 'input', () => { revision++; render(); scheduleDraft(); });
     on(save, 'click', () => void submit());
     on(input, 'keydown', event => {
       const key = event as KeyboardEvent;
@@ -139,8 +176,29 @@ export function startProjectMemory(doc: Document, options: ProjectMemoryOptions)
     for (const nav of Array.from(doc.querySelectorAll<HTMLElement>('[data-settings-section-target="' + PROJECT_MEMORY_SECTION_ID + '"]'))) on(nav, 'click', () => void reload());
     cleanups.push(watchSettingsSection(doc, PROJECT_MEMORY_SECTION_ID, () => void reload()));
   }
-  function stop(): void { stopped = true; for (const cleanup of cleanups.splice(0)) cleanup(); render(); }
-  function resume(): void { stopped = false; bind(); render(); if (settingsSectionShown(doc, PROJECT_MEMORY_SECTION_ID)) void reload(); }
+  const draftReady = options.drafts ? options.drafts.get('project-memory', 'project-memory').then(value => {
+    if (!value || revision !== 0) return;
+    if (!input) { draftError = true; return; }
+    saved = value.baseline ?? ''; loaded = true; input.value = value.text;
+    say('Recovered unsaved project notes. Review them before saving; Save replaces the current project notes.', 'info'); render();
+  }).catch(() => { draftError = true; if (!stopped) say('Stored editor drafts could not be read. Existing records were retained.', 'error'); }) : Promise.resolve();
+  async function prepareForRestart(): Promise<void> {
+    await draftReady;
+    if (busy || pendingAppends) throw new Error('Wait for the project notes request to finish before restarting.');
+    clearDraftTimer();
+    if (draftError || !options.drafts && loaded && input?.value !== saved) throw new Error('Your project notes draft could not be stored. Keep this window open.');
+    await persistDraft(); await options.drafts?.checkpoint();
+  }
+  async function readyForRuntimeRecovery(): Promise<boolean> {
+    await draftReady; return !draftError && (await options.drafts?.readyForRuntimeRecovery() ?? true);
+  }
+  function stop(): void { clearDraftTimer(); if (loaded && input?.value !== saved) void persistDraft().catch(() => {}); stopped = true; lifecycle++; busy = false; for (const cleanup of cleanups.splice(0)) cleanup(); render(); }
+  function resume(): void {
+    if (!stopped && cleanups.length) return;
+    stopped = false; lifecycle++; bind(); render();
+    if (loaded && input?.value !== saved) scheduleDraft();
+    if (settingsSectionShown(doc, PROJECT_MEMORY_SECTION_ID)) void reload();
+  }
   resume();
-  return { append, reload, stop, resume };
+  return { append, reload, prepareForRestart, readyForRuntimeRecovery, stop, resume };
 }

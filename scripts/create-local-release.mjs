@@ -44,6 +44,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/runtime-recovery.ts', 'dist/apps/desktop/src/runtime-recovery.js', 'dist/apps/desktop/src/runtime-recovery.js.map',
   'apps/desktop/src/desktop-update.ts', 'dist/apps/desktop/src/desktop-update.js', 'dist/apps/desktop/src/desktop-update.js.map',
   'apps/desktop/src/mesh-keep.ts', 'dist/apps/desktop/src/mesh-keep.js', 'dist/apps/desktop/src/mesh-keep.js.map',
+  'apps/desktop/src/editor-drafts.ts', 'dist/apps/desktop/src/editor-drafts.js', 'dist/apps/desktop/src/editor-drafts.js.map',
   'apps/desktop/src/project-memory.ts', 'dist/apps/desktop/src/project-memory.js', 'dist/apps/desktop/src/project-memory.js.map',
   'apps/desktop/src/script-sync.ts', 'dist/apps/desktop/src/script-sync.js', 'dist/apps/desktop/src/script-sync.js.map',
   'apps/desktop/src/script-diff.ts', 'dist/apps/desktop/src/script-diff.js', 'dist/apps/desktop/src/script-diff.js.map',

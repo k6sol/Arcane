@@ -539,7 +539,7 @@ else {
         confirm: async () => {
           const owner = window; if (closing || !owner || owner.isDestroyed()) return false;
           const result = await dialog.showMessageBox(owner, { type: 'warning', title: 'Arcane services stopped',
-            message: 'Restart local services to continue?', detail: 'Arcane will save your chat drafts first. Running replies are interrupted; messages and tool calls are not sent again automatically.',
+            message: 'Restart local services to continue?', detail: 'Arcane will save your workspace drafts first. Running replies are interrupted; messages and tool calls are not sent again automatically.',
             buttons: ['Keep window open', 'Restart local services'], defaultId: 1, cancelId: 0, noLink: true });
           return result.response === 1 && !closing && window === owner;
         } });

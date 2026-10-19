@@ -167,10 +167,85 @@ test('markup and styles: Settings section, studio boot hook and a motion-free ow
   assert.match(section, /<textarea id="project-memory-input"[^>]*disabled><\/textarea>/);
   assert.match(section, /id="project-memory-status"[^>]*role="status"/);
   assert.doesNotMatch(section, /\bstyle=|<script|\bon[a-z]+=/i);
-  assert.ok((await readFile('apps/desktop/src/studio.ts', 'utf8')).includes("void import('./project-memory.js').then(module=>{const memory=module.startProjectMemory(document,{token:()=>token});setProjectMemorySaver("));
+  assert.ok((await readFile('apps/desktop/src/studio.ts', 'utf8')).includes("const memory = startProjectMemory(document, {token:()=>token,drafts:editorDrafts});"));
   const start = css.indexOf('/* ---- Project memory'), end = css.indexOf('/* ---- End project memory ---- */'), reset = css.lastIndexOf('@media(prefers-reduced-motion:reduce)');
   assert.ok(start > 0 && end > start && reset > end, 'owned block sits before the final reduced-motion reset');
   assert.doesNotMatch(css.slice(start, end), /transition|animation|#[0-9a-f]{3,8}\b/i, 'shared tokens only; no motion');
   const source = await readFile('apps/desktop/src/project-memory.ts', 'utf8');
   assert.doesNotMatch(source, /\.innerHTML|\.outerHTML|localStorage|sessionStorage|\bimport\s*\(/);
+});
+
+test('real Edge: project-note drafts survive reload and failed checkpoints without saving the project file', {
+  skip: !process.env.ARCANE_UI_BROWSER_MODULE, timeout: 60000,
+}, async t => {
+  const {chromium} = await import(pathToFileURL(resolve(process.env.ARCANE_UI_BROWSER_MODULE!)).href);
+  const browser = await chromium.launch({headless: true, executablePath: process.env.ARCANE_UI_BROWSER_EXE}); t.after(() => browser.close());
+  const dir = await project(t), original = 'Saved project notes.\n', token = 'd'.repeat(64);
+  await writeFile(join(dir, PROJECT_MEMORY_FILE), original);
+  const routes = projectMemoryRoutes({projectPath: dir});
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? resolve('dist');
+  const files: Record<string, string> = {'/project-memory.js': await readFile(join(build, 'apps/desktop/src/project-memory.js'), 'utf8'),
+    '/editor-drafts.js': await readFile(join(build, 'apps/desktop/src/editor-drafts.js'), 'utf8')};
+  let native: unknown = null, rejectSaves = false, holdRead = false, releaseRead: (() => void) | null = null, holdAppend = false, releaseAppend: (() => void) | null = null, origin = '';
+  const html = `<!doctype html><section id="settings-memory"><textarea id="project-memory-input" disabled></textarea>
+    <button id="project-memory-save" disabled>Save</button><span id="project-memory-count"></span><p id="project-memory-status"></p></section>
+    <script type="module">import{EditorDraftStore}from'/editor-drafts.js';import{startProjectMemory}from'/project-memory.js';
+    Object.defineProperty(window,'localStorage',{get(){throw Error('Browser storage must not hold editor drafts.');}});
+    const f=window.fixture={saves:0,failures:0};const drafts=new EditorDraftStore({version:1,
+      read:async()=>{const response=await fetch('/fixture-drafts');return response.json();},
+      save:async value=>{const response=await fetch('/fixture-drafts',{method:'PUT',body:JSON.stringify(value)});if(!response.ok){f.failures++;throw Error('Native draft save refused.');}f.saves++;return response.json();}});
+    window.memory=startProjectMemory(document,{token:()=>${JSON.stringify(token)},drafts});
+    window.addEventListener('pagehide',()=>memory.stop());window.addEventListener('pageshow',event=>{if(event.persisted)memory.resume();});
+    await memory.readyForRuntimeRecovery();window.ready=true;</script>`;
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url ?? '/', origin);
+    if (url.pathname === '/fixture-drafts') {
+      response.setHeader('Content-Type', 'application/json');
+      if (request.method === 'PUT') {
+        let body = ''; for await (const chunk of request) body += chunk;
+        if (rejectSaves) {response.writeHead(503); response.end(JSON.stringify({saved: false})); return;}
+        native = JSON.parse(body); response.end(JSON.stringify({saved: true})); return;
+      }
+      response.end(JSON.stringify({available: true, projectPath: dir, preferences: native})); return;
+    }
+    if (url.pathname === '/v1/project-memory' && request.method === 'GET' && holdRead) await new Promise<void>(done => releaseRead = done);
+    if (url.pathname === '/v1/project-memory/append' && holdAppend) await new Promise<void>(done => releaseAppend = done);
+    if (await routes.handle(request, response, url, token, origin)) return;
+    response.setHeader('Content-Type', url.pathname.endsWith('.js') ? 'text/javascript' : 'text/html'); response.end(files[url.pathname] ?? html);
+  });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => {releaseRead?.(); releaseAppend?.(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));});
+  origin = 'http://127.0.0.1:' + (server.address() as {port: number}).port;
+  const page = await browser.newPage(), errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
+  const wait = async (condition: () => boolean) => {const end = Date.now() + 5000; while (!condition()) {assert.ok(Date.now() < end, 'Draft fixture settled within its bound.'); await new Promise(done => setTimeout(done, 10));}};
+  const stored = () => native as {drafts: {text: string; baseline: string}[]};
+  await page.goto(origin); await page.waitForFunction(() => (window as any).ready && !document.querySelector<HTMLTextAreaElement>('#project-memory-input')!.disabled);
+  const input = page.locator('#project-memory-input'), first = '  Unsaved project notes\n\n\u{1f332}  ';
+  await input.fill(first); await wait(() => !!native && stored().drafts[0]?.text === first);
+  assert.equal(stored().drafts[0]!.baseline, original); assert.equal(await readFile(join(dir, PROJECT_MEMORY_FILE), 'utf8'), original);
+  await page.reload(); await page.waitForFunction(() => (window as any).ready);
+  assert.equal(await input.inputValue(), first); assert.match(await page.locator('#project-memory-status').innerText(), /Recovered unsaved/);
+  assert.equal(await readFile(join(dir, PROJECT_MEMORY_FILE), 'utf8'), original);
+  rejectSaves = true; const second = '  Newer unsaved notes\n\n  '; await input.fill(second);
+  const refused = await page.evaluate(async () => {try {await (window as any).memory.prepareForRestart(); return false;} catch {return true;}});
+  assert.equal(refused, true); assert.equal(await input.inputValue(), second); assert.equal(stored().drafts[0]!.text, first);
+  assert.equal(await readFile(join(dir, PROJECT_MEMORY_FILE), 'utf8'), original);
+  rejectSaves = false; await page.evaluate(() => (window as any).memory.prepareForRestart());
+  await page.reload(); await page.waitForFunction(() => (window as any).ready); assert.equal(await input.inputValue(), second);
+  await page.locator('#project-memory-save').click(); await wait(() => stored().drafts.length === 0);
+  assert.equal(await readFile(join(dir, PROJECT_MEMORY_FILE), 'utf8'), second);
+  holdRead = true; await page.evaluate(() => { (window as any).readDone = false; void (window as any).memory.reload().then(() => (window as any).readDone = true); });
+  await wait(() => !!releaseRead); const third = 'Edit made while a file read was pending.'; await input.fill(third);
+  assert.equal(await page.evaluate(async () => {try {await (window as any).memory.prepareForRestart(); return false;} catch {return true;}}), true);
+  holdRead = false; releaseRead!(); await page.waitForFunction(() => (window as any).readDone);
+  assert.equal(await input.inputValue(), third, 'A late read cannot overwrite newer textarea text.');
+  await page.evaluate(() => (window as any).memory.prepareForRestart()); assert.equal(stored().drafts[0]!.text, third);
+  assert.equal(await readFile(join(dir, PROJECT_MEMORY_FILE), 'utf8'), second, 'Checkpointing a draft never saves the project file.');
+  holdAppend = true; await page.evaluate(() => {void (window as any).memory.append('Explicit chat note.').then((value: unknown) => (window as any).appendResult = value);});
+  await wait(() => !!releaseAppend);
+  assert.equal(await page.evaluate(async () => {try {await (window as any).memory.prepareForRestart(); return false;} catch {return true;}}), true, 'A pending explicit append must settle before restart.');
+  holdAppend = false; releaseAppend!(); await page.waitForFunction(() => !!(window as any).appendResult);
+  assert.equal(await input.inputValue(), third, 'Appending from chat retains unsaved editor text.');
+  await page.evaluate(() => (window as any).memory.prepareForRestart()); assert.equal(stored().drafts[0]!.text, third);
+  assert.deepEqual(errors, []);
 });

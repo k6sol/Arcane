@@ -1,3 +1,5 @@
+import { EditorDraftStore, type EditorDraftBridge } from './editor-drafts.js';
+import { startProjectMemory } from './project-memory.js';
 import { startRuntimeRecovery } from './runtime-recovery.js';
 import type { startWorkflowPanel, WorkflowPanelOptions } from './workflow-panel.js';
 import { CodexHistoryPanel } from './codex-history.js';
@@ -2139,6 +2141,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   let storage: Pick<Storage, 'getItem' | 'setItem'>;
   try { storage = window.sessionStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
   const token = takeControlToken(window.location, window.history, storage);
+  const editorBridge=(window as unknown as {arcaneDesktop?:{toolDrafts?:EditorDraftBridge}}).arcaneDesktop?.toolDrafts;
+  const editorDrafts=editorBridge?new EditorDraftStore(editorBridge):null;
+  const memory = startProjectMemory(document, {token:()=>token,drafts:editorDrafts});
+  setProjectMemorySaver(note=>memory.append(note));
+  window.addEventListener('pagehide',()=>{memory.stop();setProjectMemorySaver(null);});
+  window.addEventListener('pageshow',event=>{if(event.persisted){memory.resume();setProjectMemorySaver(note=>memory.append(note));}});
   const codexApi=new CodexChatApi(token);
   const codexChat = new CodexChat(document, codexApi);
   const providerSetup = startProviderSetup(document, {chat:codexChat, autoSelectSignedIn:true});
@@ -2155,12 +2163,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   };
   if (!chatLink) { providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat(); }
   void import('./desktop-update.js').then(module=>{
-    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
+    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await memory.prepareForRestart();await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
     window.addEventListener('pagehide',()=>updates.stop());window.addEventListener('pageshow',event=>{if(event.persisted)updates.resume();});
   }).catch(()=>{});
   let recovery:ReturnType<typeof startRuntimeRecovery>|null=null;
   {
-    recovery=startRuntimeRecovery(document,{checkpoint:async()=>{await claudeChat?.prepareForRuntimeRecovery();await codexChat.prepareForRuntimeRecovery();}});
+    recovery=startRuntimeRecovery(document,{checkpoint:async()=>{await memory.prepareForRestart();await claudeChat?.prepareForRuntimeRecovery();await codexChat.prepareForRuntimeRecovery();}});
     window.addEventListener('pagehide',()=>recovery?.stop());
     window.addEventListener('pageshow',event=>{if(event.persisted)recovery?.resume();});
   }
@@ -2229,7 +2237,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // Plans & credits: local Arcane actions usage and the checkout seam that stays disabled until configured.
   void import('./plans.js').then(module=>{const plans=module.startPlans(document,{token:()=>token,desktop:(window as unknown as {arcaneDesktop?:import('./plans.js').PlansOptions['desktop']}).arcaneDesktop??null,open:url=>{window.open(url,'_blank','noopener,noreferrer');}});window.addEventListener('pagehide',()=>plans.stop());window.addEventListener('pageshow',event=>{if(event.persisted)plans.resume();});}).catch(()=>{});
   // Project memory (Settings › Project memory): ARCANE.md that both providers read; chat "Save to project memory" buttons append through it.
-  void import('./project-memory.js').then(module=>{const memory=module.startProjectMemory(document,{token:()=>token});setProjectMemorySaver(note=>memory.append(note));window.addEventListener('pagehide',()=>{memory.stop();setProjectMemorySaver(null);});window.addEventListener('pageshow',event=>{if(event.persisted){memory.resume();setProjectMemorySaver(note=>memory.append(note));}});}).catch(()=>{});
   // Script sync (Settings › Project memory): opt-in mirror of granted Studio scripts into the project src folder.
   // Keep this mesh: assets panel + chat asset cards; the click goes to the desktop host's trusted confirmation.
   void import('./mesh-keep.js').then(module=>{const keep=module.startMeshKeep(document,{token:()=>token,desktop:(window as unknown as {arcaneDesktop?:import('./mesh-keep.js').MeshKeepOptions['desktop']}).arcaneDesktop??null});window.addEventListener('pagehide',()=>keep.stop());window.addEventListener('pageshow',event=>{if(event.persisted)keep.resume();});}).catch(()=>{});
@@ -2251,7 +2258,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       imageInputAvailable:()=>codexChat.referenceImageInputAvailable(),
     }));
     if (workflowsStopped) chatTabController.stop();
-    if(!workflowsStopped){await claudeChat?.readyForRuntimeRecovery();await codexChat.readyForRuntimeRecovery();await recovery?.ready();}
+    if(!workflowsStopped){await claudeChat?.readyForRuntimeRecovery();await codexChat.readyForRuntimeRecovery();if(await memory.readyForRuntimeRecovery())await recovery?.ready();}
   }).catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Chat could not be opened. Your saved history is unchanged.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

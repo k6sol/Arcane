@@ -40,7 +40,7 @@ test('ordinary token revocation does not create offline presentation access',()=
 });
 test('native confirmation can keep the original workspace open without claiming its drafts were saved',async()=>{
  const f=fixture({choice:0});await f.stop({code:0});assert.equal(f.calls.some(row=>row[0]==='loadWorkspace'),false);assert.equal(f.calls.some(row=>row[0]==='startDaemon'),false);assert.equal(f.context.window,f.window);
- const options=f.calls.find(row=>row[0]==='confirm')[2];assert.deepEqual([...options.buttons],['Keep window open','Restart local services']);assert.match(options.detail,/save your chat drafts first/);assert.doesNotMatch(options.detail,/drafts are saved|reconnects by itself/);
+ const options=f.calls.find(row=>row[0]==='confirm')[2];assert.deepEqual([...options.buttons],['Keep window open','Restart local services']);assert.match(options.detail,/save your workspace drafts first/);assert.doesNotMatch(options.detail,/drafts are saved|reconnects by itself/);
 });
 test('the production preload validates status and checkpoint payloads without acknowledging by itself',async()=>{
  const f=fixture();assert.equal(await f.evaluate('Object.isFrozen(api.runtimeRecovery)'),true);assert.equal((await f.evaluate('api.runtimeRecovery.status()')).state,'ready');
