@@ -120,6 +120,7 @@ export class WorkspaceShell {
     this.bindSearch();
     this.bindSettingsDrawer();
     this.bindToolSwitcher();
+    this.bindConversationPresentation();
     this.bindPreviewPresentation();
     this.bindArtifactTabs();
     this.bindPreviews();
@@ -530,6 +531,19 @@ export class WorkspaceShell {
     } catch {
       this.notice('Unable to change preview fullscreen. Use your browser fullscreen controls.');
     } finally { this.fullscreenBusy = false; }
+  }
+
+  private bindConversationPresentation(): void {
+    const panel = this.doc.getElementById('codex-panel');
+    if (panel?.tagName !== 'DETAILS') return;
+    const heading = Array.from(panel.children).find(child => child.tagName === 'SUMMARY');
+    // The main conversation has no collapse affordance. Keep its transcript and
+    // composer reachable; nested message/tool disclosures retain native behavior.
+    panel.setAttribute('open', '');
+    if (heading) this.listen(heading, 'click', event => {
+      event.preventDefault();
+      panel.setAttribute('open', '');
+    });
   }
 
   private bindPreviewPresentation(): void {
