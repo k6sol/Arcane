@@ -9,6 +9,7 @@ import { WorkStore } from '../../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { createConnectionLab } from './lab-server.js';
 import { createAssetService } from './asset-service.js';
+import {routeAppAssetMessage} from './app-asset-control.js';
 import {createDiagnosticReporter} from './diagnostic-reporter.js';
 const diagnosticReporter=createDiagnosticReporter();
 import {createAssetReviewHost,type AssetReviewHost} from './asset-review-host.js';
@@ -113,6 +114,8 @@ let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
+  // Fence private admissions synchronously, before asynchronous resource cleanup.
+  app.appAssets?.close();
   const deadline = setTimeout(() => process.exit(1), 15000); deadline.unref();
   let failed = false;
   // Each resource closes even if an earlier cleanup fails. Never remove another
@@ -138,5 +141,11 @@ if (process.send) app.meshKeep?.enableConsentChannel();
 if (process.send) process.on('message', (message: unknown) => {
   if (message && typeof message === 'object' && 'type' in message && 'protocolVersion' in message &&
       message.type === 'arcane-shutdown' && message.protocolVersion === 1) void shutdown();
-  else if (!closing) app.meshKeep?.acceptConsent(message);
+  else if (!closing) {
+    if(routeAppAssetMessage(app.appAssets,message,reply=>{
+      if(!process.send||!process.connected){app.appAssets?.close();return;}
+      process.send(reply,error=>{if(error)app.appAssets?.close();});
+    }))return;
+    app.meshKeep?.acceptConsent(message);
+  }
 });

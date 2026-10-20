@@ -1,4 +1,5 @@
 import { createNativeAssetRegistry } from './native-asset-authority.js';
+import {createAppAssetControl} from './app-asset-control.js';
 import { createNativeHandoffRoutes } from './native-handoff-routes.js';
 import { nativeAssetRoutes } from './native-asset-routes.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
@@ -133,6 +134,8 @@ export async function createConnectionLab(options: Options) {
     ?createNativeHandoffRoutes({projectPath:options.projectPath??options.cwd}):null;
   const nativeAssetRegistry = options.assetService && options.workStore
     ? createNativeAssetRegistry({projectPath:workflowProjectIdentity(options.projectPath ?? options.cwd).projectPath}) : null;
+  // Parent-only authority port. It is deliberately absent from HTTP/state.
+  const appAssets=nativeAssetRegistry?createAppAssetControl({projectPath:options.projectPath??options.cwd,registry:nativeAssetRegistry}):null;
   const coreAgentToken = (request: IncomingMessage): string => {
     const handoff=handoffs?.agentToken(request,origin);if(handoff)return handoff;
     const value = request.headers.authorization;
@@ -291,7 +294,7 @@ export async function createConnectionLab(options: Options) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
     fenceTasks();
-    handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
+    appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
     try { modelReviews?.close(); } catch { /* Preserve original failure. */ }
@@ -472,7 +475,7 @@ export async function createConnectionLab(options: Options) {
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
     fenceTasks();
-    handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
+    appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
     try { modelReviews?.close(); } catch { /* Preserve listener failure. */ }
@@ -486,10 +489,10 @@ export async function createConnectionLab(options: Options) {
   origin = 'http://127.0.0.1:' + address.port;
   let cleanup: Promise<void> | null = null;
   return {
-    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep,
+    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep, appAssets,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
+      shuttingDown = true; appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
