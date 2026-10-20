@@ -61,21 +61,69 @@ function modelPixels(png) {
 // Mounts the runtime into #asset-viewer exactly as AssetViewerPanel.show()/controls()
 // and AssetReviewCard.show() do, plus the two verified 2D preview figures studio.ts adds.
 const page = String.raw`
-const meter = window.meter = { contexts: 0, draws: 0, blank: 0, pending: false };
+const meter = window.meter = { contexts: 0, draws: 0, clears: 0, blank: 0, pending: false, frame: 0, trace: [] };
+const everPresented = new WeakSet();
+let pendingCanvas = null, lastPresentation = null, lastDrawFrame = -1;
+function canvasPresentation(canvas) {
+  let opacity = 1, allowed = document.visibilityState === 'visible' && !!canvas?.isConnected;
+  if (canvas) for (let node = canvas; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    opacity *= Number(style.opacity);
+    if (node.hidden || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.contentVisibility === 'hidden') allowed = false;
+  }
+  const clip = canvas ? visible(canvas) : { x: 0, y: 0, width: 0, height: 0 };
+  return { canPresent: allowed && opacity > 0 && clip.width > 0 && clip.height > 0,
+    rect: [clip.x, clip.y, clip.width, clip.height], opacity,
+    viewport: [innerWidth, innerHeight], buffer: canvas ? [canvas.width, canvas.height] : [0, 0] };
+}
+function trace(kind, canvas) {
+  // Fixed fixture geometry only; never labels, model data or human content.
+  meter.trace.push({ kind, frame: meter.frame, ...canvasPresentation(canvas) });
+  if (meter.trace.length > 64) meter.trace.shift();
+}
 const getContext = HTMLCanvasElement.prototype.getContext;
 HTMLCanvasElement.prototype.getContext = function (kind, ...args) { const context = getContext.call(this, kind, ...args); if (kind === 'webgl2' && context && !this.counted) { this.counted = true; meter.contexts++; } return context; };
 for (const property of ['width', 'height']) {
   const descriptor = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, property);
   Object.defineProperty(HTMLCanvasElement.prototype, property, { configurable: true, get: descriptor.get,
-    set(value) { if (this.counted && value !== descriptor.get.call(this)) meter.pending = true; descriptor.set.call(this, value); } });
+    set(value) {
+      // Assigning even the same width/height resets a canvas backing store.
+      const cleared = this.counted;
+      descriptor.set.call(this, value);
+      if (cleared) {
+        meter.clears++;
+        // Initial allocation has no prior image to lose; trace every clear.
+        if (everPresented.has(this)) { meter.pending = true; pendingCanvas = this; }
+        trace('clear', this);
+      }
+    } });
 }
 for (const name of ['drawArrays', 'drawElements']) {
   const original = WebGL2RenderingContext.prototype[name];
-  WebGL2RenderingContext.prototype[name] = function (...args) { meter.draws++; meter.pending = false; return original.apply(this, args); };
+  WebGL2RenderingContext.prototype[name] = function (...args) {
+    // Environment/texture render-target draws do not restore the canvas image.
+    const canvasDraw = this.getParameter(this.DRAW_FRAMEBUFFER_BINDING) === null;
+    const result = original.apply(this, args);
+    const count = name === 'drawArrays' ? args[2] : args[1];
+    if (canvasDraw && count > 0) {
+      meter.draws++; everPresented.add(this.canvas);
+      if (pendingCanvas === this.canvas) { meter.pending = false; pendingCanvas = null; }
+      if (lastDrawFrame !== meter.frame) { lastDrawFrame = meter.frame; trace('draw', this.canvas); }
+    }
+    return result;
+  };
 }
-// First rAF callback of every frame: a backing-store resize (which clears the WebGL
-// buffer) with no draw before the previous paint presented a blank canvas.
-const tick = () => { if (meter.pending) { meter.blank++; meter.pending = false; } requestAnimationFrame(tick); };
+// First callback of a frame inspects the previous paint's uncleared backing
+// resize. Hidden/clipped canvases cannot present a blank; keep their pending
+// clear until an actual draw, rather than erasing the evidence while hidden.
+const tick = () => {
+  meter.frame++;
+  const canvas = pendingCanvas ?? document.querySelector('#asset-viewer .viewer-canvas canvas');
+  const state = canvasPresentation(canvas), key = state.canPresent;
+  if (key !== lastPresentation) { lastPresentation = key; trace('visibility', canvas); }
+  if (meter.pending && state.canPresent) { meter.blank++; trace('visible-blank', canvas); }
+  requestAnimationFrame(tick);
+};
 requestAnimationFrame(tick);
 const THREE = await import('/vendor/three/build/three.module.js');
 const updateCamera = THREE.Camera.prototype.updateMatrixWorld;
@@ -111,15 +159,15 @@ function visible(element) {
     const style = getComputedStyle(node);
     if (style.overflowX === 'visible' && style.overflowY === 'visible') continue;
     const r = node.getBoundingClientRect();
-    x0 = Math.max(x0, r.left + node.clientLeft); y0 = Math.max(y0, r.top + node.clientTop);
-    x1 = Math.min(x1, r.left + node.clientLeft + node.clientWidth); y1 = Math.min(y1, r.top + node.clientTop + node.clientHeight);
+    if (style.overflowX !== 'visible') { x0 = Math.max(x0, r.left + node.clientLeft); x1 = Math.min(x1, r.left + node.clientLeft + node.clientWidth); }
+    if (style.overflowY !== 'visible') { y0 = Math.max(y0, r.top + node.clientTop); y1 = Math.min(y1, r.top + node.clientTop + node.clientHeight); }
   }
   x0 = Math.max(x0, 0); y0 = Math.max(y0, 0); x1 = Math.min(x1, innerWidth); y1 = Math.min(y1, innerHeight);
   return { x: Math.ceil(x0), y: Math.ceil(y0), width: Math.max(0, Math.floor(x1 - x0)), height: Math.max(0, Math.floor(y1 - y0)) };
 }
+window.present = () => canvasPresentation(document.querySelector('#asset-viewer .viewer-canvas canvas'));
 window.probe = () => {
   const card = document.getElementById('asset-viewer'), host = card.querySelector('.viewer-canvas'), canvas = host.querySelector('canvas'), stage = document.getElementById('artifact-stage');
-  host.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   const w = host.clientWidth, h = host.clientHeight, gl = canvas.getContext('webgl2');
   const dpr = Math.min(devicePixelRatio || 1, 1.5, Math.sqrt(4e6 / (w * h)));
   const camera = meter.camera;
@@ -127,7 +175,7 @@ window.probe = () => {
     hostAspect: w / h, cameraAspect: camera.isPerspectiveCamera ? camera.aspect : (camera.right - camera.left) / (camera.top - camera.bottom),
     cardClipped: card.scrollHeight - card.clientHeight, stageHeight: stage.clientHeight, visible: visible(canvas),
     camera: camera.position.toArray(), cameraZoom: camera.zoom, cameraType: camera.type,
-    frames: viewer.stats().renderFrames, lost: gl.isContextLost(), contexts: meter.contexts, blank: meter.blank };
+    frames: viewer.stats().renderFrames, lost: gl.isContextLost(), contexts: meter.contexts, blank: meter.blank, clears: meter.clears, pending: meter.pending, trace: meter.trace.slice() };
 };
 window.ready = true;
 `;
@@ -156,12 +204,14 @@ test('3D preview survives window resizes across the studio breakpoints', { timeo
     if (reveal) await tab.addStyleTag({ content: '#artifact-panel:not([hidden]){animation:resize-fixture-reveal 80ms linear both}@keyframes resize-fixture-reveal{from{opacity:0}to{opacity:1}}' });
     await tab.evaluate(([base64, after]) => mount(base64, after), [data, openAfter]);
     // Let the panel entrance (if any) finish, then require a drawn frame without any nudge.
-    await tab.waitForFunction(() => document.getAnimations().length === 0, null, { timeout: 5000 });
+    await tab.waitForFunction(() => !document.getElementById('artifact-panel').getAnimations()
+      .some(animation => animation.pending || animation.playState === 'running'), null, { timeout: 5000 });
     await tab.waitForTimeout(250);
     assert.ok(await tab.evaluate(() => viewer.stats().renderFrames) > 0, 'preview draws after the panel opens, without a resize');
     return { tab, errors };
   }
   const settle = async tab => { await tab.waitForTimeout(120); await tab.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))); };
+  const scrollHost = async tab => tab.evaluate(() => document.querySelector('#asset-viewer .viewer-canvas').scrollIntoView({ block: 'nearest', inline: 'nearest' }));
 
   await t.test('panel opened after the viewer is created draws its first frame', async t => { const {errors}=await open(t, true); assert.deepEqual(errors, []); });
 
@@ -169,10 +219,10 @@ test('3D preview survives window resizes across the studio breakpoints', { timeo
 
   await t.test('orthographic pan and zoom survive resizing with the correct projection', async t => {
     const {tab,errors}=await open(t, false);
-    await tab.evaluate(() => { viewer.setView('front'); viewer.pan(50, 30); viewer.zoom(1.4); }); await settle(tab);
+    await tab.evaluate(() => { viewer.setView('front'); viewer.pan(50, 30); viewer.zoom(1.4); }); await scrollHost(tab); await settle(tab);
     const before=await tab.evaluate(() => probe());
     assert.equal(before.cameraType, 'OrthographicCamera');
-    await tab.setViewportSize({width: 1280, height: 720}); await settle(tab);
+    await tab.setViewportSize({width: 1280, height: 720}); await scrollHost(tab); await settle(tab);
     const after=await tab.evaluate(() => probe());
     assert.equal(after.cameraType, 'OrthographicCamera'); assert.equal(after.cameraZoom, before.cameraZoom);
     after.camera.forEach((value,i) => assert.ok(Math.abs(value-before.camera[i])<1e-6, 'orthographic camera position kept'));
@@ -180,11 +230,59 @@ test('3D preview survives window resizes across the studio breakpoints', { timeo
     assert.deepEqual(errors, []);
   });
 
+  await t.test('hidden resizes retain the backing image and re-entry applies the measured size before presenting', async t => {
+    const { tab, errors } = await open(t, false);
+    await tab.evaluate(() => { viewer.orbit(.4, .2); viewer.zoom(1.2); }); await settle(tab);
+    const blank = await tab.evaluate(() => meter.blank);
+    // Move outside all clipping ancestors without changing the layout size.
+    // Re-entry then depends on IntersectionObserver, rather than a size event.
+    await tab.evaluate(() => { document.querySelector('#asset-viewer .viewer-canvas').style.transform = 'translateX(-5000px)'; });
+    await settle(tab);
+    const snapshot = () => tab.evaluate(() => {
+      const host = document.querySelector('#asset-viewer .viewer-canvas'), canvas = host.querySelector('canvas');
+      return { host: [host.clientWidth, host.clientHeight], buffer: [canvas.width, canvas.height],
+        clears: meter.clears, pending: meter.pending, blank: meter.blank, frames: viewer.stats().renderFrames, camera: meter.camera.position.toArray(),
+        cameraAspect: meter.camera.aspect, presentation: present(), trace: meter.trace.slice() };
+    });
+    const before = await snapshot(); assert.equal(before.presentation.canPresent, false, 'fixture is actually clipped before resizing');
+    await tab.setViewportSize({ width: 1280, height: 720 }); await settle(tab);
+    const hidden = await snapshot(), evidence = JSON.stringify(hidden);
+    assert.equal(hidden.presentation.canPresent, false, 'canvas remains clipped ' + evidence);
+    assert.notDeepEqual(hidden.host, before.host, 'hidden host really resized');
+    assert.deepEqual(hidden.buffer, before.buffer, 'hidden resize never clears the last backing image ' + evidence);
+    assert.equal(hidden.clears, before.clears, 'no hidden backing-store resize ' + evidence);
+    assert.equal(hidden.frames, before.frames, 'hidden viewer stays suspended');
+    assert.ok(Math.abs(hidden.cameraAspect - hidden.host[0] / hidden.host[1]) < .01, 'projection still tracks hidden dimensions');
+    await tab.evaluate(() => { document.querySelector('#asset-viewer .viewer-canvas').style.removeProperty('transform'); });
+    await scrollHost(tab); await settle(tab);
+    const resumed = await tab.evaluate(() => probe()), resumedEvidence = JSON.stringify(resumed);
+    assert.equal(await tab.evaluate(() => present().canPresent), true, 'canvas is actually visible after re-entry');
+    assert.deepEqual(resumed.buffer, resumed.expectedBuffer, 're-entry applies the deferred backing size ' + resumedEvidence);
+    assert.ok(resumed.frames > hidden.frames, 're-entry draws without an additional resize');
+    assert.equal(resumed.pending, false, 'real re-entry leaves no lost image pending');
+    resumed.camera.forEach((value, i) => assert.ok(Math.abs(value - before.camera[i]) < 1e-6, 'edited camera survives hidden resize'));
+    assert.equal(resumed.blank - blank, 0, 'no visible blank frame across hidden resize/re-entry ' + resumedEvidence);
+    assert.ok(resumed.trace.length <= 64, 'trace stays bounded');
+    // Only after the real resize/re-entry assertions: isolate the instrumentation
+    // control while hidden. Do not present this deliberately invalidated image.
+    await tab.evaluate(() => { document.querySelector('#asset-viewer .viewer-canvas').style.transform = 'translateX(-5000px)'; });
+    await settle(tab);
+    const controlBefore = await snapshot();
+    assert.equal(controlBefore.presentation.canPresent, false, 'artificial control starts actually clipped');
+    await tab.evaluate(() => { const canvas = document.querySelector('#asset-viewer .viewer-canvas canvas'); canvas.width += 1; });
+    await settle(tab);
+    const pending = await snapshot();
+    assert.equal(pending.pending, true, 'previously drawn hidden clear remains pending without an actual draw');
+    assert.equal(pending.blank, controlBefore.blank, 'the artificial clipped clear is not a visible blank');
+    assert.equal(pending.frames, controlBefore.frames, 'artificial control finishes hidden without drawing');
+    assert.deepEqual(errors, []);
+  });
+
   await t.test('canvas matches its container, stays reachable and renders at every breakpoint', async t => {
     const { tab, errors } = await open(t, false);
     const sizes = [[1440, 900], [1100, 800], [1099, 800], [900, 760], [899, 760], [761, 700], [760, 700], [521, 800], [520, 800], [360, 740], [1280, 600], [1280, 440], [1440, 900]];
     for (const [width, height] of sizes) {
-      await tab.setViewportSize({ width, height }); await settle(tab);
+      await tab.setViewportSize({ width, height }); await scrollHost(tab); await settle(tab);
       const p = await tab.evaluate(() => probe()), at = `${width}x${height} ${JSON.stringify(p)}`;
       assert.deepEqual(p.buffer, p.expectedBuffer, 'backing store follows the container and capped DPR ' + at);
       assert.ok(Math.abs(p.cameraAspect - p.hostAspect) < .01, 'camera aspect ' + at);
@@ -201,17 +299,18 @@ test('3D preview survives window resizes across the studio breakpoints', { timeo
 
   await t.test('resizing keeps a user camera and never presents a blank frame', async t => {
     const { tab, errors } = await open(t, false);
-    await tab.evaluate(() => { viewer.orbit(1.1, .35); viewer.zoom(1.6); }); await settle(tab);
+    await tab.evaluate(() => { viewer.orbit(1.1, .35); viewer.zoom(1.6); }); await scrollHost(tab); await settle(tab);
     const before = await tab.evaluate(() => probe());
-    await tab.setViewportSize({ width: 1400, height: 880 }); await settle(tab);
+    await tab.setViewportSize({ width: 1400, height: 880 }); await scrollHost(tab); await settle(tab);
     const after = await tab.evaluate(() => probe());
     after.camera.forEach((value, i) => assert.ok(Math.abs(value - before.camera[i]) < 1e-6, 'orbit/zoom kept across resize'));
     assert.ok(Math.abs(after.cameraAspect - after.hostAspect) < .01);
-    await tab.evaluate(() => viewer.reset()); await settle(tab);
+    await tab.evaluate(() => viewer.reset()); await scrollHost(tab); await settle(tab);
     const blank = await tab.evaluate(() => meter.blank), frames = await tab.evaluate(() => viewer.stats().renderFrames);
     for (let i = 1; i <= 24; i++) { await tab.setViewportSize({ width: 1400 - i * 20, height: 880 - i * 8 }); await tab.waitForTimeout(16); }
-    await settle(tab);
-    assert.equal(await tab.evaluate(() => meter.blank) - blank, 0, 'no cleared canvas is presented while the window is dragged');
+    await scrollHost(tab); await settle(tab);
+    const blankEvidence = await tab.evaluate(() => ({ blank: meter.blank, trace: meter.trace.slice() }));
+    assert.equal(blankEvidence.blank - blank, 0, 'no cleared canvas is visibly presented while the window is dragged ' + JSON.stringify(blankEvidence.trace));
     assert.ok(await tab.evaluate(() => viewer.stats().renderFrames) > frames);
     const end = await tab.evaluate(() => probe());
     assert.deepEqual(end.buffer, end.expectedBuffer); assert.equal(end.lost, false); assert.equal(end.contexts, 1);

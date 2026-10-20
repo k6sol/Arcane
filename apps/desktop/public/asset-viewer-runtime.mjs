@@ -409,19 +409,25 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
       // Refit only while the camera is still the automatic framing. A camera the
       // user orbited, panned or zoomed is kept; only its projection follows the size.
       if (width && height && nextWidth && nextHeight && !cameraEdited) fitNeeded = true;
-      width = nextWidth; height = nextHeight;
+      width = nextWidth; height = nextHeight; dirty = true;
     }
+    const visible = !!renderer && hostVisible();
     let resized = false;
     if (renderer && width > 0 && height > 0) {
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(MAX_PIXELS / (width * height)), maxDimension / width, maxDimension / height);
       const pixelWidth = Math.max(1, Math.floor(width * dpr)), pixelHeight = Math.max(1, Math.floor(height * dpr));
-      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) { renderer.setSize(pixelWidth, pixelHeight, false); dirty = true; resized = true; }
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        dirty = true;
+        // Hidden hosts retain their last image. Apply the pending backing size
+        // only when visible, then redraw before this layout is presented.
+        if (visible) { renderer.setSize(pixelWidth, pixelHeight, false); resized = true; }
+      }
       updateProjection();
     }
-    // Resizing the backing store clears a presented image. ResizeObserver runs
-    // after layout and before paint, so redraw now; waiting for the next rAF
-    // shows one blank frame per resize step while the window edge is dragged.
-    if (resized && metrics.renderFrames > 0 && hostVisible()) {
+    // ResizeObserver runs after layout and before paint. Redraw an established
+    // visible viewer synchronously after a resize, dirty update or re-entry;
+    // waiting for rAF can present the cleared or stale image for one frame.
+    if (visible && metrics.renderFrames > 0 && (resized || dirty || !lastVisible)) {
       try { draw(); lastVisible = true; }
       catch (error) { status(`3D preview stopped: ${safeReason(error)}`); dispose(); return; }
     }
@@ -638,7 +644,9 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
       intersectionKnown = true;
       const entry = entries[entries.length - 1];
       intersecting = entry.isIntersecting && entry.intersectionRatio > 0;
-      schedule();
+      // A hidden resize may have deferred the backing store. Measure before
+      // scheduling a newly intersecting host, so its first visible frame fits.
+      measure();
     }, { threshold: [0, Number.EPSILON] });
     intersectionObserver.observe(host);
     // Ancestor visibility changes do not always resize or trigger intersection.
