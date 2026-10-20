@@ -21,6 +21,7 @@ test('the C22 block is owned, static and sits before the final reduced-motion re
 
 test('type stays on the 12px floor in px and uses one scale', () => {
   for (const [, size] of block.matchAll(/font-size:([^;}]+)/g)) {
+    assert.ok(size !== undefined, 'font-size capture is required');
     if (size.startsWith('var(')) continue;
     assert.match(size, /^\d+px$/, size);
     assert.ok(parseInt(size, 10) >= 12, size);

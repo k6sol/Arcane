@@ -2742,7 +2742,9 @@ export class CodexChat {
   }
   showConversationNotice(message:string):void{this.text('codex-notice',message);}
   recordedTranscript():RecordedChatTranscript {
-    const active=this.tabs?.active();if(active?.kind==='draft')return null;const thread=active?.kind==='native'?active:this.snapshot()?.thread;
+    const active=this.tabs?.active();
+    if(active?.kind==='draft')return {provider:'codex',projectPath:this.state?.projectPath??null,conversationId:null,sessionId:null,earlierCount:0,messages:[]};
+    const thread=active?.kind==='native'?active:this.snapshot()?.thread;
     const submissions=this.state?.submittedMessages;
     return boundRecordedChatTranscript({provider:'codex',projectPath:this.state?.projectPath??null,conversationId:thread?.threadId??null,sessionId:thread?.sessionId??null,
       earlierCount:submissions&&submissions.threadId===thread?.threadId&&submissions.sessionId===thread?.sessionId?submissions.earlierCount:0,
@@ -3190,7 +3192,7 @@ export class CodexChat {
     else if(action==='edit'){
       if(item.state==='unknown')return false;
       if(typeof text!=='string'||!text.trim()||utf8(text)>CODEX_INPUT_BYTES){this.text('codex-notice','Enter a message within the chat input limit.');return false;}
-      item.text=text.trim();if(item.state!=='unknown'){item.state='paused';item.notice='Edited. Choose Send next to resume.';}
+      item.text=text.trim();item.state='paused';item.notice='Edited. Choose Send next to resume.';
     }else if(action==='up'||action==='down'){
       const other=scoped[index+(action==='up'?-1:1)];if(!other)return false;const a=this.queue.indexOf(item),b=this.queue.indexOf(other);[this.queue[a],this.queue[b]]=[this.queue[b]!,this.queue[a]!];
     }else if(action==='steer'){

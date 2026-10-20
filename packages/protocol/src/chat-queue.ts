@@ -13,7 +13,7 @@ export interface ChatQueueBridge {
   save(snapshot:ChatQueueSnapshot):Promise<{saved:true}>;
 }
 export const CHAT_QUEUE_LIMITS=Object.freeze({rows:64,perChat:5,textBytes:128*1024,providerBytes:1024*1024});
-const fail=():never=>{throw new Error('Queued messages could not be saved securely. They are retained in this window.');};
+function fail():never{throw new Error('Queued messages could not be saved securely. They are retained in this window.');}
 const bytes=(value:string)=>new TextEncoder().encode(value).length;
 function fields(value:unknown,names:readonly string[]):Record<string,unknown>{
   if(!value||typeof value!=='object'||Object.getPrototypeOf(value)!==Object.prototype||Reflect.ownKeys(value).length!==names.length)fail();
@@ -22,7 +22,17 @@ function fields(value:unknown,names:readonly string[]):Record<string,unknown>{
   return result;
 }
 function plainText(value:unknown,max:number,nonempty=false):string{
-  if(typeof value!=='string'||!value.isWellFormed()||bytes(value)>max||nonempty&&!value.trim())fail();return value;
+  if(typeof value!=='string'||value.length>max)fail();
+  // UTF-8 needs at least one byte per UTF-16 code unit. The length guard above
+  // bounds this scan without depending on String.isWellFormed (ES2024).
+  for(let index=0;index<value.length;index++){
+    const unit=value.charCodeAt(index);
+    if(unit>=0xd800&&unit<=0xdbff){
+      const low=value.charCodeAt(++index);
+      if(!(low>=0xdc00&&low<=0xdfff))fail();
+    }else if(unit>=0xdc00&&unit<=0xdfff)fail();
+  }
+  if(bytes(value)>max||nonempty&&!value.trim())fail();return value;
 }
 function identifier(value:unknown,max:number):string{
   const result=plainText(value,max,true);if(!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(result))fail();return result;

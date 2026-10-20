@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readChatQueueSnapshot,readChatQueueRead,type ChatQueueBridge,type ChatQueueSnapshot,type StoredChatQueueRow} from '../../packages/protocol/src/chat-queue.js';
+import {CHAT_QUEUE_LIMITS,readChatQueueSnapshot,readChatQueueRead,type ChatQueueBridge,type ChatQueueSnapshot,type StoredChatQueueRow} from '../../packages/protocol/src/chat-queue.js';
 import {ChatQueueJournal,storedChatQueueRows,type ChatQueueRow,mergeSubmittedMessages} from '../../apps/desktop/src/codex-chat.js';
 const project='C:\\Project',provider='codex' as const;
 const stored=(id=1,extra:Partial<StoredChatQueueRow>={}):StoredChatQueueRow=>({id,localId:'local-'+id,conversationId:'thread-'+id,sessionId:null,text:'Queued prompt '+id,modelId:'gpt-6.1-sol',effort:'low',connectionId:null,requestId:null,createdAt:'2026-10-20T12:00:00.000Z',state:'pending',attachmentState:'none',...extra});
@@ -58,4 +58,32 @@ test('removing a row while its save is in flight persists the empty queue after 
   let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve),writes:ChatQueueSnapshot[]=[],journal=new ChatQueueJournal();
   await journal.attach({version:1,read:async()=>({available:true,projectPath:project,rows:[]}),save:async value=>{writes.push(value);if(writes.length===1)await gate;return{saved:true};}},provider,()=>{},()=>{});
   const adding=journal.save([row()],project);await tick();const removing=journal.save([],project);release();await adding;assert.equal(await removing,true);assert.deepEqual(writes.map(value=>value.rows.length),[1,0]);
+});
+
+
+test('queue schema rejects malformed row and array descriptors without invoking accessors',()=>{
+  let accessed=0;
+  const rowAccessor=stored();Object.defineProperty(rowAccessor,'text',{enumerable:true,get(){accessed++;return 'Untrusted getter';}});
+  const arrayAccessor=[stored()];Object.defineProperty(arrayAccessor,'0',{enumerable:true,get(){accessed++;return stored();}});
+  const disguisedHole:unknown[]=[];disguisedHole.length=1;Object.defineProperty(disguisedHole,Symbol('gap'),{value:true,enumerable:true});
+  const expected={message:'Queued messages could not be saved securely. They are retained in this window.'};
+  for(const rows of [[rowAccessor],arrayAccessor,disguisedHole])assert.throws(()=>readChatQueueSnapshot({...snapshot(),rows}),expected);
+  assert.equal(accessed,0,'schema examines data descriptors without reading getters');
+});
+
+test('queue text rejects every unpaired UTF-16 surrogate and preserves valid pairs exactly',()=>{
+  const malformed=['\ud800','\udbff','\udc00','\udfff','\ud800x','x\udfff','\ud800\ud800','\udc00\ud800','\ud83d\ude00\udc00','\ud800\ud83d\ude00'];
+  for(const text of malformed){
+    assert.throws(()=>readChatQueueSnapshot(snapshot([stored(1,{text})])),/Queued messages could not be saved securely/);
+    assert.throws(()=>readChatQueueSnapshot({...snapshot(),projectPath:project+text}),/Queued messages could not be saved securely/);
+  }
+  const text='\ud800\udc00 / \udbff\udfff / 🧩 / 日本語 / e\u0301';
+  assert.equal(readChatQueueSnapshot(snapshot([stored(1,{text})])).rows[0]!.text,text,'no replacement, normalization or loss of valid Unicode');
+});
+
+test('queue accepts valid emoji exactly at its UTF-8 byte limit and rejects one additional byte',()=>{
+  const text='🧩'.repeat(CHAT_QUEUE_LIMITS.textBytes/4);
+  assert.equal(new TextEncoder().encode(text).length,CHAT_QUEUE_LIMITS.textBytes);
+  assert.equal(readChatQueueSnapshot(snapshot([stored(1,{text})])).rows[0]!.text,text);
+  assert.throws(()=>readChatQueueSnapshot(snapshot([stored(1,{text:text+'a'})])),/Queued messages could not be saved securely/);
 });

@@ -335,13 +335,18 @@ test('explicit start binds only its local draft to a real acknowledged native th
   const f=await serviceFixture(t),old=await f.seed();f.calls.length=0;
   const doc=new DocumentFixture(),api=new CodexChatApi(TOKEN,async(path,init)=>{if(path==='/v1/codex/state')return Response.json({state:f.service.state()});const input=JSON.parse(String(init?.body));f.calls.push(input.action);const outcome=await f.service.action(input);return Response.json(outcome,{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});});
   const chat=new CodexChat(doc.asDocument(),api);t.after(()=>chat.stop());await chat.enableChatTabs({storage:memoryStorage()});await chat.start();await chat.openSavedChat(old);const oldKey=chat.currentStateView().activeChat!.key;
+  const oldTranscript=chat.recordedTranscript();assert.equal(oldTranscript.conversationId,old);assert.ok(oldTranscript.messages.some(message=>message.text.includes('Public question for '+old)));
   doc.getElementById('codex-composer').value='Old unsent draft';doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
   const before=f.calls.length;assert.equal(await chat.newChat(),true);doc.getElementById('codex-composer').value='New unsent draft';doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  assert.equal(f.service.state().snapshot!.thread!.threadId,old,'The prior native thread remains present while the local draft is active.');
+  assert.deepEqual(chat.recordedTranscript(),{provider:'codex',projectPath:f.projectPath,conversationId:null,sessionId:null,earlierCount:0,messages:[]},'A draft publishes no previous native prompt or invented binding.');
+  assert.equal(doc.getElementById('codex-composer').value,'New unsent draft','Reading the draft transcript retains the raw composer.');
   doc.getElementById('codex-model').value='fixture-alt';doc.getElementById('codex-effort').value='high';doc.getElementById('codex-select').dispatchEvent(new Event('click'));await tick();
   assert.equal(f.calls.length,before,'staging a draft or pair cannot alter the existing native chat');assert.equal(chat.currentStateView().activeChat!.threadId,null);
   assert.equal(await chat.startCurrentChat(),true);const fresh=chat.currentStateView().activeChat!;assert.equal(fresh.kind,'native');assert.notEqual(fresh.threadId,old);assert.ok(f.actual.has(fresh.threadId!));
   assert.equal(doc.getElementById('codex-composer').value,'New unsent draft');assert.equal(f.service.state().snapshot!.thread!.writeGranted,false);assert.ok(!f.calls.includes('turn-start'));
   assert.equal(await chat.selectChat(oldKey),true);assert.equal(doc.getElementById('codex-composer').value,'Old unsent draft');assert.equal(doc.getElementById('codex-model').value,'fixture-sol');
+  assert.deepEqual(chat.recordedTranscript(),oldTranscript,'The prior native recording remains intact when reopened.');
 });
 
 

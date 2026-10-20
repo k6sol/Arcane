@@ -965,7 +965,7 @@ export class ClaudeChat {
     else if(action==='edit'){
       if(item.state==='unknown')return false;
       if(typeof text!=='string'||!text.trim()||text.length>MAX_INPUT){this.notice='Enter a message within the chat input limit.';this.render();return false;}
-      item.text=text.trim();if(item.state!=='unknown'){item.state='paused';item.notice='Edited. Choose Send next to resume.';}
+      item.text=text.trim();item.state='paused';item.notice='Edited. Choose Send next to resume.';
     }else if(action==='steer'){if(item.state==='unknown'||!this.canSteer())return false;void this.steer(item);}
     else if(action==='up'||action==='down'){
       const other=scoped[index+(action==='up'?-1:1)];if(!other)return false;const a=this.queue.indexOf(item),b=this.queue.indexOf(other);[this.queue[a],this.queue[b]]=[this.queue[b]!,this.queue[a]!];
