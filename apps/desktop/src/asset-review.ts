@@ -224,6 +224,8 @@ export class AssetReviewCard {
       if (result.state !== 'recorded') return invalid();
       this.unknown.delete(subjectKey); this.apply(s, { ...s.prepared, review: result.review });
       s.notice.textContent = result.review.status === 'approved' ? 'Model approved.' : 'Model rejected.';
+      // A recorded review decision is feedback for the local learning loop (learned-preferences.ts).
+      try { this.doc.dispatchEvent(new (this.doc.defaultView ?? globalThis).CustomEvent('arcane-learning-signal', { detail: { source: 'review', jobId: result.review.subject.jobId, positive: result.review.status === 'approved' } })); } catch { /* Learning is optional. */ }
     } catch { if (s.active()) s.notice.textContent = 'Decision not confirmed. Check its recorded status before continuing.'; }
     finally { if (s.active()) { s.busy = false; this.render(s); } }
   }

@@ -18,6 +18,24 @@ const tab = (n = 1, values = {}) => ({ localId: 'draft:'+n, title: 'Chat '+n, pr
 const snapshot = (values = {}) => ({ version: 1, projectPath: 'C:\\Project', provider: 'codex', tabs: [tab()], activeTabId: 'draft:1', ...values });
 const json = value => JSON.parse(JSON.stringify(value));
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
+const librarySnapshot=()=>({version:1,projectPath:'C:\\Project',activeId:'shared-1',folders:[{id:'folder-1',name:'Forest'}],conversations:[{id:'shared-1',title:'Tree materials',folderId:'folder-1',bindings:[{provider:'codex',conversationId:'thread-1',sessionId:null},{provider:'claude',conversationId:'claude-1',sessionId:null}],messages:[{provider:'codex',conversationId:'thread-1',id:'message-1',role:'user',text:'A private tree prompt',at:'2026-10-20T12:00:00.000Z',model:'gpt-6.1-sol'}]}]});
+
+test('shared folders and cross-provider history roundtrip through encrypted project-bound storage',async()=>{
+  const f=fixture({includeLibrary:true}),value=librarySnapshot();await f.library('save',value);
+  const full=win32.join(f.stateRoot,'conversation-library.v1.json'),bytes=f.disk.node(full).bytes;
+  assert.equal(bytes.includes(Buffer.from('A private tree prompt')),false);assert.deepEqual(json((await f.library('read')).preferences),value);
+  const reopened=fixture({disk:f.disk,safeStorage:f.safeStorage,includeLibrary:true});assert.deepEqual(json((await reopened.library('read')).preferences),value);
+  assert.equal((await f.call('read')).preferences,null,'the existing Codex tab record stays separate');
+});
+test('shared library rejects foreign projects, duplicate native ownership and grant-shaped fields',async()=>{
+  const f=fixture({includeLibrary:true}),value=librarySnapshot();await f.library('save',value);
+  for(const invalid of [{...value,projectPath:'C:\\Other'},{...value,grants:['writes']},{...value,conversations:[...value.conversations,{...value.conversations[0],id:'shared-2'}]}])await assert.rejects(f.library('save',invalid),ERROR);
+  assert.deepEqual(json((await f.library('read')).preferences),value);
+});
+test('shared history stays unavailable without encryption and failed saves retain the prior sealed record',async()=>{
+  const disabled=fixture({includeLibrary:true,smoke:true});assert.deepEqual(json(await disabled.library('read')),{available:false,projectPath:null,preferences:null});await assert.rejects(disabled.library('save',librarySnapshot()),ERROR);assert.equal(disabled.disk.writes.length,0);
+  const f=fixture({includeLibrary:true});await f.library('save',librarySnapshot());f.safeStorage.setAvailable(false);await assert.rejects(f.library('save',{...librarySnapshot(),folders:[]}),ERROR);f.safeStorage.setAvailable(true);assert.deepEqual(json((await f.library('read')).preferences),librarySnapshot());
+});
 
 function filesystemDouble() {
   const nodes = new Map(), descriptors = new Map(), writes = []; let identity = 0n, descriptor = 10, reads = 0;
@@ -95,7 +113,7 @@ function encryptedTestDouble() {
   };
 }
 
-function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false, includeTools = false } = {}) {
+function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false, includeTools = false, includeLibrary=false } = {}) {
   const userRoot = 'C:\\Owned', projectId = hash(projectPath.toLowerCase());
   const stateRoot = win32.join(userRoot, 'runtime', 'projects', projectId), handlers = new Map(), ipcCalls = [];
   disk.ensure(projectPath); disk.ensure(stateRoot);
@@ -126,7 +144,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
   });
   // Execute the actual main-owned session accessor and actual installIpc, not a substitute gate.
-  vm.runInContext('let workspacePreferences, claudePreferences, toolDrafts, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
+  vm.runInContext('let workspacePreferences, claudePreferences, toolDrafts, conversationLibrary, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
     'globalThis.setState = next => {' + ['closing', 'switching', 'window', 'origin', 'userRoot', 'token', 'projectSession']
       .map(name => `if(Object.hasOwn(next,'${name}')) ${name}=next.${name};`).join('') + '};\n' +
     mainSource.slice(begin, end), mainContext, { filename: 'workspace-preferences-main-wiring.cjs' });
@@ -141,6 +159,12 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     const endTools = mainSource.indexOf('toolDrafts.installIpc(ipcMain);', beginTools) + 'toolDrafts.installIpc(ipcMain);'.length;
     assert.ok(beginTools > 0 && endTools > beginTools, 'Production tool draft wiring exists.');
     vm.runInContext(mainSource.slice(beginTools, endTools), mainContext, { filename: 'tool-drafts-main-wiring.cjs' });
+  }
+  if(includeLibrary){
+    const beginLibrary=mainSource.indexOf("conversationLibrary = require('./workspace-preferences.cjs').createWorkspacePreferences(");
+    const endLibrary=mainSource.indexOf('conversationLibrary.installIpc(ipcMain);',beginLibrary)+'conversationLibrary.installIpc(ipcMain);'.length;
+    assert.ok(beginLibrary>0&&endLibrary>beginLibrary);
+    vm.runInContext(mainSource.slice(beginLibrary,endLibrary),mainContext,{filename:'conversation-library-main-wiring.cjs'});
   }
   let exposed, activeEvent = event, invokeError, replyOverride;
   const preloadContext = vm.createContext({ TextEncoder, require(name) {
@@ -179,6 +203,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
       preloadContext.serializedArgs = JSON.stringify(args);
       return exposed.toolDrafts[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
     },
+    library(action,...args){preloadContext.serializedArgs=JSON.stringify(args);return exposed.conversationLibrary[action](...vm.runInContext('JSON.parse(serializedArgs)',preloadContext));},
     rawTools(action, ...args) {
       hostContext.serialized = JSON.stringify(args);
       return handlers.get('arcane:tool-drafts-' + action)(activeEvent, ...vm.runInContext('JSON.parse(serialized)', hostContext));

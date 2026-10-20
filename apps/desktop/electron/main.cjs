@@ -25,6 +25,7 @@ let codeVerification, projectSession, providerSetup;
 let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
+let conversationLibrary;
 let claudePreferences;
 let toolDrafts;
 let runtimeRecovery;
@@ -58,6 +59,16 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
 /** Stop every in-app Claude chat turn of the current project and revoke its scoped credentials (quit/switch/failure). */
 function stopClaudeChat(reason) { const chat = claudeChat, arcane = stopArcaneChat(); claudeChat = null; return chat ? Promise.all([chat.dispose(reason).catch(() => null), arcane]).then(() => null) : arcane; }
+/** Learned preferences for the in-app chats: the daemon's human-only read of the <= 600-character block; '' on any failure. */
+async function learnedContext() {
+  const at = origin, bearer = token; if (!at || !bearer || smoke) return '';
+  try {
+    const response = await fetch(at + '/v1/preferences/context', { headers: { Authorization: 'Bearer ' + bearer }, redirect: 'error', signal: AbortSignal.timeout(1500) });
+    if (!response.ok) return '';
+    const value = await response.json();
+    return value && typeof value.text === 'string' ? value.text.slice(0, 600) : '';
+  } catch { return ''; }
+}
 // In-app Claude chat: headless installed Claude Code per turn, Arcane-only MCP config and a scoped credential from this
 // project's handoff broker. Bound to this project epoch; the transcript lives in an owned per-project directory.
 // Started after startDaemon, so the port/state host fixtures exercise only the daemon boundary.
@@ -72,6 +83,7 @@ async function startClaudeChat() {
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
       release: handoffId => chatBroker.releaseChat(handoffId) },
+    learned: learnedContext,
     instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
   await startArcaneChat(permissions);
 }
@@ -94,6 +106,7 @@ async function startArcaneChat(permissions) {
       const module = await import(require('node:url').pathToFileURL(join(productRoot, 'dist/apps/daemon/src/arcane-gateway.js')).href);
       return module.createArcaneGateway({ config: null, vault: null, credential });
     },
+    learned: learnedContext,
     instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
 }
 async function stopDaemon() {
@@ -617,6 +630,11 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       workspacePreferences.installIpc(ipcMain);
+      conversationLibrary = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'library', getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      conversationLibrary.installIpc(ipcMain);
       claudePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'claude', getSession: () => {
         if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };

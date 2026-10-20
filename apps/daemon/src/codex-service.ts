@@ -10,6 +10,7 @@ import { connectCodexClient, connectCodexProposalWorker, CodexClientError, type 
 import type { NativeAssetRegistry, NativeAssetIncarnation } from './native-asset-authority.js';
 import { locateNativeCli } from '../../../packages/model-adapters/src/process.js';
 import { projectMemorySection, readProjectMemory } from '../../../packages/core/src/project-memory.js';
+import { learnedPreferenceSection } from '../../../packages/core/src/preference-learning.js';
 import { HISTORY_GAP_MARKER, NATIVE_HISTORY_LIMITS, redactNativeHistoryText, type NativeHistoryResult } from '../../../packages/codex-client/src/history.js';
 import { ChatTaskCoordinator, ChatTaskProposalError, type ChatTaskProposalFactory } from './chat-task-coordinator.js';
 import type { ChatTaskProposalRecord } from '../../../packages/storage/src/chat-task-store.js';
@@ -20,6 +21,7 @@ import { WorkStore, type WorkTaskBinding } from '../../../packages/storage/src/w
 import { CHAT_TASK_PLAN_INPUT_BYTES } from './chat-task-plan-runner.js';
 import { createChatTaskNativePlan, type NativePlanClient } from './chat-task-native-plan.js';
 import { createTaskAcceptancePort } from './chat-task-acceptance.js';
+import { SubmittedChatStore, type SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import { TASK_PLAN_REVIEW_TASK_STATES, type TaskPlanView, type TaskPlanReviewView, type TaskPlanReviewTaskState } from '../../../packages/protocol/src/chat-task-plan.js';
 
 const uuid = z.string().uuid();
@@ -37,7 +39,7 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('revoke-assets'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('grant-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
-  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional(),references:imageReferences.optional() }),
+  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), displayText:z.string().min(1).refine(value=>Buffer.byteLength(value)<=131072).optional(), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional(),references:imageReferences.optional() }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
   z.strictObject({ ...common, action: z.literal('task-stop'), threadId: identifier, taskId: uuid }),
   z.strictObject({ ...common, action: z.literal('task-focus'), threadId: identifier, taskId: uuid }),
@@ -107,6 +109,8 @@ export interface CodexProductState {
   provider: 'codex'; use: 'personal-local'; projectPath: string;
   connecting: boolean; closing: boolean; busy: boolean; snapshot: Snapshot | null; lastSnapshot: Snapshot | null;
   nativeAssets?: { available: boolean; sealed: boolean; granted: boolean; admissionOpen: boolean };
+  /** Durable local Send receipts. Separate from provider-reported history; never replayed automatically. */
+  submittedMessages?: SubmittedChatTranscript;
   workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; nativeThreads?: CodexSavedThread[]; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
   chatTasks?: { taskId: string; threadId: string; sessionId: string | null; connectionId: string;
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
@@ -128,6 +132,8 @@ export interface CodexServiceOptions {
   automaticTaskPlanning?: boolean;
   /** Borrowed original-project evidence store; never accepted from an action envelope. */
   workStore?: WorkStore;
+  /** Trusted host callback: the learned-preference block (<= 600 chars) appended after project memory; never HTTP input. */
+  learnedContext?: () => Promise<string>;
 }
 function safeDirectory(path: string): string {
   if (!isAbsolute(path)) throw new CodexClientError('PATH', 'Trusted runtime paths must be absolute.');
@@ -181,11 +187,13 @@ export function createCodexService(options: CodexServiceOptions) {
       AND json_extract(a.payload,'$.action') IN ('thread-start','thread-resume','select')
       AND json_extract(a.payload,'$.model') IS NOT NULL AND json_extract(a.payload,'$.effort') IS NOT NULL
     ORDER BY a.rowid DESC LIMIT 1) WHERE selection IS NULL;`);
+  const submitted = new SubmittedChatStore(db, projectPath, 'codex');
   // A provider handle cannot survive daemon restart. Never redispatch a pending model action.
   for (const row of db.prepare("SELECT id,payload FROM actions WHERE json_extract(payload,'$.state')='pending'").all() as {id:string;payload:string}[]) {
     const record = JSON.parse(row.payload) as CodexActionRecord; record.state = 'unknown'; record.errorCode = 'DAEMON_RESTART'; record.finishedAt = new Date().toISOString();
     db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record), row.id);
   }
+  submitted.recoverPending(new Date().toISOString());
   let client: CodexHostClient | null = null, lastSnapshot: Snapshot | null = null;
   let connecting = false, closing = false, busy = false, closed = false, generation = 0;
   let pendingTaskBinding=false;
@@ -202,7 +210,7 @@ export function createCodexService(options: CodexServiceOptions) {
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
     return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}),
       // Project memory (ARCANE.md) is read fresh per thread start/resume and follows the fixed task instructions.
-      projectInstructions: async (cwd: string) => projectMemorySection((await readProjectMemory(cwd)).text) });
+      projectInstructions: async (cwd: string) => projectMemorySection((await readProjectMemory(cwd)).text) + learnedPreferenceSection(await options.learnedContext?.().catch(() => '')) });
   };
   const proposalFactory: ChatTaskProposalFactory | null = options.proposalWorker ?? (options.connect ? null : async input => {
     const command = await locateNativeCli('codex');
@@ -283,13 +291,18 @@ export function createCodexService(options: CodexServiceOptions) {
   function state(): CodexProductState {
     if (closed) throw new CodexClientError('CLOSED', 'Native workflow is closed.');
     const snapshot=client?.snapshot()??null;
+    const recordedHistory=nativeHistory(), submittedScope=snapshot?.thread?.configured?snapshot.thread:recordedHistory;
     return { provider:'codex', use:'personal-local', projectPath, connecting, closing, busy,
       snapshot, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
       ...(options.assetRegistry ? {nativeAssets:assetState(snapshot)} : {}),
       ...(tasks?.configured() ? {chatTasks:tasks.summaries().map(({id,...task})=>{const context=taskContexts.get(id);return{taskId:id,...task,retained:!!context?.ownerClient&&!context.retired};})} : {}),
-      actions:history(), nativeHistory:nativeHistory(), nativeThreads:savedThreads(), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
+      actions:history(), nativeHistory:recordedHistory, nativeThreads:savedThreads(), ...(submittedScope?{submittedMessages:submitted.read(submittedScope)}:{}), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
   }
-  const save = (record: CodexActionRecord) => { db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId); };
+  const save = (record: CodexActionRecord) => {
+    db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId);
+    if(record.action==='turn-start')submitted.finish(record.requestId,{turnId:record.turnId,model:record.model,effort:record.effort,
+      state:record.state,finishedAt:record.finishedAt,errorCode:record.errorCode});
+  };
   const exactClient = (connectionId: string): CodexHostClient => {
     if (!client || client.snapshot().connectionId !== connectionId) throw new CodexClientError('STALE_CONNECTION','Choose the exact current native connection.');
     return client;
@@ -339,8 +352,16 @@ export function createCodexService(options: CodexServiceOptions) {
       threadId:'threadId' in value ? value.threadId:null,turnId:'turnId' in value ? value.turnId:null,
       model:value.action==='select'?value.model:null,effort:value.action==='select'?value.effort:null,createdAt:new Date().toISOString(),finishedAt:null};
     if(value.action==='turn-start'&&value.references)record.references=referenceImageMetadata(value.references);
-    try { db.prepare('INSERT INTO actions(id,hash,payload) VALUES(?,?,?)').run(record.requestId,hash,JSON.stringify(record)); }
-    catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.prepare('INSERT INTO actions(id,hash,payload) VALUES(?,?,?)').run(record.requestId,hash,JSON.stringify(record));
+      const thread=client?.snapshot().thread;
+      if(value.action==='turn-start'&&thread?.configured&&thread.threadId===value.threadId)
+        submitted.put(thread,{requestId:value.requestId,turnId:null,text:value.displayText??value.text,model:thread.selection.model,effort:thread.selection.effort,
+          state:'pending',createdAt:record.createdAt,finishedAt:null,errorCode:null,contextIncluded:value.displayText!==undefined&&value.displayText!==value.text,transmittedBytes:Buffer.byteLength(value.text)});
+      db.exec('COMMIT');
+    } catch { try{db.exec('ROLLBACK');}catch{/* The original journal failure remains authoritative. */}
+      await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
     let epoch = generation;
     let stagedHistory: CodexHistoryState | null = null;
     let ownsBusy = false,ownsTaskBinding=false; const existingOperations = new Set<string>();

@@ -6,9 +6,9 @@
 import {
   closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderColumns, describeToolActivity, fillModelColumns, firstModelRow, installComposerCommands, loopPickerFocus, modelListEntry,
   modelListMove, parseToolDetail, patchMessageText, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderEarlierButton, renderMessageText, renderToolActivity,
-  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,
+  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,boundRecordedChatTranscript,publicChatText,
 } from './codex-chat.js';
-import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
+import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
 import { ClaudePreferenceStore, claudePreferenceBridge, type ClaudePreferenceBridge, type ClaudePreferenceSnapshot } from './claude-preferences.js';
 import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, restoreChatSwitchFocus } from './chat-tabs.js';
@@ -21,7 +21,30 @@ export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
 /** `image`: a live tool event's capture (PNG/JPEG data: URL from the host's Arcane tools); saved history never has one. */
 export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?: string; result?: string; image?: string }
 /** `steered`: a user message sent into a running reply (it joined that reply instead of starting a new one). */
-export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool; steered?: true }
+export interface ClaudeMessageDelivery { model:string; effort:string; turnId:string|null; startedAt:string; finishedAt:string|null; state:'sending'|'accepted'|'completed'|'failed'|'stopped'; error:string|null;contextIncluded:boolean;transmittedBytes:number }
+export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool; steered?: true; delivery?:ClaudeMessageDelivery }
+/** Exact saved IDs reconcile a late history read with messages received while that read was pending. */
+export function mergeClaudeChatMessages(saved:readonly ClaudeChatMessage[],live:readonly ClaudeChatMessage[]):ClaudeChatMessage[] {
+  const merged=saved.map(message=>({...message})), byId=new Map(merged.flatMap((message,index)=>message.id?[[message.id,index] as const]:[]));
+  for(const message of live) {
+    const index=message.id?byId.get(message.id):undefined;
+    if(index===undefined){if(message.id)byId.set(message.id,merged.length);merged.push(message);}
+    else {
+      const previous=merged[index]!;
+      const settled=previous.delivery?.finishedAt&&!message.delivery?.finishedAt?previous.delivery:message.delivery??previous.delivery;
+      merged[index]={...previous,...message,...(settled?{delivery:settled}:{}),...(previous.tool&&message.tool?{tool:{...previous.tool,...message.tool}}:{})};
+    }
+  }
+  return merged;
+}
+export function claudeMessageDetails(message:ClaudeChatMessage,provider:string,conversationId:string|null):string {
+  const delivery=message.delivery;
+  const fields:[string,string|number|null|undefined][]=[['Provider',provider],['Message',message.role==='user'?'Your prompt':message.role==='assistant'?'Assistant response':message.role==='error'?'Error':'Tool result'],
+    ['Status',delivery?.state??(message.role==='error'?'Failed':'Saved message')],['Model',delivery?.model??'Not reported for this message'],['Reasoning',delivery?.effort??'Not reported for this message'],
+    ['Submitted',delivery?.startedAt],['Finished',delivery?.finishedAt],['Recorded',message.at||null],['Error details',delivery?.error??(message.role==='error'?message.text:null)],
+    ['Text size',new TextEncoder().encode(message.text).length+' UTF-8 bytes'],['Transmitted text',delivery?delivery.transmittedBytes+' UTF-8 bytes':null],['Shared conversation context',delivery?.contextIncluded?'Included with this explicit Send':null],['Lines',message.text.split('\n').length],['Conversation',conversationId??'Not started'],['Turn',delivery?.turnId],['Message ID',message.id||null]];
+  return fields.filter(([,value])=>value!==null&&value!==undefined).map(([label,value])=>label+': '+value).join('\n');
+}
 export interface ClaudeChatStatus {
   installed: boolean; signedIn: boolean; cliVersion: string | null; models: string[]; efforts: string[];
   defaultModel: string | null; message: string | null;
@@ -37,7 +60,7 @@ export interface ClaudeChatBridge {
   history(conversationId: string): Promise<unknown>;
   /** images: optional PNG references (data URLs from the composer); the engine keeps only an '[image: name]' marker. */
   /** `playtest` mirrors the composer's Playtest switch (#playtest-toggle) when it is mounted; the engine turns it into a short system note. */
-  send(request: { conversationId: string | null; text: string; model: string; effort: string; images?: readonly ClaudeChatImage[]; playtest?: boolean }): Promise<unknown>;
+  send(request: { conversationId: string | null; text: string; model: string; effort: string; displayText?:string; images?: readonly ClaudeChatImage[]; playtest?: boolean }): Promise<unknown>;
   /** Removes a saved user message and everything after it (edit and rewind). Older bridges lack it; Edit is then hidden. */
   rewind?(request: { conversationId: string; messageId: string }): Promise<unknown>;
   /**
@@ -89,6 +112,18 @@ export interface ClaudeChatOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 }
 
+/**
+ * Feedback seam for the local learning loop (learned-preferences.ts registers it from the workspace). Presentation and
+ * learning signals only: it can append rating controls and a note to the transcript, never send, edit or authorize.
+ */
+export interface ChatFeedbackSink {
+  userMessage(event: { key: string; text: string; box: HTMLElement | null; anchor: HTMLElement | null }): void;
+  turnFinished(event: { key: string; ok: boolean; tools: readonly { name: string; status?: string; input?: string; result?: string; article?: HTMLElement | null }[]; box: HTMLElement | null }): void;
+}
+let feedbackSink: ChatFeedbackSink | null = null;
+export function setChatFeedbackHooks(sink: ChatFeedbackSink | null): void {
+  feedbackSink = sink && typeof sink.userMessage === 'function' && typeof sink.turnFinished === 'function' ? sink : null;
+}
 export const CLAUDE_CHAT_CHOICE_KEY = 'arcane.claude-chat.choice.v1';
 /** Presentation only: which saved Claude conversations are open as tabs. Never message text or authority. */
 export const CLAUDE_CHAT_TABS_KEY = 'arcane.claude-chat.tabs.v1';
@@ -155,6 +190,14 @@ export function readClaudeChatMessage(value: unknown): ClaudeChatMessage | null 
   if (!message || typeof message.role !== 'string' || !ROLES.includes(message.role as ClaudeChatRole)) return null;
   const output: ClaudeChatMessage = { id: text(message.id, 256), role: message.role as ClaudeChatRole, text: text(message.text), at: text(message.at, 64) };
   if (message.steered === true && output.role === 'user') output.steered = true;
+  const delivery=record(message.delivery);
+  if(delivery&&typeof delivery.model==='string'&&delivery.model.length<=128&&typeof delivery.effort==='string'&&delivery.effort.length<=64&&
+    typeof delivery.turnId==='string'&&delivery.turnId.length<=256&&typeof delivery.startedAt==='string'&&Number.isFinite(Date.parse(delivery.startedAt))&&
+    (delivery.finishedAt===null||typeof delivery.finishedAt==='string'&&Number.isFinite(Date.parse(delivery.finishedAt)))&&
+    ['sending','accepted','completed','failed','stopped'].includes(String(delivery.state))&&(delivery.error===null||typeof delivery.error==='string'&&delivery.error.length<=2048)&&
+    typeof delivery.contextIncluded==='boolean'&&typeof delivery.transmittedBytes==='number'&&Number.isSafeInteger(delivery.transmittedBytes)&&delivery.transmittedBytes>=0&&delivery.transmittedBytes<=2000000)
+    output.delivery={model:delivery.model,effort:delivery.effort,turnId:delivery.turnId,startedAt:delivery.startedAt,finishedAt:delivery.finishedAt as string|null,
+      state:delivery.state as ClaudeMessageDelivery['state'],error:delivery.error as string|null,contextIncluded:delivery.contextIncluded,transmittedBytes:delivery.transmittedBytes};
   const tool = record(message.tool);
   if (tool && typeof tool.status === 'string' && TOOL_STATES.includes(tool.status as ClaudeToolStatus)) {
     output.tool = { name: text(tool.name, 256) || 'Tool', status: tool.status as ClaudeToolStatus };
@@ -291,6 +334,7 @@ interface Turn {
   bubble: HTMLElement | null; text: string; echo: string | null; prompt: string;
   /** The exact text sent, offered by "Retry message" when the reply does not finish; null when images were attached. */
   retry: string | null;
+  delivery:ClaudeMessageDelivery;
 }
 /** The transcript's lightweight marker for sent PNG references (claude-chat.cjs imageMarkers). */
 export const claudeImageMarkers = (images: readonly { name: string }[]): string => images.map(image => '[image: ' + image.name + ']').join(' ');
@@ -355,6 +399,15 @@ export class ClaudeChat {
   private readonly usageListeners = new Set<() => void>();
   /** Messages shown for the active tab, in order (tool entries updated in place); used to find an edit's discarded changes. */
   private shown: ClaudeChatMessage[] = [];
+  /** Last displayed transcript for each open tab; a failed history refresh keeps it visible. */
+  private readonly cachedMessages=new Map<string,ClaudeChatMessage[]>();
+  private shownKey:string|null=null;
+  private readonly messageElements=new WeakMap<HTMLElement,ClaudeChatMessage>();
+  private beforeMessageSubmit:BeforeMessageSubmit|null=null;
+  private preparingSend=false;
+  private readonly transcriptListeners=new Set<()=>void>();
+  private transcriptSignature='';
+  private conversationRevision=0;
   /** Cancels the streamed reply's pending paint; null when nothing is waiting to be drawn. */
   private streamFrame: (() => void) | null = null;
   private streamPainted = 0;
@@ -401,6 +454,22 @@ export class ClaudeChat {
   /** True while this controller owns the shared chat surface. */
   isActive(): boolean { return this.active; }
   activeConversation(): string | null { return this.activeTab()?.conversationId ?? null; }
+  setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
+  isDraftConversation():boolean {
+    const tab=this.activeTab();return !this.nativeDisposed&&!this.nativeHydrating&&!this.loading&&!!tab&&tab.conversationId===null&&this.turn?.tabKey!==tab.key;
+  }
+  subscribeTranscriptChange(listener:()=>void):()=>void{this.transcriptListeners.add(listener);return()=>{this.transcriptListeners.delete(listener);};}
+  recordedTranscript():RecordedChatTranscript {
+    const tab=this.activeTab(),messages=this.active?this.shown:this.cachedMessages.get(tab?.key??'')??[];
+    return boundRecordedChatTranscript({provider:this.profile.provider,projectPath:this.preferenceStore?.projectPath??null,conversationId:tab?.conversationId??null,sessionId:null,earlierCount:0,
+      messages:messages.filter(message=>message.role!=='tool'&&!message.tool).map((message,index)=>({id:message.id||'local:'+tab?.key+':'+index+':'+(message.delivery?.startedAt??message.at),role:message.role as 'user'|'assistant'|'error',text:publicChatText(message.text),
+        source:message.delivery?'live' as const:'history' as const,at:message.at||message.delivery?.startedAt||null,model:message.delivery?.model??null}))});
+  }
+  private publishTranscript():void {
+    const signature=JSON.stringify(this.recordedTranscript());if(signature===this.transcriptSignature)return;this.transcriptSignature=signature;
+    for(const listener of this.transcriptListeners){try{listener();}catch{/* Presentation subscribers never affect a chat turn. */}}
+  }
+  showConversationNotice(message:string):void{this.notice=message;this.render();}
   running(): boolean { return !!this.turn; }
   openTabs(): readonly { key: string; conversationId: string | null; model: string; effort: string }[] {
     return this.tabs.map(tab => ({ key: tab.key, conversationId: tab.conversationId, model: tab.model, effort: tab.effort }));
@@ -518,7 +587,8 @@ export class ClaudeChat {
     this.el('codex-messages')?.removeAttribute('aria-busy');
     this.steerHint(false);
     for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
-    this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
+    this.rememberMessages();
+    this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];this.shownKey=null;
     this.cancelStream();
     if (this.turn) { this.turn.bubble = null; }
   }
@@ -685,6 +755,27 @@ export class ClaudeChat {
     }
     await this.showTab(tab.key);
   }
+  /** A provider handoff opens only after its exact saved history can be read; failed preparation leaves the source alone. */
+  async openRecordedConversation(conversationId:string):Promise<boolean> {
+    await this.readyForRuntimeRecovery();
+    const bridge=this.bridge;if(!bridge||this.turn&&this.turn.turnId===null)return false;
+    const fingerprint=JSON.stringify([this.viewEpoch,this.activeKey,this.preferenceStore?.projectPath,this.activeTab()?.model,this.activeTab()?.effort,this.active?this.input()?.value:this.activeTab()?.draft]),turn=this.turn;
+    let prepared:Record<string,unknown>|null;
+    try{
+      prepared=record(await bridge.history(conversationId));
+      if(!prepared||prepared.conversationId!==conversationId||!Array.isArray(prepared.messages)||prepared.messages.length>2000||prepared.messages.some(row=>!readClaudeChatMessage(row)))return false;
+    }catch{return false;}
+    if(this.nativeDisposed||this.turn!==turn||fingerprint!==JSON.stringify([this.viewEpoch,this.activeKey,this.preferenceStore?.projectPath,this.activeTab()?.model,this.activeTab()?.effort,this.active?this.input()?.value:this.activeTab()?.draft]))return false;
+    let tab=this.tabs.find(row=>row.conversationId===conversationId);
+    const reusable=this.activeTab()?.conversationId===null&&!this.activeTab()!.draft.trim()?this.activeTab():null;
+    if(!tab&&!reusable&&this.tabs.length>=CLAUDE_CHAT_TAB_LIMIT)return false;
+    this.saveDraft();tab??=reusable??this.createTab(conversationId);tab.conversationId=conversationId;
+    const row=this.conversations.find(item=>item.conversationId===conversationId);if(row)this.applyChoice(tab,row.model,row.effort);
+    const messages=(prepared.messages as unknown[]).map(readClaudeChatMessage).filter((message):message is ClaudeChatMessage=>!!message);
+    this.cachedMessages.set(tab.key,mergeClaudeChatMessages(messages,this.cachedMessages.get(tab.key)??[]));
+    await this.showTab(tab.key,prepared);
+    return this.activeTab()?.conversationId===conversationId;
+  }
 
   selectTab(key: string): void {
     if (key === this.activeKey || this.turn && this.turn.turnId === null || !this.tabs.some(tab => tab.key === key)) return;
@@ -807,10 +898,11 @@ export class ClaudeChat {
   }
 
   /** Sends the composer text, or one queued message (which leaves the composer untouched). */
+  private sendPreparationFingerprint():string{return JSON.stringify([this.viewEpoch,this.preferenceStore?.projectPath,this.activeKey,this.activeTab()?.conversationId,this.activeTab()?.model,this.activeTab()?.effort,this.turn?.turnId]);}
   async send(queued?: string): Promise<void> {
     if(this.nativeHydrating)return;
     const bridge = this.bridge, input = this.input(), tab = this.activeTab();
-    if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn || this.rewinding) return;
+    if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn || this.rewinding||this.preparingSend) return;
     const message = (queued ?? input.value).trim();
     if (!message) return;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for ' + this.profile.name + '. Shorten it to 100,000 characters.'; this.render(); return; }
@@ -821,36 +913,55 @@ export class ClaudeChat {
       catch (error) { this.notice = error instanceof Error && error.message.length <= 300 ? error.message : 'Attachments could not be prepared.'; this.render(); return; }
       if (attached && attached.text.length > MAX_INPUT) { this.notice = 'This message and its attachments are too long for ' + this.profile.name + '. Remove an attachment or shorten the message.'; this.render(); return; }
     }
-    const sent = attached?.text ?? message, images = attached?.images ?? [];
+    let sent = attached?.text ?? message;const visibleSent=sent,images = attached?.images ?? [];
+    if(this.beforeMessageSubmit&&queued===undefined){
+      const fingerprint=this.sendPreparationFingerprint();
+      this.preparingSend=true;this.renderControls();
+      try{
+        const prepared=await this.beforeMessageSubmit(visibleSent);
+        if(!this.active||input.value.trim()!==message||fingerprint!==this.sendPreparationFingerprint()||!this.canSend()||this.rewinding)return;
+        if(typeof prepared!=='string'||!prepared.trim()||prepared.length>MAX_INPUT)throw new Error('Shared conversation context could not fit this message. Your draft is retained.');
+        sent=prepared;
+      }catch(error){this.notice=error instanceof Error?error.message:'Conversation context could not be prepared. Your draft is retained.';this.render();return;}
+      finally{this.preparingSend=false;this.renderControls();}
+    }
     const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
-    const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message, retry: images.length ? null : sent };
+    const delivery:ClaudeMessageDelivery={model,effort,turnId:null,startedAt:new Date().toISOString(),finishedAt:null,state:'sending',error:null,contextIncluded:sent!==visibleSent,transmittedBytes:new TextEncoder().encode(sent).length};
+    const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message, retry: images.length ? null : visibleSent,delivery };
     this.buffered = []; this.notice = '';
     if (queued === undefined) { input.value = ''; tab.draft = ''; }
-    const echo: ClaudeChatMessage = { id: '', role: 'user', text: images.length ? sent + '\n\n' + claudeImageMarkers(images) : sent, at: new Date().toISOString() };
+    const echo: ClaudeChatMessage = { id: '', role: 'user', text: images.length ? visibleSent + '\n\n' + claudeImageMarkers(images) : visibleSent, at: delivery.startedAt,delivery };
     const echoArticle = this.appendMessage(echo, true), echoEpoch = this.viewEpoch;
+    try { feedbackSink?.userMessage({ key: this.profile.provider + ':' + tab.key, text: message, box: this.el('codex-messages'), anchor: echoArticle }); } catch { /* Learning is optional. */ }
     this.render();
     let reply: Record<string, unknown> | null, failure = this.profile.name + ' could not start this message. Try again.';
     const playtestSwitch = this.doc.getElementById?.('playtest-toggle'), playtest = playtestSwitch ? { playtest: playtestSwitch.getAttribute('aria-checked') === 'true' } : {};
-    try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(images.length ? { images } : {}), ...playtest })); }
+    try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(sent!==visibleSent?{displayText:visibleSent}:{}),...(images.length ? { images } : {}), ...playtest })); }
     catch (error) { reply = null; failure = bridgeError(error, failure, this.profile.knownErrors); }
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
     if (!turnId || !nextConversation) {
+      delivery.state='failed';delivery.finishedAt=new Date().toISOString();delivery.error=failure;this.refreshMessageDetails();
       this.turn = null; this.buffered = [];
       const visible = this.active && epoch === this.viewEpoch;
       if (visible) this.appendMessage({ id: '', role: 'error', text: failure, at: '' }, true);
       if (queued !== undefined) this.queue.unshift({ id: ++this.queueSeq, text: message, tabKey: tab.key });
-      else if (visible && !input.value) input.value = message; else if (!tab.draft) tab.draft = message;
+      else {const current=visible?input.value:tab.draft;const restored=current.trim()?current+'\n\n'+message:message;tab.draft=restored;if(visible)input.value=restored;this.preferenceEdits++;this.queueNativePreferences();}
       this.returnQueue();
       this.render(); return;
     }
     turn.turnId = turnId; turn.conversationId = nextConversation;
+    delivery.turnId=turnId;delivery.state='accepted';
     // Sent: the attachments are cleared (a failed start keeps them for another try).
     if (attached) { try { this.attachments.controller()?.clear(); } catch { /* Presentation only. */ } }
     // The engine's saved id for this message makes it editable once the reply has finished.
     const savedId = text(reply?.messageId, 256);
-    if (savedId && echoEpoch === this.viewEpoch) { echo.id = savedId; this.offerEdit(echoArticle, echo); }
+    if(savedId)echo.id=savedId;
+    if (savedId && echoEpoch === this.viewEpoch) this.offerEdit(echoArticle, echo);
+    this.reconcileShownIds();
+    this.refreshMessageDetails();
     if (this.tabs.includes(tab) && tab.conversationId === null) tab.conversationId = nextConversation;
     if (!this.conversations.some(row => row.conversationId === nextConversation)) {
+      this.conversationRevision++;
       this.conversations.unshift({ conversationId: nextConversation, title: message.split('\n')[0]!.slice(0, 80), updatedAt: new Date().toISOString(), model, effort });
     }
     this.persistTabs();
@@ -880,7 +991,7 @@ export class ClaudeChat {
     }
     this.deleting.delete(conversationId);
     this.loadUsage(); if (this.usage.delete(conversationId)) this.saveUsage();
-    this.conversations = this.conversations.filter(row => row.conversationId !== conversationId);
+    this.conversationRevision++;this.conversations = this.conversations.filter(row => row.conversationId !== conversationId);
     const tab = this.tabs.find(row => row.conversationId === conversationId);
     if (tab) { tab.draft = ''; this.closeTab(tab.key); }
     await this.reloadList();
@@ -906,46 +1017,57 @@ export class ClaudeChat {
   }
   private saveDraft(): void { const tab = this.activeTab(), input = this.input(); if (this.active && tab && input && tab.draft!==input.value) {tab.draft = input.value;this.preferenceEdits++;if(this.preferenceStore)this.persistTabs();} }
 
-  private async showTab(key: string): Promise<void> {
+  private async showTab(key: string,prepared?:Record<string,unknown>): Promise<void> {
     const tab = this.tabs.find(row => row.key === key); if (!tab) return;
+    this.rememberMessages();
     this.activeKey = key; this.confirmingDelete = false; this.persistTabs();
     if (!this.active) { this.render(); return; }
     const epoch = ++this.viewEpoch;
     const input = this.input(); if (input) input.value = tab.draft;
     this.cancelStream();
-    if (this.turn) { this.turn.bubble = null; this.turn.text = ''; }
+    if (this.turn) { this.turn.bubble = null; }
     this.closePicker();
     this.loading = !!tab.conversationId; this.clearMessages();
+    this.shownKey=key;
+    for(const message of this.cachedMessages.get(key)??[])this.appendMessage(message,false,true);
+    this.attachRunningBubble();
     this.render();
     if (!tab.conversationId || !this.bridge) return;
+    const atReadStart=new Set(this.shown),readingDelivery=this.turnOwnsActiveTab()?this.turn?.delivery:null;
     try {
-      const value = record(await this.bridge.history(tab.conversationId));
+      const value = prepared??record(await this.bridge.history(tab.conversationId));
       if (epoch !== this.viewEpoch || !this.active) return;
       const messages = Array.isArray(value?.messages) ? value.messages : null;
       if (!messages) throw Error('history');
-      this.loading = false; this.clearMessages();
+      const live=this.shown.slice();
+      this.loading = false; this.clearMessages();this.shownKey=key;
       // A long conversation shows its last turns; the earlier ones render in place from "Show earlier messages".
-      const saved = messages.map(readClaudeChatMessage).filter((message): message is ClaudeChatMessage => !!message);
+      const recorded=messages.map(readClaudeChatMessage).filter((message):message is ClaudeChatMessage=>!!message),recordedIds=new Set(recorded.flatMap(message=>message.id?[message.id]:[]));
+      // Saved history replaces older cached turns. Preserve exact matching metadata, the reply that was already
+      // running when the read began, and messages received while it was pending, even if that reply has now finished.
+      const current=live.filter(message=>!!message.id&&recordedIds.has(message.id)||!!readingDelivery&&message.delivery===readingDelivery||!atReadStart.has(message));
+      const saved = mergeClaudeChatMessages(recorded,current);
       const first = transcriptWindowStart(saved.flatMap((message, index) => message.role === 'user' || index === 0 ? [index] : []));
       this.shown.push(...saved.slice(0, first));
       for (const message of saved.slice(first)) this.appendMessage(message, false, true);
+      this.attachRunningBubble();
       if (first) this.offerEarlier(saved.slice(0, first), saved[first]?.role === 'user' ? saved[first]!.text : null);
       // The last saved turn's changes; a turn still running in this chat shows its card when it finishes.
       if (this.turn?.conversationId !== tab.conversationId) this.flushChanges();
       this.scrollToBottom();
     } catch (error) {
       if (epoch !== this.viewEpoch || !this.active) return;
-      this.loading = false; this.clearMessages();
-      this.notice = bridgeError(error, 'This conversation could not be loaded. Try again.', this.profile.knownErrors);
+      this.loading = false;
+      this.notice = bridgeError(error, 'This conversation could not be refreshed. Displayed messages and your draft are retained. Try again.', this.profile.knownErrors);
     }
     this.render();
   }
 
   private async reloadList(): Promise<void> {
     if (!this.bridge) return;
-    const previous = this.conversations;
+    const previous = this.conversations,revision=this.conversationRevision;
     let ok = false;
-    try { this.conversations = readConversations(await this.bridge.list()); ok = true; this.listed = true; }
+    try { const next=readConversations(await this.bridge.list());if(revision!==this.conversationRevision)return;this.conversations = next; ok = true; this.listed = true; }
     catch { if (!this.statusError) this.notice = 'Saved ' + this.profile.name + ' conversations could not be read.'; }
     // Keep open or just-started conversations visible until the engine lists them.
     for (const id of [...this.tabs.map(tab => tab.conversationId), this.turn?.conversationId ?? null]) {
@@ -973,27 +1095,29 @@ export class ClaudeChat {
       if (event.type === 'done') void this.reloadList().then(() => this.render());
       return;
     }
-    const visible = this.active && turn.conversationId !== null && turn.conversationId === this.activeTab()?.conversationId && !this.loading;
+    const visible = this.active && turn.conversationId !== null && turn.conversationId === this.activeTab()?.conversationId;
     switch (event.type) {
       case 'delta': {
         turn.text = (turn.text + text(event.text)).slice(-MAX_TEXT);
         if (!visible) return;
         // Only the reply being written is a live region; aria-busy holds its announcement until it settles.
-        if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '' }, false); turn.bubble.setAttribute('aria-busy', 'true'); turn.bubble.setAttribute('aria-live', 'polite'); }
+        if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '',delivery:turn.delivery }, false); turn.bubble.setAttribute('aria-busy', 'true'); turn.bubble.setAttribute('aria-live', 'polite'); }
         this.paintStream();
         return;
       }
       case 'message': case 'tool': {
         const message = readClaudeChatMessage(event.message);
         if (!message) return;
+        message.delivery=turn.delivery;
         if (message.role === 'user' && turn.echo !== null && message.text.trim() === turn.echo) { turn.echo = null; return; }
         // A finished reply replaces the pending paint; anything else first draws the text that streamed before it.
         if (message.role === 'assistant') this.cancelStream(); else this.flushStream();
         if (!visible) { if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; } return; }
         if (message.role === 'assistant' && turn.bubble) {
+          const row=this.messageElements.get(turn.bubble);if(row)Object.assign(row,message,{text:message.text||turn.text});
           this.setText(turn.bubble, message.text || turn.text, true);
           turn.bubble.setAttribute('aria-busy', 'false'); turn.bubble.removeAttribute('aria-live');
-          turn.bubble = null; turn.text = ''; return;
+          turn.bubble = null; turn.text = '';this.reconcileShownIds();this.refreshMessageDetails(); return;
         }
         if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; }
         const near = this.nearBottom();
@@ -1005,6 +1129,7 @@ export class ClaudeChat {
         this.flushStream();
         turn.bubble?.setAttribute('aria-busy', 'false'); turn.bubble?.removeAttribute('aria-live');
         const ok = event.ok === true, error = nullableText(event.error, 2048), limited = ok ? null : readUsageLimit(event.usageLimit, error, this.profile.usageLimitText);
+        turn.delivery.state=ok?'completed':turn.stopping?'stopped':'failed';turn.delivery.finishedAt=new Date().toISOString();turn.delivery.error=error;this.refreshMessageDetails();
         this.turn = null; this.markTurnLive();
         // At the usage limit the unanswered message returns to an empty composer so it can move to the other provider.
         // It is never resent automatically.
@@ -1024,6 +1149,7 @@ export class ClaudeChat {
         const model = this.turnModel(turn.tabKey), display = this.costDisplay(), reply = claudeReplyCost(event.usage, model);
         this.notice = turn.stopping && !ok ? 'Stopped.' : this.replyNotice(event.usage, model, display) ?? (ok ? 'Done.' : '');
         if (visible && reply) this.appendReplyUsage(reply, display);
+        if (visible && ok) try { feedbackSink?.turnFinished({ key: this.profile.provider + ':' + turn.tabKey, ok, tools: this.turnTools(), box: this.el('codex-messages') }); } catch { /* Learning is optional. */ }
         this.addUsage(turn.conversationId, reply);
         if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
         // The queue continues only after a reply that finished; a failure, Stop or usage limit returns it to the draft.
@@ -1104,6 +1230,13 @@ export class ClaudeChat {
   }
   /** Shows the visible turn's Studio changes as one card after its messages. */
   /** The shared transcript's build progress group is live while this tab's turn runs (presentation only). */
+  /** The visible turn's tool calls (after its user message), with their transcript articles, for the feedback seam. */
+  private turnTools(): { name: string; status: string; input?: string; result?: string; article: HTMLElement | null }[] {
+    let start = this.shown.length; while (start > 0 && this.shown[start - 1]!.role !== 'user') start--;
+    return this.shown.slice(start).filter(row => !!row.tool).map(row => ({ name: row.tool!.name, status: row.tool!.status,
+      ...(row.tool!.input !== undefined ? { input: row.tool!.input } : {}), ...(row.tool!.result !== undefined ? { result: row.tool!.result } : {}),
+      article: row.id ? this.tools.get(row.id)?.article ?? null : null }));
+  }
   private markTurnLive(): void {
     const box = this.el('codex-messages'); if (!box?.dataset || !this.active) return;
     const live = String(!!this.turn && this.turn.tabKey === this.activeKey);
@@ -1144,6 +1277,7 @@ export class ClaudeChat {
       return article;
     }
     const article = this.make('article', undefined, 'codex-message ' + role + (message.steered ? ' steered' : ''));
+    this.messageElements.set(article,message);
     article.setAttribute('data-role', message.role);
     article.setAttribute('aria-label', message.steered ? 'Your steering message' : message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : 'Error');
     // Steered into the running reply: a small label above the text (the build progress group continues past it).
@@ -1152,7 +1286,7 @@ export class ClaudeChat {
     article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text, restored ? { restored: true } : this.choiceOptions()) : Object.assign(body, { textContent: message.text }));
     if (message.role === 'error') article.append(this.make('p', 'Not completed', 'message-acknowledgement'));
     const details = this.make('details', undefined, 'message-details');
-    details.append(this.make('summary', 'Message details'), this.make('pre', this.profile.name + ' · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : ''), 'hint mono'));
+    details.append(this.make('summary', 'Message details'), this.make('pre', claudeMessageDetails(message,this.profile.name,this.activeTab()?.conversationId??null), 'hint mono'));
     article.append(details);
     if (editable(message)) this.offerEdit(article, message);
     return article;
@@ -1187,7 +1321,9 @@ export class ClaudeChat {
     const turn = this.turn; if (!turn?.bubble || !this.active) return;
     // Follows the reply only while the reader is at the bottom; scrolling up stops the follow.
     const near = this.nearBottom();
+    const message=this.messageElements.get(turn.bubble);if(message)message.text=turn.text;
     this.setText(turn.bubble, turn.text); this.streamPainted = Date.now();
+    this.publishTranscript();
     if (near) this.scrollToBottom();
   }
   /** Long saved conversations show their last turns first; "Show earlier messages" renders the rest in place. */
@@ -1317,6 +1453,7 @@ export class ClaudeChat {
     try { await bridge.rewind({ conversationId, messageId: message.id }); }
     catch (error) { this.rewinding = false; this.notice = bridgeError(error, 'This message could not be edited. Try again.', this.profile.knownErrors); this.render(); return; }
     this.rewinding = false;
+    this.discardEditedMessages(tab.key,message.id);
     if (this.activeTab() !== tab || tab.conversationId !== conversationId) return;
     await this.showTab(tab.key);
     if (!this.active || this.activeKey !== tab.key) return;
@@ -1328,6 +1465,17 @@ export class ClaudeChat {
     }
     this.notice = '';
     await this.send(edited);
+  }
+
+  /** The acknowledged rewind removes this message and its replies even if the following history read fails. */
+  private discardEditedMessages(tabKey:string,messageId:string):void {
+    const kept=(messages:ClaudeChatMessage[])=>{const index=messages.findIndex(message=>message.id===messageId);return index<0?messages:messages.slice(0,index);};
+    const cached=this.cachedMessages.get(tabKey);if(cached)this.cachedMessages.set(tabKey,kept(cached));
+    if(this.shownKey!==tabKey)return;
+    const messages=kept(this.shown);this.cachedMessages.set(tabKey,messages);
+    this.clearMessages();this.shownKey=tabKey;
+    if(this.active)for(const message of messages)this.appendMessage(message,false,true);
+    else this.shown=messages;
   }
 
   /** `restored`: from saved history, so its choice / plan buttons are inert and only show the answer given. */
@@ -1352,8 +1500,47 @@ export class ClaudeChat {
     const near = !restored && (scroll || this.nearBottom());
     if (this.messageCount === 0) box.replaceChildren();
     box.append(element); this.messageCount++;
+    this.publishTranscript();
     if (near) this.scrollToBottom();
     return element;
+  }
+
+  private rememberMessages():void {
+    if(!this.shownKey)return;
+    // A closed tab never retains another copy of its transcript.
+    for(const key of this.cachedMessages.keys())if(!this.tabs.some(tab=>tab.key===key))this.cachedMessages.delete(key);
+    const bounded:ClaudeChatMessage[]=[];let bytes=0;
+    for(const message of this.shown.slice().reverse()){
+      const cached={...message};if(message.tool){const {image,...tool}=message.tool;cached.tool=tool;}
+      const size=new TextEncoder().encode(JSON.stringify(cached)).length;
+      if(bounded.length>=256||bytes+size>512*1024)break;
+      bytes+=size;bounded.unshift(cached);
+    }
+    if(this.tabs.some(tab=>tab.key===this.shownKey))this.cachedMessages.set(this.shownKey,bounded);
+  }
+  private refreshMessageDetails():void {
+    const articles=Array.from(this.el('codex-messages')?.querySelectorAll<HTMLElement>('.codex-message')??[]);
+    for(const article of articles){
+      const message=this.messageElements.get(article);if(!message)continue;
+      if(message.tool)continue;
+      const pre=article?.querySelector<HTMLElement>('.message-details pre');
+      if(pre)pre.textContent=claudeMessageDetails(message,this.profile.name,this.activeTab()?.conversationId??null);
+    }
+  }
+  private attachRunningBubble():void {
+    if(!this.turnOwnsActiveTab()||!this.turn)return;
+    const turn=this.turn;
+    const articles=Array.from(this.el('codex-messages')?.querySelectorAll<HTMLElement>('.codex-message')??[]);
+    turn.bubble=articles.findLast(article=>{const message=this.messageElements.get(article);return message?.role==='assistant'&&message.delivery===turn.delivery&&turn.delivery.state==='accepted';})??null;
+    if(turn.bubble){turn.bubble.setAttribute('aria-busy','true');turn.bubble.setAttribute('aria-live','polite');}
+  }
+  private reconcileShownIds():void {
+    const ids=this.shown.filter(message=>!!message.id).map(message=>message.id);
+    if(new Set(ids).size===ids.length)return;
+    const messages=mergeClaudeChatMessages([],this.shown),key=this.shownKey;
+    this.clearMessages();this.shownKey=key;
+    for(const message of messages)this.appendMessage(message,false,true);
+    this.attachRunningBubble();
   }
 
   private clearMessages(): void {
@@ -1732,12 +1919,13 @@ export class ClaudeChat {
         const path = submit.querySelector?.('svg path'); path?.setAttribute('d', stopMode ? STOP_PATH : SEND_PATH); path?.setAttribute('fill', stopMode ? 'currentColor' : 'none');
       }
       const controls = submit.closest?.<HTMLElement>('.composer-controls'); if (controls) controls.dataset.taskActive = String(stopMode);
-      submit.disabled = this.nativeHydrating|| (stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || this.rewinding || !(input?.value.trim()));
+      submit.disabled = this.nativeHydrating||this.preparingSend|| (stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || this.rewinding || !(input?.value.trim()));
     }
     const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create) create.disabled = !!turn && turn.turnId === null;
   }
 
   private render(): void {
+    this.publishTranscript();
     if (!this.active) return;
     this.queueNativePreferences();
     if (this.claimed) this.claimAttachments();
@@ -1822,6 +2010,7 @@ export interface CodexComposerPeer {
   subscribeStateChange?(listener: () => void): () => void;
   /** Fresh evidence that the signed-in ChatGPT account is out of usage (CodexChat.usageLimit). */
   usageLimit?(): ProviderUsageLimit | null;
+  showConversationNotice?(message:string):void;
 }
 /** Provider setup's side: which provider owns the surface, and an explicit provider choice. */
 export interface ChatProviderSwitch {
@@ -1860,17 +2049,29 @@ const PLANS_SECTION = 'settings-plans';
  * provider setup. When the surface actually switches, the unsent composer text moves with it and the chosen model is
  * selected with the current effort when the new provider supports it. A switch never sends a message or starts a turn.
  */
-export function linkChatProviders(options: { codex: CodexComposerPeer; claude: ClaudeChat; arcane?: ClaudeChat | null; provider: ChatProviderSwitch; enabled?: () => boolean }): ChatProviderLink {
+export function linkChatProviders(options: { codex: CodexComposerPeer; claude: ClaudeChat; arcane?: ClaudeChat | null; provider: ChatProviderSwitch; enabled?: () => boolean;
+  beforeProviderSwitch?:(from:ComposerProvider,to:ComposerProvider)=>Promise<boolean>|boolean }): ChatProviderLink {
   const { codex, claude, provider } = options;
   let arcane: ClaudeChat | null = options.arcane ?? null;
   let pending: { target: ComposerProvider; model: string | null; effort: string | null; at: number } | null = null;
   let current: ComposerProvider | null = null, stopped = false;
+  let preparingSwitch=false,switchGeneration=0;
   const removers: (() => void)[] = [];
   let arcaneRemovers: (() => void)[] = [];
   const chatOf = (target: ComposerProvider | null): ClaudeChat | null => target === 'claude' ? claude : target === 'arcane' ? arcane : null;
   const chats = (): ClaudeChat[] => arcane ? [claude, arcane] : [claude];
-  const request = (target: ComposerProvider, model: string, effort: string | null) => {
-    if (stopped) return;
+  const request = async (target: ComposerProvider, model: string, effort: string | null) => {
+    if (stopped||preparingSwitch) return;
+    const source=provider.chatSurface(),generation=switchGeneration;
+    if(source!==target&&options.beforeProviderSwitch){
+      preparingSwitch=true;
+      let allowed=false;
+      try{allowed=await options.beforeProviderSwitch(source,target);}catch{/* The source conversation stays selected. */}
+      finally{preparingSwitch=false;}
+      if(stopped||generation!==switchGeneration||provider.chatSurface()!==source)return;
+      if(!allowed){const message='This conversation could not be switched. Your current chat, model and draft are retained.';
+        if(source==='codex')codex.showConversationNotice?.(message);else chatOf(source)?.showConversationNotice(message);return;}
+    }
     pending = { target, model: model || null, effort, at: Date.now() };
     if (provider.chatSurface() === target) { sync(); return; }
     let signedIn = false;
@@ -2016,7 +2217,7 @@ export function linkChatProviders(options: { codex: CodexComposerPeer; claude: C
   sync();
   return {
     sync() { stopped = false; sync(); },
-    stop() { stopped = true; pending = null; current = null; renderNotice(); },
+    stop() { stopped = true;switchGeneration++; pending = null; current = null; renderNotice(); },
     setArcane(chat: ClaudeChat | null) {
       if (chat === arcane) return;
       const previous = arcane;

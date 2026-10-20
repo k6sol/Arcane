@@ -18,18 +18,22 @@ import { registerProceduralTools, registerProceduralPlaceTool } from './procedur
 import { compactAssetJobPage, compactOutcome, serveCompactRefs, serveCompactToolList } from './token-lean.js';
 import { TERRAIN_TOOL, TERRAIN_DESCRIPTION, terrainShape, compileTerrainPlan } from './terrain-tool.js';
 import { lintLuau } from './luau-lint.js';
+import { createLearnedDefaults } from './learned-defaults.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 const skillId = z.string().regex(/^arcane-[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64);
 
-export function createMcpServer(options: { client: DaemonClient; projectRoot: string; skillRegistry?: SkillRegistry }): McpServer {
+export function createMcpServer(options: { client: DaemonClient; projectRoot: string; skillRegistry?: SkillRegistry; learnedDefaults?: boolean }): McpServer {
   const { client } = options;
   const assetScope = client.assetAudience === 'native-session'
     ? ' Native-session: the bearer’s exact project and Codex conversation scope (daemon-enforced); start/cancel need explicit host asset permission and an open admission window; the client routing mode grants no authority and no originating-turn provenance.' : '';
   const scopedAssetJobId = client.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId;
   // Injection is for trusted code fixtures only; --project remains a workspace.
   const skills = options.skillRegistry ?? new SkillRegistry();
+  // Learned preferences fill omitted tool arguments (explicit arguments win); primed once so skill boosts need no per-call read.
+  const learned = createLearnedDefaults(options.learnedDefaults === true && typeof (client as { learnedBias?: unknown }).learnedBias === 'function' ? client : null);
+  if (options.learnedDefaults === true) void learned.bias();
   const server = new McpServer({ name: 'arcane-studio', version: '0.1.0' }, {
     maxToolInputElements: 100_000,
     instructions: productInstructions(),
@@ -142,16 +146,21 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     });
   register('scene_build', sceneBuildDescription(),
     z.strictObject({ ...target, parent: ref, ...sceneBuildShape }), { ...WRITE, destructiveHint: false },
-    async ({ sessionId, timeoutMs, parent, ...input }, signal) => {
+    async ({ sessionId, timeoutMs, parent, ...requested }, signal) => {
+      const { input, learned: notes } = await learned.apply('scene_build', requested);
       const compiled = compileSceneBuild(input as SceneBuildInput, parent as Json);
       const outcome = await client.execute(sessionId, 'scene.build', compiled.args, { timeoutMs, signal });
       // Never echo the compiled hierarchy back into model context; the receipt summarises it.
       const command = outcome.command ? { ...outcome.command, args: { compiled: true, items: (compiled.args.items as Json[]).length, instances: compiled.instances } } : null;
-      return { ...outcome, command, plannedInstances: compiled.instances, ...(compiled.scatter.length ? { scatter: compiled.scatter } : {}), ...(compiled.kits.length ? { kits: compiled.kits } : {}) };
+      return { ...outcome, command, plannedInstances: compiled.instances, ...(compiled.scatter.length ? { scatter: compiled.scatter } : {}), ...(compiled.kits.length ? { kits: compiled.kits } : {}), ...(notes.length ? { learned: notes } : {}) };
     });
   register('environment_apply', environmentDescription() + ` With scene.effects: preset ${ENVIRONMENT_PRESET_NAMES.join('/')} (explicit sections override), technology, terrainDecoration, materials (MaterialVariants) and soundService (AmbientReverb, DistanceFactor, DopplerScale, RolloffScale). A setting Studio refuses rolls everything back and names the Properties-window step.`,
     z.strictObject({ ...target, ...environmentShape }), WRITE,
-    ({ sessionId, timeoutMs, ...input }, signal) => client.execute(sessionId, 'environment.apply', compileEnvironment(input), { timeoutMs, signal }));
+    async ({ sessionId, timeoutMs, ...requested }, signal) => {
+      const { input, learned: notes } = await learned.apply('environment_apply', requested);
+      const outcome = await client.execute(sessionId, 'environment.apply', compileEnvironment(input), { timeoutMs, signal });
+      return notes.length ? { ...outcome, learned: notes } : outcome;
+    });
   register('receipt_status', 'Read: an existing command/receipt by commandId in any state. Never enqueues or replays; use after an ambiguous timeout.',
     z.strictObject({ commandId: id, timeoutMs }), READ,
     ({ commandId, timeoutMs }, signal) => client.receiptStatus(commandId, { timeoutMs, signal }));
@@ -170,7 +179,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       limit: z.number().int().min(1).max(SKILL_ROUTER_LIMITS.skills).default(SKILL_ROUTER_LIMITS.skills),
       byteBudget: z.number().int().min(256).max(SKILL_ROUTER_LIMITS.maximumBytes).default(SKILL_ROUTER_LIMITS.defaultBytes),
       allowExperimental: z.boolean().default(BUNDLED_GUIDANCE_POLICY.allowExperimental) }), READ,
-    input => recommendSkills(skills, input));
+    input => recommendSkills(skills, { ...input, boosts: learned.cachedBoosts() }));
   register('skills_list', 'Read bundled skill metadata from the integrity-checked registry. Approved only by default; allowExperimental=true needs explicit opt-in. Quarantined/deprecated skills stay unavailable.',
     z.strictObject({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(20), allowExperimental: z.boolean().default(false) }), READ,
     input => skills.list(input));
@@ -210,7 +219,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
     ({ jobId, timeoutMs }, signal) => client.assetsManifest(jobId, { timeoutMs, signal }));
   registerViewportTool(server, client);
   registerNativeAssetTools(server, client);
-  registerProceduralTools(server, client, assetScope);
+  registerProceduralTools(server, client, assetScope, learned);
   // Appended last in ARCANE_TOOL_NAMES, so it is registered after the procedural tools.
   register(TERRAIN_TOOL, TERRAIN_DESCRIPTION, z.strictObject({ ...target, ...terrainShape }), WRITE,
     async ({ sessionId, timeoutMs, ...input }, signal) => {

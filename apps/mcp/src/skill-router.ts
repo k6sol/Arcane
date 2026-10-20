@@ -42,7 +42,9 @@ scene_children returns parentRef for the requested granted root/parent, includin
 }
 
 type Metadata = Awaited<ReturnType<SkillRegistry['list']>>['items'][number];
-export interface SkillRecommendationInput { request: string; limit: number; byteBudget: number; allowExperimental: boolean }
+export interface SkillRecommendationInput { request: string; limit: number; byteBudget: number; allowExperimental: boolean;
+  /** Learned-preference boosts (skill id -> 1..4) from the user's feedback; only lift skills the request already matches. */
+  boosts?: Readonly<Record<string, number>> }
 
 const CORE = ['arcane-studio-context', 'arcane-safe-edits', 'arcane-project-director', 'arcane-quality-review'] as const;
 const STOP = new Set('a an the and or of for to in on with my this that it is be as at by from please roblox game make build create help use want need existing current actual implement requested'.split(' '));
@@ -117,7 +119,8 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
   if (catalogue.truncated) fail('SKILL_CATALOGUE_LIMIT', 'Bundled skill catalogue exceeds the bounded router inventory.');
   const terms = tokens(input.request);
   const ranked = catalogue.items.filter(skill => !CORE.includes(skill.id as typeof CORE[number]))
-    .map(skill => ({ skill, score: rank(skill, terms) })).filter(row => row.score > 0)
+    .map(skill => { const score = rank(skill, terms), boost = input.boosts?.[skill.id]; return { skill, score: score > 0 && typeof boost === 'number' && boost > 0 ? score + Math.min(4, boost) : score }; })
+    .filter(row => row.score > 0)
     .sort((a, b) => b.score - a.score || a.skill.id.localeCompare(b.skill.id));
   // Preserve domain space for small budgets/limits; core process is also always
   // delivered in initialize.instructions, even when no eligible registry skill exists.

@@ -49,6 +49,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/welcome-tour.ts', 'dist/apps/desktop/src/welcome-tour.js', 'dist/apps/desktop/src/welcome-tour.js.map',
   'apps/desktop/src/editor-drafts.ts', 'dist/apps/desktop/src/editor-drafts.js', 'dist/apps/desktop/src/editor-drafts.js.map',
   'apps/desktop/src/project-memory.ts', 'dist/apps/desktop/src/project-memory.js', 'dist/apps/desktop/src/project-memory.js.map',
+  'apps/desktop/src/learned-preferences.ts', 'dist/apps/desktop/src/learned-preferences.js', 'dist/apps/desktop/src/learned-preferences.js.map',
   'apps/desktop/src/script-editor-drafts.ts', 'dist/apps/desktop/src/script-editor-drafts.js', 'dist/apps/desktop/src/script-editor-drafts.js.map',
   'apps/desktop/src/script-sync.ts', 'dist/apps/desktop/src/script-sync.js', 'dist/apps/desktop/src/script-sync.js.map',
   'apps/desktop/src/script-diff.ts', 'dist/apps/desktop/src/script-diff.js', 'dist/apps/desktop/src/script-diff.js.map',

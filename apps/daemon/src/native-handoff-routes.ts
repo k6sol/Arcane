@@ -21,7 +21,9 @@ const HANDOFF_BEARER = /^Bearer ([A-Za-z0-9_-]{43})(?![\s\S])/;
 const COMMAND_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const RUN_PATH = /^\/v1\/work\/runs\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GET_PATHS = new Set(['/v1/product/state', '/v1/work/runs', '/v1/work/ready', '/v1/studio/sessions', '/v1/studio/commands',
-  '/v1/playtests', '/v1/assets/jobs', '/v1/assets/manifest', '/v1/assets/preview']);
+  '/v1/playtests', '/v1/assets/jobs', '/v1/assets/manifest', '/v1/assets/preview',
+  // Read-only learned tool defaults and chat context; feedback and edits stay human-only (preference-routes.ts).
+  '/v1/preferences/bias', '/v1/preferences/context']);
 const POST_PATHS = new Set(['/v1/work/create', '/v1/work/claim', '/v1/work/progress', '/v1/work/submit', '/v1/studio/commands', '/v1/studio/restore',
   '/v1/playtests/prepare', '/v1/playtests/cancel', '/v1/playtests/viewport',
   '/v1/studio-native/asset-search', '/v1/studio-native/asset-insert', '/v1/studio-native/asset-generate', '/v1/studio-native/asset-job',

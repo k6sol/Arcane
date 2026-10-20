@@ -2,6 +2,7 @@ import { startScriptEditorDrafts, type ScriptDraftTarget, type AppliedScriptDraf
 import type { EditorDraft } from './editor-drafts.js';
 import { EditorDraftStore, type EditorDraftBridge } from './editor-drafts.js';
 import { startProjectMemory } from './project-memory.js';
+import { startLearnedPreferences } from './learned-preferences.js';
 import { startRuntimeRecovery } from './runtime-recovery.js';
 import type { startWorkflowPanel, WorkflowPanelOptions } from './workflow-panel.js';
 import { CodexHistoryPanel } from './codex-history.js';
@@ -13,7 +14,8 @@ import { startProviderSetup } from './provider-setup.js';
 import { startSetupChecklist, startStudioConnectionBanner } from './setup-checklist.js';
 import { startStarterGallery } from './starter-gallery.js';
 import { startWelcomeTour } from './welcome-tour.js';
-import { ClaudeChat, linkChatProviders } from './claude-chat.js';
+import { ClaudeChat, linkChatProviders, setChatFeedbackHooks } from './claude-chat.js';
+import { SharedConversations } from './shared-conversations.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
@@ -2224,16 +2226,24 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   setProjectMemorySaver(note=>memory.append(note));
   window.addEventListener('pagehide',()=>{memory.stop();setProjectMemorySaver(null);});
   window.addEventListener('pageshow',event=>{if(event.persisted){memory.resume();setProjectMemorySaver(note=>memory.append(note));}});
+  // Learning from feedback: chat rating controls, implicit signals and Settings > What Arcane has learned (local only).
+  const learned = startLearnedPreferences(document, {token:()=>token});
+  setChatFeedbackHooks(learned.hooks);
   const codexApi=new CodexChatApi(token);
   const codexChat = new CodexChat(document, codexApi);
+  codexChat.setFeedbackHooks(learned.hooks);
+  window.addEventListener('pagehide',()=>{learned.stop();setChatFeedbackHooks(null);codexChat.setFeedbackHooks(null);});
+  window.addEventListener('pageshow',event=>{if(event.persisted){learned.resume();setChatFeedbackHooks(learned.hooks);codexChat.setFeedbackHooks(learned.hooks);}});
   const providerSetup = startProviderSetup(document, {chat:codexChat, autoSelectSignedIn:true});
   // Both providers share one chat surface (tabs, transcript, composer and model picker). While provider setup reports
   // the Claude surface, Codex pauses drawing there (its state is never destroyed) and the Claude chat renders instead.
   const claudeChat = document.getElementById('codex-compose') ? new ClaudeChat(document) : null;
   let claudeChatStopped = false;
+  let sharedConversations:SharedConversations|null=null;
   // The composer model list shows ChatGPT and Claude models; picking the other provider's model switches provider
   // explicitly and carries the unsent draft. The link also owns the surface hand-off below.
-  const chatLink = claudeChat ? linkChatProviders({ codex: codexChat, claude: claudeChat, provider: providerSetup, enabled: () => !claudeChatStopped }) : null;
+  const chatLink = claudeChat ? linkChatProviders({ codex: codexChat, claude: claudeChat, provider: providerSetup, enabled: () => !claudeChatStopped,
+    beforeProviderSwitch:(from,to)=>sharedConversations?.beforeProviderSwitch(from,to)??Promise.resolve(true) }) : null;
   const showClaudeChat = () => {
     if (chatLink) { chatLink.sync(); return; }
     try { codexChat.yieldSurface(false); } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
@@ -2250,7 +2260,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     chatLink.setArcane(chat); void chat.loadModels();
   }).catch(() => { /* Arcane Credits chat is optional; ChatGPT and Claude are unaffected. */ });
   void import('./desktop-update.js').then(module=>{
-    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await memory.prepareForRestart();await scriptDrafts?.prepareForRestart();await arcaneChat?.prepareForRestart();await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
+    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await memory.prepareForRestart();await scriptDrafts?.prepareForRestart();await arcaneChat?.prepareForRestart();await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();await sharedConversations?.prepareForRestart();}});
     window.addEventListener('pagehide',()=>updates.stop());window.addEventListener('pageshow',event=>{if(event.persisted)updates.resume();});
   }).catch(()=>{});
   let recovery:ReturnType<typeof startRuntimeRecovery>|null=null;
@@ -2352,10 +2362,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,
-      beforeNewChat: () => workspaceShell.showConversation(),
+      beforeNewChat: () => {sharedConversations?.beginNewConversation();workspaceShell.showConversation();},
       // While the Claude surface is shown, sidebar New chat and Ctrl/Cmd+N start a new Claude conversation instead.
       alternateNewChat: { active: () => !claudeChatStopped && (!!claudeChat && providerSetup.chatSurface() === 'claude' || !!arcaneChat && providerSetup.chatSurface() === 'arcane'),
         start: () => { if (providerSetup.chatSurface() === 'arcane') arcaneChat?.newChat(); else claudeChat?.newChat(); } } });
+    if(claudeChat){
+      sharedConversations=new SharedConversations(document,{provider:()=>providerSetup.chatSurface(),requestProvider:p=>providerSetup.requestProvider(p),peers:{
+        codex:{recordedTranscript:()=>codexChat.recordedTranscript(),isDraftConversation:()=>codexChat.isDraftConversation(),subscribeTranscriptChange:f=>codexChat.subscribeTranscriptChange(f),setBeforeMessageSubmit:f=>codexChat.setBeforeMessageSubmit(f),showConversationNotice:t=>codexChat.showConversationNotice(t),open:id=>codexChat.openSavedChat(id),newChat:()=>codexChat.newChat()},
+        claude:{recordedTranscript:()=>claudeChat.recordedTranscript(),isDraftConversation:()=>claudeChat.isDraftConversation(),subscribeTranscriptChange:f=>claudeChat.subscribeTranscriptChange(f),setBeforeMessageSubmit:f=>claudeChat.setBeforeMessageSubmit(f),showConversationNotice:t=>claudeChat.showConversationNotice(t),open:id=>claudeChat.openRecordedConversation(id),newChat:async()=>{await claudeChat.readyForRuntimeRecovery();claudeChat.newChat();return claudeChat.isDraftConversation();}},
+      }});
+      window.addEventListener('pagehide',()=>sharedConversations?.stop());window.addEventListener('pageshow',e=>{if(e.persisted)sharedConversations?.resume();});
+    }
     const attachments=await import('./chat-attachments.js');
     codexChat.enableTextAttachments(attachments.startChatAttachments(document,{
       getScope:()=>codexChat.textAttachmentScope(),onChange:()=>codexChat.attachmentPresentationChanged(),

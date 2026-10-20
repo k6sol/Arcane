@@ -9,7 +9,7 @@ async function main() {
     throw new Error('Use arcane MCP [--project PROJECT_DIRECTORY].');
   }
   const client = DaemonClient.fromEnvironment();
-  const server = createMcpServer({ client, projectRoot: resolve(args[1] ?? process.cwd()) });
+  const server = createMcpServer({ client, projectRoot: resolve(args[1] ?? process.cwd()), learnedDefaults: true });
   let closing = false;
   const close = async () => {
     if (closing) return;

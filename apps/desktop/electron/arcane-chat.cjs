@@ -94,11 +94,13 @@ const own = (value, key) => !!value && typeof value === 'object' && !types.isPro
 function sendInput(value) {
   if (own(value, 'images')) fail('images');
   const hasPlaytest = own(value, 'playtest');
-  const v = plain(value, ['conversationId', 'text', 'model', 'effort', ...(hasPlaytest ? ['playtest'] : [])]);
+  const hasDisplay=own(value,'displayText');
+  const v = plain(value, ['conversationId', 'text', 'model', 'effort', ...(hasPlaytest ? ['playtest'] : []),...(hasDisplay?['displayText']:[])]);
   if (hasPlaytest && typeof v.playtest !== 'boolean') fail('unavailable');
   if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !MODEL_ID.test(v.model) || v.effort !== EFFORT) fail('unavailable');
   if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
-  return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort, ...(hasPlaytest ? { playtest: v.playtest } : {}) });
+  if(hasDisplay&&(typeof v.displayText!=='string'||!v.displayText.trim()||v.displayText.length>LIMITS.textChars||!v.displayText.isWellFormed()))fail('text');
+  return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort,...(hasDisplay?{displayText:v.displayText}:{}), ...(hasPlaytest ? { playtest: v.playtest } : {}) });
 }
 function rewindInput(value) {
   const v = plain(value, ['conversationId', 'messageId']);
@@ -355,6 +357,10 @@ function createArcaneChat(options) {
     instructions = (preamble + '\n\n' + text).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').slice(0, limits.instructionsChars);
     return instructions;
   }
+  /** Learned preferences from the host (daemon read, short timeout); any failure means none. Read per turn. */
+  async function loadLearned() {
+    try { const value = await options.learned?.(); return typeof value === 'string' ? value : ''; } catch { return ''; }
+  }
   async function loadProjectMemory() {
     let handle = null;
     try {
@@ -407,8 +413,8 @@ function createArcaneChat(options) {
   }
 
   // ---- Turns --------------------------------------------------------------------------------------------------------
-  const message = (role, text, tool) => ({ id: randomUUID(), role, text: shared.boundedText(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
-  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.tool ? { tool: shared.toolCopy(m.tool) } : {}) });
+  const message = (role, text, tool) => ({ id: randomUUID(), role, text: role==='user'?text:shared.boundedText(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
+  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at,...(m.delivery?{delivery:{...m.delivery}}:{}), ...(m.tool ? { tool: shared.toolCopy(m.tool) } : {}) });
   const toolName = name => (String(name).replace(/[^A-Za-z0-9._:-]/g, '_') || 'tool').slice(0, limits.toolName);
 
   async function send(input) {
@@ -428,12 +434,14 @@ function createArcaneChat(options) {
     try {
       const at = isoNow(now);
       if (!entry) {
-        const title = v.text.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
+        const title = (v.displayText??v.text).replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
         await store.create({ conversationId, title, createdAt: at, updatedAt: at, model: v.model, effort: EFFORT, sessionId: null }, new Set(byConversation.keys()));
       } else await store.update(conversationId, { updatedAt: at, model: v.model, effort: EFFORT });
       // The context is the saved conversation before this message (no server-side session exists to resume).
       turn.history = historyMessages(await store.messages(conversationId) ?? [], limits.historyChars);
-      user = message('user', v.text);
+      user = message('user', v.displayText??v.text);
+      turn.delivery={model:v.model,effort:EFFORT,turnId:turn.turnId,startedAt:at,finishedAt:null,state:'accepted',error:null,contextIncluded:v.displayText!==undefined&&v.displayText!==v.text,transmittedBytes:Buffer.byteLength(v.text)};
+      user.delivery={...turn.delivery};turn.userMessage=user;
       if (!await store.put(conversationId, user)) fail('missing');
     } catch (error) {
       turns.delete(turn.turnId); byConversation.delete(conversationId);
@@ -458,6 +466,7 @@ function createArcaneChat(options) {
     // Balance changed (or sign-in may have): the next status read asks the gateway again.
     statusCache = null;
     try {
+      if(turn.userMessage&&turn.delivery){turn.delivery={...turn.delivery,finishedAt:isoNow(now),state:ok?'completed':turn.stopped?'stopped':'failed',error:error??null};turn.userMessage.delivery={...turn.delivery};await store.put(turn.conversationId,turn.userMessage);}
       if (error) await store.put(turn.conversationId, message('error', error));
       await store.update(turn.conversationId, { updatedAt: isoNow(now) });
     } catch { /* the done event still reports the outcome */ }
@@ -491,7 +500,7 @@ function createArcaneChat(options) {
       const secret = turn.credential.env.ARCANE_LOCAL_TOKEN, leaks = value => typeof value === 'string' && value.includes(secret);
       // The server instructions carry the shared guidance block, so the task instructions' copy of it is left out.
       const own = await loadInstructions(), server = tools.serverInstructions;
-      const system = (server.includes(shared.GUIDANCE_START) ? shared.withoutSharedGuidance(own) : own) + (server ? '\n\n' + server : '') + shared.projectMemorySection(await loadProjectMemory());
+      const system = (server.includes(shared.GUIDANCE_START) ? shared.withoutSharedGuidance(own) : own) + (server ? '\n\n' + server : '') + shared.projectMemorySection(await loadProjectMemory()) + shared.learnedPreferenceSection(await loadLearned());
       const messages = [{ role: 'system', content: system }, ...turn.history, { role: 'user', content: text + shared.playtestNote(turn.playtest) }];
       const base = { turnId: turn.turnId, conversationId: turn.conversationId };
       let calls = 0, imagesShown = 0;
@@ -522,7 +531,7 @@ function createArcaneChat(options) {
         } else if (!interrupted(turn)) return finish(turn, false, MESSAGES.failed, reported());
         if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
         if (reply.trim() && !leaks(reply)) {
-          const m = message('assistant', reply);
+          const m = {...message('assistant', reply),...(turn.delivery?{delivery:{...turn.delivery,state:'completed',finishedAt:isoNow(now)}}:{})};
           await store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'message', message: publicMessage(m) });
         }

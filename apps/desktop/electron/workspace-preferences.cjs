@@ -35,6 +35,26 @@ function presentationModel(value) {
   if (!model.length || model.trim() !== model || /[\x00-\x1f\x7f]/.test(model)) fail();
   return model;
 }
+function libraryPreferences(value, scope) {
+  fields(value, ['version','projectPath','activeId','folders','conversations']);
+  const projectPath=text(value.projectPath,4096);
+  const array=(v,max)=>{if(types.isProxy(v)||!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)fail();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))fail();return d.value;});};
+  const singleLine=(v,max)=>{const s=text(v,max);if(/[\x00-\x1f\x7f]/.test(s))fail();return s;};
+  if(value.version!==1||!samePath(projectPath,scope.projectPath))fail();
+  const folderIds=new Set(),conversationIds=new Set(),nativeIds=new Set();let count=0;
+  const folders=array(value.folders,64).map(v=>{const f=fields(v,['id','name']),id=text(f.id,256,true),name=singleLine(f.name,160);if(!name.trim()||folderIds.has(id))fail();folderIds.add(id);return{id,name};});
+  const conversations=array(value.conversations,256).map(v=>{
+    const c=fields(v,['id','title','folderId','bindings','messages']),id=text(c.id,256,true),title=singleLine(c.title,512),folderId=nullableId(c.folderId,256);
+    if(conversationIds.has(id)||folderId!==null&&!folderIds.has(folderId))fail();conversationIds.add(id);
+    const providers=new Map();
+    const bindings=array(c.bindings,3).map(v=>{const b=fields(v,['provider','conversationId','sessionId']),provider=b.provider,conversationId=text(b.conversationId,256,true),sessionId=nullableId(b.sessionId,256);if(!['codex','claude','arcane'].includes(provider)||providers.has(provider))fail();const key=JSON.stringify([provider,conversationId]);if(nativeIds.has(key))fail();nativeIds.add(key);providers.set(provider,conversationId);return{provider,conversationId,sessionId};});
+    const seen=new Set();
+    const messages=array(c.messages,1024).map(v=>{const m=fields(v,['provider','conversationId','id','role','text','at','model']),provider=m.provider,conversationId=text(m.conversationId,256,true),id=text(m.id,512),role=m.role,body=text(m.text,128*1024),at=m.at,model=m.model===null?null:text(m.model,256);if(!id||providers.get(provider)!==conversationId||!['user','assistant','error'].includes(role)||!(at===null||typeof at==='string'&&at.length<=40&&Number.isFinite(Date.parse(at))))fail();const key=JSON.stringify([provider,conversationId,id]);if(seen.has(key))fail();seen.add(key);count++;return{provider,conversationId,id,role,text:body,at,model};});
+    return{id,title,folderId,bindings,messages};
+  });
+  const activeId=nullableId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
+  if(activeId!==null&&!conversationIds.has(activeId)||count>1024||Buffer.byteLength(JSON.stringify(result))>480*1024)fail();return result;
+}
 function preferences(value, scope, claude = false) {
   fields(value, ['version', 'projectPath', 'provider', 'tabs', 'activeTabId']);
   // Advisory comparison only. Never derive a path, project identity or authority from renderer data.
@@ -142,10 +162,11 @@ function checkPin(pin) {
 }
 
 function createWorkspacePreferences({ safeStorage, getSession, enabled = true, record = 'workspace' }) {
-  if (!['workspace', 'claude', 'tools'].includes(record)) fail();
-  const recordFile = record === 'tools' ? 'tool-drafts.v1.json' : record === 'claude' ? 'claude-preferences.v1.json' : FILE;
-  const recordChannel = record === 'tools' ? 'arcane:tool-drafts-' : record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
+  if (!['workspace', 'claude', 'tools','library'].includes(record)) fail();
+  const recordFile = record==='library'?'conversation-library.v1.json':record === 'tools' ? 'tool-drafts.v1.json' : record === 'claude' ? 'claude-preferences.v1.json' : FILE;
+  const recordChannel = record==='library'?'arcane:conversation-library-':record === 'tools' ? 'arcane:tool-drafts-' : record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
   function recordPreferences(value, scope) {
+    if(record==='library')return libraryPreferences(value,scope);
     if (record === 'tools') return toolDraftPreferences(value, scope);
     const parsed = preferences(value, scope, record === 'claude');
     if (record === 'claude' && (parsed.provider !== 'claude' || parsed.tabs.some(row => row.provider !== 'claude' || row.sessionId !== null || row.tool !== 'all' || row.previewOpen !== false || Object.hasOwn(row, 'workflowDraft')))) fail();

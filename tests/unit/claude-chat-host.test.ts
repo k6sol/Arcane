@@ -1051,3 +1051,16 @@ test('preload forwards steer as an exact {turnId, text} envelope and passes back
   reply = { conversationId, messages: [{ id: messageId, role: 'assistant', text: 'x', at, steered: true }] };
   await assert.rejects(exposed.claudeChat.history(conversationId), /unavailable/, 'only a user message can be steered');
 });
+
+test('durability: the host saves the complete visible prompt and delivery metadata while sending context separately',async t=>{
+  const f=await fixture(t);f.scripts.push(replay(assistant([{type:'text',text:'Ready.'}]),result()));
+  const visible='Detailed prompt '+ 'x'.repeat(70000),native='Shared conversation context\n\n'+visible;
+  const sent=await f.host.send({...turnInput(native),displayText:visible});await f.done(sent.turnId);
+  assert.equal(f.turns()[0]!.child.prompt,native);
+  const history=await f.host.history(sent.conversationId),user=history.messages.find((row:any)=>row.role==='user');
+  assert.equal(user.text,visible);assert.equal(user.delivery.contextIncluded,true);assert.equal(user.delivery.transmittedBytes,Buffer.byteLength(native));
+  assert.equal(user.delivery.state,'completed');assert.equal(user.delivery.model,'sonnet');assert.equal(user.delivery.effort,'high');
+  const reopened=chat.createClaudeChat({projectPath:f.project,stateDirectory:f.state,getWindow:()=>f.window,handoff:{prepare:async()=>null,release:async()=>true},locate:async()=>null});
+  t.after(()=>reopened.dispose());const restored=await reopened.history(sent.conversationId);
+  assert.equal(restored.messages[0].text,visible);assert.equal(restored.messages[0].delivery.contextIncluded,true);
+});

@@ -160,6 +160,16 @@ function projectMemorySection(memory) {
     : '\nThis project has no saved memory yet.');
 }
 
+/**
+ * Learned preferences (Settings > What Arcane has learned): the daemon's <= 600-character block, appended after project
+ * memory. Byte-identical to learnedPreferenceSection in packages/core/src/preference-learning.ts (a unit test pins the two).
+ */
+function learnedPreferenceSection(text) {
+  const clean = typeof text === 'string' ? text.slice(0, 600).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f​-‏‪-‮⁠-⁯﻿]/g, '')
+    .replace(/<\/?\s*learned-preferences\s*>/gi, '').trim() : '';
+  return clean ? '\n\n<learned-preferences>\n' + clean + '\n</learned-preferences>' : '';
+}
+
 class ClaudeChatError extends Error {
   constructor(key) { super(MESSAGES[key] ?? MESSAGES.unavailable); this.name = 'ClaudeChatError'; this.safe = true; }
 }
@@ -271,12 +281,15 @@ function sendInput(value) {
   const keys = ['conversationId', 'text', 'model', 'effort'];
   const hasImages = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'images');
   const hasPlaytest = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'playtest');
-  const v = plain(value, [...keys, ...(hasImages ? ['images'] : []), ...(hasPlaytest ? ['playtest'] : [])]);
+  const hasDisplay = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'displayText');
+  const v = plain(value, [...keys, ...(hasImages ? ['images'] : []), ...(hasPlaytest ? ['playtest'] : []),...(hasDisplay?['displayText']:[])]);
   if (hasPlaytest && typeof v.playtest !== 'boolean') fail('unavailable');
   if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !CHOICE.test(v.model) ||
       typeof v.effort !== 'string' || !CHOICE.test(v.effort)) fail('unavailable');
   if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
+  if(hasDisplay&&(typeof v.displayText!=='string'||!v.displayText.trim()||v.displayText.length>LIMITS.textChars||!v.displayText.isWellFormed()))fail('text');
   const out = { conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort };
+  if(hasDisplay)out.displayText=v.displayText;
   if (hasImages) out.images = imagesInput(v.images);
   if (hasPlaytest) out.playtest = v.playtest;
   return Object.freeze(out);
@@ -455,11 +468,19 @@ function createStore({ fs, p, directory, now, limits, modelPattern = CHOICE }) {
     try {
       // `steered: true` marks a user message sent into a running reply (steer); it is never on any other role.
       const steered = !!m && typeof m === 'object' && Object.hasOwn(m, 'steered');
-      const keys = m && typeof m === 'object' && Object.hasOwn(m, 'tool') ? ['id', 'role', 'text', 'at', 'tool'] : ['id', 'role', 'text', 'at', ...(steered ? ['steered'] : [])];
+      const delivery=!!m&&typeof m==='object'&&Object.hasOwn(m,'delivery');
+      const keys = [...(m && typeof m === 'object' && Object.hasOwn(m, 'tool') ? ['id', 'role', 'text', 'at', 'tool'] : ['id', 'role', 'text', 'at', ...(steered ? ['steered'] : [])]),...(delivery?['delivery']:[])];
       const v = plain(m, keys);
-      if (!isId(v.id) || !ROLES.includes(v.role) || typeof v.text !== 'string' || Buffer.byteLength(v.text) > limits.messageBytes || !ISO.test(v.at)) return null;
+      if (!isId(v.id) || !ROLES.includes(v.role) || typeof v.text !== 'string' || Buffer.byteLength(v.text) > (v.role==='user'?limits.textChars*4+1024:limits.messageBytes) || !ISO.test(v.at)) return null;
       if (steered && (v.steered !== true || v.role !== 'user')) return null;
       const out = { id: v.id, role: v.role, text: v.text, at: v.at, ...(steered ? { steered: true } : {}) };
+      if(delivery){
+        const d=plain(v.delivery,['model','effort','turnId','startedAt','finishedAt','state','error','contextIncluded','transmittedBytes']);
+        if(typeof d.model!=='string'||!modelPattern.test(d.model)||typeof d.effort!=='string'||!CHOICE.test(d.effort)||!isId(d.turnId)||!ISO.test(d.startedAt)||
+          !(d.finishedAt===null||typeof d.finishedAt==='string'&&ISO.test(d.finishedAt))||!['sending','accepted','completed','failed','stopped'].includes(d.state)||
+          !(d.error===null||typeof d.error==='string'&&d.error.length<=2048)||typeof d.contextIncluded!=='boolean'||!Number.isSafeInteger(d.transmittedBytes)||d.transmittedBytes<0||d.transmittedBytes>2000000)return null;
+        out.delivery={...d};
+      }
       if (keys.includes('tool')) {
         const raw = v.tool && typeof v.tool === 'object' ? v.tool : null;
         const t = plain(v.tool, ['name', 'status', ...['input', 'result'].filter(key => raw && Object.hasOwn(raw, key))]);
@@ -763,6 +784,10 @@ function createClaudeChat(options) {
       return text.slice(0, end);
     } catch { return ''; } finally { try { await handle?.close(); } catch { /* read-only */ } }
   }
+  /** Learned preferences from the host (daemon read, short timeout); any failure means none. Read per turn. */
+  async function loadLearned() {
+    try { const value = await options.learned?.(); return typeof value === 'string' ? value : ''; } catch { return ''; }
+  }
   function killTree(child) {
     if (!child || child.exitCode !== null && child.exitCode !== undefined || child.signalCode) return;
     if (platform === 'win32' && Number.isSafeInteger(child.pid) && child.pid > 0) {
@@ -776,8 +801,8 @@ function createClaudeChat(options) {
     }
     try { child.kill(); } catch { /* closed */ }
   }
-  const message = (role, text, tool) => ({ id: randomUUID(), role, text: bounded(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
-  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.steered === true && m.role === 'user' ? { steered: true } : {}), ...(m.tool ? { tool: toolCopy(m.tool) } : {}) });
+  const message = (role, text, tool) => ({ id: randomUUID(), role, text: role==='user'?text:bounded(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
+  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at,...(m.delivery?{delivery:{...m.delivery}}:{}), ...(m.steered === true && m.role === 'user' ? { steered: true } : {}), ...(m.tool ? { tool: toolCopy(m.tool) } : {}) });
   const toolName = name => { const short = name.startsWith('mcp__' + MCP_SERVER + '__') ? name.slice(MCP_SERVER.length + 7) : name; return (short.replace(/[^A-Za-z0-9._:-]/g, '_') || 'tool').slice(0, limits.toolName); };
 
   async function send(input) {
@@ -797,13 +822,16 @@ function createClaudeChat(options) {
     try {
       const at = isoNow(now);
       if (!entry) {
-        const title = v.text.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
+        const title = (v.displayText??v.text).replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
         await store.create({ conversationId, title, createdAt: at, updatedAt: at, model: v.model, effort: v.effort, sessionId: null }, new Set(byConversation.keys()));
       } else await store.update(conversationId, { updatedAt: at, model: v.model, effort: v.effort });
       // After an edit rewind there is no session to resume: the first turn carries the kept transcript as context.
       if (entry?.rewound === true && !entry.sessionId) turn.seed = rewindSeed(await store.messages(conversationId) ?? []);
       // The transcript keeps only a '[image: name]' marker per reference, never the image bytes.
-      user = message('user', v.images ? v.text + '\n\n' + imageMarkers(v.images) : v.text);
+      const display=v.displayText??v.text;
+      user = message('user', v.images ? display + '\n\n' + imageMarkers(v.images) : display);
+      turn.delivery={model:v.model,effort:v.effort,turnId:turn.turnId,startedAt:at,finishedAt:null,state:'accepted',error:null,contextIncluded:display!==v.text,transmittedBytes:Buffer.byteLength(turn.seed+v.text)};
+      user.delivery={...turn.delivery};turn.userMessage=user;
       if (!await store.put(conversationId, user)) fail('missing');
     } catch (error) {
       turns.delete(turn.turnId); byConversation.delete(conversationId);
@@ -832,6 +860,7 @@ function createClaudeChat(options) {
     clearTimeout(turn.timer); releaseCredential(turn.credential); turn.credential = null;
     if (!ok) statusCache = null; // the next turn re-reads native sign-in status
     try {
+      if(turn.userMessage&&turn.delivery){turn.delivery={...turn.delivery,finishedAt:isoNow(now),state:ok?'completed':turn.stopped?'stopped':'failed',error:error??null};turn.userMessage.delivery={...turn.delivery};await store.put(turn.conversationId,turn.userMessage);}
       if (error) await store.put(turn.conversationId, message('error', error));
       await store.update(turn.conversationId, { updatedAt: isoNow(now), ...(turn.sessionId ? { sessionId: turn.sessionId, rewound: false } : {}) });
     } catch { /* the done event still reports the outcome */ }
@@ -854,7 +883,7 @@ function createClaudeChat(options) {
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
       // Stable system prompt (cacheable across turns); the per-turn Playtest note goes on the user message.
       // ARCANE.md rides after the static instructions, so the prompt stays byte-identical until that file changes.
-      const prompt = (await loadInstructions()) + projectMemorySection(await loadProjectMemory()), input = text + playtestNote(turn.playtest);
+      const prompt = (await loadInstructions()) + projectMemorySection(await loadProjectMemory()) + learnedPreferenceSection(await loadLearned()), input = text + playtestNote(turn.playtest);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
       // Every turn sends its message as one stream-json user message (PNG references first) and keeps stdin open until the
       // turn's result, so steering messages can join the running turn (steer). Ending stdin then lets Claude Code exit.
@@ -953,7 +982,7 @@ function createClaudeChat(options) {
       for (const block of event.message.content.slice(0, 256)) {
         if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
           if (leaksToken(block.text)) continue; // a reply that echoes the project credential is never shown or stored
-          const m = message('assistant', block.text);
+          const m = {...message('assistant', block.text),...(turn.delivery?{delivery:{...turn.delivery,state:'completed',finishedAt:isoNow(now)}}:{})};
           void store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'message', message: publicMessage(m) });
         } else if (block?.type === 'tool_use' && typeof block.name === 'string' && typeof block.id === 'string' && block.id.length <= 256 && !turn.tools.has(block.id) && turn.tools.size < 4096) {
@@ -1103,4 +1132,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
 
 module.exports = { createClaudeChat, installClaudeChatIpc,
   // Shared with the Arcane chat host (arcane-chat.cjs): the same transcript store and bounded display details.
-  createChatStore: createStore, toolDetail, toolResultDetail, toolResultImage, withToolImage, TOOL_IMAGE_LIMITS, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, steerInput, steerJsonMessage, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, parseUsageReset, usageWindow, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+  createChatStore: createStore, toolDetail, toolResultDetail, toolResultImage, withToolImage, TOOL_IMAGE_LIMITS, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, steerInput, steerJsonMessage, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, learnedPreferenceSection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, parseUsageReset, usageWindow, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

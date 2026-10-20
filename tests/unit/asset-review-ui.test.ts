@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { AssetReviewApi, AssetReviewRequestError, readAssetReviewStatus } from '../../apps/desktop/src/asset-review.js';
+import { AssetReviewApi, AssetReviewCard, AssetReviewRequestError, readAssetReviewStatus } from '../../apps/desktop/src/asset-review.js';
+import { LearningDocument, learningTick } from './learning-ui-fixture.js';
 const JOB = '11111111-1111-4111-8111-111111111111', REVIEW = '22222222-2222-4222-8222-222222222222';
 const KEY = '33333333-3333-4333-8333-333333333333', TOKEN = 'a'.repeat(64), ORIGIN = 'http://127.0.0.1:32123';
 const viewed = { jobId: JOB, sha256: 'd'.repeat(64), bytes: 256 };
@@ -16,6 +17,28 @@ function status(change: (subject: any) => void = () => {}) {
   const review = { reviewId: REVIEW, subject, subjectDigest, status: 'pending', revision: 0, preparedAt: '2026-10-19T00:00:00.000Z', decidedAt: null };
   return { subject, subjectDigest, review, retry: false };
 }
+
+test('recorded model decisions emit the exact verified job; mismatched receipts emit no learning event', async t => {
+  for (const decision of ['approved', 'rejected', 'mismatched'] as const) await t.test(decision, async t => {
+    const doc = new LearningDocument(ORIGIN), signals: unknown[] = [];
+    doc.addEventListener('arcane-learning-signal', event => signals.push((event as CustomEvent).detail));
+    const card = new AssetReviewCard(doc.asDocument(), TOKEN, { tokenOrigin: ORIGIN, transport: async (path, init) => {
+      if (String(path).endsWith('/prepare')) return Response.json(status());
+      const command = JSON.parse(String(init!.body)), next = status();
+      Object.assign(next.review, { status: command.decision, revision: 1, decidedAt: '2026-10-19T00:01:00Z' });
+      if (decision === 'mismatched') next.review.subject.jobId = REVIEW;
+      return Response.json({ state: 'recorded', review: next.review, command: { idempotencyKey: command.idempotencyKey, decision: command.decision, revision: 1 }, retry: false });
+    } });
+    t.after(() => card.clear());
+    await card.show(doc.root as unknown as HTMLElement, viewed, new AbortController().signal, () => true);
+    const button = doc.root.querySelectorAll('button').find(node => node.textContent === (decision === 'rejected' ? 'Reject model' : 'Approve model'))!;
+    assert.equal(button.disabled, false); button.trustedClick();
+    const deadline = Date.now() + 2000;
+    while (!/Model approved\.|Model rejected\.|Decision not confirmed\./.test(doc.root.textContent) && Date.now() < deadline) await learningTick();
+    assert.deepEqual(signals, decision === 'mismatched' ? [] : [{ source: 'review', jobId: JOB, positive: decision === 'approved' }]);
+    assert.match(doc.root.textContent, decision === 'mismatched' ? /Decision not confirmed/ : /Model (?:approved|rejected)/);
+  });
+});
 test('review subject is bound to the viewed render bytes and canonical host digest', async () => {
   const good = await readAssetReviewStatus(status(), viewed); assert.equal(good.review!.status, 'pending');
   for (const mutate of [

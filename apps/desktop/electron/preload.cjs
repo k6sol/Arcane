@@ -205,6 +205,42 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
     return { saved: true };
   } catch { workspacePreferenceError(); }
 };
+function librarySnapshot(value, scope) {
+  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations']);
+  const projectPath=workspacePreferenceText(value.projectPath,4096);
+  const array=(v,max)=>{if(!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)workspacePreferenceError();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))workspacePreferenceError();return d.value;});};
+  const singleLine=(v,max)=>{const s=workspacePreferenceText(v,max);if(/[\x00-\x1f\x7f]/.test(s))workspacePreferenceError();return s;};
+  if(value.version!==1||projectPath!==scope.projectPath)workspacePreferenceError();
+  const folderIds=new Set(),conversationIds=new Set(),nativeIds=new Set();let count=0;
+  const folders=array(value.folders,64).map(v=>{const f=workspacePreferenceFields(v,['id','name']),id=workspacePreferenceText(f.id,256,true),name=singleLine(f.name,160);if(!name.trim()||folderIds.has(id))workspacePreferenceError();folderIds.add(id);return{id,name};});
+  const conversations=array(value.conversations,256).map(v=>{
+    const c=workspacePreferenceFields(v,['id','title','folderId','bindings','messages']),id=workspacePreferenceText(c.id,256,true),title=singleLine(c.title,512),folderId=workspacePreferenceId(c.folderId,256);
+    if(conversationIds.has(id)||folderId!==null&&!folderIds.has(folderId))workspacePreferenceError();conversationIds.add(id);
+    const providers=new Map();
+    const bindings=array(c.bindings,3).map(v=>{const b=workspacePreferenceFields(v,['provider','conversationId','sessionId']),provider=b.provider,conversationId=workspacePreferenceText(b.conversationId,256,true),sessionId=workspacePreferenceId(b.sessionId,256);if(!['codex','claude','arcane'].includes(provider)||providers.has(provider))workspacePreferenceError();const key=JSON.stringify([provider,conversationId]);if(nativeIds.has(key))workspacePreferenceError();nativeIds.add(key);providers.set(provider,conversationId);return{provider,conversationId,sessionId};});
+    const seen=new Set();
+    const messages=array(c.messages,1024).map(v=>{const m=workspacePreferenceFields(v,['provider','conversationId','id','role','text','at','model']),provider=m.provider,conversationId=workspacePreferenceText(m.conversationId,256,true),id=workspacePreferenceText(m.id,512),role=m.role,body=workspacePreferenceText(m.text,128*1024),at=m.at,model=m.model===null?null:workspacePreferenceText(m.model,256);if(!id||providers.get(provider)!==conversationId||!['user','assistant','error'].includes(role)||!(at===null||typeof at==='string'&&at.length<=40&&Number.isFinite(Date.parse(at))))workspacePreferenceError();const key=JSON.stringify([provider,conversationId,id]);if(seen.has(key))workspacePreferenceError();seen.add(key);count++;return{provider,conversationId,id,role,text:body,at,model};});
+    return{id,title,folderId,bindings,messages};
+  });
+  const activeId=workspacePreferenceId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
+  if(activeId!==null&&!conversationIds.has(activeId)||count>1024||new TextEncoder().encode(JSON.stringify(result)).byteLength>480*1024)workspacePreferenceError();return result;
+}
+
+const conversationLibraryInvoke = async (action,args) => {
+  try {
+    if(action==='read'?args.length!==0:args.length!==1)workspacePreferenceError();
+    const input=action==='save'?librarySnapshot(args[0],{projectPath:args[0]?.projectPath}):null;
+    const reply=await ipcRenderer.invoke('arcane:conversation-library-'+action,...(input?[input]:[]));
+    if(action==='read'){
+      workspacePreferenceFields(reply,['available','projectPath','preferences']);
+      if(typeof reply.available!=='boolean'||(reply.available?typeof reply.projectPath!=='string'||!reply.projectPath:reply.projectPath!==null||reply.preferences!==null))workspacePreferenceError();
+      return {available:reply.available,projectPath:reply.projectPath,preferences:reply.preferences===null?null:librarySnapshot(reply.preferences,{projectPath:reply.projectPath})};
+    }
+    workspacePreferenceFields(reply,['saved']);if(reply.saved!==true)workspacePreferenceError();return{saved:true};
+  }catch{workspacePreferenceError();}
+};
+const conversationLibrary=Object.freeze({version:1,read:(...args)=>conversationLibraryInvoke('read',args),save:(...args)=>conversationLibraryInvoke('save',args)});
+
 const workspacePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args), save: (...args) => workspacePreferenceInvoke('save', args),
 });
@@ -328,8 +364,15 @@ const CLAUDE_CHAT_TOOL_IMAGE = /^data:image\/(?:png|jpeg);base64,(?:[A-Za-z0-9+/
 const CLAUDE_CHAT_TOOL_IMAGE_CHARS = 'data:image/jpeg;base64,'.length + Math.ceil(1536 * 1024 / 3) * 4;
 const claudeChatMessage = (value, live = false) => {
   if (!value || typeof value !== 'object' || !claudeChatId(value.id) || !['user', 'assistant', 'tool', 'error'].includes(value.role) ||
-      !claudeChatText(value.text, 65536) || !claudeChatTime(value.at)) claudeChatUnavailable();
+      !claudeChatText(value.text, value.role==='user'?101024:65536) || !claudeChatTime(value.at)) claudeChatUnavailable();
   const out = { id: value.id, role: value.role, text: value.text, at: value.at };
+  if(value.delivery!==undefined){
+    const d=value.delivery,keys=['model','effort','turnId','startedAt','finishedAt','state','error','contextIncluded','transmittedBytes'];
+    if(!d||Object.getPrototypeOf(d)!==Object.prototype||Reflect.ownKeys(d).length!==keys.length||keys.some(k=>{const p=Object.getOwnPropertyDescriptor(d,k);return !p?.enumerable||!Object.hasOwn(p,'value');})||
+      !claudeChatText(d.model,128)||!d.model||!claudeChatText(d.effort,64)||!d.effort||!claudeChatId(d.turnId)||!claudeChatTime(d.startedAt)||!(d.finishedAt===null||claudeChatTime(d.finishedAt))||
+      !['sending','accepted','completed','failed','stopped'].includes(d.state)||!(d.error===null||claudeChatText(d.error,2048))||typeof d.contextIncluded!=='boolean'||!Number.isSafeInteger(d.transmittedBytes)||d.transmittedBytes<0||d.transmittedBytes>2000000)claudeChatUnavailable();
+    out.delivery=Object.fromEntries(keys.map(k=>[k,d[k]]));
+  }
   // A user message sent into a running reply (steer) carries steered: true; nothing else may.
   if (value.steered !== undefined) { if (value.steered !== true || value.role !== 'user') claudeChatUnavailable(); out.steered = true; }
   if (value.tool !== undefined) {
@@ -399,15 +442,17 @@ const claudeChatInvoke = async (action, args) => {
     const value = args[0];
     const keys = ['conversationId', 'text', 'model', 'effort'];
     if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) keys.push('images');
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'displayText')) keys.push('displayText');
     // The composer's Playtest switch, when mounted: a plain boolean the engine turns into a short system note.
     if (value && typeof value === 'object' && Object.hasOwn(value, 'playtest')) keys.push('playtest');
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) claudeChatUnavailable();
     for (const key of keys) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) claudeChatUnavailable(); }
     if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !claudeChatChoice(value.model) || !claudeChatChoice(value.effort)) claudeChatUnavailable();
     if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(CLAUDE_CHAT_ERRORS[4]);
+    if(keys.includes('displayText')&&(typeof value.displayText!=='string'||!value.displayText.trim()||!value.displayText.isWellFormed()||value.displayText.length>100000))claudeChatUnavailable();
     if (keys.includes('playtest') && typeof value.playtest !== 'boolean') claudeChatUnavailable();
     input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('images') ? { images: claudeChatImages(value.images) } : {}),
-      ...(keys.includes('playtest') ? { playtest: value.playtest } : {}) };
+      ...(keys.includes('playtest') ? { playtest: value.playtest } : {}),...(keys.includes('displayText')?{displayText:value.displayText}:{}) };
   } else if (action === 'rewind') {
     const value = args[0];
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();
@@ -519,13 +564,15 @@ const arcaneChatInvoke = async (action, args) => {
     const value = args[0];
     if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) throw new Error(ARCANE_CHAT_ERRORS[6]);
     const keys = ['conversationId', 'text', 'model', 'effort'];
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'displayText')) keys.push('displayText');
     if (value && typeof value === 'object' && Object.hasOwn(value, 'playtest')) keys.push('playtest');
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) arcaneChatUnavailable();
     for (const key of keys) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) arcaneChatUnavailable(); }
     if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !arcaneChatModel(value.model) || !claudeChatChoice(value.effort)) arcaneChatUnavailable();
     if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(ARCANE_CHAT_ERRORS[4]);
+    if(keys.includes('displayText')&&(typeof value.displayText!=='string'||!value.displayText.trim()||!value.displayText.isWellFormed()||value.displayText.length>100000))arcaneChatUnavailable();
     if (keys.includes('playtest') && typeof value.playtest !== 'boolean') arcaneChatUnavailable();
-    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('playtest') ? { playtest: value.playtest } : {}) };
+    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('playtest') ? { playtest: value.playtest } : {}),...(keys.includes('displayText')?{displayText:value.displayText}:{}) };
   } else if (action === 'rewind') {
     const value = args[0];
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) arcaneChatUnavailable();
@@ -798,4 +845,4 @@ const runtimeRecovery = Object.freeze({ version: 1,
   onState: listener => recoveryListen('arcane:runtime-recovery-state', listener),
   onCheckpoint: listener => recoveryListen('arcane:runtime-recovery-checkpoint', listener, true),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));

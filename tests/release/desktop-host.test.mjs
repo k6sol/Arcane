@@ -177,7 +177,7 @@ function productServiceFixture({ closeFailAt } = {}) {
     cwd, runtimeRoot:'C:\\UserData', directory, connectionDirectory:win32.join(directory,'connection-lab'),
     stateOverride:directory, resourceOverride:cwd, port:0, workflowCodeVerification:undefined,
     process:{env:{ARCANE_PROJECT:projectPath},pid:17,exit(code){exitCode=code;}},
-    join:win32.join, resolve:win32.resolve,
+    join:win32.join, resolve:win32.resolve, basename:win32.basename, dirname:win32.dirname,
     async reportStartupFailure(){ assert.fail('A healthy product composition must not report a startup failure.'); },
     StudioStore:class { constructor(options) { assert.equal(options.directory,directory); created('studio',this); } close(){closed('studio',this);} },
     WorkStore:class { constructor(options) { assert.equal(options.directory,directory); assert.equal(options.projectPath,projectPath); created('work',this); } close(){closed('work',this);} },
@@ -221,6 +221,7 @@ function productServiceFixture({ closeFailAt } = {}) {
       assert.equal(options.studioStore,services.studio); assert.equal(options.workStore,services.work);
       assert.equal(options.conversationWorkStore,services.associations); assert.equal(options.assetService,services.assets); assert.equal(options.learningService,services.learning);
       assert.equal(options.studioImportStaging,services.staging);
+      assert.equal(options.preferenceGlobalDirectory,win32.join('C:\\UserData','runtime','learned-preferences'));
       return created('lab',{origin,async close(){closed('lab',this);}});
     },
   };

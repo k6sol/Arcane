@@ -1,6 +1,6 @@
 import { workflowCodeHostConfiguration } from './workflow-code-host.js';
 import { createLearningService } from './learning-service.js';
-import { resolve, join, isAbsolute } from 'node:path';
+import { resolve, join, isAbsolute, basename, dirname } from 'node:path';
 import { mkdir, writeFile, unlink, readFile, lstat } from 'node:fs/promises';
 import { directStateDirectory, validatedStateDirectory } from './state-directory-validation.js';
 import { reportStartupFailure, type StartupPhase } from './startup-failure.js';
@@ -78,6 +78,8 @@ try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'worke
 try {importStaging=createStudioImportStagingController({projectPath: associations.projectPath, workAssociations: associations, studio: store,
   assets, host: importHost.hooks, pluginArtifactHash});}
 catch(error){await startupFailed('services', error, [() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
+// The desktop gives each project <userRoot>/runtime/projects/<key>; the user-wide learned layer sits beside them.
+function learnedGlobalDirectory(state: string): string { return basename(dirname(state)) === 'projects' ? join(dirname(dirname(state)), 'learned-preferences') : join(state, 'learned-preferences-global'); }
 let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
 catch (error) { await startupFailed('services', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
@@ -88,7 +90,7 @@ try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory
   try{release=store.bindAssetModelReview(intent=>{if(!intent.modelReview)assetReviewFailure('REQUIRED');assets.assertReviewedImport(intent.jobId,{projectId:intent.projectId,conversation:intent.conversation},intent.modelReview);});}
   catch(error){modelReviewHost=null;host.close();throw error;}
   return Object.freeze({...host,close(){release();host.close();if(modelReviewHost===host)modelReviewHost=null;}});
-}, learningService: learning, projectPath:associations.projectPath, port, ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
+}, learningService: learning, projectPath:associations.projectPath, port, preferenceGlobalDirectory: learnedGlobalDirectory(directory), ...(workflowCodeVerification ? {workflowCodeVerification} : {}) }); }
 catch (error) { await startupFailed('listen', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 const descriptor = join(directory, 'daemon.json');
 try {

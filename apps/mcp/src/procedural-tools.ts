@@ -9,6 +9,7 @@ import { assetJobId, nativeAssetJobId } from './asset-schemas.js';
 import { id, ref } from './schemas.js';
 import { COLUMN_BASES, COLUMN_CAPITALS, DEADWOOD_SPECIES, FOLIAGE_STYLES, LOG_ENDS, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, PROCEDURAL_VARIANTS, ROCK_FORMS, STUMP_TOPS, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
 import { MODEL_FINISHES, MODEL_LIMITS } from '../../../packages/asset-pipeline/src/model-spec.js';
+import type { LearnedDefaults } from './learned-defaults.js';
 
 /** Procedural Blender meshes: start (assets_procedural), look (assets_preview) and, for native
  * sessions, place the reconstructed meshes as MeshParts (assets_place_studio_import). */
@@ -135,14 +136,16 @@ export function proceduralStartBody(input: z.output<typeof proceduralInput>): Re
   return drop({ template: 'procedural', ...rest, procedural: drop({ ...generator, variant }) });
 }
 
-export function registerProceduralTools(server: McpServer, client: DaemonClient, scope = ''): void {
+export function registerProceduralTools(server: McpServer, client: DaemonClient, scope = '', learned: LearnedDefaults | null = null): void {
   const scopedJob = client.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId;
   const preview = previewInput.extend({ jobId: scopedJob });
   server.registerTool<z.ZodRawShape, typeof proceduralInput>('assets_procedural', { description: PROCEDURAL + scope, inputSchema: proceduralInput, annotations: WRITE }, async (input, extra) => {
     try {
-      const a = input as z.output<typeof proceduralInput>;
+      // Learned preferences fill only omitted generator fields (explicit arguments win); notes are returned as `learned`.
+      const biased = learned ? await learned.apply('assets_procedural', input as z.output<typeof proceduralInput>) : { input: input as z.output<typeof proceduralInput>, learned: [] as string[] };
+      const a = biased.input;
       const started = await client.assetsStart(proceduralStartBody(a) as never, { timeoutMs: a.timeoutMs, signal: extra.signal });
-      return ok(client, { ...(started as Record<string, unknown>), nextStep: 'Poll assets_jobs until this job succeeds, then call assets_preview with its jobId and critique the render.' });
+      return ok(client, { ...(started as Record<string, unknown>), nextStep: 'Poll assets_jobs until this job succeeds, then call assets_preview with its jobId and critique the render.', ...(biased.learned.length ? { learned: biased.learned } : {}) });
     } catch (error) { return failure(client, error); }
   });
 

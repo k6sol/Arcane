@@ -91,6 +91,7 @@
 .wordmark{display:flex;align-items:center;gap:10px;font-size:21px;letter-spacing:3px;font-weight:600}.wordmark .arcane-logo{width:36px;height:42px;filter:drop-shadow(0 0 10px transparent)}.wordmark small{display:block;font-size:12px;letter-spacing:0;font-weight:400;color:var(--muted);margin-top:5px}
 .new-chat{display:flex;align-items:center;gap:10px;width:100%;min-height:46px;padding:12px;background:var(--accent-tint);color:var(--text);border-color:var(--accent-line);font-size:13px}kbd{font:12px "Segoe UI",Arial,sans-serif;color:var(--muted);white-space:nowrap}.new-chat kbd{margin-left:auto}
 .sidebar-links,.sidebar-secondary{display:flex;flex-direction:column;gap:7px}.sidebar-label{color:var(--muted);font-size:12px;margin:0 12px 4px}
+.conversation-library{display:flex;flex-direction:column;gap:8px;min-height:0;max-height:38vh;overflow:auto;font-size:12px}.conversation-library:empty{display:none}.conversation-library details{min-width:0}.conversation-library summary{cursor:pointer;padding:6px;color:var(--muted)}.conversation-library input,.conversation-library select{width:100%;min-width:0;font:inherit}.conversation-library button{font:inherit;text-align:left;border:1px solid transparent;background:transparent;color:inherit;padding:7px;border-radius:6px;cursor:pointer;overflow-wrap:anywhere}.conversation-library button:hover,.conversation-library button[aria-current=true]{background:var(--accent-tint);border-color:var(--accent-line)}.conversation-library .library-chat{display:block;width:100%}.conversation-library label{display:grid;gap:6px;padding:6px}.conversation-library .hint,.conversation-library details>p{margin:4px 6px}.shared-conversation-history{flex:0 0 auto;max-height:45vh;overflow:auto;border-bottom:1px solid var(--line);padding:8px 14px}.shared-conversation-history summary{cursor:pointer;color:var(--muted);font-size:12px;padding:4px}.shared-history-message{padding:10px 4px;border-top:1px solid var(--line)}.shared-history-message small{color:var(--muted)}.shared-history-message p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.app-sidebar.compact .conversation-library{display:none}@media(max-width:960px){.conversation-library{flex:1 0 100%;max-height:24vh}}
 .nav-link{display:flex;align-items:center;gap:12px;width:100%;min-height:44px;border:1px solid transparent;background:transparent;color:var(--text);text-align:left;padding:12px;font-size:13px;font-weight:500}.nav-link small{display:block;color:var(--muted);font-size:12px;font-weight:400;margin-top:4px;line-height:1.5}
 .nav-link[aria-pressed=true]{background:var(--accent-tint);border-color:var(--accent-line);box-shadow:inset 2px 0 var(--accent)}.sidebar-secondary{margin-top:auto;padding-top:18px;border-top:1px solid var(--line)}.sidebar-note{color:var(--muted);font-size:12px;line-height:1.7;padding:0 12px}
 .app-main{margin-left:218px;min-width:0}.workspace-topbar{display:flex;align-items:center;gap:18px;min-height:74px;padding:12px 24px;border-bottom:1px solid var(--line)}
@@ -2070,6 +2071,41 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
 .arcane-app .chat-memory-status{margin:8px 0 0;font-size:var(--fs-meta);color:var(--text-secondary)}
 .arcane-app .chat-memory-status:empty{display:none}
 @media (forced-colors:active){.arcane-app :is(.chat-memory,.project-memory-input){border-color:ButtonText}}
+/* Learning from feedback: rating rows under replies and model cards, the Learning note, Settings > What Arcane has learned. */
+.arcane-app :is(.turn-feedback,.model-feedback){display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 12px;font-size:var(--fs-meta);color:var(--text-secondary)}
+.arcane-app .model-feedback{margin:8px 0 0}
+.arcane-app .feedback-prompt{margin-right:2px}
+.arcane-app .feedback-button{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;min-height:28px;padding:0;border:1px solid var(--line);border-radius:var(--radius-sm);background:transparent;color:var(--text-secondary);cursor:pointer}
+.arcane-app .feedback-button:hover{background:var(--hover);color:var(--text)}
+.arcane-app .feedback-button[aria-pressed=true]{border-color:var(--accent-line);background:var(--accent-tint);color:var(--accent-text)}
+.arcane-app .feedback-button:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.arcane-app .feedback-icon{display:block;width:16px;height:16px}
+.arcane-app .feedback-reason{display:flex;flex:1 1 280px;flex-wrap:wrap;align-items:center;gap:6px;margin:0}
+.arcane-app .feedback-reason[hidden]{display:none}
+.arcane-app .feedback-reason-input{flex:1 1 200px;min-width:0;min-height:28px;padding:4px 8px;font-size:var(--fs-meta);color:var(--text);background:var(--input);border:1px solid var(--field-line);border-radius:var(--radius-sm)}
+.arcane-app :is(.feedback-send,.feedback-skip){min-height:28px;padding:4px 10px;font-size:var(--fs-meta)}
+.arcane-app .feedback-skip{color:var(--text-secondary);background:transparent;border-color:var(--line)}
+.arcane-app .feedback-status{flex-basis:100%;margin:0;font-size:var(--fs-meta);color:var(--text-secondary)}
+.arcane-app .feedback-status:empty{display:none}
+.arcane-app .feedback-status[data-learned=true]{color:var(--text)}
+.arcane-app .learning-note{display:flex;align-items:baseline;gap:8px;margin:2px 0 12px;font-size:var(--fs-meta);color:var(--text)}
+.arcane-app .workspace-stage #codex-messages>:is(.learning-note,.turn-feedback){padding-left:34px}
+.arcane-app .learning-note-badge{flex:0 0 auto;padding:1px 8px;border:1px solid var(--accent-line);border-radius:999px;color:var(--accent-text);background:var(--accent-tint);font-weight:600}
+.arcane-app .learned-list{display:flex;flex-direction:column;gap:0;margin:var(--space-3) 0 0;padding:0;list-style:none}
+.arcane-app .learned-item{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"stance label actions" ". meta actions";align-items:center;column-gap:var(--space-3);row-gap:2px;padding:10px 0;border-top:1px solid var(--line)}
+.arcane-app .learned-stance{grid-area:stance;min-width:64px;padding:1px 8px;border:1px solid var(--line-strong);border-radius:999px;font-size:var(--fs-meta);font-weight:600;text-align:center;color:var(--text-secondary)}
+.arcane-app .learned-item[data-stance=like] .learned-stance{border-color:var(--success-line);color:var(--success);background:var(--success-bg)}
+.arcane-app .learned-item[data-stance=dislike] .learned-stance{border-color:var(--danger-line);color:var(--danger);background:var(--danger-bg)}
+.arcane-app .learned-item[data-stance=unsure] .learned-label{color:var(--text-secondary)}
+.arcane-app .learned-label{grid-area:label;min-width:0;color:var(--text);overflow-wrap:anywhere}
+.arcane-app .learned-meta{grid-area:meta;font-size:var(--fs-meta);color:var(--text-secondary)}
+.arcane-app .learned-actions{grid-area:actions;display:flex;gap:4px}
+.arcane-app .learned-action{margin:0;padding:4px 8px;font-size:var(--fs-meta)}
+.arcane-app .learned-action[aria-pressed=true]{color:var(--accent-text)}
+.arcane-app .learned-status[data-kind=error]{color:var(--danger)}
+.arcane-app .learned-status[data-kind=ready]{color:var(--success)}
+.arcane-app #learned-forget[data-armed=true]{border-color:var(--danger-line);color:var(--danger)}
+@media (forced-colors:active){.arcane-app :is(.feedback-button,.learned-stance,.learning-note-badge){border-color:ButtonText}.arcane-app .feedback-button[aria-pressed=true]{outline:2px solid Highlight}}
 /* ---- End project memory ---- */
 /* ---- Script sync: Settings card, status line and decision lists (script-sync.ts; owned block; keep before the reduced-motion reset; static) ---- */
 .arcane-app .script-sync-card .permission-switch{margin-top:var(--space-3)}

@@ -382,7 +382,7 @@ test('bridge failures produce safe messages and keep the draft', async t => {
   assert.equal(g.bubbles()[1]!.text, 'Claude could not start this message. Try again.');
   assert.equal(g.input.value, 'Keep me'); assert.equal(g.chat.running(), false); assert.equal(g.submit.disabled, false);
   g.input.value = ''; click(g.saved()[0]!); await tick();
-  assert.equal(g.notice.textContent, 'This conversation could not be loaded. Try again.');
+  assert.equal(g.notice.textContent, 'This conversation could not be refreshed. Displayed messages and your draft are retained. Try again.');
 
   b.reply(async () => ({ turnId: 'turn-1', conversationId: 'conv-new' }));
   g.chat.newChat(); g.type('Go'); key(g.input, 'Enter'); await tick();
@@ -539,7 +539,7 @@ test('delete is disabled while that conversation has a running turn and failures
 const chatgpt = (available = true) => ({ provider: 'codex' as const, label: 'ChatGPT', available, hint: available ? 'Connect to choose a model' : 'Sign in to use',
   models: available ? [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' }, { id: 'gpt-6.1-mini', label: 'GPT-6.1-Mini' }] : [] });
 type Cross = import('../../apps/desktop/src/codex-chat.js').CrossProviderModels;
-function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unknown = fakeBridge().bridge) {
+function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unknown = fakeBridge().bridge,options:Pick<Parameters<typeof linkChatProviders>[0],'beforeProviderSwitch'>={}) {
   const f = mount(bridge, memory(), false);
   const calls: unknown[][] = []; let source: Cross | null = null;
   let codexLimit: { resetsAt: number | null } | null = null; const codexListeners = new Set<() => void>();
@@ -554,13 +554,14 @@ function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unk
     takeComposerDraft() { const value = f.input.value; f.input.value = ''; calls.push(['take', value]); return value; },
     receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }) { calls.push(['receive', handoff]); if (handoff.draft) f.input.value = handoff.draft; },
     usageLimit: () => codexLimit,
+    showConversationNotice(message:string){calls.push(['notice',message]);},
     subscribeStateChange(fn: () => void) { codexListeners.add(fn); return () => { codexListeners.delete(fn); }; },
   };
   let surface: 'codex' | 'claude' = initial; const listeners = new Set<() => void>(); const requests: string[] = [];
   const provider = { chatSurface: () => surface, subscribeChatSurface: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
     requestProvider: (next: 'codex' | 'claude') => { requests.push(next); return true; } };
   const setSurface = (next: 'codex' | 'claude') => { surface = next; for (const fn of [...listeners]) fn(); };
-  const link = linkChatProviders({ codex, claude: f.chat, provider });
+  const link = linkChatProviders({ codex, claude: f.chat, provider,...options });
   const item = (node: Element): string => node.className === 'model-group-heading' ? '# ' + node.textContent : node.className.includes('model-column-empty') ? '(' + node.textContent + ')' : node.textContent + (node.disabled ? ' [disabled]' : '');
   // Columns flatten left to right: '# Provider' heading, then that column's rows.
   const layout = () => f.el('codex-model-options').children.flatMap(node => node.className === 'model-column' ? node.children.map(item) : [item(node)]);
@@ -2363,4 +2364,104 @@ test('Edge: Enter steers a running Claude reply inline and the build progress gr
   await page.waitForFunction(() => (window as any).fx.calls.length === 2);
   assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Then add a handle', 'the queue continues after the reply');
   assert.deepEqual(errors, []);
+});
+
+test('durability: sending during a late history load retains the prompt and streamed reply once',async t=>{
+  const b=fakeBridge();let resolveHistory!:(value:unknown)=>void;
+  b.histories.set('conv-new',()=>new Promise(resolve=>{resolveHistory=resolve;}));
+  b.reply(async()=>({turnId:'turn-1',conversationId:'conv-new',messageId:'user-current'}));
+  const f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();
+  const opening=f.chat.open('conv-new');await tick();f.type('Current prompt');await f.chat.send();
+  b.emit({type:'delta',text:'Current reply'});
+  resolveHistory({conversationId:'conv-new',messages:[{id:'old-user',role:'user',text:'Earlier prompt',at:'2026-10-20T18:00:00.000Z'},
+    {id:'user-current',role:'user',text:'Current prompt',at:'2026-10-20T18:01:00.000Z'}]});
+  await opening;assert.equal(f.bubbles().filter(row=>row.text==='Current prompt').length,1);
+  assert.equal(f.bubbles().filter(row=>row.text==='Current reply').length,1);
+  b.emit({type:'message',message:{id:'reply-current',role:'assistant',text:'Current reply complete',at:'2026-10-20T18:02:00.000Z'}});
+  b.emit({type:'done',ok:true,error:null,usage:null});
+  assert.equal(f.chat.recordedTranscript().messages.filter(row=>row.id==='reply-current').length,1);
+  f.chat.deactivate();b.histories.set('conv-new',()=>Promise.reject(Error('fixture read failure')));f.chat.activate();await tick();await tick();
+  assert.ok(f.bubbles().some(row=>row.text==='Current prompt'));assert.ok(f.bubbles().some(row=>row.text==='Current reply complete'));
+  assert.match(f.notice.textContent,/retained/);
+});
+
+test('durability: refreshing an active reply retains its prompt and tool result when the reply finishes before history returns',async t=>{
+  const b=fakeBridge();b.reply(async()=>({turnId:'turn-1',conversationId:'conv-new',messageId:'user-current'}));
+  const f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Build an oak');await f.chat.send();
+  b.emit({type:'tool',message:{id:'tool-current',role:'tool',text:'assets_procedural',at:'',tool:{name:'assets_procedural',status:'started'}}});
+  let resolveHistory!:(value:unknown)=>void;
+  b.histories.set('conv-new',()=>new Promise(resolve=>{resolveHistory=resolve;}));
+  const reopening=f.chat.open('conv-new');await tick();
+  b.emit({type:'tool',message:{id:'tool-current',role:'tool',text:'assets_procedural',at:'',tool:{name:'assets_procedural',status:'finished',result:'Oak mesh exported.'}}});
+  b.emit({type:'message',message:{id:'reply-current',role:'assistant',text:'Oak complete.',at:''}});
+  b.emit({type:'done',ok:true,error:null,usage:null});
+  resolveHistory({conversationId:'conv-new',messages:[{id:'old-user',role:'user',text:'Earlier prompt',at:''}]});await reopening;
+  assert.equal(f.bubbles().filter(row=>row.text==='Build an oak').length,1);
+  assert.equal(f.bubbles().filter(row=>row.text==='Oak complete.').length,1);
+  const tools=f.messages.querySelectorAll('.tool');assert.equal(tools.length,1);assert.equal(tools[0]!.dataset.toolState,'finished');
+  assert.match(tools[0]!.querySelector('.tool-details')!.textContent,/Oak mesh exported/);
+});
+
+test('durability: an acknowledged edit discards its old replies even when the following history read fails',async t=>{
+  let fixture!:Awaited<ReturnType<typeof rewindFixture>>;
+  fixture=await rewindFixture(t,async request=>{
+    fixture.b.calls.push(['rewind',request]);fixture.b.histories.set('conv-new',()=>Promise.reject(Error('fixture history unavailable')));
+    return{conversationId:'conv-new',kept:2};
+  });
+  const {b,f}=fixture;click(f.messages.querySelectorAll('.chat-message-edit')[1]!);
+  const form=f.messages.querySelector('.chat-edit')!;form.querySelector('.chat-edit-input')!.value='Add a blue door';
+  form.dispatchEvent(new Event('submit',{cancelable:true}));await settle();
+  assert.deepEqual(f.bubbles().map(row=>row.role+':'+row.text),['user:Make a lobby','assistant:Lobby ready.','user:Add a blue door']);
+  assert.deepEqual(sends(b).map((row:any)=>row.text),['Add a blue door']);assert.equal(f.messages.querySelector('.chat-change-card'),null);
+  f.chat.deactivate();f.chat.activate();await settle();
+  assert.ok(f.bubbles().some(row=>row.text==='Add a blue door'));assert.ok(!f.bubbles().some(row=>row.text==='Add a red door'||row.text==='Door added.'));
+});
+
+test('durability: context preparation keeps edited drafts and sends original visible text with recorded details',async t=>{
+  const b=fakeBridge();b.reply(async()=>({turnId:'turn-1',conversationId:'conv-new',messageId:'user-current'}));
+  const f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Visible prompt');
+  f.chat.setBeforeMessageSubmit(async()=>{throw Error('Context unavailable. Your draft is retained.');});await f.chat.send();
+  assert.equal(f.input.value,'Visible prompt');assert.equal(sends(b).length,0);
+  let release!:(value:string)=>void;f.chat.setBeforeMessageSubmit(()=>new Promise(resolve=>{release=resolve;}));
+  const preparing=f.chat.send();await tick();f.type('Edited prompt');release('Context\nVisible prompt');await preparing;
+  assert.equal(f.input.value,'Edited prompt');assert.equal(sends(b).length,0);
+  f.chat.setBeforeMessageSubmit(draft=>'Shared context\n\n'+draft);await f.chat.send();
+  assert.deepEqual(sends(b),[{conversationId:null,text:'Shared context\n\nEdited prompt',displayText:'Edited prompt',model:'sonnet',effort:'high'}]);
+  assert.equal(f.bubbles()[0]!.text,'Edited prompt');
+  const details=f.messages.querySelector('.message-details')!.textContent;assert.match(details,/Model: sonnet/);assert.match(details,/Shared conversation context: Included/);assert.doesNotMatch(details,/Shared context\n/);
+  b.emit({type:'done',ok:false,error:'Mesh export failed: invalid material assignment.',usage:null});
+  assert.match(f.messages.textContent,/Mesh export failed: invalid material assignment/);
+  assert.match(f.messages.querySelector('.message-details')!.textContent,/Status: failed/);
+});
+
+test('durability: provider preparation gates overlapping switches and retains the source when refused',async t=>{
+  let resolveGate!:(value:boolean)=>void,calls=0;
+  const f=linked('codex',chatgpt(),fakeBridge().bridge,{beforeProviderSwitch:()=>{calls++;return new Promise(resolve=>{resolveGate=resolve;});}});
+  t.after(()=>{f.link.stop();f.chat.stop();});await f.chat.refresh();f.input.value='Retained source draft';
+  f.codexSource().choose('sonnet','claude');f.codexSource().choose('opus','claude');
+  assert.equal(calls,1);assert.deepEqual(f.requests,[]);assert.equal(f.input.value,'Retained source draft');
+  resolveGate(false);await tick();assert.deepEqual(f.requests,[]);assert.equal(f.input.value,'Retained source draft');
+  assert.ok(f.calls.some(row=>row[0]==='notice'&&String(row[1]).includes('retained')));
+  f.codexSource().choose('sonnet','claude');resolveGate(true);await tick();assert.deepEqual(f.requests,['claude']);
+});
+
+test('durability: opening a linked saved conversation changes nothing when its history cannot be read',async t=>{
+  const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Retained draft');
+  const before=f.chat.openTabs();b.histories.set('missing-conversation',()=>Promise.reject(Error('fixture unavailable')));
+  assert.equal(await f.chat.openRecordedConversation('missing-conversation'),false);
+  assert.deepEqual(f.chat.openTabs(),before);assert.equal(f.input.value,'Retained draft');
+  b.histories.set('saved-conversation',{conversationId:'saved-conversation',messages:[{id:'saved-message',role:'user',text:'Saved prompt',at:'2026-10-20T18:00:00.000Z'}]});
+  assert.equal(await f.chat.openRecordedConversation('saved-conversation'),true);assert.equal(f.chat.activeConversation(),'saved-conversation');
+  assert.ok(f.bubbles().some(row=>row.text==='Saved prompt'));
+});
+
+test('durability: a saved-list read started before Send cannot remove the newly accepted conversation',async t=>{
+  let hold=false,resolveList!:(value:unknown)=>void,rows:unknown[]=[];
+  const b=fakeBridge({list:async()=>{if(hold){hold=false;return new Promise(resolve=>{resolveList=resolve;});}return{conversations:rows};}});
+  b.reply(async()=>({turnId:'turn-1',conversationId:'conv-new',messageId:'user-current'}));
+  const f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();hold=true;
+  const refreshing=f.chat.refresh();await tick();f.type('Keep this accepted prompt');await f.chat.send();
+  rows=[{conversationId:'conv-new',title:'Accepted chat',model:'sonnet',effort:'high',updatedAt:'2026-10-20T18:00:00.000Z'}];
+  b.emit({type:'done',ok:true,error:null,usage:null});await tick();resolveList({conversations:[]});await refreshing;
+  assert.equal(f.chat.activeConversation(),'conv-new');assert.ok(f.bubbles().some(row=>row.text==='Keep this accepted prompt'));
 });

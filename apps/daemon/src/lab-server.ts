@@ -36,6 +36,8 @@ import {studioTestRoutes, STUDIO_TEST_HTTP_LIMITS, type StudioTestActorResolver,
 import { studioImportPluginArtifactHash } from './studio-import-plugin-artifact.js';
 import { plansRoutes } from './plans-routes.js';
 import { projectMemoryRoutes } from './project-memory-routes.js';
+import { preferenceRoutes } from './preference-routes.js';
+import { createPreferenceStore } from '../../../packages/core/src/preference-store.js';
 import { scriptSyncRoutes } from './script-sync-routes.js';
 import { ActionsLedger } from './actions-ledger.js';
 import { createMeshKeep } from './mesh-keep-routes.js';
@@ -110,6 +112,8 @@ interface Options {
   studioTestService?: StudioTestService;
   /** Owned native connection factory for trusted process/SDK fixtures only. */
   studioTestConnect?: () => Promise<NativeTestConnection>;
+  /** Trusted launcher path for the user-wide learned-preference layer (owned state root); never HTTP input. */
+  preferenceGlobalDirectory?: string;
 }
 export async function createConnectionLab(options: Options) {
   if (options.conversationWorkStore) {
@@ -157,6 +161,7 @@ export async function createConnectionLab(options: Options) {
     ...(options.codexAutomaticTaskPlanning === true ? {automaticTaskPlanning:true} : {}),
     ...(nativeAssetRegistry ? {assetRegistry:nativeAssetRegistry} : {}),
     ...(options.workStore ? {workStore:options.workStore} : {}),
+    learnedContext: async () => learnedStore ? learnedStore.context() : '',
     arcaneMcp: () => ({ nodeExecutable: process.execPath, serverEntry: join(options.cwd,'dist','apps','mcp','src','main.js'),
       projectRoot: options.projectPath ?? options.cwd, daemonUrl: origin, agentToken }),
   }) : null);
@@ -164,6 +169,13 @@ export async function createConnectionLab(options: Options) {
   // Arcane actions metering and Plans & credits (informational; never blocks work, never charges).
   // Project memory: ARCANE.md in this project folder, read and written by the human desktop only.
   const projectMemory = options.studioStore ? projectMemoryRoutes({ projectPath: options.projectPath ?? options.cwd }) : null;
+  // Learned preferences: local feedback loop (chat context, tool defaults, skill boosts). Feedback is human-only; agents read.
+  const learnedStore = options.studioStore ? createPreferenceStore({ projectDirectory: join(options.stateDirectory, 'learned-preferences'),
+    globalDirectory: options.preferenceGlobalDirectory ?? join(options.stateDirectory, 'learned-preferences-global') }) : null;
+  const learnedPreferences = learnedStore ? preferenceRoutes({ store: learnedStore, agent: request => {
+    const supplied = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : '';
+    return (Buffer.byteLength(supplied) === Buffer.byteLength(agentToken) && timingSafeEqual(Buffer.from(supplied), Buffer.from(agentToken))) || !!handoffs?.agentToken(request, origin);
+  } }) : null;
   // Script sync (opt-in per project): mirrors granted Studio scripts into <project>/src and applies file edits back. Human desktop only.
   const scriptSync = options.studioStore ? scriptSyncRoutes({ projectPath: options.projectPath ?? options.cwd, stateDirectory: options.stateDirectory, studio: options.studioStore }) : null;
   // Keep this mesh: human desktop only; uploads need a trusted-dialog consent delivered over the parent IPC (product-main).
@@ -352,6 +364,8 @@ export async function createConnectionLab(options: Options) {
           ['/studio-diagnostics.js', [join(options.cwd, 'dist/apps/desktop/src/studio-diagnostics.js'), 'text/javascript']],
           ['/arcane-dialog.js', [join(options.cwd, 'dist/apps/desktop/src/arcane-dialog.js'), 'text/javascript']],
           ['/chat-tabs.js', [join(options.cwd, 'dist/apps/desktop/src/chat-tabs.js'), 'text/javascript']],
+          ['/conversation-library.js', [join(options.cwd, 'dist/apps/desktop/src/conversation-library.js'), 'text/javascript']],
+          ['/shared-conversations.js', [join(options.cwd, 'dist/apps/desktop/src/shared-conversations.js'), 'text/javascript']],
           ['/chat-attachments.js', [join(options.cwd, 'dist/apps/desktop/src/chat-attachments.js'), 'text/javascript']],
           ['/task-usage.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage.js'), 'text/javascript']],
           ['/task-usage-ui.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage-ui.js'), 'text/javascript']],
@@ -386,6 +400,7 @@ export async function createConnectionLab(options: Options) {
           ['/mesh-keep.js',[join(options.cwd,'dist/apps/desktop/src/mesh-keep.js'),'text/javascript']],
           ['/editor-drafts.js',[join(options.cwd,'dist/apps/desktop/src/editor-drafts.js'),'text/javascript']],
           ['/project-memory.js',[join(options.cwd,'dist/apps/desktop/src/project-memory.js'),'text/javascript']],
+          ['/learned-preferences.js',[join(options.cwd,'dist/apps/desktop/src/learned-preferences.js'),'text/javascript']],
           ['/script-editor-drafts.js',[join(options.cwd,'dist/apps/desktop/src/script-editor-drafts.js'),'text/javascript']],
           ['/script-sync.js',[join(options.cwd,'dist/apps/desktop/src/script-sync.js'),'text/javascript']],
           ['/script-diff.js',[join(options.cwd,'dist/apps/desktop/src/script-diff.js'),'text/javascript']],
@@ -404,6 +419,7 @@ export async function createConnectionLab(options: Options) {
       }
       if(plans&&await plans.handle(request,response,url,token,origin))return;
       if(projectMemory&&await projectMemory.handle(request,response,url,token,origin))return;
+      if(learnedPreferences&&await learnedPreferences.handle(request,response,url,token,origin))return;
       if(scriptSync&&await scriptSync.handle(request,response,url,token,origin))return;
       if(meshKeep&&await meshKeep.handle(request,response,url,token,origin))return;
       if(url.pathname==='/v1/playtests/repair'&&await repairPlaytestRecords(request,response))return;

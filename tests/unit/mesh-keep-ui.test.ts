@@ -4,10 +4,26 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { meshKeepStatus, readMeshKeepView } from '../../apps/desktop/src/mesh-keep.js';
+import { meshKeepStatus, readMeshKeepView, startMeshKeep } from '../../apps/desktop/src/mesh-keep.js';
+import { LearningDocument, learningTick } from './learning-ui-fixture.js';
 
 const candidate = { digest: 'ab'.repeat(32), sessionId: '11111111-2222-4333-8444-555555555555', placeName: 'Place', name: 'OakTemplate', jobId: 'job-1', meshCount: 2,
   placedAt: '2026-10-18T10:00:00.000Z', live: true, capable: true, action: 'keep', receipt: null };
+
+test('starting a mesh upload does not teach a successful keep', async t => {
+  const doc = new LearningDocument(), signals: unknown[] = [], calls: unknown[] = [];
+  doc.addEventListener('arcane-learning-signal', event => signals.push((event as CustomEvent).detail));
+  const panel = doc.createElement('section'); panel.id = 'mesh-keep-panel';
+  const list = doc.createElement('ol'); list.setAttribute('data-mesh-keep-list', ''); panel.append(list); doc.root.append(panel);
+  const controller = startMeshKeep(doc.asDocument(), { token: () => 'fixture-token',
+    fetch: async () => Response.json({ available: true, consentChannel: true, candidates: [candidate], receipts: [] }),
+    desktop: { meshKeep: { version: 1, keep: async request => { calls.push(request); return { state: 'started', message: '' }; } } } });
+  t.after(() => controller.stop()); await controller.reload();
+  const upload = panel.querySelectorAll('button').find(node => node.textContent === 'Keep this mesh')!;
+  assert.ok(upload); upload.trustedClick(); await learningTick(); await learningTick();
+  assert.deepEqual(calls, [{ digest: candidate.digest, sessionId: candidate.sessionId }]);
+  assert.deepEqual(signals, [], 'upload admission is not a kept receipt or a model review');
+});
 
 test('mesh keep view reader is strict and keeps only display fields', () => {
   const view = readMeshKeepView({ available: true, consentChannel: true, candidates: [candidate], receipts: [] });

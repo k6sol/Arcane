@@ -241,6 +241,11 @@ export class DaemonClient {
     } finally { deadline.dispose(); }
   }
 
+  /** Read-only learned tool defaults (preference-routes.ts); the caller validates the content with readLearnedBias. */
+  async learnedBias(options: WaitOptions = {}): Promise<unknown> {
+    return this.readRecord('/v1/preferences/bias', z.object({ enabled: z.boolean() }).passthrough(), options);
+  }
+
   async workRuns(options: WaitOptions = {}): Promise<{ runs: WorkRun[] }> {
     return this.readRecord('/v1/work/runs', z.object({ runs: z.array(workRun).max(100) }), options);
   }

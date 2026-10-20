@@ -5,6 +5,8 @@ import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './work
 import type { Approval, McpToolCallArgs, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsController } from './chat-tabs.js';
 import type { ChatAttachmentsController } from './chat-attachments.js';
+import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.js';
+import type { SubmittedChatMessage, SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
 export const CODEX_INPUT_BYTES = 131072;
@@ -27,6 +29,29 @@ export type ChatState = Omit<CodexProductState, 'snapshot' | 'lastSnapshot' | 'n
   snapshot: ChatSnapshot | null; lastSnapshot: ChatSnapshot | null; actions: ChatActionRecord[];
   nativeAssets?: NativeAssetPermission;
 };
+/** Safe public conversation text for the workspace's shared history. Tool inputs and authority are excluded. */
+export interface RecordedChatTranscript {
+  provider:'codex'|'claude'|'arcane';projectPath:string|null;conversationId:string|null;sessionId:string|null;earlierCount:number;
+  messages:{id:string;role:'user'|'assistant'|'error';text:string;source:'history'|'live'|'submission';at:string|null;model:string|null}[];
+}
+export type BeforeMessageSubmit=(draft:string)=>string|Promise<string>;
+/** Defense in depth for public text moved between chat surfaces; this never reads a secret store. */
+export function publicChatText(value:string):string {
+  return value.replace(/-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g,'[REDACTED]')
+    .replace(/\b(?:sk-(?:proj-|ant-|svcacct-)?[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,})\b/g,'[REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,'[REDACTED]')
+    .replace(/\b[a-f0-9]{64}\b/gi,'[REDACTED]').replace(/\b(Bearer|Basic)[ \t]+[A-Za-z0-9+/_=.-]+/gi,'$1 [REDACTED]')
+    .replace(/\b([A-Za-z0-9_-]{0,64}(?:api[_-]?key|token|client[_-]?secret|password|passwd|authorization|cookie|secret|credential)[A-Za-z0-9_-]{0,64}["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&}\r\n]+)/gi,'$1[REDACTED]');
+}
+export function boundRecordedChatTranscript(value:RecordedChatTranscript):RecordedChatTranscript {
+  const messages:RecordedChatTranscript['messages']=[];let bytes=0;
+  for(const row of value.messages.slice().reverse()){
+    const safe={...row,text:publicChatText(row.text)},size=utf8(JSON.stringify(safe));
+    if(messages.length>=256||bytes+size>256*1024)break;
+    bytes+=size;messages.unshift(safe);
+  }
+  return {...value,earlierCount:value.earlierCount+value.messages.length-messages.length,messages};
+}
 /** JSON data only: reject getters without invoking them, including hidden/symbol fields. */
 function dataObject(value: unknown, keys?: readonly string[]): value is Record<string, unknown> {
   if (!object(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
@@ -152,10 +177,25 @@ function readActionRecord(value: unknown): ChatActionRecord {
 }
 export function readCodexState(value: unknown): ChatState {
   if (!dataObject(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !dataObject(value.nativeTools, ['configured','verified']) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
-  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks'];
+  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks','submittedMessages'];
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected native workflow state field.');
   if (Object.hasOwn(value, 'nativeAssets')) readNativeAssets(value.nativeAssets);
   readSnapshot(value.snapshot); readSnapshot(value.lastSnapshot);
+  if(Object.hasOwn(value,'submittedMessages')) {
+    const submitted=value.submittedMessages, ids=new Set<string>();
+    if(!dataObject(submitted,['provider','projectPath','threadId','sessionId','earlierCount','messages'])||submitted.provider!=='codex'||submitted.projectPath!==value.projectPath||
+      !text(submitted.threadId)||!(submitted.sessionId===null||text(submitted.sessionId))||!integer(submitted.earlierCount)||!Array.isArray(submitted.messages)||submitted.messages.length>64||utf8(JSON.stringify(submitted.messages))>512*1024)
+      throw new Error('Invalid submitted message transcript.');
+    for(const row of submitted.messages) {
+      if(!dataObject(row,['requestId','turnId','text','model','effort','state','createdAt','finishedAt','errorCode','contextIncluded','transmittedBytes'])||!uuid(row.requestId)||ids.has(row.requestId)||typeof row.contextIncluded!=='boolean'||!integer(row.transmittedBytes)||(row.transmittedBytes as number)>CODEX_INPUT_BYTES||
+        !(row.turnId===null||text(row.turnId))||typeof row.text!=='string'||utf8(row.text)>CODEX_INPUT_BYTES||!(row.model===null||text(row.model))||!(row.effort===null||text(row.effort,64))||
+        !['pending','acknowledged','rejected','unknown'].includes(String(row.state))||!text(row.createdAt,64)||!Number.isFinite(Date.parse(row.createdAt))||
+        !(row.finishedAt===null||text(row.finishedAt,64)&&Number.isFinite(Date.parse(row.finishedAt)))||!(row.errorCode===null||text(row.errorCode)))throw new Error('Invalid submitted message receipt.');
+      ids.add(row.requestId);
+    }
+    const snapshot=value.snapshot as ChatSnapshot|null, binding=snapshot?.thread?.configured?snapshot.thread:value.nativeHistory;
+    if(!object(binding)||binding.threadId!==submitted.threadId||binding.sessionId!==submitted.sessionId)throw new Error('Submitted messages changed their conversation binding.');
+  }
   if(Object.hasOwn(value,'chatTasks')){
     if(!Array.isArray(value.chatTasks)||value.chatTasks.length>256)throw new Error('Invalid bounded conversation task state.');
     const ids=new Set<string>();
@@ -201,7 +241,7 @@ export function readCodexState(value: unknown): ChatState {
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
   const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], 'task-stop':['threadId','taskId'], 'task-focus':['threadId','taskId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
-  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites','references']:action==='disconnect'?['preserveAssetWork']:[];
+  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites','references','displayText']:action==='disconnect'?['preserveAssetWork']:[];
   const keys = [...accepted[action]!, ...optional.filter(key=>Object.hasOwn(fields,key))];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
   if (action==='disconnect' && Object.hasOwn(fields,'preserveAssetWork') && typeof fields.preserveAssetWork!=='boolean')
@@ -227,6 +267,7 @@ export function prepareCodexAction(state: ChatState | null, action: string, fiel
   if(action==='task-stop'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===s?.thread?.threadId&&task.sessionId===s.thread.sessionId&&fields.threadId===task.threadId)))throw new Error('Choose the exact owned task in this conversation.');
   if(action==='task-focus'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===fields.threadId&&task.retained===true&&state.nativeThreads?.some(saved=>saved.threadId===task.threadId&&saved.sessionId===task.sessionId))))throw new Error('Choose the exact retained task in a saved conversation.');
   if (action === 'turn-start' && (typeof fields.text !== 'string' || !fields.text.trim() || utf8(fields.text) > CODEX_INPUT_BYTES)) throw new Error('Submit nonempty text of at most 128 KiB in UTF-8.');
+  if(action==='turn-start'&&Object.hasOwn(fields,'displayText')&&(typeof fields.displayText!=='string'||!fields.displayText.trim()||utf8(fields.displayText)>CODEX_INPUT_BYTES))throw new Error('The visible prompt exceeds its display limit.');
   if(action==='turn-start'&&Object.hasOwn(fields,'references')){
     const refs=fields.references;
     if(!Array.isArray(refs)||!refs.length||refs.length>4||refs.some(image=>!dataObject(image,['name','dataUrl'])||!text(image.name,128)||typeof image.dataUrl!=='string'||image.dataUrl.length>699074||!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}(?![\s\S])/.test(image.dataUrl)))throw new Error('Choose bounded PNG references from the attachment picker.');
@@ -498,7 +539,43 @@ export class CodexChatApi {
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
 }
-export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall }
+export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall; receipt?:SubmittedChatMessage; source?:'history'|'live'|'submission' }
+/** Join local Send receipts to native turns, never by prompt text (identical consecutive prompts remain separate). */
+export function mergeSubmittedMessages(messages:readonly ChatMessage[],submitted:SubmittedChatTranscript|undefined):ChatMessage[] {
+  const merged=messages.map(message=>({...message}));
+  for(const receipt of submitted?.messages??[]) {
+    const byRequest=merged.findIndex(row=>row.role==='human'&&row.key===receipt.requestId);
+    const byTurn=receipt.state==='acknowledged'&&receipt.turnId!==null?merged.findIndex(row=>row.role==='human'&&row.threadId===submitted!.threadId&&row.key.split('\0')[1]===receipt.turnId):-1;
+    const row:ChatMessage={key:receipt.requestId,role:'human',threadId:submitted!.threadId,scope:submitted!.threadId,text:receipt.text,
+      acknowledgement:'Native acknowledgement: '+receipt.state,receipt,source:'submission'};
+    if(byTurn>=0) {
+      const native=merged[byTurn]!;merged[byTurn]={...native,...row,key:native.key,scope:native.scope};
+      if(byRequest>=0&&byRequest!==byTurn)merged.splice(byRequest,1);
+    } else if(byRequest>=0)merged[byRequest]={...merged[byRequest]!,...row};
+    else {
+      const first=receipt.turnId===null?-1:merged.findIndex(message=>message.threadId===submitted!.threadId&&message.key.split('\0')[1]===receipt.turnId);
+      if(first<0)merged.push(row);else merged.splice(first,0,row);
+    }
+  }
+  return merged;
+}
+/** Recorded facts for a message; absent provider metadata stays absent. */
+export function codexMessageDetails(message:ChatMessage,state:ChatState|null):string {
+  const ids=message.key.split('\0'),turnId=message.receipt?.turnId??(ids.length===3?ids[1]:null),threadId=message.threadId??ids[0]??null;
+  const action=state?.actions.find(row=>row.action==='turn-start'&&(row.requestId===message.key||!!turnId&&row.threadId===threadId&&row.turnId===turnId));
+  const receipt=message.receipt??action;
+  const terminal=state?.snapshot?.events.findLast(event=>event.type==='turn'&&event.threadId===threadId&&event.turnId===turnId);
+  const failure=state?.snapshot?.events.findLast(event=>event.type==='error'&&event.threadId===threadId&&event.turnId===turnId);
+  const status=message.role==='human'?receipt?.state??message.acknowledgement??'Recorded':terminal?.type==='turn'?terminal.status:'Recorded response';
+  const reason=receipt?.errorCode??(failure?.type==='error'?failure.code:null);
+  const fields:[string,string|number|null|undefined][]=[['Provider','Codex'],['Message',message.role==='human'?'Your prompt':message.role==='codex'?'Assistant response':'Tool result'],
+    ['Status',status],['Source',message.source==='submission'?'Saved Send receipt':message.source==='history'?'Saved public history':'Live conversation'],
+    ['Model',receipt?.model??'Not reported for this message'],['Reasoning',receipt?.effort??'Not reported for this message'],
+    ['Submitted',receipt?.createdAt],['Acknowledged',receipt?.finishedAt],['Error code',reason],['Error details',reason?codexFailureHint(reason)||'The provider did not report a more detailed reason.':null],
+    ['Text size',utf8(message.text)+' UTF-8 bytes'],['Transmitted text',message.receipt?.transmittedBytes===undefined?null:message.receipt.transmittedBytes+' UTF-8 bytes'],
+    ['Shared conversation context',message.receipt?.contextIncluded?'Included with this explicit Send':null],['Lines',message.text.split('\n').length],['Request',message.receipt?.requestId??action?.requestId],['Conversation',threadId],['Turn',turnId],['Item',ids.length===3?ids[2]:null]];
+  return fields.filter(([,value])=>value!==undefined&&value!==null).map(([label,value])=>label+': '+value).join('\n');
+}
 /** Live Arcane tool identity from the native item event: tool name plus allowlisted display arguments. Presentation only. */
 export interface LiveToolCall { name:string; input:McpToolCallArgs|null }
 type TurnCounts={inputTokens:number;cachedInputTokens:number;outputTokens:number};
@@ -1444,6 +1521,20 @@ export function readToolResultText(text:string):{name:string|null;input:unknown;
   const failed=!!result&&(!!activityRecord(result.error)||['failed','cancelled','needs_reconciliation'].includes(String(result.state)));
   return {name:STUDIO_METHOD_TOOLS[method]??null,input:command?.args??null,result,state:failed?'failed':'finished'};
 }
+/** Learning needs a saved successful command and this session's exact Arcane item identity; display args are insufficient. */
+export function codexFeedbackTools(messages: readonly ChatMessage[], threadId: string, turnId: string): ChatFeedbackTool[] {
+  const tools: ChatFeedbackTool[] = [];
+  for (const message of messages) {
+    const ids = message.key.split('\0');
+    if (message.role !== 'tool' || ids.length !== 3 || ids[0] !== threadId || ids[1] !== turnId || !message.toolCall || message.toolState === 'started' || message.toolState === 'failed') continue;
+    const read = readToolResultText(message.text), result = activityRecord(read.result);
+    if (!read.name || ![read.name, 'mcp__arcane__' + read.name].includes(message.toolCall.name) || read.state !== 'finished' ||
+      !activityRecord(read.input) || result?.state !== 'succeeded' || result.terminal !== true || result.ambiguous === true) continue;
+    const input = JSON.stringify(read.input);
+    if (input.length <= 16_384) tools.push({ name: read.name, status: 'finished', input, result: message.text });
+  }
+  return tools.slice(-48);
+}
 const STATE_WORDS:Record<ToolActivityState,string>={started:'Running',finished:'Done',failed:'Failed'};
 /**
  * The activity line for a tool message: a state mark (red dot running, check finished, cross failed), the plain-language
@@ -2248,6 +2339,7 @@ export class CodexChat {
   private tabs: ChatTabs | null = null;
   private tabTransition = false;
   private preparingMessage = false;
+  private beforeMessageSubmit:BeforeMessageSubmit|null=null;
   private messageLifetime = 0;
   private restoredWorkflowDraft = false;
   private readonly tabDraftContexts = new Map<string,{origins:WorkflowDraftProvenance[];reviewed:ReviewedDraft|null;restored:boolean}>();
@@ -2268,6 +2360,24 @@ export class CodexChat {
   /** Formats a finished turn's usage line; null (no line) until the usage presentation attaches one. */
   private replyUsage:ReplyUsageFormat|null=null;
   private replyUsageVersion=0;
+  private feedbackHooks: ChatFeedbackHooks | null = null;
+  private readonly feedbackTurns = new Set<string>();
+  setFeedbackHooks(hooks: ChatFeedbackHooks | null): void { this.feedbackHooks = hooks; }
+  private feedbackKey(threadId: string): string {
+    const thread = this.snapshot()?.thread;
+    return 'codex:' + JSON.stringify([this.state?.projectPath, threadId, thread?.threadId === threadId ? thread.sessionId : null]);
+  }
+  private reportFeedback(messages: readonly ChatMessage[]): void {
+    const snapshot = this.snapshot(), thread = snapshot?.thread, hooks = this.feedbackHooks;
+    if (!hooks || this.surfaceYielded || this.stopped || !this.fresh || !thread?.turnId || thread.turnStatus !== 'completed' ||
+      this.tabs && !this.tabs.bound(this.state) || !this.transcript.finishedTurns.has(thread.threadId + '\0' + thread.turnId)) return;
+    const key = this.feedbackKey(thread.threadId), completed = key + '\0' + thread.turnId;
+    if (this.feedbackTurns.has(completed)) return;
+    const tools = codexFeedbackTools(messages, thread.threadId, thread.turnId);
+    if (!tools.length) return;
+    this.feedbackTurns.add(completed); bounded(this.feedbackTurns);
+    try { hooks.turnFinished({ key, ok: true, tools, box: this.el('codex-messages') }); } catch { /* Learning is optional. */ }
+  }
   private readonly autoHandled=new Set<string>();
   private readonly autoLog:{at:number;summary:string}[]=[];
   private readonly autoListeners=new Set<()=>void>();
@@ -2503,6 +2613,21 @@ export class CodexChat {
     freeze(copy);return copy;
   }
   subscribeStateChange(listener:()=>void):()=>void {this.stateListeners.add(listener);return()=>{this.stateListeners.delete(listener);};}
+  subscribeTranscriptChange(listener:()=>void):()=>void{return this.subscribeStateChange(listener);}
+  setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
+  isDraftConversation():boolean {
+    const tab=this.tabs?.active(),persistence=this.tabs?.persistenceStatus();
+    return !this.stopped&&!!this.state?.projectPath&&persistence!=='native-loading'&&persistence!=='native-error'&&tab?.kind==='draft'&&tab.projectPath===this.state.projectPath;
+  }
+  showConversationNotice(message:string):void{this.text('codex-notice',message);}
+  recordedTranscript():RecordedChatTranscript {
+    const active=this.tabs?.active(),thread=active?.kind==='native'?active:this.snapshot()?.thread;
+    const submissions=this.state?.submittedMessages;
+    return boundRecordedChatTranscript({provider:'codex',projectPath:this.state?.projectPath??null,conversationId:thread?.threadId??null,sessionId:thread?.sessionId??null,
+      earlierCount:submissions&&submissions.threadId===thread?.threadId&&submissions.sessionId===thread?.sessionId?submissions.earlierCount:0,
+      messages:this.displayMessages().filter(message=>message.role!=='tool').map(message=>({id:message.receipt?'send:'+message.receipt.requestId:message.role==='human'&&uuid(message.key)?'send:'+message.key:JSON.stringify(message.key.split('\0')),role:message.role==='human'?'user' as const:'assistant' as const,
+        text:this.api.safe(message.text),source:message.source??'live',at:message.receipt?.createdAt??null,model:message.receipt?.model??null}))});
+  }
   private publishState():void {
     this.attachments?.syncScope();
     const signature=JSON.stringify([this.state?.projectPath??null,this.tabs?.active()?.key??null,this.workflowConversation(),this.workflowModelSelection()]);
@@ -2900,6 +3025,20 @@ export class CodexChat {
     if(!message.trim()||utf8(message)>CODEX_INPUT_BYTES)return;
     const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
     const referenceRevision=this.attachments?.selectionRevision(),referenceFields=references.length?{references}:{};
+    const visibleMessage=message;
+    if(this.beforeMessageSubmit){
+      const fingerprint=JSON.stringify([this.generation,this.state?.projectPath,this.providerPreference(),this.tabs?.active()?.key,this.snapshot()?.thread?.threadId,this.snapshot()?.thread?.turnId,this.displaySelection()]);
+      this.preparingMessage=true;this.renderControls();
+      try {
+        const prepared=await this.beforeMessageSubmit(visibleMessage);
+        if(this.stopped||this.surfaceYielded||fingerprint!==JSON.stringify([this.generation,this.state?.projectPath,this.providerPreference(),this.tabs?.active()?.key,this.snapshot()?.thread?.threadId,this.snapshot()?.thread?.turnId,this.displaySelection()])||
+          this.value('codex-composer')!==draft||this.attachments?.selectionRevision()!==referenceRevision||!this.messageTargetReady())return;
+        if(typeof prepared!=='string'||!prepared.trim()||utf8(prepared)>CODEX_INPUT_BYTES)throw new Error('Shared conversation context could not fit this message. Your draft is retained.');
+        message=prepared;
+      }catch(error){this.text('codex-notice',error instanceof Error?error.message:'Conversation context could not be prepared. Your draft is retained.');return;}
+      finally{this.preparingMessage=false;this.renderControls();}
+    }
+    const displayFields=message===visibleMessage?{}:{displayText:visibleMessage};
     // Reject an oversized caption/reference envelope before opening a draft's
     // native thread or clearing its selected files. Unknown future thread IDs
     // reserve their maximum encoded space; dispatch checks the exact body again.
@@ -2909,7 +3048,7 @@ export class CodexChat {
     }
     const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
     const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
-    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
+    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
     if(!selection)return;
     this.preparingMessage=true;this.renderControls();
     try {
@@ -2924,8 +3063,8 @@ export class CodexChat {
       let current:string;
       try {current=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
       catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
-      if(this.value('codex-composer')!==draft||!references.length&&current!==message){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
-      await this.dispatch('turn-start',{threadId:live.threadId,text:message,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
+      if(this.value('codex-composer')!==draft||!references.length&&current!==visibleMessage){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
+      await this.dispatch('turn-start',{threadId:live.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
   /**
@@ -3396,7 +3535,10 @@ export class CodexChat {
       this.workflowDraftOrigins=sentDraft.origins;this.reviewedDraftTarget=sentDraft.reviewed;this.restoredWorkflowDraft=sentDraft.restored;this.stashTabDraft();
       this.text('codex-notice',(this.el('codex-notice').textContent??'')+' Your message text was restored to the composer.');
     };
-    if(input.action==='turn-start'){this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,acknowledgement:'Awaiting native acknowledgement'});this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
+    if(input.action==='turn-start'){
+      try { this.feedbackHooks?.userMessage({key:this.feedbackKey(input.threadId),text:input.displayText??input.text,box:this.el('codex-messages'),anchor:null}); } catch { /* Learning is optional. */ }
+      this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.displayText??input.text,acknowledgement:'Awaiting native acknowledgement'});this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();
+    }
     this.render();this.publishState();
     let acknowledgedStateApplied=false;
     try {
@@ -3446,17 +3588,19 @@ export class CodexChat {
     const s=this.snapshot();return s?.thread?.configured?s.thread.selection:s?.selection??null;
   }
   private displayMessages():ChatMessage[] {
-    if(!this.tabs)return this.transcript.messages;
+    if(!this.tabs)return mergeSubmittedMessages(this.transcript.messages,this.state?.submittedMessages);
     const active=this.tabs.active();if(!active||active.kind==='draft')return [];
     const saved=this.tabs.recording(active)?.recorded?.result.entries??[];
     const recorded:ChatMessage[]=saved.map(entry=>({key:entry.ids.threadId+'\0'+entry.ids.turnId+'\0'+entry.ids.itemId,
       role:entry.role==='user'?'human':entry.role==='assistant'?'codex':'tool',threadId:entry.ids.threadId,
-      scope:entry.ids.threadId+' · '+entry.ids.turnId+' · '+entry.ids.itemId,text:entry.text}));
+      scope:entry.ids.threadId+' · '+entry.ids.turnId+' · '+entry.ids.itemId,text:entry.text,source:'history'}));
     const keys=new Set(recorded.map(row=>row.key));
     // A saved tool result keeps the live call's name and display arguments when this session saw it run.
     const liveCalls=new Map(this.transcript.messages.flatMap(m=>m.role==='tool'&&m.toolCall?[[m.key,m.toolCall] as const]:[]));
     if(liveCalls.size)for(const row of recorded){const live=row.role==='tool'?liveCalls.get(row.key):undefined;if(live)row.toolCall=live;}
-    return [...recorded,...(this.tabs.bound(this.state)?this.transcript.messages.filter(row=>row.threadId===active.threadId&&!keys.has(row.key)):[])];
+    const submissions=this.state?.submittedMessages;
+    return mergeSubmittedMessages([...recorded,...(this.tabs.bound(this.state)?this.transcript.messages.filter(row=>row.threadId===active.threadId&&!keys.has(row.key)):[])],
+      submissions?.projectPath===active.projectPath&&submissions.threadId===active.threadId&&submissions.sessionId===active.sessionId?submissions:undefined);
   }
 
   /** What is drawn for each transcript row, so an update rebuilds only from the first row whose rendering changed. */
@@ -3475,7 +3619,7 @@ export class CodexChat {
       messages.replaceChildren(this.make('p',this.tabs?.active()?.kind==='draft'?'Local draft. Starting a conversation will not send your message.':this.tabs?.recording()?.recorded?'No public text entries in this saved recording.':'No public history has been loaded for this conversation.','empty'));
       return;
     }
-    const turnOf=(message:ChatMessage)=>message.key.split('\0')[1]??null;
+    const turnOf=(message:ChatMessage)=>message.receipt?.turnId??message.key.split('\0')[1]??null;
     const starts:number[]=[];all.forEach((message,index)=>{if(!index||turnOf(message)!==turnOf(all[index-1]!))starts.push(index);});
     const first=this.earlierView===view?0:transcriptWindowStart(starts);
     const lastHuman=all.findLastIndex(message=>message.role==='human'),nextHuman:(string|null)[]=new Array(all.length).fill(null);
@@ -3487,7 +3631,7 @@ export class CodexChat {
       const message=all[index]!,turn=turnOf(message),last=index===all.length-1||turnOf(all[index+1]!)!==turn;
       if(index===first||turn!==turnOf(all[index-1]!))thread=message.threadId??message.key.split('\0')[0]??null;
       const line=last&&turn&&thread?this.replyUsageLine(thread,turn):null,streaming=running&&index===all.length-1&&message.role==='codex';
-      const extra=JSON.stringify([message.role==='codex'?index>lastHuman?'live':nextHuman[index]??null:'',last,line?[line.textContent,line.title]:null,streaming]);
+      const extra=JSON.stringify([message.role==='codex'?index>lastHuman?'live':nextHuman[index]??null:'',last,line?[line.textContent,line.title]:null,streaming,message.role==='tool'?null:codexMessageDetails(message,this.state)]);
       specs.push({message,index,turn,last,line,streaming,sig:JSON.stringify(message)+extra,body:JSON.stringify({...message,text:''})+extra});
     }
     const earlier=first>0?'earlier:'+first:null,offset=earlier?1:0,sigs=[...(earlier?[earlier]:[]),...specs.map(spec=>spec.sig)];
@@ -3513,12 +3657,13 @@ export class CodexChat {
       if(message.role==='tool'){const tool=renderCodexToolArticle(this.doc,message,value=>this.api.safe(value));change=tool.change??null;element=tool.article;}
       else{
         const card=element=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');
+        card.setAttribute('data-role',message.role==='human'?'user':'assistant');
         // Only the reply being written is a live region; it is announced once it settles.
         if(spec.streaming){card.setAttribute('aria-busy','true');card.setAttribute('aria-live','polite');}
         card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text),options(spec.index)):this.make('pre',message.text,'message-text'));
         if(message.role==='human'&&message.text.trim())card.append(this.editAsNewButton(message.text));
         if(message.acknowledgement){const acknowledgement=message.acknowledgement==='Native acknowledgement: acknowledged'?'Accepted':message.acknowledgement==='Native acknowledgement: rejected'?'Not accepted':'Awaiting confirmation';card.append(this.make('p',acknowledgement,'message-acknowledgement'));}
-        const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',message.scope+(message.acknowledgement?'\n'+message.acknowledgement:''),'hint mono'));card.append(metadata);
+        const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',this.api.safe(codexMessageDetails(message,this.state)),'hint mono'));card.append(metadata);
       }
       messages.append(element);nodes.push(element);if(change)changes.push(change);
       if(spec.last){
@@ -3559,13 +3704,14 @@ export class CodexChat {
     const view=this.tabs?.active()?.key??'thread:'+(t?.threadId??'');
     // The build progress group stays live while this thread's turn runs (presentation only).
     if(!this.surfaceYielded){const box=this.doc.getElementById('codex-messages'),live=String(!!t&&['starting','inProgress'].includes(t.turnStatus));if(box?.dataset&&box.dataset.turnLive!==live)box.dataset.turnLive=live;}
-    const displayedMessages=this.displayMessages(),messageSignature=JSON.stringify(displayedMessages)+usage+(this.earlierView===view?'\0all':'');
+    const displayedMessages=this.displayMessages(),messageSignature=JSON.stringify(displayedMessages)+JSON.stringify(displayedMessages.filter(message=>message.role!=='tool').map(message=>codexMessageDetails(message,this.state)))+usage+(this.earlierView===view?'\0all':'');
     if(!this.surfaceYielded&&messageSignature!==this.messageSignature){
     const reset=!this.messageSignature;this.messageSignature=messageSignature;
     const messages=this.el('codex-messages'),bottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<80;
     this.renderTranscript(messages,displayedMessages,view,!!t&&['starting','inProgress'].includes(t.turnStatus),reset);
     if(bottom)messages.scrollTop=messages.scrollHeight;
     }
+    this.reportFeedback(displayedMessages);
     this.text('codex-events-note','Event sequence '+this.transcript.cursor+' · native dropped '+this.transcript.dropped+' · missing sequences '+this.transcript.gaps+(this.transcript.truncated?' · public display truncated; earlier text may be missing.':' · bounded public message stream.'));
     if(this.tabs) {
       const active=this.tabs.active(),history=this.tabs.recording()?.recorded;

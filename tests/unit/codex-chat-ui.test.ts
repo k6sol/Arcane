@@ -14,7 +14,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { CodexClientError, type Approval, type Snapshot, type ThreadState } from '../../packages/codex-client/src/types.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
-import { CodexChat, CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, autoApprovalVerdict, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
+import { CodexChat, CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, autoApprovalVerdict, codexFeedbackTools, type ChatMessage, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
 
 const HUMAN='a'.repeat(64), AGENT='b'.repeat(64), PROJECT=resolve('.');
 function snapshot():Snapshot {
@@ -23,6 +23,24 @@ function snapshot():Snapshot {
 function state(s:ChatSnapshot|null=snapshot(),projectPath=PROJECT):ChatState {return {provider:'codex',use:'personal-local',projectPath,connecting:false,closing:false,busy:false,snapshot:s,lastSnapshot:null,actions:[],nativeTools:{configured:true,verified:false}};}
 function thread():ThreadState {return {threadId:'fixture-thread',sessionId:'fixture-session',selection:{model:'fixture-sol',effort:'ultra'},configured:true,writeGranted:false,turnId:null,turnStatus:'idle'};}
 function approval(s:Snapshot,projectPath=PROJECT):Approval {return {handle:randomUUID(),connectionId:s.connectionId,serverRequestId:7,method:'item/commandExecution/requestApproval',threadId:s.thread!.threadId,turnId:s.thread!.turnId!,itemId:'fixture-command',reason:'Fixture only',command:'fixture command <script>window.injected=true</script>',cwd:projectPath,changes:null,canAccept:true,expiresAt:Date.now()+60000};}
+
+test('Codex feedback carries only successful full command inputs from the exact thread, turn and Arcane item', () => {
+  const command = (threadId: string, turnId: string, name: string): ChatMessage => ({ key: [threadId, turnId, name].join('\0'), role: 'tool', scope: '',
+    toolCall: { name: 'scene_build', input: { name: 'display-only' } }, text: JSON.stringify({ state: 'succeeded', terminal: true,
+      command: { method: 'scene.build', args: { name, scatter: [{ count: name === 'tree-A' ? 20 : 2 }] }, result: { created: { count: 1 } } } }) });
+  const tree = command('thread-A', 'turn-A', 'tree-A'), rock = command('thread-B', 'turn-B', 'rock-B');
+  const messages = [tree, rock, command('thread-A', 'other-turn', 'old'), { ...tree, key: tree.key + '\0extra' }];
+  const read = codexFeedbackTools(messages, 'thread-A', 'turn-A');
+  assert.equal(read.length, 1);
+  assert.deepEqual(JSON.parse(read[0]!.input!), { name: 'tree-A', scatter: [{ count: 20 }] }, 'saved command args win over display-only arguments');
+  assert.equal(codexFeedbackTools(messages, 'thread-B', 'turn-B').length, 1);
+  for (const row of [
+    { ...tree, toolCall: undefined }, { ...tree, toolState: 'started' }, { ...tree, toolState: 'failed' },
+    { ...tree, toolCall: { name: 'environment_apply', input: {} } }, { ...tree, text: '' },
+    { ...tree, text: tree.text.replace('succeeded', 'failed') }, { ...tree, text: tree.text.replace('"terminal":true', '"terminal":false') },
+    { ...tree, text: JSON.stringify({ jobId: 'tree-job', state: 'succeeded' }), toolCall: { name: 'assets_procedural', input: { name: 'tree-A' } } },
+  ]) assert.deepEqual(codexFeedbackTools([row as ChatMessage], 'thread-A', 'turn-A'), [], 'incomplete, mismatched or failed evidence never teaches');
+});
 
 test('browser action envelopes exactly match service schemas, with UUIDs and no host configuration',()=>{
   const st=state(), fields:Record<string,Record<string,unknown>>={connect:{},disconnect:{},select:{model:'fixture-sol',effort:'ultra'},'thread-start':{},'thread-resume':{threadId:'human-exact-id'},'grant-writes':{threadId:'fixture-thread'},'revoke-writes':{threadId:'fixture-thread'},'turn-start':{threadId:'fixture-thread',text:'Human public text'},'turn-interrupt':{threadId:'fixture-thread',turnId:'exact-turn'},approval:{threadId:'fixture-thread',turnId:'exact-turn',handle:'exact-handle',decision:'accept'},'history-load':{threadId:'fixture-thread'}};
