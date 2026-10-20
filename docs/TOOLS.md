@@ -195,7 +195,7 @@ Write: update an observed ref with the schema fields its native class supports. 
 
 **Safety:** Writes (additive)
 
-Write: one atomic hierarchy, one undo step/receipt, under a returned parent ref; container Model/Folder. prototypes: reusable parts with ground-level local Position/Orientation. items: groups, parts or placements (use/at/yaw/scale/tint); ground:true drops onto the surface. scatter: seeded Poisson spacing, clusters and clearing falloff; Never use rings or grids for foliage. avoid circles and avoidPaths polylines reserve full-width routes/end caps; footprintRadius pads them and clearings by scaled canopy radius. Anchored defaults true. Limits: 2000 items, 32 prototypes x 64 parts, 4000 instances, 250 KiB compiled. Verifies before parenting; atomic failure. Returns counts/root/keyed refs; receipt_restore removes an unchanged build. Needs plugin 0.2.0+, write grant and edit mode; older plugins: PLUGIN_UPDATE_REQUIRED. Never auto-retry; receipt_status on ambiguity. Effects: effect className, name, in (group/part/Attachment key), fx. GUI (scene.gui): container ScreenGui or world GUIs; GUI className + ui; stamp a ui prototype (e.g. a button) N times via use; then only interaction logic via script_update.
+Write: one atomic hierarchy (one undo step/receipt) under a returned parent ref; container Model/Folder, or ScreenGui (parent StarterGui; GUI items; screen = its props). prototypes: reusable parts local to a ground-level origin, or ui trees. items: groups, parts, placements (use/at/yaw/scale/tint/ground), effects (className + fx in a part/Attachment) or GUI (scene.gui; className + ui; use stamps a ui prototype), fx/ui as on scene_create (refs = item keys); key = local id, in = earlier key. scatter: seeded Poisson spacing, clusters, clearings, keep-out routes; Never use rings or grids for foliage. Fields: skills_get arcane-natural-scenes:scene-build. Anchored defaults true. Limits: 2000 items, 32 prototypes x 64 parts, 4000 instances, 250 KiB. Verified before parenting. Returns counts/root/keyed refs; receipt_restore removes an unchanged build. Plugin 0.2.0+, write grant, edit mode. Never auto-retry; receipt_status on ambiguity.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
@@ -208,8 +208,8 @@ Write: one atomic hierarchy, one undo step/receipt, under a returned parent ref;
 | `defaults` | object | no |  |
 | `prototypes` | object | no |  |
 | `templates` | object | no |  |
-| `items` | object[] | no | 0–2000 items, default [] |
-| `scatter` | object[] | no | 0–16 items, default [] |
+| `items` | object[] | no | 0–2000 items |
+| `scatter` | object[] | no | 0–16 items |
 | `kits` | object[] | no | 0–4 items |
 
 ### `environment_apply`
@@ -240,7 +240,7 @@ Write: in one undo step, fill Workspace.Terrain with ordered Block/Ball/Cylinder
 
 **Safety:** Writes (may change or remove existing state)
 
-Write: generate natural terrain in one undo step. Replaces all Terrain in the region box (snapped to the 4-stud grid; ≤2048x2048 studs, height cap 512) with a seeded fBm/ridged heightfield plus ordered features: hill, mountain, valley, crater, plateau, flatten (clearing for a focal build), lake (water level), river/path (polyline carve, width, depth, material). Heights are studs above floor. Default materials: Sand at shores, Mud near water, Rock/Slate on steep slopes, Ground on mid slopes, Grass/LeafyGrass elsewhere, Snow above snowLine; materials.rules (height, slope, noise -1..1, nearWater) replace them. Same seed = same terrain. Written in chunks with yields. Revert with Studio Undo (receipt_restore is refused). Workspace grant; never auto-retry.
+Write: natural terrain in one undo step. Replaces all Terrain in the region box (4-stud grid; ≤2048x2048 studs, height cap 512) with a seeded fBm/ridged heightfield plus ordered features: hill, mountain, valley, crater, plateau, flatten (clearing for a focal build; base adds ground-blend rings), lake, river/path (polyline carve); caves (terrain.caves plugin) carve tunnels with hillside mouths and chambers into a rock outcrop, never under pads or keep-outs; result.caves lists mouths, chambers and scene_build fixtures. Points are [x,z]; heights are studs above floor (world Y). Default materials follow height, slope and water (Snow above snowLine); materials.rules (first match wins) replace them. Fields: skills_get arcane-natural-scenes:scene-build. Same seed = same terrain. Revert with Studio Undo (receipt_restore is refused). Workspace grant; never auto-retry.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
@@ -257,6 +257,7 @@ Write: generate natural terrain in one undo step. Replaces all Terrain in the re
 | `snowLine` | number | no | 0–512 |
 | `features` | object[] | no | 0–32 items |
 | `materials` | object | no |  |
+| `caves` | object | no |  |
 
 ### `scene_delete`
 
@@ -380,7 +381,7 @@ Toolbox models are disabled by default and require the user to enable them in Se
 | `category` | "Model" / "MeshPart" / "Audio" | no | default "Model" |
 | `page` | integer | no | 1–3, default 1 |
 | `pageSize` | integer | no | 1–10, default 8 |
-| `verifiedOnly` | boolean | no | default false |
+| `verifiedOnly` | boolean | no |  |
 | `timeoutMs` | integer | no | 5000–60000, default 25000 |
 
 ### `studio_asset_insert`
@@ -402,7 +403,7 @@ Toolbox models require an explicit user request and the human-controlled Setting
 | `maxSize` | number[] | no | exactly 3 items |
 | `ground` | boolean | no | default true |
 | `anchor` | boolean | no | default true |
-| `allowScripts` | boolean | no | default false |
+| `allowScripts` | boolean | no |  |
 | `timeoutMs` | integer | no | 5000–60000, default 50000 |
 
 ### `studio_asset_generate`
@@ -498,13 +499,14 @@ Read: fetch the daemon-validated local artifact manifest for this exact jobId, i
 
 **Safety:** Writes (additive)
 
-Write: generate an original bounded mesh in the local Blender worker from a bundled parameterised generator (no code accepted): tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; tapered branching limbs and thin curved closed leaves), rock (size, roughness; noise + chiselled facets, flat base), column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian), foliage clump (bush/grass/fern), fallen log (oak/birch, length, radius, sawn/broken ends, moss) or stump (oak/birch, root flare, cut/broken top, moss; log/stump ≤4,000 triangles). Output: one optimised GLB, one mesh per material (≤20,000 triangles total, analytic UV0, original 256px opaque colour/normal/roughness/metalness maps; finish flat selects solid materials), a box/trunk collision proxy, and two preview renders. Deterministic per seed. Use for original hero/organic assets. Toolbox models require an explicit user request; inspect the actual preview before calling any result realistic. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. Open the 3D preview for human Approve; agents cannot approve. Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.
+Write: generate an original bounded mesh in the local Blender worker from a bundled parameterised generator (no code accepted): tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; tapered branching limbs and thin curved closed leaves), rock (size, roughness, form boulder/outcrop/cave, moss; noise, bevelled fracture planes, strata, flat base, ≤6,000 triangles), column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian), foliage clump (bush/grass/fern), fallen log (oak/birch, length, radius, sawn/broken ends, moss) or stump (oak/birch, root flare, cut/broken top, moss; log/stump ≤4,000 triangles). spec: ANY other original object as a declarative part graph (box/cylinder/sphere/revolve/extrude/loft/sweep/sdf parts; mirror/radial/array/scatter; csg weld/cut; noise; ≤3 materials wood/stone/metal/... with edge wear and cavity); load the model-spec reference first. It compiles to a watertight, budgeted, auto-smoothed, base-pivoted mesh with a packed UV0 atlas and baked PBR; assets_preview then returns review metrics (size vs spec, watertight, thickness, silhouette, floating parts, hints): build, look, adjust the spec. Output: one optimised GLB, one mesh per material (≤20,000 triangles total, analytic UV0, original 256px opaque colour/normal/roughness/metalness maps; finish flat selects solid materials), a box/trunk collision proxy, and two preview renders. Deterministic per seed. Use for original hero/organic assets. Toolbox models require an explicit user request; inspect the actual preview before calling any result realistic. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. Open the 3D preview for human Approve; agents cannot approve. Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
 | `name` | string | yes | ≤ 48 chars |
 | `generator` | object | yes |  |
 | `seed` | integer | no | 0–2147483647 |
+| `variant` | integer[] | no | exactly 2 items |
 | `color` | number[] | no | exactly 3 items |
 | `triangleBudget` | integer | no | 2500–20000 |
 | `renderResolution` | integer | no | 128–768 |
@@ -514,7 +516,7 @@ Write: generate an original bounded mesh in the local Blender worker from a bund
 
 **Safety:** Read-only
 
-Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence.
+Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence. Spec jobs: side is a 2x2 sheet (front, right, top, wireframe) and the result includes measured review metrics and hints.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
@@ -547,7 +549,7 @@ Read bundled skill metadata from the integrity-checked registry. Approved only b
 |---|---|---|---|
 | `query` | string | no | ≤ 200 chars |
 | `limit` | integer | no | 1–100, default 20 |
-| `allowExperimental` | boolean | no | default false |
+| `allowExperimental` | boolean | no |  |
 
 ### `skills_get`
 
@@ -558,9 +560,9 @@ Read 1–8 bundled skills (e.g. deferredIds from skills_recommend) and declared 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
 | `ids` | string[] | yes | 1–8 items |
-| `references` | string[] | no | 0–20 items, default [] |
+| `references` | string[] | no | 0–20 items |
 | `byteBudget` | integer | no | 256–131072, default 16384 |
-| `allowExperimental` | boolean | no | default false |
+| `allowExperimental` | boolean | no |  |
 
 ## Work graph
 

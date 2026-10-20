@@ -15,3 +15,6 @@ Use reproducible scripts or modifiers where they improve iteration; preserve a s
 
 ## Verification
 Render multiple controlled views and check measured dimensions. Export through a verified target route, inspect axis/scale/materials in Studio and test interaction clearance. Keep approved geometry stable during revisions. Do not call a beautiful render an imported, usable asset.
+
+## Model specs in Arcane
+For an original object without a dedicated generator, describe it as a part graph: `assets_procedural` with `generator.kind:"spec"`. Load the format first (`skills_get` arcane-blender-props with reference `arcane-blender-props:model-spec`). Build, read the review sheet and metrics from `assets_preview`, adjust the spec and rebuild; the compiler handles welds, budget, normals, pivot, UVs and PBR.

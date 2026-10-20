@@ -708,7 +708,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-blender-props/SKILL.md",
-      "sha256": "22e8b1b4b1e120a6d95fc89b63b750cbe6169c4271871b4810993215ac67ef3c",
+      "sha256": "ad2519e0f48f19e2176800d871669a0eb24c8c8aceeaef07bb1421387d1e140b",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -716,7 +716,13 @@
         "blender.run",
         "asset.import"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "model-spec",
+          "path": "skills/arcane/arcane-blender-props/references/model-spec.md",
+          "sha256": "1860d18f6941c0fcea0e159422ce4c1b51c83a985f63ab0c3d4abcb53b0b3e18"
+        }
+      ]
     },
     {
       "id": "arcane-characters",
@@ -1338,7 +1344,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-architectural-features/SKILL.md",
-      "sha256": "5ce2b80ca3bf26aa72a8bc95a28de33eda0ce9fe5b0d6fc82c5030cfe493ca37",
+      "sha256": "7884fc04df82f5fa2beb7ef1828019704df6dc2a037725f412ad5f62a6d45646",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1362,14 +1368,20 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-natural-scenes/SKILL.md",
-      "sha256": "44f2400e31574bb7da58ed85d6a55da95a88eac2b08f4131dba91e43f7b095c0",
+      "sha256": "45b7e7349114235306d10105537c4b9f8e2447d063a1d1edb3b575a8a6b9c78f",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
       "verificationCapabilities": [
         "studio.write"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "scene-build",
+          "path": "skills/arcane/arcane-natural-scenes/references/scene-build.md",
+          "sha256": "e2a42c2b7647fbd47204654c67a7c0a65cbe18cd2a0cfaa2485b2af0d3f7da76"
+        }
+      ]
     },
     {
       "id": "arcane-photoreal",

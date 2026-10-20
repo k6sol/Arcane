@@ -21,7 +21,7 @@ license: MIT
 
 ## Spawn and surroundings
 - Moving a spawn: scene_inspect then scene_update on the existing SpawnLocation with exact baselines. Keep it upright, anchored and collidable, with its bottom on the platform top and clear of rails.
-- Round spawn plinth: scene_build kits plinth; fluted only if classical. Verify kits spawn.top.
+- Round spawn plinth: scene_build kits plinth (fields: `arcane-natural-scenes:scene-build`); fluted only if classical. Verify kits spawn.top.
 - Avoid duplicate spawns; use scene_delete when removal is requested. Deletion uses Studio Undo, not receipt_restore.
 - Size the clearing and foliage exclusion from the final footprint. Blend the ground around it instead of making a huge flat disc. Keep the approach and cave route unobstructed.
 - Make the safe-zone boundary visible at ground/platform level. A decorative ring is not functioning protection; implement and verify server-side behavior if requested.

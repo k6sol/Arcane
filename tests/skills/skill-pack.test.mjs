@@ -37,7 +37,7 @@ async function fixture(t) {
 test('real authored pack validates without claiming behavioral approval', async () => {
   const result = await validatePack(ROOT);
   assert.equal(result.skills, 62);
-  assert.equal(result.references, 33);
+  assert.equal(result.references, 35);
   assert.equal(result.approved, 0);
   assert.equal(result.behaviorRuns, 0);
   assert.equal(result.verification, 'offline-structure-and-integrity-only');
@@ -217,7 +217,7 @@ test('scene recipes are prescriptive: terrain ground, natural Poisson placement,
   const nature = await read('arcane-natural-scenes'), architecture = await read('arcane-architectural-features'), world = await read('arcane-world-building');
   for (const text of ['environment_apply', 'terrain', 'terrain_generate', '`flatten` the clearing', '`river`', '`path`', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
     'Pine', 'Oak', 'Birch', 'tint', 'scale [0.75,1.25]', 'CastShadow false', 'ClockTime', 'atmosphere', '800-2500']) assert.ok(nature.includes(text), text);
-  for (const text of ['seed = kit seed x 100 + n', 'oak-1..3', '`<use>-<n>` variants', '`recipe`', 'agents never approve', 'ONE approved copy', '`blockouts`', 'never call that forest realistic']) assert.ok(nature.includes(text), text);
+  for (const text of ['family seed = kit seed x 100 + 1', 'oak-1..4', 'variant family', '`<use>-<n>` variants', '`recipe`', 'agents never approve', 'ONE approved copy', '`blockouts`', 'never call that forest realistic']) assert.ok(nature.includes(text), text);
   for (const text of ['Blender', 'UVs, textures and PBR', 'assets_preview', 'scene_delete', 'SpawnLocation', 'scene_update', 'Add a spiral stair only when requested', 'exact failing stage'])
     assert.ok(architecture.includes(text), text);
   assert.match(world, /Never place foliage in rings, grids or rows/);
@@ -327,6 +327,13 @@ test('characters skill covers rigs, verifiable default animations, pathfinding, 
   // Leaves the router room for a second domain skill (e.g. gameplay systems) within the default 10,240-byte load.
   const pair = await packSkills(['arcane-characters', 'arcane-gameplay-systems'], { root: ROOT, allowExperimental: true });
   assert.ok(pair.bytes <= 10_240, `characters + systems load is ${pair.bytes} bytes`);
+});
+
+test('blender props model-spec reference teaches the whole part graph within the default load', async () => {
+  const pack = await packSkills(['arcane-blender-props'], { root: ROOT, allowExperimental: true, references: ['arcane-blender-props:model-spec'] });
+  assert.ok(pack.bytes <= 16_384, `blender props + model-spec is ${pack.bytes} bytes`);
+  for (const text of ['kind:"spec"', '`revolve`', '`extrude`', '`loft`', '`sweep`', '`sdf`', '`mirror`', '`radial`', '`array`', '`scatter`', 'csg:"union"', '`flutes`', '`noise`', 'review',
+    'Lantern', 'Barrel', 'Park bench', 'Chair', 'Stone arch', 'Fountain', 'Sword', 'Crate', 'Fluted column', 'spec -> build -> look -> adjust']) assert.ok(pack.context.includes(text), text);
 });
 
 test('skill entrypoints stay lean enough for the default router budget', async () => {
