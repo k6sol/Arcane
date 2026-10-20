@@ -48,9 +48,12 @@ const stump = z.strictObject({ kind: z.literal('stump'), finish, species: z.enum
 // Model spec: the part graph is validated in full by the host (packages/asset-pipeline/src/model-spec.ts), so the advertised schema stays compact.
 const unit = between(0, 1).optional();
 const spec = z.strictObject({ kind: z.literal('spec'), finish, size: z.tuple([between(...MODEL_LIMITS.size), between(...MODEL_LIMITS.size), between(...MODEL_LIMITS.size)]).describe('Real-world [x,y,z] metres; Z up, front -Y.'),
-  materials: z.array(z.strictObject({ id: z.string().regex(/^[a-z][a-z0-9]{0,15}$/), finish: z.enum(MODEL_FINISHES), color: color.optional(), roughness: unit, metallic: unit, wear: unit, cavity: unit })).min(1).max(3),
+  materials: z.array(z.strictObject({ id: z.string().regex(/^[a-z][a-z0-9]{0,15}$/), finish: z.enum(MODEL_FINISHES), color: color.optional(), roughness: unit, metallic: unit, wear: unit, cavity: unit,
+    library: z.string().regex(/^[a-z][a-z-]{1,31}$/).optional().describe('Library family; omitted = inferred from ids, context and shape (see review.materials); "none" = plain finish.'),
+    glow: between(0, 10).optional(), moss: unit, age: unit })).min(1).max(3),
   parts: z.array(z.record(z.string(), z.unknown())).min(1).max(MODEL_LIMITS.parts).describe('Part graph {id, op, material, at, rot, ...}; format: skills_get arcane-blender-props reference model-spec.'),
-  pivot: z.enum(['base', 'origin']).optional(), smoothAngle: between(0, 180).optional() });
+  pivot: z.enum(['base', 'origin']).optional(), smoothAngle: between(0, 180).optional(), autoDetail: z.boolean().optional(),
+  context: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,23}$/)).max(8).optional().describe('Scene tags steering inferred materials/weathering, e.g. ["outdoor","ancient","swamp"]; "new" = clean.') });
 
 export const proceduralInput = z.strictObject({
   name: assetSlug.describe('Lowercase slug, e.g. "oak-large".'),
@@ -62,6 +65,7 @@ export const proceduralInput = z.strictObject({
   color: color.optional().describe('Primary colour (bark/rock/stone/foliage), linear RGB 0..1.'),
   triangleBudget: z.number().int().min(L.minTriangles).max(L.maxTriangles).optional().describe('Whole asset, 2500..20000 (defaults: tree 16000, rock 6000, column 12000, foliage 8000, log/stump 4000, spec 8000).'),
   renderResolution: z.number().int().min(128).max(768).optional().describe('Preview PNG size (default 512).'),
+  renderSamples: z.number().int().min(4).max(64).optional().describe('Preview render samples (default 16). Use 4 with a smaller renderResolution for draft look development; UV, PBR and export checks still run.'),
   timeoutMs: wait(20_000),
 });
 export const previewInput = z.strictObject({ jobId: assetJobId, view: z.enum(['hero', 'side', 'both']).default('hero'), timeoutMs: wait(20_000) });

@@ -510,6 +510,7 @@ Write: generate an original bounded mesh in the local Blender worker from a bund
 | `color` | number[] | no | exactly 3 items |
 | `triangleBudget` | integer | no | 2500–20000 |
 | `renderResolution` | integer | no | 128–768 |
+| `renderSamples` | integer | no | 4–64, default 16; controls preview rendering; UV/PBR/export checks still run |
 | `timeoutMs` | integer | no | 1000–60000, default 20000 |
 
 ### `assets_preview`

@@ -107,6 +107,24 @@ test(`procedural manifest v${schemaVersion}/density${leafDensity} reads exact me
   assert.equal(assetRequest.safeParse(request).success, true, 'MCP request schema accepts normalized procedural requests');
 });
 
+test('procedural preview sampling stays bounded and reaches the production request', () => {
+  const base = { name: 'lookdev-rock', generator: { kind: 'rock' } };
+  for (const renderSamples of [4, 16, 64]) {
+    const body = proceduralStartBody(proceduralInput.parse({ ...base, renderResolution: 128, renderSamples }));
+    assert.equal(body.renderSamples, renderSamples);
+    assert.equal(assetInput.safeParse(body).success, true, 'the shared start schema accepts the forwarded value');
+    const request = normalizeRequest(body);
+    assert.equal(request.renderSamples, renderSamples);
+    assert.equal(request.renderResolution, 128);
+    assert.equal(request.procedural!.finish, 'natural', 'lower preview sampling retains the UV/PBR workflow');
+    assert.equal(request.triangleBudget, 6000, 'geometry budget is independent of preview sampling');
+  }
+  assert.equal(normalizeRequest(proceduralStartBody(proceduralInput.parse(base))).renderSamples, 16, 'the default stays unchanged');
+  for (const renderSamples of [3, 65, 4.5, Infinity, '4']) {
+    assert.equal(proceduralInput.safeParse({ ...base, renderSamples }).success, false);
+  }
+});
+
 test('assets_procedural maps typed generator input onto the shared start body', () => {
   const input = proceduralInput.parse({ name: 'pine-a', generator: { kind: 'tree', species: 'pine', height: 14, leafDensity: 0.9 }, seed: 3 });
   const body = proceduralStartBody(input);
