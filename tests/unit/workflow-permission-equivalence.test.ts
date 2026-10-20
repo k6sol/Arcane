@@ -8,7 +8,7 @@ import { join, relative, isAbsolute, resolve, sep } from 'node:path';
 import { parsePrivateReceiptDescriptor } from '../../apps/daemon/src/workflow-private-storage.js';
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 import { nativeMetadataJsonSetup, privatePermissionTraceScript, tracePrivatePermissions } from './windows-private-permission-fixture.js';
-import {ownerPolicyFixture as ownerFixture} from './windows-owner-policy-fixture.js';
+import {createOwnerPolicyHost} from './windows-owner-policy-fixture.js';
 
 test('permission diagnostic is read-only metadata and cannot grant a private receipt descriptor', () => {
   for (const write of ['CreateDirectory', 'SetAccessControl', 'Set-Acl', 'SetOwner', 'SetTokenInformation', 'AdjustTokenPrivileges', 'ReadAllBytes', 'File]::Open'])
@@ -100,11 +100,21 @@ test('complete production owner policy: captured token equivalence preserves for
     .replaceAll('[ArcaneOwnerFixtureDirectory]', '[IO.Directory]').replaceAll('[ArcaneOwnerFixtureFile]', '[IO.File]')
     .replace('[ArcaneOwnerFixtureItem]::new($path)', '[IO.DirectoryInfo]::new($path)')
     .replace('[ArcaneOwnerFixtureItem]::new($path)', '[IO.FileInfo]::new($path)'), production);
-  const script = ownerFixture + '\ntry { & {\n' + doubled + String.raw`
-} } finally {
-  [Console]::Error.WriteLine('OWNER_POLICY_METADATA_DOUBLE '+$nativeJson.Serialize(@{identities=[ArcaneOwnerFixtureState]::Identities;creates=[ArcaneOwnerFixtureState]::Creates;writes=[ArcaneOwnerFixtureState]::Writes;directoryOwnerIsUser=([ArcaneOwnerFixtureState]::DirectoryAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq [ArcaneOwnerFixtureState]::User.Value);directoryProtected=[ArcaneOwnerFixtureState]::DirectoryAcl.AreAccessRulesProtected;directoryUnchanged=([ArcaneOwnerFixtureState]::DirectoryAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeDirectory);keyUnchanged=([ArcaneOwnerFixtureState]::KeyAcl.GetSecurityDescriptorSddlForm($sections) -ceq $beforeKey)}))
-}
-`;
+  // The historical checker remains byte pinned. Both policies use the same
+  // metadata-only type seams; the host verifies its sole exit/throw roundtrip.
+  const previous = readFileSync(resolve('tests/fixtures/workflow-private-storage-before-owner-fix.txt'), 'utf8').replaceAll('\r\n', '\n');
+  assert.equal(createHash('sha256').update(previous).digest('hex'), 'f1e777b8885e769df7b0777223405105588650e8b34033cc61f0341fbee2c582');
+  let previousDouble = previous;
+  for (const [native, fixture] of [
+    ['Security.Principal.WindowsIdentity', 'ArcaneOwnerFixtureIdentity'], ['IO.Directory', 'ArcaneOwnerFixtureDirectory'],
+    ['IO.File', 'ArcaneOwnerFixtureFile'], ['IO.DirectoryInfo', 'ArcaneOwnerFixtureItem'], ['IO.FileInfo', 'ArcaneOwnerFixtureItem'],
+  ]) previousDouble = previousDouble.replaceAll('[' + native + ']', '[' + fixture + ']');
+  assert.equal(previousDouble.replaceAll('[ArcaneOwnerFixtureIdentity]', '[Security.Principal.WindowsIdentity]')
+    .replaceAll('[ArcaneOwnerFixtureDirectory]', '[IO.Directory]').replaceAll('[ArcaneOwnerFixtureFile]', '[IO.File]')
+    .replace('[ArcaneOwnerFixtureItem]::new($path)', '[IO.DirectoryInfo]::new($path)')
+    .replace('[ArcaneOwnerFixtureItem]::new($path)', '[IO.FileInfo]::new($path)'), previous);
+  const host=await createOwnerPolicyHost(doubled,previousDouble);
+  t.after(async()=>assert.deepEqual(await host.close(),{code:0,signal:null}));
   const user = 'S-1-5-21-100-200-300-1001', foreign = 'S-1-5-21-100-200-300-1002', admin = 'S-1-5-32-544', system = 'S-1-5-18';
   const existing = { defaultOwner: admin, directoryOwner: user, keyOwner: admin, existing: true, protected: true, directoryForeign: false, keyForeign: false, nonempty: false, unsafeAncestor: false, ancestorReparse: false, keyReparse: false, keyLength: 32 };
   const fresh = { ...existing, existing: false, protected: false, directoryOwner: admin };
@@ -135,18 +145,11 @@ test('complete production owner policy: captured token equivalence preserves for
     { name: 'reparse key remains refused', value: { ...existing, keyReparse: true }, accepted: false },
     { name: 'wrong key length remains refused', value: { ...existing, keyLength: 31 }, accepted: false },
   ];
-  const windows = process.env.SystemRoot ?? 'C:\\Windows', executable = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  for (const scenario of cases) await t.test('native metadata DOUBLE: ' + scenario.name, () => {
-    const result = childProcess.spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
-      env: { ...process.env, PSModulePath: join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
-        ARCANE_WORKFLOW_ACL_ROOT: 'C:\\arcane-owner-fixture', ARCANE_WORKFLOW_ACL_PREPARE: scenario.value.existing ? '0' : '1',
-        ARCANE_WORKFLOW_ACL_KEY: scenario.value.existing ? '1' : '0', ARCANE_OWNER_FIXTURE_CASE: JSON.stringify(scenario.value) },
-      shell: false, windowsHide: true, timeout: 5_000, maxBuffer: 16_384, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    assert.equal(result.error, undefined); assert.equal(result.signal, null);
+  for (const scenario of cases) await t.test('native metadata DOUBLE: ' + scenario.name, async () => {
+    const result = await host.run(scenario.value);
     assert.equal(result.status, scenario.accepted ? 0 : 1, result.stderr);
     const line = result.stderr.split(/\r?\n/).find(row => row.startsWith('OWNER_POLICY_METADATA_DOUBLE '));
-    assert.ok(line, 'The original exit/catch must still run the fixture observation finally. ' + result.stderr);
+    assert.ok(line, 'The original refusal catch must still reach fixture observation. ' + result.stderr);
     const metadata = JSON.parse(line.slice('OWNER_POLICY_METADATA_DOUBLE '.length)) as { identities: number; creates: number; writes: number; directoryOwnerIsUser: boolean; directoryProtected: boolean; directoryUnchanged: boolean; keyUnchanged: boolean };
     assert.equal(metadata.identities, 1, 'User and default Owner must come from one captured host identity.');
     assert.equal(metadata.keyUnchanged, true, 'Key inspection is read-only for every owner and refusal.');
@@ -158,24 +161,9 @@ test('complete production owner policy: captured token equivalence preserves for
     } else { assert.equal(result.stdout, ''); assert.ok(result.stderr.includes('Arcane private workflow storage unavailable.')); }
     if (scenario.value.existing || !scenario.accepted) assert.equal(metadata.directoryUnchanged, true, 'Existing/refused directory ACLs are never repaired.');
   });
-  // Preserve the exact historical checker independently of later performance
-  // changes; it must still reproduce the original native owner refusals.
-  const previous = readFileSync(resolve('tests/fixtures/workflow-private-storage-before-owner-fix.txt'), 'utf8').replaceAll('\r\n', '\n');
-  assert.equal(createHash('sha256').update(previous).digest('hex'), 'f1e777b8885e769df7b0777223405105588650e8b34033cc61f0341fbee2c582');
-  let previousDouble = previous;
-  for (const [native, fixture] of [
-    ['Security.Principal.WindowsIdentity', 'ArcaneOwnerFixtureIdentity'], ['IO.Directory', 'ArcaneOwnerFixtureDirectory'],
-    ['IO.File', 'ArcaneOwnerFixtureFile'], ['IO.DirectoryInfo', 'ArcaneOwnerFixtureItem'], ['IO.FileInfo', 'ArcaneOwnerFixtureItem'],
-  ]) previousDouble = previousDouble.replaceAll('[' + native + ']', '[' + fixture + ']');
-  const previousScript = script.replace(doubled, previousDouble);
-  for (const scenario of [cases[0]!, cases[14]!]) await t.test('previous source-pinned policy reproduces refusal: ' + scenario.name, () => {
-    const result = childProcess.spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', previousScript], {
-      env: { ...process.env, PSModulePath: join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
-        ARCANE_WORKFLOW_ACL_ROOT: 'C:\\arcane-owner-fixture', ARCANE_WORKFLOW_ACL_PREPARE: scenario.value.existing ? '0' : '1',
-        ARCANE_WORKFLOW_ACL_KEY: scenario.value.existing ? '1' : '0', ARCANE_OWNER_FIXTURE_CASE: JSON.stringify(scenario.value) },
-      shell: false, windowsHide: true, timeout: 5_000, maxBuffer: 16_384, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 1);
+  for (const scenario of [cases[0]!, cases[14]!]) await t.test('previous source-pinned policy reproduces refusal: ' + scenario.name, async () => {
+    const result = await host.run(scenario.value,'previous');
+    assert.equal(result.status, 1);
     assert.equal(result.stdout, ''); assert.ok(result.stderr.includes('Arcane private workflow storage unavailable.'));
     const line = result.stderr.split(/\r?\n/).find(row => row.startsWith('OWNER_POLICY_METADATA_DOUBLE ')); assert.ok(line);
     const metadata = JSON.parse(line.slice('OWNER_POLICY_METADATA_DOUBLE '.length));

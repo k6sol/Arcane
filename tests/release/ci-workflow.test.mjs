@@ -86,7 +86,10 @@ test('bounded Windows metadata-fixture preparation follows build without replaci
   assert.equal([...source.matchAll(/run: node scripts\/prepare-windows-owner-policy-fixture.mjs/g)].length,1);
   const native=readFileSync(new URL('../../tests/unit/workflow-permission-equivalence.test.ts',import.meta.url),'utf8');
   assert.match(native,/timeout: 30_000/);
-  assert.equal([...native.matchAll(/timeout: 5_000/g)].length,2,'Current and historical fresh-process policy query bounds stay fixed.');
+  const fixture=readFileSync(new URL('../../tests/unit/windows-owner-policy-fixture.ts',import.meta.url),'utf8');
+  assert.match(fixture,/OWNER_POLICY_HOST_MS = 5_000, OWNER_POLICY_QUERY_MS = 5_000/);
+  assert.equal([...native.matchAll(/await createOwnerPolicyHost\(/g)].length,1,'The metadata matrix reuses one test-only host.');
+  assert.match(native,/await host.run\(scenario.value\)/);assert.match(native,/await host.run\(scenario.value,'previous'\)/);
   assert.match(native,/for \(const scenario of cases\)/);
   assert.match(native,/for \(const scenario of \[cases\[0\]!, cases\[14\]!\]\)/);
 });
