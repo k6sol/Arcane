@@ -31,7 +31,17 @@ const MESSAGES = Object.freeze({
   unavailable: 'Studio plugin setup is unavailable.',
   busy: 'A plugin install is already running.',
   changed: 'The plugin folder changed during install. Nothing was overwritten; try again.',
+  locked: 'Roblox Studio or another program is using the plugin file. Close Roblox Studio, then try again.',
+  studio: 'Roblox Studio is not set up for this Windows user yet. Install Roblox Studio and open it once, then try again.',
+  automatic: 'Arcane updated the Studio plugin automatically. Restart Roblox Studio to load it.',
+  autoOn: 'Arcane will update the Studio plugin automatically.',
+  autoOff: 'Arcane will ask before updating the Studio plugin.',
+  preference: 'The plugin update preference could not be saved.',
 });
+const PREFERENCE_FILE = 'studio-plugin-preferences.v1.json';
+const PREFERENCE_ON = JSON.stringify({ version: 1, autoUpdate: true }) + '\n';
+// Native file errors that mean the plugin file or folder is held open or write-protected (Studio running, antivirus).
+const LOCKED_CODES = Object.freeze(['EBUSY', 'EPERM', 'EACCES', 'ETXTBSY']);
 // Credential material that must never be written into a Studio plugin file.
 const CREDENTIAL_PATTERNS = Object.freeze([
   /arcane_local_v1_[0-9]+_[a-f0-9]{64}/i,
@@ -54,7 +64,9 @@ function ownedPluginText(text, filename) {
 }
 
 /**
- * createStudioPluginInstaller({ productRoot, pluginsDirectory?, localAppData?, backupDirectory, platform?, enabled?, confirm, fs? })
+ * createStudioPluginInstaller({ productRoot, pluginsDirectory?, localAppData?, backupDirectory, preferenceDirectory?, platform?, enabled?, confirm, fs? })
+ * The optional "update automatically" choice is one small app-wide file under preferenceDirectory. It is off unless the
+ * user turned it on behind a native confirm, and it only ever replaces an older Arcane plugin (never a first install).
  * Every path option may be a value or a zero-argument getter so the host can bind late (after app ready).
  */
 function createStudioPluginInstaller(options = {}) {
@@ -95,9 +107,10 @@ function createStudioPluginInstaller(options = {}) {
       return { bytes, sha256: entry.sha256, pluginVersion: typeof manifest.pluginVersion === 'string' && VERSION.test(manifest.pluginVersion) ? manifest.pluginVersion : null };
     } catch (error) { if (error.safe) throw error; throw failure(MESSAGES.bundle); }
   }
+  const explicitRoot = () => { const value = read(options.pluginsDirectory); return value !== undefined && value !== null; };
   function pluginsRoot() {
     const explicit = read(options.pluginsDirectory);
-    if (explicit !== undefined && explicit !== null) {
+    if (explicitRoot()) {
       if (typeof explicit !== 'string' || !path.isAbsolute(explicit)) throw failure(MESSAGES.folder);
       return path.resolve(explicit);
     }
@@ -142,7 +155,65 @@ function createStudioPluginInstaller(options = {}) {
     }
   }
 
-  async function install() {
+  /** The saved "update automatically" choice; anything missing or unexpected reads as off. Never writes. */
+  async function readAutoUpdate() {
+    const directory = read(options.preferenceDirectory);
+    if (typeof directory !== 'string' || !path.isAbsolute(directory)) return false;
+    const file = path.join(directory, PREFERENCE_FILE);
+    try {
+      await noLinks(file);
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64) return false;
+      return (await fs.readFile(file)).toString('utf8') === PREFERENCE_ON;
+    } catch { return false; }
+  }
+  async function writeAutoUpdate(on) {
+    const directory = read(options.preferenceDirectory);
+    if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw failure(MESSAGES.preference);
+    try {
+      await noLinks(directory); await fs.mkdir(directory, { recursive: true });
+      const file = path.join(directory, PREFERENCE_FILE), temp = path.join(directory, 'studio-plugin-preferences.' + randomUUID() + '.partial');
+      await noLinks(file);
+      await fs.writeFile(temp, on ? PREFERENCE_ON : JSON.stringify({ version: 1, autoUpdate: false }) + '\n', { flag: 'wx' });
+      try { await fs.rename(temp, file); } catch (error) { await fs.rm(temp, { force: true }).catch(() => {}); throw error; }
+    } catch { throw failure(MESSAGES.preference); }
+  }
+  const preferenceReply = (autoUpdate, message) => Object.freeze({ version: 1, autoUpdate, message });
+  async function preference() {
+    if (!enabled) return preferenceReply(false, MESSAGES.disabled);
+    const on = await readAutoUpdate();
+    return preferenceReply(on, on ? MESSAGES.autoOn : MESSAGES.autoOff);
+  }
+  /** Turning automatic updates on always asks natively first; turning them off never asks. */
+  async function setAutoUpdate(on) {
+    if (!enabled) throw failure(MESSAGES.disabled);
+    if (on === true && !(await readAutoUpdate())) {
+      const accepted = await options.confirm({
+        title: 'Update the Studio plugin automatically',
+        message: 'Let Arcane update its Studio plugin automatically?',
+        detail: 'When this version of Arcane bundles a newer Arcane plugin, Arcane backs up the old one and copies the verified update into your Roblox Studio Plugins folder without asking. It never installs the plugin for the first time or replaces another plugin. Restart Roblox Studio to load each update. Turn this off anytime in Settings.',
+        confirmLabel: 'Turn on',
+      });
+      if (accepted !== true) return preferenceReply(false, MESSAGES.autoOff);
+    }
+    await writeAutoUpdate(on === true);
+    return preferenceReply(on === true, on === true ? MESSAGES.autoOn : MESSAGES.autoOff);
+  }
+
+  /** Fixed friendly text for native file failures while installing; other safe failures pass through unchanged. */
+  const installFailure = error => {
+    if (error && error.safe) return error;
+    if (error && LOCKED_CODES.includes(error.code)) return failure(MESSAGES.locked);
+    return failure(MESSAGES.unavailable);
+  };
+  async function install() { return run(false); }
+  /** Update an older Arcane plugin without a dialog, only while the user's "update automatically" choice is on. */
+  async function autoUpdate() {
+    if (!enabled) throw failure(MESSAGES.disabled);
+    if (!(await readAutoUpdate())) { const now = await status(); return reply(now.state, now.pluginVersion, now.message, false); }
+    return run(true);
+  }
+  async function run(automatic) {
     if (!enabled) throw failure(MESSAGES.disabled);
     if (busy) throw failure(MESSAGES.busy);
     busy = true;
@@ -151,7 +222,12 @@ function createStudioPluginInstaller(options = {}) {
       const { verified, root, target, original, legacy } = found;
       if (found.state === 'installed') return reply('installed', verified.pluginVersion, MESSAGES.current, false);
       const update = found.state === 'outdated';
-      const accepted = await options.confirm({
+      if (automatic && !update) return reply(found.state, verified.pluginVersion, MESSAGES[found.state], false);
+      if (!explicitRoot()) {
+        // No Roblox folder at all means Studio never ran for this user: say so instead of inventing the folder.
+        try { await fs.lstat(path.dirname(root)); } catch (error) { if (error.code === 'ENOENT') throw failure(MESSAGES.studio); throw error; }
+      }
+      const accepted = automatic ? true : await options.confirm({
         title: update ? 'Update Arcane Studio plugin' : 'Install Arcane Studio plugin',
         message: update ? 'Update the Arcane plugin in Roblox Studio?' : 'Install the Arcane plugin into Roblox Studio?',
         detail: 'Arcane will copy its verified plugin' + (verified.pluginVersion ? ' (version ' + verified.pluginVersion + ')' : '') +
@@ -191,13 +267,16 @@ function createStudioPluginInstaller(options = {}) {
         if (!current || !current.equals(old.bytes)) throw failure(MESSAGES.changed);
         await fs.rename(old.from, backupPath(old.name));
       }
-      return reply('installed', verified.pluginVersion, MESSAGES.updated, true);
-    } finally { busy = false; }
+      return reply('installed', verified.pluginVersion, automatic ? MESSAGES.automatic : MESSAGES.updated, true);
+    } catch (error) { throw installFailure(error); }
+    finally { busy = false; }
   }
 
-  /** IPC: two zero-argument intents. `trusted(event)` owns the sender/frame/origin checks. */
+  /** IPC: zero-argument intents only. `trusted(event)` owns the sender/frame/origin checks. */
   function installIpc(ipcMain, { trusted }) {
-    for (const [action, run] of [['status', status], ['install', install]]) {
+    const intents = [['status', status], ['install', install], ['auto-update', autoUpdate], ['preference', preference],
+      ['auto-on', () => setAutoUpdate(true)], ['auto-off', () => setAutoUpdate(false)]];
+    for (const [action, run] of intents) {
       ipcMain.handle('arcane:studio-plugin-' + action, async (event, ...args) => {
         try {
           if (args.length || !trusted(event)) throw failure(MESSAGES.unavailable);
@@ -206,7 +285,7 @@ function createStudioPluginInstaller(options = {}) {
       });
     }
   }
-  return Object.freeze({ status, install, installIpc });
+  return Object.freeze({ status, install, autoUpdate, preference, setAutoUpdate, installIpc });
 }
 
-module.exports = { createStudioPluginInstaller, containsCredential, ARTIFACT, STATES, MESSAGES };
+module.exports = { createStudioPluginInstaller, containsCredential, ARTIFACT, STATES, MESSAGES, PREFERENCE_FILE };

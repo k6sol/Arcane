@@ -8,6 +8,10 @@ import {mkdtemp,mkdir,readFile,writeFile,realpath,rm,link,access} from 'node:fs/
 import {tmpdir} from 'node:os';
 import {join,resolve,relative,isAbsolute,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {createHash,randomUUID} from 'node:crypto';
+import {createRequire} from 'node:module';
+import {once} from 'node:events';
+import {PassThrough} from 'node:stream';
 
 const ROOT=fileURLToPath(new URL('../../',import.meta.url));
 const ENTRY=join(ROOT,'dist/apps/daemon/src/product-main.js');
@@ -85,4 +89,80 @@ test('actual daemon reports only a real occupied listener as a port conflict',as
   t.after(()=>new Promise(accept=>owner.close(accept)));
   const address=owner.address();assert.ok(address&&typeof address==='object');
   reported(await start(f,{port:String(address.port)}),'PORT_IN_USE');
+});
+
+// A daemon that was hard-killed (or stopped after an unknown preparation write) leaves
+// studio-import-preparations/preparation-owner.json behind. That once failed every later
+// startup of the project with STARTUP_FAILED and no recovery path.
+async function preparationLock(f,content){
+  const directory=join(f.state,'studio-import-preparations'),path=join(directory,'preparation-owner.json');
+  await mkdir(directory,{recursive:true});await writeFile(path,content);return path;
+}
+const projectId=async f=>{const real=await realpath(f.project);return createHash('sha256').update(process.platform==='win32'?real.toLowerCase():real).digest('hex');};
+
+async function startReady(f){
+  const env={...Object.fromEntries(Object.entries(process.env).filter(([key])=>ENVIRONMENT_NAMES.has(key.toLowerCase()))),
+    ARCANE_RESOURCE_DIRECTORY:ROOT,ARCANE_STATE_DIRECTORY:f.state,ARCANE_PROJECT:f.project,ARCANE_PORT:'0'};
+  const child=spawn(process.execPath,[ENTRY],{cwd:f.root,env,shell:false,windowsHide:true,stdio:['ignore','ignore','pipe','ipc']});
+  let stderr='';child.stderr.on('data',chunk=>{if(stderr.length<65536)stderr+=chunk;});
+  const messages=[];
+  const closed=new Promise((accept,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>accept({code,signal}));});
+  const deadline=setTimeout(()=>child.kill(),15000);
+  child.on('message',value=>{messages.push(value);
+    if(value?.type==='arcane-ready')child.send({type:'arcane-shutdown',protocolVersion:1});});
+  const outcome=await closed;clearTimeout(deadline);
+  return{outcome,messages,stderr};
+}
+
+test('regression: actual daemon recovers a preparation owner file abandoned by a killed daemon',async t=>{
+  const f=await fixture(t);
+  const path=await preparationLock(f,JSON.stringify({schemaVersion:1,projectId:await projectId(f),writerId:randomUUID()}));
+  const {outcome,messages,stderr}=await startReady(f);
+  assert.equal(messages[0]?.type,'arcane-ready',stderr);assert.equal(messages.length,1);
+  assert.deepEqual(outcome,{code:0,signal:null},stderr);
+  // The recovered owner was replaced by this daemon's own lock and released on clean shutdown.
+  await assert.rejects(access(path),{code:'ENOENT'});
+  await assert.rejects(access(join(f.state,'daemon.json')),{code:'ENOENT'});
+});
+
+test('regression: an empty owner file from a crash during lock creation is recovered',async t=>{
+  const f=await fixture(t),path=await preparationLock(f,'');
+  const {outcome,messages,stderr}=await startReady(f);
+  assert.equal(messages[0]?.type,'arcane-ready',stderr);assert.deepEqual(outcome,{code:0,signal:null},stderr);
+  await assert.rejects(access(path),{code:'ENOENT'});
+});
+
+test('foreign or other-project preparation owner files are still refused and retained unchanged',async t=>{
+  for(const content of ['{"foreign":"lock"}',JSON.stringify({schemaVersion:1,projectId:'b'.repeat(64),writerId:randomUUID()})]){
+    const f=await fixture(t),path=await preparationLock(f,content);
+    reported(await start(f),'STARTUP_FAILED');
+    assert.equal(await readFile(path,'utf8'),content);
+  }
+});
+
+const policy=createRequire(import.meta.url)('../../apps/desktop/electron/policy.cjs');
+
+test('a real startup failure leaves its stderr in the bounded state-root log',async t=>{
+  const f=await fixture(t);await preparationLock(f,'{"foreign":"lock"}');
+  const log=policy.daemonStderrLog(f.state);assert.ok(log);
+  const env={...Object.fromEntries(Object.entries(process.env).filter(([key])=>ENVIRONMENT_NAMES.has(key.toLowerCase()))),
+    ARCANE_RESOURCE_DIRECTORY:ROOT,ARCANE_STATE_DIRECTORY:f.state,ARCANE_PROJECT:f.project,ARCANE_PORT:'0'};
+  const child=spawn(process.execPath,[ENTRY],{cwd:f.root,env,shell:false,windowsHide:true,stdio:['ignore','ignore','pipe','ipc']});
+  log.attach(child.stderr);
+  await once(child,'close');
+  const text=await readFile(join(f.state,policy.DAEMON_STDERR_LOG),'utf8');
+  assert.match(text,/^\[Arcane local runtime stderr, started /);
+  assert.match(text,/STUDIO_IMPORT_PREPARATION_LOCKED/);
+});
+
+test('daemon stderr log keeps one previous run, stays bounded and never follows a hardlink',async t=>{
+  const f=await fixture(t),current=join(f.state,policy.DAEMON_STDERR_LOG),previous=join(f.state,'daemon-stderr.previous.log');
+  const first=policy.daemonStderrLog(f.state,128),one=new PassThrough();first.attach(one);
+  one.end('first run '+'x'.repeat(200));await once(one,'close');
+  const firstText=await readFile(current,'utf8');assert.match(firstText,/\[truncated at 128 bytes\]\n$/);
+  assert.ok(Buffer.byteLength(firstText)<=128+40);
+  const second=policy.daemonStderrLog(f.state,128),two=new PassThrough();second.attach(two);two.end('second');await once(two,'close');
+  assert.equal(await readFile(previous,'utf8'),firstText);assert.match(await readFile(current,'utf8'),/second$/);
+  const outside=join(f.root,'outside.log');await writeFile(outside,'retained');await rm(current);await link(outside,current);
+  assert.equal(policy.daemonStderrLog(f.state),null);assert.equal(await readFile(outside,'utf8'),'retained');
 });

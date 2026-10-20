@@ -2,7 +2,7 @@ import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
 import { validateTerrainGenerate } from './terrain-policy.js';
 import { validateMeshKeep } from './mesh-keep-policy.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_ASSET_TRANSFER_LIMITS, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS, STUDIO_SEARCH_CLASS_CAPABILITY, OUTPUT_LEVELS, OUTPUT_READ_LIMITS } from '../../protocol/src/studio.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_ASSET_TRANSFER_LIMITS, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS, STUDIO_SEARCH_CLASS_CAPABILITY, STUDIO_ENVIRONMENT_FOREST_CAPABILITY, OUTPUT_LEVELS, OUTPUT_READ_LIMITS } from '../../protocol/src/studio.js';
 /** One engine class name for scene.search IsA filtering (never a path or expression). */
 export const SEARCH_CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 
@@ -666,6 +666,63 @@ export const ENVIRONMENT_PRESETS = Object.freeze({
     colorCorrection: { Brightness: 0, Contrast: 0.15, Saturation: 0.1, TintColor: [0.9,0.97,1] },
     sunRays: { Intensity: 0.05, Spread: 0.4 },
   },
+  // Forest looks tuned for Future lighting: technology rides along (explicit wins), a subtle DepthOfField and the built-in
+  // Sky (no custom textures) are set, and SoundService gets Forest reverb when the Workspace grant allows it.
+  'forest-morning': {
+    technology: 'Future',
+    lighting: { ClockTime: 7.4, GeographicLatitude: 48, Brightness: 2.4, ExposureCompensation: 0.15, EnvironmentDiffuseScale: 0.9, EnvironmentSpecularScale: 0.8, ShadowSoftness: 0.25, Ambient: [0.06,0.065,0.07], OutdoorAmbient: [0.38,0.4,0.44], ColorShift_Top: [1,0.82,0.6], GlobalShadows: true },
+    atmosphere: { Density: 0.36, Offset: 0.12, Haze: 2.2, Glare: 0.45, Color: [0.85,0.82,0.76], Decay: [0.92,0.72,0.5] },
+    bloom: { Intensity: 0.45, Size: 28, Threshold: 1.3 },
+    colorCorrection: { Brightness: 0.01, Contrast: 0.08, Saturation: 0.06, TintColor: [1,0.97,0.92] },
+    sunRays: { Intensity: 0.12, Spread: 0.75 },
+    depthOfField: { FarIntensity: 0.08, FocusDistance: 60, InFocusRadius: 50, NearIntensity: 0 },
+    sky: { CelestialBodiesShown: true, SunAngularSize: 16 },
+    soundService: { AmbientReverb: 'Forest' },
+  },
+  'forest-noon': {
+    technology: 'Future',
+    lighting: { ClockTime: 12.5, GeographicLatitude: 40, Brightness: 3.2, ExposureCompensation: -0.1, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 1, ShadowSoftness: 0.12, Ambient: [0.06,0.065,0.07], OutdoorAmbient: [0.48,0.5,0.52], ColorShift_Top: [0.18,0.16,0.1], GlobalShadows: true },
+    atmosphere: { Density: 0.28, Offset: 0.2, Haze: 1, Glare: 0.15, Color: [0.78,0.84,0.9], Decay: [0.6,0.68,0.74] },
+    bloom: { Intensity: 0.3, Size: 24, Threshold: 1.6 },
+    colorCorrection: { Brightness: 0, Contrast: 0.06, Saturation: 0.04, TintColor: [1,1,0.98] },
+    sunRays: { Intensity: 0.05, Spread: 0.5 },
+    depthOfField: { FarIntensity: 0.05, FocusDistance: 80, InFocusRadius: 50, NearIntensity: 0 },
+    sky: { CelestialBodiesShown: true, SunAngularSize: 12 },
+    soundService: { AmbientReverb: 'Forest' },
+  },
+  'forest-golden-hour': {
+    technology: 'Future',
+    lighting: { ClockTime: 17.7, GeographicLatitude: 45, Brightness: 2.2, ExposureCompensation: 0.25, EnvironmentDiffuseScale: 0.9, EnvironmentSpecularScale: 0.9, ShadowSoftness: 0.3, Ambient: [0.08,0.065,0.055], OutdoorAmbient: [0.5,0.42,0.36], ColorShift_Top: [1,0.72,0.42], GlobalShadows: true },
+    atmosphere: { Density: 0.34, Offset: 0.1, Haze: 2, Glare: 0.7, Color: [0.96,0.78,0.6], Decay: [0.92,0.56,0.34] },
+    bloom: { Intensity: 0.6, Size: 30, Threshold: 1.15 },
+    colorCorrection: { Brightness: 0.02, Contrast: 0.1, Saturation: 0.12, TintColor: [1,0.94,0.86] },
+    sunRays: { Intensity: 0.14, Spread: 0.85 },
+    depthOfField: { FarIntensity: 0.1, FocusDistance: 50, InFocusRadius: 45, NearIntensity: 0 },
+    sky: { CelestialBodiesShown: true, SunAngularSize: 18 },
+    soundService: { AmbientReverb: 'Forest' },
+  },
+  'forest-overcast': {
+    technology: 'Future',
+    lighting: { ClockTime: 11, GeographicLatitude: 52, Brightness: 1.2, ExposureCompensation: 0.2, EnvironmentDiffuseScale: 1, EnvironmentSpecularScale: 0.5, ShadowSoftness: 0.9, Ambient: [0.1,0.105,0.11], OutdoorAmbient: [0.52,0.55,0.56], ColorShift_Top: [0,0,0], GlobalShadows: true },
+    atmosphere: { Density: 0.45, Offset: 0.04, Haze: 2.6, Glare: 0, Color: [0.74,0.77,0.79], Decay: [0.6,0.64,0.66] },
+    bloom: { Intensity: 0.25, Size: 20, Threshold: 1.8 },
+    colorCorrection: { Brightness: 0, Contrast: 0.04, Saturation: -0.12, TintColor: [0.95,0.98,1] },
+    sunRays: { Intensity: 0, Spread: 0 },
+    depthOfField: { FarIntensity: 0.12, FocusDistance: 40, InFocusRadius: 40, NearIntensity: 0 },
+    sky: { CelestialBodiesShown: false },
+    soundService: { AmbientReverb: 'Forest' },
+  },
+  'forest-dusk': {
+    technology: 'Future',
+    lighting: { ClockTime: 18.6, GeographicLatitude: 45, Brightness: 1, ExposureCompensation: 0.35, EnvironmentDiffuseScale: 0.7, EnvironmentSpecularScale: 0.8, ShadowSoftness: 0.5, Ambient: [0.05,0.05,0.08], OutdoorAmbient: [0.24,0.24,0.34], ColorShift_Top: [0.75,0.45,0.35], GlobalShadows: true },
+    atmosphere: { Density: 0.4, Offset: 0.08, Haze: 2.2, Glare: 0.25, Color: [0.55,0.5,0.62], Decay: [0.62,0.38,0.32] },
+    bloom: { Intensity: 0.7, Size: 30, Threshold: 1 },
+    colorCorrection: { Brightness: 0, Contrast: 0.1, Saturation: -0.08, TintColor: [0.92,0.92,1] },
+    sunRays: { Intensity: 0.04, Spread: 0.6 },
+    depthOfField: { FarIntensity: 0.12, FocusDistance: 40, InFocusRadius: 35, NearIntensity: 0 },
+    sky: { CelestialBodiesShown: true, StarCount: 1500, MoonAngularSize: 11 },
+    soundService: { AmbientReverb: 'Forest' },
+  },
 } as const);
 export type EnvironmentPreset = keyof typeof ENVIRONMENT_PRESETS;
 export const ENVIRONMENT_PRESET_NAMES = Object.keys(ENVIRONMENT_PRESETS) as EnvironmentPreset[];
@@ -694,11 +751,15 @@ export const TERRAIN_SHAPES = ['Block', 'Ball', 'Cylinder', 'Wedge'] as const;
 /** Fixed Lighting/effect allowlist: numeric [low, high], 'color' (0..1 RGB) or 'boolean'. */
 export const ENVIRONMENT_PROPERTIES = Object.freeze({
   lighting: { ClockTime: [0, 24], Brightness: [0, 10], ExposureCompensation: [-3, 3], EnvironmentDiffuseScale: [0, 1], EnvironmentSpecularScale: [0, 1],
-    ShadowSoftness: [0, 1], FogStart: [0, 100000], FogEnd: [0, 100000], Ambient: 'color', OutdoorAmbient: 'color', ColorShift_Top: 'color', FogColor: 'color', GlobalShadows: 'boolean' },
+    ShadowSoftness: [0, 1], FogStart: [0, 100000], FogEnd: [0, 100000], Ambient: 'color', OutdoorAmbient: 'color', ColorShift_Top: 'color', FogColor: 'color', GlobalShadows: 'boolean',
+    GeographicLatitude: [-90, 90] },
   atmosphere: { Density: [0, 1], Offset: [0, 1], Haze: [0, 10], Glare: [0, 10], Color: 'color', Decay: 'color' },
   bloom: { Intensity: [0, 2], Size: [0, 56], Threshold: [0, 4] },
   colorCorrection: { Brightness: [-1, 1], Contrast: [-1, 1], Saturation: [-1, 1], TintColor: 'color' },
   sunRays: { Intensity: [0, 1], Spread: [0, 1] },
+  // Lighting children: DepthOfFieldEffect, and the built-in Sky (its skybox textures are never set here).
+  depthOfField: { FarIntensity: [0, 1], FocusDistance: [0, 200], InFocusRadius: [0, 50], NearIntensity: [0, 1] },
+  sky: { CelestialBodiesShown: 'boolean', StarCount: [0, 5000], SunAngularSize: [0, 60], MoonAngularSize: [0, 60] },
 } as const);
 export type EnvironmentSection = keyof typeof ENVIRONMENT_PROPERTIES;
 const ENVIRONMENT_EXTRAS = ['preset', 'technology', 'terrainDecoration', 'materials', 'soundService'] as const;
@@ -723,8 +784,12 @@ function expandEnvironment(input: Record<string, Json>, session: StudioSession):
   const { preset, ...a } = input;
   if (preset !== undefined) {
     if (typeof preset !== 'string' || !Object.hasOwn(ENVIRONMENT_PRESETS, preset)) throw new ArcaneError('INPUT', `preset must be one of ${ENVIRONMENT_PRESET_NAMES.join(', ')}.`);
-    for (const [section, values] of Object.entries(ENVIRONMENT_PRESETS[preset as EnvironmentPreset]))
+    for (const [section, values] of Object.entries(ENVIRONMENT_PRESETS[preset as EnvironmentPreset]) as [string, Json][]) {
+      if (typeof values === 'string') { a[section] ??= values; continue; } // technology: an explicit value wins
+      // Forest reverb is a bonus: a Lighting-only grant still gets the look.
+      if (section === 'soundService' && !session.allowedRoots.includes('Workspace')) continue;
       a[section] = { ...structuredClone(values) as Record<string, Json>, ...(a[section] === undefined ? {} : object(a[section], section) as Record<string, Json>) };
+    }
   }
   if (a.technology !== undefined) {
     if (!LIGHTING_TECHNOLOGIES.includes(a.technology as typeof LIGHTING_TECHNOLOGIES[number])) throw new ArcaneError('PROPERTY', `technology must be ${LIGHTING_TECHNOLOGIES.join(', ')}.`);
@@ -744,9 +809,19 @@ function expandEnvironment(input: Record<string, Json>, session: StudioSession):
   }
   return a;
 }
+/** Forest looks (forest-* presets), the depthOfField/sky Lighting children and GeographicLatitude reach Studio only
+ * through a plugin advertising environment.forest; an older plugin would refuse them with a generic error. */
+export const FOREST_ENVIRONMENT_SECTIONS = ['depthOfField', 'sky'] as const;
+function requireForest(input: Record<string, Json>, session: StudioSession): void {
+  const lighting = input.lighting;
+  const forest = typeof input.preset === 'string' && input.preset.startsWith('forest-') || FOREST_ENVIRONMENT_SECTIONS.some(key => input[key] !== undefined)
+    || lighting !== null && typeof lighting === 'object' && !Array.isArray(lighting) && Object.hasOwn(lighting, 'GeographicLatitude');
+  if (forest) requireEffects(session, 'forest lighting (forest-* presets, depthOfField, sky and GeographicLatitude)', STUDIO_ENVIRONMENT_FOREST_CAPABILITY);
+}
 function validateEnvironment(input: Record<string, Json>, session: StudioSession): Record<string, Json> {
   const sections = Object.keys(ENVIRONMENT_PROPERTIES) as EnvironmentSection[];
   keys(input, ['terrain', ...sections, ...ENVIRONMENT_EXTRAS]);
+  requireForest(input, session);
   const a = expandEnvironment(input, session);
   if (!Object.keys(a).length) throw new ArcaneError('INPUT', 'Choose terrain shapes or lighting/effect settings.');
   if (a.terrain !== undefined) {

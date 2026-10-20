@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, lstatSync, realpathSync, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, opendir, realpath, unlink, type FileHandle } from 'node:fs/promises';
-import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual, types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
@@ -139,7 +139,11 @@ async function readPinned(path: string, limit: number, io: IO, optional = false)
 /** Durable metadata only. Records cannot be used as upload/import consent or an
  * observed engine baseline. Exclusive creation never replaces a prior record;
  * failed writes and unknown locks remain for explicit inspection. Physical path
- * checks and the lock coordinate local writers; they are not an OS sandbox. */
+ * checks and the lock coordinate local writers; they are not an OS sandbox.
+ * An owner file abandoned by a daemon that was killed or stopped after an
+ * unknown write is recovered only when the co-located StudioStore holds the
+ * exclusive workspace lock (so no other daemon can be its writer) and the file
+ * is this project's own lock shape. Records are then still fully validated. */
 export async function createStudioImportPreparationStore(options: {
   projectPath: string; directory: string; workAssociations: ConversationWorkStore; studio: StudioStore;
   limits?: Partial<Limits>; now?: () => number;
@@ -270,7 +274,26 @@ export async function createStudioImportPreparationStore(options: {
       if (error instanceof ArcaneError) throw error; return fail(wrote ? 'WRITE_UNKNOWN' : 'UNAVAILABLE');
     } finally { busy = false; releaseIdle?.(); releaseIdle = undefined; }
   }
+  async function recoverAbandonedLock(): Promise<void> {
+    // Without this, one hard-killed daemon blocks every later startup of the project with a generic failure.
+    if (!receipts.holdsWorkspaceLock(dirname(directory))) return;
+    paths(); let before: BigIntStats;
+    try { before = await lstat(lockPath, { bigint: true }); } catch (error) { if (errno(error) === 'ENOENT') return; throw error; }
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 1024n) return;
+    if (before.size > 0n) {
+      // A zero-length file is a crash between exclusive creation and its first write.
+      let pin: FilePin | null, value: unknown;
+      try { pin = await readPinned(lockPath, 1024, startupIO); value = pin && JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(pin.bytes)); } catch { return; }
+      if (!pin || !sameFile(before, pin.stat) || !value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return;
+      const lock = value as Record<string, unknown>;
+      if (Object.keys(lock).sort().join(',') !== 'projectId,schemaVersion,writerId' || lock.schemaVersion !== 1 || lock.projectId !== projectId ||
+        typeof lock.writerId !== 'string' || !UUID.test(lock.writerId)) return;
+    }
+    paths(); if (!sameFile(before, await lstat(lockPath, { bigint: true }))) return;
+    await unlink(lockPath);
+  }
   try {
+    await recoverAbandonedLock();
     await inventory(startupIO); paths(); lockAttempted = true;
     const handle = await open(lockPath, 'wx', 0o600);
     try { await handle.writeFile(JSON.stringify({ schemaVersion: 1, projectId, writerId: randomUUID() })); await handle.sync(); } finally { await handle.close(); }

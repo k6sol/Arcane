@@ -21,8 +21,8 @@ type Layer = NonNullable<Kit['species']>[number] & { footprint?: number };
 /** A plinth kit with every default resolved. */
 interface PlinthKit { kind: 'plinth'; key?: string | undefined; in?: string | undefined; name?: string | undefined; at: Vec; seed: number; radius: number;
   tiers: number; riser: number; style: 'fluted' | 'smooth' | 'platform'; height: number; flutes: number; column?: string | undefined;
-  material: NonNullable<Props['Material']>; trim: NonNullable<Props['Material']>; color?: unknown; weathering: number; spawn: boolean }
-const PLINTH_ONLY = ['style', 'tiers', 'height', 'column', 'material', 'color', 'weathering', 'spawn'] as const;
+  material: NonNullable<Props['Material']>; trim: NonNullable<Props['Material']>; color?: unknown; weathering: number; spawn: boolean; life?: 'day' | 'dusk' | undefined }
+const PLINTH_ONLY = ['style', 'tiers', 'height', 'column', 'material', 'color', 'weathering', 'spawn', 'life'] as const;
 const FOREST_ONLY = ['clearing', 'trees', 'undergrowth', 'species', 'cover', 'paths'] as const;
 function only(kit: Kit, label: string, forbidden: readonly string[]) {
   const extra = forbidden.filter(field => (kit as Record<string, unknown>)[field] !== undefined);
@@ -35,13 +35,15 @@ function resolvePlinth(kit: Kit, label: string): PlinthKit {
   const material = kit.material ?? 'Limestone', style = kit.style ?? 'smooth';
   return { kind: 'plinth', key: kit.key, in: kit.in, name: kit.name, at: kit.at as Vec, seed: kit.seed, radius, tiers: kit.tiers ?? 3, riser: 1, style,
     height: kit.height ?? 18, flutes: style === 'fluted' ? 16 : 0, column: kit.column, material, trim: material === 'Limestone' ? 'Marble' : material,
-    color: kit.color, weathering: kit.weathering ?? 0.5, spawn: kit.spawn ?? true };
+    color: kit.color, weathering: kit.weathering ?? 0.5, spawn: kit.spawn ?? true, life: kit.life };
 }
 
 /** Per-kit summary returned with the build receipt (a template clone counts the layer's `tris`, else its recipe generator's
  * assets_procedural budget for `<use>-<n>` originals, else TEMPLATE_TRIANGLES). */
 export interface KitReport { kind: 'plinth' | 'forest'; key: string; parts: number; triangles: number;
   spawn?: { at: number[]; top: number }; top?: number; placed?: number; requested?: number;
+  /** Plinth ambient life: effect/sound instance count and the steady-state particle budget (sum of Rate x max Lifetime). */
+  life?: { instances: number; particles: number; sounds: string[] };
   /** Forest layers cloned from Blender original template variants (`<use>-<n>`), and the ones that fell back to blockouts. */
   originals?: Record<string, string[]>; blockouts?: string[]; note?: string; recipe?: OriginalVariant[] }
 /** Internal bookkeeping consumed by compileSceneBuild: which items/scatter specs belong to each kit. */
@@ -171,11 +173,12 @@ export const BUILTIN_SPECIES = ['pine', 'oak', 'birch', 'bush', 'fern', 'rock', 
 
 /** One assets_procedural call for a forest original; its name is also the scene_build template name. */
 export interface OriginalVariant { name: string; seed: number; generator: Record<string, string | number> }
-/** Original Blender variants per built-in forest species (log has none: it stays a blockout or a user template). */
+/** Original Blender variants per built-in forest species (log: the fallen-log generator; stumps are user templates). */
 export const ORIGINAL_VARIANTS: Record<string, { count: number; generator: Record<string, string | number> }> = {
   oak: { count: 3, generator: { kind: 'tree', species: 'oak', height: 6 } }, birch: { count: 2, generator: { kind: 'tree', species: 'birch', height: 7 } },
   pine: { count: 3, generator: { kind: 'tree', species: 'pine', height: 8 } }, bush: { count: 2, generator: { kind: 'foliage', style: 'bush' } },
   fern: { count: 2, generator: { kind: 'foliage', style: 'fern', radius: 0.5, height: 0.4 } }, rock: { count: 3, generator: { kind: 'rock' } },
+  log: { count: 2, generator: { kind: 'log', species: 'oak', length: 3, radius: 0.25 } },
 };
 /**
  * Deterministic assets_procedural plan for a forest kit's species: `<use>-<n>` names, natural finish (the default),
@@ -285,7 +288,44 @@ function plinth(kit: PlinthKit, index: number): Built {
     report.parts++; report.triangles += PRIMITIVE_TRIANGLES.Cylinder!;
     report.spawn = { at: [r2(x0), r2(sy), r2(z0)], top: r2(sy + 0.5) };
   }
+  if (kit.life) items.push(...ambientLife(kit, key, report));
   return { items, report };
+}
+
+/** Optional plinth ambience (`life`), budgeted for phones: clearing dust motes (vfx Dust motes preset, Rate x max Lifetime <= 100),
+ * a soft unshadowed rune light in the spawn, dusk fireflies (<= 40 live) and SoundGroup/Sound hooks without SoundIds: no
+ * verified built-in wind or bird audio exists, so the user or studio_asset_search (Audio) supplies the ids. */
+function ambientLife(kit: PlinthKit, key: string, report: KitReport): Item[] {
+  const [x0, y0, z0] = kit.at, R = kit.radius, dusk = kit.life === 'dusk', motes = r2((R + 6) * 2);
+  const hidden = { Transparency: 1, CanCollide: false, CastShadow: false } as const;
+  const rate = clamp(Math.round(4 * motes * motes / 100), 2, 10);
+  const items: Item[] = [
+    { key: key + '-motes', name: 'MoteVolume', className: 'Part', in: key, props: { Size: [motes, 8, motes], Position: [r2(x0), r2(y0 + 4.5), r2(z0)], ...hidden } },
+    { name: 'DustMotes', className: 'ParticleEmitter', in: key + '-motes', fx: { Texture: 'rbxasset://textures/particles/sparkles_main.dds', Rate: rate, Lifetime: [6, 10],
+      Speed: [0.1, 0.3], SpreadAngle: [180, 180], Size: 0.1, Transparency: [[0, 1], [0.3, 0.5], [0.7, 0.5], [1, 1]], Color: '#fff3d6', Shape: 'Box', ShapeStyle: 'Volume',
+      LightEmission: dusk ? 0.2 : 0.4, LightInfluence: 1, Drag: 0.6, Rotation: [0, 360], RotSpeed: [-15, 15] } },
+  ];
+  let particles = rate * 10, instances = 2;
+  if (kit.spawn) {
+    items.push({ name: 'RuneLight', className: 'PointLight', in: key + '-spawn', fx: { Color: '#a8d8ff', Brightness: dusk ? 1.2 : 0.5, Range: clamp(R * 0.8, 6, 12), Shadows: false } });
+    instances++;
+  }
+  if (dusk) {
+    const span = r2((R + 30) * 2);
+    items.push({ key: key + '-fireflies', name: 'FireflyVolume', className: 'Part', in: key, props: { Size: [span, 5, span], Position: [r2(x0), r2(y0 + 4.5), r2(z0)], ...hidden } },
+      { name: 'Fireflies', className: 'ParticleEmitter', in: key + '-fireflies', fx: { Texture: 'rbxasset://textures/particles/sparkles_main.dds', Rate: 4, Lifetime: [6, 9],
+        Speed: [0.3, 0.8], SpreadAngle: [180, 180], Size: [[0, 0.1], [0.5, 0.22], [1, 0.1]], Transparency: [[0, 1], [0.2, 0], [0.4, 0.6], [0.6, 0], [0.8, 0.5], [1, 1]],
+        Color: '#d8ff6a', Shape: 'Box', ShapeStyle: 'Volume', LightEmission: 1, LightInfluence: 0, Drag: 1 } });
+    particles += 4 * 9; instances += 2;
+  }
+  const ambience = key + '-ambience', layer = dusk ? 'Crickets' : 'Birds';
+  items.push({ key: ambience, name: 'Ambience', className: 'SoundGroup', in: key, fx: { Volume: 0.6 } },
+    { name: 'Wind', className: 'Sound', in: key, fx: { Volume: 0.25, Looped: true, Playing: false, SoundGroup: ambience } },
+    { name: layer, className: 'Sound', in: key + '-motes', fx: { Volume: dusk ? 0.3 : 0.35, Looped: true, Playing: false, RollOffMode: 'InverseTapered',
+      RollOffMinDistance: 15, RollOffMaxDistance: 120, SoundGroup: ambience } });
+  report.parts += dusk ? 2 : 1;
+  report.life = { instances: instances + 3, particles, sounds: ['Wind', layer] };
+  return items;
 }
 
 // ---- forest ----

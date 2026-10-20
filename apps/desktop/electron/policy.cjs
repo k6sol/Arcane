@@ -1,7 +1,7 @@
 'use strict';
-const { resolve, relative, isAbsolute, sep, parse } = require('node:path');
+const { resolve, relative, isAbsolute, sep, parse, join } = require('node:path');
 const { lstat, realpath } = require('node:fs/promises');
-const { lstatSync, realpathSync, mkdirSync, readdirSync } = require('node:fs');
+const { lstatSync, realpathSync, mkdirSync, readdirSync, renameSync, openSync, writeSync, closeSync } = require('node:fs');
 function validOrigin(origin) {
   return typeof origin === 'string' && /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/.test(origin) && Number(origin.split(':').pop()) <= 65535;
 }
@@ -119,4 +119,42 @@ function startupFailureMessage(message) {
   if (!message || typeof message !== 'object' || Object.getPrototypeOf(message) !== Object.prototype || Object.keys(message).sort().join(',') !== 'code,protocolVersion,type' || message.type !== 'arcane-startup-failure' || message.protocolVersion !== 1 || typeof message.code !== 'string' || !STARTUP_FAILURE_CODES.includes(message.code)) throw new Error('Invalid private daemon failure report.');
   return message.code;
 }
-module.exports = { validOrigin, navigationAllowed, requestAllowed, protectConsolePipes, installClipboardPermissions, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage, STARTUP_FAILURE_CODES, startupFailureMessage };
+const DAEMON_STDERR_LOG = 'daemon-stderr.log', DAEMON_STDERR_PREVIOUS_LOG = 'daemon-stderr.previous.log', DAEMON_STDERR_LIMIT = 64 * 1024;
+/** Bounded diagnostic trail of the owned daemon's stderr (never stdout, which carries the workspace token).
+ * The prior run's log is kept once as .previous; an unexpected file kind at either name disables logging
+ * rather than following or replacing it. Logging never blocks or fails daemon startup. */
+function daemonStderrLog(stateRoot, limit = DAEMON_STDERR_LIMIT) {
+  const current = join(stateRoot, DAEMON_STDERR_LOG), previous = join(stateRoot, DAEMON_STDERR_PREVIOUS_LOG);
+  const plain = path => {
+    try { const stat = lstatSync(path); return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1; }
+    catch (error) { return error.code === 'ENOENT' ? null : false; }
+  };
+  let fd;
+  try {
+    const existing = plain(current); if (existing === false) return null;
+    if (existing) { if (plain(previous) === false) return null; renameSync(current, previous); }
+    fd = openSync(current, 'wx', 0o600);
+  } catch { return null; }
+  let written = 0, closed = false;
+  const close = () => { if (closed) return; closed = true; try { closeSync(fd); } catch { /* Diagnostics only. */ } };
+  const write = text => { const bytes = Buffer.isBuffer(text) ? text : Buffer.from(text, 'utf8'); writeSync(fd, bytes); written += bytes.length; };
+  try { write('[Arcane local runtime stderr, started ' + new Date().toISOString() + ']\n'); } catch { close(); return null; }
+  return Object.freeze({
+    path: current,
+    attach(stream) {
+      // Always drain the pipe so a chatty child never blocks; persist only the bounded prefix.
+      stream.on('data', chunk => {
+        if (closed) return;
+        try {
+          const room = limit - written;
+          if (chunk.length <= room) { write(chunk); return; }
+          if (room > 0) write(chunk.subarray(0, room));
+          write('\n[truncated at ' + limit + ' bytes]\n'); close();
+        } catch { close(); }
+      });
+      stream.once('close', close); stream.once('error', close);
+    },
+    close,
+  });
+}
+module.exports = { daemonStderrLog, DAEMON_STDERR_LOG, DAEMON_STDERR_LIMIT, validOrigin, navigationAllowed, requestAllowed, protectConsolePipes, installClipboardPermissions, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage, STARTUP_FAILURE_CODES, startupFailureMessage };

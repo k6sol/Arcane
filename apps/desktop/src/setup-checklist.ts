@@ -112,7 +112,43 @@ export function readPluginStatus(value: unknown): PluginStatus {
   return { state: v.state as PluginInstallState, pluginVersion: v.pluginVersion as string | null, message: v.message };
 }
 
-interface PluginBridge { version: 1; status(): Promise<unknown>; install(): Promise<unknown> }
+// ---- Studio plugin update banner ----
+// Compares two things with the plugin bundled in this Arcane: the plugin file in Studio's Plugins folder (native status) and
+// the plugin a live Studio session paired with (the daemon's display-only report). One click updates through the native
+// host (backup, verified copy, native confirm); Arcane then asks for a Studio restart and notices when the new plugin pairs.
+export type PluginBannerKind = 'hidden' | 'available' | 'restart' | 'stale' | 'ready';
+export interface PluginBannerInput {
+  desktop: boolean; plugin: PluginStatus | null;
+  /** Null without a live Studio session; false when the paired plugin predates the bundled one. */
+  pairedCurrent: boolean | null;
+  /** This app run replaced the plugin file. */
+  justUpdated: boolean;
+}
+export const PLUGIN_BANNER_TEXT = Object.freeze({
+  available: 'Studio plugin update available — this version of Arcane needs a newer Arcane plugin in Roblox Studio.',
+  restart: 'Plugin updated. Restart Roblox Studio (or turn the Arcane plugin off and on under Plugins › Manage Plugins) to load it. Arcane will notice when it reconnects.',
+  stale: 'Roblox Studio is still running an older Arcane plugin. Restart Roblox Studio to load the installed update.',
+  staleBrowser: 'The connected Arcane Studio plugin is older than this app. Update it from the Arcane desktop app, then restart Roblox Studio.',
+  ready: 'Studio is running the updated Arcane plugin.',
+});
+/** Pure: which plugin banner (if any) the observed state calls for. */
+export function pluginBannerKind(s: PluginBannerInput): PluginBannerKind {
+  if (s.desktop && s.plugin?.state === 'outdated') return 'available';
+  if (s.pairedCurrent === false) return s.justUpdated ? 'restart' : 'stale';
+  if (s.justUpdated) return s.pairedCurrent === true ? 'ready' : 'restart';
+  return 'hidden';
+}
+export interface PluginPreference { autoUpdate: boolean; message: string }
+export function readPluginPreference(value: unknown): PluginPreference | null {
+  const v = value as Record<string, unknown> | null;
+  if (!v || typeof v !== 'object' || v.version !== 1 || typeof v.autoUpdate !== 'boolean' || typeof v.message !== 'string' || v.message.length > 512 || /[\x00-\x1f\x7f]/.test(v.message)) return null;
+  return { autoUpdate: v.autoUpdate, message: v.message };
+}
+
+interface PluginBridge {
+  version: 1; status(): Promise<unknown>; install(): Promise<unknown>;
+  autoUpdate?(): Promise<unknown>; preference?(): Promise<unknown>; enableAutoUpdate?(): Promise<unknown>; disableAutoUpdate?(): Promise<unknown>;
+}
 interface ProjectBridge { version: 1; open(): Promise<unknown> }
 function bridges(desktop: unknown): { plugin: PluginBridge | null; project: ProjectBridge | null } {
   const root = desktop && typeof desktop === 'object' ? desktop as Record<string, unknown> : null;
@@ -133,7 +169,11 @@ export interface SetupChecklistOptions {
   workbench: {
     studioConnected(): boolean | null; subscribeStudioChange(listener: () => void): () => void;
     getCurrentProduct(): Readonly<{ projectPath: string }> | null; subscribeProjectChange(listener: () => void): () => void;
+    /** Null without a live session; false when the paired plugin predates the bundled one. Notified through subscribeStudioChange. */
+    studioPluginCurrent?(): boolean | null;
   };
+  /** Banner timers (tests); defaults to window timers. */
+  timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
   /** The preload bridge (window.arcaneDesktop); absent in a plain browser. */
   desktop?: unknown;
   /** One-click Studio pairing; without it the Studio row keeps the API key flow. */
@@ -142,6 +182,8 @@ export interface SetupChecklistOptions {
 }
 export interface SetupChecklistController {
   rows(): ChecklistRow[]; visible(): boolean; memory(): ChecklistMemory;
+  /** The plugin update banner currently shown ('hidden' when none). */
+  pluginBanner(): PluginBannerKind;
   refreshPlugin(): Promise<void>; stop(): void; resume(): void; cleanup(): void;
 }
 export interface SetupChecklistPersistence {
@@ -157,6 +199,11 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
   const persistence = options.persistence ?? (desktopMemory?.version === 1 && typeof desktopMemory.read === 'function' && typeof desktopMemory.save === 'function' ? desktopMemory : null);
   const removers: (() => void)[] = [];
   let plugin: PluginStatus | null = null, pluginBusy = false, later = false, stopped = false, disposed = false, notice = '';
+  // Plugin update banner and the "update automatically" choice (null until the host answered).
+  let autoUpdate: boolean | null = null, autoTried = false, justUpdated = false, lastPaired: boolean | null = null;
+  let bannerKind: PluginBannerKind = 'hidden', bannerDismissed: PluginBannerKind | null = null, readyTimer: unknown = null;
+  const timers = options.timers ?? { set: (fn: () => void, ms: number) => setTimeout(fn, ms), clear: (handle: unknown) => clearTimeout(handle as number) };
+  const pairedCurrent = (): boolean | null => { try { return options.workbench.studioPluginCurrent?.() ?? null; } catch { return null; } };
   let memory = (() => { try { return readChecklistMemory(storage?.getItem(SETUP_CHECKLIST_KEY)); } catch { return readChecklistMemory(null); } })();
   let hydrated = !persistence, automatic = !persistence, forced = false, revision = 0, preferenceError = '';
   let pendingSave: Promise<void> = Promise.resolve();
@@ -192,7 +239,51 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     if (done) { const path = doc.createElementNS(ns, 'path'); path.setAttribute('d', TICK); svg.append(path); }
     return svg;
   };
+  let banner: { root: HTMLElement; message: HTMLElement; update: HTMLButtonElement; auto: HTMLButtonElement; dismiss: HTMLButtonElement } | null = null;
+  const mountBanner = () => {
+    if (banner) return banner;
+    const messages = el('codex-messages'), parent = messages?.parentElement;
+    if (!messages || !parent) return null;
+    const root = make('div', undefined, 'notice warning studio-connection-banner studio-plugin-banner');
+    root.id = 'studio-plugin-banner'; root.setAttribute('role', 'status'); root.setAttribute('aria-live', 'polite'); root.hidden = true;
+    const button = (text: string, className: string, action: string) => { const node = make('button', text, className); node.type = 'button'; node.dataset.pluginBanner = action; return node; };
+    banner = { root, message: make('p', '', 'studio-plugin-banner-message'), update: button('Update plugin', 'secondary studio-connection-reconnect', 'update'),
+      auto: button('Update automatically', 'quiet studio-plugin-banner-auto', 'auto'), dismiss: button('Not now', 'quiet studio-plugin-banner-dismiss', 'dismiss') };
+    root.append(banner.message, banner.update, banner.auto, banner.dismiss);
+    parent.insertBefore(root, messages);
+    const click = (event: Event) => {
+      const target = (event.target as Element | null)?.closest?.('button[data-plugin-banner]') as HTMLButtonElement | null;
+      if (!target || target.disabled || stopped || disposed || !event.isTrusted) return;
+      const action = target.dataset.pluginBanner;
+      if (action === 'update') act('install-plugin', event);
+      else if (action === 'auto') void setAutoUpdate(true);
+      else if (action === 'dismiss') { bannerDismissed = bannerKind; render(); }
+    };
+    root.addEventListener('click', click); removers.push(() => root.removeEventListener('click', click));
+    return banner;
+  };
+  const paintBanner = () => {
+    const kind = pluginBannerKind({ desktop: !!native.plugin, plugin, pairedCurrent: pairedCurrent(), justUpdated });
+    if (kind !== bannerKind) {
+      bannerKind = kind; bannerDismissed = null;
+      if (readyTimer !== null) { timers.clear(readyTimer); readyTimer = null; }
+      // The confirmation that Studio runs the new plugin clears itself.
+      if (kind === 'ready') readyTimer = timers.set(() => { readyTimer = null; justUpdated = false; render(); }, 6000);
+    }
+    const b = mountBanner(); if (!b) return;
+    const show = !stopped && kind !== 'hidden' && bannerDismissed !== kind;
+    b.root.hidden = !show;
+    b.root.className = 'notice ' + (kind === 'ready' ? 'good' : 'warning') + ' studio-connection-banner studio-plugin-banner';
+    b.root.dataset.kind = kind;
+    const text = kind === 'hidden' ? '' : kind === 'stale' && !native.plugin ? PLUGIN_BANNER_TEXT.staleBrowser : PLUGIN_BANNER_TEXT[kind];
+    b.message.textContent = kind === 'available' && notice ? text + ' ' + notice : text;
+    b.update.hidden = kind !== 'available'; b.update.disabled = pluginBusy || stopped; b.update.textContent = pluginBusy ? 'Updating…' : 'Update plugin';
+    b.auto.hidden = kind !== 'available' || autoUpdate !== false || typeof native.plugin?.enableAutoUpdate !== 'function'; b.auto.disabled = pluginBusy || stopped;
+    b.dismiss.hidden = kind === 'ready';
+  };
   const renderSettings = () => {
+    const auto = el('studio-plugin-auto') as HTMLInputElement | null;
+    if (auto) { auto.checked = autoUpdate === true; auto.disabled = typeof native.plugin?.preference !== 'function' || autoUpdate === null || pluginBusy || stopped; }
     const state = el('studio-plugin-state'), status = el('studio-plugin-status');
     const install = el('studio-plugin-install') as HTMLButtonElement | null, refresh = el('studio-plugin-refresh') as HTMLButtonElement | null;
     const label = !native.plugin ? 'Desktop app only' : !plugin ? 'Checking' : plugin.state === 'installed' ? 'Installed' : plugin.state === 'outdated' ? 'Update available' : plugin.state === 'missing' ? 'Not installed' : 'Unavailable';
@@ -207,7 +298,7 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     if (disposed) return;
     const current = rows();
     if (hydrated && automatic && !memory.completed && current.every(row => row.state === 'done')) save({ ...memory, completed: true });
-    renderSettings();
+    renderSettings(); paintBanner();
     if (!root || !list) return;
     const visible = !stopped && (forced || hydrated && automatic && checklistVisible(current, memory, later));
     root.hidden = !visible;
@@ -237,14 +328,48 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     try { plugin = readPluginStatus(await native.plugin.status()); }
     catch { plugin = { state: 'unavailable', pluginVersion: null, message: PLUGIN_MESSAGES.failed }; }
     finally { pluginBusy = false; render(); }
+    if (plugin?.state === 'installed') autoTried = false;
+    else if (plugin?.state === 'outdated') void runAutoUpdate();
+  };
+  const replyMessage = (value: unknown) => { const text = (value as Record<string, unknown> | null)?.message; return typeof text === 'string' && text.length <= 512 && !/[\x00-\x1f\x7f]/.test(text) ? text : ''; };
+  const errorMessage = (error: unknown) => error instanceof Error && error.message.length <= 512 ? error.message : PLUGIN_MESSAGES.failed;
+  const readPreference = async () => {
+    if (typeof native.plugin?.preference !== 'function' || disposed) return;
+    try { autoUpdate = readPluginPreference(await native.plugin.preference())?.autoUpdate ?? false; } catch { autoUpdate = false; }
+    render();
+    if (plugin?.state === 'outdated') void runAutoUpdate();
+  };
+  /** Opt-in only: the host re-checks the saved choice and replaces only an older Arcane plugin, once per detection. */
+  const runAutoUpdate = async () => {
+    const bridge = native.plugin;
+    if (!bridge || typeof bridge.autoUpdate !== 'function' || autoUpdate !== true || autoTried || pluginBusy || stopped || disposed || plugin?.state !== 'outdated') return;
+    autoTried = true; pluginBusy = true; render();
+    try {
+      const result = await bridge.autoUpdate() as Record<string, unknown>;
+      if (result?.changed === true) justUpdated = true;
+      notice = result?.changed === true ? replyMessage(result) : '';
+    } catch (error) { notice = errorMessage(error); }
+    finally { pluginBusy = false; }
+    await refreshPlugin();
+  };
+  const setAutoUpdate = async (on: boolean) => {
+    const bridge = native.plugin;
+    const call = on ? bridge?.enableAutoUpdate : bridge?.disableAutoUpdate;
+    if (!bridge || typeof call !== 'function' || pluginBusy || stopped || disposed) { render(); return; }
+    pluginBusy = true; notice = ''; render();
+    try { const value = readPluginPreference(await call.call(bridge)); if (value) { autoUpdate = value.autoUpdate; notice = value.message; } }
+    catch (error) { notice = errorMessage(error); }
+    finally { pluginBusy = false; render(); }
+    if (autoUpdate === true) { autoTried = false; void runAutoUpdate(); }
   };
   const installPlugin = async () => {
     if (!native.plugin || pluginBusy || stopped || disposed) return;
     pluginBusy = true; notice = ''; render();
     try {
       const result = await native.plugin.install() as Record<string, unknown>;
-      notice = typeof result?.message === 'string' && result.message.length <= 512 ? result.message : '';
-    } catch (error) { notice = error instanceof Error && error.message.length <= 512 ? error.message : PLUGIN_MESSAGES.failed; }
+      notice = replyMessage(result);
+      if (result?.changed === true) justUpdated = true;
+    } catch (error) { notice = errorMessage(error); }
     finally { pluginBusy = false; }
     // Re-read the file state from the host rather than trusting the install reply.
     await refreshPlugin();
@@ -282,6 +407,21 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
   listen(el('setup-checklist-show'), 'click', event => { if (event.isTrusted) { forced = memory.completed || !automatic; later = false; save({ ...memory, dismissed: false }); render(); } });
   listen(el('studio-plugin-install'), 'click', event => act('install-plugin', event));
   listen(el('studio-plugin-refresh'), 'click', event => act('check-plugin', event));
+  listen(el('studio-plugin-auto'), 'change', event => {
+    const input = event.target as HTMLInputElement | null;
+    if (!input || !event.isTrusted || stopped || disposed) { render(); return; }
+    const want = input.checked; input.checked = autoUpdate === true; // The host's answer decides, after its own confirm.
+    void setAutoUpdate(want);
+  });
+  // Pairing: a newly paired plugin that predates the bundled one re-reads the plugin file once (the banner then offers the
+  // update or a Studio restart); a current one after an update clears the banner.
+  try {
+    removers.push(options.workbench.subscribeStudioChange(() => {
+      const paired = pairedCurrent();
+      if (paired === false && lastPaired !== false && !stopped) void refreshPlugin();
+      lastPaired = paired;
+    }));
+  } catch { /* The banner keeps the plugin file signal only. */ }
   // Returning from Studio re-reads the local plugin file once; there is no polling.
   listen(doc.defaultView, 'focus', () => { if (!stopped && native.plugin && plugin?.state !== 'installed') void refreshPlugin(); });
   for (const subscribe of [options.provider.subscribeSignInChange, options.provider.subscribeChatSurface, options.workbench.subscribeStudioChange, options.workbench.subscribeProjectChange]) {
@@ -296,12 +436,18 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
       else if (revision === 0 && value.available && (memory.completed || memory.dismissed)) save(memory);
     }).catch(() => { automatic = false; }).finally(() => { hydrated = true; render(); });
   }
-  render(); void refreshPlugin();
+  render(); void refreshPlugin(); void readPreference();
   return {
     rows, visible: () => !!root && !root.hidden, memory: () => ({ ...memory }), refreshPlugin,
+    pluginBanner: () => banner && !banner.root.hidden ? bannerKind : 'hidden',
     stop() { stopped = true; render(); },
     resume() { if (disposed || !stopped) return; stopped = false; render(); void refreshPlugin(); },
-    cleanup() { if (disposed) return; stopped = true; disposed = true; for (const remove of removers.splice(0)) { try { remove(); } catch { /* Already removed. */ } } if (root) root.hidden = true; },
+    cleanup() {
+      if (disposed) return; stopped = true; disposed = true;
+      if (readyTimer !== null) { timers.clear(readyTimer); readyTimer = null; }
+      for (const remove of removers.splice(0)) { try { remove(); } catch { /* Already removed. */ } }
+      if (root) root.hidden = true; if (banner) banner.root.hidden = true;
+    },
   };
 }
 

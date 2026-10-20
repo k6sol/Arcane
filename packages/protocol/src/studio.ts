@@ -57,8 +57,14 @@ export const STUDIO_GUI_EDIT_CAPABILITY = 'scene.gui.edit' as const;
 export const STUDIO_CHARACTERS_CAPABILITY = 'scene.characters' as const;
 /** Non-method feature capability: scene.search filters by className (IsA), with or without a name query. */
 export const STUDIO_SEARCH_CLASS_CAPABILITY = 'scene.search.class' as const;
+/** Non-method feature capability: environment.apply forest looks (forest-* presets), the depthOfField and sky
+ * Lighting-child sections and Lighting.GeographicLatitude. Older plugins never advertise it. */
+export const STUDIO_ENVIRONMENT_FOREST_CAPABILITY = 'environment.forest' as const;
+/** Most capability strings one pairing may advertise (methods + feature capabilities + diagnostics), with headroom
+ * so a new method or feature never makes pairing reject a current plugin. */
+export const STUDIO_PAIRING_CAPABILITY_LIMIT = 64;
 /** Every non-method feature capability a plugin may advertise at pairing (anything else must be a known method). */
-export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts', STUDIO_SEARCH_CLASS_CAPABILITY]);
+export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts', STUDIO_SEARCH_CLASS_CAPABILITY, STUDIO_ENVIRONMENT_FOREST_CAPABILITY]);
 /** GUI value bounds: Text/PlaceholderText UTF-8 bytes, UDim scale magnitude and integer pixel-offset magnitude. */
 export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOffset: 10000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent

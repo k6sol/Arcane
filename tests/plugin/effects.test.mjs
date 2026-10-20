@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+// The host pairing limit, read from the protocol source so this test tracks it.
+const STUDIO_PAIRING_CAPABILITY_LIMIT = Number(/STUDIO_PAIRING_CAPABILITY_LIMIT = (\d+)/.exec(await readFile(path.join(repository, 'packages/protocol/src/studio.ts'), 'utf8'))[1]);
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
 const modules = ['Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
@@ -304,6 +306,23 @@ local variant = materialService:GetChildren()[1]
 check(variant and variant.ClassName == "MaterialVariant" and variant.Name == "Mossy Slate" and variant.BaseMaterial == Enum.Material.Slate and variant.ColorMap == "rbxassetid://555" and variant.StudsPerTile == 8, "variant created")
 check(overrides.Slate == "Mossy Slate" and env.mutation.after.materials[1] == "Mossy Slate", "base material override set")
 refuses("CONFLICT", function() return run("environment.apply", V.decode(${json({ materials: [{ name: 'Mossy Slate', baseMaterial: 'Slate' }] })}, http)) end)
+
+-- 8b. Forest look: GeographicLatitude plus a DepthOfFieldEffect and the built-in Sky created under Lighting (no skybox textures).
+-- The plugin advertises environment.forest so the host never sends these to an older plugin, and the whole advertised
+-- list (methods, staging, features, mesh keep, diagnostics) stays within the host pairing limit (${STUDIO_PAIRING_CAPABILITY_LIMIT}).
+check(table.find(V.FEATURE_CAPABILITIES, "environment.forest") ~= nil, "plugin advertises environment.forest")
+check(#V.READ_METHODS + #V.WRITE_METHODS + #V.ASSET_STAGE_METHODS + #V.FEATURE_CAPABILITIES + #V.MESH_KEEP_METHODS + 1 <= ${STUDIO_PAIRING_CAPABILITY_LIMIT}, "advertised capabilities fit the pairing limit")
+lighting._properties.GeographicLatitude = 41.733
+local look = run("environment.apply", V.decode(${json({ lighting: { GeographicLatitude: 48 }, depthOfField: { FarIntensity: 0.08, FocusDistance: 60, InFocusRadius: 50, NearIntensity: 0 },
+  sky: { CelestialBodiesShown: true, SunAngularSize: 16 } })}, http))
+local dof, sky = nil, nil
+for _, child in ipairs(lighting:GetChildren()) do
+  if child.ClassName == "DepthOfFieldEffect" then dof = child elseif child.ClassName == "Sky" then sky = child end
+end
+check(near(lighting.GeographicLatitude, 48) and dof ~= nil and near(dof.FarIntensity, 0.08) and near(dof.FocusDistance, 60) and sky ~= nil and sky.CelestialBodiesShown == true and near(sky.SunAngularSize, 16), "forest look applied")
+check(look.mutation.before.sky == "created" and look.mutation.before.depthOfField == "created" and look.mutation.after.depthOfField.InFocusRadius == 50, "receipt records the created Lighting children")
+refuses("INPUT", function() return run("environment.apply", V.decode(${json({ sky: { SkyboxUp: 'rbxasset://textures/sky/up.png' } })}, http)) end)
+refuses("INPUT", function() return run("environment.apply", V.decode(${json({ depthOfField: { FocusDistance: 500 } })}, http)) end)
 
 -- 9. Studio refusing a plugin write rolls everything back and names the Properties-window step.
 lighting._properties.Technology = Enum.Technology.ShadowMap

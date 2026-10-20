@@ -96,6 +96,20 @@ test('surface GLB validation checks embedded PNG bytes, UV0 and all three PBR bi
   assert.throws(() => validateSurfaceGlb(changed.bytes, changed.request, changed.measured));
 });
 
+test('surface GLB alpha mode must match the audited surface: opaque tiles stay OPAQUE, cutout atlases MASK at 0.5', () => {
+  assert.throws(() => { const bad = exported(doc => { doc.materials[0].alphaMode = 'MASK'; }); validateSurfaceGlb(bad.bytes, bad.request, bad.measured); }, /alphaMode MASK must be OPAQUE/);
+  const cutout = (alphaMode?: string, alphaCutoff?: number) => {
+    const fixture = exported(doc => { if (alphaMode) doc.materials[0].alphaMode = alphaMode; if (alphaCutoff !== undefined) doc.materials[0].alphaCutoff = alphaCutoff; });
+    fixture.measured.meshes[0]!.materialProperties![0]!.surface!.alphaMode = 'MASK';
+    return () => validateSurfaceGlb(fixture.bytes, fixture.request, fixture.measured);
+  };
+  assert.doesNotThrow(cutout('MASK'));
+  assert.doesNotThrow(cutout('MASK', .5));
+  assert.throws(cutout(), /must be MASK/);
+  assert.throws(cutout('BLEND'), /must be MASK/);
+  assert.throws(cutout('MASK', .3), /must be MASK/);
+});
+
 test('native textured Blender manifest preserves generated surfaces and worker provenance', { skip: !process.env.ARCANE_TEXTURE_NATIVE_REPORT }, async () => {
   const report = JSON.parse(await readFile(process.env.ARCANE_TEXTURE_NATIVE_REPORT!, 'utf8'));
   assert.equal(report.result.state, 'succeeded');

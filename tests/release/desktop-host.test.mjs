@@ -385,7 +385,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
   assert.equal(Object.isFrozen(exposed.projectPermissions), true);
   assert.deepEqual(Object.keys(exposed.projectPermissions).sort(), ['read', 'save', 'version']);
   assert.equal(Object.isFrozen(exposed.studioPlugin), true);
-  assert.deepEqual(Object.keys(exposed.studioPlugin).sort(), ['install', 'status', 'version']);
+  assert.deepEqual(Object.keys(exposed.studioPlugin).sort(), ['autoUpdate', 'disableAutoUpdate', 'enableAutoUpdate', 'install', 'preference', 'status', 'version']);
   assert.equal(Object.isFrozen(exposed.workspaceProject), true);
   assert.deepEqual(Object.keys(exposed.workspaceProject).sort(), ['open', 'version']);
   assert.equal(Object.isFrozen(exposed.nativeHandoff), true);
@@ -427,7 +427,9 @@ test('source contract: bundled resource entry executes in owned writable cwd ove
   assert.match(mainSource, /cwd:\s*userRoot/);
   assert.match(mainSource, /shell:\s*false/);
   assert.match(mainSource, /windowsHide:\s*true/);
-  assert.match(mainSource, /stdio:\s*\['ignore',\s*'ignore',\s*'ignore',\s*'ipc'\]/);
+  // stdout (which carries the workspace token) stays ignored; only stderr may reach the bounded state-root log.
+  assert.match(mainSource, /stdio:\s*\['ignore',\s*'ignore',\s*stderrLog \? 'pipe' : 'ignore',\s*'ipc'\]/);
+  assert.match(mainSource, /const stderrLog = policy\.daemonStderrLog\(stateRoot\)/);
   assert.match(mainSource, /await stopDaemon\(\)[\s\S]*?await startDaemon\(path\)/);
   assert.match(productSource, /outputRoot:\s*join\(directory,\s*'assets'\)/);
   assert.match(productSource, /process\.send\(\{\s*type:\s*'arcane-ready'/);

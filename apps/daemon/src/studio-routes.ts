@@ -3,7 +3,8 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
-import { object, textField } from '../../../packages/protocol/src/studio.js';
+import { object, textField, READ_METHODS, WRITE_METHODS, ASSET_STAGE_METHODS, STUDIO_FEATURE_CAPABILITIES, type StudioSession } from '../../../packages/protocol/src/studio.js';
+import { STUDIO_PLUGIN_VERSION } from '../../../packages/protocol/src/studio-plugin-artifact.js';
 import type { StudioStore } from '../../../packages/storage/src/studio-store.js';
 import type { WorkStore, WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
@@ -13,6 +14,22 @@ import type { ScriptSourceVerifier } from '../../../packages/core/src/script-sou
  * It listens only while a human-started offer is pending and answers nothing else. */
 export const STUDIO_PAIRING_DISCOVERY_PORT = 45870;
 export type StudioPairingDiscoveryState = { state: 'idle' | 'listening' | 'unavailable'; port: number | null };
+
+/** Capabilities every current Arcane plugin advertises unconditionally (mesh keep and diagnostics depend on Studio itself). */
+const BUNDLED_PLUGIN_CAPABILITIES: readonly string[] = Object.freeze([...READ_METHODS, ...WRITE_METHODS, ...ASSET_STAGE_METHODS, ...STUDIO_FEATURE_CAPABILITIES]);
+const versionParts = (value: string): number[] | null => /^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$/.test(value) ? value.split('.').map(Number) : null;
+/** True when a paired plugin predates the plugin bundled with this Arcane: an older version or a missing capability. */
+export function studioPluginOutdated(session: Pick<StudioSession, 'pluginVersion' | 'capabilities'>, bundled: string = STUDIO_PLUGIN_VERSION): boolean {
+  const have = versionParts(session.pluginVersion), want = versionParts(bundled);
+  if (!have || !want) return true;
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) { if (have[i]! < want[i]!) return true; break; }
+  const reported = new Set(session.capabilities);
+  return BUNDLED_PLUGIN_CAPABILITIES.some(capability => !reported.has(capability));
+}
+/** Display-only plugin currency for /v1/studio/sessions. It never changes a session or gates a command. */
+export function studioPluginReport(sessions: readonly StudioSession[]): { bundledVersion: string; outdatedSessionIds: string[] } {
+  return { bundledVersion: STUDIO_PLUGIN_VERSION, outdatedSessionIds: sessions.filter(session => !session.revokedAt && studioPluginOutdated(session)).map(session => session.id) };
+}
 const LOOPBACK = new Set(['127.0.0.1', '::ffff:127.0.0.1']);
 
 function pairingDiscovery(store: StudioStore, fixedPort: number) {
@@ -122,7 +139,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
         }
         if (url.pathname === '/v1/studio/keys') { send(200, {keys:store.keys()}); return true; }
         if (url.pathname === '/v1/studio/pairing-offer' && !url.search) { discovery.sync(); send(200, { offer: store.pairingOffer(), discovery: discovery.state() }); return true; }
-        if (url.pathname === '/v1/studio/sessions') { send(200, { sessions: store.sessions() }); return true; }
+        if (url.pathname === '/v1/studio/sessions') { const sessions = store.sessions(); send(200, { sessions, plugin: studioPluginReport(sessions) }); return true; }
         if (url.pathname === '/v1/studio/diagnostics' && !url.search) { send(200, { diagnostics: store.diagnostics() }); return true; }
         if (url.pathname === '/v1/studio/commands') { send(200, { commands: store.commands(url.searchParams.get('sessionId') ?? undefined) }); return true; }
         if (url.pathname.startsWith('/v1/studio/script-diff/')) {

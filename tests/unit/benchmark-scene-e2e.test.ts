@@ -18,7 +18,7 @@ import { WorkStore } from '../../packages/storage/src/work-store.js';
 import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
 import { PROCEDURAL_LIMITS } from '../../packages/asset-pipeline/src/procedural.js';
 import type { AssetInput, AssetManifest, AssetProbe } from '../../packages/asset-pipeline/src/types.js';
-import { sceneBuildInstanceCount } from '../../packages/core/src/studio-policy.js';
+import { sceneBuildInstanceCount, ENVIRONMENT_PRESETS } from '../../packages/core/src/studio-policy.js';
 import { terrainVoxelCount } from '../../packages/core/src/terrain-policy.js';
 import { READ_METHODS, WRITE_METHODS, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type StudioCommand } from '../../packages/protocol/src/studio.js';
 import { VIEWPORT_CAMERA_READ_PROGRAM } from '../../packages/studio-test-controller/src/viewport.js';
@@ -67,7 +67,7 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
     let clones = 0;
     for (const item of items) {
       const parentId = item.parent === 0 ? root.instanceId : ids[(item.parent as number) - 1]!, p = nodes.get(parentId)!.ref;
-      const className = item.kind === 'group' ? item.className as string : item.kind === 'part' ? item.className as string
+      const className = item.kind === 'group' || item.kind === 'part' || item.kind === 'effect' ? item.className as string
         : item.kind === 'clone' ? templates[(item.template as number) - 1]!.className : protos[(item.template as number) - 1]!.parts!.length === 1 ? protos[(item.template as number) - 1]!.parts![0]!.className : 'Model';
       const ref = add(mkRef(p.root, [...p.pathSegments, item.name as string], className), item.name as string, parentId);
       ids.push(ref.instanceId);
@@ -301,16 +301,21 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
 
   // 3. scene_build: plinth kit with the circular SpawnLocation on top.
   const monument = await call('3 plinth', 'scene_build', { sessionId, parent: workspace, name: 'Monument',
-    kits: [{ kind: 'plinth', key: 'plinth', at: PLINTH, radius: R, tiers: 3, style: 'smooth', material: 'Limestone', weathering: 0.6, seed: 7 }] });
+    kits: [{ kind: 'plinth', key: 'plinth', at: PLINTH, radius: R, tiers: 3, style: 'smooth', material: 'Limestone', weathering: 0.6, seed: 7, life: 'day' }] });
   assert.equal(monument.state, 'succeeded');
   const plinthReport = monument.kits[0];
   assert.equal(plinthReport.kind, 'plinth'); assert.ok(plinthReport.spawn, 'a spawn is built by default');
-  const plinthArgs = plugin.commands.find(c => c.method === 'scene.build')!.args as { items: { kind: string; name: string; className?: string; key?: string; properties?: Record<string, { value: number[] } | string> }[] };
+  const plinthArgs = plugin.commands.find(c => c.method === 'scene.build')!.args as { items: { kind: string; name: string; className?: string; key?: string; parent: number; properties?: Record<string, { value: number[] } | string> }[] };
+  // Ambient life: clearing dust motes, a soft rune light in the spawn and silent wind/bird hooks (no invented sound ids).
+  assert.deepEqual(plinthReport.life, { instances: 6, particles: 100, sounds: ['Wind', 'Birds'] });
+  const rune = plinthArgs.items.find(i => i.className === 'PointLight')!;
+  assert.equal(plinthArgs.items[rune.parent - 1]!.className, 'SpawnLocation');
+  assert.ok(plinthArgs.items.filter(i => i.className === 'Sound').every(i => !Object.hasOwn(i.properties ?? {}, 'SoundId')));
   const spawn = plinthArgs.items.find(i => i.className === 'SpawnLocation')!;
   const sp = spawn.properties!, spawnAt = (sp.Position as { value: number[] }).value, spawnSize = (sp.Size as { value: number[] }).value;
   assert.equal(sp.Shape, 'Cylinder', 'the spawn is circular'); assert.deepEqual((sp.Orientation as { value: number[] }).value, [0, 0, 90]);
   assert.equal(spawnSize[1], spawnSize[2]); assert.ok(spawnAt.every((v, i) => Math.abs(v - plinthReport.spawn.at[i]) < 1e-4), `wire spawn ${spawnAt} = reported ${plinthReport.spawn.at}`);
-  const structural = plinthArgs.items.filter(i => i.kind === 'part' && i.className !== 'SpawnLocation' && !/^(Moss|Fragment)\d+$/.test(i.name));
+  const structural = plinthArgs.items.filter(i => i.kind === 'part' && i.className !== 'SpawnLocation' && !/^(Moss|Fragment)\d+$|^MoteVolume$/.test(i.name));
   assert.ok(structural.every(i => i.properties!.Shape === 'Cylinder'), 'tiers, trim, drums and capital are all round');
   const tops = structural.map(i => { const p = i.properties!, at = (p.Position as { value: number[] }).value, size = (p.Size as { value: number[] }).value; return { top: at[1]! + size[0]! / 2, radius: size[1]! / 2, name: i.name }; });
   const summit = Math.max(...tops.map(x => x.top)), capital = tops.filter(x => Math.abs(x.top - summit) < 0.01);
@@ -381,12 +386,23 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   const realTris = [...trees, ...cover].reduce((sum, i) => sum + assets.jobs.find(job => job.request.name === templateNames[i.template! - 1])!.request.triangleBudget!, 0);
   assert.equal(forestReport.triangles, realTris, 'kit triangle estimate equals the originals’ triangle budgets');
 
-  // 6. environment_apply: realistic forest light and atmosphere.
-  const env = await call('6 environment', 'environment_apply', { sessionId, preset: 'golden_hour', technology: 'Future', terrainDecoration: true,
-    atmosphere: { Density: 0.32, Haze: 1.6 } });
+  // 6. environment_apply: the forest-morning preset (Future lighting, low warm sun, haze, god-rays, subtle DepthOfField,
+  // built-in Sky, Forest reverb) expands host-side to exact values; the plugin never sees the preset name.
+  const env = await call('6 environment', 'environment_apply', { sessionId, preset: 'forest-morning', terrainDecoration: true });
   assert.equal(env.state, 'succeeded');
   const envArgs = plugin.commands.find(c => c.method === 'environment.apply')!.args as Record<string, Record<string, Json>>;
-  assert.equal(envArgs.technology, 'Future'); assert.equal(envArgs.atmosphere!.Density, 0.32);
+  assert.equal(envArgs.preset, undefined); assert.equal(envArgs.technology, 'Future'); assert.equal(envArgs.terrainDecoration, true as never);
+  const morning = ENVIRONMENT_PRESETS['forest-morning'];
+  for (const section of ['lighting', 'atmosphere', 'bloom', 'colorCorrection', 'sunRays', 'depthOfField', 'sky', 'soundService'] as const)
+    assert.deepEqual(envArgs[section], morning[section], section);
+  const light = envArgs.lighting as Record<string, Json>, haze = envArgs.atmosphere as Record<string, Json>;
+  assert.equal(light.ClockTime, 7.4); assert.equal(light.GeographicLatitude, 48); assert.equal(light.Brightness, 2.4); assert.equal(light.ShadowSoftness, 0.25);
+  assert.equal(light.EnvironmentDiffuseScale, 0.9); assert.equal(light.EnvironmentSpecularScale, 0.8); assert.equal(light.ExposureCompensation, 0.15);
+  assert.deepEqual(light.OutdoorAmbient, [0.38, 0.4, 0.44]); assert.deepEqual(light.Ambient, [0.06, 0.065, 0.07]);
+  assert.equal(haze.Density, 0.36); assert.equal(haze.Haze, 2.2); assert.equal(haze.Glare, 0.45); assert.deepEqual(haze.Decay, [0.92, 0.72, 0.5]);
+  assert.equal(envArgs.sunRays!.Intensity, 0.12); assert.equal(envArgs.depthOfField!.FarIntensity, 0.08); assert.equal(envArgs.sky!.CelestialBodiesShown, true);
+  assert.equal(envArgs.soundService!.AmbientReverb, 'Forest');
+  assert.equal(env.command.result.mutation.after.depthOfField.FocusDistance, 60, 'the receipt echoes the applied values');
 
   // 7. studio_viewport_capture framed on the plinth (metadata checked; the image is fixture context).
   const shot = await call('7 viewport', 'studio_viewport_capture', { sessionId, maxDimension: 512, frame: { ref: plinthRef, view: 'three_quarter' } });

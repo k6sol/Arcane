@@ -693,8 +693,9 @@ Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reco
 -- Keep this mesh: host-only upload + swap; advertised only when the Studio upload API probe passes (AssetPlacement.keepSupported).
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
--- character classes: Humanoid, HumanoidDescription, AnimationController, Animator).
-Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts", "scene.search.class"})
+-- character classes: Humanoid, HumanoidDescription, AnimationController, Animator; environment.forest: forest looks,
+-- the depthOfField/sky Lighting children and Lighting.GeographicLatitude).
+Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts", "scene.search.class", "environment.forest"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -3134,11 +3135,15 @@ local TERRAIN_MATERIALS = table.freeze({"Air", "Grass", "LeafyGrass", "Ground", 
 	"Snow", "Ice", "Glacier", "Salt", "Cobblestone", "Asphalt", "Concrete", "Brick", "WoodPlanks", "CrackedLava", "Water"})
 local ENVIRONMENT_SECTIONS = table.freeze({
 	{key = "lighting", props = {ClockTime = {0, 24}, Brightness = {0, 10}, ExposureCompensation = {-3, 3}, EnvironmentDiffuseScale = {0, 1}, EnvironmentSpecularScale = {0, 1},
-		ShadowSoftness = {0, 1}, FogStart = {0, 100000}, FogEnd = {0, 100000}, Ambient = "color", OutdoorAmbient = "color", ColorShift_Top = "color", FogColor = "color", GlobalShadows = "boolean"}},
+		ShadowSoftness = {0, 1}, FogStart = {0, 100000}, FogEnd = {0, 100000}, Ambient = "color", OutdoorAmbient = "color", ColorShift_Top = "color", FogColor = "color", GlobalShadows = "boolean",
+		GeographicLatitude = {-90, 90}}},
 	{key = "atmosphere", className = "Atmosphere", props = {Density = {0, 1}, Offset = {0, 1}, Haze = {0, 10}, Glare = {0, 10}, Color = "color", Decay = "color"}},
 	{key = "bloom", className = "BloomEffect", props = {Intensity = {0, 2}, Size = {0, 56}, Threshold = {0, 4}}},
 	{key = "colorCorrection", className = "ColorCorrectionEffect", props = {Brightness = {-1, 1}, Contrast = {-1, 1}, Saturation = {-1, 1}, TintColor = "color"}},
 	{key = "sunRays", className = "SunRaysEffect", props = {Intensity = {0, 1}, Spread = {0, 1}}},
+	{key = "depthOfField", className = "DepthOfFieldEffect", props = {FarIntensity = {0, 1}, FocusDistance = {0, 200}, InFocusRadius = {0, 50}, NearIntensity = {0, 1}}},
+	-- The built-in Sky: only these properties, never its skybox textures.
+	{key = "sky", className = "Sky", props = {CelestialBodiesShown = "boolean", StarCount = {0, 5000}, SunAngularSize = {0, 60}, MoonAngularSize = {0, 60}}},
 })
 
 local function environmentValue(value: any, kind: any, label: string): any

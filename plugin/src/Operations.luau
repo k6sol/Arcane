@@ -1327,11 +1327,15 @@ local TERRAIN_MATERIALS = table.freeze({"Air", "Grass", "LeafyGrass", "Ground", 
 	"Snow", "Ice", "Glacier", "Salt", "Cobblestone", "Asphalt", "Concrete", "Brick", "WoodPlanks", "CrackedLava", "Water"})
 local ENVIRONMENT_SECTIONS = table.freeze({
 	{key = "lighting", props = {ClockTime = {0, 24}, Brightness = {0, 10}, ExposureCompensation = {-3, 3}, EnvironmentDiffuseScale = {0, 1}, EnvironmentSpecularScale = {0, 1},
-		ShadowSoftness = {0, 1}, FogStart = {0, 100000}, FogEnd = {0, 100000}, Ambient = "color", OutdoorAmbient = "color", ColorShift_Top = "color", FogColor = "color", GlobalShadows = "boolean"}},
+		ShadowSoftness = {0, 1}, FogStart = {0, 100000}, FogEnd = {0, 100000}, Ambient = "color", OutdoorAmbient = "color", ColorShift_Top = "color", FogColor = "color", GlobalShadows = "boolean",
+		GeographicLatitude = {-90, 90}}},
 	{key = "atmosphere", className = "Atmosphere", props = {Density = {0, 1}, Offset = {0, 1}, Haze = {0, 10}, Glare = {0, 10}, Color = "color", Decay = "color"}},
 	{key = "bloom", className = "BloomEffect", props = {Intensity = {0, 2}, Size = {0, 56}, Threshold = {0, 4}}},
 	{key = "colorCorrection", className = "ColorCorrectionEffect", props = {Brightness = {-1, 1}, Contrast = {-1, 1}, Saturation = {-1, 1}, TintColor = "color"}},
 	{key = "sunRays", className = "SunRaysEffect", props = {Intensity = {0, 1}, Spread = {0, 1}}},
+	{key = "depthOfField", className = "DepthOfFieldEffect", props = {FarIntensity = {0, 1}, FocusDistance = {0, 200}, InFocusRadius = {0, 50}, NearIntensity = {0, 1}}},
+	-- The built-in Sky: only these properties, never its skybox textures.
+	{key = "sky", className = "Sky", props = {CelestialBodiesShown = "boolean", StarCount = {0, 5000}, SunAngularSize = {0, 60}, MoonAngularSize = {0, 60}}},
 })
 
 local function environmentValue(value: any, kind: any, label: string): any

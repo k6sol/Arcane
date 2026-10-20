@@ -80,6 +80,31 @@ test('plinth: platform style, template column and impossible geometry', () => {
   assert.throws(() => compile({ name: 'Bad', kits: [{ kind: 'plinth', at: [0, 0, 0], column: 'Missing' }] }), /Unknown prototype or template "Missing"/);
 });
 
+test('plinth life: budgeted dust motes, a soft rune light, dusk fireflies and silent ambience hooks', () => {
+  const effects = { ...session(), capabilities: [...session().capabilities, 'scene.effects'] };
+  const day = compile({ name: 'Grove', kits: [{ kind: 'plinth', key: 'P', at: [0, 32, 0], radius: 12, life: 'day' }] });
+  const list = items(day.args), kit = day.kits[0]!;
+  const emitters = list.filter(i => i.className === 'ParticleEmitter'), light = list.find(i => i.className === 'PointLight')!;
+  assert.deepEqual(emitters.map(e => e.name), ['DustMotes'], 'daylight has motes, no fireflies');
+  assert.equal(light.parent, list.findIndex(i => i.key === 'P-spawn') + 1, 'the rune light lives in the spawn');
+  const lp = light.properties as unknown as Record<string, number | boolean>;
+  assert.ok(lp.Brightness as number <= 1 && lp.Shadows === false && lp.Range as number <= 12, 'soft and unshadowed');
+  const motes = emitters[0]!.properties as unknown as Record<string, { value: number[] } | number>;
+  assert.ok((motes.Rate as number) * (motes.Lifetime as { value: number[] }).value[1]! <= 100, 'ambient fill budget');
+  const sounds = list.filter(i => i.className === 'Sound');
+  assert.deepEqual(sounds.map(s => s.name), ['Wind', 'Birds']);
+  assert.ok(sounds.every(s => !Object.hasOwn(s.properties ?? {}, 'SoundId')), 'no invented sound ids: hooks only');
+  assert.deepEqual(kit.life, { instances: 6, particles: 100, sounds: ['Wind', 'Birds'] });
+  assert.equal(sceneBuildInstanceCount(validateCommandArgs('scene.build', day.args, effects)), day.instances);
+  const dusk = compile({ name: 'Grove', kits: [{ kind: 'plinth', key: 'P', at: [0, 32, 0], radius: 12, life: 'dusk' }] });
+  const duskItems = items(dusk.args);
+  assert.deepEqual(duskItems.filter(i => i.className === 'ParticleEmitter').map(e => e.name), ['DustMotes', 'Fireflies']);
+  assert.ok(duskItems.some(i => i.name === 'Crickets') && dusk.kits[0]!.life!.particles <= 150);
+  assert.ok(validateCommandArgs('scene.build', dusk.args, effects));
+  assert.equal(items(compile(brief()).args).some(i => i.className === 'ParticleEmitter'), false, 'life is opt-in');
+  assert.throws(() => compile({ name: 'Bad', kits: [{ kind: 'forest', at: [0, 0, 0], radius: 50, life: 'day' }] }), /does not take life/);
+});
+
 test('forest kit: deterministic by seed and accepted by the daemon validator with exact instance counts', () => {
   const a = compile(brief(3)), b = compile(brief(3)), c = compile(brief(4));
   assert.deepEqual(a.args, b.args, 'same seed, same scene');
@@ -205,9 +230,11 @@ test('forest kit: <use>-<n> Blender original templates replace built-in species;
   assert.deepEqual(partial.originals, { oak: ['oak-1', 'oak-2', 'oak-10'] });
   assert.deepEqual(partial.blockouts, ['birch', 'rock', 'bush']);
   assert.ok(partial.recipe!.every(r => !r.name.startsWith('oak')));
-  // log has no Blender recipe; it is reported as a blockout without one.
+  // log uses the fallen-log generator (2 variants at its 4k default budget).
   const logs = compile({ name: 'Logs', kits: [{ ...kit, species: [{ use: 'oak', spacing: 14 }], cover: [{ use: 'log', spacing: 7 }] }] }).kits[0]!;
-  assert.deepEqual(logs.recipe!.map(r => r.name), ['oak-1', 'oak-2', 'oak-3']);
+  assert.deepEqual(logs.recipe!.map(r => r.name), ['oak-1', 'oak-2', 'oak-3', 'log-1', 'log-2']);
+  assert.deepEqual(logs.recipe!.at(-1)!.generator, { kind: 'log', species: 'oak', length: 3, radius: 0.25 });
+  assert.ok(proceduralInput.safeParse({ name: 'log-1', generator: logs.recipe!.at(-1)!.generator, seed: 1 }).success);
   assert.deepEqual(logs.blockouts, ['oak', 'log']);
   const twin = compile({ name: 'Twin', kits: [kit, { ...kit, key: 'East', at: [300, 0, 0] }] }).kits;
   assert.deepEqual(twin.map(k => k.blockouts), [draft.blockouts, draft.blockouts], 'a second forest still reports its blockouts');

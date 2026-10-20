@@ -429,6 +429,9 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   const fixtureAssetJobs: AssetJobRecord[] = [], fixturePng = png(); let corruptPreview = false;
   const fixtureRuntime = { executable: 'HTTP-fixture-only-no-Blender', version: 'fixture', pythonVersion: 'fixture', background: true, capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } };
   const posted: { path: string; body: Record<string, unknown>; authorization: string }[] = [];
+  // The toolbox policy panel polls a read-only status POST every 2s while its settings page is open. Record those
+  // background reads apart from human actions so `posted.at(-1)` always names the action under test.
+  const toolboxReads: { body: Record<string, unknown>; authorization: string }[] = [];
   const assets = new Map(['/studio', '/studio.css', '/studio.js', '/codex-chat.js', '/workspace-shell.js', '/asset-downloads.js', '/learning-panel.js', '/brand/arcane-ridges.png'].map((path, i) => [path, resolve(['apps/desktop/public/studio.html', 'apps/desktop/public/studio.css', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/studio.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/asset-downloads.js'), resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/learning-panel.js'), 'apps/desktop/public/brand/arcane-ridges.png'][i]!) ]));
   for(const name of ['asset-viewer','automatic-asset-previews','glb-preflight']) assets.set('/'+name+'.js',resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist','apps/desktop/src/'+name+'.js'));
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
@@ -483,6 +486,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
       const c = commands.find(c => '/v1/studio/commands/' + c.id === url.pathname); if (c) { send({ command: c }); return; }
     }
     let raw = ''; for await (const chunk of request) raw += String(chunk); const body = JSON.parse(raw) as Record<string, unknown>;
+    if (url.pathname === '/v1/studio-native/toolbox-policy') { toolboxReads.push({ body, authorization: request.headers.authorization ?? '' }); send({ error: 'NOT_FOUND', message: 'Unknown fixture route.' }, 404); return; }
     posted.push({ path: url.pathname, body, authorization: request.headers.authorization ?? '' });
     if (url.pathname === '/v1/assets/probe') { send({ probe: { observedAt: new Date().toISOString(), available: true, blender: fixtureRuntime, python: null, attempts: [] } }); return; }
     if (url.pathname === '/v1/assets/start') {
@@ -641,6 +645,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   await page.reload(); await expectText('#connection-status', 'Daemon responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#key-writes, input[name="key-root"]').count(), 0); assert.equal(await page.locator('#key-result').isVisible(), false); assert.equal(await page.locator('#key-secret').textContent(), '');
   await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(writer.id); await expectText('#session-mode', 'Writes granted'); await page.locator('#revoke').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await expectText('#session-mode', 'No target'); assert.equal(await page.locator('#session-picker').inputValue(), ''); assert.equal(await page.locator('#session-picker option[value="' + writer.id + '"]').count(), 0); assert.equal(await page.locator('#session-count').textContent(), sessions.filter(s => !s.revokedAt).length + ' active'); assert.equal(await page.locator('#send').isDisabled(), true);
   assert.deepEqual(errors, []); assert.ok(posted.every(p => p.authorization === 'Bearer ' + TOKEN));
+  assert.ok(toolboxReads.every(p => p.authorization === 'Bearer ' + TOKEN && JSON.stringify(Object.keys(p.body)) === '["sessionId"]'), 'Background toolbox polls only read status and never change the grant without a human.');
 });
 
 

@@ -803,10 +803,19 @@ export class StudioWorkbench {
     this.studioListeners.add(listener);
     return () => { this.studioListeners.delete(listener); };
   }
+  // Plugin currency of the live Studio session(s), from the daemon's display-only report: null with no live session.
+  private outdatedPluginSessions = new Set<string>();
+  private studioPluginFresh: boolean | null = null;
+  studioPluginCurrent(): boolean | null { return this.stopped ? null : this.studioPluginFresh; }
+  private observePluginReport(value: unknown): void {
+    const ids = (value as { outdatedSessionIds?: unknown } | null)?.outdatedSessionIds;
+    this.outdatedPluginSessions = new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string').slice(0, 1000) : []);
+  }
   private observeStudioSessions(): void {
-    const live = this.sessions.some(session => !session.revokedAt && Date.now() - Date.parse(session.lastSeenAt) <= 30000);
-    if (live === this.studioLive) return;
-    this.studioLive = live;
+    const liveSessions = this.sessions.filter(session => !session.revokedAt && Date.now() - Date.parse(session.lastSeenAt) <= 30000);
+    const live = liveSessions.length > 0, fresh = live ? !liveSessions.some(session => this.outdatedPluginSessions.has(session.id)) : null;
+    if (live === this.studioLive && fresh === this.studioPluginFresh) return;
+    this.studioLive = live; this.studioPluginFresh = fresh;
     for (const listener of [...this.studioListeners]) { try { listener(); } catch { /* Observers cannot interrupt refresh. */ } }
   }
   private observeProjectPath(value: unknown, identity: unknown = null): void {
@@ -1064,9 +1073,9 @@ export class StudioWorkbench {
       if (product.status === 'rejected') { this.text('product-evidence', 'Product state unavailable: ' + String(product.reason)); this.text('project-path', 'Product state unavailable'); this.text('command-counts', 'Unknown'); this.text('build-tasks', 'Build board unavailable: ' + String(product.reason)); }
       const sessionRead = reads[0]!;
       if (sessionRead.status === 'rejected') throw sessionRead.reason;
-      const sessionData = sessionRead.value as { sessions: StudioSession[] };
+      const sessionData = sessionRead.value as { sessions: StudioSession[]; plugin?: unknown };
       if (!Array.isArray(sessionData.sessions)) throw new Error('The session endpoint returned an invalid payload.');
-      this.sessions = sessionData.sessions;
+      this.sessions = sessionData.sessions; this.observePluginReport(sessionData.plugin ?? null);
       this.online = true;
       this.renderSessions(); this.observeStudioSessions();
       if (capturedSession && historyCurrent()) {

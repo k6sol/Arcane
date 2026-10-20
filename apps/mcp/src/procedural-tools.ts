@@ -7,7 +7,7 @@ import { BridgeError, type CommandOutcome, type DaemonClient } from './daemon-cl
 import { assetSlug, boundedVector } from './assembly-schemas.js';
 import { assetJobId, nativeAssetJobId } from './asset-schemas.js';
 import { id, ref } from './schemas.js';
-import { COLUMN_BASES, COLUMN_CAPITALS, FOLIAGE_STYLES, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
+import { COLUMN_BASES, COLUMN_CAPITALS, DEADWOOD_SPECIES, FOLIAGE_STYLES, LOG_ENDS, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, STUMP_TOPS, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
 
 /** Procedural Blender meshes: start (assets_procedural), look (assets_preview) and, for native
  * sessions, place the reconstructed meshes as MeshParts (assets_place_studio_import). */
@@ -37,13 +37,18 @@ const column = z.strictObject({ kind: z.literal('column'), finish, radius: betwe
   base: z.enum(COLUMN_BASES).optional(), capital: z.enum(COLUMN_CAPITALS).optional() });
 const foliage = z.strictObject({ kind: z.literal('foliage'), finish, style: z.enum(FOLIAGE_STYLES).default('bush'),
   radius: between(...L.foliageRadius).default(0.8), height: between(...L.foliageHeight).default(0.9), density: between(0, 1).optional() });
+const moss = z.boolean().optional().describe('Moss band along the top (default false).');
+const log = z.strictObject({ kind: z.literal('log'), finish, species: z.enum(DEADWOOD_SPECIES).default('oak'), length: between(...L.logLength).default(3),
+  radius: between(...L.logRadius).default(0.25), ends: z.enum(LOG_ENDS).optional().describe('Sawn, snapped or mixed (default) ends.'), moss });
+const stump = z.strictObject({ kind: z.literal('stump'), finish, species: z.enum(DEADWOOD_SPECIES).default('oak'), radius: between(...L.stumpRadius).default(0.35),
+  height: between(...L.stumpHeight).default(0.5), top: z.enum(STUMP_TOPS).optional(), moss });
 
 export const proceduralInput = z.strictObject({
   name: assetSlug.describe('Lowercase slug, e.g. "oak-large".'),
-  generator: z.discriminatedUnion('kind', [tree, rock, column, foliage]),
+  generator: z.discriminatedUnion('kind', [tree, rock, column, foliage, log, stump]),
   seed: z.number().int().min(0).max(2147483647).optional().describe('Same seed + parameters = identical mesh; vary for variants.'),
   color: color.optional().describe('Primary colour (bark/rock/stone/foliage), linear RGB 0..1.'),
-  triangleBudget: z.number().int().min(L.minTriangles).max(L.maxTriangles).optional().describe('Whole asset, 2500..20000 (defaults: tree 16000, rock 6000, column 12000, foliage 8000).'),
+  triangleBudget: z.number().int().min(L.minTriangles).max(L.maxTriangles).optional().describe('Whole asset, 2500..20000 (defaults: tree 16000, rock 6000, column 12000, foliage 8000, log/stump 4000).'),
   renderResolution: z.number().int().min(128).max(768).optional().describe('Preview PNG size (default 512).'),
   timeoutMs: wait(20_000),
 });
@@ -61,7 +66,8 @@ export const placeInput = z.strictObject({
 
 const PROCEDURAL = 'Write: generate an original bounded mesh in the local Blender worker from a bundled parameterised generator (no code accepted): ' +
   'tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; tapered branching limbs and thin curved closed leaves), rock (size, roughness; noise + chiselled facets, flat base), ' +
-  'column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian) or foliage clump (bush/grass/fern). ' +
+  'column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian), foliage clump (bush/grass/fern), ' +
+  'fallen log (oak/birch, length, radius, sawn/broken ends, moss) or stump (oak/birch, root flare, cut/broken top, moss; log/stump ≤4,000 triangles). ' +
   'Output: one optimised GLB, one mesh per material (≤20,000 triangles total, analytic UV0, original 256px opaque colour/normal/roughness/metalness maps; finish flat selects solid materials), a box/trunk collision proxy, and two preview renders. Deterministic per seed. ' +
   'Use for original hero/organic assets. Toolbox models require an explicit user request; inspect the actual preview before calling any result realistic. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. ' +
   'Open the 3D preview for human Approve; agents cannot approve. Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.';

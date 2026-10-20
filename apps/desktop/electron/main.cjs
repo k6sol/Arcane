@@ -130,7 +130,7 @@ async function startDaemon(project) {
     STATE_NEWER: 'This project uses records saved by a newer version of Arcane. Open this project with that version or later. No automatic retry or downgrade was attempted.',
     STATE_UNSAFE: 'Arcane could not safely verify this project\'s saved records. They were retained unchanged; inspect the Arcane application-data folder before restarting. No automatic retry was attempted.',
     RESOURCE_UNAVAILABLE: 'The Arcane application folder is incomplete or unavailable. Project records and the saved port were retained. Replace the complete app folder, then restart Arcane. No automatic retry was attempted.',
-    STARTUP_FAILED: 'The local runtime could not start. Project records and the saved port were retained. No automatic retry was attempted.',
+    STARTUP_FAILED: 'The local runtime could not start. Project records and the saved port were retained. Its error output was saved to daemon-stderr.log in the Arcane runtime folder for this project. No automatic retry was attempted.',
     STARTUP_TIMEOUT: 'The local runtime startup timed out after 30 seconds. Project records and the saved port were retained. No automatic retry was attempted.',
   });
   const portFailure = () => { throw startupPortError('Saved local port metadata is unavailable. Project records were retained; inspect the Arcane application-data folder before restarting.'); };
@@ -189,7 +189,10 @@ async function startDaemon(project) {
   const verification = managedCodeVerificationConfiguration({ codeVerification,
     project: { projectId: key, projectPath: canonical, stateRoot }, productRoot });
   Object.assign(env, verification.environment);
-  const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  // stdout carries the workspace token and stays ignored; stderr goes to a bounded log under the owned state root.
+  const stderrLog = policy.daemonStderrLog(stateRoot);
+  const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', stderrLog ? 'pipe' : 'ignore', 'ipc'] });
+  if (stderrLog) { if (owned.stderr) stderrLog.attach(owned.stderr); else stderrLog.close(); }
   child = owned;
   let reportedFailure = null;
   const ready = await new Promise((resolve, reject) => {
@@ -598,7 +601,7 @@ else {
       toolDrafts.installIpc(ipcMain);
       // One-click Studio plugin install/update: verified bundled artifact only, after a native confirm dialog.
       studioPlugin = require('./plugin-install.cjs').createStudioPluginInstaller({ enabled: !smoke, productRoot: () => productRoot,
-        backupDirectory: () => userRoot ? join(userRoot, 'plugin-backups') : null,
+        backupDirectory: () => userRoot ? join(userRoot, 'plugin-backups') : null, preferenceDirectory: () => userRoot ?? null,
         confirm: async request => {
           const owner = window; if (closing || switching || !owner || owner.isDestroyed()) return false;
           const choice = await dialog.showMessageBox(owner, { type: 'question', title: request.title, message: request.message, detail: request.detail,

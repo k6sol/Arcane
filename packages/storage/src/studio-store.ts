@@ -1,12 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from './sqlite-path.js';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { STUDIO_ASSET_TRANSFER_LIMITS, isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
+import { STUDIO_ASSET_TRANSFER_LIMITS, isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, STUDIO_PAIRING_CAPABILITY_LIMIT, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
 import { canonical, validateCommandArgs, sceneBuildInstanceCount, isGuiClass } from '../../core/src/studio-policy.js';
 import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
 import { terrainVoxelCount } from '../../core/src/terrain-policy.js';
@@ -218,6 +218,7 @@ const sameReceiptRef = (a: unknown, b: unknown): boolean => {
 export class StudioStore {
   private db!: DatabaseSync;
   private lockPath: string;
+  private readonly workspaceDirectory: string;
   private lockFd: number;
   private now: () => number;
   private closed = false;
@@ -322,6 +323,7 @@ export class StudioStore {
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
+    this.workspaceDirectory = resolve(options.directory);
     this.lockPath = join(options.directory, 'studio.lock');
     if (existsSync(this.lockPath)) {
       let stale = false;
@@ -449,7 +451,7 @@ export class StudioStore {
     const clientSessionId = textField(identity.clientSessionId, 'client session', 100);
     const name = textField(identity.name, 'Studio name', 200); const pluginVersion = textField(identity.pluginVersion, 'plugin version', 80);
     for (const f of ['placeId', 'universeId']) if (typeof identity[f] !== 'number' || !Number.isSafeInteger(identity[f]) || (identity[f] as number) < 0) throw new ArcaneError('IDENTITY', 'Invalid place/universe identity.');
-    if (!Array.isArray(a.capabilities) || a.capabilities.length > 32 || a.capabilities.some(c => typeof c !== 'string')) throw new ArcaneError('CAPABILITY', 'Invalid plugin capabilities.');
+    if (!Array.isArray(a.capabilities) || a.capabilities.length > STUDIO_PAIRING_CAPABILITY_LIMIT || a.capabilities.some(c => typeof c !== 'string')) throw new ArcaneError('CAPABILITY', 'Invalid plugin capabilities.');
     const capabilities: string[] = [...new Set(a.capabilities)].map(c => c === STUDIO_DIAGNOSTICS_CAPABILITY || STUDIO_FEATURE_CAPABILITIES.includes(c) ? c : methodField(c));
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM grants WHERE hash=?').get(hash(code)) as Row | undefined;
@@ -1604,5 +1606,12 @@ export class StudioStore {
   }
   counts(): Record<string, number> { return Object.fromEntries((this.db.prepare('SELECT state,count(*) AS n FROM commands GROUP BY state').all() as Row[]).map(r => [r.state, Number(r.n)])); }
   events(limit = 100): Json[] { return (this.db.prepare('SELECT sequence,occurred_at,kind,entity_id,detail FROM events ORDER BY sequence DESC LIMIT ?').all(Math.max(1, Math.min(limit, 100))) as Row[]).map(r => ({ sequence: Number(r.sequence), occurredAt: r.occurred_at as string, kind: r.kind as string, entityId: r.entity_id as string, detail: JSON.parse(r.detail as string) as Json })); }
+  /** True only while this open store holds the exclusive workspace lock of exactly `directory`. Owned
+   * subdirectory stores use it to prove no other daemon can be their writer. */
+  holdsWorkspaceLock(directory: string): boolean {
+    if (this.closed || typeof directory !== 'string') return false;
+    const a = resolve(directory), b = this.workspaceDirectory;
+    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  }
   close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
 }

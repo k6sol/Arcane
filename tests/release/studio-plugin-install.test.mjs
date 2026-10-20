@@ -11,7 +11,7 @@ import vm from 'node:vm';
 
 // Every test writes only inside its own temp fixture; the real Roblox Plugins folder is never resolved or touched.
 const require = createRequire(import.meta.url);
-const { createStudioPluginInstaller, containsCredential, MESSAGES } = require('../../apps/desktop/electron/plugin-install.cjs');
+const { createStudioPluginInstaller, containsCredential, MESSAGES, PREFERENCE_FILE } = require('../../apps/desktop/electron/plugin-install.cjs');
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const pluginXml = body => '<?xml version="1.0" encoding="utf-8"?>\n<roblox version="4"><Item class="Script"><Properties><string name="Name">ArcaneLocalBridge</string>' +
@@ -74,9 +74,56 @@ test('a failed rename leaves the installed plugin unchanged and removes the temp
   const f = await fixture(t), old = Buffer.from(pluginXml('-- fixture plugin v1'));
   await fs.mkdir(f.plugins, { recursive: true }); await fs.writeFile(f.target, old);
   const host = f.make({ fs: { ...fs, rename: async () => { throw Object.assign(new Error('simulated'), { code: 'EBUSY' }); } } });
-  await assert.rejects(host.install(), error => error.message === 'Studio plugin setup is unavailable.' || error.code === 'EBUSY');
+  await assert.rejects(host.install(), { message: MESSAGES.locked }, 'A locked plugin file gets the fixed close-Studio message.');
   assert.deepEqual(await fs.readFile(f.target), old);
   assert.deepEqual(await list(f.plugins), ['ArcaneLocalBridge.rbxmx']);
+  const denied = f.make({ fs: { ...fs, rename: async () => { throw Object.assign(new Error('C:\\Users\\someone\\x'), { code: 'EPERM' }); } } });
+  await assert.rejects(denied.install(), { message: MESSAGES.locked });
+  const odd = f.make({ fs: { ...fs, rename: async () => { throw Object.assign(new Error('C:\\Users\\someone\\x'), { code: 'EIO' }); } } });
+  await assert.rejects(odd.install(), { message: MESSAGES.unavailable }, 'Native paths never reach the renderer.');
+  assert.deepEqual(await fs.readFile(f.target), old);
+});
+
+test('a missing Roblox folder says Studio is not set up instead of creating it', async t => {
+  const f = await fixture(t), local = join(f.root, 'EmptyLocalAppData'); await fs.mkdir(local);
+  const host = f.make({ pluginsDirectory: undefined, localAppData: local });
+  assert.equal((await host.status()).state, 'missing');
+  await assert.rejects(host.install(), { message: MESSAGES.studio });
+  assert.deepEqual(await list(local), [], 'Nothing was created.');
+  assert.equal(f.confirms.length, 0);
+  // With Roblox present but no Plugins folder yet, install creates only the Plugins folder.
+  await fs.mkdir(join(local, 'Roblox'));
+  assert.equal((await host.install()).changed, true);
+  assert.deepEqual(await list(join(local, 'Roblox', 'Plugins')), ['ArcaneLocalBridge.rbxmx']);
+});
+
+test('automatic updates are off by default, need a native confirm to turn on and only replace an older Arcane plugin', async t => {
+  const f = await fixture(t), prefs = join(f.root, 'prefs'), old = Buffer.from(pluginXml('-- fixture plugin v1'));
+  const host = f.make({ preferenceDirectory: prefs });
+  assert.deepEqual(await host.preference(), { version: 1, autoUpdate: false, message: MESSAGES.autoOff });
+  await fs.mkdir(f.plugins, { recursive: true }); await fs.writeFile(f.target, old);
+  assert.deepEqual(await host.autoUpdate(), { version: 1, state: 'outdated', pluginVersion: '0.2.0', message: MESSAGES.outdated, changed: false }, 'Off: nothing is written.');
+  assert.deepEqual(await fs.readFile(f.target), old); assert.equal(f.confirms.length, 0);
+  const declined = f.make({ preferenceDirectory: prefs, accept: false });
+  assert.deepEqual(await declined.setAutoUpdate(true), { version: 1, autoUpdate: false, message: MESSAGES.autoOff });
+  assert.equal(await list(prefs), null, 'A declined confirm saves nothing.');
+  assert.deepEqual(await host.setAutoUpdate(true), { version: 1, autoUpdate: true, message: MESSAGES.autoOn });
+  assert.equal(f.confirms.at(-1).confirmLabel, 'Turn on');
+  assert.deepEqual(await list(prefs), [PREFERENCE_FILE]);
+  const confirms = f.confirms.length;
+  assert.deepEqual(await host.autoUpdate(), { version: 1, state: 'installed', pluginVersion: '0.2.0', message: MESSAGES.automatic, changed: true });
+  assert.equal(f.confirms.length, confirms, 'An automatic update asks nothing more.');
+  assert.deepEqual(await fs.readFile(f.target), f.artifact);
+  assert.equal((await list(f.backups)).length, 1, 'The old plugin is backed up.');
+  assert.equal((await host.autoUpdate()).changed, false, 'Current: nothing to do.');
+  await fs.rm(f.target);
+  assert.deepEqual(await host.autoUpdate(), { version: 1, state: 'missing', pluginVersion: '0.2.0', message: MESSAGES.missing, changed: false }, 'Never a first install.');
+  assert.equal(await list(f.plugins).then(names => names.length), 0);
+  await fs.writeFile(join(prefs, PREFERENCE_FILE), '{"version":1,"autoUpdate":"yes"}\n');
+  assert.equal((await host.preference()).autoUpdate, false, 'An unexpected record reads as off.');
+  assert.deepEqual(await host.setAutoUpdate(false), { version: 1, autoUpdate: false, message: MESSAGES.autoOff });
+  assert.equal((await host.preference()).autoUpdate, false);
+  assert.equal((await f.make({ preferenceDirectory: prefs, enabled: false }).preference()).message, MESSAGES.disabled);
 });
 
 test('refuses when the bundled artifact does not match its manifest hash, before touching the Plugins folder', async t => {
@@ -132,7 +179,8 @@ test('IPC accepts only trusted zero-argument intents and returns fixed messages'
   const f = await fixture(t), handlers = new Map(), host = f.make();
   let trusted = false;
   host.installIpc({ handle: (channel, handler) => handlers.set(channel, handler) }, { trusted: () => trusted });
-  assert.deepEqual([...handlers.keys()].sort(), ['arcane:studio-plugin-install', 'arcane:studio-plugin-status']);
+  assert.deepEqual([...handlers.keys()].sort(), ['auto-off', 'auto-on', 'auto-update', 'install', 'preference', 'status'].map(action => 'arcane:studio-plugin-' + action));
+  for (const channel of handlers.keys()) await assert.rejects(handlers.get(channel)({}), { message: 'Studio plugin setup is unavailable.' }, channel + ' needs a trusted sender');
   await assert.rejects(handlers.get('arcane:studio-plugin-install')({}), { message: 'Studio plugin setup is unavailable.' });
   trusted = true;
   await assert.rejects(handlers.get('arcane:studio-plugin-status')({}, 'C:\\elsewhere'), { message: 'Studio plugin setup is unavailable.' });
@@ -157,6 +205,19 @@ test('preload bridge copies only fixed fields and rejects unknown messages, path
   reply = new Error("Error invoking remote method 'arcane:studio-plugin-install': Error: " + MESSAGES.foreign);
   await assert.rejects(bridge.install(), { message: MESSAGES.foreign });
   assert.deepEqual(calls.map(call => call.length), [1, 1, 1, 1], 'No renderer argument ever crosses.');
+  reply = new Error("Error invoking remote method 'arcane:studio-plugin-install': Error: " + MESSAGES.locked);
+  await assert.rejects(bridge.install(), { message: MESSAGES.locked });
+  reply = { version: 1, state: 'installed', pluginVersion: '0.2.0', message: MESSAGES.automatic, changed: true, path: 'C:\\x' };
+  assert.equal(JSON.stringify(await bridge.autoUpdate()), JSON.stringify({ version: 1, state: 'installed', pluginVersion: '0.2.0', message: MESSAGES.automatic, changed: true }));
+  reply = { version: 1, autoUpdate: true, message: MESSAGES.autoOn, extra: 1 };
+  for (const action of ['preference', 'enableAutoUpdate', 'disableAutoUpdate']) assert.equal(JSON.stringify(await bridge[action]()), JSON.stringify({ version: 1, autoUpdate: true, message: MESSAGES.autoOn }));
+  await assert.rejects(bridge.enableAutoUpdate(true), { message: 'Studio plugin setup is unavailable.' });
+  reply = { version: 1, autoUpdate: 'yes', message: MESSAGES.autoOn };
+  await assert.rejects(bridge.preference(), { message: 'Studio plugin setup is unavailable.' });
+  assert.deepEqual(calls.slice(-6).map(call => call[0]), ['install', 'auto-update', 'preference', 'auto-on', 'auto-off', 'preference'].map(action => 'arcane:studio-plugin-' + action));
+  // Every fixed host message is known to the bridge.
+  const known = preload.slice(preload.indexOf('const STUDIO_PLUGIN_UNAVAILABLE'), preload.indexOf('const studioPluginInvoke'));
+  for (const message of Object.values(MESSAGES)) assert.ok(known.includes(message), message);
   reply = { requested: true }; assert.equal(JSON.stringify(await exposed.workspaceProject.open()), '{"requested":true}');
   await assert.rejects(exposed.workspaceProject.open('C:\\'), { message: 'The project picker is unavailable.' });
 });

@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { StudioStore, STUDIO_DIAGNOSTICS_CAPABILITY } from '../../packages/storage/src/studio-store.js';
 import { z } from 'zod';
 import { validateCommandArgs, ENVIRONMENT_PRESETS, ENVIRONMENT_PRESET_NAMES, EFFECT_CLASSES, EFFECT_PROPERTIES, contentId, sceneBuildInstanceCount } from '../../packages/core/src/studio-policy.js';
-import { READ_METHODS, WRITE_METHODS, STUDIO_EFFECTS_CAPABILITY, type InstanceRef, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
+import { READ_METHODS, WRITE_METHODS, STUDIO_EFFECTS_CAPABILITY, STUDIO_ENVIRONMENT_FOREST_CAPABILITY, STUDIO_FEATURE_CAPABILITIES, ASSET_STAGE_METHODS, MESH_KEEP_METHODS, type InstanceRef, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
 import { compileSceneBuild, compileEnvironment, compileEffectProps, sceneBuildShape, type SceneBuildInput } from '../../apps/mcp/src/scene-build.js';
 import { composeViewportSheet, frameCamera, VIEWPORT_FRAMING, VIEWPORT_VIEWS, viewportRequestSchema } from '../../packages/studio-test-controller/src/viewport.js';
 import { decodeViewportPng, encodeRgbPng, VIEWPORT_LIMITS } from '../../packages/studio-test-controller/src/viewport-image.js';
@@ -11,7 +15,7 @@ import { decodeViewportPng, encodeRgbPng, VIEWPORT_LIMITS } from '../../packages
 const SESSION = 'effects-session';
 const session = (effects = true, roots: StudioSession['allowedRoots'] = ['Workspace', 'Lighting']): StudioSession => ({
   id: SESSION, protocolVersion: 1, clientSessionId: 'lifetime', placeId: 0, universeId: 0, name: 'Fixture', pluginVersion: '0.2.0',
-  allowedRoots: roots, allowWrites: true, capabilities: [...READ_METHODS, ...WRITE_METHODS, ...(effects ? [STUDIO_EFFECTS_CAPABILITY] : [])],
+  allowedRoots: roots, allowWrites: true, capabilities: [...READ_METHODS, ...WRITE_METHODS, ...(effects ? [STUDIO_EFFECTS_CAPABILITY, STUDIO_ENVIRONMENT_FOREST_CAPABILITY] : [])],
   connectedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), revokedAt: null });
 const ref = (className: string, root = false): InstanceRef => ({ instanceId: 'opaque-' + className, sessionId: SESSION, root: 'Workspace', pathSegments: root ? [] : [className], className });
 const seq = (value: number[][]) => ({ type: 'NumberSequence', value });
@@ -171,7 +175,8 @@ test('environment presets expand host-side to exact values; explicit values over
     assert.equal(Object.hasOwn(result, 'preset'), false);
     assert.deepEqual(result, structuredClone(ENVIRONMENT_PRESETS[name]));
   }
-  assert.deepEqual(ENVIRONMENT_PRESET_NAMES, ['clear_day', 'golden_hour', 'foggy_forest', 'night', 'horror', 'sci_fi']);
+  assert.deepEqual(ENVIRONMENT_PRESET_NAMES, ['clear_day', 'golden_hour', 'foggy_forest', 'night', 'horror', 'sci_fi',
+    'forest-morning', 'forest-noon', 'forest-golden-hour', 'forest-overcast', 'forest-dusk']);
   const tuned = validateCommandArgs('environment.apply', { preset: 'golden_hour', lighting: { ClockTime: 18.2 }, technology: 'Future', terrainDecoration: true }, session());
   assert.equal((tuned.lighting as Record<string, Json>).ClockTime, 18.2);
   assert.equal((tuned.lighting as Record<string, Json>).Brightness, ENVIRONMENT_PRESETS.golden_hour.lighting.Brightness);
@@ -187,6 +192,69 @@ test('environment presets expand host-side to exact values; explicit values over
     { preset: 'night', technology: 'Future', materials: [{ name: 'M', baseMaterial: 'Rock' }] });
   assert.ok(validateCommandArgs('scene.inspect', { ref: ref('Model') as unknown as Json, bounds: true }, session()));
   assert.throws(() => validateCommandArgs('scene.inspect', { ref: ref('Model') as unknown as Json, bounds: true }, session(false)), { code: 'PLUGIN_UPDATE_REQUIRED' });
+});
+
+test('forest presets: Future technology, DepthOfField, built-in Sky and Forest reverb within the allowlist', () => {
+  for (const name of ENVIRONMENT_PRESET_NAMES.filter(n => n.startsWith('forest-'))) {
+    const preset = ENVIRONMENT_PRESETS[name] as unknown as Record<string, Record<string, Json> | string>;
+    assert.equal(preset.technology, 'Future', name);
+    for (const section of ['lighting', 'atmosphere', 'bloom', 'colorCorrection', 'sunRays', 'depthOfField', 'sky', 'soundService']) assert.ok(preset[section], name + ' ' + section);
+    const lighting = preset.lighting as Record<string, number>;
+    for (const key of ['ClockTime', 'GeographicLatitude', 'Brightness', 'EnvironmentDiffuseScale', 'EnvironmentSpecularScale', 'ExposureCompensation', 'Ambient', 'OutdoorAmbient', 'ShadowSoftness'])
+      assert.ok(lighting[key] !== undefined, name + ' ' + key);
+    for (const key of ['Density', 'Offset', 'Color', 'Decay', 'Glare', 'Haze']) assert.ok((preset.atmosphere as Record<string, Json>)[key] !== undefined, name + ' ' + key);
+    // Sane, subtle values: Atmosphere never hides the map, DepthOfField stays gameplay-light, bloom never washes the scene.
+    const atmosphere = preset.atmosphere as Record<string, number>, dof = preset.depthOfField as Record<string, number>, bloom = preset.bloom as Record<string, number>;
+    assert.ok(atmosphere.Density! <= 0.5 && atmosphere.Haze! <= 3 && atmosphere.Glare! <= 1, name);
+    assert.ok(dof.FarIntensity! <= 0.15 && dof.NearIntensity === 0 && dof.InFocusRadius! >= 30, name);
+    assert.ok(bloom.Threshold! >= 1 && bloom.Intensity! <= 0.8 && lighting.Brightness! <= 3.5, name);
+    assert.equal(JSON.stringify(preset).includes('rbxassetid'), false, 'no custom sky textures');
+  }
+  const morning = validateCommandArgs('environment.apply', { preset: 'forest-morning', technology: 'ShadowMap', sky: { StarCount: 0 } }, session());
+  assert.equal(morning.technology, 'ShadowMap', 'an explicit technology wins');
+  assert.deepEqual(morning.sky, { CelestialBodiesShown: true, SunAngularSize: 16, StarCount: 0 });
+  assert.deepEqual(morning.soundService, { AmbientReverb: 'Forest' });
+  const lightingOnly = validateCommandArgs('environment.apply', { preset: 'forest-dusk' }, session(true, ['Lighting']));
+  assert.equal(Object.hasOwn(lightingOnly, 'soundService'), false, 'a Lighting-only grant still gets the look without reverb');
+  assert.throws(() => validateCommandArgs('environment.apply', { depthOfField: { FarIntensity: 2 } }, session()), /FarIntensity/);
+  assert.throws(() => validateCommandArgs('environment.apply', { sky: { SkyboxUp: 'rbxassetid://1' } }, session()), { code: 'INPUT' });
+  assert.throws(() => validateCommandArgs('environment.apply', { lighting: { GeographicLatitude: 120 } }, session()), /GeographicLatitude/);
+});
+
+test('forest lighting needs environment.forest: an effects-only plugin gets PLUGIN_UPDATE_REQUIRED naming the update', () => {
+  assert.ok(STUDIO_FEATURE_CAPABILITIES.includes(STUDIO_ENVIRONMENT_FOREST_CAPABILITY));
+  const older: StudioSession = { ...session(), capabilities: session().capabilities.filter(c => c !== STUDIO_ENVIRONMENT_FOREST_CAPABILITY) };
+  const forest = [{ preset: 'forest-morning' }, { preset: 'forest-dusk', lighting: { ClockTime: 19 } }, { depthOfField: { FarIntensity: 0.1 } },
+    { sky: { StarCount: 100 } }, { lighting: { GeographicLatitude: 40 } }] as Record<string, Json>[];
+  for (const input of forest) {
+    assert.throws(() => validateCommandArgs('environment.apply', input, older), (error: { code?: string; message?: string }) =>
+      error.code === 'PLUGIN_UPDATE_REQUIRED' && /forest lighting/.test(error.message!) && /Update the Studio plugin/.test(error.message!), JSON.stringify(input));
+    assert.ok(validateCommandArgs('environment.apply', input, session()), JSON.stringify(input));
+  }
+  // Earlier looks and plain lighting keep working on the older plugin.
+  for (const preset of ENVIRONMENT_PRESET_NAMES.filter(n => !n.startsWith('forest-'))) assert.ok(validateCommandArgs('environment.apply', { preset }, older), preset);
+  assert.ok(validateCommandArgs('environment.apply', { lighting: { ClockTime: 14 }, atmosphere: { Density: 0.3 } }, older));
+  // Plinth life only uses effects classes the effects capability already covers.
+  const life = compileSceneBuild(z.object(sceneBuildShape).parse({ name: 'Grove', kits: [{ kind: 'plinth', at: [0, 0, 0], radius: 12, life: 'dusk' }] }) as SceneBuildInput, ref('Model') as unknown as Json);
+  assert.ok(validateCommandArgs('scene.build', life.args, older));
+  assert.throws(() => validateCommandArgs('scene.build', life.args, session(false)), { code: 'PLUGIN_UPDATE_REQUIRED' });
+});
+
+test('pairing accepts the full current plugin capability list, including environment.forest', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'arcane-forest-pair-')), store = new StudioStore({ directory });
+  t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
+  const grant = store.createGrant({ allowedRoots: ['Workspace', 'Lighting'], allowWrites: true });
+  // Exactly what the plugin's Transport advertises: methods, asset staging, features, mesh keep and diagnostics.
+  const advertised = [...READ_METHODS, ...WRITE_METHODS, ...ASSET_STAGE_METHODS, ...STUDIO_FEATURE_CAPABILITIES, ...MESH_KEEP_METHODS, STUDIO_DIAGNOSTICS_CAPABILITY];
+  const paired = store.pair({ code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'forest-plugin', placeId: 0, universeId: 0, name: 'Forest fixture', pluginVersion: '0.3.0' }, capabilities: advertised });
+  assert.ok(store.session(paired.sessionId).capabilities.includes(STUDIO_ENVIRONMENT_FOREST_CAPABILITY));
+  const queued = store.enqueue({ sessionId: paired.sessionId, requestId: 'forest-look-001', method: 'environment.apply', args: { preset: 'forest-golden-hour' } });
+  assert.ok(queued);
+  const olderGrant = store.createGrant({ allowedRoots: ['Workspace', 'Lighting'], allowWrites: true });
+  const older = store.pair({ code: olderGrant.code, protocolVersion: 1, identity: { clientSessionId: 'older-plugin', placeId: 0, universeId: 0, name: 'Older fixture', pluginVersion: '0.2.0' },
+    capabilities: advertised.filter(c => c !== STUDIO_ENVIRONMENT_FOREST_CAPABILITY) });
+  assert.throws(() => store.enqueue({ sessionId: older.sessionId, requestId: 'forest-look-002', method: 'environment.apply', args: { preset: 'forest-noon' } }), { code: 'PLUGIN_UPDATE_REQUIRED' });
+  assert.equal(store.commands(older.sessionId).length, 0, 'nothing was queued for the older plugin');
 });
 
 test('framing math: every named view keeps the whole bounding box inside the vertical field of view', () => {

@@ -2136,6 +2136,10 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
 .arcane-app .studio-connection-banner>p{flex:1 1 240px;min-width:0;margin:0;color:var(--text);font-size:var(--fs-body);line-height:1.5;overflow-wrap:anywhere}
 .arcane-app .studio-connection-banner>button{flex:0 0 auto;margin-left:auto}
 .arcane-app .studio-connection-banner>button:disabled{opacity:.6}
+/* Studio plugin update banner (setup-checklist.ts): the same card; its actions sit together at the end. */
+.arcane-app .studio-plugin-banner>button+button{margin-left:0}
+.arcane-app .studio-plugin-banner>.quiet{padding:var(--space-2) var(--space-1)}
+.arcane-app .studio-plugin-auto{flex-direction:row;align-items:center;gap:10px;margin:var(--space-3) 0 0;color:var(--text);font-size:var(--fs-body)}
 /* Retry message under a reply that did not finish (claude-chat.ts): a quiet red action, one control height. */
 .arcane-app .workspace-stage .codex-message .chat-message-retry{display:inline-flex;width:fit-content;margin:var(--space-2) 0 var(--space-1);border-color:var(--accent-line);background:var(--accent-tint);color:var(--accent-text)}
 .arcane-app .workspace-stage .codex-message .chat-message-retry::before{content:"\21BB";font-size:14px;line-height:1}

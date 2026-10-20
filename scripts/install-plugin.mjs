@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, lstat, realpath, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, lstat, realpath, rename, rm } from 'node:fs/promises';
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +6,8 @@ import { buildPlugin } from './build-plugin.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+// Native codes for a plugin file held open or write-protected (Studio running, antivirus).
+const LOCKED = ['EBUSY', 'EPERM', 'EACCES', 'ETXTBSY'];
 function inside(root, target) {
   const part = relative(root, target);
   return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep));
@@ -55,6 +57,10 @@ export async function installPlugin({ localAppData = process.env.LOCALAPPDATA, i
   if (original && hash(original) === artifact.sha256 && legacy.length === 0) {
     return { installed: true, changed: false, target, sha256: artifact.sha256, backup: null, migrated: [], studioReloadRequired: true };
   }
+  if (!installDirectory) {
+    // No Roblox folder at all means Studio never ran for this Windows user: say so instead of inventing the folder.
+    try { await lstat(dirname(root)); } catch (error) { if (error.code === 'ENOENT') throw new Error('Roblox Studio is not set up for this Windows user yet. Install Roblox Studio and open it once, then run the installer again.'); throw error; }
+  }
   await mkdir(root, { recursive: true });
   const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   if (!samePath(await realpath(root), root)) throw new Error('Install directory resolves to a different location.');
@@ -71,7 +77,13 @@ export async function installPlugin({ localAppData = process.env.LOCALAPPDATA, i
   await writeFile(temp, bytes, { flag: 'wx' });
   const current = await existingPlugin(target, filename);
   if (Boolean(current) !== Boolean(original) || (current && !current.equals(original))) throw new Error('Plugin changed during installation. Backup retained.');
-  await noLinks(target); await rename(temp, target);
+  await noLinks(target);
+  try { await rename(temp, target); }
+  catch (error) {
+    await rm(temp, { force: true }).catch(() => {});
+    if (LOCKED.includes(error.code)) throw new Error('Roblox Studio or another program is using the plugin file. Close Roblox Studio, then run the installer again. The installed plugin was not changed' + (backup ? '; a backup was kept.' : '.'));
+    throw error;
+  }
   if (hash(await readFile(target)) !== artifact.sha256) throw new Error('Installed plugin checksum mismatch. Backup retained.');
   const migrated = [];
   for (const old of legacy) {

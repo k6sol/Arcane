@@ -556,19 +556,32 @@ const STUDIO_PLUGIN_MESSAGES = [STUDIO_PLUGIN_UNAVAILABLE, 'The Arcane Studio pl
   'One-click plugin install is available on Windows.', 'The Roblox Studio Plugins folder could not be found.',
   'The bundled Arcane plugin failed its integrity check. Reinstall Arcane, then try again.',
   'Another plugin already uses the Arcane plugin file name. Remove or rename it, then try again.',
-  'A plugin install is already running.', 'The plugin folder changed during install. Nothing was overwritten; try again.'];
+  'A plugin install is already running.', 'The plugin folder changed during install. Nothing was overwritten; try again.',
+  'Roblox Studio or another program is using the plugin file. Close Roblox Studio, then try again.',
+  'Roblox Studio is not set up for this Windows user yet. Install Roblox Studio and open it once, then try again.',
+  'Arcane updated the Studio plugin automatically. Restart Roblox Studio to load it.',
+  'Arcane will update the Studio plugin automatically.', 'Arcane will ask before updating the Studio plugin.',
+  'The plugin update preference could not be saved.'];
 const studioPluginInvoke = async (action, args) => {
   if (args.length) throw new Error(STUDIO_PLUGIN_UNAVAILABLE);
   let value;
   try { value = await ipcRenderer.invoke('arcane:studio-plugin-' + action); }
   catch (error) { const text = String(error?.message ?? ''); throw new Error(STUDIO_PLUGIN_MESSAGES.find(known => text.endsWith(known)) ?? STUDIO_PLUGIN_UNAVAILABLE); }
+  // The "update automatically" choice: one boolean and a fixed message.
+  if (['preference', 'auto-on', 'auto-off'].includes(action)) {
+    if (!value || typeof value !== 'object' || value.version !== 1 || typeof value.autoUpdate !== 'boolean' || !STUDIO_PLUGIN_MESSAGES.includes(value.message)) throw new Error(STUDIO_PLUGIN_UNAVAILABLE);
+    return { version: 1, autoUpdate: value.autoUpdate, message: value.message };
+  }
+  const writes = action === 'install' || action === 'auto-update';
   if (!value || typeof value !== 'object' || value.version !== 1 || !['installed', 'outdated', 'missing', 'unavailable'].includes(value.state) ||
       !(value.pluginVersion === null || typeof value.pluginVersion === 'string' && /^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$/.test(value.pluginVersion)) ||
-      !STUDIO_PLUGIN_MESSAGES.includes(value.message) || (action === 'install' && typeof value.changed !== 'boolean')) throw new Error(STUDIO_PLUGIN_UNAVAILABLE);
-  return { version: 1, state: value.state, pluginVersion: value.pluginVersion, message: value.message, ...(action === 'install' ? { changed: value.changed } : {}) };
+      !STUDIO_PLUGIN_MESSAGES.includes(value.message) || (writes && typeof value.changed !== 'boolean')) throw new Error(STUDIO_PLUGIN_UNAVAILABLE);
+  return { version: 1, state: value.state, pluginVersion: value.pluginVersion, message: value.message, ...(writes ? { changed: value.changed } : {}) };
 };
 const studioPlugin = Object.freeze({ version: 1,
   status: (...args) => studioPluginInvoke('status', args), install: (...args) => studioPluginInvoke('install', args),
+  autoUpdate: (...args) => studioPluginInvoke('auto-update', args), preference: (...args) => studioPluginInvoke('preference', args),
+  enableAutoUpdate: (...args) => studioPluginInvoke('auto-on', args), disableAutoUpdate: (...args) => studioPluginInvoke('auto-off', args),
 });
 // Open project: the host shows its own native folder picker and switch confirmation. Nothing else crosses.
 const workspaceProject = Object.freeze({ version: 1,

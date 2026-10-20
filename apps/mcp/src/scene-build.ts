@@ -159,11 +159,11 @@ export const sceneBuildShape = {
     at: v3.describe('Ground centre.'), radius: z.number().min(3).max(2048).optional().describe('Plinth (default 10) or forest.'), seed,
     style: z.enum(['fluted', 'smooth', 'platform']).optional(), tiers: z.number().int().min(1).max(6).optional(), height: z.number().min(4).max(120).optional(),
     column: z.string().max(64).optional().describe('Template/prototype shaft; height = its height.'), material: stone.optional(), color: colorInput.optional(),
-    weathering: unit.optional(), spawn: z.boolean().optional(),
+    weathering: unit.optional(), spawn: z.boolean().optional(), life: z.enum(['day', 'dusk']).optional(),
     clearing: clearingShape.optional(), trees: z.number().int().min(0).max(1500).optional(), undergrowth: z.number().int().min(0).max(1500).optional(),
     species: z.array(layer).min(1).max(8).optional(), cover: z.array(layer).min(1).max(8).optional(),
     paths: avoidRoutes.optional(),
-  })).max(4).optional().describe('plinth: round stepped stone, trim, column (smooth; fluted only if classical), weathering, SpawnLocation on top. forest: species groves (pine/oak/birch, 80) + cover at trunks (bush/fern/rock/log, 2x), per-layer spacing, clearing/rim falloff, lean, ground drop. Undeclared use: templates <use>-1..n as variants, else blockout (reported).'),
+  })).max(4).optional().describe('plinth: round stepped stone, trim, column (smooth; fluted only if classical), weathering, SpawnLocation on top, life: motes+rune light (dusk: fireflies). forest: species groves (pine/oak/birch, 80) + cover at trunks (bush/fern/rock/log, 2x), per-layer spacing, clearing/rim falloff, lean, ground drop. Undeclared use: templates <use>-1..n as variants, else blockout (reported).'),
 };
 export type SceneBuildInput = z.output<z.ZodObject<typeof sceneBuildShape>>;
 
@@ -441,7 +441,7 @@ export const environmentShape = {
     height: z.number().min(1).max(ENVIRONMENT_LIMITS.extent).optional().describe('Cylinder height.'), orientation: v3.optional(),
   })).min(1).max(ENVIRONMENT_LIMITS.terrainShapes).optional().describe('Ordered Terrain fills (later shapes overwrite earlier ones).'),
   ...Object.fromEntries(Object.entries(ENVIRONMENT_PROPERTIES).map(([section, spec]) => [section, sectionSchema(spec).optional()])),
-  preset: z.enum(ENVIRONMENT_PRESET_NAMES as [string, ...string[]]).optional().describe('One-word look expanded host-side to exact lighting/atmosphere/bloom/colorCorrection/sunRays values; explicit section values override.'),
+  preset: z.enum(ENVIRONMENT_PRESET_NAMES as [string, ...string[]]).optional().describe('Look expanded host-side to exact section values (forest-*: Future, depthOfField, built-in sky, Forest reverb with Workspace grant); explicit values override.'),
   technology: z.enum(LIGHTING_TECHNOLOGIES).optional().describe('Lighting.Technology (Future for photoreal). If Studio refuses, the error names the Properties-window step.'),
   terrainDecoration: z.boolean().optional().describe('Workspace.Terrain.Decoration (animated grass on Grass terrain).'),
   materials: z.array(z.strictObject({
