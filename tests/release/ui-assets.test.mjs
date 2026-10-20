@@ -4,7 +4,7 @@ import { realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { BRAND_BITMAP_PATH, REQUIRED_FRONTEND_FILES, createLocalRelease, verifyLocalRelease } from '../../scripts/create-local-release.mjs';
 import { REQUIRED_MANAGED_LUAU_FILES } from '../../scripts/managed-luau-compiler.mjs';
@@ -27,7 +27,7 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   await write('tsconfig.json', '{}');
   for (const path of ['README.md', 'LICENSE']) await write(path, 'Offline fixture.\n');
   for (const path of REQUIRED_FRONTEND_FILES) {
-    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
+    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: [relative(dirname(path), path.slice('dist/'.length, -'.js.map'.length) + '.ts').split(sep).join('/')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
     await put(path, bytes);
   }
   for (const path of firstRunFiles) await put(path, 'Offline first-run fixture; never executed.\n');

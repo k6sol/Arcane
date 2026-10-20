@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, appendFile, readFile, readdir, rm, lstat, link, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { packageWindows, verifyWindowsBundle, hasPrivateKeyMaterial } from '../../scripts/package-windows.mjs';
 import { REQUIRED_FRONTEND_FILES, BRAND_BITMAP_PATH } from '../../scripts/create-local-release.mjs';
@@ -70,7 +70,7 @@ async function fixture(t) {
   const ts = 'export const fixture = true;\n';
   for (const path of REQUIRED_FRONTEND_FILES) {
     const content = path === BRAND_BITMAP_PATH ? png : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.map')
-      ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [ts] })
+      ? JSON.stringify({ version: 3, sources: [relative(dirname(path), path.slice('dist/'.length, -'.js.map'.length) + '.ts').split(sep).join('/')], sourcesContent: [ts] })
       : path.endsWith('.ts') ? ts : '// Fixture only.\n';
     await write(path, content);
   }
@@ -202,6 +202,11 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
   for (const path of REQUIRED_MANAGED_LUAU_FILES) assert.ok(data.files.some(file => file.path === 'resources/product/' + path), path);
   assert.equal(hash(await readFile(join(result.directory, 'resources/product/' + MANAGED_LUAU_FILES[0]))), MANAGED_LUAU_SHA256);
   assert.ok(data.files.some(file => file.path === 'resources/product/dist/apps/desktop/src/studio-key-settings.js'));
+  for (const path of ['packages/protocol/src/chat-queue.ts', 'dist/packages/protocol/src/chat-queue.js', 'dist/packages/protocol/src/chat-queue.js.map']) {
+    const bytes = await readFile(join(root, path)), payloadPath = 'resources/product/' + path;
+    assert.deepEqual(data.files.find(file => file.path === payloadPath), { path: payloadPath, bytes: bytes.length, sha256: hash(bytes) });
+    assert.deepEqual(await readFile(join(result.directory, payloadPath)), bytes);
+  }
   assert.deepEqual(data.dependencies.map(dep => dep.path), [
     'node_modules/@modelcontextprotocol/sdk', 'node_modules/@modelcontextprotocol/sdk/node_modules/helper-a',
     'node_modules/helper-a', 'node_modules/zod',

@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, link, lstat } from 'n
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { dirname, join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createLocalRelease, verifyLocalRelease, REQUIRED_FRONTEND_FILES, BRAND_BITMAP_PATH } from '../../scripts/create-local-release.mjs';
 import { productDoctor } from '../../scripts/product-doctor.mjs';
@@ -31,7 +31,7 @@ async function fixture(t) {
   const shellSource = 'export const fixtureShell = true;\n';
   const bitmap = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWooAAAAASUVORK5CYII=', 'base64');
   for (const path of REQUIRED_FRONTEND_FILES) {
-    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: ['../../../../apps/desktop/src/' + path.split('/').at(-1).replace('.js.map', '.ts')], sourcesContent: [shellSource] }) : '// Test fixture only.\n';
+    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: [relative(dirname(path), path.slice('dist/'.length, -'.js.map'.length) + '.ts').split(sep).join('/')], sourcesContent: [shellSource] }) : '// Test fixture only.\n';
     await write(path, bytes);
   }
   await write('skills/registry.json', '{}');
@@ -61,6 +61,31 @@ test('release snapshots compiled/source files and never copies runtime, tokens, 
   await mkdir(join(result.directory, 'runtime')); await writeFile(join(result.directory, 'runtime', 'user-data.json'), '{}');
   await mkdir(join(result.directory, 'node_modules')); await writeFile(join(result.directory, 'node_modules', 'installed.json'), '{}');
   assert.deepEqual((await verifyLocalRelease(result.directory)).mutableRootsNotVerified, ['node_modules', 'runtime', 'apps/mcp/generated']);
+});
+
+test('protocol chat queue keeps its real source, compiled output and source-map provenance', async t => {
+  const { root, write } = await fixture(t);
+  const sourcePath = 'packages/protocol/src/chat-queue.ts', entryPath = 'dist/packages/protocol/src/chat-queue.js', mapPath = entryPath + '.map';
+  const required = [sourcePath, entryPath, mapPath];
+  for (const path of required) assert.ok(REQUIRED_FRONTEND_FILES.includes(path), path);
+  assert.equal(REQUIRED_FRONTEND_FILES.includes('apps/desktop/src/chat-queue.ts'), false);
+  const result = await createLocalRelease({ repository: root });
+  const manifest = JSON.parse(await readFile(join(result.directory, 'release-manifest.json'), 'utf8'));
+  for (const path of required) {
+    const bytes = await readFile(join(root, path)), record = manifest.files.find(file => file.path === path);
+    assert.deepEqual(record, { path, bytes: bytes.length, sha256: hash(bytes) });
+    assert.deepEqual(await readFile(join(result.directory, path)), bytes);
+  }
+  const original = await readFile(join(root, sourcePath), 'utf8'), map = JSON.parse(await readFile(join(root, mapPath), 'utf8'));
+  assert.deepEqual(map.sources, ['../../../../' + sourcePath]);
+  assert.deepEqual(map.sourcesContent, [original]);
+  await assert.rejects(readFile(join(root, 'apps/desktop/src/chat-queue.ts')), { code: 'ENOENT' });
+  await write(sourcePath, 'export const changedProtocolQueue = true;\n');
+  await assert.rejects(createLocalRelease({ repository: root }), /Compiled source is stale\/missing: packages\/protocol\/src\/chat-queue\.ts/);
+  await write(sourcePath, original);
+  map.sources[0] = '../../../../apps/desktop/src/chat-queue.ts';
+  await write(mapPath, JSON.stringify(map));
+  await assert.rejects(createLocalRelease({ repository: root }), /Compiled source is stale\/missing: apps\/desktop\/src\/chat-queue\.ts/);
 });
 
 test('integrity verification rejects modified, unlisted and traversal payloads', async t => {
