@@ -386,6 +386,11 @@ export class ClaudeChat {
   /** Messages typed while a reply runs; sent one by one after each reply finishes successfully. */
   private queue: (ChatQueueRow&{tabKey:string})[] = [];
   private queueJournal=new ChatQueueJournal();
+  /** An empty local replacement remains dirty until its exact checkpoint is acknowledged. */
+  private queueEmptyCheckpoint:{projectPath:string|null}|null=null;
+  private queueEmptyRenderPending=false;
+  private queueSaveGeneration=0;
+  private queueRecoveryContext:{projectPath:string|null}|null=null;
   private queueAfterDraftSendScope:string|null=null;
   private queueSeq = 0;
   private queueEnqueue:ChatQueueRow|null=null;
@@ -465,15 +470,32 @@ export class ClaudeChat {
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
   setQueuePersistence(port:ChatQueueBridge|null):Promise<void>{
     if(this.profile.provider!=='claude')return Promise.resolve();
+    const preserveLocal=this.queue.length>0||this.queueEmptyCheckpoint!==null;
+    const recovering={projectPath:this.queueProject()};this.queueRecoveryContext=recovering;this.queueSaveGeneration++;
     return this.queueJournal.attach(port,'claude',(rows,project)=>{
-      if(this.queue.length)return;
+      if(preserveLocal||this.queue.length||this.queueEmptyCheckpoint)return;
       this.queue=rows.map<ChatQueueRow&{tabKey:string}>(target=>({id:target.id,text:target.text,tabKey:target.localId,scope:chatQueueScope('claude',project,target.conversationId,target.sessionId,target.localId),
         state:target.state==='unknown'?'unknown':target.state==='rejected'?'rejected':'paused',notice:target.attachmentState==='missing'?'Attachments must be restored before this message can be sent.':'Restored after restart. Review this chat and choose Send next.',...(target.requestId?{requestId:target.requestId}:{}),target}));
       this.queueSeq=Math.max(this.queueSeq,...rows.map(row=>row.id));this.queueAfterTurn=null;this.queueChoice=null;
-    },()=>{if(!this.nativeDisposed)this.render();});
+    },()=>{if(!this.nativeDisposed)this.render();}).finally(()=>{if(this.queueRecoveryContext===recovering)this.queueRecoveryContext=null;});
   }
-  private queueProject():string|null{return this.preferenceStore?.projectPath??this.queueJournal.projectPath;}
-  private queueSave(explicit=false):Promise<boolean>{return this.queueJournal.save(this.queue,this.queueProject(),explicit);}
+  private queueProject():string|null{return this.preferenceStore?.projectPath??this.queueJournal.projectPath??this.queueRecoveryContext?.projectPath??null;}
+  private async queueSave(explicit=false):Promise<boolean>{
+    const project=this.queueProject(),pending=this.queueEmptyCheckpoint,generation=++this.queueSaveGeneration;
+    if(!this.queue.length&&pending)this.queueEmptyRenderPending=false;
+    if(pending&&pending.projectPath!==project)return false;
+    const saved=await this.queueJournal.save(this.queue,project,explicit);
+    if(saved&&generation===this.queueSaveGeneration&&project===this.queueProject()&&this.queueEmptyCheckpoint===pending){this.queueEmptyCheckpoint=null;this.queueEmptyRenderPending=false;}
+    return saved;
+  }
+  private replaceQueue(rows:(ChatQueueRow&{tabKey:string})[]):void {
+    const removedLast=this.queue.length>0&&!rows.length;this.queue=rows;
+    if(this.profile.provider==='claude'&&removedLast){
+      const project=this.queueProject();
+      if(!this.queueEmptyCheckpoint||this.queueEmptyCheckpoint.projectPath===project)this.queueEmptyCheckpoint={projectPath:project};
+      this.queueEmptyRenderPending=true;
+    }
+  }
 
   isDraftConversation():boolean {
     const tab=this.activeTab();return !this.nativeDisposed&&!this.nativeHydrating&&!this.loading&&!!tab&&tab.conversationId===null&&this.turn?.tabKey!==tab.key;
@@ -865,7 +887,7 @@ export class ClaudeChat {
     if (id) {
       echo.id = id;
       if (shown) article.dataset.steerState = 'sent';
-      if(item)this.queue=this.queue.filter(row=>row!==item);
+      if(item)this.replaceQueue(this.queue.filter(row=>row!==item));
       this.render();if(turn.delivery.state==='completed')this.drainQueue(turn);return true;
     }
     // A refused or unknown steering result never starts another turn or retries this text.
@@ -907,7 +929,7 @@ export class ClaudeChat {
       if(this.queueEnqueue!==item)return;this.queueEnqueue=null;
       if(!saved){
         // The IPC reply can fail after bytes were saved. Any surviving disk row restores paused.
-        this.queue=this.queue.filter(row=>row!==item);this.notice='Saving the queued message could not be confirmed. Your original draft and files are retained.';
+        this.replaceQueue(this.queue.filter(row=>row!==item));this.notice='Saving the queued message could not be confirmed. Your original draft and files are retained.';
       }else if(gesture===this.queueGesture()&&draftRevision===this.preferenceEdits&&this.turn===turn&&!turn.stopping&&this.active&&this.input()===input&&input.value===draft&&this.attachments.controller()?.selectionRevision()===attachmentRevision){
         item.state='queued';item.notice=null;this.armQueue(turn);input.value='';tab.draft='';this.notice='';
       }else{
@@ -923,7 +945,7 @@ export class ClaudeChat {
   dequeue(id: number): void {
     if(this.queueEnqueue)return;
     const before = this.queue.length;
-    this.queue = this.queue.filter(item => item.id !== id||item.scope!==this.queueScope()||item.state==='sending');
+    this.replaceQueue(this.queue.filter(item => item.id !== id||item.scope!==this.queueScope()||item.state==='sending'));
     if (this.queue.length !== before) this.render();
   }
   /** Unsubmitted rows stay separate from drafts and require an explicit resume after failure. */
@@ -938,7 +960,7 @@ export class ClaudeChat {
     if(finished&&(finished.tabKey!==head.tabKey||finished.conversationId!==this.activeTab()?.conversationId)){this.pauseQueue('Conversation changed. Choose Send next to resume.');return;}
     this.queueAfterTurn=null;this.queueSending=true;head.state='sending';head.notice='Sending queued message…';this.render();
     void this.send(head.text,head).then(accepted=>{
-      if(accepted){this.queue=this.queue.filter(item=>item!==head);if(this.active&&this.queueScope()===scope&&this.queue.some(item=>item.scope===scope&&item.state==='queued'))this.armQueue(accepted);}
+      if(accepted){this.replaceQueue(this.queue.filter(item=>item!==head));if(this.active&&this.queueScope()===scope&&this.queue.some(item=>item.scope===scope&&item.state==='queued'))this.armQueue(accepted);}
       else if(head.state==='sending'){head.state='paused';head.notice='Not sent. Review this conversation and choose Send next.';this.pauseQueue('Paused after the queued message could not start.');}
       this.queueSending=false;this.render();
       if(accepted?.delivery.state==='completed')this.drainQueue(accepted);
@@ -1892,11 +1914,14 @@ export class ClaudeChat {
     while(this.nativeDeferred.length&&this.tabs.length<CLAUDE_CHAT_TAB_LIMIT)this.tabs.push(this.nativeDeferred.shift()!);
     if(!this.nativeDeferred.length&&this.notice?.startsWith('Close a chat tab to load'))this.notice='';
   }
-  async readyForRuntimeRecovery():Promise<void> { await this.queueJournal.ready();if(this.queue.length&&this.profile.provider==='claude'&&!this.queueJournal.available(this.queueProject()))throw new Error('Saved queued messages could not be read.');if(this.nativeReading)await this.nativeReading;if(this.preferenceStore?.error())throw new Error('Saved chat drafts could not be read.'); }
+  async readyForRuntimeRecovery():Promise<void> { await this.queueJournal.ready();if((this.queue.length||this.queueEmptyCheckpoint)&&this.profile.provider==='claude'&&!this.queueJournal.available(this.queueProject()))throw new Error('Saved queued messages could not be read.');if(this.nativeReading)await this.nativeReading;if(this.preferenceStore?.error())throw new Error('Saved chat drafts could not be read.'); }
   async prepareForRuntimeRecovery():Promise<void> {
     if(this.active){const attachments=this.attachments.controller();if(attachments&&(attachments.prepareReferences().length||attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');}
     this.returnQueue();
-    await this.queueJournal.ready();if(this.queue.length&&this.profile.provider==='claude'&&!await this.queueSave(true))throw new Error('Queued messages could not be saved. Keep this window open.');
+    await this.queueJournal.ready();
+    if((this.queue.length||this.queueEmptyCheckpoint)&&this.profile.provider==='claude'){
+      const saved=await this.queueSave(true);if(!saved||this.queueEmptyCheckpoint)throw new Error('Queued messages could not be saved. Keep this window open.');
+    }
     if(this.nativeReading)await this.nativeReading;
     if(this.preferenceStore&&!this.preferenceStore.available())await this.loadNativePreferences();
     this.saveDraft();this.persistTabs();
@@ -2048,7 +2073,7 @@ export class ClaudeChat {
     }
     if (!host) return;
     if(this.queueAfterTurn&&this.queueChoice!==this.queueSelection())this.pauseQueue('Model or conversation changed. Choose Send next to resume.');
-    if(this.profile.provider==='claude'&&this.queueJournal.available(this.queueProject()))void this.queueSave();
+    if(this.profile.provider==='claude'&&(this.queue.length||this.queueEmptyRenderPending)&&!this.queueEnqueue&&!this.queueSending&&!this.queueSteering&&this.queueJournal.available(this.queueProject()))void this.queueSave();
     const scope=this.queueScope(),gesture=this.queueGesture(),items=this.queue.filter(item=>item.scope===scope);
     renderChatQueueStrip(this.doc,host,items,{active:this.active,busy:!!this.queueEnqueue,scope,gesture,canSteer:this.canSteer(),steerReason:this.canSteer()?'Guide the current reply with this message.':'Steering is available only for this chat’s active reply.',
       canSendNext:this.ready()&&!this.rewinding&&!this.queueSteering&&!this.queueSending&&(!this.turn||this.turnOwnsActiveTab()),action:(action,item,text)=>this.queueAction(action,item,gesture,text)});

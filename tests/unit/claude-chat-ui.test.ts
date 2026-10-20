@@ -104,7 +104,7 @@ function surface() {
 function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | null = memory(), activate = true, preferences?:ClaudePreferenceBridge,queuePort:ChatQueueBridge=memoryQueue()) {
   const { doc, root, el } = surface();
   const chat = new ClaudeChat(doc as unknown as Document, { bridge, storage,...(preferences?{preferences}:{}) });
-  void chat.setQueuePersistence(queuePort);
+  const queueReady=chat.setQueuePersistence(queuePort);
   if (activate) chat.activate();
   const input = el('codex-composer'), messages = el('codex-messages');
   const type = (text: string) => { input.value = text; input.dispatchEvent(new Event('input')); };
@@ -112,7 +112,7 @@ function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | 
   const tabs = () => el('claude-chat-tabs').querySelectorAll('[role=tab]');
   const saved = () => el('claude-saved-chats').querySelectorAll('button').filter(node => node.dataset.conversationId);
   const remove = () => el('claude-saved-chats').querySelector('.claude-chat-delete');
-  return { chat, doc, root, el, input, messages, submit: el('codex-submit'), form: el('codex-compose'), notice: el('claude-chat-notice'), trigger: el('codex-model-trigger'), type, bubbles, tabs, saved, remove };
+  return { chat, queueReady, doc, root, el, input, messages, submit: el('codex-submit'), form: el('codex-compose'), notice: el('claude-chat-notice'), trigger: el('codex-model-trigger'), type, bubbles, tabs, saved, remove };
 }
 function memoryQueue(rows:StoredChatQueueRow[]=[]):ChatQueueBridge&{writes:ChatQueueSnapshot[];refuse:boolean}{
   const port={version:1 as const,writes:[] as ChatQueueSnapshot[],refuse:false,read:async()=>({available:true,projectPath:'C:\\Project',rows:structuredClone(rows)}),save:async(value:ChatQueueSnapshot)=>{if(port.refuse)throw Error('save refused');port.writes.push(structuredClone(value));return{saved:true as const};}};return port;
@@ -1466,7 +1466,7 @@ test('a reply that fails mid-turn offers Retry message: it re-sends only on clic
 });
 
 test('Claude queue: Enter retains visible rows; edit, reorder, remove and Send next affect only the shown chat',async t=>{
-  const b=fakeBridge(),port=memoryQueue(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();
+  const native=nativeClaudePreferences(),storage=memory(),b=fakeBridge(),port=memoryQueue(),f=mount(b.bridge,storage,true,native.bridge,port);t.after(()=>f.chat.stop());await f.queueReady;await f.chat.readyForRuntimeRecovery();await f.chat.refresh();
   const rows=()=>f.el('claude-chat-queue').querySelectorAll('.queue-row'),texts=()=>rows().map(node=>node.querySelector('.queue-text')!.textContent);
   f.type('First');key(f.input,'Enter');await tick();
   f.type('Second');key(f.input,'Enter');assert.equal(f.input.value,'Second');await tick();await tick();f.type('Third');key(f.input,'Enter');await tick();await tick();f.type('Remove me');key(f.input,'Enter');await tick();await tick();
@@ -1476,16 +1476,19 @@ test('Claude queue: Enter retains visible rows; edit, reorder, remove and Send n
   click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-edit')!);const editor=rows()[0]!.querySelector('.queue-edit-input')!;editor.value='Edited third';click(rows()[0]!.querySelector('.queue-save')!);
   assert.deepEqual(texts(),['Edited third','Second']);assert.equal(rows()[0]!.dataset.queueState,'paused');
   click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-next')!);assert.equal(sends(b).length,1,'Send next never starts a concurrent reply');
-  f.type('Unsent composer draft');b.emit({type:'done',ok:true,error:null,usage:null});await tick();await tick();
-  assert.deepEqual(sends(b).map((row:any)=>row.text),['First','Edited third']);assert.equal(f.input.value,'Unsent composer draft');assert.deepEqual(texts(),['Second']);
+  const draft='  Unsent composer draft\n\n\u{1F9E9}  ';f.type(draft);b.emit({type:'done',ok:true,error:null,usage:null});await tick();await tick();
+  assert.deepEqual(sends(b).map((row:any)=>row.text),['First','Edited third']);assert.equal(f.input.value,draft);assert.deepEqual(texts(),['Second']);
   b.emit({type:'done',ok:false,error:'Reply failed',usage:null});await tick();
-  assert.equal(sends(b).length,2);assert.equal(rows()[0]!.dataset.queueState,'paused');assert.equal(f.input.value,'Unsent composer draft');
+  assert.equal(sends(b).length,2);assert.equal(rows()[0]!.dataset.queueState,'paused');assert.equal(f.input.value,draft);
   await f.chat.prepareForRuntimeRecovery();assert.equal(port.writes.at(-1)!.rows[0]!.text,'Second');
+  assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft,'recovery checkpoints the exact composer separately from its queue');
+  assert.equal([...storage.data.values()].some(value=>value.includes('Unsent composer draft')||value.includes('Second')),false,'renderer storage never substitutes for either secure checkpoint');
+  assert.equal(sends(b).length,2,'recovery never replays a pending row');
 });
 
 test('Claude explicit Steer joins the exact running reply; refused and unknown messages remain visible without replay',async t=>{
   const steers:unknown[]=[];let result:unknown={messageId:'steer-accepted'};
-  const b=fakeBridge({steer:async(request:unknown)=>{steers.push(request);if(result instanceof Error)throw result;return result;}}),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();
+  const b=fakeBridge({steer:async(request:unknown)=>{steers.push(request);if(result instanceof Error)throw result;return result;}}),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.queueReady;await f.chat.refresh();
   const rows=()=>f.el('claude-chat-queue').querySelectorAll('.queue-row');
   f.type('First');key(f.input,'Enter');await tick();f.type('Make it blue');key(f.input,'Enter');await tick();await tick();assert.equal(steers.length,0,'Enter only queues');
   click(rows()[0]!.querySelector('.queue-steer')!);await tick();await tick();assert.deepEqual(steers,[{turnId:'turn-1',text:'Make it blue'}]);assert.equal(sends(b).length,1);assert.equal(rows().length,0);assert.equal(f.messages.querySelector('.steered .message-text')!.textContent,'Make it blue');
@@ -1496,7 +1499,7 @@ test('Claude explicit Steer joins the exact running reply; refused and unknown m
 
 test('Claude queue recovery pauses saved rows; failed checkpoints and mid-gesture provider changes never deliver them',async t=>{
   const target:StoredChatQueueRow={id:4,localId:'previous-tab',conversationId:'conv-new',sessionId:null,text:'Retained after update',modelId:'sonnet',effort:'high',connectionId:null,requestId:null,createdAt:'2026-10-20T12:00:00.000Z',state:'pending',attachmentState:'none'};
-  const port=memoryQueue([target]),b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();await f.chat.open('conv-new');await tick();
+  const port=memoryQueue([target]),b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.queueReady;await f.chat.refresh();await f.chat.open('conv-new');await tick();
   const rows=()=>f.el('claude-chat-queue').querySelectorAll('.queue-row');assert.equal(rows()[0]!.dataset.queueState,'paused');assert.equal(sends(b).length,0);
   port.refuse=true;click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-next')!);await tick();await tick();assert.equal(sends(b).length,0);assert.match(rows()[0]!.textContent,/secure saving failed/);
   port.refuse=false;let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve);const original=port.save;port.save=async value=>{await gate;return original(value);};
@@ -1529,7 +1532,7 @@ test('Claude steer: a delayed failure after a provider switch restores only its 
 });
 
 test('Claude steer: saved steered messages render inline without Edit; a bridge without steer keeps Enter as queue', async t => {
-  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.queueReady;await f.chat.refresh();
   b.histories.set('conv-s', { conversationId: 'conv-s', messages: [
     { id: randomUUID(), role: 'user', text: 'Build a door', at: '2026-10-20T00:00:00.000Z' },
     { id: randomUUID(), role: 'user', text: 'Make it blue', at: '2026-10-20T00:00:01.000Z', steered: true },
@@ -1614,7 +1617,7 @@ async function rewindFixture(t: { after: (fn: () => void) => void }, rewind?: (r
   });
   b.histories.set('conv-new', lobbyHistory());
   b.reply(async () => { order.push('send'); return { turnId: 'turn-1', conversationId: 'conv-new', messageId: 'u3' }; });
-  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.queueReady; await f.chat.refresh();
   await f.chat.open('conv-new'); await tick();
   return { b, f, order };
 }
@@ -1712,7 +1715,7 @@ test('choice blocks: strict JSON parsing; anything invalid stays a plain code bl
 });
 
 test('Claude choices: a click sends exactly one message; plan approval sends once and Change plan only pre-fills', async t => {
-  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.queueReady;await f.chat.refresh();
   f.type('Make a door'); key(f.input, 'Enter'); await tick();
   b.emit({ type: 'message', message: { id: 'a1', role: 'assistant', text: 'Which colour?\n\n```arcane-choices\n{"question":"Which door colour?","options":["Red","Blue"]}\n```', at: '' } });
   const options = () => f.messages.querySelectorAll('.chat-choice');
@@ -2061,6 +2064,7 @@ test('Claude chat shows attachment chips, sends PNG references with the message 
   };
   const chat = new ClaudeChat(doc as unknown as Document, { bridge: b.bridge, storage: memory(), attachments: { claim: owner => { claims.push(owner); }, controller: () => controller } });
   t.after(() => chat.stop());
+  await chat.setQueuePersistence(memoryQueue());
   el('workspace-add-context').hidden = false;
   chat.activate();
   assert.equal(claims.length, 1); const owner = claims[0]!;
@@ -2083,6 +2087,7 @@ test('Claude chat shows attachment chips, sends PNG references with the message 
   images = [{ name: 'wall.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }];
   type('And this one?'); key(input, 'Enter'); await tick();
   assert.deepEqual(chat.queued(), []); assert.equal(input.value, 'And this one?');
+  assert.deepEqual(images,[{name:'wall.png',dataUrl:'data:image/png;base64,iVBORw0KGgo='}]);assert.equal(cleared,1,'queue refusal keeps the selected files and text together');
   assert.equal(el('claude-chat-notice').textContent, CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT);
   b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
   // A refused start keeps the attachments and the draft for another try; the engine's fixed refusal is shown.
@@ -2115,6 +2120,116 @@ test('the shared attachments controller follows a claiming surface and namespace
   assert.equal(sharedChatAttachments(doc as unknown as Document), null, 'cleanup forgets the controller');
 });
 
+
+test('Claude queue recovery refuses an unsaved composer without a draft vault while keeping its saved pending row',async t=>{
+  const storage=memory(),port=memoryQueue(),b=fakeBridge(),f=mount(b.bridge,storage,true,undefined,port);t.after(()=>f.chat.stop());
+  await f.queueReady;await f.chat.refresh();f.type('Running task');key(f.input,'Enter');await tick();
+  f.type('Saved follow-up');key(f.input,'Enter');await tick();await tick();
+  assert.equal(f.input.value,'');assert.deepEqual(f.chat.queued().map(row=>row.text),['Saved follow-up']);
+  const draft='  Keep this unsaved draft\n\n\u{1F9E9}  ';f.type(draft);b.emit({type:'done',ok:false,error:'Reply stopped.',usage:null});await tick();
+  await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Send or clear your unsent drafts/);
+  assert.equal(f.input.value,draft);assert.deepEqual(f.chat.queued().map(row=>row.text),['Saved follow-up']);
+  assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');
+  assert.equal(port.writes.at(-1)!.rows[0]!.text,'Saved follow-up','a successful queue checkpoint cannot stand in for the missing draft checkpoint');
+  assert.equal([...storage.data.values()].some(value=>value.includes('Keep this unsaved draft')||value.includes('Saved follow-up')),false);
+  assert.equal(sends(b).length,1,'neither recovery nor a stopped turn replays either retained message');
+});
+
+test('Claude recovery explicitly retries a failed last-row removal without replaying or changing its raw composer',{timeout:5000},async t=>{
+  const native=nativeClaudePreferences(),storage=memory(),port=memoryQueue(),save=port.save;
+  const attempts:string[][]=[];let disk:StoredChatQueueRow[]=[];
+  port.read=async()=>({available:true,projectPath:nativeClaudeProject,rows:structuredClone(disk)});
+  port.save=async value=>{attempts.push(value.rows.map(row=>row.text));const reply=await save(value);disk=structuredClone(value.rows);return reply;};
+  const b=fakeBridge(),f=mount(b.bridge,storage,true,native.bridge,port);t.after(()=>f.chat.stop());
+  await f.queueReady;await f.chat.readyForRuntimeRecovery();await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Remove this follow-up');key(f.input,'Enter');await tick();await tick();
+  b.emit({type:'done',ok:false,error:'Reply stopped.',usage:null});await tick();
+  assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');
+  const draft='  Keep this raw draft\n\n\u{1F9E9}  ';f.type(draft);port.refuse=true;
+  click(f.el('claude-chat-queue').querySelector('.queue-remove')!);await tick();await tick();
+  assert.deepEqual(f.chat.queued(),[]);assert.equal(f.input.value,draft);assert.deepEqual(disk.map(row=>row.text),['Remove this follow-up']);
+  assert.deepEqual(attempts.at(-1),[]);const failedAttempts=attempts.length;
+  f.chat.deactivate();f.chat.activate();await f.chat.refresh();
+  assert.equal(attempts.length,failedAttempts,'rendering never retries a failed empty checkpoint');
+  await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);
+  assert.equal(attempts.length,failedAttempts+1,'public recovery explicitly retries the pending empty checkpoint');
+  assert.equal(f.input.value,draft);assert.deepEqual(f.chat.queued(),[]);assert.equal(sends(b).length,1);
+  port.refuse=false;await f.chat.prepareForRuntimeRecovery();
+  assert.deepEqual(disk,[]);assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);
+  assert.equal(f.input.value,draft);assert.equal(sends(b).length,1);
+  const freshBackend=fakeBridge(),fresh=mount(freshBackend.bridge,memory(),true,native.bridge,port);t.after(()=>fresh.chat.stop());
+  await fresh.queueReady;await fresh.chat.readyForRuntimeRecovery();await fresh.chat.refresh();
+  assert.equal(fresh.input.value,draft);assert.deepEqual(fresh.chat.queued(),[]);assert.equal(sends(freshBackend).length,0);
+});
+
+for(const useVault of[false,true])test('Claude held queue reattach preserves a last-row removal and local draft with vault='+useVault,{timeout:5000},async t=>{
+  const native=useVault?nativeClaudePreferences():null,port=memoryQueue(),b=fakeBridge(),f=mount(b.bridge,memory(),true,native?.bridge,port);t.after(()=>f.chat.stop());
+  await f.queueReady;await f.chat.readyForRuntimeRecovery();await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Retained before reattach');key(f.input,'Enter');await tick();await tick();
+  b.emit({type:'done',ok:false,error:'Reply stopped.',usage:null});await tick();
+  const oldRows=structuredClone(port.writes.at(-1)!.rows);assert.equal(oldRows[0]!.text,'Retained before reattach');
+  assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');
+  const draft='  Local draft during recovery\n\n  ';f.type(draft);
+  let release!:()=>void,reading!:()=>void,written!:()=>void;
+  const held=new Promise<void>(resolve=>release=resolve),readStarted=new Promise<void>(resolve=>reading=resolve),emptyWritten=new Promise<void>(resolve=>written=resolve);
+  const writes:ChatQueueSnapshot[]=[];
+  const reattached:ChatQueueBridge={version:1,read:async()=>{reading();await held;return{available:true,projectPath:nativeClaudeProject,rows:oldRows};},save:async value=>{writes.push(structuredClone(value));if(!value.rows.length)written();return{saved:true};}};
+  t.after(()=>release());
+  const recovery=f.chat.setQueuePersistence(reattached);await readStarted;
+  click(f.el('claude-chat-queue').querySelector('.queue-remove')!);
+  assert.deepEqual(f.chat.queued(),[]);assert.equal(f.input.value,draft);assert.equal(writes.length,0,'deletion waits for the held secure store');
+  release();await recovery;await emptyWritten;
+  if(native){await f.chat.prepareForRuntimeRecovery();assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);}
+  else await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Send or clear your unsent drafts/);
+  assert.deepEqual(f.chat.queued(),[]);assert.equal(f.input.value,draft);assert.equal(sends(b).length,1);
+  assert.ok(writes.length>0);assert.ok(writes.every(value=>value.rows.length===0),'the stale disk row is never reintroduced or checkpointed again');
+  const restoredBackend=fakeBridge(),restored=mount(restoredBackend.bridge,memory(),true,undefined,memoryQueue(writes.at(-1)!.rows));t.after(()=>restored.chat.stop());
+  await restored.queueReady;await restored.chat.refresh();assert.deepEqual(restored.chat.queued(),[]);assert.equal(sends(restoredBackend).length,0);
+});
+
+test('Claude queued steering accepted after yielding the surface still checkpoints its last-row removal',{timeout:5000},async t=>{
+  let accept!:(value:unknown)=>void,started!:()=>void,steers=0;
+  const reply=new Promise<unknown>(resolve=>accept=resolve),steering=new Promise<void>(resolve=>started=resolve);
+  const native=nativeClaudePreferences(),port=memoryQueue(),b=fakeBridge({steer:async()=>{steers++;started();return reply;}});
+  const f=mount(b.bridge,memory(),true,native.bridge,port);t.after(()=>{accept(false);f.chat.stop();});
+  await f.queueReady;await f.chat.readyForRuntimeRecovery();await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Guide this reply');key(f.input,'Enter');await tick();await tick();
+  click(f.el('claude-chat-queue').querySelector('.queue-steer')!);await steering;
+  const draft='  Claude draft before switching\n\n  ';f.type(draft);f.chat.deactivate();f.input.value='Other provider draft';
+  port.refuse=true;accept({messageId:'accepted-guidance'});await tick();await tick();
+  assert.deepEqual(f.chat.queued(),[]);assert.equal(f.input.value,'Other provider draft');assert.equal(steers,1);
+  await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);
+  assert.equal(f.input.value,'Other provider draft');assert.equal(sends(b).length,1);
+  port.refuse=false;await f.chat.prepareForRuntimeRecovery();
+  assert.deepEqual(port.writes.at(-1)!.rows,[]);assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);
+  assert.equal(f.input.value,'Other provider draft');assert.equal(steers,1);assert.equal(sends(b).length,1);
+});
+
+test('Claude queue: a rejected enqueue after attaching another project cannot replace the original pending removal',{timeout:5000},async t=>{
+  const portA=memoryQueue(),saveA=portA.save;let rowsA:StoredChatQueueRow[]=[];
+  portA.read=async()=>({available:true,projectPath:nativeClaudeProject,rows:structuredClone(rowsA)});
+  portA.save=async value=>{const result=await saveA(value);rowsA=structuredClone(value.rows);return result;};
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,portA);t.after(()=>f.chat.stop());
+  await f.queueReady;await f.chat.refresh();f.type('First');key(f.input,'Enter');await tick();
+  f.type('Remove only from project A');key(f.input,'Enter');await tick();await tick();
+  assert.equal(rowsA[0]!.text,'Remove only from project A');const oldA=structuredClone(rowsA);
+  portA.refuse=true;click(f.el('claude-chat-queue').querySelector('.queue-remove')!);await tick();await tick();
+  assert.deepEqual(f.chat.queued(),[]);assert.deepEqual(rowsA,oldA);
+  const foreign:StoredChatQueueRow={...oldA[0]!,id:99,localId:'foreign-tab',conversationId:'foreign-conversation',text:'Keep project B queue'};
+  const rowsB=[foreign],writesB:ChatQueueSnapshot[]=[];
+  const portB:ChatQueueBridge={version:1,read:async()=>({available:true,projectPath:nativeClaudeProject+'-other',rows:structuredClone(rowsB)}),save:async value=>{writesB.push(structuredClone(value));return{saved:true};}};
+  await f.chat.setQueuePersistence(portB);assert.deepEqual(f.chat.queued(),[]);
+  await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);
+  assert.deepEqual(writesB,[],'the original empty intent cannot be checkpointed into another project');
+  const draft='  Keep rejected project B draft\n\n  ';f.type(draft);key(f.input,'Enter');await tick();await tick();
+  assert.deepEqual(f.chat.queued(),[]);assert.equal(f.input.value,draft);assert.equal(sends(b).length,1);
+  await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);
+  assert.deepEqual(writesB,[],'removing the rejected provisional row must retain project A intent, not blank project B');
+  assert.deepEqual(rowsB,[foreign]);assert.deepEqual(rowsA,oldA);
+  portA.refuse=false;await f.chat.setQueuePersistence(portA);assert.deepEqual(f.chat.queued(),[]);
+  await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Send or clear your unsent drafts/);
+  assert.deepEqual(rowsA,[]);assert.deepEqual(writesB,[]);assert.equal(f.input.value,draft);assert.equal(sends(b).length,1);
+});
 
 test('desktop update keeps unsent provider drafts and running turns in the current window',async t=>{
   const f=fakeBridge(),ui=mount(f.bridge);t.after(()=>ui.chat.stop());await ui.chat.refresh();await settle();
@@ -2240,7 +2355,7 @@ test('native Claude model choice carries into new chats when browser storage is 
 
 test('runtime recovery preserves raw composer text and queued messages without replaying a turn',async t=>{
  for(const interrupted of[false,true]){
- const native=nativeClaudePreferences(),backend=fakeBridge(),port=memoryQueue(),f=mount(backend.bridge,memory(),true,native.bridge,port);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ const native=nativeClaudePreferences(),backend=fakeBridge(),port=memoryQueue(),f=mount(backend.bridge,memory(),true,native.bridge,port);t.after(()=>f.chat.stop());await f.queueReady;await f.chat.refresh();await tick();
  f.type('Start the original task');key(f.input,'Enter');await tick();await tick();f.type('Queued follow-up');key(f.input,'Enter');await tick();
  assert.equal(f.chat.queued().length,1);const draft='  Keep raw composer text\n\n  ';f.type(draft);const before=sends(backend).length;
  if(interrupted){backend.emit({type:'done',ok:false,error:'Local services stopped.',usage:null});await tick();}
@@ -2351,7 +2466,7 @@ test('Edge: Enter queues and explicit Steer guides a running Claude reply while 
 test('Claude enqueue preserves the composer until its checkpoint succeeds and repeated Enter cannot duplicate it',async t=>{
   const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);let attempts=0,hold=false;
   port.save=async value=>{attempts++;if(hold)await gate;return save(value);};
-  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.queueReady;await f.chat.refresh();
   f.type('First');key(f.input,'Enter');await tick();f.type('Earlier queued prompt');key(f.input,'Enter');await tick();await tick();
   hold=true;attempts=0;f.type('Queued original  ');key(f.input,'Enter');key(f.input,'Enter');
   assert.equal(f.input.value,'Queued original  ');assert.equal(f.chat.queued().length,2);await tick();assert.equal(attempts,1);assert.equal(sends(b).length,1);
@@ -2364,17 +2479,17 @@ test('Claude enqueue preserves the composer until its checkpoint succeeds and re
 test('Claude lost enqueue save acknowledgement retains its draft, removes the provisional duplicate and never replays restored text',async t=>{
   const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);
   port.save=async value=>{await gate;await save(value);throw Error('acknowledgement lost after bytes were saved');};
-  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.queueReady;await f.chat.refresh();
   f.type('First');key(f.input,'Enter');await tick();f.type('Keep this raw draft  ');key(f.input,'Enter');release();await tick();await tick();
   assert.equal(f.input.value,'Keep this raw draft  ');assert.deepEqual(f.chat.queued(),[]);assert.equal(sends(b).length,1);
-  const retained=port.writes.find(value=>value.rows.length);assert.ok(retained);const restoredBackend=fakeBridge(),restored=mount(restoredBackend.bridge,memory(),true,undefined,memoryQueue(retained.rows));t.after(()=>restored.chat.stop());await restored.chat.refresh();await restored.chat.open('conv-new');await tick();
+  const retained=port.writes.find(value=>value.rows.length);assert.ok(retained);const restoredBackend=fakeBridge(),restored=mount(restoredBackend.bridge,memory(),true,undefined,memoryQueue(retained.rows));t.after(()=>restored.chat.stop());await restored.queueReady;await restored.chat.refresh();await restored.chat.open('conv-new');await tick();
   assert.deepEqual(restored.chat.queued().map(row=>row.text),['Keep this raw draft']);assert.equal(restored.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');assert.equal(sends(restoredBackend).length,0);
   b.emit({type:'done',ok:true,error:null,usage:null});await tick();f.type('Ordinary Send');await f.chat.send();assert.equal(sends(b).length,2,'failed queue saving does not block ordinary Send');
 });
 
 for(const change of ['edit','edit-back','model','chat','provider','finished'] as const)test('Claude enqueue pauses after '+change+' during its checkpoint and preserves current drafts',async t=>{
   const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);port.save=async value=>{await gate;return save(value);};
-  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.queueReady;await f.chat.refresh();
   f.type('First');key(f.input,'Enter');await tick();f.type('Queued original');key(f.input,'Enter');await tick();
   if(change==='edit')f.type('Edited while saving');
   if(change==='edit-back'){f.type('Temporary edit');f.type('Queued original');}
@@ -2389,7 +2504,7 @@ for(const change of ['edit','edit-back','model','chat','provider','finished'] as
 
 test('Claude Stop stays available during an enqueue checkpoint and retains its pending row without sending it',async t=>{
   const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);port.save=async value=>{await gate;return save(value);};
-  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.queueReady;await f.chat.refresh();
   f.type('First');key(f.input,'Enter');await tick();f.type('After Stop');key(f.input,'Enter');
   assert.equal(f.submit.disabled,false);assert.equal(f.submit.getAttribute('aria-label'),'Stop task');click(f.submit);await tick();assert.equal(b.calls.filter(row=>row[0]==='stop').length,1);
   b.emit({type:'done',ok:false,error:null,usage:null});release();await tick();await tick();
@@ -2397,15 +2512,17 @@ test('Claude Stop stays available during an enqueue checkpoint and retains its p
 });
 
 test('Claude usage limits retain the unanswered draft and separately persisted pending rows without replay',async t=>{
-  const port=memoryQueue(),b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();
+  const native=nativeClaudePreferences(),storage=memory(),port=memoryQueue(),b=fakeBridge(),f=mount(b.bridge,storage,true,native.bridge,port);t.after(()=>f.chat.stop());await f.queueReady;await f.chat.readyForRuntimeRecovery();await f.chat.refresh();
   f.type('Unanswered prompt');key(f.input,'Enter');await tick();f.type('Follow-up after reset');key(f.input,'Enter');await tick();await tick();
   b.emit({type:'done',ok:false,error:'Claude usage limit reached. This message was not answered; try again after the limit resets.',usageLimit:{resetsAt:null},usage:null});await tick();
   assert.equal(sends(b).length,1);assert.equal(f.input.value,'Unanswered prompt');assert.deepEqual(f.chat.queued().map(row=>row.text),['Follow-up after reset']);assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');
   await f.chat.prepareForRuntimeRecovery();assert.equal(port.writes.at(-1)!.rows[0]!.text,'Follow-up after reset');assert.equal(f.input.value,'Unanswered prompt');assert.equal(sends(b).length,1);
+  assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,'Unanswered prompt','the unanswered message uses the draft vault, independently of its pending row');
+  assert.equal([...storage.data.values()].some(value=>value.includes('Unanswered prompt')||value.includes('Follow-up after reset')),false);
 });
 
 test('Claude checkpoint refusal leaves a row retryable but no native dispatch occurs until secure saving succeeds',async t=>{
-  let steers=0;const port=memoryQueue(),b=fakeBridge({steer:async()=>{steers++;return{messageId:'accepted-once'};}}),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();
+  let steers=0;const port=memoryQueue(),b=fakeBridge({steer:async()=>{steers++;return{messageId:'accepted-once'};}}),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.queueReady;await f.chat.refresh();
   f.type('First');key(f.input,'Enter');await tick();f.type('Queued guidance');key(f.input,'Enter');await tick();await tick();
   port.refuse=true;click(f.el('claude-chat-queue').querySelector('.queue-steer')!);await tick();await tick();assert.equal(steers,0);assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');assert.deepEqual(f.chat.queued().map(row=>row.text),['Queued guidance']);
   port.refuse=false;click(f.el('claude-chat-queue').querySelector('.queue-steer')!);await tick();await tick();assert.equal(steers,1);assert.deepEqual(f.chat.queued(),[]);assert.equal(sends(b).length,1);
