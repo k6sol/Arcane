@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "workers/blender/uv"))  # UV engine modules (natural finish; flat in a job)
 spec = importlib.util.spec_from_file_location("procedural_quality", ROOT / "workers/blender/procedural.py")
 procedural = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(procedural)

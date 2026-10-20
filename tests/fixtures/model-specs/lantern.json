@@ -1,0 +1,23 @@
+{"name": "iron-lantern", "triangleBudget": 9000, "spec": {
+  "kind": "spec", "size": [0.22, 0.22, 0.47],
+  "materials": [
+    {"id": "iron", "finish": "metal", "color": [0.045, 0.045, 0.05], "roughness": 0.55},
+    {"id": "glass", "finish": "glass", "color": [0.95, 0.62, 0.25]},
+    {"id": "brass", "finish": "metal", "color": [0.62, 0.43, 0.16], "roughness": 0.35}
+  ],
+  "parts": [
+    {"id": "base", "op": "box", "material": "iron", "size": [0.2, 0.2, 0.03], "bevel": 0.006, "at": [0, 0, 0.015]},
+    {"id": "foot", "op": "cylinder", "material": "iron", "radius": 0.012, "height": 0.012, "at": [0.08, 0.08, -0.006], "mirror": "xy"},
+    {"id": "pane", "op": "box", "material": "glass", "size": [0.15, 0.15, 0.22], "at": [0, 0, 0.14]},
+    {"id": "post", "op": "box", "material": "iron", "size": [0.016, 0.016, 0.24], "bevel": 0.002, "at": [0.08, 0.08, 0.15], "mirror": "xy"},
+    {"id": "rail_y", "op": "box", "material": "iron", "size": [0.16, 0.012, 0.014], "at": [0, 0.08, 0.038], "array": {"count": 2, "step": [0, 0, 0.218]}, "mirror": "y"},
+    {"id": "rail_x", "op": "box", "material": "iron", "size": [0.012, 0.16, 0.014], "at": [0.08, 0, 0.038], "array": {"count": 2, "step": [0, 0, 0.218]}, "mirror": "x"},
+    {"id": "bar_y", "op": "box", "material": "iron", "size": [0.006, 0.006, 0.21], "at": [0, 0.078, 0.147], "mirror": "y"},
+    {"id": "bar_x", "op": "box", "material": "iron", "size": [0.006, 0.006, 0.21], "at": [0.078, 0, 0.147], "mirror": "x"},
+    {"id": "roof", "op": "revolve", "material": "iron", "at": [0, 0, 0.256],
+     "profile": [[0, 0], [0.16, 0], [0.16, 0.012], [0.095, 0.06], [0.04, 0.085], [0, 0.088]], "segments": 4, "rot": [0, 0, 45]},
+    {"id": "chimney", "op": "cylinder", "material": "iron", "radius": 0.026, "radiusTop": 0.02, "height": 0.04, "at": [0, 0, 0.36]},
+    {"id": "finial", "op": "sphere", "material": "brass", "radius": 0.016, "at": [0, 0, 0.388]},
+    {"id": "handle", "op": "sweep", "material": "brass", "shape": {"type": "circle", "r": 0.0055},
+     "path": {"points": [[0.045, 0, 0.415], [0, 0, 0.46], [-0.045, 0, 0.415], [0, 0, 0.392]], "curve": "catmull", "closed": true}}
+  ]}}

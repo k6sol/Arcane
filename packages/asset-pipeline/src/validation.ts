@@ -7,6 +7,7 @@ import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, procedur
 import type { AssemblyMaterial, AssetAudit, AssetManifest, AssetRequest } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
 import { decodeMaterialPng } from './material-png.js';
+import { MODEL_WORKER_SCRIPTS } from './model-spec.js';
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AssetError('VALIDATION', `${label} must be an object.`);
@@ -74,6 +75,7 @@ export function validateAudit(value: unknown, request: AssetRequest, manifestVer
       if (m[field] !== 0) throw new AssetError('MESH', `audit.json mesh[${meshIndex}]: ${field} is ${measuredNumber(m[field])}; required 0.`);
     }
     if (m.finitePositions !== true || !Array.isArray(m.errors) || m.errors.length) throw new AssetError('MESH', `audit.json mesh[${meshIndex}]: Mesh reported structural errors or nonfinite positions.`);
+    if (m.uvQuality !== undefined) validateUvQuality(m.uvQuality, m.role, meshIndex);
     vector(m.dimensions, 1e-6, 100, 'mesh dimensions');
     if (vector(m.scale, 0, 2, 'mesh scale').some(n => Math.abs(n - 1) > 1e-5) || vector(m.rotation, -7, 7, 'mesh rotation').some(n => Math.abs(n) > 1e-5)) throw new AssetError('MESH', 'Mesh transforms were not applied.');
     if (!Array.isArray(m.materials) || m.materials.some(s => typeof s !== 'string' || !s.startsWith('MAT_'))) throw new AssetError('MESH', 'Invalid named mesh materials.');
@@ -336,10 +338,24 @@ export function inspectPng(bytes: Buffer, expectedResolution: number): void {
   if (max - min < 12) bad(`Image is uniform or empty; luminance range ${max - min} must be at least 12.`);
 }
 
+/** Measured UV quality (workers/blender/uv uv_metrics.report): a passing verdict with finite metrics. */
+export function validateUvQuality(value: unknown, role: unknown, meshIndex: number): void {
+  const q = record(value, 'UV quality'), where = `audit.json mesh[${meshIndex}]: uvQuality`;
+  if (role === 'collision' || !['unique', 'periodic', 'tiled', 'atlas'].includes(String(q.intent))) throw new AssetError('MESH', `${where} has an unsupported intent.`);
+  if (!Array.isArray(q.errors) || q.errors.length) throw new AssetError('MESH', `${where} failed: ${Array.isArray(q.errors) ? q.errors.slice(0, 4).map(e => String(e).slice(0, 120)).join('; ') : 'missing verdict'}.`);
+  if (!Array.isArray(q.warnings) || q.warnings.length > 32 || q.warnings.some(w => typeof w !== 'string' || w.length > 256)) throw new AssetError('MESH', `${where} warnings are invalid.`);
+  for (const key of ['angleDistortion', 'angleDistortionP95', 'areaDistortion', 'densityCV', 'texelsPerMetre', 'seamRatio']) {
+    if (typeof q[key] !== 'number' || !Number.isFinite(q[key]) || (q[key] as number) < 0) throw new AssetError('MESH', `${where}.${key} must be a finite non-negative measurement.`);
+  }
+  for (const key of ['faces', 'islands', 'foldedFaces', 'mirroredFaces']) integer(q[key], 0, 200000, 'UV quality ' + key);
+}
+/** General UV engine modules (workers/blender/uv), bundled flat for natural-finish and model-spec jobs. */
+export const UV_WORKER_SCRIPTS: readonly string[] = ['uv_engine.py', 'uv_metrics.py', 'uv_stage.py'];
 /** Bundled worker files hashed into a job's template digest, in fixed order. */
 export function workerScripts(request: AssetRequest): string[] {
-  return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []),
-    ...(request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural' ? ['textures.py'] : [])];
+  return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []), ...(request.procedural?.variant ? ['variation.py'] : []),
+    ...(request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural' ? ['textures.py'] : []),
+    ...(request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec' ? UV_WORKER_SCRIPTS : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : [])];
 }
 function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial, pattern?: string): void {
   const surface = record(value, 'generated procedural surface'), expected = { ...wanted.surface! };
@@ -429,7 +445,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
   const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request, m.schemaVersion);
   if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 32) throw new AssetError('MANIFEST', 'Invalid artifact list.');
-  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', 'textures.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
+  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', ...Object.fromEntries(MODEL_WORKER_SCRIPTS.map(name => [name, 'worker'])), 'variation.py': 'worker', 'textures.py': 'worker', 'uv_engine.py': 'worker', 'uv_metrics.py': 'worker', 'uv_stage.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
   const names = new Set<string>(), hashes = new Map<string, string>();
   let totalBytes = 0;
@@ -453,10 +469,11 @@ export async function validateManifestFiles(directory: string, value: unknown): 
     } catch (error) { artifactFailure(error, name); }
   }
   if ((request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
-  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : [])]) {
+  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : []), ...(request.procedural?.variant ? ['variation.py'] : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : [])]) {
     if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
   }
-  if (sha256(Buffer.from(workerScripts(request).map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
+  // Natural assets generated before the UV engine bundled no uv_*.py modules.
+  if (sha256(Buffer.from(workerScripts(request).filter(name => !UV_WORKER_SCRIPTS.includes(name) || names.has(name)).map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
   if (JSON.stringify(normalizeRequest(await readJson(artifactPath(directory, 'request.json')))) !== JSON.stringify(request) || JSON.stringify(await readJson(artifactPath(directory, 'audit.json'))) !== JSON.stringify(m.validation)) throw new AssetError('MANIFEST', 'Manifest request/audit differs from the original evidence.');
   if (m.sourceRequestSha256 !== undefined || request.recipe || request.procedural) {
     if (m.sourceRequestSha256 !== hashes.get('input.json') || !isDeepStrictEqual(normalizeRequest(await readJson(artifactPath(directory, 'input.json'), CUSTOM_REQUEST_BYTES)), request)) throw new AssetError('MANIFEST', 'Original input provenance differs from normalized request.');

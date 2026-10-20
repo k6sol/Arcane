@@ -1,0 +1,16 @@
+{"name": "fluted-column", "triangleBudget": 12000, "spec": {
+  "kind": "spec", "size": [0.86, 0.86, 3.18],
+  "materials": [
+    {"id": "marble", "finish": "stone", "color": [0.82, 0.8, 0.76], "roughness": 0.5, "wear": 0.3}
+  ],
+  "parts": [
+    {"id": "plinth", "op": "box", "material": "marble", "size": [0.86, 0.86, 0.16], "bevel": 0.012, "at": [0, 0, 0.08]},
+    {"id": "base", "op": "revolve", "material": "marble", "curve": "smooth",
+     "profile": [[0, 0.16], [0.4, 0.16], [0.41, 0.2], [0.37, 0.25], [0.33, 0.27], [0.35, 0.31], [0.32, 0.35], [0, 0.35]]},
+    {"id": "shaft", "op": "revolve", "material": "marble", "curve": "smooth",
+     "profile": [[0, 0.34], [0.3, 0.34], [0.31, 1.2], [0.29, 2.2], [0.26, 2.86], [0, 2.86]],
+     "flutes": {"count": 20, "depth": 0.8, "width": 0.82, "from": 0.45, "to": 2.75}},
+    {"id": "echinus", "op": "revolve", "material": "marble", "curve": "smooth",
+     "profile": [[0, 2.84], [0.27, 2.84], [0.29, 2.9], [0.36, 2.98], [0.38, 3.02], [0, 3.02]]},
+    {"id": "abacus", "op": "box", "material": "marble", "size": [0.84, 0.84, 0.16], "bevel": 0.01, "at": [0, 0, 3.1]}
+  ]}}

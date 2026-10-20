@@ -1,3 +1,4 @@
+import type { ModelSpec } from './model-spec.js';
 export class AssetError extends Error {
   constructor(public readonly code: string, message: string, public readonly diagnostic?: AssetFailureDiagnostic) { super(message); this.name = 'AssetError'; }
 }
@@ -19,11 +20,12 @@ export type AssetTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' 
 export type ProceduralFinish = 'natural' | 'flat';
 export type ProceduralSpec = (
   | { kind: 'tree'; species: 'pine' | 'oak' | 'birch' | 'palm'; height: number; trunkTaper: number; branchLevels: number; leafDensity: number; trunkRadius: number | null; secondaryColor: Vec3 }
-  | { kind: 'rock'; size: Vec3; roughness: number }
+  | { kind: 'rock'; size: Vec3; roughness: number; form?: 'boulder' | 'outcrop' | 'cave'; moss?: boolean }
   | { kind: 'column'; radius: number; height: number; flutes: number; base: 'none' | 'plinth' | 'attic'; capital: 'none' | 'doric' | 'ionic' | 'corinthian' }
   | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number }
   | { kind: 'log'; species: 'oak' | 'birch'; length: number; radius: number; ends: 'cut' | 'broken' | 'mixed'; moss: boolean }
-  | { kind: 'stump'; species: 'oak' | 'birch'; radius: number; height: number; top: 'cut' | 'broken'; moss: boolean }) & { finish?: ProceduralFinish };
+  | { kind: 'stump'; species: 'oak' | 'birch'; radius: number; height: number; top: 'cut' | 'broken'; moss: boolean }
+  | ModelSpec) & { finish?: ProceduralFinish; variant?: [number, number] };
 export interface AssetInput {
   template: AssetTemplate;
   name: string;
@@ -62,7 +64,11 @@ export interface MeshMetrics {
   uvLayers: number; uvLoops: number; invalidUVs: number; degenerateUVFaces: number;
   dimensions: number[]; scale: number[]; rotation: number[]; materials: string[];
   errors: string[];
+  /** Natural-finish parts: measured UV quality (stretch, texel density, overlap, padding, seams) and its verdict. */
+  uvQuality?: UvQuality;
 }
+/** Metrics (angleDistortion, densityCV, texelsPerMetre, overlapFaces, islandGapPx, utilization, seamRatio, ...) are numbers or null. */
+export interface UvQuality { intent: 'unique' | 'periodic' | 'tiled' | 'atlas'; errors: string[]; warnings: string[]; [metric: string]: unknown }
 export interface RenderMetrics {
   path: string; width: number; height: number; finitePixels: boolean;
   minLuminance: number; maxLuminance: number; meanLuminance: number; standardDeviation: number;
@@ -72,6 +78,8 @@ export interface AssetAudit {
   schemaVersion: 1; template: AssetTemplate; meshes: MeshMetrics[];
   totals: { renderTriangles: number; lod1Triangles: number; collisionTriangles: number; materials: number };
   renders: RenderMetrics[]; exports: ExportMetrics[];
+  /** Model spec jobs: measured self-check (size, watertight, thickness, silhouette, floating parts, hints). */
+  review?: Record<string, unknown>;
   assembly?: AssemblyEvidence;
   /** Optional for old jobs. Import preparation requires this producer evidence. */
   studioImport?: WorkerStudioImportEvidence;
@@ -144,7 +152,7 @@ export interface AssemblyRecipe {
 }
 export interface SurfaceEvidence {
   profile: MaterialSurface['profile']; resolution: number; generator: 'arcane-tile-v1'; texCoord: 0;
-  /** Natural oak/birch/pine and log/stump only: worker pattern ('oak-bark', 'pine-leaves', 'birch-log', ...) and its glTF alpha mode. */
+  /** Natural oak/birch/pine, log/stump and rock forms only: worker pattern ('oak-bark', 'pine-leaves', 'birch-log', 'rock-boulder', ...) and its glTF alpha mode. */
   pattern?: string; alphaMode?: 'OPAQUE' | 'MASK';
   images: { role: 'baseColor' | 'normal' | 'metallicRoughness'; name: string; width: number; height: number; sha256: string; colorSpace: 'sRGB' | 'Non-Color' }[];
 }

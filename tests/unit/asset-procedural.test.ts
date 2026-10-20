@@ -40,6 +40,7 @@ test('procedural parameters reject code, unknown fields, out-of-range values and
     { kind: 'column', radius: 1, height: 2 }, { kind: 'foliage', style: 'cactus' }, { kind: 'teapot' }, { kind: 'tree', script: 'x' },
     { kind: 'log', species: 'pine' }, { kind: 'log', length: 30 }, { kind: 'log', ends: 'chewed' }, { kind: 'log', moss: 'yes' }, { kind: 'log', top: 'cut' },
     { kind: 'stump', top: 'split' }, { kind: 'stump', radius: 3 }, { kind: 'stump', height: 0 }, { kind: 'stump', ends: 'cut' },
+    { kind: 'rock', form: 'arch' }, { kind: 'rock', form: 'boulder', moss: 'yes' }, { kind: 'rock', species: 'oak' },
   ];
   for (const procedural of bad) assert.throws(() => normalizeRequest({ template: 'procedural', name: 'bad', procedural }), code('INPUT'), JSON.stringify(procedural));
   assert.throws(() => normalizeRequest({ template: 'procedural', name: 'big', triangleBudget: 20001 }), code('INPUT'));
@@ -123,6 +124,16 @@ test('assets_procedural maps typed generator input onto the shared start body', 
   for (const generator of [{ kind: 'log', species: 'palm' }, { kind: 'stump', top: 'sawn' }, { kind: 'log', length: 13 }])
     assert.equal(proceduralInput.safeParse({ name: 'x', generator }).success, false, JSON.stringify(generator));
   assert.equal(proceduralInput.safeParse({name:'external-rock',generator:{kind:'rock',finish:'download'}}).success,false);
+  // Rock forms: the tool defaults to the natural boulder; stored requests without a form keep the legacy rock bytes.
+  const boulder = normalizeRequest(proceduralStartBody(proceduralInput.parse({ name: 'rock-1', generator: { kind: 'rock' }, seed: 2 })));
+  assert.deepEqual(boulder.procedural, { kind: 'rock', size: [1.6, 1.2, 0.9], roughness: 0.5, form: 'boulder', moss: false, finish: 'natural' });
+  assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(boulder))), boulder);
+  const cave = normalizeRequest(proceduralStartBody(proceduralInput.parse({ name: 'cave-1', generator: { kind: 'rock', form: 'cave', size: [6, 3, 4.5], moss: true } })));
+  assert.deepEqual(cave.procedural, { kind: 'rock', size: [6, 3, 4.5], roughness: 0.5, form: 'cave', moss: true, finish: 'natural' });
+  assert.equal(cave.triangleBudget, 6000);
+  assert.deepEqual(normalizeRequest({ template: 'procedural', name: 'rock-2', procedural: { kind: 'rock' } }).procedural, { kind: 'rock', size: [1.6, 1.2, 0.9], roughness: 0.5 });
+  assert.equal((normalizeRequest({ template: 'procedural', name: 'rock-3', procedural: { kind: 'rock', moss: true } }).procedural as { form?: string }).form, 'boulder');
+  assert.equal(proceduralInput.safeParse({ name: 'x', generator: { kind: 'rock', form: 'arch' } }).success, false);
   for (const bad of [{ name: 'x', generator: { kind: 'tree', code: 'import os' } }, { name: 'x', generator: { kind: 'python' } }, { name: 'x', generator: { kind: 'rock' }, triangleBudget: 30000 }])
     assert.equal(proceduralInput.safeParse(bad).success, false, JSON.stringify(bad));
 });

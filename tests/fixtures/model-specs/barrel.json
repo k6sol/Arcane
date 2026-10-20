@@ -1,0 +1,17 @@
+{"name": "oak-barrel", "triangleBudget": 9000, "spec": {
+  "kind": "spec", "size": [0.64, 0.64, 0.9],
+  "materials": [
+    {"id": "oak", "finish": "wood", "color": [0.36, 0.2, 0.09]},
+    {"id": "iron", "finish": "metal", "color": [0.06, 0.055, 0.05], "roughness": 0.6}
+  ],
+  "parts": [
+    {"id": "staves", "op": "revolve", "material": "oak", "curve": "smooth", "grain": "z",
+     "profile": [[0, -0.43], [0.255, -0.43], [0.27, -0.45], [0.3, -0.25], [0.315, 0], [0.3, 0.25], [0.27, 0.45], [0.255, 0.43], [0, 0.43]],
+     "flutes": {"count": 18, "depth": 0.25, "width": 0.07}},
+    {"id": "hoop_end", "op": "revolve", "material": "iron", "closed": true, "mirror": "z",
+     "profile": [[0.28, 0.36], [0.293, 0.36], [0.297, 0.4], [0.284, 0.4]]},
+    {"id": "hoop_mid", "op": "revolve", "material": "iron", "closed": true, "mirror": "z",
+     "profile": [[0.307, 0.15], [0.32, 0.15], [0.32, 0.19], [0.307, 0.19]]},
+    {"id": "rivet", "op": "sphere", "material": "iron", "radius": 0.006, "at": [0.322, 0, 0.17], "radial": {"count": 6}, "mirror": "z"},
+    {"id": "bung", "op": "cylinder", "material": "oak", "radius": 0.022, "height": 0.03, "rot": [0, 90, 0], "at": [0.315, 0, 0]}
+  ]}}

@@ -1,0 +1,19 @@
+{"name": "supply-crate", "triangleBudget": 9000, "spec": {
+  "kind": "spec", "size": [0.84, 0.84, 0.81],
+  "materials": [
+    {"id": "pine", "finish": "wood", "color": [0.55, 0.38, 0.2]},
+    {"id": "iron", "finish": "metal", "color": [0.07, 0.07, 0.075], "roughness": 0.6}
+  ],
+  "parts": [
+    {"id": "core", "op": "box", "material": "pine", "size": [0.76, 0.76, 0.76], "at": [0, 0, 0.4]},
+    {"id": "plank_y", "op": "box", "material": "pine", "size": [0.74, 0.022, 0.24], "bevel": 0.004, "at": [0, 0.39, 0.15], "array": {"count": 3, "step": [0, 0, 0.25]}, "mirror": "y"},
+    {"id": "plank_x", "op": "box", "material": "pine", "size": [0.022, 0.74, 0.24], "bevel": 0.004, "at": [0.39, 0, 0.15], "array": {"count": 3, "step": [0, 0, 0.25]}, "mirror": "x"},
+    {"id": "lid", "op": "box", "material": "pine", "size": [0.74, 0.24, 0.022], "bevel": 0.004, "at": [0, -0.25, 0.79], "array": {"count": 3, "step": [0, 0.25, 0]}},
+    {"id": "edge_y", "op": "box", "material": "pine", "size": [0.07, 0.03, 0.8], "bevel": 0.005, "at": [0.37, 0.405, 0.4], "mirror": "xy"},
+    {"id": "edge_x", "op": "box", "material": "pine", "size": [0.03, 0.07, 0.8], "bevel": 0.005, "at": [0.405, 0.37, 0.4], "mirror": "xy"},
+    {"id": "brace_y", "op": "box", "material": "pine", "size": [0.86, 0.02, 0.07], "bevel": 0.004, "rot": [0, -42, 0], "at": [0, 0.408, 0.4], "mirror": "y"},
+    {"id": "brace_x", "op": "box", "material": "pine", "size": [0.02, 0.86, 0.07], "bevel": 0.004, "rot": [42, 0, 0], "at": [0.408, 0, 0.4], "mirror": "x"},
+    {"id": "corner", "op": "box", "material": "iron", "size": [0.1, 0.1, 0.012], "bevel": 0.003, "at": [0.375, 0.375, 0.806], "mirror": "xy"},
+    {"id": "nail", "op": "sphere", "material": "iron", "radius": 0.0055,
+     "scatter": {"on": "edge_y", "count": 40, "spacing": 0.07, "align": 1, "minUp": -0.2, "sink": 0.002}}
+  ]}}

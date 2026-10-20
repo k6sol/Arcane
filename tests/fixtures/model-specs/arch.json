@@ -1,0 +1,18 @@
+{"name": "stone-arch", "triangleBudget": 9000, "spec": {
+  "kind": "spec", "size": [3.0, 0.8, 3.35],
+  "materials": [
+    {"id": "granite", "finish": "stone", "color": [0.5, 0.47, 0.42]}
+  ],
+  "parts": [
+    {"id": "wall", "op": "box", "material": "granite", "size": [2.8, 0.6, 3.0], "bevel": 0.02, "at": [0, 0, 1.6], "csg": "union"},
+    {"id": "plinth", "op": "box", "material": "granite", "size": [0.75, 0.8, 0.22], "bevel": 0.025, "at": [1.0, 0, 0.11], "mirror": "x", "csg": "union"},
+    {"id": "impost", "op": "box", "material": "granite", "size": [0.72, 0.72, 0.14], "bevel": 0.02, "at": [1.02, 0, 2.05], "mirror": "x", "csg": "union"},
+    {"id": "cornice", "op": "extrude", "material": "granite", "rot": [90, 0, 0], "at": [0, 0.4, 0], "height": 0.8,
+     "shape": {"type": "polygon", "points": [[-1.5, 3.1], [1.5, 3.1], [1.5, 3.25], [1.45, 3.3], [-1.45, 3.3], [-1.5, 3.25]]}, "csg": "union"},
+    {"id": "opening", "op": "box", "csg": "subtract", "size": [1.6, 1.0, 2.15], "at": [0, 0, 1.075]},
+    {"id": "opening_top", "op": "cylinder", "csg": "subtract", "radius": 0.8, "height": 1.0, "rot": [90, 0, 0], "at": [0, 0, 2.15]},
+    {"id": "keystone", "op": "extrude", "material": "granite", "rot": [90, 0, 0], "at": [0, 0.33, 0], "height": 0.66, "bevel": 0.012,
+     "shape": {"type": "polygon", "points": [[-0.12, 2.945], [0.12, 2.945], [0.16, 3.12], [-0.16, 3.12]]}},
+    {"id": "voussoir", "op": "extrude", "material": "granite", "rot": [90, 0, 0], "at": [0, 0.32, 0], "height": 0.64, "bevel": 0.01,
+     "shape": {"type": "polygon", "points": [[0.8, 2.15], [1.0, 2.15], [0.94, 2.55], [0.74, 2.45]]}, "mirror": "x"}
+  ]}}

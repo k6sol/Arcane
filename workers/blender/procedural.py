@@ -142,6 +142,10 @@ class MeshData:
         # Natural canopy only: one soft shading normal per vertex (outward from its leaf cluster),
         # applied as custom split normals so clusters shade as masses, not single cards.
         self.normals = None
+        # Natural finish only: UV intent and texture size from the UV stage (engine_uvs).
+        self.uv_report = None
+        # Natural rock forms only: per-vertex bake inputs and chart rects (see plan_natural_rock).
+        self.bake = None
 
     def vertex(self, co):
         self.vertices.append((float(co[0]), float(co[1]), float(co[2])))
@@ -1223,8 +1227,9 @@ CANOPY = {
     # Pine needle sprays (needle_canopy): outer: share of each whorl branch left bare near the trunk;
     # leader: needled leader length; cover: card length per card share of shoot length; size: card
     # length bounds per height unit; shade: tone below which a card uses the shade row.
-    "pine": {"cards": 640, "aspect": .5, "outer": .45, "leader": .9, "cover": 10.0, "size": (.3, .9), "droop": .06,
-             "bend": .08, "tipdrop": .1, "cup": .1, "shade": .55},
+    # droop/sag: spray pitch below its shoot at the leader / extra at the crown base.
+    "pine": {"cards": 700, "aspect": .5, "outer": .35, "leader": .9, "cover": 10.0, "size": (.3, .9), "droop": .06, "sag": .5,
+             "bend": .08, "tipdrop": .14, "cup": .1, "shade": .55},
 }
 # Leaf-spray atlas: 4 x 2 tiles of 128 x 256 px at 512 (textures.ATLAS); row 0 sunlit, row 1 shade.
 ATLAS_COLS, ATLAS_ROWS, ATLAS_PAD = 4, 2, 2 / 512
@@ -1602,11 +1607,17 @@ def needle_canopy(leaves, style, axes, anchors, scale, capacity, wanted, rng):
         side = cross(UP, t)
         side = norm(side) if dot(side, side) > 1e-6 else perpendicular(t)
         side = mul(side, 1 if k % 2 else -1)
-        fan = rng.uniform(.15, .95)
-        axis = norm(add(add(mul(t, math.cos(fan)), mul(side, math.sin(fan))), (0.0, 0.0, rng.uniform(-.18, .22) - style["droop"])))
-        face = norm(add(add(UP, mul(side, rng.uniform(-1.5, 1.5))), mul(t, rng.uniform(-.3, .3))))
-        if abs(dot(face, axis)) > .95:
-            face = perpendicular(axis)
+        # Age: 0 at the leader, 1 at the crown base. Old, low sprays sag further below their branch.
+        age = 1 - (root[2] - low) / max(high - low, 1e-6)
+        fan = rng.uniform(.1, .85)
+        sag = style["droop"] + style["sag"] * age * rng.uniform(.6, 1.3)
+        axis = norm(add(add(mul(t, math.cos(fan)), mul(side, math.sin(fan))), (0.0, 0.0, rng.uniform(-.15, .2) - sag)))
+        # Layered roll about the spray: flat pads facing the sky, then sprays turned half and
+        # nearly fully towards the side, so overlapping cards give the crown depth from any view.
+        lift = sub(UP, mul(axis, dot(UP, axis)))
+        lift = norm(lift) if dot(lift, lift) > 1e-6 else perpendicular(axis)
+        roll = (rng.uniform(0, .35), rng.uniform(.55, .9), rng.uniform(1.0, 1.35))[(k // 2) % 3] * (1 if rng.random() < .5 else -1)
+        face = norm(add(mul(lift, math.cos(roll)), mul(cross(axis, lift), math.sin(roll))))
         size = length * rng.uniform(.85, 1.15)
         width = size * style["aspect"] * rng.uniform(.92, 1.08)
         radial = math.hypot(root[0], root[1]) / reach
@@ -1614,7 +1625,7 @@ def needle_canopy(leaves, style, axes, anchors, scale, capacity, wanted, rng):
         rect = atlas_rect(rng.randrange(ATLAS_COLS), 1 if tone < style["shade"] else 0)
         first = len(leaves.vertices)
         leaves.card(root, axis, face, size, width, max(.0008, width * .01), rect, bend=style["bend"] * rng.uniform(.4, 1.6),
-                    droop=style["tipdrop"] * rng.uniform(.5, 1.5), cup=style["cup"])
+                    droop=style["tipdrop"] * (.5 + age) * rng.uniform(.6, 1.4), cup=style["cup"])
         out = norm((root[0], root[1], 0.0)) if radial > 1e-3 else UP
         mottle = mul(face, rng.uniform(-.1, .35))
         for v in leaves.vertices[first:]:
@@ -1725,6 +1736,621 @@ def plan_rock(params, seed, budget_total):
             uv.append((u, v))
         rock.face(f, uvs=uv)
     return rock
+
+
+# ------------------------------------------------------ natural rock ---------
+# Natural rock forms (procedural.form): a weathered boulder, a steep cliff-face outcrop (front -Y,
+# sloped back for setting into a hillside) and the same outcrop with a recessed cave mouth.
+# Requests without a form keep plan_rock above byte for byte.
+ROCK_FORMS = ("boulder", "outcrop", "cave")
+ROCK_TRIANGLES = 6000
+# Unique UV layout: every lattice face of every closed shell is its own chart, packed into the
+# 512 px texture with a gutter, so textures.py can bake world-space stone, moss and shading.
+ROCK_ATLAS = 512
+ROCK_GUTTER = 3
+# Hidden faces resting on the ground get less texture.
+ROCK_GROUND_CHART = .35
+# Scree stones at the foot of an outcrop: a small closed lattice each (48 triangles).
+SCREE_TRIANGLES = 48
+
+
+def rock_extent(params):
+    """Metres of the rock's largest dimension (bounds the texture's world-space scales)."""
+    return max(params["size"])
+
+
+def rock_lattice(dims, charts=None):
+    """Closed box lattice on [-1, 1]^3 with nx x ny x nz cells: (points, quads wound outward).
+    ``charts`` (a list) receives one {axis, side, grid, quads} per box face: grid[i][j] is the vertex
+    at cell corner (i, j) and quads[k] = (quad index, [(i, j) of each ring corner])."""
+    index, points, quads = {}, [], []
+
+    def vid(c):
+        key = tuple(c)
+        if key not in index:
+            index[key] = len(points)
+            points.append(tuple(2 * c[k] / dims[k] - 1 for k in range(3)))
+        return index[key]
+    for axis in range(3):
+        a, b = [k for k in range(3) if k != axis]
+        for side in (0, dims[axis]):
+            flip = (side == 0) != (axis == 1)
+            grid = [[0] * (dims[b] + 1) for _ in range(dims[a] + 1)]
+            cells = []
+            for i in range(dims[a]):
+                for j in range(dims[b]):
+                    ring, corners = [], []
+                    for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                        c = [0, 0, 0]
+                        c[axis], c[a], c[b] = side, i + di, j + dj
+                        ring.append(vid(c))
+                        grid[i + di][j + dj] = ring[-1]
+                        corners.append((i + di, j + dj))
+                    cells.append((len(quads), corners[::-1] if flip else corners))
+                    quads.append(tuple(reversed(ring)) if flip else tuple(ring))
+            if charts is not None:
+                charts.append({"axis": axis, "side": side, "grid": grid, "quads": cells})
+    return points, quads
+
+
+def rock_pattern(params):
+    """Texture pattern of a natural rock form: the cave mouth wears the outcrop texture."""
+    return "rock-boulder" if params["form"] == "boulder" else "rock-outcrop"
+
+
+def rock_dims(size, cap):
+    """Lattice cells per axis (at least 3) for near-square cells within ``cap`` triangles."""
+    step, best = max(size) / 3, None
+    while step > 1e-3:
+        dims = [max(3, int(math.ceil(s / step))) for s in size]
+        if 4 * (dims[0] * dims[1] + dims[1] * dims[2] + dims[0] * dims[2]) > cap:
+            break
+        best, step = dims, step * .97
+    if best is None:
+        raise ValueError("Rock exceeded its triangle budget")
+    return best
+
+
+def smin(a, b, k):
+    """Smooth minimum: a bevelled fillet of width ~k where two faces meet."""
+    h = max(0.0, min(1.0, .5 + .5 * (b - a) / k))
+    return b + (a - b) * h - k * h * (1 - h)
+
+
+def vsum(vectors, indices):
+    x = y = z = 0.0
+    for i in indices:
+        v = vectors[i]
+        x, y, z = x + v[0], y + v[1], z + v[2]
+    return (x, y, z)
+
+
+def rock_lobes(rng, w, d, h):
+    """Outcrop rock mass: overlapping, tilted and yawed strata slabs (wide low beds, narrower set-back
+    upper blocks, one crowning block) merged with rounded masses, in metres (front -Y, base z = 0)."""
+    lobes = []
+
+    def slab(cx, front, back, bottom, top, half_width, turn):
+        lobes.append(("box", (cx, (front + back) / 2, (bottom + top) / 2), (half_width, (back - front) / 2, (top - bottom) / 2), turn))
+
+    def tilt(amount):
+        return (rng.uniform(-.35, .35), rng.uniform(-amount, amount), rng.uniform(-amount, amount))
+    low = 2 + rng.randrange(2)
+    for k in range(low):
+        cx = (-.5 + (k + .5) / low) * w + rng.uniform(-.06, .06) * w
+        slab(cx, -d / 2 + rng.uniform(-.02, .2) * d, d / 2 - rng.uniform(0, .12) * d, -.3 * h, h * rng.uniform(.35, .62),
+             w / low * rng.uniform(.6, .74), tilt(.12))
+    mid = 2 + rng.randrange(3)
+    for k in range(mid):
+        cx = (-.5 + (k + rng.uniform(.25, .75)) / mid) * w * .8
+        slab(cx, -d / 2 + rng.uniform(-.06, .24) * d, d * rng.uniform(.0, .3), .2 * h, h * rng.uniform(.66, .92),
+             w * rng.uniform(.14, .25), tilt(.22))
+    slab(rng.uniform(-.2, .2) * w, -d / 2 + rng.uniform(-.04, .16) * d, d * rng.uniform(.05, .25), .45 * h, h,
+         w * rng.uniform(.18, .28), tilt(.3))
+    for _ in range(2 + rng.randrange(2)):
+        lobes.append(("ellipsoid", (rng.uniform(-.42, .42) * w, rng.uniform(-.15, .15) * d, h * rng.uniform(.05, .4)),
+                      (w * rng.uniform(.12, .22), d * rng.uniform(.3, .45), h * rng.uniform(.25, .42)), tilt(.4)))
+    return lobes
+
+
+def lobe_exit(lobe, origin, ray, rounding, soft):
+    """Distance at which ``ray`` (unit) from ``origin`` leaves one lobe: rounded box edges via a smooth
+    minimum of the slab exits; fades to 0 as the chord through the lobe vanishes (a grazing miss)."""
+    kind, centre, half, (yaw, pitch, roll) = lobe
+
+    def local(v):
+        # Into the lobe frame: undo yaw (about z), then pitch (about x), then roll (about y).
+        x, y, z = v
+        x, y = math.cos(yaw) * x + math.sin(yaw) * y, -math.sin(yaw) * x + math.cos(yaw) * y
+        y, z = math.cos(pitch) * y + math.sin(pitch) * z, -math.sin(pitch) * y + math.cos(pitch) * z
+        x, z = math.cos(roll) * x - math.sin(roll) * z, math.sin(roll) * x + math.cos(roll) * z
+        return (x, y, z)
+    o, r = local(sub(origin, centre)), local(ray)
+    if kind == "box":
+        near, far = -1e18, None
+        k_round = min(rounding, .45 * min(half))
+        for k in range(3):
+            if abs(r[k]) < 1e-12:
+                if abs(o[k]) > half[k]:
+                    return 0.0
+                continue
+            t1, t2 = (-half[k] - o[k]) / r[k], (half[k] - o[k]) / r[k]
+            near = max(near, min(t1, t2))
+            far = max(t1, t2) if far is None else smin(far, max(t1, t2), k_round)
+    else:
+        oo = tuple(o[k] / half[k] for k in range(3))
+        rr = tuple(r[k] / half[k] for k in range(3))
+        a, b, c = dot(rr, rr), dot(oo, rr), dot(oo, oo) - 1
+        disc = b * b - a * c
+        if disc <= 0:
+            return 0.0
+        s = math.sqrt(disc)
+        near, far = (-b - s) / a, (-b + s) / a
+    if far is None or far <= 0:
+        return 0.0
+    return far * smoothstep((far - near) / soft)
+
+
+def rock_stone(rng, noise, centre, radius, flat):
+    """One scree stone: a 2x2x2 lattice shell, rounded, chipped and partly sunk into the ground."""
+    charts = []
+    lattice, quads = rock_lattice((2, 2, 2), charts)
+    power = rng.uniform(2.6, 4.0)
+    stretch = (rng.uniform(.8, 1.3), rng.uniform(.8, 1.3), rng.uniform(.45, .7))
+    yaw = rng.uniform(0, 2 * math.pi)
+    cuts = [(norm((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-.2, 1))), rng.uniform(.45, .75)) for _ in range(2)]
+    shift = tuple(rng.uniform(0, 40) for _ in range(3))
+    points = []
+    for q in lattice:
+        length = sum(abs(c) ** power for c in q) ** (1 / power)
+        p = mul(q, (1 + .18 * noise(add(mul(q, 1.7), shift))) / length)
+        for n, dist in cuts:
+            e = dot(p, n) - dist
+            if e > 0:
+                p = sub(p, mul(n, e * .92))
+        x, y, z = p[0] * stretch[0] * radius, p[1] * stretch[1] * radius, p[2] * stretch[2] * radius
+        x, y = x * math.cos(yaw) - y * math.sin(yaw), x * math.sin(yaw) + y * math.cos(yaw)
+        z = centre[2] + z
+        points.append((centre[0] + x, centre[1] + y, z if z > flat else flat + (z - flat) * .04))
+    return points, quads, charts
+
+
+def pack_charts(sizes, atlas=ROCK_ATLAS, gutter=ROCK_GUTTER):
+    """Skyline-pack (width m, height m) charts into an atlas px square, each with a gutter px border,
+    turning charts a quarter where that packs lower: (px per metre, [(x, y, turned) per chart])."""
+    def skyline(scale, order):
+        sky = [[0.0, 0.0, float(atlas)]]
+        spots = [None] * len(sizes)
+        for k in order:
+            best = None
+            for turned in (False, True):
+                w, h = sizes[k][::-1] if turned else sizes[k]
+                w, h = w * scale + 2 * gutter, h * scale + 2 * gutter
+                for i, (x, _, _) in enumerate(sky):
+                    if x + w > atlas + 1e-9:
+                        break
+                    y, j, reach = 0.0, i, x + w
+                    while j < len(sky) and sky[j][0] < reach - 1e-9:
+                        y = max(y, sky[j][1])
+                        j += 1
+                    if y + h <= atlas + 1e-9 and (best is None or (y + h, x) < (best[0], best[1])):
+                        best = (y + h, x, y, w, turned)
+            if best is None:
+                return None
+            top, x, y, w, turned = best
+            spots[k] = (x, y, turned)
+            right, merged = x + w, []
+            for sx, sy, sw in sky:
+                if sx + sw <= x + 1e-9 or sx >= right - 1e-9:
+                    merged.append([sx, sy, sw])
+                    continue
+                if sx < x:
+                    merged.append([sx, sy, x - sx])
+                if sx + sw > right:
+                    merged.append([right, sy, sx + sw - right])
+            merged.append([x, top, w])
+            merged.sort()
+            sky = []
+            for seg in merged:
+                if sky and abs(sky[-1][1] - seg[1]) < 1e-9:
+                    sky[-1][2] += seg[2]
+                else:
+                    sky.append(seg)
+        return spots
+    orders = [sorted(range(len(sizes)), key=key) for key in (
+        lambda k: (-max(sizes[k]), -min(sizes[k]), k),
+        lambda k: (-sizes[k][0] * sizes[k][1], k),
+        lambda k: (-sizes[k][1], -sizes[k][0], k))]
+    best = (0.0, None)
+    for order in orders:
+        low, high = best[0], max(best[0] * 1.5, 1.0)
+        while skyline(high, order) is not None:
+            low, high = high, high * 2
+        if low <= best[0] and skyline(low, order) is None:
+            continue
+        for _ in range(30):
+            middle = (low + high) / 2
+            low, high = (middle, high) if skyline(middle, order) is not None else (low, middle)
+        if low > best[0]:
+            best = (low, skyline(low, order))
+    if best[1] is None:
+        raise ValueError("Rock charts do not fit the texture")
+    return best
+
+
+def plan_natural_rock(params, seed, budget_total):
+    """Natural boulder / outcrop / cave mouth on a flat base, scaled to the exact requested size.
+    The boulder is a closed lattice shell shaped by a superellipsoid, lumps, bevelled fracture planes
+    and fine fracture noise. The outcrop is a merged mass of yawed strata slabs and rounded shoulders
+    (an irregular footprint, varied heights, an overhanging brow), cast as a closed radial shell,
+    with scree stones at its foot; the cave carves a tunnel mouth back into its front face. Each
+    lattice face is one chart of a unique UV layout; ``bake`` carries smoothed normals, cavity and
+    tunnel depth per vertex so textures.py can bake moss, stone and shading in world space."""
+    rng = random.Random(seed)
+    noise = value_noise(seed + 3301)
+    form, rough = params["form"], params["roughness"]
+    sx, sy, sz = params["size"]
+    cap = min(budget_total, ROCK_TRIANGLES)
+    cliff = form != "boulder"
+    stones = min(14, int(cap * .12) // SCREE_TRIANGLES) if cliff else 0
+    dims = rock_dims((sx, sy, sz), cap - stones * SCREE_TRIANGLES)
+    charts = []
+    lattice, quads = rock_lattice(dims, charts)
+    half = (sx / 2, sy / 2, sz / 2)
+    radius = min(sx, sy) / 2
+    if not cliff:
+        power = rng.uniform(2.3, 3.0)
+        offset = tuple(rng.uniform(0, 60) for _ in range(3))
+
+        def fbm(p, frequency, octaves, gain=.5):
+            total, weight, w = 0.0, 0.0, 1.0
+            for _ in range(octaves):
+                total += w * noise(add(mul(p, frequency), offset))
+                weight += w
+                frequency *= 2.03
+                w *= gain
+            return total / weight
+        planes = []
+        for _ in range(5 + int(rough * 5) + rng.randrange(2)):
+            planes.append((norm((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-.35, 1))), rng.uniform(.5, .76), rng.uniform(.025, .06)))
+        dip = (rng.uniform(-.12, .12), rng.uniform(-.12, .12))
+        layer = rng.uniform(.14, .26)
+        strata = rng.uniform(0, .35) * (.6 + .4 * rough)
+        layer_offsets = [rng.uniform(-1, 1) for _ in range(64)]
+        shaped = []
+        for q in lattice:
+            length = sum(abs(c) ** power for c in q) ** (1 / power)
+            p = mul(q, 1 / length)
+            p = mul(p, 1 + (.07 + .1 * rough) * fbm(p, 1.1, 3))
+            for n, dist, k in planes:
+                e = dot(p, n) - dist
+                if e > -2 * k:
+                    p = sub(p, mul(n, e - smin(e, 0.0, k)))
+            shaped.append(p)
+        points = []
+        for p in shaped:
+            x = (p[0] * half[0], p[1] * half[1], p[2] * half[2])
+            # Faint bedding: each bed of the boulder stands a little in or out, partings grooved.
+            horizontal = (x[0], x[1], 0.0)
+            flat = math.sqrt(dot(horizontal, horizontal))
+            if flat > 1e-9:
+                s = (x[2] + dip[0] * x[0] + dip[1] * x[1]) / layer + .35 * noise(mul(x, 1.7 / layer))
+                bed = math.floor(s)
+                parting = 1 - smoothstep(min(s - bed, bed + 1 - s) / .14)
+                facing = flat / math.sqrt(dot(x, x))
+                step = radius * strata * (.035 * layer_offsets[bed % 64] - .03 * parting) * facing ** 2
+                x = add(x, mul(horizontal, step / flat))
+            grain = radius * (.012 + .02 * rough) * fbm(mul(x, 1 / max(radius, .05)), 4.0, 3)
+            size = math.sqrt(dot(x, x))
+            if size > 1e-9:
+                x = add(x, mul(x, grain / size))
+            points.append(x)
+        low = min(p[2] for p in points)
+        cut = low + (max(p[2] for p in points) - low) * .16
+        points = [(p[0], p[1], cut + (p[2] - cut) * .05) if p[2] < cut else p for p in points]
+    else:
+        # Shaped at a bounded aspect (no side under .35 of the longest), then scaled linearly to the
+        # exact size below, so very thin or flat requests squash cleanly instead of folding.
+        shape = tuple(max(s, .35 * max(sx, sy, sz)) for s in (sx, sy, sz))
+        points = rock_mass(rng, noise, lattice, quads, shape, rough)
+    tunnel = [0.0] * len(points)
+    mouth = None
+    if form == "cave":
+        mouth = carve_cave(rng, noise, lattice, charts, points, tunnel, shape)
+        untangle(points, quads, lattice_links(len(points), quads))
+    shells = [(points, quads, charts, tunnel)]
+    if stones:
+        shells += scree(rng, noise, points, shape, stones, mouth)
+    # One vertex list; exact requested size with the lowest point on z = 0.
+    vertices, offsets = [], []
+    for shell in shells:
+        offsets.append(len(vertices))
+        vertices += shell[0]
+    xs, ys, zs = ([p[k] for p in vertices] for k in range(3))
+    mid = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+    scale = (sx / (max(xs) - min(xs)), sy / (max(ys) - min(ys)), sz / (max(zs) - min(zs)))
+    floor = min(zs)
+    vertices = [((p[0] - mid[0]) * scale[0], (p[1] - mid[1]) * scale[1], (p[2] - floor) * scale[2]) for p in vertices]
+    rock = MeshData()
+    for p in vertices:
+        rock.vertex(p)
+    # Charts: per box face, column/row spacing from the mean shaped edge lengths (less stretch).
+    faces_uv = []
+    for s, (_, _, faces, _) in enumerate(shells):
+        for chart in faces:
+            grid, base = chart["grid"], offsets[s]
+            na, nb = len(grid) - 1, len(grid[0]) - 1
+            us, vs = [0.0], [0.0]
+            for i in range(na):
+                us.append(us[-1] + sum(math.dist(vertices[base + grid[i][j]], vertices[base + grid[i + 1][j]]) for j in range(nb + 1)) / (nb + 1))
+            for j in range(nb):
+                vs.append(vs[-1] + sum(math.dist(vertices[base + grid[i][j]], vertices[base + grid[i][j + 1]]) for i in range(na + 1)) / (na + 1))
+            weight = ROCK_GROUND_CHART if chart["axis"] == 2 and chart["side"] == 0 else 1.0
+            faces_uv.append((s, chart, [u * weight for u in us], [v * weight for v in vs]))
+    # Large faces are cut into pieces at cell boundaries so the charts pack the square tightly.
+    limit = .3 * math.sqrt(sum(us[-1] * vs[-1] for _, _, us, vs in faces_uv))
+
+    def cuts(along):
+        pieces = min(len(along) - 1, max(1, int(math.ceil(along[-1] / max(limit, 1e-9) - 1e-9))))
+        marks = [0] + [min(range(1, len(along) - 1), key=lambda i: abs(along[i] - along[-1] * k / pieces)) for k in range(1, pieces)] + [len(along) - 1]
+        return sorted(set(marks))
+    sizes, layout = [], []
+    for s, chart, us, vs in faces_uv:
+        ucut, vcut = cuts(us), cuts(vs)
+        for ia, ib in zip(ucut, ucut[1:]):
+            for ja, jb in zip(vcut, vcut[1:]):
+                sizes.append((max(us[ib] - us[ia], 1e-6), max(vs[jb] - vs[ja], 1e-6)))
+                layout.append((s, chart, us, vs, ia, ib, ja, jb))
+    px, spots = pack_charts(sizes)
+    rects, chart_of = [], []
+    for (s, chart, us, vs, ia, ib, ja, jb), (x0, y0, turned), (w, h) in zip(layout, spots, sizes):
+        ox, oy = x0 + ROCK_GUTTER, y0 + ROCK_GUTTER
+        if turned:
+            w, h = h, w
+        rects.append((ox / ROCK_ATLAS, oy / ROCK_ATLAS, (ox + w * px) / ROCK_ATLAS, (oy + h * px) / ROCK_ATLAS))
+        base = offsets[s]
+        quad_list = shells[s][1]
+        # Charts keep the surface's winding (no mirrored texels): the quads' ring order in (i, j).
+        ring = chart["quads"][0][1]
+        winding = sum(ring[k][0] * ring[k - 1][1] - ring[k - 1][0] * ring[k][1] for k in range(4))
+        mirror = (winding > 0) != turned
+        for q, corners in chart["quads"]:
+            if not (ia <= min(i for i, _ in corners) < ib and ja <= min(j for _, j in corners) < jb):
+                continue
+            a, b, c, d = (base + i for i in quad_list[q])
+            uv = {}
+            for n, (i, j) in enumerate(corners):
+                cu, cv = us[i] - us[ia], vs[j] - vs[ja]
+                if turned:
+                    cu, cv = cv, cu
+                if mirror:
+                    cu = w - cu
+                uv[base + quad_list[q][n]] = ((ox + cu * px) / ROCK_ATLAS, (oy + cv * px) / ROCK_ATLAS)
+            # Shorter diagonal after shaping keeps fracture edges crisp.
+            tris = ((a, b, c), (a, c, d)) if math.dist(vertices[a], vertices[c]) <= math.dist(vertices[b], vertices[d]) else ((a, b, d), (b, c, d))
+            for tri in tris:
+                rock.face(tri, uvs=[uv[i] for i in tri])
+                chart_of.append(len(rects) - 1)
+    if rock.triangles() > cap:
+        raise ValueError("Rock exceeded its triangle budget")
+    tunnels = []
+    for shell in shells:
+        tunnels += shell[3]
+    rock.bake = rock_shading(rock, tunnels, (sx, sy, sz))
+    rock.bake.update(charts=rects, chartOf=chart_of)
+    return rock
+
+
+def lattice_links(count, quads):
+    """Sorted neighbour lists of a quad lattice."""
+    links = [set() for _ in range(count)]
+    for quad in quads:
+        for k in range(4):
+            links[quad[k]].update((quad[k - 1], quad[(k + 1) % 4]))
+    return [sorted(n) for n in links]
+
+
+def lattice_normals(points, quads):
+    normals = [(0.0, 0.0, 0.0)] * len(points)
+    for a, b, c, d in quads:
+        n = cross(sub(points[c], points[a]), sub(points[d], points[b]))
+        for i in (a, b, c, d):
+            normals[i] = add(normals[i], n)
+    return [norm(n) if dot(n, n) > 1e-24 else UP for n in normals]
+
+
+def relax(points, links, normals, rounds, rate, floor=None):
+    """Tangential relaxation: slide vertices toward their neighbours' centroid within the surface,
+    evening out cells stretched by the cast; vertices on the ground stay on it."""
+    for _ in range(rounds):
+        moved = []
+        for i, p in enumerate(points):
+            step = sub(mul(vsum(points, links[i]), 1 / len(links[i])), p)
+            step = sub(step, mul(normals[i], dot(step, normals[i])))
+            q = add(p, mul(step, rate))
+            if floor is not None and p[2] <= floor:
+                q = (q[0], q[1], p[2])
+            moved.append(q)
+        points[:] = moved
+
+
+def untangle(points, quads, links, rounds=8):
+    """Smooth away folded cells (a cell facing against its vertices' normals) where shaping overlapped."""
+    for _ in range(rounds):
+        normals = lattice_normals(points, quads)
+        bad = set()
+        for quad in quads:
+            a, b, c, d = quad
+            n = cross(sub(points[c], points[a]), sub(points[d], points[b]))
+            for tri in ((a, b, c), (a, c, d), (a, b, d), (b, c, d)):
+                t = cross(sub(points[tri[1]], points[tri[0]]), sub(points[tri[2]], points[tri[0]]))
+                if dot(t, n) <= 0 or any(dot(t, normals[i]) <= 0 for i in tri):
+                    bad.update(quad)
+                    break
+        if not bad:
+            return
+        for i in sorted(bad):
+            ring = set(links[i])
+            centre = mul(vsum(points, links[i]), 1 / len(links[i]))
+            points[i] = add(mul(points[i], .3), mul(centre, .7)) if ring else points[i]
+
+
+def rock_mass(rng, noise, lattice, quads, size, rough):
+    """Outcrop shell: each lattice point cast from an interior origin onto the merged lobes, clipped by
+    the ground and relaxed along the surface, then pushed along its normal by large-scale noise, joint
+    planes bevel it, and beds step in or out (metres)."""
+    w, d, h = size
+    lobes = rock_lobes(rng, w, d, h)
+    offset = tuple(rng.uniform(0, 60) for _ in range(3))
+    planes = []
+    for _ in range(4 + int(rough * 4) + rng.randrange(2)):
+        planes.append((norm((rng.uniform(-1, 1), rng.uniform(-1, .3), rng.uniform(-.2, .7))), rng.uniform(.68, .9), rng.uniform(.03, .07)))
+    dip = (rng.uniform(-.1, .1), rng.uniform(-.06, .06))
+    layer = min(.3 * h, max(.08 * h, rng.uniform(.45, .8)))
+    layer_offsets = [rng.uniform(-1, 1) for _ in range(64)]
+    least = min(w, d, h)
+    origin = (0.0, -.04 * d, .3 * h)
+    rounding, soft, union = .2 * least, .12 * least, .18 * least
+
+    def fbm(p, frequency, octaves, gain=.5):
+        total, weight, k = 0.0, 0.0, 1.0
+        for _ in range(octaves):
+            total += k * noise(add(mul(p, frequency), offset))
+            weight += k
+            frequency *= 2.03
+            k *= gain
+        return total / weight
+    points = []
+    for q in lattice:
+        target = (q[0] * w / 2, q[1] * d / 2, (q[2] + 1) / 2 * h)
+        ray = norm(sub(target, origin))
+        reach = 0.0
+        for lobe in lobes:
+            reach = -smin(-reach, -lobe_exit(lobe, origin, ray, rounding, soft), union)
+        if ray[2] < 0:
+            reach = smin(reach, origin[2] / -ray[2], .02 * h)
+        points.append(add(origin, mul(ray, reach)))
+    links = lattice_links(len(points), quads)
+    relax(points, links, lattice_normals(points, quads), 4, .5, floor=.005 * h)
+    normals = lattice_normals(points, quads)
+    shaped = []
+    for p, n in zip(points, normals):
+        unit = (p[0] / (w / 2), p[1] / (d / 2), (p[2] - h / 2) / (h / 2))
+        # Large-scale breakup of the silhouette, then medium lumps, along the surface normal.
+        bump = .16 * least * fbm(unit, .8, 3) + .05 * least * fbm(unit, 2.9, 2)
+        p = add(p, mul(n, bump * smoothstep(p[2] / (.04 * h))))
+        # Joint planes bevel the footprint's corners and the skyline into fresh faces.
+        unit = (p[0] / (w / 2), p[1] / (d / 2), (p[2] - h / 2) / (h / 2))
+        for jn, dist, k in planes:
+            e = dot(unit, jn) - dist
+            if e > -2 * k:
+                unit = sub(unit, mul(jn, e - smin(e, 0.0, k)))
+        p = (unit[0] * w / 2, unit[1] * d / 2, unit[2] * h / 2 + h / 2)
+        # Bedding: each bed of the face stands in or out, with a soft step between beds.
+        horizontal = (n[0], n[1], 0.0)
+        flat = math.sqrt(dot(horizontal, horizontal))
+        if flat > 1e-9 and p[2] > .03 * h:
+            s = (p[2] + dip[0] * p[0] + dip[1] * p[1]) / layer + .3 * noise(mul(p, 1.3 / layer))
+            bed = math.floor(s)
+            t = smoothstep((s - bed) / .3)
+            stand = layer_offsets[bed % 64] * (1 - t) + layer_offsets[(bed + 1) % 64] * t
+            p = add(p, mul(horizontal, .06 * least * stand * flat))
+        shaped.append(p)
+    low = min(p[2] for p in shaped)
+    cut = low + (max(p[2] for p in shaped) - low) * .03
+    shaped = [(p[0], p[1], cut + (p[2] - cut) * .05) if p[2] < cut else p for p in shaped]
+    untangle(shaped, quads, links)
+    return shaped
+
+
+def carve_cave(rng, noise, lattice, charts, points, tunnel, size):
+    """Carve a tunnel mouth back into the front (-Y) face from the ground: an arch whose walls and
+    ceiling recede up to 60% of the local thickness, under an overhanging brow. ``tunnel`` gets each
+    vertex's recess (0 at the rim, 1 deepest). Returns (centre x, half width) of the mouth in metres."""
+    w, d, h = size
+    middle, width = rng.uniform(-.14, .14), rng.uniform(.17, .22)
+    crown = rng.uniform(.42, .58)
+    depth = rng.uniform(.5, .6)
+    brow = rng.uniform(.06, .1) * min(w, d, h)
+    high = max(p[2] for p in points)
+    front = next(c for c in charts if c["axis"] == 1 and c["side"] == 0)["grid"]
+    back = next(c for c in charts if c["axis"] == 1 and c["side"] != 0)["grid"]
+    xs = [p[0] for p in points]
+    span = (min(xs), max(xs))
+    centre = span[0] + (span[1] - span[0]) * (.5 + middle)
+    half_width = (span[1] - span[0]) * width
+    moved = {}
+    for i, column in enumerate(front):
+        for j, v in enumerate(column):
+            p = points[v]
+            rx = (p[0] - centre + .12 * half_width * (noise(mul(p, 1.1)) - .5)) / half_width
+            rz = p[2] / (crown * high)
+            shape = 1 - rx * rx - rz ** 3
+            mask = smoothstep(shape / .45) * smoothstep(p[2] / (.05 * high))
+            thickness = points[back[i][j]][1] - p[1]
+            recess = mask * depth * thickness * (1 + .12 * (noise(mul(p, 2.3)) - .5))
+            # The brow: rock just above the arch leans forward over the mouth.
+            lip = brow * smoothstep((shape + 1.1) / .55) * (1 - smoothstep((shape + .05) / .4)) * smoothstep((rz - .8) / .3) * (1 - smoothstep((abs(rx) - .6) / .6))
+            moved[v] = (p[0], p[1] + recess - lip, p[2] - .35 * mask * mask * p[2] * smoothstep(1 - rz))
+            tunnel[v] = mask * mask
+    for v, p in moved.items():
+        points[v] = p
+    return centre, half_width
+
+
+def scree(rng, noise, points, size, count, mouth):
+    """Scree: fallen stones along the foot of the front and sides, kept clear of a cave mouth."""
+    w, d, h = size
+    base = [p for p in points if p[2] < .06 * h]
+    stones = []
+    for k in range(count * 6):
+        if len(stones) == count:
+            break
+        angle = rng.uniform(math.radians(-170), math.radians(-10))
+        r = min(w, d, h) * rng.uniform(.04, .1) * (1.7 if rng.random() < .3 else 1.0)
+        direction2 = (math.cos(angle), math.sin(angle))
+        foot = max(base, key=lambda p: p[0] * direction2[0] + p[1] * direction2[1] - .4 * abs(p[0] * direction2[1] - p[1] * direction2[0]))
+        centre = (foot[0] + direction2[0] * r * rng.uniform(.2, 1.4), foot[1] + direction2[1] * r * rng.uniform(.2, 1.4), r * rng.uniform(.15, .45))
+        if mouth is not None and abs(centre[0] - mouth[0]) < mouth[1] * .85:
+            continue
+        if any(math.dist(centre, other) < (r + other_r) * .9 for other, other_r in ((s[4], s[5]) for s in stones)):
+            continue
+        shell = rock_stone(rng, noise, centre, r, 0.0)
+        stones.append((shell[0], shell[1], shell[2], [0.0] * len(shell[0]), centre, r))
+    return [s[:4] for s in stones]
+
+
+def rock_shading(mesh, tunnel, size):
+    """Per-vertex bake inputs: area-weighted normals, a twice-smoothed normal for moss (so moss
+    follows the form, not every chip), and signed cavity (+ crevice, - exposed edge) from how far
+    each vertex sits below its Laplacian-smoothed neighbourhood."""
+    count = len(mesh.vertices)
+    normals = [(0.0, 0.0, 0.0)] * count
+    neighbours = [set() for _ in range(count)]
+    for face in mesh.faces:
+        ps = [mesh.vertices[i] for i in face]
+        n = cross(sub(ps[1], ps[0]), sub(ps[2], ps[0]))
+        for k, i in enumerate(face):
+            normals[i] = add(normals[i], n)
+            neighbours[i].update((face[(k + 1) % 3], face[(k + 2) % 3]))
+    normals = [norm(n) if dot(n, n) > 1e-24 else UP for n in normals]
+    neighbours = [sorted(n) for n in neighbours]
+    soft = normals
+    for _ in range(2):
+        soft = [norm(add(mul(soft[i], 2.0), mul(vsum(soft, neighbours[i]), 2.0 / max(1, len(neighbours[i]))))) for i in range(count)]
+    smooth = mesh.vertices
+    for _ in range(6):
+        smooth = [add(mul(smooth[i], .4), mul(vsum(smooth, neighbours[i]), .6 / max(1, len(neighbours[i])))) for i in range(count)]
+    scale = .02 * sum(size) / 3
+    cavity = [max(-1.0, min(1.0, dot(sub(smooth[i], mesh.vertices[i]), normals[i]) / scale)) for i in range(count)]
+    return {"normals": normals, "mossNormals": soft, "cavity": cavity, "tunnel": list(tunnel)}
+
+
+def rock_bake(mesh):
+    """World-space bake inputs for textures.tree_pixels (rock patterns): triangles with their UVs."""
+    bake = dict(mesh.bake)
+    bake.update(vertices=mesh.vertices, faces=mesh.faces, uvs=mesh.uvs)
+    return bake
 
 
 # ------------------------------------------------------------ column ---------
@@ -2057,19 +2683,26 @@ def plan(request):
     budget = min(request["triangleBudget"], HARD_TRIANGLE_LIMIT)
     if kind not in GENERATORS:
         raise ValueError("Unknown procedural generator")
+    post = None
+    if params.get("variant"):
+        # Variant family member (workers/blender/variation, copied as variation.py): concrete params, own seed, post-deformation.
+        import variation
+        params, seed, post = variation.resolve(params, seed, SPECIES[params["species"]]["radius"] if kind == "tree" else None)
     if kind == "tree":
         bark, leaves = plan_tree(params, seed, budget)
         parts = [("bark", "primary", bark)]
         if params["leafDensity"] > 0:
             parts.append(("leaves", "secondary", leaves))
     elif kind == "rock":
-        parts = [("rock", "primary", plan_rock(params, seed, budget))]
+        parts = [("rock", "primary", (plan_natural_rock if params.get("form") else plan_rock)(params, seed, budget))]
     elif kind == "column":
         parts = [("stone", "primary", plan_column(params, seed, budget))]
     elif kind in ("log", "stump"):
         parts = [("bark", "primary", (plan_log if kind == "log" else plan_stump)(params, seed, budget))]
     else:
         parts = [("foliage", "primary", plan_foliage(params, seed, budget))]
+    if post is not None:
+        variation.deform(parts, post)
     total = sum(p[2].triangles() for p in parts)
     if total > budget or any(not p[2].faces for p in parts):
         raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
@@ -2080,7 +2713,16 @@ def plan(request):
         if p[2].wood is not None:
             p[2].wood["samples"] = [((c[0], c[1], c[2] - floor), r) for c, r in p[2].wood["samples"]]
             p[2].wood["junctions"] = [((c[0], c[1], c[2] - floor), r, rp) for c, r, rp in p[2].wood["junctions"]]
+    if params.get("finish") == "natural":
+        engine_uvs(request, parts)
     return parts
+
+
+def engine_uvs(request, parts):
+    """General UV stage (workers/blender/uv; uv_*.py flat beside this file in a job): unwraps the
+    parts without deliberate generator UVs and tags every part's UV intent for the audit."""
+    import uv_stage
+    uv_stage.finish_uvs(request, parts, surface_materials(request), tuple(BARK_TILE))
 
 
 MATERIALS = {
@@ -2417,6 +3059,8 @@ def build(request, make_material, make_collection, select, make_box):
         obj["arcane_role"] = "render"
         obj["arcane_source_key"] = key
         obj["arcane_surface_uv"] = True
+        if data.uv_report:
+            obj["arcane_uv_intent"], obj["arcane_uv_texture"] = data.uv_report["intent"], data.uv_report["textureSize"]
         mesh.materials.append(mat)
         main.append(obj)
     bpy.context.view_layer.update()
@@ -2450,15 +3094,26 @@ def surface_materials(request):
     deadwood = kind in ("log", "stump")
     if deadwood:
         keys = ["bark"]
+    # Natural rock forms: one 512 px texture baked in world space over the rock's unique UV charts.
+    stone = kind == "rock" and request["procedural"].get("form") in ROCK_FORMS
     return [{"id": key.capitalize(), "color": request["procedural"]["secondaryColor"] if key == "leaves" else request["color"],
              "metallic": MATERIALS[key][0], "roughness": .8 if key in ("leaves", "foliage", "stone") else MATERIALS[key][1],
-             "surface": {"profile": profiles[key], "resolution": BARK_RESOLUTION if tree or deadwood else 256},
+             "surface": {"profile": profiles[key], "resolution": BARK_RESOLUTION if tree or deadwood or stone else 256},
              **({"pattern": species + "-" + key} if tree else {}),
-             **({"pattern": species + "-log", "repeats": log_repeats(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if deadwood else {})}
+             **({"pattern": species + "-log", "repeats": log_repeats(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if deadwood else {}),
+             **({"pattern": rock_pattern(request["procedural"]), "extent": rock_extent(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if stone else {})}
             for key in keys]
 
 
 def author_finish(request, directory, objects):
     from textures import author_surfaces
     relief = {"tree": .008, "rock": .005, "column": .006, "foliage": .007, "log": .008, "stump": .008}[request["procedural"]["kind"]]
-    author_surfaces({"seed": request["seed"], "recipe": {"materials": surface_materials(request)}}, directory, objects, normal_relief=relief)
+    materials = surface_materials(request)
+    if materials and request["procedural"]["kind"] == "rock" and request["procedural"].get("form") in ROCK_FORMS:
+        # The rock texture is baked from the (deterministic) planned mesh: world-space stone and moss.
+        materials[0]["bake"] = rock_bake(plan(request)[0][2])
+    seed = request["seed"]
+    if request["procedural"].get("variant"):
+        import variation
+        materials, seed = variation.tint_surfaces(request["procedural"], seed, materials), variation.texture_seed(request["procedural"], seed)
+    author_surfaces({"seed": seed, "recipe": {"materials": materials}}, directory, objects, normal_relief=relief)

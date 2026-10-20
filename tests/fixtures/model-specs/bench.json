@@ -1,0 +1,19 @@
+{"name": "park-bench", "triangleBudget": 10000, "spec": {
+  "kind": "spec", "size": [1.7, 0.66, 0.92],
+  "materials": [
+    {"id": "teak", "finish": "wood", "color": [0.42, 0.24, 0.12]},
+    {"id": "iron", "finish": "metal", "color": [0.04, 0.05, 0.045], "roughness": 0.6, "wear": 0.3}
+  ],
+  "parts": [
+    {"id": "frame", "op": "extrude", "material": "iron", "rot": [90, 0, 90], "at": [-0.74, 0, 0], "mirror": "x", "height": 0.045, "bevel": 0.006,
+     "shape": {"type": "polygon", "round": 0.012, "points": [
+       [-0.29, 0], [-0.2, 0], [-0.14, 0.38], [0.15, 0.38], [0.22, 0], [0.31, 0], [0.23, 0.42],
+       [0.27, 0.9], [0.2, 0.9], [0.15, 0.45], [-0.17, 0.45], [-0.22, 0.12]]}},
+    {"id": "seat", "op": "box", "material": "teak", "size": [1.64, 0.072, 0.034], "bevel": 0.008, "at": [0, -0.185, 0.467],
+     "array": {"count": 5, "step": [0, 0.08, 0]}},
+    {"id": "back", "op": "box", "material": "teak", "size": [1.64, 0.072, 0.026], "bevel": 0.007, "rot": [84, 0, 0], "at": [0, 0.155, 0.58],
+     "array": {"count": 3, "step": [0, 0.012, 0.1]}},
+    {"id": "arm", "op": "sweep", "material": "iron", "mirror": "x", "shape": {"type": "rect", "w": 0.04, "h": 0.022, "round": 0.008},
+     "path": {"points": [[0.7175, -0.2, 0.44], [0.7175, -0.25, 0.6], [0.7175, -0.12, 0.66], [0.7175, 0.1, 0.66], [0.7175, 0.2, 0.62]], "curve": "catmull"}},
+    {"id": "bolt", "op": "sphere", "material": "iron", "radius": 0.007, "at": [0.7175, -0.185, 0.484], "mirror": "x", "array": {"count": 5, "step": [0, 0.08, 0]}}
+  ]}}

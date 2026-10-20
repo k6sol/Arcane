@@ -18,6 +18,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "workers" / "blender" / "procedural.py"
+sys.path.insert(0, str(ROOT / "workers" / "blender" / "uv"))  # UV engine modules (natural finish; flat in a job)
 spec = importlib.util.spec_from_file_location("arcane_procedural_under_test", SOURCE)
 procedural = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(procedural)
@@ -105,7 +106,10 @@ CASES = [tree(s, h, lv) for s in ("pine", "oak", "birch", "palm") for h, lv in (
     {"kind": "log", "species": s, "length": L, "radius": r, "ends": e, "moss": m} for s in ("oak", "birch") for L, r in ((.5, .05), (3.0, .25), (12.0, 1.2))
     for e, m in (("cut", False), ("broken", True), ("mixed", False))] + [
     {"kind": "stump", "species": s, "radius": r, "height": h, "top": t, "moss": m} for s in ("oak", "birch") for r, h in ((.05, .1), (.35, .5), (1.5, 2.5))
-    for t, m in (("cut", True), ("broken", False))]
+    for t, m in (("cut", True), ("broken", False))] + [
+    {"kind": "rock", "size": size, "roughness": r, "form": f, "moss": m, "finish": "natural"} for f, size in (("boulder", [1.8, 1.4, 1.1]), ("outcrop", [6.0, 2.6, 4.2]), ("cave", [6.5, 3.2, 4.6]),
+                                                                                              ("boulder", [.1, .1, .1]), ("cave", [12.0, .1, 12.0]))
+    for r, m in ((0.0, False), (1.0, True))]
 
 
 def request(params, budget=20000, seed=7):
@@ -580,6 +584,93 @@ class GeneratorContract(unittest.TestCase):
         for params in ({**tree("palm"), "finish": "natural"}, {"kind": "rock", "size": [2.0, 1.5, 1.2], "roughness": .5, "finish": "natural"}):
             self.assertTrue(all("pattern" not in m and m["surface"]["resolution"] == 256 for m in procedural.surface_materials(request(params))))
 
+    def test_natural_rock_forms_are_bounded_deterministic_sized_and_uniquely_charted(self):
+        def rock(form, size=(6.0, 2.6, 4.2), moss=True, **kw):
+            return {"kind": "rock", "size": list(size), "roughness": .6, "form": form, "moss": moss, "finish": "natural", **kw}
+
+        def components(mesh):
+            parent = list(range(len(mesh.vertices)))
+
+            def find(i):
+                while parent[i] != i:
+                    parent[i] = parent[parent[i]]
+                    i = parent[i]
+                return i
+            for a, b, c in mesh.faces:
+                parent[find(b)] = find(a)
+                parent[find(c)] = find(a)
+            return len({find(i) for i in range(len(parent))})
+        for form in procedural.ROCK_FORMS:
+            for budget in (2500, 6000, 20000):
+                with self.subTest(form=form, budget=budget):
+                    (key, _, mesh), = procedural.plan(request(rock(form), budget, 5))
+                    self.assertEqual(key, "rock")
+                    self.assertLessEqual(mesh.triangles(), min(budget, procedural.ROCK_TRIANGLES))
+                    self.assertGreater(mesh.triangles(), .8 * min(budget, procedural.ROCK_TRIANGLES))
+                    again = procedural.plan(request(rock(form), budget, 5))[0][2]
+                    self.assertEqual((mesh.vertices, mesh.faces, mesh.uvs, mesh.bake), (again.vertices, again.faces, again.uvs, again.bake))
+                    self.assertNotEqual(mesh.vertices, procedural.plan(request(rock(form), budget, 6))[0][2].vertices)
+                    for axis, size in enumerate((6.0, 2.6, 4.2)):
+                        values = [v[axis] for v in mesh.vertices]
+                        self.assertAlmostEqual(max(values) - min(values), size, places=6)
+                    self.assertAlmostEqual(min(v[2] for v in mesh.vertices), 0.0, places=6)
+                    # Flat base: a ring of vertices rests within 2% of the height on the ground.
+                    self.assertGreater(sum(v[2] < .02 * 4.2 for v in mesh.vertices), 20)
+                    # Unique UV layout: every triangle lies inside its own chart; charts never overlap
+                    # and keep a gutter, so the baked texture never repeats or bleeds.
+                    bake, rects = mesh.bake, mesh.bake["charts"]
+                    self.assertEqual(len(bake["chartOf"]), len(mesh.faces))
+                    for uv, chart in zip(mesh.uvs, bake["chartOf"]):
+                        u0, v0, u1, v1 = rects[chart]
+                        self.assertTrue(all(u0 - 1e-9 <= u <= u1 + 1e-9 and v0 - 1e-9 <= v <= v1 + 1e-9 for u, v in uv))
+                    gap = 2 * procedural.ROCK_GUTTER / procedural.ROCK_ATLAS - 1e-9
+                    for i, (a0, b0, a1, b1) in enumerate(rects):
+                        self.assertTrue(0 < a0 < a1 < 1 and 0 < b0 < b1 < 1)
+                        for c0, d0, c1, d1 in rects[i + 1:]:
+                            self.assertTrue(a1 + gap <= c0 or c1 + gap <= a0 or b1 + gap <= d0 or d1 + gap <= b0)
+                    # The charts fill most of the texture.
+                    self.assertGreater(sum((a1 - a0) * (b1 - b0) for a0, b0, a1, b1 in rects), .6)
+                    for name in ("normals", "mossNormals", "cavity", "tunnel"):
+                        self.assertEqual(len(bake[name]), len(mesh.vertices))
+                    self.assertTrue(all(-1 <= c <= 1 for c in bake["cavity"]) and all(0 <= t <= 1 for t in bake["tunnel"]))
+                    self.assertEqual(max(bake["tunnel"]) > .5, form == "cave")
+                    # Outcrops carry scree: separate closed stones at the foot of the mass.
+                    if form == "boulder":
+                        self.assertEqual(components(mesh), 1)
+                    else:
+                        self.assertGreater(components(mesh), 3)
+        # The outcrop is a merged rock mass, not a box: its front foot line wanders and its skyline
+        # rises and falls along the width.
+        outcrop = procedural.plan(request(rock("outcrop"), 6000, 7))[0][2]
+        shell = [v for v in outcrop.vertices if v[2] > .25]
+        bins = collections.defaultdict(list)
+        for x, y, z in shell:
+            bins[min(5, int((x + 3.0) / 1.0))].append((y, z))
+        fronts = [min(y for y, _ in b) for b in bins.values()]
+        tops = [max(z for _, z in b) for b in bins.values()]
+        self.assertGreater(max(fronts) - min(fronts), .1 * 2.6)
+        self.assertGreater(max(tops) - min(tops), .2 * 4.2)
+        # The cave mouth is carved back into the front (-Y) face of the same outcrop.
+        outcrop, cave = (procedural.plan(request(rock(form, (6.5, 3.2, 4.6)), 6000, 8))[0][2] for form in ("outcrop", "cave"))
+
+        def front_depth(mesh):
+            middle = [v for v in mesh.vertices if abs(v[0]) < .6 and .3 < v[2] < 1.5]
+            return min(middle, key=lambda v: v[1])[1] if middle else math.inf
+        self.assertGreater(front_depth(cave) - front_depth(outcrop), .5)
+        # Fracture planes: the boulder has broad near-flat facets (many coplanar neighbour normals).
+        boulder = procedural.plan(request(rock("boulder", (1.8, 1.4, 1.1), moss=False), 6000, 5))[0][2]
+        normals = []
+        for face in boulder.faces:
+            a, b, c = (boulder.vertices[i] for i in face)
+            normals.append(procedural.norm(procedural.cross(procedural.sub(b, a), procedural.sub(c, a))))
+        flat = sum(1 for n, m in zip(normals, normals[1:]) if procedural.dot(n, m) > .995)
+        self.assertGreater(flat, .2 * len(normals))
+        materials = procedural.surface_materials(request(rock("cave", (6.5, 3.2, 4.6))))
+        self.assertEqual([(m["id"], m["pattern"], m["surface"], m["extent"], m["moss"]) for m in materials],
+                         [("Rock", "rock-outcrop", {"profile": "stone", "resolution": 512}, 6.5, True)])
+        self.assertEqual(procedural.surface_materials(request(rock("boulder", finish="flat"))), [])
+        self.assertEqual(procedural.surface_materials(request(rock("boulder", moss=False)))[0]["pattern"], "rock-boulder")
+
     def test_positive_density_scales_complete_leaves_linearly_without_a_minimum_floor(self):
         for species, make in [(s, tree) for s in ("pine", "oak", "birch")] + [(s, natural) for s in ("oak", "birch", "pine")]:
             dense = procedural.plan(request(make(species, density=1.0), 16000))[1][2]
@@ -626,7 +717,7 @@ class GeneratorContract(unittest.TestCase):
         self.assertFalse(names & {"eval", "exec", "compile", "open", "__import__", "getattr", "globals"})
         imported = {alias.name.split(".")[0] for node in ast.walk(tree_ast) if isinstance(node, (ast.Import, ast.ImportFrom))
                     for alias in node.names} | {node.module for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module}
-        self.assertLessEqual(imported, {"math", "random", "heapq", "bpy", "bmesh", "textures", "author_surfaces"})
+        self.assertLessEqual(imported, {"math", "random", "heapq", "bpy", "bmesh", "textures", "author_surfaces", "uv_stage"})
         texture_imports = [node for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module == "textures"]
         self.assertEqual([[alias.name for alias in node.names] for node in texture_imports], [["author_surfaces"]])
 
@@ -771,6 +862,70 @@ class NaturalTreeTextures(unittest.TestCase):
         self.assertEqual((procedural.LOG_DISC_ROW, procedural.LOG_DISC_TILE), (discs / 512, (512 - discs) / 512))
         with self.assertRaises(ValueError):
             self.textures.tree_surface("oak-log", [.2, .2, .2], 1, 512, 9)
+
+    def test_pine_needle_atlas_is_dense_dark_radial_bundles(self):
+        rgb, alpha, normal, _ = self.textures.tree_surface("pine-leaves", [.05, .16, .07], 3, 512)
+        for row in range(2):
+            for col in range(4):
+                tile = (slice(row * 256, (row + 1) * 256), slice(col * 128, (col + 1) * 128))
+                covered = alpha[tile] >= .5
+                # A full bottle-brush spray: wide (needles all round each shoot) and dense, still with gaps.
+                self.assertGreater(covered.mean(), .3)
+                self.assertGreater(covered.any(axis=0).mean(), .7)
+                # Dark green: green leads, blue no darker than half the red.
+                leaf = rgb[tile][covered]
+                self.assertTrue(leaf[:, 1].mean() > leaf[:, 0].mean() and leaf[:, 2].mean() >= .5 * leaf[:, 0].mean())
+                self.assertLess(leaf.mean(), .12)
+                # Lighter new growth at the shoot tips (upper tile) than at the base of the spray.
+                rows = numpy.nonzero(covered.any(axis=1))[0]
+                top, low = covered[rows[-1] - 40:rows[-1]], covered[rows[0]:rows[0] + 80]
+                tips = rgb[tile][rows[-1] - 40:rows[-1]][top][:, 1].mean()
+                base = rgb[tile][rows[0]:rows[0] + 80][low][:, 1].mean()
+                self.assertGreater(tips, base)
+        # Shade row darker than the sunlit row.
+        self.assertLess(rgb[256:][alpha[256:] >= .5].mean(), rgb[:256][alpha[:256] >= .5].mean())
+
+    def test_rock_texture_is_baked_in_world_space_with_soft_moss_and_a_dark_tunnel(self):
+        def bake(form, size, moss=True, seed=8):
+            params = {"kind": "rock", "size": size, "roughness": .6, "form": form, "moss": moss, "finish": "natural"}
+            mesh = procedural.plan(request(params, 6000, seed))[0][2]
+            return procedural.rock_bake(mesh), procedural.rock_pattern(params)
+        boulder, pattern = bake("boulder", [1.8, 1.4, 1.1], seed=11)
+        rgb, alpha, normal, rough = self.textures.tree_surface(pattern, [.2, .19, .17], 9, 512, moss=True, extent=1.8, bake=boulder)
+        again = self.textures.tree_surface(pattern, [.2, .19, .17], 9, 512, moss=True, extent=1.8, bake=boulder)
+        self.assertTrue(all((a == b).all() for a, b in zip((rgb, alpha, normal, rough), again)))
+        self.assertFalse((rgb == self.textures.tree_surface(pattern, [.2, .19, .17], 10, 512, moss=True, extent=1.8, bake=boulder)[0]).all())
+        self.assertTrue((alpha == 1).all() and numpy.isfinite(rgb).all() and (rough >= 0).all() and (rough <= 1).all())
+        self.assertTrue(numpy.allclose(numpy.linalg.norm(normal, axis=-1), 1))
+        self.assertGreater((normal[..., 2] < .995).mean(), .05)
+        # Moss settles on the boulder: green, rough texels, with a soft fringe of partial cover
+        # between moss and bare stone instead of a hard stair-stepped edge.
+        green = rgb[..., 1] - rgb[..., 0]
+        moss = green > .02
+        self.assertGreater(moss.mean(), .05)
+        self.assertGreater(rough[moss].mean(), rough[green < 0].mean())
+        partial = (green > .004) & (green < .016)
+        self.assertGreater(partial.sum(), .08 * moss.sum())
+        bare = self.textures.tree_surface(pattern, [.2, .19, .17], 9, 512, moss=False, extent=1.8, bake=boulder)[0]
+        self.assertLess(((bare[..., 1] - bare[..., 0]) > .02).mean(), .01)
+        # The cave mouth darkens inward: texels deep in the tunnel are far darker than the rim.
+        cave, pattern = bake("cave", [6.5, 3.2, 4.6])
+        rgb = self.textures.tree_surface(pattern, [.2, .19, .17], 9, 512, moss=True, extent=6.5, bake=cave)[0]
+        maps, filled, texels = self.textures._rasterise(numpy, cave, 512)
+        tunnel = maps[..., 10].reshape(512, 512)
+        texels = texels.reshape(512, 512)
+        deep, rim = texels & (tunnel > .7), texels & (tunnel > .02) & (tunnel < .15)
+        self.assertTrue(deep.any() and rim.any())
+        self.assertLess(rgb[deep].mean(), .5 * rgb[rim].mean())
+        # Outcrop strata are world-space bands with soft partings, never thin regular texel stripes:
+        # no row-to-row jump along the texture is larger than the stone's own variation.
+        self.assertLess(numpy.abs(numpy.diff(rgb.mean(axis=2), axis=0)).mean(), .02)
+        # Rock textures need their planned mesh, a 512 px layout and a bounded extent.
+        with self.assertRaises(ValueError):
+            self.textures.tree_surface("rock-boulder", [.2, .2, .2], 1, 512, extent=1.8)
+        for extent in (.01, 30.0, math.inf):
+            with self.assertRaises(ValueError):
+                self.textures.tree_surface("rock-boulder", [.2, .2, .2], 1, 512, extent=extent, bake=boulder)
 
 
 if __name__ == "__main__":

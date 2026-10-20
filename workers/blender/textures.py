@@ -40,6 +40,9 @@ def pattern(profile, phases, u, v):
     return height, clamp(.6 * height + .25 * broad + .15 * fine)
 
 
+tile_pattern = pattern
+
+
 def author_surfaces(request, directory, objects, *, normal_relief=.035):
     # Trusted generator composition only; public recipes expose bounded profiles/resolutions.
     import bpy
@@ -50,6 +53,10 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
             raise ValueError("Textured parts require exactly one generated UV layer")
         obj.data.uv_layers[0].name = "UVMap"
     for data in request["recipe"]["materials"]:
+        if data.get("library"):
+            # New requests only: a named library material (materials/mat_library) as a tile.
+            library_surface(request, directory, data)
+            continue
         surface = data.get("surface")
         if not surface:
             continue
@@ -57,23 +64,25 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
         if profile not in ["bark", "stone", "leaf", "weathered"] or size not in [128, 256, 512]:
             raise ValueError("Unsupported bounded texture profile")
         seed = int.from_bytes(hashlib.sha256((str(request["seed"]) + ":" + data["id"]).encode()).digest()[:8], "big")
-        # Natural oak/birch/pine and deadwood only (procedural.surface_materials): species bark tiles and leaf atlases.
+        # Natural oak/birch/pine, deadwood and rock forms only (procedural.surface_materials): species bark tiles, leaf atlases, baked rock textures.
         pattern = data.get("pattern")
-        if pattern is not None and (pattern not in TREE_PATTERNS or size != 512 or pattern.endswith("leaves") == (profile == "bark")):
+        stone = pattern is not None and pattern.startswith("rock-")
+        if pattern is not None and (pattern not in TREE_PATTERNS or size != 512 or stone != (profile == "stone") or (not stone and pattern.endswith("leaves") == (profile == "bark"))):
             raise ValueError("Unsupported natural tree pattern")
         cutout = pattern is not None and pattern.endswith("leaves")
         phases = [random.Random(seed + index).random() * math.tau for index in range(4)]
         pixels = {role: [] for role, _, _ in ROLES}
         step = 1 / (size - 1)
         if pattern is not None:
-            pixels = tree_pixels(pattern, data["color"], data["metallic"], seed, size, data.get("repeats", 1), data.get("moss", False))
+            pixels = tree_pixels(pattern, data["color"], data["metallic"], seed, size, data.get("repeats", 1), data.get("moss", False), data.get("extent", 1.0), data.get("bake"))
         for y in range(size if pattern is None else 0):
             v = (y % (size - 1)) * step
             for x in range(size):
                 u = (x % (size - 1)) * step
-                height, variation = pattern(profile, phases, u, v)
-                dx = (pattern(profile, phases, u + step, v)[0] - pattern(profile, phases, u - step, v)[0]) / (2 * step)
-                dy = (pattern(profile, phases, u, v + step)[0] - pattern(profile, phases, u, v - step)[0]) / (2 * step)
+                # tile_pattern: the local ``pattern`` (natural pattern name) shadows pattern().
+                height, variation = tile_pattern(profile, phases, u, v)
+                dx = (tile_pattern(profile, phases, u + step, v)[0] - tile_pattern(profile, phases, u - step, v)[0]) / (2 * step)
+                dy = (tile_pattern(profile, phases, u, v + step)[0] - tile_pattern(profile, phases, u, v - step)[0]) / (2 * step)
                 nx, ny = -dx * normal_relief, -dy * normal_relief
                 length = math.sqrt(nx * nx + ny * ny + 1)
                 pixels["baseColor"].extend([srgb(clamp(channel * (.65 + .5 * variation))) for channel in data["color"]] + [1])
@@ -119,6 +128,21 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
         mat.update_tag()
 
 
+def library_surface(request, directory, data):
+    """Bind a library material request {"name", "params"?, "resolution"?, "tileMetres"?} to
+    MAT_<id>: tileable maps (UV0 = tile_m metres) under the shared texture contract."""
+    import bpy
+    import mat_blender
+    import mat_library
+    lib = data["library"]
+    size = lib.get("resolution", 512)
+    seed = int.from_bytes(hashlib.sha256((str(request["seed"]) + ":" + data["id"]).encode()).digest()[:4], "big") & 0x7FFFFFFF
+    result = mat_library.tile(lib["name"], lib.get("params"), size=size, tile_m=lib.get("tileMetres"), seed=seed)
+    if result["evidence"]["metrics"]["errors"]:
+        raise ValueError("Library material failed its own validation")
+    mat_blender.write_material(bpy.data.materials["MAT_" + data["id"]], result, directory / ".worker", data["id"])
+
+
 def surface_evidence(mat):
     result = json.loads(mat["arcane_surface"])
     nodes = mat.node_tree.nodes
@@ -148,7 +172,7 @@ def surface_evidence(mat):
 # and the log/stump textures (procedural.py).
 # Pixel arrays only (NumPy, bundled with Blender); rows run bottom (v = 0) to top like
 # bpy image pixels. Deterministic for the material seed; periodic where UVs repeat.
-TREE_PATTERNS = ("oak-bark", "birch-bark", "pine-bark", "oak-leaves", "birch-leaves", "pine-leaves", "oak-log", "birch-log")
+TREE_PATTERNS = ("oak-bark", "birch-bark", "pine-bark", "oak-leaves", "birch-leaves", "pine-leaves", "oak-log", "birch-log", "rock-boulder", "rock-outcrop")
 # Physical size (around, along) in metres of one bark repeat; must match procedural.BARK_TILE.
 BARK_SIZE = {"oak": (.42, 1.0), "birch": (.5, .6), "pine": (.5, .8)}
 # Birch strips (first row, rows) at 512 px; must match procedural.BIRCH_STRIPS.
@@ -443,8 +467,9 @@ class _Canvas:
             rgb = np.array(color)[None, None, :] * (.6 + .5 * round_)[..., None]
             self.put(y0, x0, alpha, rgb, round_ * r * .05, np.full(alpha.shape, .85))
 
-    def stroke(self, points, widths, colors):
-        """A thin rounded stroke (a needle) whose colour runs along it from point to point."""
+    def stroke(self, points, widths, colors, lift=0.0):
+        """A thin rounded stroke (a needle) whose colour runs along it from point to point; ``lift``
+        raises it in the height field (needles nearer the viewer stand proud of the shoot)."""
         np = self.np
         for (a, b), (wa, wb), (ca, cb) in zip(zip(points, points[1:]), zip(widths, widths[1:]), zip(colors, colors[1:])):
             found = self.window(np.array([a, b]), max(wa, wb) + 1)
@@ -458,7 +483,7 @@ class _Canvas:
             alpha = np.clip(r - d + .5, 0, 1)
             round_ = np.sqrt(np.clip(1 - (d / np.maximum(r, .5)) ** 2, 0, 1))
             rgb = (ca + (cb - ca) * t[..., None]) * (.72 + .4 * round_)[..., None]
-            self.put(y0, x0, alpha, rgb, round_ * r * .08, np.full(alpha.shape, .6))
+            self.put(y0, x0, alpha, rgb, round_ * r * .08 + lift, np.full(alpha.shape, .8))
 
 
 def _shoot(start, heading, length, steps, curve):
@@ -635,50 +660,75 @@ def _pine_bark(np, rng, color, size):
 
 
 def _needle_spray(np, rng, color, width, height, shade):
-    """One original pine shoot: a twig with one or two side shoots, densely set with long paired
-    needles angled forward and crowding into a tuft round each bud."""
+    """One original pine branch end: a twig forking into three to five shoots, each a dense
+    bottle-brush of fine needles set radially all round it (seen in projection, back needles in
+    shade behind the twig, front ones lit over it), closing into a lighter new-growth tuft at
+    every tip. Dark green with a slight blue-grey cast."""
     canvas = _Canvas(np, width, height)
-    leaf = np.array(color) * (np.array([.62, .66, .7]) if shade else np.array([1.25, 1.08, .78]))
-    bark = np.array([.15, .08, .045])
-    main = _shoot((width * rng.uniform(.45, .55), 2.0), math.pi / 2 + rng.uniform(-.06, .06), height * rng.uniform(.78, .86), 16, rng.uniform(-.2, .2))
-    shoots = [(main, 2.2)]
-    for k in range(int(rng.integers(2, 4))):
-        index = int(rng.uniform(.22, .5) * (len(main) - 1))
-        side = 1 if (k + int(rng.integers(2))) % 2 else -1
-        shoots.append((_shoot(main[index], math.pi / 2 + side * rng.uniform(.45, .7), height * rng.uniform(.3, .4), 10, -side * rng.uniform(.15, .4)), 1.5))
-    for points, w in shoots:
-        canvas.twig([np.array(q) for q in points], [w * (1 - .5 * k / (len(points) - 1)) for k in range(len(points))], bark)
-    needles = []
-    for number, (points, _) in enumerate(shoots):
+    tone = np.array([.68, .7, .56]) * (np.array([.62, .66, .72]) if shade else 1.0)
+    leaf = np.array(color) * tone + np.array([.006, .007, .009])
+    fresh = leaf * np.array([1.9, 1.7, .95])
+    bark = np.array([.13, .075, .045])
+    reach = height * rng.uniform(.15, .17)
+    main = _shoot((width * rng.uniform(.46, .54), 2.0), math.pi / 2 + rng.uniform(-.06, .06), height * rng.uniform(.8, .88), 18, rng.uniform(-.16, .16))
+    shoots = [(main, 2.4, .1)]
+    forks = int(rng.integers(4, 7))
+    first = int(rng.integers(2))
+    for k in range(forks):
+        index = int((.14 + .46 * (k + rng.uniform(0, 1)) / forks) * (len(main) - 1))
+        side = 1 if (k + first) % 2 else -1
+        span = height - main[index][1] - 4
+        # Low forks splay wide, high ones hug the leader, so the spray fills its tile.
+        splay = rng.uniform(.5, .78) - .25 * k / forks
+        shoots.append((_shoot(main[index], math.pi / 2 + side * splay, min(span, height * rng.uniform(.26, .44)), 12,
+                              -side * rng.uniform(.15, .4)), 1.5, .0))
+    marks = []
+    for number, (points, w, bare) in enumerate(shoots):
+        widths = [w * (1 - .6 * k / (len(points) - 1)) for k in range(len(points))]
+        marks.append((0.0, "twig", (points, widths)))
         arc = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
-        count = int(arc / (.8 if number == 0 else 1.0))
-        for k in range(count):
-            f = .05 + .95 * (k + rng.uniform(0, 1)) / count
-            needles.append((points, f, 1 if k % 2 else -1, number))
-    reach = height * .15
-    for i in sorted(range(len(needles)), key=lambda i: rng.random()):
-        points, f, side, number = needles[i]
-        position = f * (len(points) - 1)
-        index = min(len(points) - 2, int(position))
-        a, b = np.array(points[index]), np.array(points[index + 1])
-        base = a + (b - a) * (position - index)
-        heading = math.atan2(b[1] - a[1], b[0] - a[0])
-        # Forward-swept needles that close into a tuft at the tip.
-        swing = side * rng.uniform(.45, 1.05) * (1 - .55 * f ** 3)
-        length = reach * rng.uniform(.75, 1.1) * (.85 if number else 1.0) * (1 - .25 * f ** 4)
-        curl = -side * rng.uniform(.0, .25)
-        for _ in range(12):
-            tip = base + length * np.array([math.cos(heading + swing + curl), math.sin(heading + swing + curl)])
-            if 2 <= tip[0] <= width - 3 and 2 <= tip[1] <= height - 3:
-                break
-            swing *= .8
-            length *= .92
-        mid = base + .5 * length * np.array([math.cos(heading + swing), math.sin(heading + swing)])
-        tone = rng.uniform(.72, 1.2)
-        old = rng.random() < .04
-        root = leaf * tone * .7
-        end = leaf * tone * np.array([1.35, 1.35, 1.1]) if not old else np.array([.24, .17, .07])
-        canvas.stroke([base, mid, tip], [rng.uniform(.75, .95), .7, .45], [root, (root + end) / 2, end])
+        count = int(arc * (2.2 if number == 0 else 1.9))
+        phi = 0.0
+        # Along the shoot, then a crowded tuft of short new needles round the bud.
+        for k in range(count + 16):
+            f = bare + (1 - bare) * (k + rng.uniform(0, 1)) / count if k < count else rng.uniform(.9, 1.0)
+            # Needles come in pairs from one sheath: the second keeps close to the first.
+            phi = phi + rng.uniform(-.5, .5) if k % 2 else rng.uniform(0, 2 * math.pi)
+            tip = _smooth(np, .8, 1.0, f)
+            theta = rng.uniform(.7, 1.2) * (1 - .5 * tip)
+            length = reach * rng.uniform(.78, 1.12) * (1 - .3 * tip) * (.9 if number else 1.0)
+            position = f * (len(points) - 1)
+            index = min(len(points) - 2, int(position))
+            a, b = np.array(points[index]), np.array(points[index + 1])
+            base = a + (b - a) * (position - index)
+            t = (b - a) / max(np.linalg.norm(b - a), 1e-9)
+            n = np.array([-t[1], t[0]])
+            depth = math.sin(theta) * math.sin(phi)
+            for _ in range(10):
+                vec = t * length * math.cos(theta) + n * length * math.sin(theta) * math.cos(phi)
+                end = base + vec
+                if 2 <= end[0] <= width - 3 and 2 <= end[1] <= height - 3:
+                    break
+                length *= .88
+            else:
+                continue
+            # Slight inward curve towards the shoot tip.
+            mid = base + .5 * vec + t * .06 * length
+            light = .52 + .48 * (.5 + .5 * depth) + rng.uniform(-.12, .12)
+            root = leaf * light * .75
+            end_colour = (leaf + (fresh - leaf) * float(tip)) * light * rng.uniform(1.05, 1.3)
+            if rng.random() < .012:
+                end_colour = np.array([.13, .09, .04])
+            lift = .08 * length * math.sin(theta) * math.sin(phi)
+            marks.append((depth, "needle", ([base, mid, end], [rng.uniform(.62, .8), .6, .42], [root, (root + end_colour) / 2, end_colour], lift)))
+    order = sorted(range(len(marks)), key=lambda i: (marks[i][0], rng.random()))
+    for i in order:
+        _, kind, data = marks[i]
+        if kind == "twig":
+            points, widths = data
+            canvas.twig([np.array(q) for q in points], widths, bark)
+        else:
+            canvas.stroke(*data)
     return canvas
 
 
@@ -840,13 +890,298 @@ def _log_surface(np, rng, species, color, size, repeats, moss):
     return out_rgb, np.ones(out_rgb.shape[:2]), out_normal, out_rough
 
 
-def tree_surface(pattern, color, seed, size, repeats=1, moss=False):
+# ------------------------------------------------------------------ rock ---
+# Natural rock forms are baked, not tiled: procedural.plan_natural_rock gives every lattice face of
+# the rock its own UV chart, and the bake inputs (positions, normals, cavity, tunnel recess) are
+# rasterised over those charts so stone, strata, moss and shading are computed per texel from
+# world-space position in metres. Moss edges are therefore soft and irregular at texel resolution,
+# and nothing repeats or bands across the rock.
+ROCK_GUTTER_FILL = 6
+
+
+def _rasterise(np, bake, size):
+    """Per-texel channels (position, normal, moss normal, cavity, tunnel, metres per texel along u
+    and v) over the bake's UV triangles, with a 1.5 px linear extension and a nearest-texel fill over
+    the gutters. Returns (channels HxWxC, filled HxW, texels HxW: inside a triangle)."""
+    vertices = np.asarray(bake["vertices"], dtype=float)
+    faces = np.asarray(bake["faces"], dtype=np.int64)
+    uvs = np.asarray(bake["uvs"], dtype=float) * size - .5
+    channels = np.concatenate([vertices, np.asarray(bake["normals"], dtype=float), np.asarray(bake["mossNormals"], dtype=float),
+                               np.asarray(bake["cavity"], dtype=float)[:, None], np.asarray(bake["tunnel"], dtype=float)[:, None]], axis=1)
+    if faces.ndim != 2 or faces.shape[1] != 3 or uvs.shape != (len(faces), 3, 2) or len(channels) != len(vertices):
+        raise ValueError("Rock bake needs triangles with three UVs each")
+    e1, e2 = uvs[:, 1] - uvs[:, 0], uvs[:, 2] - uvs[:, 0]
+    area = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    keep = np.abs(area) > 1e-9
+    faces, uvs, e1, e2, area = faces[keep], uvs[keep], e1[keep], e2[keep], area[keep]
+    # Metres per texel along u and v: the position gradient of each triangle.
+    p = vertices[faces]
+    du = np.stack([p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]], axis=2)
+    inverse = np.stack([np.stack([e2[:, 1], -e2[:, 0]], axis=1), np.stack([-e1[:, 1], e1[:, 0]], axis=1)], axis=1) / area[:, None, None]
+    gradient = du @ inverse
+    metric = np.stack([np.linalg.norm(gradient[:, :, 0], axis=1), np.linalg.norm(gradient[:, :, 1], axis=1)], axis=1)
+    lengths = np.stack([np.hypot(*(uvs[:, 2] - uvs[:, 1]).T), np.hypot(*e2.T), np.hypot(*e1.T)], axis=1)
+    width = channels.shape[1] + 2
+    out = np.zeros((size * size, width))
+    filled = np.zeros(size * size, dtype=bool)
+    texels = None
+    for grow in (0.0, 1.5):
+        low = np.floor(uvs.min(axis=1) - grow).astype(np.int64)
+        span = np.ceil(uvs.max(axis=1) + grow).astype(np.int64) - low + 1
+        extent = span.max(axis=1)
+        # Batches of triangles by bounding box size, rasterised together.
+        for bucket in (4, 8, 16, 32, 64, 128, 256, 512):
+            pick = np.nonzero((extent <= bucket) & (extent > bucket // 2) if bucket > 4 else extent <= 4)[0]
+            for start in range(0, len(pick), max(1, 400000 // (bucket * bucket))):
+                ids = pick[start:start + max(1, 400000 // (bucket * bucket))]
+                gy, gx = np.mgrid[0:bucket, 0:bucket]
+                x = low[ids, 0][:, None, None] + gx
+                y = low[ids, 1][:, None, None] + gy
+                dx, dy = x - uvs[ids, 0, 0][:, None, None], y - uvs[ids, 0, 1][:, None, None]
+                a = area[ids][:, None, None]
+                b1 = (dx * e2[ids, 1][:, None, None] - dy * e2[ids, 0][:, None, None]) / a
+                b2 = (e1[ids, 0][:, None, None] * dy - e1[ids, 1][:, None, None] * dx) / a
+                b0 = 1 - b1 - b2
+                slack = (grow * lengths[ids] / np.abs(area[ids])[:, None] if grow else np.full((len(ids), 3), 1e-9))[:, :, None, None]
+                inside = (b0 >= -slack[:, 0]) & (b1 >= -slack[:, 1]) & (b2 >= -slack[:, 2]) & (x >= 0) & (y >= 0) & (x < size) & (y < size)
+                t, yy, xx = np.nonzero(inside)
+                index = y[t, yy, xx] * size + x[t, yy, xx]
+                if grow:
+                    fresh = ~filled[index]
+                    t, yy, xx, index = t[fresh], yy[fresh], xx[fresh], index[fresh]
+                weights = np.stack([b0[t, yy, xx], b1[t, yy, xx], b2[t, yy, xx]], axis=1)
+                corner = channels[faces[ids[t]]]
+                out[index] = np.concatenate([(weights[:, :, None] * corner).sum(axis=1), metric[ids[t]]], axis=1)
+                filled[index] = True
+        if texels is None:
+            texels = filled.copy()
+    # Nearest fill over the rest of each gutter: propagate the source texel index outward.
+    source = np.where(filled, np.arange(size * size), -1).reshape(size, size)
+    for _ in range(ROCK_GUTTER_FILL):
+        grown = source.copy()
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            shifted = np.full_like(source, -1)
+            shifted[max(0, dy):size + min(0, dy), max(0, dx):size + min(0, dx)] = source[max(0, -dy):size + min(0, -dy), max(0, -dx):size + min(0, -dx)]
+            grown = np.where((grown < 0) & (shifted >= 0), shifted, grown)
+        source = grown
+    source = source.ravel()
+    filled = source >= 0
+    out[filled] = out[source[filled]]
+    return out, filled, texels
+
+
+def _noise3(np, table, p):
+    """Smooth 3D value noise in [0, 1] at lattice coordinates p (N, 3)."""
+    cell = np.floor(p)
+    f = p - cell
+    s = f * f * (3 - 2 * f)
+    i = cell.astype(np.int64)
+    hx = (i[:, 0] * 73856093, (i[:, 0] + 1) * 73856093)
+    hy = (i[:, 1] * 19349663, (i[:, 1] + 1) * 19349663)
+    hz = (i[:, 2] * 83492791, (i[:, 2] + 1) * 83492791)
+
+    def corner(a, b, c):
+        return table[(hx[a] ^ hy[b] ^ hz[c]) & 4095]
+    sx, sy, sz = s[:, 0], s[:, 1], s[:, 2]
+    x00 = corner(0, 0, 0)
+    x00 = x00 + (corner(1, 0, 0) - x00) * sx
+    x10 = corner(0, 1, 0)
+    x10 = x10 + (corner(1, 1, 0) - x10) * sx
+    x01 = corner(0, 0, 1)
+    x01 = x01 + (corner(1, 0, 1) - x01) * sx
+    x11 = corner(0, 1, 1)
+    x11 = x11 + (corner(1, 1, 1) - x11) * sx
+    y0 = x00 + (x10 - x00) * sy
+    return y0 + (x01 + (x11 - x01) * sy - y0) * sz
+
+
+class _Field:
+    """World-space noise layers in metres over N texels, each octave faded out above the texel's
+    Nyquist limit (so fine detail never aliases where texels are coarse)."""
+
+    def __init__(self, np, rng, position, texel):
+        self.np, self.rng, self.p, self.texel = np, rng, position, texel
+
+    def fade(self, frequency):
+        return self.np.clip((.9 - frequency * self.texel) / .4, 0, 1)
+
+    def fbm(self, frequency, octaves=1, gain=.5, stretch=(1.0, 1.0, 1.0)):
+        np = self.np
+        table = self.rng.random(4096)
+        shift = self.rng.uniform(0, 500, 3)
+        total, weight, w = np.zeros(len(self.p)), 0.0, 1.0
+        for _ in range(octaves):
+            fade = self.fade(frequency * max(stretch))
+            if fade.any():
+                total = total + w * (.5 + (_noise3(np, table, self.p * (frequency * np.array(stretch)) + shift) - .5) * fade)
+            else:
+                total = total + w * .5
+            weight += w
+            w *= gain
+            frequency *= 2.03
+            shift = shift + 17.3
+        return total / weight
+
+    def worley(self, density, warp=None):
+        """Cellular F1, F2 in metres for jittered points ``density`` per metre."""
+        np = self.np
+        table = self.rng.random((4096, 3))
+        q = (self.p if warp is None else warp) * density
+        g = np.floor(q).astype(np.int64)
+        f1 = np.full(len(q), 9.0)
+        f2 = np.full(len(q), 9.0)
+        for dx in (-1, 0, 1):
+            hx = (g[:, 0] + dx) * 73856093
+            for dy in (-1, 0, 1):
+                hxy = hx ^ (g[:, 1] + dy) * 19349663
+                for dz in (-1, 0, 1):
+                    h = (hxy ^ (g[:, 2] + dz) * 83492791) & 4095
+                    d = q - g - np.array([dx, dy, dz]) - table[h]
+                    d = np.sqrt((d * d).sum(axis=1))
+                    f2 = np.where(d < f1, f1, np.minimum(f2, d))
+                    f1 = np.minimum(f1, d)
+        return f1 / density, f2 / density
+
+
+def _rock_surface(np, rng, color, size, form, extent, moss, bake):
+    """Natural rock texture baked over the rock's unique UV charts (see _rasterise): world-space
+    tone, iron staining, mineral grain, joints and hairline cracks, irregular strata on outcrops,
+    rain streaks, lichen, crevice and ground-contact darkening, a tunnel that darkens inward, and
+    moss settling on sky-facing rock and in crevices with a soft, irregular edge."""
+    if size != 512:
+        raise ValueError("Rock textures are laid out for 512 px")
+    if not (isinstance(extent, (int, float)) and math.isfinite(extent) and .05 <= extent <= 20):
+        raise ValueError("Rock texture extent must be .05..20 m")
+    if not isinstance(bake, dict):
+        raise ValueError("Rock textures are baked from the planned rock mesh")
+    maps, filled, texels = _rasterise(np, bake, size)
+    m = maps[filled]
+    p, normal, soft = m[:, 0:3], m[:, 3:6], m[:, 6:9]
+    cavity, tunnel, mu, mv = m[:, 9], m[:, 10], np.maximum(m[:, 11], 1e-5), np.maximum(m[:, 12], 1e-5)
+    normal = normal / np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-9)
+    soft = soft / np.maximum(np.linalg.norm(soft, axis=1, keepdims=True), 1e-9)
+    up, soft_up = normal[:, 2], soft[:, 2]
+    texel = np.maximum(mu, mv)
+    field = _Field(np, rng, p, texel)
+    outcrop = form == "outcrop"
+    top = max(float(p[:, 2].max()) if len(p) else 1.0, .05)
+    base = np.array(color)
+    # Tone: macro and medium variation, iron staining, mineral grain and specks, a warm/cool drift.
+    macro = field.fbm(.8 * min(1.0, 4.0 / extent) + .25, 3)
+    medium = field.fbm(7.0, 2)
+    grain = field.fbm(70.0, 1)
+    speck = field.fbm(190.0, 1)
+    tone = .4 + .5 * macro + .36 * (medium - .5)
+    rgb = base * tone[:, None]
+    stain = _smooth(np, .58, .8, field.fbm(1.6, 3))
+    rgb = rgb + (rgb * np.array([1.25, 1.02, .75]) - rgb) * stain[:, None] * .45
+    rgb = rgb * (1 + .28 * _smooth(np, .72, .9, speck)[:, None] - .3 * _smooth(np, .3, .12, speck)[:, None])
+    rgb = rgb * (.94 + .12 * grain)[:, None]
+    warm = field.fbm(.7, 2)
+    rgb = rgb * (1 + (warm[:, None] - .5) * np.array([.22, .08, -.14]))
+    pits = field.fbm(26.0, 2)
+    rgb = rgb * (1 - .12 * _smooth(np, .55, .75, pits))[:, None]
+    height = .006 * medium + .002 * grain - .0015 * _smooth(np, .5, .75, pits)
+    rough = .8 + .1 * (grain - .5) - .06 * (macro - .5)
+    # Joints and hairline fractures: edges of a warped 3D cellular network, only some of them open,
+    # never thinner than about a texel so they do not shimmer.
+    warp = p + .12 * (np.stack([field.fbm(2.5, 2), field.fbm(2.5, 2), field.fbm(2.5, 2)], axis=1) - .5)
+    f1, f2 = field.worley(1.3 if outcrop else 2.0, warp * (np.array([1.0, 1.0, 1.6]) if outcrop else 1.0))
+    openness = _smooth(np, .5, .68, field.fbm(1.3, 2))
+    crack = (1 - _smooth(np, 0, np.maximum(.012, 1.3 * texel), f2 - f1)) * openness
+    hair = 0.0
+    if (field.fade(6.0) > 0).any():
+        h1, h2 = field.worley(6.0, warp)
+        hair = (1 - _smooth(np, 0, np.maximum(.004, 1.1 * texel), h2 - h1)) * _smooth(np, .58, .72, field.fbm(3.0, 1)) * field.fade(6.0)
+    rgb = rgb * (1 - .45 * crack * (.6 + .4 * medium) - .22 * hair)[:, None]
+    height = height - .01 * crack - .003 * hair
+    rough = rough + .12 * crack
+    steep = 1 - _smooth(np, .55, .92, np.abs(up))
+    # Strata: warped, dipping beds of uneven thickness in world metres, each bed its own tone; only
+    # some partings open, and those at least two texels wide, so beds read as bands, not stripes.
+    thickness = .45 if outcrop else .22
+    bend = field.fbm(.5, 2)
+    s = (p[:, 2] + .05 * p[:, 0] + .03 * p[:, 1] + 1.4 * thickness * (bend - .5)) / thickness
+    s = s + .35 * np.sin(s * 2.1 + 1.3) + .2 * np.sin(s * 3.7)
+    bed = np.floor(s)
+    shade = rng.random(4096)[bed.astype(np.int64) % 4096]
+    edge = np.minimum(s - bed, bed + 1 - s) * thickness
+    parting = (1 - _smooth(np, 0, np.maximum(.025, 2.2 * texel), edge)) * _smooth(np, .4, .65, field.fbm(.9, 2))
+    strength = (1.0 if outcrop else .15) * (.25 + .75 * steep)
+    rgb = rgb * (1 + strength[:, None] * (.16 * (shade[:, None] - .5) - .2 * parting[:, None]))
+    height = height + strength * (.005 * shade - .007 * parting)
+    # Rain streaks: dark vertical stains on the steep faces.
+    streak = field.fbm(1.6, 3, stretch=(2.5, 2.5, .2)) * _smooth(np, .3, .7, field.fbm(.5, 2))
+    rgb = rgb * (1 - .28 * _smooth(np, .35, .62, streak) * steep)[:, None]
+    # Lichen: pale and rust crusts in clusters; rosettes where texels are fine enough to show them.
+    cover = _smooth(np, .56, .76, field.fbm(2.2, 3))
+    show = field.fade(12.0)
+    rosette = .45 * (1 - show)
+    if (show > 0).any():
+        l1, _ = field.worley(12.0)
+        rosette = rosette + (1 - _smooth(np, .01, .04, l1)) * show
+    spots = field.fbm(40.0, 1)
+    lichen = rosette * cover * .4 * (.7 + .3 * spots) * (1 - _smooth(np, .02, .25, tunnel))
+    pale = np.array([.2, .21, .17]) * (.85 + .3 * spots[:, None])
+    rust = np.array([.34, .22, .07])
+    hue = _smooth(np, .62, .75, field.fbm(5.0, 1))[:, None]
+    rgb = rgb + (pale + (rust - pale) * hue * .6 - rgb) * lichen[:, None]
+    height = height + .0008 * lichen
+    rough = rough + .06 * lichen
+    # Occlusion: crevices darken, exposed edges catch a little light, rock darkens where it meets the
+    # ground, and the tunnel darkens toward its back.
+    crevice, exposed = np.clip(cavity, 0, 1), np.clip(-cavity, 0, 1)
+    contact = 1 - _smooth(np, 0, .06 * top + .03, p[:, 2])
+    shadow = (1 - .38 * crevice) * (1 + .1 * exposed) * (1 - .3 * contact) * (1 - .86 * _smooth(np, 0, 1, tunnel) ** .8)
+    rgb = rgb * shadow[:, None]
+    if moss:
+        # Moss mask from the smoothed up-facing normal, crevices and multi-octave world noise, with
+        # a texel-resolution ragged fringe; never in the tunnel or under overhangs.
+        lay = (.8 * _smooth(np, .1, .85, soft_up) + .45 * crevice * (soft_up > -.2) - .25 * exposed
+               - .35 * (1 - _smooth(np, .02, .12, p[:, 2] / top)))
+        patch = field.fbm(.9 * min(1.0, 3.0 / extent) + .3, 4)
+        fringe = field.fbm(14.0, 2)
+        amount = lay + 1.1 * (patch - .5) + .25 * (fringe - .5) - .5 * _smooth(np, .05, .4, tunnel)
+        coverage = _smooth(np, .52, .66, amount) * _smooth(np, -.3, .2, soft_up)
+        tufts = field.fbm(80.0, 2)
+        clumps = field.fbm(6.0, 3)
+        green = np.array([.025, .045, .012]) + np.array([.05, .065, .016]) * tufts[:, None]
+        green = green + (np.array([.09, .1, .03]) - green) * _smooth(np, .5, .8, clumps)[:, None] * .5
+        green = green * (1 - .35 * crevice)[:, None]
+        rgb = rgb + (green - rgb) * coverage[:, None]
+        height = height * (1 - coverage) + (.008 + .006 * tufts) * coverage
+        rough = rough + (.96 - rough) * coverage
+    rough = rough + (.95 - rough) * _smooth(np, .2, 1, tunnel) * .5
+    # Back to the texture grid; unused atlas space is the mean stone, flat and matte.
+    mean = rgb[texels[filled]].mean(axis=0) if texels.any() else base * .5
+    grid_rgb = np.empty((size * size, 3))
+    grid_rgb[:] = mean
+    grid_rgb[filled] = rgb
+    grid_height = np.zeros(size * size)
+    grid_height[filled] = height
+    grid_rough = np.full(size * size, .85)
+    grid_rough[filled] = rough
+    grid_mu, grid_mv = np.ones(size * size), np.ones(size * size)
+    grid_mu[filled], grid_mv[filled] = mu, mv
+    height, mu, mv = (a.reshape(size, size) for a in (grid_height, grid_mu, grid_mv))
+    # Tangent-space normals (+X = +u, +Y = +v) from the height field, in metres per texel.
+    gx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) / (2 * mu)
+    gy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) / (2 * mv)
+    tangent = np.stack([-gx, -gy, np.ones_like(gx)], axis=-1)
+    tangent[~filled.reshape(size, size)] = (0.0, 0.0, 1.0)
+    return (np.clip(grid_rgb.reshape(size, size, 3), 0, 1), np.ones((size, size)), _unit(np, tangent),
+            np.clip(grid_rough.reshape(size, size), .4, 1.0))
+
+
+def tree_surface(pattern, color, seed, size, repeats=1, moss=False, extent=1.0, bake=None):
     """(linear rgb HxWx3, alpha HxW, normal HxWx3, roughness HxW) for a natural tree pattern."""
     np = _np()
     if pattern not in TREE_PATTERNS:
         raise ValueError("Unsupported natural tree pattern")
     rng = np.random.default_rng(seed)
     species, kind = pattern.split("-")
+    if species == "rock":
+        return _rock_surface(np, rng, color, size, kind, extent, bool(moss), bake)
     if kind == "log":
         if not isinstance(repeats, int) or not 1 <= repeats <= 8:
             raise ValueError("Log bark repeats must be 1..8")
@@ -856,11 +1191,11 @@ def tree_surface(pattern, color, seed, size, repeats=1, moss=False):
     return _leaf_atlas(np, rng, species, color, size)
 
 
-def tree_pixels(pattern, color, metallic, seed, size, repeats=1, moss=False):
+def tree_pixels(pattern, color, metallic, seed, size, repeats=1, moss=False, extent=1.0, bake=None):
     """Flat float32 RGBA arrays (bpy pixel order) for the baseColor/normal/metallicRoughness roles.
     Base colour alpha is leaf coverage for the atlases and exactly 1 for bark."""
     np = _np()
-    rgb, alpha, normal, rough = tree_surface(pattern, color, seed, size, repeats, moss)
+    rgb, alpha, normal, rough = tree_surface(pattern, color, seed, size, repeats, moss, extent, bake)
     rgb = np.clip(rgb, 0, 1)
     encoded = np.where(rgb <= .0031308, 12.92 * rgb, 1.055 * np.power(rgb, 1 / 2.4) - .055)
     ones = np.ones(alpha.shape)

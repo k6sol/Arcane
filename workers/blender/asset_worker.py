@@ -22,6 +22,12 @@ import bmesh
 from mathutils import Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Model spec compiler modules (grammar/ in the repository; flat beside this file in a job).
+sys.path.insert(1, str(Path(__file__).resolve().parent / "grammar"))
+# General UV engine modules (uv/ in the repository; flat beside this file in a job).
+sys.path.insert(2, str(Path(__file__).resolve().parent / "uv"))
+# Procedural PBR material library (materials/ in the repository; flat beside this file in a job).
+sys.path.insert(3, str(Path(__file__).resolve().parent / "materials"))
 from audit import audit_scene, render_metrics
 
 
@@ -56,7 +62,7 @@ def failure_report(error):
     elif text.endswith(" export round trip failed"):
         code = "EXPORT_ROUNDTRIP"
     elif text in ["Tree has no foliage anchors within budget", "Column is too short for its base and capital",
-                  "Column exceeds its triangle budget; reduce flutes", "Procedural mesh exceeded its triangle budget or is empty"]:
+                  "Column exceeds its triangle budget; reduce flutes", "Procedural mesh exceeded its triangle budget or is empty"] or text.startswith("Model spec:"):
         code = "PROCEDURAL_LIMIT"
     elif _failure_stage in ["identity", "export-identity"] and isinstance(error, ValueError):
         code = "IMPORT_IDENTITY"
@@ -489,7 +495,10 @@ def main():
     if request["template"] == "custom-assembly":
         main_objects, lods, collision, sockets = build_assembly(request, material, collection, select)
     elif request["template"] == "procedural":
-        from procedural import build as build_procedural
+        if request["procedural"]["kind"] == "spec":
+            from model_build import build as build_procedural
+        else:
+            from procedural import build as build_procedural
         main_objects, lods, collision, sockets = build_procedural(request, material, collection, select, box)
     else:
         mats = [material("MAT_Body", request["color"], 0.15, 0.42),
@@ -503,13 +512,16 @@ def main():
     event("mesh-validation")
     for obj in main_objects + lods + collision:
         finalize(obj)
-    if any(data.get("surface") for data in request.get("recipe", {}).get("materials", [])):
+    if any(data.get("surface") or data.get("library") for data in request.get("recipe", {}).get("materials", [])):
         event("texture-authoring")
         from textures import author_surfaces
         author_surfaces(request, directory, main_objects + lods)
     elif request.get("procedural", {}).get("finish") == "natural":
         event("texture-authoring")
-        from procedural import author_finish
+        if request["procedural"]["kind"] == "spec":
+            from model_build import author_finish
+        else:
+            from procedural import author_finish
         author_finish(request, directory, main_objects + lods)
     meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
     if errors:
@@ -526,8 +538,13 @@ def main():
     if request["template"] == "procedural":
         # Large organic assets: keep albedo readable under the span-scaled preview lights.
         scene.view_settings.exposure = -1.4
-    renders = []
-    for name, offset in [("preview-hero.png", (2.6, -3.5, 2.3)), ("preview-side.png", (-4.0, 0, 0.5))]:
+    renders, review = [], None
+    if request.get("procedural", {}).get("kind") == "spec":
+        # Model spec self-check: hero render, 2x2 review sheet and measured review metrics.
+        from model_build import review as spec_review
+        event("review-render", "preview-hero.png")
+        renders, review = spec_review(request, directory, camera, target, span, render_metrics)
+    for name, offset in [] if review is not None else [("preview-hero.png", (2.6, -3.5, 2.3)), ("preview-side.png", (-4.0, 0, 0.5))]:
         event("review-render", name)
         camera.location = target + Vector(offset) * span
         camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
@@ -568,9 +585,15 @@ def main():
               "renders": renders, "exports": exports, "studioImport": import_evidence, "savedSceneReopened": True, "errors": [],
               "warnings": ["UV overlap/texel density, inter-object intersections and visual quality require human review.",
                            "Roblox import, scale mapping and collision behavior are unverified."]}
+    if any("uvQuality" in mesh for mesh in meshes):
+        # Measured UV quality (workers/blender/uv) replaces the generic UV review note.
+        report["warnings"][0] = "Inter-object intersections and visual quality require human review; UV quality is measured per mesh (uvQuality)."
+        report["warnings"] += [mesh["name"] + ": " + line for mesh in meshes for line in mesh.get("uvQuality", {}).get("warnings", [])][:32]
     if request["template"] == "custom-assembly":
         report["assembly"] = assembly_evidence(request)
         write_json(directory / "assembly.json", report["assembly"])
+    if review is not None:
+        report["review"] = review
     event("audit-write", "audit.json")
     write_json(directory / "audit.json", report)
     print("ARCANE_RESULT " + json.dumps({"audit": "audit.json"}), flush=True)

@@ -1,0 +1,28 @@
+{"name": "runed-sword", "triangleBudget": 7000, "spec": {
+  "kind": "spec", "size": [0.3, 0.06, 1.12],
+  "materials": [
+    {"id": "steel", "finish": "metal", "color": [0.62, 0.63, 0.66], "roughness": 0.28, "wear": 0.25},
+    {"id": "gold", "finish": "metal", "color": [0.78, 0.55, 0.2], "roughness": 0.3},
+    {"id": "leather", "finish": "leather", "color": [0.2, 0.1, 0.05]}
+  ],
+  "parts": [
+    {"id": "blade", "op": "loft", "material": "steel", "curve": "smooth", "grain": "z",
+     "sections": [
+       {"z": 0.2, "shape": {"type": "polygon", "points": [[0.026, 0], [0.004, 0.006], [-0.004, 0.006], [-0.026, 0], [-0.004, -0.006], [0.004, -0.006]]}},
+       {"z": 0.55, "shape": {"type": "polygon", "points": [[0.026, 0], [0.004, 0.006], [-0.004, 0.006], [-0.026, 0], [-0.004, -0.006], [0.004, -0.006]]}, "scale": [1.12, 1]},
+       {"z": 0.95, "shape": {"type": "polygon", "points": [[0.026, 0], [0.004, 0.006], [-0.004, 0.006], [-0.026, 0], [-0.004, -0.006], [0.004, -0.006]]}, "scale": [0.75, 0.85]},
+       {"z": 1.1, "shape": {"type": "polygon", "points": [[0.026, 0], [0.004, 0.006], [-0.004, 0.006], [-0.026, 0], [-0.004, -0.006], [0.004, -0.006]]}, "scale": 0}]},
+    {"id": "ricasso", "op": "box", "material": "steel", "size": [0.05, 0.012, 0.05], "bevel": 0.002, "at": [0, 0, 0.2]},
+    {"id": "guard", "op": "sweep", "material": "gold", "shape": {"type": "rect", "w": 0.026, "h": 0.02, "round": 0.006},
+     "path": {"points": [[-0.14, 0, 0.215], [-0.08, 0, 0.18], [0, 0, 0.17], [0.08, 0, 0.18], [0.14, 0, 0.215]], "curve": "catmull"},
+     "taper": [[0, 0.55], [0.5, 1.15], [1, 0.55]]},
+    {"id": "guard_tip", "op": "sphere", "material": "gold", "radius": 0.013, "at": [0.142, 0, 0.217], "mirror": "x"},
+    {"id": "grip", "op": "revolve", "material": "leather", "curve": "smooth",
+     "profile": [[0, 0.02], [0.015, 0.02], [0.017, 0.09], [0.015, 0.16], [0, 0.16]],
+     "flutes": {"count": 9, "depth": 0.35, "width": 0.5}},
+    {"id": "pommel", "op": "sdf", "material": "gold",
+     "shapes": [
+       {"prim": "sphere", "r": 0.026, "at": [0, 0, 0.0]},
+       {"prim": "cylinder", "r": 0.016, "h": 0.03, "at": [0, 0, 0.026], "blend": 0.01},
+       {"prim": "torus", "r": 0.024, "r2": 0.006, "at": [0, 0, 0.0], "rot": [90, 0, 0], "blend": 0.006}]}
+  ]}}

@@ -18,7 +18,8 @@ test('procedural natural finish is controlled, canonical and preserves legacy re
     assert.equal(normalized.procedural!.finish, finish);
     assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(normalized))), normalized);
   }
-  assert.deepEqual(workerScripts(normalizeRequest(input('natural'))), [...workerScripts(legacy), 'textures.py']);
+  // Natural finish bundles the surface author and the general UV engine modules (workers/blender/uv).
+  assert.deepEqual(workerScripts(normalizeRequest(input('natural'))), [...workerScripts(legacy), 'textures.py', 'uv_engine.py', 'uv_metrics.py', 'uv_stage.py']);
   for (const finish of [null, 1, {}, 'photo', 'https://example.test/bark.png', 'import os']) assert.throws(() => normalizeRequest(input(finish)));
 });
 
@@ -77,6 +78,23 @@ test('natural procedural audit refuses missing, wrong or incomplete generated ma
   ]) { const value = measured(); change(value); assert.throws(() => validateAudit(value, request)); }
 });
 
+test('measured UV quality of natural parts must pass and stay finite; audits made before it stay valid', () => {
+  const request = normalizeRequest(input('natural'));
+  const quality = () => ({ intent: 'tiled' as const, faces: 3114, islands: 147, foldedFaces: 0, mirroredFaces: 15, angleDistortion: .65, angleDistortionP95: 1.99,
+    areaDistortion: .65, densityCV: .5, texelsPerMetre: 1117.8, seamRatio: .2, islandGapPx: null, errors: [] as string[], warnings: ['UV densityCV 0.508 above (0.5)'] });
+  const withQuality = () => { const value = measured(); value.meshes[0]!.uvQuality = quality(); value.meshes[1]!.uvQuality = { ...quality(), intent: 'atlas' }; return value; };
+  assert.doesNotThrow(() => validateAudit(measured(), request));
+  assert.doesNotThrow(() => validateAudit(withQuality(), request));
+  for (const change of [
+    (value: AssetAudit) => { value.meshes[0]!.uvQuality!.errors = ['UV angleDistortionP95 7.57 above (4)']; },
+    (value: AssetAudit) => { value.meshes[0]!.uvQuality!.intent = 'smart' as never; },
+    (value: AssetAudit) => { value.meshes[0]!.uvQuality!.angleDistortion = Number.NaN; },
+    (value: AssetAudit) => { value.meshes[0]!.uvQuality!.foldedFaces = -1; },
+    (value: AssetAudit) => { delete (value.meshes[0]!.uvQuality as Record<string, unknown>).warnings; },
+    (value: AssetAudit) => { value.meshes[2]!.uvQuality = quality(); },
+  ]) { const value = withQuality(); change(value); assert.throws(() => validateAudit(value, request), /uvQuality|UV quality/); }
+});
+
 test('natural oak/birch evidence names its species pattern and cutout leaves; older plain tiles stay valid', () => {
   const request = normalizeRequest(input('natural'));
   assert.equal(request.procedural!.kind === 'tree' && request.procedural!.species, 'oak');
@@ -95,6 +113,21 @@ test('natural oak/birch evidence names its species pattern and cutout leaves; ol
   assert.throws(() => validateAudit(plain, request), /selected finish/);
   const rock = normalizeRequest({ template: 'procedural', name: 'quality', renderResolution: 128, procedural: { kind: 'rock', finish: 'natural' } });
   assert.deepEqual(proceduralSurfaceMaterials(rock.procedural!, rock.color).map(m => m.surface), [{ profile: 'stone', resolution: 256 }]);
+});
+
+test('natural rock forms author one opaque 512 px rock atlas; the legacy rock keeps its plain tile', () => {
+  for (const [form, pattern] of [['boulder', 'rock-boulder'], ['outcrop', 'rock-outcrop'], ['cave', 'rock-outcrop']] as const) {
+    const request = normalizeRequest({ template: 'procedural', name: 'quality', renderResolution: 128, procedural: { kind: 'rock', form, moss: true, finish: 'natural' } });
+    const materials = proceduralSurfaceMaterials(request.procedural!, request.color);
+    assert.deepEqual(materials.map(m => [m.id, m.surface]), [['Rock', { profile: 'stone', resolution: 512 }]]);
+    assert.equal(proceduralSurfacePattern(request.procedural!, 'Rock'), pattern);
+    assert.deepEqual(workerScripts(request), ['asset_worker.py', 'audit.py', 'probe.py', 'procedural.py', 'textures.py', 'uv_engine.py', 'uv_metrics.py', 'uv_stage.py']);
+  }
+  const flat = normalizeRequest({ template: 'procedural', name: 'quality', renderResolution: 128, procedural: { kind: 'rock', form: 'boulder', finish: 'flat' } });
+  assert.deepEqual(proceduralSurfaceMaterials(flat.procedural!, flat.color), []);
+  assert.equal(proceduralSurfacePattern(flat.procedural!, 'Rock'), undefined);
+  const legacy = normalizeRequest({ template: 'procedural', name: 'quality', renderResolution: 128, procedural: { kind: 'rock', finish: 'natural' } });
+  assert.equal(proceduralSurfacePattern(legacy.procedural!, 'Rock'), undefined);
 });
 
 test('natural pine authors 512 px species bark and needle-spray cutout patterns; palm keeps plain tiles', () => {

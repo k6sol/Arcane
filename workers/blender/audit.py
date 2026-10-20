@@ -14,7 +14,17 @@ def material_metrics(mat):
     if mat.get("arcane_surface"):
         from textures import surface_evidence
         result["surface"] = surface_evidence(mat)
+    if mat.get("arcane_material"):
+        # Library materials (materials/mat_blender): measured again from the packed images.
+        from mat_blender import audit_material
+        result["library"] = audit_material(mat)
     return result
+
+
+def uv_quality(mesh, intent, texture_size):
+    # uv_*.py: flat beside this file in a job; asset_worker puts workers/blender/uv on the path otherwise.
+    from uv_stage import audit_quality
+    return audit_quality(mesh, intent, texture_size)
 
 
 def mesh_metrics(obj, role, imported=False):
@@ -83,6 +93,10 @@ def mesh_metrics(obj, role, imported=False):
         elif obj.get("arcane_surface_uv") and obj.get("arcane_source_key") and role != "collision":
             result["materialProperties"] = [material_metrics(mat) for mat in mesh.materials if mat]
         errors = result["errors"]
+        if role != "collision" and uv and obj.get("arcane_uv_intent"):
+            # Natural-finish parts: measured UV quality (workers/blender/uv) gates the audit.
+            result["uvQuality"] = uv_quality(mesh, obj["arcane_uv_intent"], obj.get("arcane_uv_texture", 512))
+            errors.extend(result["uvQuality"]["errors"])
         if not finite or any(not math.isfinite(d) or d <= 1e-6 for d in obj.dimensions):
             errors.append("Nonfinite coordinates or empty dimensions")
         for field in ["nonManifoldEdges", "looseVertices", "looseEdges", "duplicateFaces", "degenerateFaces", "inconsistentNormals", "invertedComponents"]:
@@ -105,6 +119,9 @@ def mesh_metrics(obj, role, imported=False):
                     continue
                 if not all(link.is_valid for link in mat.node_tree.links):
                     errors.append("Invalid material node link")
+                if mat.get("arcane_material"):
+                    from mat_blender import audit_material
+                    errors.extend("Library material " + e for e in audit_material(mat)["errors"])
                 outputs = [node for node in mat.node_tree.nodes if node.type == "OUTPUT_MATERIAL" and node.is_active_output]
                 if not outputs or not outputs[0].inputs["Surface"].is_linked:
                     errors.append("Material surface is disconnected")

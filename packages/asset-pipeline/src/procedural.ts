@@ -1,11 +1,13 @@
 import { AssetError } from './types.js';
 import type { AssemblyMaterial, MaterialSurface, ProceduralSpec, Vec3 } from './types.js';
+import { MODEL_FINISH_DEFAULTS, MODEL_LIMITS, modelMaterialName, modelSourceKeys, normalizeModelSpec } from './model-spec.js';
 
 /** Bounded parameters for the bundled Blender generators (workers/blender/procedural.py).
  * Data only: typed numbers/enums, never code, paths or imports. Normalization is
  * canonical (fixed key order, explicit defaults) so a stored request re-normalizes
  * to itself. Triangle budgets follow the 20,000-triangle per-mesh Roblox limit. */
-export const PROCEDURAL_KINDS = ['tree', 'rock', 'column', 'foliage', 'log', 'stump'] as const;
+/** 'spec': a declarative part-graph model (model-spec.ts) compiled by workers/blender/grammar. */
+export const PROCEDURAL_KINDS = ['tree', 'rock', 'column', 'foliage', 'log', 'stump', 'spec'] as const;
 export const TREE_SPECIES = ['pine', 'oak', 'birch', 'palm'] as const;
 export const COLUMN_BASES = ['none', 'plinth', 'attic'] as const;
 export const COLUMN_CAPITALS = ['none', 'doric', 'ionic', 'corinthian'] as const;
@@ -14,6 +16,8 @@ export const FOLIAGE_STYLES = ['bush', 'grass', 'fern'] as const;
 export const DEADWOOD_SPECIES = ['oak', 'birch'] as const;
 export const LOG_ENDS = ['cut', 'broken', 'mixed'] as const;
 export const STUMP_TOPS = ['cut', 'broken'] as const;
+/** Natural rock forms: weathered boulder, steep cliff-face outcrop (front -Y), outcrop with a recessed cave mouth. Omitted keeps the legacy rock. */
+export const ROCK_FORMS = ['boulder', 'outcrop', 'cave'] as const;
 export const PROCEDURAL_FINISHES = ['natural', 'flat'] as const;
 export const PROCEDURAL_SURFACE_RESOLUTION = 256;
 /** Natural oak/birch/pine: species bark tile and leaf/needle-spray cutout atlas (glTF MASK leaves) at 512 px. */
@@ -21,7 +25,7 @@ export const PROCEDURAL_TREE_SURFACE_RESOLUTION = 512;
 const PATTERN_SPECIES: readonly string[] = ['oak', 'birch', 'pine'];
 export const PROCEDURAL_LIMITS = Object.freeze({
   minTriangles: 2500, maxTriangles: 20000,
-  defaultTriangles: { tree: 16000, rock: 6000, column: 12000, foliage: 8000, log: 4000, stump: 4000 } as const,
+  defaultTriangles: { tree: 16000, rock: 6000, column: 12000, foliage: 8000, log: 4000, stump: 4000, spec: MODEL_LIMITS.defaultTriangles } as const,
   treeHeight: [2, 20] as const, trunkRadius: [0.03, 1.5] as const, rockSize: [0.1, 12] as const,
   columnRadius: [0.05, 2] as const, columnHeight: [0.5, 20] as const, flutes: [8, 32] as const,
   foliageRadius: [0.1, 5] as const, foliageHeight: [0.1, 5] as const,
@@ -75,8 +79,21 @@ function vec(v: unknown, range: readonly [number, number], fallback: Vec3, label
   return value.map(n => num(n, range, 0, label)) as Vec3;
 }
 
+/** Variant family member [i, n] (workers/blender/variation): 1 <= i <= n, 2 <= n <= 16; members are ordered youngest/smallest first. */
+export const PROCEDURAL_VARIANTS = 16;
 export function normalizeProcedural(value: unknown): ProceduralSpec {
+  if (value && typeof value === 'object' && !Array.isArray(value) && 'variant' in value) {
+    const { variant, ...rest } = value as Record<string, unknown>, spec = normalizeProcedural(rest);
+    if (variant === undefined) return spec;
+    if (!['tree', 'rock', 'foliage', 'log', 'stump'].includes(spec.kind)) fail(`A ${spec.kind} has no variant family (tree, rock, foliage, log or stump only).`);
+    if (spec.kind === 'spec') fail('Model specs have no variant family; vary the seed or the spec.');
+    const [i, n] = Array.isArray(variant) && variant.length === 2 ? variant : [];
+    if (!Number.isInteger(n) || !Number.isInteger(i) || (n as number) < 2 || (n as number) > PROCEDURAL_VARIANTS || (i as number) < 1 || (i as number) > (n as number))
+      fail(`variant must be [i, n] with 2 <= n <= ${PROCEDURAL_VARIANTS} and 1 <= i <= n.`);
+    return { ...spec, variant: [i as number, n as number] };
+  }
   const kind = choice((value as { kind?: unknown } | null)?.kind, PROCEDURAL_KINDS, 'tree', 'procedural.kind');
+  if (kind === 'spec') return normalizeModelSpec(value);
   // Omitted legacy requests keep their exact canonical bytes and flat-material meaning.
   // The reviewed assets_procedural tool explicitly selects the natural finish by default.
   const finished = <T extends ProceduralSpec>(r: Record<string, unknown>, spec: T): T => r.finish === undefined ? spec
@@ -92,8 +109,10 @@ export function normalizeProcedural(value: unknown): ProceduralSpec {
       secondaryColor: color(r.secondaryColor, 'secondaryColor') ?? [...SPECIES[species].leaves] as Vec3 });
   }
   if (kind === 'rock') {
-    const r = fields(value, ['kind', 'size', 'roughness', 'finish']);
-    return finished(r, { kind, size: vec(r.size, PROCEDURAL_LIMITS.rockSize, [1.6, 1.2, 0.9], 'Rock size (m)'), roughness: num(r.roughness, [0, 1], 0.5, 'roughness') });
+    const r = fields(value, ['kind', 'size', 'roughness', 'form', 'moss', 'finish']);
+    const rock = { kind, size: vec(r.size, PROCEDURAL_LIMITS.rockSize, [1.6, 1.2, 0.9], 'Rock size (m)'), roughness: num(r.roughness, [0, 1], 0.5, 'roughness') };
+    // Without a form (or moss) the legacy rock keeps its exact canonical bytes.
+    return finished(r, r.form === undefined && r.moss === undefined ? rock : { ...rock, form: choice(r.form, ROCK_FORMS, 'boulder', 'Rock form'), moss: flag(r.moss, 'moss') });
   }
   if (kind === 'column') {
     const r = fields(value, ['kind', 'radius', 'height', 'flutes', 'base', 'capital', 'finish']);
@@ -120,25 +139,32 @@ export function normalizeProcedural(value: unknown): ProceduralSpec {
 
 /** Exact render membership from normalized parameters; never inferred from scene claims. */
 export function proceduralRenderSourceKeys(spec: ProceduralSpec, manifestVersion: 1 | 2 = 2): string[] {
+  if (spec.kind === 'spec') return modelSourceKeys(spec);
   return spec.kind === 'tree' ? (manifestVersion === 2 && spec.leafDensity === 0 ? ['bark'] : ['bark', 'leaves'])
     : [spec.kind === 'column' ? 'stone' : spec.kind === 'rock' ? 'rock' : spec.kind === 'log' || spec.kind === 'stump' ? 'bark' : 'foliage'];
 }
 
 /** Exact opaque PBR authoring contract shared by generation, persisted audit and GLB verification. */
 export function proceduralSurfaceMaterials(spec: ProceduralSpec, primary: Vec3, manifestVersion: 1 | 2 = 2): AssemblyMaterial[] {
+  // Model specs bake one 512 px atlas per material slot unless finish is flat.
+  if (spec.kind === 'spec') return spec.finish === 'flat' ? [] : spec.materials.map(m => ({ id: modelMaterialName(m.id), color: [...m.color] as Vec3, metallic: m.metallic,
+    roughness: m.roughness, surface: { profile: MODEL_FINISH_DEFAULTS[m.finish][0], resolution: PROCEDURAL_TREE_SURFACE_RESOLUTION } }));
   if (spec.finish !== 'natural') return [];
   const rows: [string, MaterialSurface['profile'], Vec3, number][] = spec.kind === 'tree' ? [['Bark', 'bark', primary, .92], ['Leaves', 'leaf', spec.secondaryColor, .8]]
     : spec.kind === 'log' || spec.kind === 'stump' ? [['Bark', 'bark', primary, .92]]
     : spec.kind === 'rock' ? [['Rock', 'stone', primary, .88]] : spec.kind === 'column' ? [['Stone', 'weathered', primary, .8]]
     : [['Foliage', 'leaf', primary, .8]];
   const keys = proceduralRenderSourceKeys(spec, manifestVersion);
-  const resolution = (spec.kind === 'tree' && PATTERN_SPECIES.includes(spec.species)) || spec.kind === 'log' || spec.kind === 'stump' ? PROCEDURAL_TREE_SURFACE_RESOLUTION : PROCEDURAL_SURFACE_RESOLUTION;
+  const resolution = (spec.kind === 'tree' && PATTERN_SPECIES.includes(spec.species)) || spec.kind === 'log' || spec.kind === 'stump' || (spec.kind === 'rock' && spec.form !== undefined)
+    ? PROCEDURAL_TREE_SURFACE_RESOLUTION : PROCEDURAL_SURFACE_RESOLUTION;
   return rows.filter(([id]) => keys.includes(id.toLowerCase())).map(([id, profile, color, roughness]) => ({ id, color: [...color] as Vec3, metallic: 0, roughness,
     surface: { profile, resolution } }));
 }
 
-/** Worker pattern evidence for a natural oak/birch/pine surface (e.g. 'pine-leaves', log/stump 'birch-log'), else undefined. */
+/** Worker pattern evidence for a natural oak/birch/pine surface (e.g. 'pine-leaves', log/stump 'birch-log', rock form 'rock-outcrop'), else undefined. */
 export function proceduralSurfacePattern(spec: ProceduralSpec, id: string): string | undefined {
+  if (spec.kind === 'spec') { const m = spec.materials.find(x => modelMaterialName(x.id) === id); return spec.finish !== 'flat' && m ? 'spec-' + m.finish : undefined; }
+  if (spec.kind === 'rock') return spec.finish === 'natural' && spec.form !== undefined ? 'rock-' + (spec.form === 'boulder' ? 'boulder' : 'outcrop') : undefined;
   if (spec.kind === 'log' || spec.kind === 'stump') return spec.finish === 'natural' ? spec.species + '-log' : undefined;
   return spec.finish === 'natural' && spec.kind === 'tree' && PATTERN_SPECIES.includes(spec.species) ? spec.species + '-' + id.toLowerCase() : undefined;
 }
@@ -147,6 +173,7 @@ const clamp = (n: number) => Math.min(20, Math.max(0.1, Math.round(n * 1e4) / 1e
 /** Approximate bounding size, informational only; the worker measures the real bounds. */
 export function proceduralSize(spec: ProceduralSpec): Vec3 {
   if (spec.kind === 'tree') { const w = clamp(spec.height * SPECIES[spec.species].width); return [w, w, clamp(spec.height)]; }
+  if (spec.kind === 'spec') return [...spec.size] as Vec3; // Exact declared size (validated 0.02..40 m).
   if (spec.kind === 'rock') return spec.size.map(clamp) as Vec3;
   if (spec.kind === 'column') { const w = clamp(spec.radius * (spec.base === 'none' ? 2.6 : 2.7)); return [w, w, clamp(spec.height)]; }
   if (spec.kind === 'log') return [clamp(spec.length), clamp(spec.radius * 2.4), clamp(spec.radius * 2.2)];
@@ -154,6 +181,7 @@ export function proceduralSize(spec: ProceduralSpec): Vec3 {
   return [clamp(spec.radius * 2), clamp(spec.radius * 2), clamp(spec.height)];
 }
 export function proceduralColor(spec: ProceduralSpec): Vec3 {
+  if (spec.kind === 'spec') return [...spec.materials[0]!.color] as Vec3;
   return [...(spec.kind === 'tree' || spec.kind === 'log' || spec.kind === 'stump' ? SPECIES[spec.species].bark : PRIMARY[spec.kind])] as Vec3;
 }
 export function proceduralDefaultBudget(spec: ProceduralSpec): number { return PROCEDURAL_LIMITS.defaultTriangles[spec.kind]; }
