@@ -53,3 +53,5 @@ Waterfall body: a `terrain_generate` lake (or an `environment_apply` Water fill)
 
 ## Verify
 Edit-mode `studio_viewport_capture` with `frame {ref, views}` shows lights, Beams and placement; particles animate at runtime, so confirm motion with `playtest_request` (capture). Check silhouette readability, no blown-out additive stacking, and that effects stop and clean up after interruption.
+
+Previews: `arcane-vfx:portable`.

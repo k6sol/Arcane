@@ -37,7 +37,7 @@ async function fixture(t) {
 test('real authored pack validates without claiming behavioral approval', async () => {
   const result = await validatePack(ROOT);
   assert.equal(result.skills, 62);
-  assert.equal(result.references, 35);
+  assert.equal(result.references, 39);
   assert.equal(result.approved, 0);
   assert.equal(result.behaviorRuns, 0);
   assert.equal(result.verification, 'offline-structure-and-integrity-only');

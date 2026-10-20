@@ -847,9 +847,9 @@
         "light",
         "highlight"
       ],
-      "version": "0.2.0",
+      "version": "0.3.0",
       "path": "skills/arcane/arcane-vfx/SKILL.md",
-      "sha256": "40d5b61d1429073f08643ddfed8315ef10976ae6f6e141225f20aba4bfd715da",
+      "sha256": "403e300c9d5a6aa0226626527ded0fe711720b375ed4b9c46da78ff10a46f744",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -862,6 +862,26 @@
           "name": "recipes",
           "path": "skills/arcane/arcane-vfx/references/recipes.md",
           "sha256": "caca9356c72d9ed59e1388515c71b6460b2eca1a113e13e4cfd6287858b57876"
+        },
+        {
+          "name": "portable",
+          "path": "skills/arcane/arcane-vfx/toolkit/skills/arcane-vfx/SKILL.md",
+          "sha256": "80d85b87c63fc1e1fea5eb5c00985c650d4a364cec580e753053bdb16dd6b41a"
+        },
+        {
+          "name": "format",
+          "path": "skills/arcane/arcane-vfx/toolkit/skills/arcane-vfx/references/effect-format.md",
+          "sha256": "f711049698c36b3988f9a23ef29091251445a74c96d9bd7f2b2a8edb79b7c57e"
+        },
+        {
+          "name": "playback",
+          "path": "skills/arcane/arcane-vfx/toolkit/skills/arcane-vfx/references/roblox-playback.md",
+          "sha256": "edf24b588d73de9eec9bae6354124c94b518cc8351801916c301a2e88e2d943f"
+        },
+        {
+          "name": "runtime",
+          "path": "skills/arcane/arcane-vfx/toolkit/skills/arcane-vfx/assets/Runtime.luau",
+          "sha256": "04c43af531886cb7a348f018fca41e6d1c44a1ed1a44479733a6cb8912ae18c1"
         }
       ]
     },
