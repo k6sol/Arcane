@@ -57,16 +57,16 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
         if profile not in ["bark", "stone", "leaf", "weathered"] or size not in [128, 256, 512]:
             raise ValueError("Unsupported bounded texture profile")
         seed = int.from_bytes(hashlib.sha256((str(request["seed"]) + ":" + data["id"]).encode()).digest()[:8], "big")
-        # Natural oak/birch only (procedural.surface_materials): species bark tiles and leaf atlases.
+        # Natural oak/birch/pine and deadwood only (procedural.surface_materials): species bark tiles and leaf atlases.
         pattern = data.get("pattern")
-        if pattern is not None and (pattern not in TREE_PATTERNS or size != 512 or pattern.endswith("bark") != (profile == "bark")):
+        if pattern is not None and (pattern not in TREE_PATTERNS or size != 512 or pattern.endswith("leaves") == (profile == "bark")):
             raise ValueError("Unsupported natural tree pattern")
         cutout = pattern is not None and pattern.endswith("leaves")
         phases = [random.Random(seed + index).random() * math.tau for index in range(4)]
         pixels = {role: [] for role, _, _ in ROLES}
         step = 1 / (size - 1)
         if pattern is not None:
-            pixels = tree_pixels(pattern, data["color"], data["metallic"], seed, size)
+            pixels = tree_pixels(pattern, data["color"], data["metallic"], seed, size, data.get("repeats", 1), data.get("moss", False))
         for y in range(size if pattern is None else 0):
             v = (y % (size - 1)) * step
             for x in range(size):
@@ -144,17 +144,26 @@ def surface_evidence(mat):
 
 
 # ----------------------------------------------------- natural tree surfaces ---
-# Species bark tiles and leaf-spray atlases for the natural-finish oak/birch (procedural.py).
+# Species bark tiles and leaf-spray (pine: needle-spray) atlases for the natural-finish oak/birch/pine
+# and the log/stump textures (procedural.py).
 # Pixel arrays only (NumPy, bundled with Blender); rows run bottom (v = 0) to top like
 # bpy image pixels. Deterministic for the material seed; periodic where UVs repeat.
-TREE_PATTERNS = ("oak-bark", "birch-bark", "oak-leaves", "birch-leaves")
+TREE_PATTERNS = ("oak-bark", "birch-bark", "pine-bark", "oak-leaves", "birch-leaves", "pine-leaves", "oak-log", "birch-log")
 # Physical size (around, along) in metres of one bark repeat; must match procedural.BARK_TILE.
-BARK_SIZE = {"oak": (.42, 1.0), "birch": (.5, .6)}
+BARK_SIZE = {"oak": (.42, 1.0), "birch": (.5, .6), "pine": (.5, .8)}
 # Birch strips (first row, rows) at 512 px; must match procedural.BIRCH_STRIPS.
-BIRCH_ROWS = (("clean", 0, 256), ("patched", 256, 128), ("base", 384, 128))
-# Leaf atlas tiles: 4 x 2 of 128 x 256 px at 512; must match procedural.ATLAS_* and MASS_TILE.
+# Bottom up in trunk order, so the texel rows beside each strip continue its own edge content (mip
+# filtering never bleeds a foreign strip in); BIRCH_GUARD rows below base / above clean continue them.
+BIRCH_ROWS = (("base", 4, 68), ("fall", 72, 68), ("patched", 140, 76), ("rise", 216, 92), ("clean", 308, 200))
+BIRCH_GUARD = 4
+# Natural log/stump texture rows (name, first row, rows) at 512 px: one bark band (mossy when the
+# asset asks for moss) and four end-grain discs; must match procedural.LOG_BAND / LOG_DISC_*.
+LOG_ROWS = (("bark", 0, 384), ("discs", 384, 128))
+# Bark tile lengths one log band spans along the log, so its exact repeat is that much longer;
+# must match procedural.LOG_CYCLES.
+LOG_CYCLES = {"oak": 2, "birch": 2}
+# Leaf atlas tiles: 4 x 2 of 128 x 256 px at 512 (row 0 sunlit, row 1 shade); must match procedural.ATLAS_*.
 ATLAS = (4, 2)
-MASS = (3, 1)
 
 
 def _np():
@@ -201,55 +210,84 @@ def _wrap(np, d):
     return d - np.round(d)
 
 
-def _oak_bark(np, rng, color, size):
+def _oak_bark(np, rng, color, size, rows=None, around_tiles=1, cycles=1, weathered=0.0):
     """Furrowed oak: deep warped vertical furrows between corky ridges, broken into plates by
-    staggered, partial cross cracks."""
+    staggered, partial cross cracks. Defaults give the tree tile (one repeat on size x size). A log
+    band passes ``rows`` (period rows - 1, last row repeating the first), ``around_tiles`` tile widths
+    round the whole girth and ``cycles`` tile lengths along it, all generated afresh (no copied
+    tiles), and ``weathered`` (0..1) for the lower-contrast, softer-relief bark of dead wood."""
     around, along = BARK_SIZE["oak"]
-    x = (np.arange(size) + .5) / size
-    u, v = np.meshgrid(x, x)
-    columns = 9
-    warp = (_fbm(np, rng, u, v, 3, 3, 3) - .5) * 2.2 + (_fbm(np, rng, u, v, 8, 6, 2) - .5) * .7
+    n = size if rows is None else rows - 1
+    u, v = np.meshgrid((np.arange(size) + .5) / size, (np.arange(n) + .5) / n)
+    a, c = around_tiles, cycles
+    columns = 7 * a
+    warp = (_fbm(np, rng, u, v, 3 * a, 3 * c, 3) - .5) * 2.2 + (_fbm(np, rng, u, v, 8 * a, 6 * c, 2) - .5) * .7
     w = columns * u + warp
     ridge_index = np.floor(w).astype(np.int64) % columns
     s = w - np.floor(w)
     edge = np.minimum(s, 1 - s)
-    furrow = .12 + .2 * _fbm(np, rng, u, v, columns, 10, 2)
+    furrow = .2 + .22 * _fbm(np, rng, u, v, columns, 10 * c, 2)
     plate = _smooth(np, .02, furrow + .04, edge)
     crown = np.clip(edge / .5, 0, 1)
-    cracks = rng.integers(5, 11, columns)
+    cracks = rng.integers(5, 11, columns) * c
     phase = rng.random(columns)
-    position = cracks[ridge_index] * v + phase[ridge_index] + .35 * (_fbm(np, rng, u, v, 10, 6, 2) - .5)
-    gate = _smooth(np, .35, .55, _value_noise(np, rng, u, v, columns * 2, 18))
+    position = cracks[ridge_index] * v + phase[ridge_index] + .35 * (_fbm(np, rng, u, v, 10 * a, 6 * c, 2) - .5)
+    gate = _smooth(np, .35, .55, _value_noise(np, rng, u, v, columns * 2, 18 * c))
     crack = (1 - _smooth(np, 0.0, .07, np.abs(_wrap(np, position)))) * gate
     plate = plate * (1 - .75 * crack)
-    cell = (ridge_index * 31 + np.floor(position).astype(np.int64) * 7) % 97
+    # Plate index modulo its ridge's crack count, so plate tones repeat with the tile.
+    cell = (ridge_index * 31 + (np.floor(position).astype(np.int64) % cracks[ridge_index]) * 7) % 97
     tone = (.82 + .3 * rng.random(97))[cell]
-    grain = _fbm(np, rng, u, v, 20, 24, 3)
-    fine = _value_noise(np, rng, u, v, 110, 90)
+    grain = _fbm(np, rng, u, v, 20 * a, 24 * c, 3)
+    fine = _value_noise(np, rng, u, v, 110 * a, 90 * c)
     height = plate * (.75 + .25 * crown) + .14 * grain * plate + .05 * fine
-    metres = .025 * height
-    normal = _normals(np, metres, around / size, along / size)
+    metres = .025 * (1 - .45 * weathered) * height
+    normal = _normals(np, metres, around * a / size, along * c / n)
     base = np.array(color, dtype=np.float64)
-    top = (base * .85 + np.array([.2, .19, .175]) * .5) * tone[..., None]
-    deep = base * .16
+    top = (base * .62 + np.array([.03, .028, .026])) * tone[..., None]
+    deep = base * (.07 + .3 * weathered)
     lit = np.clip(plate * (.7 + .3 * crown) + .15 * (grain - .5), 0, 1)[..., None]
     rgb = deep + (top - deep) * lit
-    lichen = _smooth(np, .62, .72, _fbm(np, rng, u, v, 4, 6, 3))[..., None] * lit * .5
+    lichen = _smooth(np, .64, .74, _fbm(np, rng, u, v, 4 * a, 6 * c, 3))[..., None] * lit * .3
     rgb = rgb + (np.array([.28, .31, .24]) - rgb) * lichen
     rgb = rgb * (.85 + .3 * grain * (.6 + .4 * fine))[..., None]
     rough = .78 + .2 * (1 - lit[..., 0])
-    return rgb, np.ones((size, size)), normal, rough
+    if weathered:
+        # Dead wood: furrow and plate tones pulled towards their mean, so the bark reads as one
+        # weathered surface rather than black and white stripes.
+        mean = rgb.reshape(-1, 3).mean(axis=0)
+        rgb = mean + (rgb - mean) * (1 - .45 * weathered)
+    if rows is not None:
+        rgb, normal, rough = (np.concatenate([x, x[:1]], axis=0) for x in (rgb, normal, rough))
+    return rgb, np.ones(rgb.shape[:2]), normal, rough
 
 
-def _birch_strip(np, rng, color, size, name, rows):
-    """One periodic birch strip (``rows`` px, period rows - 1 so its last row repeats its first).
-    Clean: white papery bark with horizontal lenticels; patched: dark rugged patches on white;
-    base: dark fissured bark with a few white remnants."""
+LENTICELS = 150
+# Per strip: (patch level at the strip foot, at its top, lenticel count at foot, at top). Levels
+# above every field value leave clean white bark; lower levels grow the dark rugged patches.
+BIRCH_GRADES = {"clean": (2.0, 2.0, 150, 150), "rise": (.6, 1.2, 60, 150), "patched": (.6, .6, 60, 60),
+                "fall": (.36, .6, 14, 60), "base": (.36, .36, 14, 14), "log": (.62, .62, 90, 90)}
+
+
+def _birch_strip(np, seed, color, size, name, rows):
+    """One birch strip of ``rows`` px covering one repeat (period rows - 1, so a periodic strip's
+    last row repeats its first). Every strip samples the same fields (same seed) at strip-relative
+    v, so strips that meet where the tile wraps agree: clean white papery bark with horizontal
+    lenticels, patched (dark rugged patches on white), the dark fissured base, and the grading
+    strips whose patch level and lenticel count ramp from one neighbour to the other."""
+    rng = np.random.default_rng(seed)
     around, along = BARK_SIZE["birch"]
     period = rows - 1
     x = (np.arange(size) + .5) / size
-    t = np.arange(period) / period
+    # One extra row beyond each end for the non-periodic gradient of the grading strips.
+    t = np.arange(-1, period + 2) / period
     u, v = np.meshgrid(x, t)
+    lo_level, hi_level, lo_count, hi_count = BIRCH_GRADES[name]
+    # Ragged grading: the ramp is displaced by noise that vanishes at both strip ends.
+    ragged = _value_noise(np, rng, u, v, 5, 2) - .5
+    ramp = np.clip(v + 1.1 * ragged * np.sin(np.pi * np.clip(v, 0.0, 1.0)), 0.0, 1.0)
+    level = lo_level + (hi_level - lo_level) * ramp
+    count = lo_count + (hi_count - lo_count) * ramp
     white = np.array(color, dtype=np.float64)
     band = _fbm(np, rng, u, v, 3, 20, 3)
     streak = np.abs(np.sin(np.pi * (v * 40 + .8 * _fbm(np, rng, u, v, 3, 4, 2))))
@@ -260,41 +298,53 @@ def _birch_strip(np, rng, color, size, name, rows):
     height = .2 * band
     rough = .55 + .1 * band
     dark = np.zeros_like(u)
-    count = {"clean": 85, "patched": 40, "base": 14}[name]
-    for _ in range(count):
+    for k in range(LENTICELS):
         cx, cy = rng.random(), rng.random()
-        half = rng.uniform(.01, .055) * (1.8 if rng.random() < .15 else 1)
-        thick = rng.uniform(.0035, .0075) / along
+        half = rng.uniform(.015, .07) * (1.8 if rng.random() < .15 else 1)
+        thick = rng.uniform(.004, .009) / along
+        strength = rng.uniform(.6, 1)
         du = _wrap(np, u - cx) / half
         dv = _wrap(np, v - cy - .02 * du * du * half) / thick
-        mark = np.clip(1.6 * (1 - du * du - dv * dv), 0, 1) * rng.uniform(.6, 1)
+        mark = np.clip(1.6 * (1 - du * du - dv * dv), 0, 1) * strength * np.clip(count - k, 0, 1)
         dark = np.maximum(dark, mark)
-    if name != "clean":
-        field = _fbm(np, rng, u, v, 4, 4, 4) + .14 * (_fbm(np, rng, u, v, 16, 14, 2) - .5)
-        level = .6 if name == "patched" else .36
-        patch = _smooth(np, level, level + .025, field)
-        fissure = 1 - np.abs(2 * _fbm(np, rng, u, v, 14, 4, 3) - 1)
-        rugged = fissure ** 1.5
-        grey = np.array([.025, .023, .021]) + np.array([.14, .13, .12]) * rugged[..., None]
-        rgb = rgb + (grey - rgb) * patch[..., None]
-        height = height + patch * (.9 * rugged + .4)
-        rough = rough + (.95 - rough) * patch
-        dark = dark * (1 - patch)
+    field = _fbm(np, rng, u, v, 4, 4, 4) + .14 * (_fbm(np, rng, u, v, 16, 14, 2) - .5)
+    patch = np.clip((field - level) / .025, 0.0, 1.0)
+    patch = patch * patch * (3 - 2 * patch)
+    fissure = 1 - np.abs(2 * _fbm(np, rng, u, v, 14, 4, 3) - 1)
+    rugged = fissure ** 1.5
+    grey = np.array([.025, .023, .021]) + np.array([.14, .13, .12]) * rugged[..., None]
+    rgb = rgb + (grey - rgb) * patch[..., None]
+    height = height + patch * (.9 * rugged + .4)
+    rough = rough + (.95 - rough) * patch
+    dark = dark * (1 - patch)
     lenticel = np.array([.05, .04, .036])
     rgb = rgb + (lenticel - rgb) * dark[..., None]
     height = height + .3 * dark
     rough = rough + (.88 - rough) * dark
     metres = .008 * height
-    normal = _normals(np, metres, around / size, along / period)
-    cat = lambda a: np.concatenate([a, a[:1]], axis=0)
-    return cat(rgb), cat(np.ones_like(u)), cat(normal), cat(rough)
+    gx = (np.roll(metres, -1, axis=1) - np.roll(metres, 1, axis=1)) / (2 * around / size)
+    gy = (metres[2:] - metres[:-2]) / (2 * along / period)
+    gx = gx[1:-1]
+    length = np.sqrt(gx * gx + gy * gy + 1)
+    normal = np.stack([-gx / length, -gy / length, 1 / length], axis=-1)
+    out = [rgb[1:-1], np.ones_like(u[1:-1]), normal, rough[1:-1]]
+    if lo_level == hi_level:
+        # Periodic strip: its last row is exactly its first.
+        for a in out:
+            a[-1] = a[0]
+    return tuple(out)
 
 
 def _birch_bark(np, rng, color, size):
     if size != 512:
         raise ValueError("Birch strips are laid out for 512 px")
-    parts = [_birch_strip(np, rng, color, size, name, rows) for name, _, rows in BIRCH_ROWS]
-    return tuple(np.concatenate([p[k] for p in parts], axis=0) for k in range(4))
+    seed = int(rng.integers(2 ** 62))
+    parts = [_birch_strip(np, seed, color, size, name, rows) for name, _, rows in BIRCH_ROWS]
+    g = BIRCH_GUARD
+    # Guards: the base period just below its first row, the clean period just above its last.
+    below = [a[-1 - g:-1] for a in parts[0]]
+    above = [a[1:1 + g] for a in parts[-1]]
+    return tuple(np.concatenate([below[k]] + [p[k] for p in parts] + [above[k]], axis=0) for k in range(4))
 
 
 def _leaf_shape(np, species, s, side, lobes):
@@ -393,6 +443,23 @@ class _Canvas:
             rgb = np.array(color)[None, None, :] * (.6 + .5 * round_)[..., None]
             self.put(y0, x0, alpha, rgb, round_ * r * .05, np.full(alpha.shape, .85))
 
+    def stroke(self, points, widths, colors):
+        """A thin rounded stroke (a needle) whose colour runs along it from point to point."""
+        np = self.np
+        for (a, b), (wa, wb), (ca, cb) in zip(zip(points, points[1:]), zip(widths, widths[1:]), zip(colors, colors[1:])):
+            found = self.window(np.array([a, b]), max(wa, wb) + 1)
+            if found is None:
+                continue
+            x0, y0, X, Y = found
+            ab = b - a
+            t = np.clip(((X - a[0]) * ab[0] + (Y - a[1]) * ab[1]) / max(ab @ ab, 1e-9), 0, 1)
+            d = np.hypot(X - (a[0] + ab[0] * t), Y - (a[1] + ab[1] * t))
+            r = wa + (wb - wa) * t
+            alpha = np.clip(r - d + .5, 0, 1)
+            round_ = np.sqrt(np.clip(1 - (d / np.maximum(r, .5)) ** 2, 0, 1))
+            rgb = (ca + (cb - ca) * t[..., None]) * (.72 + .4 * round_)[..., None]
+            self.put(y0, x0, alpha, rgb, round_ * r * .08, np.full(alpha.shape, .6))
+
 
 def _shoot(start, heading, length, steps, curve):
     points = [start]
@@ -409,10 +476,10 @@ def _spray(np, rng, species, color, width, height, shade):
     leaf_color = np.array(color) * (np.array([.6, .66, .8]) if shade else 1.0)
     bark = np.array([.09, .065, .045]) if species == "oak" else np.array([.14, .06, .04])
     oak = species == "oak"
-    main = _shoot((width * rng.uniform(.42, .58), 2.0), math.pi / 2 + rng.uniform(-.12, .12), height * (.62 if oak else .82), 14, rng.uniform(-.35, .35))
+    main = _shoot((width * rng.uniform(.44, .56), 2.0), math.pi / 2 + rng.uniform(-.07, .07), height * (.66 if oak else .82), 14, rng.uniform(-.22, .22))
     shoots = [(main, 2.6 if oak else 1.7)]
-    for k in range(2 if oak else 3):
-        f = rng.uniform(.25, .6) if oak else rng.uniform(.2, .7)
+    for k in range(3 if oak else 4):
+        f = rng.uniform(.12, .5) if oak else rng.uniform(.15, .65)
         index = int(f * (len(main) - 1))
         side = 1 if k % 2 == 0 else -1
         if rng.random() < .5:
@@ -427,17 +494,17 @@ def _spray(np, rng, species, color, width, height, shade):
         scale = 1.0 if number == 0 else .85
         if oak:
             # Oak leaves crowd at shoot tips (a rosette) with a few along the shoot.
-            for k in range(rng.integers(2, 4) if number else rng.integers(3, 5)):
-                f = rng.uniform(.3, .8)
-                leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.6, 1.1), scale * rng.uniform(.18, .23)))
-            for k in range(rng.integers(4, 6) if number == 0 else 3):
-                leaves.append((points, 1.0, rng.uniform(-1.1, 1.1), scale * rng.uniform(.2, .27)))
+            for k in range(rng.integers(3, 5) if number else rng.integers(4, 7)):
+                f = rng.uniform(.15, .85)
+                leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.6, 1.2), scale * rng.uniform(.14, .19)))
+            for k in range(rng.integers(5, 8) if number == 0 else 4):
+                leaves.append((points, 1.0, rng.uniform(-1.2, 1.2), scale * rng.uniform(.16, .21)))
         else:
             # Birch: alternate leaves along thin, slightly drooping shoots.
-            count = rng.integers(8, 11) if number == 0 else rng.integers(4, 6)
+            count = rng.integers(11, 15) if number == 0 else rng.integers(5, 8)
             for k in range(count):
-                f = .15 + .85 * k / max(1, count - 1)
-                leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.5, 1.15), scale * rng.uniform(.13, .17)))
+                f = .12 + .88 * k / max(1, count - 1)
+                leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.5, 1.2), scale * rng.uniform(.11, .14)))
     for i in sorted(range(len(leaves)), key=lambda i: rng.random()):
         points, f, swing, size = leaves[i]
         index = min(len(points) - 1, int(round(f * (len(points) - 1))))
@@ -457,17 +524,161 @@ def _spray(np, rng, species, color, width, height, shade):
     return canvas
 
 
-def _mass(np, rng, species, color, width, height):
-    """Opaque packed-leaf tile for inner volumes: shaded leaves over a deep green ground."""
+# ------------------------------------------------------------------ pine ---
+# Pine strips (first row, rows) at 512 px, bottom up in trunk order with PINE_GUARD rows below/above;
+# must match procedural.PINE_STRIPS. Each strip's plate level ramps from its foot to its top: 1 is the
+# deep plated lower-trunk bark, 0 the thin flaking upper bark that also covers the limbs.
+PINE_ROWS = (("plated", 4, 224), ("grade", 228, 96), ("upper", 324, 184))
+PINE_GUARD = 4
+PINE_GRADES = {"plated": (1.0, 1.0), "grade": (1.0, 0.0), "upper": (0.0, 0.0)}
+
+
+def _cells(np, rng, u, v, cu, cv, aspect):
+    """Periodic jittered-grid cells (period 1 in u and v): nearest and second-nearest feature
+    distances in u units (v distances scaled by ``aspect``) and the nearest cell's index."""
+    jitter = rng.random((cv, cu, 2))
+    f1, f2 = np.full(u.shape, 9.0), np.full(u.shape, 9.0)
+    ident = np.zeros(u.shape, dtype=np.int64)
+    for j in range(cv):
+        for i in range(cu):
+            d = np.hypot(_wrap(np, u - (i + .15 + .7 * jitter[j, i, 0]) / cu), _wrap(np, v - (j + .15 + .7 * jitter[j, i, 1]) / cv) * aspect)
+            closer = d < f1
+            f2 = np.where(closer, f1, np.minimum(f2, d))
+            ident = np.where(closer, j * cu + i, ident)
+            f1 = np.where(closer, d, f1)
+    return f1, f2, ident
+
+
+def _pine_strip(np, seed, color, size, name, rows):
+    """One pine strip of ``rows`` px covering one repeat (period rows - 1). Lower trunk: thick
+    reddish-brown plates with weathered grey-brown faces, fresh red-orange flake scars and deep dark
+    fissures. Upper trunk and limbs: thin papery orange flakes with fine dark seams. Every strip
+    samples the same fields (same seed) at strip-relative v, so strips meeting at a tile wrap agree."""
+    rng = np.random.default_rng(seed)
+    around, along = BARK_SIZE["pine"]
+    aspect = along / around
+    period = rows - 1
+    x = (np.arange(size) + .5) / size
+    t = np.arange(-1, period + 2) / period
+    u, v = np.meshgrid(x, t)
+    lo, hi = PINE_GRADES[name]
+    ragged = _value_noise(np, rng, u, v, 5, 2) - .5
+    ramp = np.clip(v + 1.1 * ragged * np.sin(np.pi * np.clip(v, 0.0, 1.0)), 0.0, 1.0)
+    plated = lo + (hi - lo) * ramp
+    base = np.array(color, dtype=np.float64)
+    wu = (_fbm(np, rng, u, v, 6, 5, 3) - .5) * .13
+    wv = (_fbm(np, rng, u, v, 6, 5, 3) - .5) * .07
+    flakes = _fbm(np, rng, u, v, 24, 30, 3)
+    fine = _value_noise(np, rng, u, v, 120, 150)
+    # Lower trunk plates: cells about 12 x 27 cm, drawn out further along the trunk.
+    f1, f2, ident = _cells(np, rng, u + wu, v + wv, 4, 3, aspect * .36)
+    edge = (f2 - f1) * around
+    fissure = 1 - _smooth(np, .006, .038, edge)
+    shoulder = _smooth(np, .0, .07, edge)
+    tone = (.78 + .44 * rng.random(15))[ident % 15]
+    # Vertical fibrous layering across each plate face.
+    terrace = _fbm(np, rng, u + .3 * wu, v, 64, 5, 2)
+    # Layered scales on each plate: where an outer scale has flaked off, fresh red-brown bark shows.
+    h1, h2, hid = _cells(np, rng, u + 1.6 * wu + .012 * (flakes - .5), v + 1.4 * wv, 14, 9, aspect * .7)
+    subedge = (h2 - h1) * around
+    subline = (1 - _smooth(np, .0005, .003, subedge)) * (1 - fissure) * _smooth(np, .35, .6, flakes)
+    lost = (rng.random(126) > .6)[hid % 126]
+    scar = lost * _smooth(np, .0008, .006, subedge) * (1 - fissure) * (.55 + .45 * _smooth(np, .3, .7, fine))
+    grey = base * np.array([.68, .72, .8]) + .018
+    fresh = base * np.array([1.35, .88, .68])
+    mottle = _fbm(np, rng, u, v, 12, 16, 3)
+    face = (grey + (fresh - grey) * scar[..., None]) * tone[..., None] * (.78 + .44 * mottle[..., None])
+    face = face * (.86 + .14 * terrace[..., None]) * (.9 + .2 * fine[..., None]) * (.62 + .38 * shoulder[..., None]) * (1 - .2 * subline[..., None])
+    deep = base * np.array([.3, .2, .16])
+    wall = base * np.array([1.2, .78, .6])
+    gap = deep + (wall - deep) * _smooth(np, .005, .03, edge)[..., None]
+    lower = gap + (face - gap) * (1 - fissure)[..., None]
+    lower_h = (1 - fissure) * (.55 + .3 * shoulder + .12 * flakes - .06 * terrace - .1 * scar - .08 * subline) + .05 * fine
+    lower_r = .78 + .17 * fissure
+    # Upper trunk: thin papery flakes, about 5 x 4.5 cm, peeling lighter at their edges.
+    g1, g2, gid = _cells(np, rng, u + .5 * wu, v + .5 * wv, 10, 18, aspect)
+    seam = 1 - _smooth(np, .0004, .004, (g2 - g1) * around)
+    peel = _smooth(np, .55, .8, _fbm(np, rng, u, v, 14, 20, 2)) * _smooth(np, .002, .01, (g2 - g1) * around)
+    orange = base * np.array([1.6, 1.22, .86])
+    flake_tone = (.84 + .3 * rng.random(180))[gid % 180]
+    upper = orange * flake_tone[..., None] * (.92 + .16 * fine[..., None])
+    upper = upper + (orange * np.array([1.22, 1.2, 1.15]) - upper) * peel[..., None]
+    upper = upper * (1 - .55 * seam[..., None])
+    upper_h = .3 * (1 - seam) + .1 * flakes + .12 * peel
+    upper_r = .66 + .12 * seam
+    p = plated[..., None]
+    rgb = upper + (lower - upper) * p
+    height = upper_h + (lower_h - upper_h) * plated
+    rough = upper_r + (lower_r - upper_r) * plated
+    metres = (.004 + .018 * plated) * height
+    gx = (np.roll(metres, -1, axis=1) - np.roll(metres, 1, axis=1)) / (2 * around / size)
+    gy = (metres[2:] - metres[:-2]) / (2 * along / period)
+    gx = gx[1:-1]
+    length = np.sqrt(gx * gx + gy * gy + 1)
+    normal = np.stack([-gx / length, -gy / length, 1 / length], axis=-1)
+    out = [rgb[1:-1], np.ones_like(u[1:-1]), normal, np.clip(rough[1:-1], 0, 1)]
+    if lo == hi:
+        for a in out:
+            a[-1] = a[0]
+    return tuple(out)
+
+
+def _pine_bark(np, rng, color, size):
+    if size != 512:
+        raise ValueError("Pine strips are laid out for 512 px")
+    seed = int(rng.integers(2 ** 62))
+    parts = [_pine_strip(np, seed, color, size, name, rows) for name, _, rows in PINE_ROWS]
+    g = PINE_GUARD
+    below = [a[-1 - g:-1] for a in parts[0]]
+    above = [a[1:1 + g] for a in parts[-1]]
+    return tuple(np.concatenate([below[k]] + [p[k] for p in parts] + [above[k]], axis=0) for k in range(4))
+
+
+def _needle_spray(np, rng, color, width, height, shade):
+    """One original pine shoot: a twig with one or two side shoots, densely set with long paired
+    needles angled forward and crowding into a tuft round each bud."""
     canvas = _Canvas(np, width, height)
-    canvas.rgb[:] = np.array(color) * .3
-    canvas.alpha[:] = 1.0
-    canvas.height[:] = 0.0
-    leaf_color = np.array(color) * np.array([.55, .62, .78])
-    for _ in range(70 if species == "oak" else 90):
-        base = np.array([rng.uniform(-10, width + 10), rng.uniform(-10, height + 10)])
-        canvas.leaf(species, rng, base, rng.uniform(0, 2 * np.pi), rng.uniform(.12, .2) * height, leaf_color)
-    canvas.alpha[:] = 1.0
+    leaf = np.array(color) * (np.array([.62, .66, .7]) if shade else np.array([1.25, 1.08, .78]))
+    bark = np.array([.15, .08, .045])
+    main = _shoot((width * rng.uniform(.45, .55), 2.0), math.pi / 2 + rng.uniform(-.06, .06), height * rng.uniform(.78, .86), 16, rng.uniform(-.2, .2))
+    shoots = [(main, 2.2)]
+    for k in range(int(rng.integers(2, 4))):
+        index = int(rng.uniform(.22, .5) * (len(main) - 1))
+        side = 1 if (k + int(rng.integers(2))) % 2 else -1
+        shoots.append((_shoot(main[index], math.pi / 2 + side * rng.uniform(.45, .7), height * rng.uniform(.3, .4), 10, -side * rng.uniform(.15, .4)), 1.5))
+    for points, w in shoots:
+        canvas.twig([np.array(q) for q in points], [w * (1 - .5 * k / (len(points) - 1)) for k in range(len(points))], bark)
+    needles = []
+    for number, (points, _) in enumerate(shoots):
+        arc = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+        count = int(arc / (.8 if number == 0 else 1.0))
+        for k in range(count):
+            f = .05 + .95 * (k + rng.uniform(0, 1)) / count
+            needles.append((points, f, 1 if k % 2 else -1, number))
+    reach = height * .15
+    for i in sorted(range(len(needles)), key=lambda i: rng.random()):
+        points, f, side, number = needles[i]
+        position = f * (len(points) - 1)
+        index = min(len(points) - 2, int(position))
+        a, b = np.array(points[index]), np.array(points[index + 1])
+        base = a + (b - a) * (position - index)
+        heading = math.atan2(b[1] - a[1], b[0] - a[0])
+        # Forward-swept needles that close into a tuft at the tip.
+        swing = side * rng.uniform(.45, 1.05) * (1 - .55 * f ** 3)
+        length = reach * rng.uniform(.75, 1.1) * (.85 if number else 1.0) * (1 - .25 * f ** 4)
+        curl = -side * rng.uniform(.0, .25)
+        for _ in range(12):
+            tip = base + length * np.array([math.cos(heading + swing + curl), math.sin(heading + swing + curl)])
+            if 2 <= tip[0] <= width - 3 and 2 <= tip[1] <= height - 3:
+                break
+            swing *= .8
+            length *= .92
+        mid = base + .5 * length * np.array([math.cos(heading + swing), math.sin(heading + swing)])
+        tone = rng.uniform(.72, 1.2)
+        old = rng.random() < .04
+        root = leaf * tone * .7
+        end = leaf * tone * np.array([1.35, 1.35, 1.1]) if not old else np.array([.24, .17, .07])
+        canvas.stroke([base, mid, tip], [rng.uniform(.75, .95), .7, .45], [root, (root + end) / 2, end])
     return canvas
 
 
@@ -480,7 +691,7 @@ def _leaf_atlas(np, rng, species, color, size):
     height, rough = np.zeros((size, size)), np.full((size, size), .7)
     for row in range(rows):
         for col in range(cols):
-            tile = _mass(np, rng, species, color, tw, th) if (col, row) == MASS else _spray(np, rng, species, color, tw, th, row == 1)
+            tile = _needle_spray(np, rng, color, tw, th, row == 1) if species == "pine" else _spray(np, rng, species, color, tw, th, row == 1)
             covered = tile.alpha > .5
             # Transparent texels carry the tile's mean leaf colour so filtering never darkens edges.
             if not covered.all():
@@ -492,23 +703,164 @@ def _leaf_atlas(np, rng, species, color, size):
     return rgb, alpha, normal, rough
 
 
-def tree_surface(pattern, color, seed, size):
+def _tile_columns(np, a, repeats):
+    """``repeats`` copies of a u-periodic image across its width, box-filtered (still periodic)."""
+    n = a.shape[1]
+    index = (np.arange(n)[:, None] * repeats + np.arange(repeats)[None, :]) % n
+    return a[:, index].mean(axis=2)
+
+
+def _periodic_rows(np, a, rows):
+    """Resample a v-periodic image to one period of rows - 1 rows plus a repeat of its first row."""
+    n, period = a.shape[0], rows - 1
+    position = np.arange(period) * n / period
+    i0 = np.floor(position).astype(np.int64)
+    f = (position - i0).reshape((-1,) + (1,) * (a.ndim - 1))
+    out = a[i0 % n] * (1 - f) + a[(i0 + 1) % n] * f
+    return np.concatenate([out, out[:1]], axis=0)
+
+
+def _unit(np, normal):
+    return normal / np.linalg.norm(normal, axis=-1, keepdims=True)
+
+
+def _end_grain(np, rng, species, tile, broken):
+    """One end-grain disc on a ``tile`` px square: annual rings round an off-centre pith with a
+    warped, uneven spacing, sapwood and a bark rim, radial checks; broken discs are weathered grey,
+    fibrous and split. Outside the disc the bark rim colour continues."""
+    y, x = np.meshgrid(np.arange(tile) + .5, np.arange(tile) + .5, indexing="ij")
+    c = tile / 2
+    radius = .46 * tile
+    dx, dy = (x - c) / radius, (y - c) / radius
+    rho = np.sqrt(dx * dx + dy * dy)
+    angle = np.arctan2(dy, dx)
+    a = (angle / (2 * np.pi)) % 1.0
+    px, py = rng.uniform(-.12, .12, 2)
+    pith = np.sqrt((dx - px) ** 2 + (dy - py) ** 2)
+    warp = (_fbm(np, rng, a, np.clip(rho, 0, 1), 6, 3, 3) - .5) * .9
+    rings = rng.uniform(16, 26)
+    phase = pith * rings * (1 + .25 * pith) + warp * 2.2
+    line = 1 - _smooth(np, 0.0, .22, np.abs(_wrap(np, phase)))
+    late = _smooth(np, .3, .8, phase - np.floor(phase))
+    heart, sap = ({"oak": ([.40, .27, .15], [.66, .52, .33]), "birch": ([.74, .62, .45], [.84, .75, .58])})[species]
+    heart, sap = np.array(heart), np.array(sap)
+    inner = _smooth(np, .62, .74, rho)[..., None]
+    wood = heart + (sap - heart) * inner
+    rgb = wood * (1 - .12 * late[..., None] - .3 * line[..., None])
+    fibre = _value_noise(np, rng, a, np.clip(rho, 0, 1), 90, 6)
+    rgb = rgb * (.92 + .16 * fibre)[..., None]
+    checks = np.zeros_like(rho)
+    for _ in range(int(rng.integers(2, 5)) + (3 if broken else 0)):
+        at = rng.uniform(0, 1)
+        length = rng.uniform(.35, .85)
+        width = rng.uniform(.006, .014) * (2.2 if broken else 1)
+        gap = np.abs(_wrap(np, a - at - .02 * np.sin(rho * 9))) * 2 * np.pi * np.maximum(rho, .05)
+        checks = np.maximum(checks, (1 - _smooth(np, 0.0, width * (1 - rho + .2), gap)) * _smooth(np, 1.0 - length, 1.0 - length + .08, rho) * (rho < .93))
+    height = .4 + .15 * late - .25 * line + .1 * fibre - .9 * checks
+    if broken:
+        grey = np.array([.26, .22, .18]) * (.8 + .4 * fibre[..., None])
+        rgb = rgb + (grey - rgb) * .6
+        shards = _fbm(np, rng, a, np.clip(rho, 0, 1), 24, 4, 3)
+        height = height + .6 * shards
+        rgb = rgb * (.8 + .4 * shards[..., None])
+    saw = .025 * np.sin((dx * .8 + dy * .6) * 60) if not broken else 0.0
+    rgb = rgb * (1 + saw)[..., None] if not broken else rgb
+    rgb = rgb * (1 - .75 * checks[..., None])
+    bark = _smooth(np, .9, .96, rho)[..., None]
+    barkc = np.array([.16, .12, .09]) if species == "oak" else np.array([.62, .6, .56])
+    rgb = rgb + (barkc - rgb) * bark
+    height = height * (1 - bark[..., 0]) + .55 * bark[..., 0]
+    rough = .78 + .15 * checks + (.1 if broken else 0)
+    return rgb, height, np.clip(rough, 0, 1)
+
+
+def _moss(np, rng, band, normal, rough, height_px, cycles=1):
+    """Moss over the top of a log band: centred on u = .5 with a patchy edge that thins out into
+    scattered cushions and a faint green algal film, so it blends into the bark instead of ending."""
+    rows, width = band.shape[:2]
+    period = rows - 1
+    u, v = np.meshgrid((np.arange(width) + .5) / width, np.arange(rows) / period)
+    up = -np.cos(2 * np.pi * u)
+    patchy = _fbm(np, rng, u, v, 14, 5 * cycles, 4)
+    holes = _fbm(np, rng, u, v, 32, 12 * cycles, 3)
+    reach = .5 * up + 1.3 * (patchy - .5)
+    cover = _smooth(np, .0, .6, reach) * _smooth(np, .18, .5, holes + .2 * up)
+    cover = cover ** 1.2
+    film = _smooth(np, -.35, .45, reach) * .32
+    tufts = _fbm(np, rng, u, v, 128, 48 * cycles, 2)
+    tone = _smooth(np, .45, .65, _fbm(np, rng, u, v, 16, 8 * cycles, 3))[..., None]
+    green = np.array([.045, .075, .02]) + np.array([.07, .08, .015]) * tufts[..., None]
+    green = green + (np.array([.16, .17, .05]) - green) * tone * .5
+    algae = band * np.array([.8, 1.0, .7]) * .9
+    rgb = band + (algae - band) * film[..., None]
+    rgb = rgb + (green - rgb) * cover[..., None]
+    lift = .005 * tufts * cover
+    gx = (np.roll(lift, -1, axis=1) - np.roll(lift, 1, axis=1)) / (2 * height_px[0])
+    gy = (np.roll(lift, -1, axis=0) - np.roll(lift, 1, axis=0)) / (2 * height_px[1])
+    bump = _unit(np, np.stack([-gx, -gy, np.ones_like(gx)], axis=-1))
+    normal = _unit(np, normal * (1 - cover[..., None]) + bump * cover[..., None])
+    rough = rough + (.96 - rough) * cover
+    for a in (rgb, normal, rough):
+        a[-1] = a[0]
+    return rgb, normal, rough
+
+
+def _log_surface(np, rng, species, color, size, repeats, moss):
+    """Natural log/stump texture (rows bottom up, see LOG_ROWS): the species bark round the whole
+    girth (``repeats`` bark tile widths) over LOG_CYCLES tile lengths, mossy on top when asked, then
+    four end-grain discs."""
+    if size != 512:
+        raise ValueError("Log textures are laid out for 512 px")
+    (_, _, rows), (_, _, disc_rows) = LOG_ROWS
+    around, along = BARK_SIZE[species]
+    cycles = LOG_CYCLES[species]
+    if species == "oak":
+        bark = _oak_bark(np, rng, color, size, rows, repeats, cycles, weathered=1.0)
+        rgb, normal, rough = bark[0], bark[2], bark[3]
+    else:
+        # Birch: one fine-grained strip repeat per tile length, ``cycles`` of them along the band.
+        strip = _birch_strip(np, int(rng.integers(2 ** 62)), color, size, "log", (rows - 1) // cycles + 1)
+        rgb, normal, rough = (_periodic_rows(np, np.concatenate([a[:-1]] * cycles, axis=0), rows) for a in
+                              (_tile_columns(np, a, repeats) for a in (strip[0], strip[2], strip[3])))
+        normal = _unit(np, normal)
+    if moss:
+        texel = (around * repeats / size, along * cycles / (rows - 1))
+        rgb, normal, rough = _moss(np, rng, rgb.copy(), normal.copy(), rough.copy(), texel, cycles)
+    tile = disc_rows
+    discs = [_end_grain(np, rng, species, tile, k >= 2) for k in range(size // tile)]
+    drgb = np.concatenate([d[0] for d in discs], axis=1)
+    dheight = np.concatenate([d[1] for d in discs], axis=1)
+    drough = np.concatenate([d[2] for d in discs], axis=1)
+    dnormal = _normals(np, .006 * dheight, .004, .004)
+    out_rgb = np.concatenate([rgb, drgb], axis=0)
+    out_normal = np.concatenate([normal, dnormal], axis=0)
+    out_rough = np.concatenate([rough, drough], axis=0)
+    if out_rgb.shape[0] != size:
+        raise ValueError("Log texture rows changed")
+    return out_rgb, np.ones(out_rgb.shape[:2]), out_normal, out_rough
+
+
+def tree_surface(pattern, color, seed, size, repeats=1, moss=False):
     """(linear rgb HxWx3, alpha HxW, normal HxWx3, roughness HxW) for a natural tree pattern."""
     np = _np()
     if pattern not in TREE_PATTERNS:
         raise ValueError("Unsupported natural tree pattern")
     rng = np.random.default_rng(seed)
     species, kind = pattern.split("-")
+    if kind == "log":
+        if not isinstance(repeats, int) or not 1 <= repeats <= 8:
+            raise ValueError("Log bark repeats must be 1..8")
+        return _log_surface(np, rng, species, color, size, repeats, bool(moss))
     if kind == "bark":
-        return (_oak_bark if species == "oak" else _birch_bark)(np, rng, color, size)
+        return {"oak": _oak_bark, "birch": _birch_bark, "pine": _pine_bark}[species](np, rng, color, size)
     return _leaf_atlas(np, rng, species, color, size)
 
 
-def tree_pixels(pattern, color, metallic, seed, size):
+def tree_pixels(pattern, color, metallic, seed, size, repeats=1, moss=False):
     """Flat float32 RGBA arrays (bpy pixel order) for the baseColor/normal/metallicRoughness roles.
     Base colour alpha is leaf coverage for the atlases and exactly 1 for bark."""
     np = _np()
-    rgb, alpha, normal, rough = tree_surface(pattern, color, seed, size)
+    rgb, alpha, normal, rough = tree_surface(pattern, color, seed, size, repeats, moss)
     rgb = np.clip(rgb, 0, 1)
     encoded = np.where(rgb <= .0031308, 12.92 * rgb, 1.055 * np.power(rgb, 1 / 2.4) - .055)
     ones = np.ones(alpha.shape)

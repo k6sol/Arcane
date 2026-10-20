@@ -21,7 +21,9 @@ export type ProceduralSpec = (
   | { kind: 'tree'; species: 'pine' | 'oak' | 'birch' | 'palm'; height: number; trunkTaper: number; branchLevels: number; leafDensity: number; trunkRadius: number | null; secondaryColor: Vec3 }
   | { kind: 'rock'; size: Vec3; roughness: number }
   | { kind: 'column'; radius: number; height: number; flutes: number; base: 'none' | 'plinth' | 'attic'; capital: 'none' | 'doric' | 'ionic' | 'corinthian' }
-  | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number }) & { finish?: ProceduralFinish };
+  | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number }
+  | { kind: 'log'; species: 'oak' | 'birch'; length: number; radius: number; ends: 'cut' | 'broken' | 'mixed'; moss: boolean }
+  | { kind: 'stump'; species: 'oak' | 'birch'; radius: number; height: number; top: 'cut' | 'broken'; moss: boolean }) & { finish?: ProceduralFinish };
 export interface AssetInput {
   template: AssetTemplate;
   name: string;
@@ -142,6 +144,8 @@ export interface AssemblyRecipe {
 }
 export interface SurfaceEvidence {
   profile: MaterialSurface['profile']; resolution: number; generator: 'arcane-tile-v1'; texCoord: 0;
+  /** Natural oak/birch/pine and log/stump only: worker pattern ('oak-bark', 'pine-leaves', 'birch-log', ...) and its glTF alpha mode. */
+  pattern?: string; alphaMode?: 'OPAQUE' | 'MASK';
   images: { role: 'baseColor' | 'normal' | 'metallicRoughness'; name: string; width: number; height: number; sha256: string; colorSpace: 'sRGB' | 'Non-Color' }[];
 }
 export interface MaterialEvidence { name: string; color: Vec3; metallic: number; roughness: number; emission: { color: Vec3; strength: number }; surface?: SurfaceEvidence }

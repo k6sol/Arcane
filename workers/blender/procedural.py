@@ -1,4 +1,4 @@
-"""Bundled, parameterised procedural generators: tree, rock, column and foliage.
+"""Bundled, parameterised procedural generators: tree, rock, column, foliage, log and stump.
 
 Data-only recipes. The host validates every parameter (packages/asset-pipeline
 src/procedural.ts) before this file runs. No eval/exec, file paths, imports or
@@ -11,7 +11,7 @@ import random
 
 # Geometry helpers below use only plain tuples, so the triangle accounting and
 # budget planner can be exercised without Blender (tests/unit/*_test.py).
-GENERATORS = ("tree", "rock", "column", "foliage")
+GENERATORS = ("tree", "rock", "column", "foliage", "log", "stump")
 HARD_TRIANGLE_LIMIT = 20000
 TUBE_MIN_RADIUS = 0.004
 
@@ -92,12 +92,15 @@ def wood_tile_uvs(distances, sides, wood_uv):
     Repeat boundaries fall on stations (each run of whole segments closest to ``period`` spans
     exactly one repeat), so every face fits inside one tile copy: UV0 stays in 0..1 and the
     periodic texture stays continuous across faces. A strip is a horizontal band of the tile
-    (v0, height h, inset by ``pad``) whose content repeats within it; default the whole tile."""
+    (v0, height h, inset by ``pad``) whose content repeats within it; default the whole tile.
+    ``strip(first, last, j)`` is chosen once per repeat (its first and last station), so strips
+    change only where the tile wraps: transition strips then keep the bark continuous."""
     n, period = wood_uv["around"], wood_uv["period"]
     if n < 1 or sides % n:
         raise ValueError("Bark tile repeats must divide the tube sides")
     m = len(distances) - 1
     level, group, i, g = [0.0] * (m + 1), [0] * m, 0, 0
+    bounds = []
     while i < m:
         e = i + 1
         while e < m and distances[e + 1] - distances[i] <= period:
@@ -109,11 +112,12 @@ def wood_tile_uvs(distances, sides, wood_uv):
         for x in range(i, e):
             level[x + 1] = g + span * (distances[x + 1] - distances[i]) / run
             group[x] = g
+        bounds.append((i, e))
         g, i = g + 1, e
-    strip = wood_uv.get("strip") or (lambda station, j: (0.0, 1.0, 0.0))
+    strip = wood_uv.get("strip") or (lambda first, last, j: (0.0, 1.0, 0.0))
 
     def face(index, j):
-        v0, h, pad = strip(index, j)
+        v0, h, pad = strip(*bounds[group[index]], j)
         k = (n * j) // sides
         ua, ub = n * j / sides - k, n * (j + 1) / sides - k
         va, vb = (v0 + pad + (h - 2 * pad) * (level[x] - group[index]) for x in (index, index + 1))
@@ -248,53 +252,29 @@ class MeshData:
         else:
             self.face(tuple(rings[-1]), smooth=False)
 
-    def leaf(self, base, axis, face_normal, length, width, thickness, rim=None, cup=0.0, band=None):
+    def leaf(self, base, axis, face_normal, length, width, thickness):
         """Closed curved lanceolate leaf, with a continuous rim and explicit mirrored vein UVs.
 
         Six rim samples replace the old four-corner diamond. A cupped centre and gently
         curled tip read in silhouette; front/back share UV0 and remain opaque/manifold.
-        Canopy sprays (natural finish only) pass another six-sample ``rim``, a ``cup`` that
-        bends the sides back from the face normal, and a UV ``band`` (u0, width) inside the
-        tonal strip u in (0.5, 1) of the leaf tile; the defaults keep legacy leaves unchanged.
         """
         axis = norm(axis)
         side = cross(axis, face_normal)
         side = norm(side) if dot(side, side) > 1e-6 else perpendicular(axis)
         up = norm(cross(side, axis))
-        rim = rim or [(0, 0), (.32, .5), (.72, .38), (1, 0), (.72, -.38), (.32, -.5)]
+        rim = [(0, 0), (.32, .5), (.72, .38), (1, 0), (.72, -.38), (.32, -.5)]
         indices, uv = [], []
         for t, across in rim:
             curl = length * (.025 * t ** 3 - .008 * math.sin(math.pi * t))
-            if cup:
-                curl -= cup * width * across * across
             point = add(add(add(base, mul(axis, length * t)), mul(side, width * across)), mul(up, curl))
             indices.append(self.vertex(point))
-            uv.append((abs(across), t) if band is None else (band[0] + band[1] * abs(across), t))
+            uv.append((abs(across), t))
         centre = add(add(base, mul(axis, length * .46)), mul(up, length * .012))
         hi, lo = self.vertex(add(centre, mul(up, thickness * .5))), self.vertex(add(centre, mul(up, -thickness * .5)))
         for n, a in enumerate(indices):
             k = (n + 1) % len(indices)
-            mid = (0, .46) if band is None else (band[0], .46)
-            self.face((a, indices[k], hi), uvs=(uv[n], uv[k], mid))
-            self.face((indices[k], a, lo), uvs=(uv[k], uv[n], mid))
-
-    def blob(self, ring, top, bottom, band, rect=None):
-        """Closed bipyramid over a ring (counter-clockwise about top - bottom): 2 * len(ring) triangles.
-        UVs sweep the ring across a narrow tile band, so every triangle keeps a nonzero UV area;
-        a ``rect`` (u0, v0, u1, v1) instead spreads it over one opaque atlas tile."""
-        rim = [self.vertex(p) for p in ring]
-        hi, lo = self.vertex(top), self.vertex(bottom)
-        count = len(rim)
-        for j in range(count):
-            k = (j + 1) % count
-            if rect is not None:
-                u0, u1 = rect[0] + (rect[2] - rect[0]) * j / count, rect[0] + (rect[2] - rect[0]) * (j + 1) / count
-                mid, high, low = (rect[1] + rect[3]) / 2, rect[3], rect[1]
-            else:
-                u0, u1 = band[0] + band[1] * j / count, band[0] + band[1] * (j + 1) / count
-                mid, high, low = .5, 1.0, 0.0
-            self.face((rim[j], rim[k], hi), uvs=((u0, mid), (u1, mid), ((u0 + u1) / 2, high)))
-            self.face((rim[k], rim[j], lo), uvs=((u1, mid), (u0, mid), ((u0 + u1) / 2, low)))
+            self.face((a, indices[k], hi), uvs=(uv[n], uv[k], (0, .46)))
+            self.face((indices[k], a, lo), uvs=(uv[k], uv[n], (0, .46)))
 
     def card(self, base, axis, face_normal, length, width, thickness, rect, bend=0.0, droop=0.0, cup=0.0):
         """Closed curved cutout card for one leaf-spray atlas tile: the leaf() lens (six rim samples,
@@ -390,7 +370,7 @@ def spine_points(start, heading, length, steps, rng, wobble, gravity):
 
 def plan_tree(params, seed, budget_total):
     """Returns (bark MeshData, leaves MeshData). Pure Python; deterministic."""
-    if params.get("finish") == "natural" and params["species"] in BROADLEAF:
+    if params.get("finish") == "natural" and (params["species"] in BROADLEAF or params["species"] in CONIFER):
         return plan_broadleaf(params, seed, budget_total)
     rng = random.Random(seed)
     species = params["species"]
@@ -912,14 +892,19 @@ def taper_tip(axis, prune_radius):
 
 
 # Natural bark tile (textures.bark_tile): physical size of one repeat (around, along) in metres.
-BARK_TILE = {"oak": (.42, 1.0), "birch": (.5, .6)}
+BARK_TILE = {"oak": (.42, 1.0), "birch": (.5, .6), "pine": (.5, .8)}
 # Birch tile strips (v0, height) of the 512 px texture: clean white bark with lenticels, white bark
-# with dark patches, and the dark rugged base. Each strip repeats within itself (inset half a texel).
-BIRCH_STRIPS = {"clean": (0.0, .5), "patched": (.5, .25), "base": (.75, .25)}
+# with dark patches and the dark rugged base, each repeating within itself (inset half a texel),
+# plus two grading strips: "rise" (patched at its foot, clean at its top) and "fall" (base -> patched).
+BIRCH_STRIPS = {"base": (4 / 512, 68 / 512), "fall": (72 / 512, 68 / 512), "patched": (140 / 512, 76 / 512), "rise": (216 / 512, 92 / 512),
+                "clean": (308 / 512, 200 / 512)}
+# Pine tile strips (v0, height): deep reddish-brown plates of the lower trunk, a grading strip and the
+# thin, lighter flaking bark of the upper trunk and limbs; must match textures.PINE_ROWS.
+PINE_STRIPS = {"plated": (4 / 512, 224 / 512), "grade": (228 / 512, 96 / 512), "upper": (324 / 512, 184 / 512)}
 BARK_RESOLUTION = 512
 
 
-def bark_tile(species, order, spine, radius, sides, rng):
+def bark_tile(species, order, spine, radius, sides, rng, dead=False):
     """Tube ``wood_uv`` for natural bark: tile repeats round the branch from its circumference (a
     divisor of its sides), isotropic repeat length on thin axes, and birch trunk strips by height."""
     around_m, along_m = BARK_TILE[species]
@@ -927,6 +912,8 @@ def bark_tile(species, order, spine, radius, sides, rng):
     around = min((d for d in range(1, sides + 1) if sides % d == 0), key=lambda d: (abs(math.log(d * around_m / circumference)), d))
     period = along_m * min(1.0, circumference / (around * around_m))
     result = {"around": around, "period": period}
+    if species == "pine":
+        return pine_bark_strips(result, order, spine, rng, dead)
     if species != "birch":
         return result
     pad = .5 / BARK_RESOLUTION
@@ -937,19 +924,42 @@ def bark_tile(species, order, spine, radius, sides, rng):
     if order > 0:
         # Thin young twigs are darker and blotched; limbs keep the clean white bark.
         name = "patched" if radius < .014 else "clean"
-        result["strip"] = lambda station, j: band(name)
+        result["strip"] = lambda first, last, j: band(name)
         return result
     z0 = spine[0][2]
     height = spine[-1][2] - z0
-    phase = rng.uniform(0, 2 * math.pi)
-    # Irregular boundaries: a smooth wave plus per-column jitter round the trunk.
-    wave = [math.sin(2 * math.pi * 2 * j / sides + phase) * .5 + rng.uniform(-.5, .5) for j in range(sides)]
-    reach = [(.075 + .03 * w) * height for w in wave]
-    patch = [(.2 + .05 * w + .04 * rng.uniform(-1, 1)) * height for w in wave]
+    # Whole repeats change strip: dark base, a "fall" repeat that grades base into patched bark,
+    # patched repeats, a "rise" repeat that grades into clean white bark, then clean. The grading
+    # (and its ragged edge) lives in the texture, so the trunk shows no horizontal step.
+    reach = (.09 + .03 * rng.uniform(-1, 1)) * height
+    patch = max(reach + 2 * period, (.2 + .04 * rng.uniform(-1, 1)) * height)
 
-    def strip(station, j):
-        z = spine[min(station, len(spine) - 1)][2] - z0
-        return band("base" if z < reach[j] else "patched" if z < patch[j] else "clean")
+    def strip(first, last, j):
+        zs, ze = (spine[min(s, len(spine) - 1)][2] - z0 for s in (first, last))
+        name = "base" if ze < reach else "fall" if zs < reach else "patched" if ze < patch else "rise" if zs < patch else "clean"
+        return band(name)
+    result["strip"] = strip
+    return result
+
+
+def pine_bark_strips(result, order, spine, rng, dead=False):
+    """Pine trunk: plated bark up to about 40% of the trunk, one grading repeat, then the thin upper
+    bark, which every living limb also wears (dead stubs keep the dark plated bark). Whole repeats
+    change strip, as on birch."""
+    pad = .5 / BARK_RESOLUTION
+
+    def band(name):
+        v0, h = PINE_STRIPS[name]
+        return (v0, h, pad)
+    if order > 0:
+        result["strip"] = lambda first, last, j: band("plated" if dead else "upper")
+        return result
+    z0 = spine[0][2]
+    top = (.4 + .06 * rng.uniform(-1, 1)) * (spine[-1][2] - z0)
+
+    def strip(first, last, j):
+        zs, ze = (spine[min(s, len(spine) - 1)][2] - z0 for s in (first, last))
+        return band("plated" if ze < top else "grade" if zs < top else "upper")
     result["strip"] = strip
     return result
 
@@ -1042,6 +1052,12 @@ def broadleaf_skeleton(params, rng):
             if a["radii"][0] > cap:
                 a["radii"] = [r * cap / a["radii"][0] for r in a["radii"]]
     anchors = prune_wood(axes, params["branchLevels"], prune_radius)
+    wood_joints(axes)
+    return axes, anchors, scale
+
+
+def wood_joints(axes):
+    """Collar joints of kept child axes: parent radius at the socket and where the child emerges."""
     for a in axes:
         if a["kept"] and a["parent"] is not None:
             p = axes[a["parent"]]
@@ -1052,19 +1068,19 @@ def broadleaf_skeleton(params, rng):
             if a["radii"][0] > .8 * rp:
                 f = .8 * rp / a["radii"][0]
                 a["radii"] = [r * f for r in a["radii"]]
-    return axes, anchors, scale
 
 
 def plan_broadleaf(params, seed, budget_total):
-    """Natural-finish oak/birch: (bark, leaves) with bark.wood set for the union in build()."""
+    """Natural-finish oak/birch/pine: (bark, leaves) with bark.wood set for the union in build()."""
     rng = random.Random(seed)
-    spec, profile = SPECIES[params["species"]], BROADLEAF[params["species"]]
+    conifer = params["species"] in CONIFER
+    spec, profile = SPECIES[params["species"]], (CONIFER if conifer else BROADLEAF)[params["species"]]
     height, density = params["height"], params["leafDensity"]
-    axes, anchors, scale = broadleaf_skeleton(params, rng)
+    axes, anchors, scale = (conifer_skeleton if conifer else broadleaf_skeleton)(params, rng)
 
     # Wood budget: a larger share than legacy tubes (blended limbs must stay connected to their
     # foliage), or nearly all of it for bare wood. Reserve union seams.
-    share = .45 if density > 0 else .9
+    share = profile.get("woodShare", .45) if density > 0 else .9
     limit = int(budget_total * share / UNION_RESERVE)
 
     def cost(axis, preset):
@@ -1078,7 +1094,7 @@ def plan_broadleaf(params, seed, budget_total):
         for a in axes:
             if a["kept"] and a["parent"] is not None:
                 rp = axes[a["parent"]]["radii"][a["attach"]]
-                axes[a["parent"]]["sockets"].append((a["attach"], a["radii"][0], axes[a["parent"]]["order"] <= 1 and a["radii"][0] >= .3 * rp))
+                axes[a["parent"]]["sockets"].append((a["attach"], a["radii"][0], axes[a["parent"]]["order"] <= 1 and a["radii"][0] >= profile.get("wideSocket", .3) * rp))
     sockets()
     kept = [a for a in axes if a["kept"]]
 
@@ -1133,7 +1149,7 @@ def plan_broadleaf(params, seed, budget_total):
                 return 1.0 + flare_gain(theta + turn, heights[i], strength)
         joint = a.get("joint")
         collar = (joint["rp"] * scale, joint["emerge"] * scale) if joint else None
-        uv = bark_tile(params["species"], a["order"], spine, radii[0], n, bark_rng)
+        uv = bark_tile(params["species"], a["order"], spine, radii[0], n, bark_rng, a.get("kind") == "dead")
         bark.tube(spine, radii, n, tip=True, flare=flare, collar=collar, blunt=True, tangents=[t for _, _, _, t in stations], wood_uv=uv)
         samples += list(zip(spine, radii))
         if joint:
@@ -1150,6 +1166,11 @@ def plan_broadleaf(params, seed, budget_total):
     # Atlas cards each carry a whole leaf spray: fewer, larger cards than the budget would allow.
     capacity = min(remaining // leaf_triangles(), CANOPY[params["species"]]["cards"])
     wanted = math.ceil(capacity * density)
+    if conifer:
+        if wanted <= 0:
+            raise ValueError("Tree has no foliage anchors within budget")
+        needle_canopy(leaves, CANOPY[params["species"]], axes, anchors, scale, capacity, wanted, rng)
+        return bark, leaves
 
     def attached(axis_id):
         # Foliage only where its chain reaches kept wood: never on limbs dropped for budget.
@@ -1160,7 +1181,7 @@ def plan_broadleaf(params, seed, budget_total):
                 return True
             axis_id = axes[axis_id]["parent"]
         return True
-    chains, tips, limbs = [], [], []
+    chains, tips, limbs, shoots = [], [], [], []
     for axis_id, order, chain in anchors:
         if attached(axis_id):
             chains.append((order, [mul(p, scale) for p in chain]))
@@ -1171,61 +1192,47 @@ def plan_broadleaf(params, seed, budget_total):
             # Inner shoots on scaffolds and limbs (outer half of each wood axis) carry shade foliage.
             count = a["woodCount"]
             limbs += [mul(q, scale) for q in a["points"][count // 2:count - 1:3]]
+            shoots += [(mul(a["points"][i], scale), polyline_tangent(a["points"], i)) for i in range(count // 2, count - 1)]
     if not chains or wanted <= 0:
         raise ValueError("Tree has no foliage anchors within budget")
-    canopy(leaves, CANOPY[params["species"]], chains, tips, limbs, capacity, wanted, rng)
+    canopy(leaves, CANOPY[params["species"]], chains, tips, limbs, capacity, wanted, rng, shoots)
     return bark, leaves
 
 
 # ------------------------------------------------- natural broadleaf canopy ---
-# Leaf sprays (one 12-triangle closed card each, the budget unit) are grouped into clusters
-# on the pruned twigs and the order-2/3 remainders. Cluster size comes from the density-1
-# capacity, so density only chooses how many clusters (a spread-out prefix) are kept and the
-# coverage scales linearly. Cluster centres: wood tips first (they never poke out), then a
-# farthest-point order over the crown shell interleaved with interior clusters for depth.
-# Tone rides the leaf tile's tonal strip (u in 0.5..1): interior dark, sunlit crown light.
+# Leaf-spray cards (one 12-triangle closed cutout card each, the budget unit) are grouped into
+# clusters on the pruned twigs and the order-2/3 remainders. Each card shows one tile of the
+# species leaf-spray atlas (textures.tree_surface), so many leaves ride on few cards. Card size
+# comes from the density-1 capacity, so density only chooses how many clusters (a spread-out
+# prefix) are kept and coverage scales linearly. Cluster centres: wood tips first (they never
+# poke out), then a farthest-point order over the crown shell interleaved with interior clusters
+# for depth. Deep and inner clusters use the atlas's shade row, the rest the sunlit row.
 CANOPY = {
-    # size: cluster size range; per: sprays per unit cluster; up/droop: facing bias; cap: dome
-    # half-angle (deg); flat: dome depth along its pole; spread: dome radius per spray length and
-    # sqrt(sprays); aspect: spray width/length; cup: side bend; shell: shell share of clusters;
-    # depth: normalised depth where interior starts; area: total spray area / crown silhouette
-    # at density 1 (sets the spray length); out: outward push; hang: sag of drooping clusters.
+    # size: cluster size range; per: cards per unit cluster; up/droop: facing bias; cap: dome
+    # half-angle (deg); flat: dome depth along its pole; spread: dome radius per card length and
+    # sqrt(cards); aspect: card width/length (the atlas tile's); cup: side bend; shell: shell
+    # share of clusters; depth: normalised depth where interior starts; area: total card area /
+    # crown silhouette at density 1 (sets the card length); out: outward push; hang: sag of
+    # drooping clusters; cards: card cap at density 1; bend/tipdrop: card arch and tip droop.
     "oak": {"size": (.7, 1.35), "per": 6, "up": .55, "droop": .1, "cap": 115, "flat": .75, "spread": .5, "aspect": .5,
-            "cup": .12, "shell": .75, "depth": .3, "area": 8.0, "out": .3, "hang": 0.0, "reach": .45, "shell_dirs": 160, "soft": .35, "core": .45, "sink": .25, "shell_r": (.45, .9),
-            "cards": 380, "bend": .1, "tipdrop": .08},
+            "cup": .12, "shell": .75, "depth": .3, "area": 17.0, "out": .3, "hang": 0.0, "reach": .45, "shell_dirs": 160, "soft": .35, "shell_r": (.45, .9),
+            "cards": 460, "bend": .1, "tipdrop": .08},
     "birch": {"size": (.7, 1.3), "per": 5, "up": .05, "droop": .55, "cap": 120, "flat": .8, "spread": .36, "aspect": .5,
-              "cup": .08, "shell": .75, "depth": .3, "area": 5.5, "out": .2, "hang": 1.2, "reach": .25, "shell_dirs": 160, "soft": .25, "core": 0.0, "sink": 0.0, "shell_r": (.6, 1.0),
-              "cards": 320, "bend": .06, "tipdrop": .2},
+              "cup": .08, "shell": .75, "depth": .3, "area": 11.5, "out": .2, "hang": 1.2, "reach": .25, "shell_dirs": 160, "soft": .25, "shell_r": (.6, 1.0),
+              "cards": 420, "bend": .06, "tipdrop": .2},
+    # Pine needle sprays (needle_canopy): outer: share of each whorl branch left bare near the trunk;
+    # leader: needled leader length; cover: card length per card share of shoot length; size: card
+    # length bounds per height unit; shade: tone below which a card uses the shade row.
+    "pine": {"cards": 640, "aspect": .5, "outer": .45, "leader": .9, "cover": 10.0, "size": (.3, .9), "droop": .06,
+             "bend": .08, "tipdrop": .1, "cup": .1, "shade": .55},
 }
-SPRAY_RIMS = (
-    [(0, 0), (.3, .5), (.72, .4), (1, 0), (.72, -.4), (.3, -.5)],
-    [(0, 0), (.42, .56), (.64, .17), (1, 0), (.64, -.17), (.42, -.56)],
-    [(0, 0), (.5, .58), (.6, .1), (1, 0), (.7, -.34), (.28, -.5)],
-    [(0, 0), (.36, .46), (.58, .3), (1, 0), (.82, -.22), (.4, -.52)],
-)
-# cards: card cap at density 1; bend/tipdrop: card arch and tip droop per card length.
-# A cluster's inner mass costs two 12-triangle budget units (24 triangles).
-CORE_UNITS = 2
-# Leaf-spray atlas (textures.leaf_atlas): 4 x 2 tiles of 128 x 256 px. Row 0 holds sunlit sprays,
-# row 1 shade sprays; the last shade tile is an opaque packed-leaf mass for the oak inner volumes.
+# Leaf-spray atlas: 4 x 2 tiles of 128 x 256 px at 512 (textures.ATLAS); row 0 sunlit, row 1 shade.
 ATLAS_COLS, ATLAS_ROWS, ATLAS_PAD = 4, 2, 2 / 512
-MASS_TILE = (3, 1)
 
 
 def atlas_rect(col, row):
+    """UV rectangle (u0, v0, u1, v1) of one atlas tile, inset two texels against filter bleed."""
     return (col / ATLAS_COLS + ATLAS_PAD, row / ATLAS_ROWS + ATLAS_PAD, (col + 1) / ATLAS_COLS - ATLAS_PAD, (row + 1) / ATLAS_ROWS - ATLAS_PAD)
-# Area of the spray rims per (length x width), all four close to the lanceolate 0.62.
-RIM_AREA = .62
-# Tone strip of the leaf tile: u in (0.5, 0.75) darkens towards 0.625, (0.75, 1) lightens.
-TONE_BAND = .035
-
-
-def tone_band(tone):
-    """UV band start for a tone in [-1 (deep shade), 1 (sunlit)]; 0 is the plain tile colour."""
-    tone = max(-1.0, min(1.0, tone))
-    s = math.asin(abs(tone)) / (2 * math.pi)
-    centre = .5 + .5 * (s if tone < 0 else .5 + s)
-    return max(.5, min(1 - TONE_BAND, centre - TONE_BAND / 2))
 
 
 def farthest_order(points, count, seeds=()):
@@ -1250,10 +1257,32 @@ def farthest_order(points, count, seeds=()):
     return order
 
 
-def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng):
+class TwigAnchors:
+    """Hash grid of foliage anchors (point, unit tangent) on twig chains and outer limb wood. Each
+    spray card is rooted on one, so no spray floats free of a twig; reuse is penalised so sprays
+    spread along the twigs instead of stacking on one point."""
+
+    def __init__(self, items, cell):
+        self.items, self.cell, self.grid, self.uses = items, cell, {}, [0] * len(items)
+        for index, (p, _) in enumerate(items):
+            self.grid.setdefault(self.key(p), []).append(index)
+
+    def key(self, p):
+        return (math.floor(p[0] / self.cell), math.floor(p[1] / self.cell), math.floor(p[2] / self.cell))
+
+    def take(self, q, penalty):
+        k = self.key(q)
+        near = [i for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1) for i in self.grid.get((k[0] + dx, k[1] + dy, k[2] + dz), ())]
+        best = min(near or range(len(self.items)), key=lambda i: (math.dist(self.items[i][0], q) + penalty * self.uses[i], i))
+        self.uses[best] += 1
+        return self.items[best]
+
+
+def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng, shoots=()):
     points = []
     for order, chain in chains:
         points += chain[1::2] if len(chain) > 2 else chain[-1:]
+    twigs = [(p, polyline_tangent(chain, i)) for _, chain in chains if len(chain) >= 2 for i, p in enumerate(chain)]
     low = [min(p[k] for p in points) for k in range(3)]
     high = [max(p[k] for p in points) for k in range(3)]
     centre = ((low[0] + high[0]) / 2, (low[1] + high[1]) / 2, low[2] + .45 * (high[2] - low[2]))
@@ -1301,6 +1330,7 @@ def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng):
     radii = (high[0] - low[0] + high[1] - low[1]) / 4, (high[2] - low[2]) / 2
     silhouette = math.pi * radii[0] * radii[1]
     spray = math.sqrt(style["area"] * silhouette / (max(1, capacity) * style["aspect"]))
+    roots = TwigAnchors(twigs + list(shoots), spray)
     seed_tips = [tips[i] for i in farthest_order(tips, len(tips))]
     shell_order = [shell[i] for i in farthest_order(shell, len(shell), seed_tips)] if shell else []
     inner_order = [inner[i] for i in farthest_order(inner, len(inner), seed_tips + shell_order[:8])] if inner else []
@@ -1333,10 +1363,10 @@ def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng):
             break
         n = min(n, remaining)
         remaining -= n
-        cluster(leaves, style, p, kind, spray, n, centre, depth(p), rng)
+        cluster(leaves, style, p, kind, spray, n, centre, depth(p), rng, roots)
 
 
-def cluster(leaves, style, p, kind, spray, n, centre, deep, rng):
+def cluster(leaves, style, p, kind, spray, n, centre, deep, rng, roots):
     rho = spray * style["spread"] * math.sqrt(n)
     out = sub(p, centre)
     out = norm((out[0], out[1], out[2] * .6)) if dot(out, out) > 1e-9 else UP
@@ -1358,25 +1388,6 @@ def cluster(leaves, style, p, kind, spray, n, centre, deep, rng):
         leaves.normals = []
     cap = math.cos(math.radians(style["cap"]))
     spin = rng.uniform(0, 2 * math.pi)
-    if style["core"] and n >= 5:
-        # Shaded inner mass: a closed 12-sided bipyramid (two budget units) inside the sprays.
-        # It fills the see-through gaps between sprays with a darker, softly shaded volume.
-        n -= CORE_UNITS
-        size = rho * style["core"]
-        mid = sub(c, mul(pole, rho * style["sink"]))
-        ring = []
-        for j in range(12):
-            # Lobed, wavy rim (alternating in/out, lifted and dropped) so the mass is never a smooth ball.
-            a = spin + 2 * math.pi * j / 12
-            r = size * (rng.uniform(.95, 1.2) if j % 2 else rng.uniform(.6, .8))
-            rim = add(mul(e1, r * math.cos(a)), mul(e2, r * math.sin(a)))
-            ring.append(add(add(mid, rim), mul(pole, size * rng.uniform(-.22, .22))))
-        top, bottom = add(mid, mul(pole, size * rng.uniform(.65, .85))), sub(mid, mul(pole, size * rng.uniform(.35, .5)))
-        first = len(leaves.vertices)
-        leaves.blob(ring, top, bottom, None, rect=atlas_rect(*MASS_TILE))
-        for v in leaves.vertices[first:]:
-            mottle = (rng.uniform(-.3, .3), rng.uniform(-.3, .3), rng.uniform(-.3, .3))
-            leaves.normals.append(norm(add(add(add(norm(sub(v, mid)), mul(out, style["soft"])), mul(UP, .25)), mottle)))
     for i in range(n):
         # Fibonacci dome around the pole: cos(theta) from 1 down to the cap.
         z = 1 - (1 - cap) * (i + .5) / n
@@ -1389,15 +1400,25 @@ def cluster(leaves, style, p, kind, spray, n, centre, deep, rng):
         if style["hang"]:
             # Drooping species: sprays hang in a curtain below the cluster centre.
             q = add(q, (0.0, 0.0, -rho * style["hang"] * (i + .5) / n))
-        # Spray axis: tangent to the dome, swirled, pulled down for drooping species.
-        t = rotate(perpendicular(d), d, phi * 1.7 + rng.uniform(-.6, .6))
-        t = norm(add(t, (0.0, 0.0, -style["droop"])))
-        t = norm(sub(t, mul(d, dot(t, d) * .85)))
+        # Root the spray on the twig nearest its dome spot, fanned off the twig towards that spot
+        # and pulled down for drooping species: lobes grow along the twigs, never free-floating.
+        root, tangent = roots.take(q, .6 * spray)
+        side = sub(q, root)
+        side = sub(side, mul(tangent, dot(side, tangent)))
+        side = norm(side) if dot(side, side) > 1e-9 else perpendicular(tangent)
+        fan = rng.uniform(.35, 1.0)
+        t = norm(add(add(mul(tangent, math.cos(fan)), mul(side, math.sin(fan))), (0.0, 0.0, -style["droop"])))
         length = spray * rng.uniform(.85, 1.15)
         width = length * style["aspect"] * rng.uniform(.92, 1.08)
-        face = norm(add(d, mul(t, -.15)))
-        base = sub(q, mul(t, length * .5))
-        rect = atlas_rect(rng.randrange(ATLAS_COLS - (row == MASS_TILE[1])), row)
+        # The spray lies in the plane of its twig and its fan (a flat shoot), turned to the light.
+        sky = norm(add(out, UP))
+        flat = cross(tangent, side)
+        flat = mul(flat, -1.0) if dot(flat, sky) < 0 else flat
+        face = norm(add(flat, mul(sky, .6)))
+        if abs(dot(face, t)) > .98:
+            face = perpendicular(t)
+        base = root
+        rect = atlas_rect(rng.randrange(ATLAS_COLS), row)
         first = len(leaves.vertices)
         leaves.card(base, t, face, length, width, max(.0008, width * .01), rect, bend=style["bend"] * rng.uniform(.4, 1.6),
                     droop=style["tipdrop"] * rng.uniform(.5, 1.5), cup=style["cup"])
@@ -1406,6 +1427,200 @@ def cluster(leaves, style, p, kind, spray, n, centre, deep, rng):
         mottle = mul(face, rng.uniform(-.1, .35))
         for v in leaves.vertices[first:]:
             leaves.normals.append(norm(add(add(add(norm(sub(v, core)), mul(out, style["soft"])), mul(UP, .25)), mottle)))
+
+
+# ------------------------------------------------------- natural conifer ---
+# Finish "natural" pine: a straight monopodial trunk with a continuous taper and a butt flare, whorls
+# of branches that droop with age, bare dead stubs below an irregular living crown and order-2
+# laterals. Grown in the broadleaf 7.5 m units (scaled by height); wood fitting, tubes and the
+# blended union are shared with the broadleaf path. Foliage is needle-spray cards on the outer,
+# young part of every living shoot (pine keeps its needles a few years only).
+CONIFER = {
+    # trunk length; lean; flare strength; living crown base and lowest stub whorl (shares of the trunk);
+    # whorl spacing; branches per living whorl; widest branch reach; lateral spacing; wood budget share;
+    # child/parent radius ratio for socket ring pairs (whorl branches stay single rings).
+    "pine": {"trunk": 7.3, "lean": .03, "flare": .35, "crown": .4, "stubs": .1, "internode": (.36, .52), "whorl": (4, 6),
+             "reach": 1.95, "lateral": (.24, .34), "woodShare": .55, "wideSocket": .55},
+}
+
+
+def grow_conifer(profile, rng):
+    """Axes for a 7.5 m pine: trunk, whorled branches (kind branch/dead) and order-2 laterals."""
+    axes = []
+
+    def register(axis):
+        axis["id"] = len(axes)
+        axes.append(axis)
+        return axis
+
+    def phases():
+        return (rng.uniform(0, 6.28), rng.uniform(0, 6.28))
+    yaw = rng.uniform(0, 2 * math.pi)
+    lean = norm((profile["lean"] * math.cos(yaw), profile["lean"] * math.sin(yaw), 1.0))
+    top = profile["trunk"]
+    trunk = register({"order": 0, "parent": None, "attach": None, "kind": "trunk",
+                      "points": grow_axis((0.0, 0.0, 0.0), UP, lean, top, 3.0, .018, 2.6, 0.0, phases())})
+    pts = trunk["points"]
+    base = profile["crown"] * top
+    z = profile["stubs"] * top + rng.uniform(0, .25)
+    spin = rng.uniform(0, 2 * math.pi)
+    while z < top - .3:
+        index = min(len(pts) - 3, int(round(z / V5_STEP)))
+        living = z >= base + rng.uniform(-.35, .25)
+        # Age: 0 at the leader, 1 at the crown base. Old whorls reach furthest and droop most.
+        age = min(1.0, max(0.0, (top - z) / (top - base)))
+        count = rng.randint(*profile["whorl"]) if living else rng.randint(2, 4)
+        spin += rng.uniform(.5, 1.6)
+        for k in range(count):
+            azimuth = spin + 2 * math.pi * k / count + rng.uniform(-.3, .3)
+            if not living:
+                # Dead lower branches: short bare stubs, roughly level or hanging.
+                length = rng.uniform(.14, .5)
+                d0 = direction(azimuth, math.radians(rng.uniform(-28.0, 4.0)))
+                register({"order": 1, "parent": 0, "attach": index, "kind": "dead", "departure": d0,
+                          "points": grow_axis(pts[index], d0, d0, length, 1.0, .01, 1.0, .03, phases())})
+                continue
+            if count > 4 and rng.random() < .1:
+                continue
+            length = (.16 + profile["reach"] * age ** .8 * (1 - .2 * age ** 4)) * rng.uniform(.72, 1.15)
+            rise = math.radians(45 - 70 * age + rng.uniform(-7, 7))
+            tip = math.radians(8 + 20 * (1 - age) + rng.uniform(-5, 5))
+            d0, dT = direction(azimuth, rise), direction(azimuth + rng.uniform(-.15, .15), tip)
+            register({"order": 1, "parent": 0, "attach": index, "kind": "branch", "departure": d0, "age": age,
+                      "points": grow_axis(pts[index], d0, dT, length, .8 * length, .03, max(length, .5) * 1.3, .1 + .25 * age, phases())})
+        z += rng.uniform(*profile["internode"])
+    for b in [a for a in axes if a["kind"] == "branch"]:
+        p = b["points"]
+        total = (len(p) - 1) * V5_STEP
+        s = total * rng.uniform(.14, .24)
+        side = 1 if rng.random() < .5 else -1
+        while s < total * .9:
+            i = min(len(p) - 2, max(1, int(round(s / V5_STEP))))
+            t = polyline_tangent(p, i)
+            flat = cross(UP, t)
+            flat = mul(norm(flat) if dot(flat, flat) > 1e-6 else perpendicular(t), side)
+            dep = math.radians(rng.uniform(46, 64))
+            d0 = norm(add(add(mul(t, math.cos(dep)), mul(flat, math.sin(dep))), (0.0, 0.0, rng.uniform(-.25, .35))))
+            dT = norm(add(add(mul(t, .75), mul(flat, .55)), (0.0, 0.0, .12)))
+            length = min(.8, max(.1, .1 + .4 * (total - s))) * rng.uniform(.8, 1.15)
+            register({"order": 2, "parent": b["id"], "attach": i, "kind": "lateral", "departure": d0,
+                      "points": grow_axis(p[i], d0, dT, length, .5 * length, .02, max(length, .3), .08 + .2 * b["age"], phases())})
+            side = -side
+            s += rng.uniform(*profile["lateral"])
+    return axes
+
+
+def conifer_skeleton(params, rng):
+    """Grown, radius-fielded and pruned pine axes in 7.5 m units: (axes, foliage anchor chains, scale)."""
+    spec, profile = SPECIES[params["species"]], CONIFER[params["species"]]
+    height = params["height"]
+    scale = height / V5_HEIGHT
+    base_radius = (params["trunkRadius"] or height * spec["radius"]) / scale
+    axes = grow_conifer(profile, rng)
+    trunk = axes[0]
+    n = len(trunk["points"])
+    # Continuous monopodial taper (trunkTaper bends it from a cone towards a paraboloid) plus a butt swell.
+    power = 1.1 - .6 * params["trunkTaper"]
+    trunk["radii"] = [max(V5_TIP_RADIUS, base_radius * (1 - i / (n - 1)) ** power * (1 + .14 * max(0.0, 1 - p[2] / .9) ** 2))
+                      for i, p in enumerate(trunk["points"])]
+    for a in axes[1:]:
+        rp = axes[a["parent"]]["radii"][a["attach"]]
+        m = len(a["points"])
+        length = (m - 1) * V5_STEP
+        if a["kind"] == "dead":
+            r0, fall = min(.3 * rp, .008 + .03 * length), .4
+        elif a["kind"] == "branch":
+            r0, fall = min(.42 * rp, .007 + .02 * length), .82
+        else:
+            r0, fall = min(.6 * rp, .003 + .009 * length), .82
+        a["radii"] = [r0 * (1 - fall * i / (m - 1)) for i in range(m)]
+    anchors = prune_wood(axes, params["branchLevels"], PRUNE_DIAMETER / 2 / scale)
+    for a in axes:
+        if a["kind"] == "dead" and a["kept"]:
+            # Broken stubs stay blunt rather than easing to a point.
+            r0 = a["radii"][0]
+            a["radii"] = [r0 * (1 - .4 * i / (len(a["radii"]) - 1)) for i in range(len(a["radii"]))]
+    wood_joints(axes)
+    return axes, anchors, scale
+
+
+def radical_inverse(k):
+    """Base-2 van der Corput value of k: a low-discrepancy order, so every prefix spreads evenly."""
+    value, f = 0.0, .5
+    while k:
+        if k & 1:
+            value += f
+        k >>= 1
+        f *= .5
+    return value
+
+
+def needle_canopy(leaves, style, axes, anchors, scale, capacity, wanted, rng):
+    """Needle-spray cards rooted on the young outer shoots of every living whorl branch, its
+    laterals and the leader. Positions follow a van der Corput order over the total foliated shoot
+    length, so density keeps an evenly spread prefix; inner, low sprays use the shade row."""
+
+    def alive(a):
+        while a is not None:
+            if a["kind"] == "dead" or (a.get("dropped") and a["order"] <= 1):
+                return False
+            a = axes[a["parent"]] if a["parent"] is not None else None
+        return True
+    chains = []
+    for a in axes:
+        if not alive(a):
+            continue
+        p = a["points"]
+        if a["kind"] == "branch":
+            chains.append(p[int(len(p) * style["outer"]):])
+        elif a["kind"] == "lateral":
+            chains.append(p[int(len(p) * .15):])
+    top = axes[0]["points"]
+    chains.append(top[max(0, len(top) - 1 - int(style["leader"] / V5_STEP)):])
+    chains = [[mul(q, scale) for q in c] for c in chains if len(c) >= 2]
+    starts, total = [], 0.0
+    for c in chains:
+        starts.append(total)
+        total += sum(math.dist(a, b) for a, b in zip(c, c[1:]))
+    zs = [q[2] for c in chains for q in c]
+    low, high = min(zs), max(zs)
+    reach = max(math.hypot(q[0], q[1]) for c in chains for q in c) or 1.0
+    length = min(max(style["cover"] * total / max(1, capacity), style["size"][0] * scale), style["size"][1] * scale)
+    if leaves.normals is None:
+        leaves.normals = []
+    for k in range(wanted):
+        s = (radical_inverse(k + 1) + rng.uniform(-.3, .3) / max(1, capacity)) % 1.0 * total
+        c = max(i for i in range(len(chains)) if starts[i] <= s)
+        chain, s = chains[c], s - starts[c]
+        i = 0
+        while i < len(chain) - 2 and s > math.dist(chain[i], chain[i + 1]):
+            s -= math.dist(chain[i], chain[i + 1])
+            i += 1
+        f = min(1.0, s / max(math.dist(chain[i], chain[i + 1]), 1e-9))
+        root = add(chain[i], mul(sub(chain[i + 1], chain[i]), f))
+        t = norm(sub(chain[i + 1], chain[i]))
+        side = cross(UP, t)
+        side = norm(side) if dot(side, side) > 1e-6 else perpendicular(t)
+        side = mul(side, 1 if k % 2 else -1)
+        fan = rng.uniform(.15, .95)
+        axis = norm(add(add(mul(t, math.cos(fan)), mul(side, math.sin(fan))), (0.0, 0.0, rng.uniform(-.18, .22) - style["droop"])))
+        face = norm(add(add(UP, mul(side, rng.uniform(-1.5, 1.5))), mul(t, rng.uniform(-.3, .3))))
+        if abs(dot(face, axis)) > .95:
+            face = perpendicular(axis)
+        size = length * rng.uniform(.85, 1.15)
+        width = size * style["aspect"] * rng.uniform(.92, 1.08)
+        radial = math.hypot(root[0], root[1]) / reach
+        tone = .9 * radial + .5 * (root[2] - low) / max(high - low, 1e-6) + rng.uniform(-.25, .25)
+        rect = atlas_rect(rng.randrange(ATLAS_COLS), 1 if tone < style["shade"] else 0)
+        first = len(leaves.vertices)
+        leaves.card(root, axis, face, size, width, max(.0008, width * .01), rect, bend=style["bend"] * rng.uniform(.4, 1.6),
+                    droop=style["tipdrop"] * rng.uniform(.5, 1.5), cup=style["cup"])
+        out = norm((root[0], root[1], 0.0)) if radial > 1e-3 else UP
+        mottle = mul(face, rng.uniform(-.1, .35))
+        for v in leaves.vertices[first:]:
+            ring = (v[0], v[1], 0.0)
+            ring = norm(ring) if dot(ring, ring) > 1e-9 else out
+            leaves.normals.append(norm(add(add(add(mul(ring, .55), mul(out, .35)), mul(UP, .55)), mottle)))
 
 
 # -------------------------------------------------------------- rock ---------
@@ -1648,6 +1863,192 @@ def plan_foliage(params, seed, budget_total):
     return plant
 
 
+# ------------------------------------------------------- fallen log / stump ---
+# Natural deadwood in oak or birch bark: one closed bark mesh within DEADWOOD_TRIANGLES. Its
+# species log texture (textures "<species>-log") holds one bark band round the whole girth,
+# ``log_repeats`` bark tile widths wide and LOG_CYCLES tile lengths long (mossy on top, centred on
+# u = .5, when the asset asks for moss), and four end-grain discs: 0-1 sawn, 2-3 broken. Rows
+# (v0, height) at 512 px; must match textures.LOG_ROWS / LOG_CYCLES.
+DEADWOOD_TRIANGLES = 4000
+LOG_BAND = (0.0, .75)
+LOG_CYCLES = {"oak": 2, "birch": 2}
+# Flat (untextured) deadwood keeps its original bark band mapping.
+LOG_BANDS = {"plain": (0.0, .375), "moss": (.375, .375)}
+LOG_DISC_ROW, LOG_DISC_TILE, LOG_DISC_RADIUS = .75, .25, .46
+
+
+def log_repeats(params):
+    """Bark tiles packed round the log texture: the species tile count round the mean girth."""
+    radius = params["radius"] * (.91 if params["kind"] == "log" else 1.0)
+    return max(1, min(8, int(round(2 * math.pi * radius / BARK_TILE[params["species"]][0]))))
+
+
+def deadwood_body(mesh, spine, radius_at, sides, params, rng, ends, up):
+    """Closed bark body on ``spine`` with end caps. ``radius_at(i, theta)`` gives the ring radius;
+    theta = pi (u = .5, the mossy side) faces ``up``. ``ends`` (start, end) are "cut" (a slightly
+    tilted sawn face), "broken" (splintered, ragged rim) or "foot" (a flat hidden base)."""
+    count = len(spine)
+    tangents = [polyline_tangent(spine, i) for i in range(count)]
+    normal = sub(mul(up, -1.0), mul(tangents[0], dot(mul(up, -1.0), tangents[0])))
+    normal = norm(normal) if dot(normal, normal) > 1e-9 else perpendicular(tangents[0])
+    frames = []
+    for i in range(count):
+        if i:
+            axis = cross(tangents[i - 1], tangents[i])
+            if dot(axis, axis) > 1e-12:
+                normal = norm(rotate(normal, norm(axis), math.acos(max(-1.0, min(1.0, dot(tangents[i - 1], tangents[i]))))))
+        frames.append((normal, norm(cross(tangents[i], normal))))
+    thetas = [2 * math.pi * j / sides for j in range(sides)]
+    mean = sum(radius_at(count // 2, t) for t in thetas) / sides
+    # Splinter heights round a broken rim: squared noise, smoothed, longer on one side.
+    jags = {}
+    for which, style in zip((0, count - 1), ends):
+        if style == "broken":
+            raw = [rng.random() ** 3 for _ in range(sides)]
+            lean = rng.uniform(0, 2 * math.pi)
+            jags[which] = [(.7 * raw[j] + .15 * (raw[j - 1] + raw[(j + 1) % sides])) * (.3 + .7 * (.5 + .5 * math.cos(thetas[j] - lean))) for j in range(sides)]
+        elif style == "cut":
+            tilt, phase = math.tan(math.radians(rng.uniform(2.0, 9.0))), rng.uniform(0, 2 * math.pi)
+            jags[which] = [tilt * math.cos(t - phase) for t in thetas]
+    rings = []
+    for i in range(count):
+        n, b = frames[i]
+        out = -1.0 if i == 0 else 1.0
+        ring = []
+        for j, t in enumerate(thetas):
+            r = radius_at(i, t)
+            offset = add(mul(n, math.cos(t) * r), mul(b, math.sin(t) * r))
+            shift = 0.0
+            if i in jags and ends[0 if i == 0 else 1] == "broken":
+                shift = .6 * mean * jags[i][j]
+            elif i in jags:
+                shift = r * jags[i][j]
+            ring.append(mesh.vertex(add(add(spine[i], offset), mul(tangents[i], out * shift))))
+        rings.append(ring)
+    distances = [0.0]
+    for a, c in zip(spine, spine[1:]):
+        distances.append(distances[-1] + math.dist(a, c))
+    around_m, along_m = BARK_TILE[params["species"]]
+    girth = 2 * math.pi * mean
+    natural = params.get("finish") == "natural"
+    band = LOG_BAND if natural else LOG_BANDS["moss" if params.get("moss") else "plain"]
+    cycles = LOG_CYCLES[params["species"]] if natural else 1
+    pad = .5 / BARK_RESOLUTION
+    uv = wood_tile_uvs(distances + [distances[-1] + 1e-6], sides, {"around": 1, "period": cycles * along_m * girth / (log_repeats(params) * around_m),
+                                                                    "strip": lambda first, last, j: (band[0], band[1], pad)})
+    for index in range(count - 1):
+        a, c = rings[index], rings[index + 1]
+        for j in range(sides):
+            k = (j + 1) % sides
+            mesh.face((a[j], a[k], c[k], c[j]), uvs=uv(index, j))
+
+    def disc(tile, f, t):
+        cu, cv = (tile + .5) * LOG_DISC_TILE, LOG_DISC_ROW + .5 * LOG_DISC_TILE
+        rho = LOG_DISC_RADIUS * LOG_DISC_TILE * f
+        return (cu + rho * math.cos(t), cv + rho * math.sin(t))
+    for which, style in zip((0, count - 1), ends):
+        n, b = frames[which]
+        rim, out = rings[which], (-1.0 if which == 0 else 1.0)
+        tile = 2 + rng.randrange(2) if style == "broken" else rng.randrange(2)
+        layers = [(1.0, rim)]
+        if style == "broken":
+            # Two inner rings of splinters above the rim, then a lower, torn heart.
+            for f, rise in ((.64, 1.5), (.3, .7)):
+                ring = []
+                for j, t in enumerate(thetas):
+                    r = radius_at(which, t) * f
+                    lift = mean * (.08 + .75 * rise * jags[which][j] + .1 * rng.random())
+                    ring.append(mesh.vertex(add(add(spine[which], add(mul(n, math.cos(t) * r), mul(b, math.sin(t) * r))), mul(tangents[which], out * lift))))
+                layers.append((f, ring))
+            centre = mesh.vertex(add(spine[which], mul(tangents[which], out * mean * rng.uniform(.1, .3))))
+        else:
+            centre = mesh.vertex(spine[which])
+        for (fa, outer), (fb, inner) in zip(layers, layers[1:]):
+            for j in range(sides):
+                k = (j + 1) % sides
+                quad = (outer[j], outer[k], inner[k], inner[j])
+                uvs = (disc(tile, fa, thetas[j]), disc(tile, fa, thetas[k]), disc(tile, fb, thetas[k]), disc(tile, fb, thetas[j]))
+                if out > 0:
+                    mesh.face(quad, uvs=uvs)
+                else:
+                    mesh.face(tuple(reversed(quad)), uvs=tuple(reversed(uvs)))
+        f, last = layers[-1]
+        for j in range(sides):
+            k = (j + 1) % sides
+            if out > 0:
+                mesh.face((last[j], last[k], centre), uvs=(disc(tile, f, thetas[j]), disc(tile, f, thetas[k]), disc(tile, 0.0, 0.0)))
+            else:
+                mesh.face((last[k], last[j], centre), uvs=(disc(tile, f, thetas[k]), disc(tile, f, thetas[j]), disc(tile, 0.0, 0.0)))
+    return mesh
+
+
+def deadwood_cap_triangles(style, sides):
+    return 5 * sides if style == "broken" else sides
+
+
+def plan_log(params, seed, budget_total):
+    """Fallen log along +X: natural taper, a root swell at the butt, a slight bend, oval bark
+    bumps, and sawn or broken ends; ``ends`` "mixed" saws the butt and snaps the top."""
+    rng = random.Random(seed)
+    noise = value_noise(seed + 7741)
+    length, radius = params["length"], params["radius"]
+    ends = {"cut": ("cut", "cut"), "broken": ("broken", "broken"), "mixed": ("cut", "broken")}[params["ends"]]
+    sides = 24 if radius >= .12 else 16
+    budget = min(budget_total, DEADWOOD_TRIANGLES) - sum(deadwood_cap_triangles(e, sides) for e in ends)
+    count = max(6, min(budget // (2 * sides) + 1, int(math.ceil(length / min(.12, max(.05, radius * .45)))) + 1))
+    bend, phase, sag = length * rng.uniform(.015, .04), rng.uniform(0, 2 * math.pi), rng.uniform(.005, .015) * length
+    spine = []
+    for i in range(count):
+        s = i / (count - 1)
+        spine.append((length * (s - .5), bend * math.sin(math.pi * s) + .3 * bend * math.sin(2 * math.pi * s + phase), -sag * math.sin(math.pi * s)))
+    oval, turn = rng.uniform(.03, .07), rng.uniform(0, 2 * math.pi)
+
+    def radius_at(i, theta):
+        s = i / (count - 1)
+        x = s * length
+        swell = 1 + .22 * math.exp(-x / max(1.2 * radius, 1e-6))
+        lumps = 1 + .05 * noise((math.cos(theta) * 1.4, math.sin(theta) * 1.4, x / max(radius, .05) * .6)) + .025 * noise((math.cos(theta) * 4, math.sin(theta) * 4, x / max(radius, .05) * 2.2))
+        return radius * (1 - .18 * s) * swell * (1 + oval * math.cos(2 * (theta - turn))) * lumps
+    mesh = deadwood_body(MeshData(), spine, radius_at, sides, params, rng, ends, UP)
+    if mesh.triangles() > min(budget_total, DEADWOOD_TRIANGLES):
+        raise ValueError("Log exceeded its triangle budget")
+    return mesh
+
+
+def plan_stump(params, seed, budget_total):
+    """Stump with buttress root flare (the v5 lobes), a slight lean, and a sawn or broken top."""
+    rng = random.Random(seed)
+    noise = value_noise(seed + 9157)
+    radius, height = params["radius"], params["height"]
+    ends = ("foot", params["top"])
+    sides = 40 if radius >= .12 else 24
+    budget = min(budget_total, DEADWOOD_TRIANGLES) - sides - deadwood_cap_triangles(params["top"], sides)
+    # Rings: dense through the flare, then about one per radius up the bole.
+    zs = sorted({-.04 * radius} | {radius * f for f in (0.0, .04, .1, .18, .28, .4, .55, .75, 1.0)} | {height * k / 8 for k in range(1, 9)})
+    zs = [z for z in zs if z <= height]
+    if zs[-1] < height:
+        zs.append(height)
+    merged = []
+    for z in zs:
+        if not merged or z - merged[-1] > .02 * radius:
+            merged.append(z)
+    if len(merged) - 1 > budget // (2 * sides):
+        raise ValueError("Stump exceeded its triangle budget")
+    lean = (rng.uniform(-.04, .04), rng.uniform(-.04, .04))
+    spine = [(lean[0] * z, lean[1] * z, z) for z in merged]
+    turn = rng.uniform(0, 2 * math.pi)
+    scale = 1.05 / max(1.25 * radius, 1e-6)
+
+    def radius_at(i, theta):
+        z = max(0.0, merged[i])
+        lumps = 1 + .04 * noise((math.cos(theta) * 1.6, math.sin(theta) * 1.6, z / radius))
+        # Softened buttresses: the v5 lobes averaged over a few degrees read as roots, not fins.
+        gain = sum(flare_gain(theta + turn + d, z * scale, .75) for d in (-.22, -.11, 0.0, .11, .22)) / 5
+        return radius * (1 + gain + .12 * max(0.0, 1 - z / (.6 * radius)) ** 2) * lumps
+    north = (math.cos(turn), math.sin(turn), 0.0)
+    return deadwood_body(MeshData(), spine, radius_at, sides, params, rng, ends, north)
+
+
 # ----------------------------------------------------------- dispatcher ------
 def plan(request):
     """Return [(source_key, material_key, MeshData, smooth)] for the validated request."""
@@ -1665,6 +2066,8 @@ def plan(request):
         parts = [("rock", "primary", plan_rock(params, seed, budget))]
     elif kind == "column":
         parts = [("stone", "primary", plan_column(params, seed, budget))]
+    elif kind in ("log", "stump"):
+        parts = [("bark", "primary", (plan_log if kind == "log" else plan_stump)(params, seed, budget))]
     else:
         parts = [("foliage", "primary", plan_foliage(params, seed, budget))]
     total = sum(p[2].triangles() for p in parts)
@@ -2041,15 +2444,21 @@ def surface_materials(request):
     keys = (["bark"] if request["procedural"]["leafDensity"] == 0 else ["bark", "leaves"]) if kind == "tree" else ["stone" if kind == "column" else "rock" if kind == "rock" else "foliage"]
     profiles = {"bark": "bark", "leaves": "leaf", "rock": "stone", "stone": "weathered", "foliage": "leaf"}
     species = request["procedural"].get("species")
-    # Natural oak/birch: species bark tile and leaf-spray cutout atlas at 512 px (textures.tree_pixels).
+    # Natural oak/birch/pine: species bark tile and leaf/needle-spray cutout atlas at 512 px (textures.tree_pixels).
     tree = kind == "tree" and species in BARK_TILE
+    # Natural log/stump: one bark mesh with the species log texture (bark bands + end-grain discs).
+    deadwood = kind in ("log", "stump")
+    if deadwood:
+        keys = ["bark"]
     return [{"id": key.capitalize(), "color": request["procedural"]["secondaryColor"] if key == "leaves" else request["color"],
              "metallic": MATERIALS[key][0], "roughness": .8 if key in ("leaves", "foliage", "stone") else MATERIALS[key][1],
-             "surface": {"profile": profiles[key], "resolution": BARK_RESOLUTION if tree else 256},
-             **({"pattern": species + "-" + key} if tree else {})} for key in keys]
+             "surface": {"profile": profiles[key], "resolution": BARK_RESOLUTION if tree or deadwood else 256},
+             **({"pattern": species + "-" + key} if tree else {}),
+             **({"pattern": species + "-log", "repeats": log_repeats(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if deadwood else {})}
+            for key in keys]
 
 
 def author_finish(request, directory, objects):
     from textures import author_surfaces
-    relief = {"tree": .008, "rock": .005, "column": .006, "foliage": .007}[request["procedural"]["kind"]]
+    relief = {"tree": .008, "rock": .005, "column": .006, "foliage": .007, "log": .008, "stump": .008}[request["procedural"]["kind"]]
     author_surfaces({"seed": request["seed"], "recipe": {"materials": surface_materials(request)}}, directory, objects, normal_relief=relief)

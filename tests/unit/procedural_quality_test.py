@@ -53,7 +53,10 @@ class ProceduralQuality(unittest.TestCase):
         natural = request(tree())
         materials = procedural.surface_materials(natural)
         self.assertEqual([m["id"] for m in materials], ["Bark", "Leaves"])
-        self.assertEqual([m["surface"] for m in materials], [{"profile": "bark", "resolution": 256}, {"profile": "leaf", "resolution": 256}])
+        # Natural oak/birch/pine author 512 px species bark tiles and leaf/needle-spray cutout atlases.
+        self.assertEqual([m["surface"] for m in materials], [{"profile": "bark", "resolution": 512}, {"profile": "leaf", "resolution": 512}])
+        pine = procedural.surface_materials(request(tree("pine")))
+        self.assertEqual([(m["pattern"], m["surface"]["resolution"]) for m in pine], [("pine-bark", 512), ("pine-leaves", 512)])
         self.assertTrue(all(m["metallic"] == 0 for m in materials))
         natural["procedural"].pop("finish")
         self.assertEqual(procedural.surface_materials(natural), [], "Legacy requests retain their flat finish")

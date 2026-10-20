@@ -3,7 +3,7 @@ import { jsonSnapshot, normalizeRecipe, preflightRecipe, preflightPart, checkSoc
 import { inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { AssetError } from './types.js';
-import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralRenderSourceKeys, proceduralSize, proceduralSurfaceMaterials, PROCEDURAL_LIMITS } from './procedural.js';
+import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralRenderSourceKeys, proceduralSize, proceduralSurfaceMaterials, proceduralSurfacePattern, PROCEDURAL_LIMITS, PROCEDURAL_SURFACE_RESOLUTION } from './procedural.js';
 import type { AssemblyMaterial, AssetAudit, AssetManifest, AssetRequest } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
 import { decodeMaterialPng } from './material-png.js';
@@ -104,7 +104,7 @@ export function validateAudit(value: unknown, request: AssetRequest, manifestVer
           typeof actual.metallic !== 'number' || Math.abs(actual.metallic - wanted.metallic!) > .00001 || typeof actual.roughness !== 'number' || Math.abs(actual.roughness - wanted.roughness!) > .00001 ||
           emission.strength !== 0 || !isDeepStrictEqual(vector(emission.color, 0, 1, 'procedural emission color'), [1, 1, 1]))
         throw new AssetError('MESH', 'Measured procedural PBR values differ from the selected finish.');
-      validateGeneratedSurface(actual.surface, wanted);
+      validateGeneratedSurface(actual.surface, wanted, proceduralSurfacePattern(request.procedural, wanted.id));
     }
   }
   if (request.template === 'hero-prop' && (!totals.lod1Triangles || totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Hero LOD must reduce geometry.');
@@ -341,9 +341,13 @@ export function workerScripts(request: AssetRequest): string[] {
   return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []),
     ...(request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural' ? ['textures.py'] : [])];
 }
-function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial): void {
-  const surface = record(value, 'generated procedural surface'), expected = wanted.surface!;
+function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial, pattern?: string): void {
+  const surface = record(value, 'generated procedural surface'), expected = { ...wanted.surface! };
+  // Natural oak/birch/pine assets made before the species patterns keep their plain 256 px tiles.
+  if (pattern !== undefined && surface.pattern === undefined && surface.resolution === PROCEDURAL_SURFACE_RESOLUTION) { expected.resolution = PROCEDURAL_SURFACE_RESOLUTION; pattern = undefined; }
+  const alphaMode = pattern?.endsWith('-leaves') ? 'MASK' : 'OPAQUE';
   if (surface.profile !== expected.profile || surface.resolution !== expected.resolution || surface.generator !== 'arcane-tile-v1' || surface.texCoord !== 0 ||
+      surface.pattern !== pattern || (pattern === undefined ? surface.alphaMode !== undefined : surface.alphaMode !== alphaMode) ||
       !Array.isArray(surface.images) || surface.images.length !== 3) throw new AssetError('MESH', 'Generated procedural surface differs from the selected finish.');
   const roles = new Set<string>();
   for (const raw of surface.images) {
@@ -392,6 +396,9 @@ export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: 
     if ((pbr.roughnessFactor ?? 1) !== 1) fail(`roughnessFactor ${measuredNumber(pbr.roughnessFactor)} must equal 1 for the packed PNG.`);
     const evidence = audit.meshes.flatMap(mesh => mesh.materialProperties ?? []).find(item => item.name === actual.name)?.surface;
     if (!evidence) fail('Generated surface audit evidence is missing.');
+    // Leaf-spray atlases are alpha cutouts (MASK at the default 0.5 cutoff); every other surface is opaque.
+    const alphaMode = (evidence as { alphaMode?: string }).alphaMode ?? 'OPAQUE';
+    if ((actual.alphaMode ?? 'OPAQUE') !== alphaMode || (alphaMode === 'MASK' && (actual.alphaCutoff ?? .5) !== .5)) fail(`alphaMode ${String(actual.alphaMode ?? "OPAQUE").slice(0, 16)} must be ${alphaMode} as audited.`);
     for (const [role, rawUse] of [['baseColor', pbr.baseColorTexture], ['normal', actual.normalTexture], ['metallicRoughness', pbr.metallicRoughnessTexture]] as const) {
       location = `Generated material[${materialIndex}] ${role} map`;
       const use = object(rawUse, 'generated texture binding');

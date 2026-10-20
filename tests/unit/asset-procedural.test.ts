@@ -26,7 +26,7 @@ test('procedural requests normalize canonically with derived size, colour and bo
   assert.deepEqual(request.color, [0.22, 0.18, 0.14]);
   // Stored requests re-normalize to themselves (manifest/request provenance relies on it).
   assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(request))), request);
-  for (const kind of ['rock', 'column', 'foliage'] as const) {
+  for (const kind of ['rock', 'column', 'foliage', 'log', 'stump'] as const) {
     const r = normalizeRequest({ template: 'procedural', name: kind + '-a', procedural: { kind } });
     assert.equal(r.procedural!.kind, kind); assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(r))), r);
     assert.equal(r.triangleBudget, PROCEDURAL_LIMITS.defaultTriangles[kind]);
@@ -38,6 +38,8 @@ test('procedural parameters reject code, unknown fields, out-of-range values and
     { kind: 'tree', python: 'import os' }, { kind: 'tree', species: 'baobab' }, { kind: 'tree', height: 40 }, { kind: 'tree', branchLevels: 1.5 },
     { kind: 'tree', leafDensity: -1 }, { kind: 'rock', size: [1, 1] }, { kind: 'rock', size: [1, 1, 30] }, { kind: 'column', flutes: 4 },
     { kind: 'column', radius: 1, height: 2 }, { kind: 'foliage', style: 'cactus' }, { kind: 'teapot' }, { kind: 'tree', script: 'x' },
+    { kind: 'log', species: 'pine' }, { kind: 'log', length: 30 }, { kind: 'log', ends: 'chewed' }, { kind: 'log', moss: 'yes' }, { kind: 'log', top: 'cut' },
+    { kind: 'stump', top: 'split' }, { kind: 'stump', radius: 3 }, { kind: 'stump', height: 0 }, { kind: 'stump', ends: 'cut' },
   ];
   for (const procedural of bad) assert.throws(() => normalizeRequest({ template: 'procedural', name: 'bad', procedural }), code('INPUT'), JSON.stringify(procedural));
   assert.throws(() => normalizeRequest({ template: 'procedural', name: 'big', triangleBudget: 20001 }), code('INPUT'));
@@ -112,6 +114,14 @@ test('assets_procedural maps typed generator input onto the shared start body', 
   assert.equal(normalizeRequest(body).procedural!.kind, 'tree');
   assert.equal(normalizeRequest(body).procedural!.finish, 'natural');
   assert.equal(proceduralInput.parse({name:'plain-rock',generator:{kind:'rock',finish:'flat'}}).generator.finish,'flat');
+  // Fallen log / stump: typed deadwood parameters with canonical defaults.
+  const log = normalizeRequest(proceduralStartBody(proceduralInput.parse({ name: 'log-1', generator: { kind: 'log', species: 'birch', length: 4, moss: true }, seed: 5 })));
+  assert.deepEqual(log.procedural, { kind: 'log', species: 'birch', length: 4, radius: 0.25, ends: 'mixed', moss: true, finish: 'natural' });
+  assert.equal(log.triangleBudget, 4000); assert.deepEqual(log.color, [0.82, 0.8, 0.75]);
+  const stump = normalizeRequest({ template: 'procedural', name: 'stump-1', procedural: { kind: 'stump', top: 'broken' } });
+  assert.deepEqual(stump.procedural, { kind: 'stump', species: 'oak', radius: 0.35, height: 0.5, top: 'broken', moss: false });
+  for (const generator of [{ kind: 'log', species: 'palm' }, { kind: 'stump', top: 'sawn' }, { kind: 'log', length: 13 }])
+    assert.equal(proceduralInput.safeParse({ name: 'x', generator }).success, false, JSON.stringify(generator));
   assert.equal(proceduralInput.safeParse({name:'external-rock',generator:{kind:'rock',finish:'download'}}).success,false);
   for (const bad of [{ name: 'x', generator: { kind: 'tree', code: 'import os' } }, { name: 'x', generator: { kind: 'python' } }, { name: 'x', generator: { kind: 'rock' }, triangleBudget: 30000 }])
     assert.equal(proceduralInput.safeParse(bad).success, false, JSON.stringify(bad));

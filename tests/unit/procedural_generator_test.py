@@ -101,7 +101,11 @@ CASES = [tree(s, h, lv) for s in ("pine", "oak", "birch", "palm") for h, lv in (
     {"kind": "column", "radius": 0.4, "height": 5.0, "flutes": f, "base": b, "capital": c}
     for f in (0, 8, 32) for b in ("none", "plinth", "attic") for c in ("none", "doric", "ionic", "corinthian")] + [
     {"kind": "foliage", "style": s, "radius": 0.8, "height": 0.9, "density": d} for s in ("bush", "grass", "fern") for d in (0.0, 1.0)] + [
-    natural(s, h, lv, d) for s in ("oak", "birch") for h, lv, d in ((2.0, 1, .5), (9.0, 2, .7), (9.0, 3, 0.0), (20.0, 3, 1.0))]
+    natural(s, h, lv, d) for s in ("oak", "birch", "pine") for h, lv, d in ((2.0, 1, .5), (9.0, 2, .7), (9.0, 3, 0.0), (20.0, 3, 1.0))] + [
+    {"kind": "log", "species": s, "length": L, "radius": r, "ends": e, "moss": m} for s in ("oak", "birch") for L, r in ((.5, .05), (3.0, .25), (12.0, 1.2))
+    for e, m in (("cut", False), ("broken", True), ("mixed", False))] + [
+    {"kind": "stump", "species": s, "radius": r, "height": h, "top": t, "moss": m} for s in ("oak", "birch") for r, h in ((.05, .1), (.35, .5), (1.5, 2.5))
+    for t, m in (("cut", True), ("broken", False))]
 
 
 def request(params, budget=20000, seed=7):
@@ -109,7 +113,7 @@ def request(params, budget=20000, seed=7):
 
 
 # Natural broadleaf (bark, leaves) triangle counts at 16000, seed 7, height 9, three levels.
-BASELINE = {("oak", 0.7): (6178, 6444), ("oak", 0.0): (10934,), ("birch", 0.7): (6468, 6216), ("birch", 0.0): (12362,)}
+BASELINE = {("oak", 0.7): (6178, 3864), ("oak", 0.0): (10934,), ("birch", 0.7): (6468, 3528), ("birch", 0.0): (12362,)}
 
 
 class GeneratorContract(unittest.TestCase):
@@ -239,7 +243,7 @@ class GeneratorContract(unittest.TestCase):
                 self.assertTrue(1.5 <= trunk["radii"][0] * (1 + gain) / breast <= 2.2)
 
     def test_zero_density_emits_only_nonempty_closed_wood_for_every_tree_species(self):
-        for species, finish in [(s, None) for s in ("pine", "oak", "birch", "palm")] + [("oak", "natural"), ("birch", "natural")]:
+        for species, finish in [(s, None) for s in ("pine", "oak", "birch", "palm")] + [("oak", "natural"), ("birch", "natural"), ("pine", "natural")]:
             with self.subTest(species=species, finish=finish):
                 params = tree(species, density=0.0)
                 if finish:
@@ -258,15 +262,17 @@ class GeneratorContract(unittest.TestCase):
                 self.assertEqual(mesh.wood is not None, finish == "natural")
 
     def test_natural_canopy_fills_the_crown_silhouette_at_default_density(self):
-        # Scanline proxy in front and side orthographic views: covered share of each row's crown span.
-        # Oak is a full crown (70-85%); birch is deliberately airier.
-        for species, seeds, low, high in (("oak", (101, 102, 103, 104, 105, 106), .7, .86), ("birch", (201, 202, 203), .55, .72)):
+        # Scanline proxy in front and side orthographic views: share of each row's crown span covered by
+        # card geometry. Cards are cutouts (the atlas leaves cover about a third of each), so the cards
+        # themselves must span most of the crown without becoming one solid hull. Every spray is rooted on a
+        # twig, so the crown reads as clumpy lobes with some sky between them where no twig grows.
+        for species, seeds, low, high in (("oak", (101, 102, 103, 104, 105, 106), .76, .95), ("birch", (201, 202, 203), .78, .95)):
             for seed in seeds:
                 leaves = procedural.plan(request(natural(species), 16000, seed))[1][2]
                 for keep in (0, 1):
                     with self.subTest(species=species, seed=seed, view=keep):
                         self.assertTrue(low <= canopy_coverage(leaves, keep, rows=True) <= high)
-                        self.assertGreater(canopy_coverage(leaves, keep), low - .12)
+                        self.assertGreater(canopy_coverage(leaves, keep), low - .15)
 
     def test_natural_canopy_coverage_rises_with_density(self):
         for species, seed in (("oak", 102), ("birch", 202)):
@@ -292,7 +298,8 @@ class GeneratorContract(unittest.TestCase):
         for species in ("oak", "birch", "pine", "palm"):
             self.assertIsNone(procedural.plan(request(tree(species), 16000))[1][2].normals, "legacy leaves keep their shading")
 
-    def test_natural_canopy_stays_in_budget_and_in_the_tonal_strip(self):
+    def test_natural_canopy_cards_map_whole_atlas_tiles_within_budget(self):
+        tiles = [procedural.atlas_rect(c, r) for r in range(procedural.ATLAS_ROWS) for c in range(procedural.ATLAS_COLS)]
         for species in ("oak", "birch"):
             for height, budget in ((2.0, 4000), (9.0, 16000), (20.0, 20000)):
                 with self.subTest(species=species, height=height, budget=budget):
@@ -301,34 +308,280 @@ class GeneratorContract(unittest.TestCase):
                     self.assertLessEqual(bark.wood["triangleLimit"] + leaves.triangles(), budget)
                     self.assertTrue(all(data.triangles() <= procedural.HARD_TRIANGLE_LIMIT for _, _, data in parts))
                     self.assertEqual(leaves.triangles() % procedural.leaf_triangles(), 0)
-                    u = [point[0] for uv in leaves.uvs for point in uv]
-                    self.assertGreaterEqual(min(u), .5 - 1e-9)
-                    self.assertLessEqual(max(u), 1 + 1e-9)
-        # Interior clusters and inner masses use the shaded half of the strip, sunlit ones the light half.
-        u = [uv[0][0] for uv in procedural.plan(request(natural("oak"), 16000, 102))[1][2].uvs]
-        self.assertGreater(sum(x < .75 for x in u), len(u) * .1)
-        self.assertGreater(sum(x > .75 for x in u), len(u) * .1)
-        self.assertAlmostEqual(procedural.tone_band(0.0) + procedural.TONE_BAND / 2, .75)
-        self.assertAlmostEqual(procedural.tone_band(-1.0) + procedural.TONE_BAND / 2, .625)
-        self.assertAlmostEqual(procedural.tone_band(1.0) + procedural.TONE_BAND / 2, .875)
+                    self.assertLessEqual(leaves.triangles() // procedural.leaf_triangles(), procedural.CANOPY[species]["cards"])
+                    # Every card is one closed lens over exactly one atlas tile: 12 faces sharing a tile.
+                    for first in range(0, len(leaves.uvs), 12):
+                        points = [pt for uv in leaves.uvs[first:first + 12] for pt in uv]
+                        inside = [t for t in tiles if all(t[0] - 1e-9 <= u <= t[2] + 1e-9 and t[1] - 1e-9 <= v <= t[3] + 1e-9 for u, v in points)]
+                        self.assertEqual(len(inside), 1)
+                        self.assertAlmostEqual(min(u for u, _ in points), inside[0][0])
+                        self.assertAlmostEqual(max(v for _, v in points), inside[0][3])
+        # Deep and inner clusters use the shade row, the rest the sunlit row.
+        rows = collections.Counter(int(uv[0][1] * procedural.ATLAS_ROWS) for uv in procedural.plan(request(natural("oak"), 16000, 102))[1][2].uvs[::12])
+        self.assertGreater(rows[0], sum(rows.values()) * .2)
+        self.assertGreater(rows[1], sum(rows.values()) * .1)
 
-    def test_natural_oak_clusters_carry_shaded_inner_masses_birch_stays_airy(self):
-        original, cores = procedural.MeshData.blob, collections.Counter()
+    def test_natural_canopy_uses_fewer_larger_cards_than_the_budget_allows(self):
+        for species, seed in (("oak", 103), ("birch", 202)):
+            with self.subTest(species=species):
+                parts = procedural.plan(request(natural(species, density=1.0), 16000, seed))
+                bark, leaves = parts[0][2], parts[1][2]
+                cards = leaves.triangles() // procedural.leaf_triangles()
+                self.assertEqual(cards, procedural.CANOPY[species]["cards"])
+                self.assertLess(cards, (16000 - bark.wood["triangleLimit"]) // procedural.leaf_triangles())
+                # Cards are curved: the twig line of each card is bent, never one flat plane.
+                card = leaves.vertices[:8]
+                normal = procedural.norm(procedural.cross(procedural.sub(card[2], card[0]), procedural.sub(card[5], card[0])))
+                self.assertGreater(abs(procedural.dot(procedural.sub(card[1], card[0]), normal)), 1e-4)
 
-        def counted(mesh, ring, top, bottom, band):
-            cores[species] += 1
-            return original(mesh, ring, top, bottom, band)
-        with patch.object(procedural.MeshData, "blob", counted):
-            for species in ("oak", "birch"):
-                procedural.plan(request(natural(species), 16000, 103))
-        self.assertGreater(cores["oak"], 20)
-        self.assertEqual(cores["birch"], 0)
-        blob = procedural.MeshData()
-        blob.blob([(math.cos(a), math.sin(a), 0.0) for a in (2 * math.pi * k / 12 for k in range(12))], (0, 0, .7), (0, 0, -.4), (.55, .035))
-        self.assertEqual(blob.triangles(), procedural.CORE_UNITS * procedural.leaf_triangles())
+    def test_natural_bark_tile_repeats_along_branches_inside_uv0(self):
+        for species in ("oak", "birch"):
+            bark = procedural.plan(request(natural(species, density=0.0), 16000, 103))[0][2]
+            with self.subTest(species=species):
+                points = [pt for uv in bark.uvs for pt in uv]
+                self.assertTrue(all(-1e-9 <= c <= 1 + 1e-9 for pt in points for c in pt))
+                areas = [abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(uv, uv[1:] + uv[:1]))) for uv in bark.uvs]
+                self.assertGreater(min(areas), 1e-12)
+        # One synthetic tube: repeats land on stations, the texture coordinate is continuous across
+        # faces modulo the tile, and the tile repeats a divisor-of-sides number of times around.
+        spine = [(0.0, 0.0, z) for z in (0.0, .3, .7, 1.2, 1.5, 2.1, 2.6, 3.0)]
+        uv = procedural.wood_tile_uvs([p[2] for p in spine] + [3.1], 8, {"around": 2, "period": 1.0})
+        for index in range(len(spine) - 1):
+            for j in range(8):
+                face = uv(index, j)
+                self.assertTrue(all(0 <= c <= 1 for pt in face for c in pt))
+                if index:
+                    # The ring shared with the face below: the same tile coordinate, or one repeat on.
+                    step = uv(index - 1, j)[2][1] - face[0][1]
+                    self.assertTrue(min(abs(step), abs(step - 1)) < 1e-9)
+                if j:
+                    step = uv(index, j - 1)[1][0] - face[0][0]
+                    self.assertTrue(min(abs(step), abs(step - 1)) < 1e-9)
+        with self.assertRaises(ValueError):
+            procedural.wood_tile_uvs([0.0, 1.0, 1.1], 5, {"around": 2, "period": 1.0})
+        # Birch trunk: whole repeats change strip, in trunk order base -> fall -> patched -> rise -> clean, the
+        # same all round the trunk, so the grading strips (not a hard band edge) carry every change.
+        order = ("base", "fall", "patched", "rise", "clean")
+        for seed in (201, 202, 203):
+            birch = procedural.plan(request(natural("birch", density=0.0), 16000, seed))[0][2]
+            sides, trunk = birch.wood["preset"][0], birch.wood["trunkFaces"]
+            quads = [k for k in range(trunk) if len(birch.uvs[k]) == 4]
+            self.assertEqual(quads, list(range(len(quads))))
+
+            def strip(uv):
+                v = min(c for _, c in uv)
+                return next(n for n in order if procedural.BIRCH_STRIPS[n][0] - 1e-9 <= v <= sum(procedural.BIRCH_STRIPS[n]) + 1e-9)
+            rings = [{strip(birch.uvs[k]) for k in quads[r * sides:(r + 1) * sides]} for r in range(len(quads) // sides)]
+            self.assertTrue(all(len(names) == 1 for names in rings), "strips never vary round the trunk")
+            ranks = [order.index(next(iter(names))) for names in rings]
+            self.assertIn(ranks[0], (0, 1))
+            self.assertEqual(ranks[-1], 4)
+            # Allowed changes meet on matching content (fall and rise both end on patched bark).
+            allowed = {(0, 1), (1, 2), (1, 3), (2, 3), (3, 4)} | {(k, k) for k in range(5)}
+            self.assertTrue(all(pair in allowed for pair in zip(ranks, ranks[1:])), ranks)
+            self.assertIn(1, ranks)
+            self.assertIn(3, ranks)
+
+    def test_natural_spray_cards_are_rooted_on_twigs(self):
+        # Every leaf-spray card starts on a twig chain or wood axis (no free-floating sprays at the crown edge).
+        for species, seed, density in (("oak", 106, 1.0), ("oak", 103, .7), ("birch", 201, .7)):
+            with self.subTest(species=species, seed=seed):
+                params = natural(species, density=density)
+                leaves = procedural.plan_broadleaf(params, seed, 16000)[1]
+                axes, _, scale = procedural.broadleaf_skeleton(params, random.Random(seed))
+                grid = collections.defaultdict(list)
+                for a in axes:
+                    for q in a["points"]:
+                        p = procedural.mul(q, scale)
+                        grid[tuple(math.floor(c / .25) for c in p)].append(p)
+                for first in range(0, len(leaves.vertices), 8):
+                    card = leaves.vertices[first:first + 8]
+                    base = procedural.mul(procedural.add(card[0], card[5]), .5)
+                    key = tuple(math.floor(c / .25) for c in base)
+                    near = min((math.dist(base, p) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                                for p in grid.get((key[0] + dx, key[1] + dy, key[2] + dz), ())), default=math.inf)
+                    self.assertLess(near, .12)
+
+    def test_natural_pine_is_bounded_deterministic_and_maps_whole_needle_tiles(self):
+        tiles = [procedural.atlas_rect(c, r) for r in range(procedural.ATLAS_ROWS) for c in range(procedural.ATLAS_COLS)]
+        for height, budget in ((2.0, 4000), (9.0, 12000), (9.0, 16000), (20.0, 20000)):
+            for seed in (7, 31):
+                with self.subTest(height=height, budget=budget, seed=seed):
+                    params = natural("pine", height, density=1.0)
+                    parts = procedural.plan(request(params, budget, seed))
+                    again = procedural.plan(request(params, budget, seed))
+                    self.assertEqual([(d.vertices, d.faces, d.uvs, d.normals) for _, _, d in parts], [(d.vertices, d.faces, d.uvs, d.normals) for _, _, d in again])
+                    self.assertNotEqual(parts[1][2].vertices, procedural.plan(request(params, budget, seed + 1))[1][2].vertices)
+                    self.assertEqual([key for key, _, _ in parts], ["bark", "leaves"])
+                    bark, leaves = parts[0][2], parts[1][2]
+                    self.assertIsNotNone(bark.wood)
+                    self.assertEqual(bark.wood["triangleLimit"], math.floor(bark.triangles() * procedural.UNION_RESERVE))
+                    self.assertLessEqual(bark.wood["triangleLimit"] + leaves.triangles(), budget)
+                    self.assertTrue(all(data.triangles() <= procedural.HARD_TRIANGLE_LIMIT for _, _, data in parts))
+                    self.assertLessEqual(leaves.triangles() // procedural.leaf_triangles(), procedural.CANOPY["pine"]["cards"])
+                    self.assertEqual(len(leaves.normals), len(leaves.vertices))
+                    self.assertTrue(all(abs(math.sqrt(procedural.dot(n, n)) - 1) < 1e-9 for n in leaves.normals))
+                    for first in range(0, len(leaves.uvs), 12):
+                        points = [pt for uv in leaves.uvs[first:first + 12] for pt in uv]
+                        inside = [t for t in tiles if all(t[0] - 1e-9 <= u <= t[2] + 1e-9 and t[1] - 1e-9 <= v <= t[3] + 1e-9 for u, v in points)]
+                        self.assertEqual(len(inside), 1)
+        # Inner, low sprays use the shade row, the rest the sunlit row.
+        rows = collections.Counter(int(uv[0][1] * procedural.ATLAS_ROWS) for uv in procedural.plan(request(natural("pine"), 16000, 7))[1][2].uvs[::12])
+        self.assertGreater(rows[0], sum(rows.values()) * .2)
+        self.assertGreater(rows[1], sum(rows.values()) * .1)
+
+    def test_natural_pine_density_keeps_the_wood_and_scales_needle_cards(self):
+        bare = procedural.plan(request(natural("pine", density=0.0), 16000, 7))
+        self.assertEqual([key for key, _, _ in bare], ["bark"])
+        self.assertIsNotNone(bare[0][2].wood)
+        parts = [procedural.plan(request(natural("pine", density=d), 16000, 7)) for d in (1e-8, .35, .7, 1.0)]
+        self.assertEqual(len({tuple(p[0][2].vertices) for p in parts}), 1, "any positive density keeps the same wood")
+        cards = [p[1][2].triangles() // procedural.leaf_triangles() for p in parts]
+        self.assertEqual(cards[0], 1)
+        self.assertEqual(cards[1:], [math.ceil(cards[-1] * d) for d in (.35, .7, 1.0)])
+        # A density prefix: the sparser canopy is exactly the first cards of the denser one.
+        sparse, dense = parts[1][1][2], parts[3][1][2]
+        self.assertEqual(sparse.vertices, dense.vertices[:len(sparse.vertices)])
+        covered = [canopy_coverage(p[1][2], 0, rows=True) for p in parts[1:]]
+        self.assertLess(covered[0], covered[2])
+
+    def test_natural_pine_anatomy(self):
+        for seed in (7, 31, 101, 102, 103):
+            with self.subTest(seed=seed):
+                axes, _, scale = procedural.conifer_skeleton(natural("pine"), random.Random(seed))
+                trunk = axes[0]
+                self.assertTrue(trunk["kept"])
+                # Straight monopodial trunk: continuous, monotone taper to the leader, a butt flare.
+                radii = trunk["radii"][:trunk["woodCount"]]
+                self.assertTrue(all(b <= a + 1e-12 for a, b in zip(radii, radii[1:])))
+                body = radii[:int(len(radii) * (1 - procedural.TIP_TAPER))]
+                self.assertLess(max((a - b) / a for a, b in zip(body, body[1:])), .1)
+                self.assertGreater(radii[0], 1.1 * trunk["radii"][int(round(1.3 / procedural.V5_STEP))])
+                top = trunk["points"][-1]
+                self.assertLess(math.hypot(top[0], top[1]), .06 * top[2])
+                # Whorls: several branches share each socket height.
+                branches = [a for a in axes if a["kind"] == "branch"]
+                whorls = collections.Counter(a["attach"] for a in branches)
+                self.assertGreaterEqual(sum(n >= 3 for n in whorls.values()), 8)
+                # Dead, bare stubs below the living crown: short, kept as dark wood, never needled.
+                dead = [a for a in axes if a["kind"] == "dead"]
+                self.assertTrue(dead)
+                lowest_living = min(trunk["points"][a["attach"]][2] for a in branches)
+                self.assertTrue(all(trunk["points"][a["attach"]][2] < lowest_living + .65 for a in dead))
+                self.assertTrue(all(sum(math.dist(p, q) for p, q in zip(a["points"], a["points"][1:])) <= .5 + 1e-9 for a in dead))
+                self.assertFalse(any(c["parent"] == a["id"] for a in dead for c in axes))
+                # Branches droop with age: low whorls depart lower and reach further than the top ones.
+                ordered = sorted(branches, key=lambda a: a["attach"])
+                third = len(ordered) // 3
+                low, high = ordered[:third], ordered[-third:]
+                self.assertLess(sum(a["departure"][2] for a in low) / third, sum(a["departure"][2] for a in high) / third - .3)
+                self.assertGreater(sum(len(a["points"]) for a in low), 1.5 * sum(len(a["points"]) for a in high))
+                # Conical crown: the widest reach sits in the lower half of the living crown.
+                reach = [(a["points"][0][2], max(math.hypot(p[0], p[1]) for p in a["points"])) for a in branches]
+                widest = max(reach, key=lambda r: r[1])[0]
+                self.assertLess(widest, (lowest_living + top[2]) / 2)
+
+    def test_natural_pine_needle_cards_are_rooted_on_living_shoots(self):
+        for seed, density in ((7, 1.0), (31, .7)):
+            with self.subTest(seed=seed):
+                params = natural("pine", density=density)
+                leaves = procedural.plan_broadleaf(params, seed, 16000)[1]
+                axes, _, scale = procedural.conifer_skeleton(params, random.Random(seed))
+                living, dead = collections.defaultdict(list), []
+                for a in axes:
+                    for q in a["points"]:
+                        p = procedural.mul(q, scale)
+                        if a["kind"] == "dead":
+                            dead.append(p)
+                        else:
+                            living[tuple(math.floor(c / .25) for c in p)].append(p)
+                for first in range(0, len(leaves.vertices), 8):
+                    card = leaves.vertices[first:first + 8]
+                    base = procedural.mul(procedural.add(card[0], card[5]), .5)
+                    key = tuple(math.floor(c / .25) for c in base)
+                    near = min((math.dist(base, p) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                                for p in living.get((key[0] + dx, key[1] + dy, key[2] + dz), ())), default=math.inf)
+                    self.assertLess(near, .12)
+
+    def test_natural_pine_bark_strips_grade_up_the_trunk(self):
+        order = ("plated", "grade", "upper")
+        for seed in (7, 31, 101):
+            bark = procedural.plan(request(natural("pine", density=0.0), 16000, seed))[0][2]
+            sides, trunk = bark.wood["preset"][0], bark.wood["trunkFaces"]
+            quads = [k for k in range(trunk) if len(bark.uvs[k]) == 4]
+
+            def strip(uv):
+                v = min(c for _, c in uv)
+                return next(n for n in order if procedural.PINE_STRIPS[n][0] - 1e-9 <= v <= sum(procedural.PINE_STRIPS[n]) + 1e-9)
+            rings = [{strip(bark.uvs[k]) for k in quads[r * sides:(r + 1) * sides]} for r in range(len(quads) // sides)]
+            self.assertTrue(all(len(names) == 1 for names in rings))
+            ranks = [order.index(next(iter(names))) for names in rings]
+            self.assertEqual(ranks[0], 0)
+            self.assertEqual(ranks[-1], 2)
+            self.assertEqual(ranks, sorted(ranks))
+            self.assertIn(1, ranks)
+            # Living limbs wear the thin upper bark.
+            limbs = {strip(uv) for uv in bark.uvs[trunk:] if len(uv) == 4}
+            self.assertIn("upper", limbs)
+
+    def test_deadwood_logs_and_stumps_are_bounded_deterministic_bark(self):
+        def log(**kw):
+            return {"kind": "log", "species": "oak", "length": 3.0, "radius": .25, "ends": "mixed", "moss": False, **kw}
+
+        def stump(**kw):
+            return {"kind": "stump", "species": "birch", "radius": .35, "height": .5, "top": "cut", "moss": False, **kw}
+        for params in (log(), log(ends="broken", moss=True), log(length=12.0, radius=1.2), stump(), stump(top="broken", moss=True), stump(radius=1.5, height=2.5)):
+            with self.subTest(params=params):
+                parts = procedural.plan(request(params, 20000, 5))
+                self.assertEqual([(key, material) for key, material, _ in parts], [("bark", "primary")])
+                mesh = parts[0][2]
+                self.assertLessEqual(mesh.triangles(), procedural.DEADWOOD_TRIANGLES)
+                self.assertEqual(mesh.vertices, procedural.plan(request(params, 20000, 5))[0][2].vertices)
+                self.assertNotEqual(mesh.vertices, procedural.plan(request(params, 20000, 6))[0][2].vertices)
+                band = procedural.LOG_BANDS["moss" if params["moss"] else "plain"]
+                for uv in mesh.uvs:
+                    vs = [v for _, v in uv]
+                    self.assertTrue(all(0 <= c <= 1 for pt in uv for c in pt))
+                    # Bark faces stay in the selected band; end caps map inside the end-grain disc row.
+                    self.assertTrue(band[0] <= min(vs) and max(vs) <= band[0] + band[1] or min(vs) >= procedural.LOG_DISC_ROW)
+                xs = [v[0] for v in mesh.vertices]
+                if params["kind"] == "log":
+                    self.assertGreater(max(xs) - min(xs), params["length"] * .98)
+                    self.assertLess(max(xs) - min(xs), params["length"] + 1.2 * params["radius"] * (2 if params["ends"] != "cut" else .4))
+                else:
+                    top = max(v[2] for v in mesh.vertices)
+                    self.assertGreaterEqual(top, params["height"] * .95)
+                    if params["top"] == "broken":
+                        self.assertGreater(top, params["height"] + .2 * params["radius"])
+                    # Root flare: the foot is wider than the bole.
+                    foot = [math.hypot(v[0], v[1]) for v in mesh.vertices if v[2] < .02]
+                    self.assertGreater(max(foot), params["radius"] * 1.4)
+        # A tight budget still fits; natural deadwood names its species log texture and packed repeats.
+        self.assertLessEqual(procedural.plan(request(log(length=12.0, radius=1.2, ends="broken"), 2500))[0][2].triangles(), 2500)
+        materials = procedural.surface_materials(request({**log(), "finish": "natural"}))
+        self.assertEqual([(m["id"], m["pattern"], m["surface"], m["repeats"], m["moss"]) for m in materials], [("Bark", "oak-log", {"profile": "bark", "resolution": 512}, 3, False)])
+        self.assertTrue(procedural.surface_materials(request({**stump(moss=True), "finish": "natural"}))[0]["moss"])
+        # Natural deadwood maps its bark into the single LOG_BAND, LOG_CYCLES tile lengths per band repeat.
+        for params in ({**log(moss=True), "finish": "natural"}, {**stump(), "finish": "natural"}):
+            mesh = procedural.plan(request(params, 20000, 5))[0][2]
+            band = procedural.LOG_BAND
+            for uv in mesh.uvs:
+                vs = [v for _, v in uv]
+                self.assertTrue(band[0] <= min(vs) and max(vs) <= band[0] + band[1] or min(vs) >= procedural.LOG_DISC_ROW)
+            self.assertNotEqual(mesh.uvs, procedural.plan(request({**params, "finish": "flat"}, 20000, 5))[0][2].uvs)
+        self.assertEqual(procedural.surface_materials(request({**stump(), "finish": "flat"})), [])
+        self.assertEqual([procedural.log_repeats(log(radius=r)) for r in (.05, 1.2)], [1, 8])
+
+    def test_natural_surfaces_select_species_patterns_and_keep_other_finishes(self):
+        for species in ("oak", "birch", "pine"):
+            materials = procedural.surface_materials(request(natural(species)))
+            self.assertEqual([(m["id"], m["pattern"], m["surface"]) for m in materials],
+                             [("Bark", species + "-bark", {"profile": "bark", "resolution": 512}), ("Leaves", species + "-leaves", {"profile": "leaf", "resolution": 512})])
+        for params in ({**tree("palm"), "finish": "natural"}, {"kind": "rock", "size": [2.0, 1.5, 1.2], "roughness": .5, "finish": "natural"}):
+            self.assertTrue(all("pattern" not in m and m["surface"]["resolution"] == 256 for m in procedural.surface_materials(request(params))))
 
     def test_positive_density_scales_complete_leaves_linearly_without_a_minimum_floor(self):
-        for species, make in [(s, tree) for s in ("pine", "oak", "birch")] + [(s, natural) for s in ("oak", "birch")]:
+        for species, make in [(s, tree) for s in ("pine", "oak", "birch")] + [(s, natural) for s in ("oak", "birch", "pine")]:
             dense = procedural.plan(request(make(species, density=1.0), 16000))[1][2]
             capacity = dense.triangles() // procedural.leaf_triangles()
             for density in (1e-8, .1, .25, .7, 1.0):
@@ -376,6 +629,148 @@ class GeneratorContract(unittest.TestCase):
         self.assertLessEqual(imported, {"math", "random", "heapq", "bpy", "bmesh", "textures", "author_surfaces"})
         texture_imports = [node for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module == "textures"]
         self.assertEqual([[alias.name for alias in node.names] for node in texture_imports], [["author_surfaces"]])
+
+
+
+try:
+    import numpy  # noqa: F401  (bundled with Blender; the natural tree texture patterns use it)
+except ImportError:
+    numpy = None
+
+
+@unittest.skipIf(numpy is None, "NumPy is bundled with Blender, not every host Python")
+class NaturalTreeTextures(unittest.TestCase):
+    """Pixel contract of textures.tree_surface (no bpy: author_surfaces imports it lazily)."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("arcane_textures_under_test", ROOT / "workers" / "blender" / "textures.py")
+        cls.textures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.textures)
+
+    def test_patterns_are_deterministic_original_maps(self):
+        for pattern, color in (("oak-bark", [.22, .18, .14]), ("birch-bark", [.82, .8, .75]), ("pine-bark", [.24, .14, .09]),
+                               ("oak-leaves", [.12, .25, .06]), ("birch-leaves", [.24, .42, .1]), ("pine-leaves", [.05, .16, .07])):
+            with self.subTest(pattern=pattern):
+                rgb, alpha, normal, rough = self.textures.tree_surface(pattern, color, 99, 512)
+                again = self.textures.tree_surface(pattern, color, 99, 512)
+                other = self.textures.tree_surface(pattern, color, 100, 512)
+                self.assertTrue(all((a == b).all() for a, b in zip((rgb, alpha, normal, rough), again)))
+                self.assertFalse((rgb == other[0]).all())
+                self.assertEqual(rgb.shape, (512, 512, 3))
+                self.assertTrue(numpy.isfinite(rgb).all() and (rough >= 0).all() and (rough <= 1).all())
+                self.assertTrue(numpy.allclose(numpy.linalg.norm(normal, axis=-1), 1))
+                if pattern.endswith("bark"):
+                    self.assertTrue((alpha == 1).all())
+                else:
+                    # Cutout coverage: real holes and solid leaves in every tile, opaque nowhere else.
+                    for row in range(2):
+                        for col in range(4):
+                            tile = alpha[row * 256:(row + 1) * 256, col * 128:(col + 1) * 128]
+                            self.assertTrue(.15 < (tile >= .5).mean() < .6)
+                            # Leaves stay inside their tile: the outer texel ring is transparent.
+                            ring = numpy.concatenate([tile[0], tile[-1], tile[:, 0], tile[:, -1]])
+                            self.assertLess((ring >= .5).mean(), .02)
+
+    def test_birch_strips_repeat_within_themselves_and_bark_wraps_round(self):
+        rgb, _, normal, _ = self.textures.tree_surface("birch-bark", [.82, .8, .75], 5, 512)
+        rows = {name: (first, count) for name, first, count in self.textures.BIRCH_ROWS}
+        for name in ("base", "patched", "clean"):
+            first, count = rows[name]
+            self.assertTrue((rgb[first] == rgb[first + count - 1]).all())
+            self.assertTrue((normal[first] == normal[first + count - 1]).all())
+        # Trunk order bottom up with guard rows, so neighbouring texel rows continue each strip's edge, and
+        # every strip change on the trunk is continuous: each strip's last row is the next one's first.
+        guard = self.textures.BIRCH_GUARD
+        self.assertEqual([n for n, _, _ in self.textures.BIRCH_ROWS], ["base", "fall", "patched", "rise", "clean"])
+        self.assertEqual(self.textures.BIRCH_ROWS[0][1], guard)
+        self.assertEqual(sum(c for _, _, c in self.textures.BIRCH_ROWS) + 2 * guard, 512)
+        for (_, a, ca), (_, b, _) in zip(self.textures.BIRCH_ROWS, self.textures.BIRCH_ROWS[1:]):
+            self.assertEqual(a + ca, b)
+        step = numpy.abs(rgb[1:] - rgb[:-1]).mean()
+        for low, high in (("base", "fall"), ("fall", "patched"), ("patched", "rise"), ("rise", "clean"), ("patched", "patched"), ("clean", "clean")):
+            self.assertLess(numpy.abs(rgb[sum(rows[low]) - 1] - rgb[rows[high][0]]).mean(), step * 1e-3, (low, high))
+            self.assertLess(numpy.abs(normal[sum(rows[low]) - 1] - normal[rows[high][0]]).mean(), .02, (low, high))
+        # Grading strips really grade: dark patch cover falls from the base to the clean bark.
+        dark = {name: (rgb[f:f + c].mean(axis=2) < .25).mean() for name, (f, c) in rows.items()}
+        self.assertGreater(dark["base"], dark["fall"])
+        self.assertGreater(dark["fall"], dark["patched"])
+        self.assertGreater(dark["patched"], dark["rise"])
+        for name, (first, count) in rows.items():
+            self.assertEqual(procedural.BIRCH_STRIPS[name], (first / 512, count / 512))
+        rgb, _, _, _ = self.textures.tree_surface("oak-bark", [.22, .18, .14], 5, 512)
+        seam = numpy.abs(rgb[:, 0] - rgb[:, -1]).mean()
+        inner = numpy.abs(rgb[:, 1:] - rgb[:, :-1]).mean()
+        self.assertLess(seam, inner * 3)
+        self.assertLess(numpy.abs(rgb[0] - rgb[-1]).mean(), numpy.abs(rgb[1:] - rgb[:-1]).mean() * 3)
+        self.assertEqual(self.textures.BARK_SIZE, procedural.BARK_TILE)
+
+    def test_pine_strips_repeat_within_themselves_and_grade_plates_into_upper_bark(self):
+        rgb, _, normal, _ = self.textures.tree_surface("pine-bark", [.24, .14, .09], 5, 512)
+        rows = {name: (first, count) for name, first, count in self.textures.PINE_ROWS}
+        for name in ("plated", "upper"):
+            first, count = rows[name]
+            self.assertTrue((rgb[first] == rgb[first + count - 1]).all())
+            self.assertTrue((normal[first] == normal[first + count - 1]).all())
+        guard = self.textures.PINE_GUARD
+        self.assertEqual([n for n, _, _ in self.textures.PINE_ROWS], ["plated", "grade", "upper"])
+        self.assertEqual(self.textures.PINE_ROWS[0][1], guard)
+        self.assertEqual(sum(c for _, _, c in self.textures.PINE_ROWS) + 2 * guard, 512)
+        for (_, a, ca), (_, b, _) in zip(self.textures.PINE_ROWS, self.textures.PINE_ROWS[1:]):
+            self.assertEqual(a + ca, b)
+        step = numpy.abs(rgb[1:] - rgb[:-1]).mean()
+        for low, high in (("plated", "grade"), ("grade", "upper"), ("plated", "plated"), ("upper", "upper")):
+            self.assertLess(numpy.abs(rgb[sum(rows[low]) - 1] - rgb[rows[high][0]]).mean(), step * 1e-3, (low, high))
+            self.assertLess(numpy.abs(normal[sum(rows[low]) - 1] - normal[rows[high][0]]).mean(), .02, (low, high))
+        # Dark deep plates low on the trunk, lighter thin bark above, with relief falling away.
+        light = {name: rgb[f:f + c].mean() for name, (f, c) in rows.items()}
+        self.assertLess(light["plated"], light["grade"])
+        self.assertLess(light["grade"], light["upper"])
+        relief = {name: 1 - normal[f:f + c, :, 2].mean() for name, (f, c) in rows.items()}
+        self.assertGreater(relief["plated"], 2 * relief["upper"])
+        for name, (first, count) in rows.items():
+            self.assertEqual(procedural.PINE_STRIPS[name], (first / 512, count / 512))
+        seam = numpy.abs(rgb[:, 0] - rgb[:, -1]).mean()
+        self.assertLess(seam, numpy.abs(rgb[:, 1:] - rgb[:, :-1]).mean() * 3)
+
+    def test_log_texture_holds_one_girth_wide_bark_band_and_end_grain_discs(self):
+        (_, band, rows), (_, discs, _) = self.textures.LOG_ROWS
+        for species, color in (("oak", [.22, .18, .14]), ("birch", [.82, .8, .75])):
+            for moss in (False, True):
+                with self.subTest(species=species, moss=moss):
+                    rgb, alpha, normal, rough = self.textures.tree_surface(species + "-log", color, 9, 512, 3, moss)
+                    again = self.textures.tree_surface(species + "-log", color, 9, 512, 3, moss)
+                    self.assertTrue(all((a == b).all() for a, b in zip((rgb, alpha, normal, rough), again)))
+                    self.assertFalse((rgb == self.textures.tree_surface(species + "-log", color, 9, 512, 2, moss)[0]).all())
+                    self.assertEqual(rgb.shape, (512, 512, 3))
+                    self.assertTrue((alpha == 1).all() and (rough >= 0).all() and (rough <= 1).all())
+                    self.assertTrue(numpy.allclose(numpy.linalg.norm(normal, axis=-1), 1))
+                    self.assertTrue((rgb[band] == rgb[band + rows - 1]).all())
+                    # Moss is green and sits round u = .5 (the top of a log), never at the seam.
+                    green = rgb[band:band + rows, :, 1] - rgb[band:band + rows, :, 0]
+                    if moss:
+                        self.assertGreater(green[:, 200:312].mean(), green[:, :40].mean() + .02)
+                    else:
+                        self.assertLess(abs(green[:, 200:312].mean() - green[:, :40].mean()), .02)
+                    # Each disc tile has wood inside and the bark rim colour at its corners.
+                    tile = 512 - discs
+                    for k in range(4):
+                        block = rgb[discs:, k * tile:(k + 1) * tile]
+                        self.assertGreater(numpy.abs(block[tile // 2, tile // 2] - block[1, 1]).sum(), .05)
+        # Oak log bark is generated round the whole girth (no copied tile columns) and its exact repeat
+        # spans LOG_CYCLES tile lengths; it is weathered: lower contrast than the living tree's bark.
+        rgb = self.textures.tree_surface("oak-log", [.22, .18, .14], 9, 512, 3)[0][band:band + rows]
+        third = 512 // 3
+        self.assertGreater(numpy.abs(rgb[:, :third] - rgb[:, third:2 * third]).mean(), .005)
+        half = (rows - 1) // 2
+        self.assertGreater(numpy.abs(rgb[:half] - rgb[half:2 * half]).mean(), .005)
+        tree = self.textures.tree_surface("oak-bark", [.22, .18, .14], 9, 512)[0]
+        self.assertLess(rgb.mean(axis=2).std(), .75 * tree.mean(axis=2).std())
+        self.assertEqual(procedural.LOG_BAND, (band / 512, rows / 512))
+        self.assertEqual(procedural.LOG_CYCLES, self.textures.LOG_CYCLES)
+        self.assertEqual((procedural.LOG_DISC_ROW, procedural.LOG_DISC_TILE), (discs / 512, (512 - discs) / 512))
+        with self.assertRaises(ValueError):
+            self.textures.tree_surface("oak-log", [.2, .2, .2], 1, 512, 9)
 
 
 if __name__ == "__main__":
