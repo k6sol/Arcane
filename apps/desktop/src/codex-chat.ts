@@ -7,7 +7,7 @@ import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsCon
 import type { ChatAttachmentsController } from './chat-attachments.js';
 import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.js';
 import type { SubmittedChatMessage, SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
-import {readChatQueueSnapshot,readChatQueueRead,type ChatQueueBridge,type ChatQueueProvider,type ChatQueueSnapshot,type StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
+import type {ChatQueueBridge,ChatQueueProvider,ChatQueueSnapshot,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
 export const CODEX_INPUT_BYTES = 131072;
@@ -2042,6 +2042,7 @@ export function storedChatQueueRows(rows:readonly ChatQueueRow[]):StoredChatQueu
       state:row.state==='unknown'||row.state==='sending'?'unknown':row.state==='rejected'?'rejected':'pending'};
   });
 }
+type ChatQueueCodec=Pick<typeof import('../../../packages/protocol/src/chat-queue.js'),'readChatQueueSnapshot'|'readChatQueueRead'>;
 /** One provider partition, serialized encrypted saves, and no authority to dispatch recovered text. */
 export class ChatQueueJournal {
   projectPath:string|null=null;
@@ -2051,28 +2052,35 @@ export class ChatQueueJournal {
   private chain:Promise<boolean>=Promise.resolve(true);
   private attempted='';private saved='';private epoch=0;private changed:()=>void=()=>{};
   private failure:string|null=null;
+  private codec:ChatQueueCodec|null=null;
+  // Ordinary chat boot does not depend on secure queue recovery being available.
+  constructor(private readonly loadCodec:()=>Promise<ChatQueueCodec>=()=>import('../../../packages/protocol/src/chat-queue.js')){}
   attach(port:ChatQueueBridge|null,provider:ChatQueueProvider,restore:(rows:StoredChatQueueRow[],project:string)=>void,changed:()=>void):Promise<void>{
-    const epoch=++this.epoch;this.port=port;this.provider=provider;this.changed=changed;this.projectPath=null;this.attempted='';this.saved='';
+    const epoch=++this.epoch;this.port=port;this.provider=provider;this.changed=changed;this.projectPath=null;this.codec=null;this.attempted='';this.saved='';
     this.failure=port?'Reading saved queued messages…':'Queued messages are retained in this window. Secure saving is unavailable.';
     return this.loading=(async()=>{
       try{
-        if(!port||port.version!==1)throw new Error();
-        const reply=readChatQueueRead(await port.read(provider),provider);if(epoch!==this.epoch)return;
+        if(!port)return;
+        if(port.version!==1)throw new Error();
+        const codec=await this.loadCodec();if(epoch!==this.epoch)return;
+        const reply=codec.readChatQueueRead(await port.read(provider),provider);if(epoch!==this.epoch)return;
         if(!reply.available||!reply.projectPath)throw new Error();
-        this.projectPath=reply.projectPath;
-        this.saved=this.attempted=JSON.stringify(readChatQueueSnapshot({version:1,provider,projectPath:reply.projectPath,rows:reply.rows},provider));
+        const saved=JSON.stringify(codec.readChatQueueSnapshot({version:1,provider,projectPath:reply.projectPath,rows:reply.rows},provider));
+        this.codec=codec;this.projectPath=reply.projectPath;
+        this.saved=this.attempted=saved;
         this.failure=null;restore(reply.rows,reply.projectPath);
       }catch{if(epoch===this.epoch)this.failure='Saved queued messages could not be read. Existing records were kept; this window cannot overwrite them.';}
       finally{if(epoch===this.epoch){this.loading=null;changed();}}
     })();
   }
   async ready():Promise<void>{if(this.loading)await this.loading;}
-  available(project:string|null):boolean{return !!this.port&&!!project&&project===this.projectPath&&!this.loading;}
+  available(project:string|null):boolean{return !!this.port&&!!this.codec&&!!project&&project===this.projectPath&&!this.loading;}
   notice():string|null{return this.failure;}
   save(rows:readonly ChatQueueRow[],project:string|null,explicit=false):Promise<boolean>{
-    if(!this.available(project)){this.failure='Queued messages are retained in this window. Secure saving is unavailable for this project.';return Promise.resolve(false);}
+    const codec=this.codec;
+    if(!this.available(project)||!codec){this.failure='Queued messages are retained in this window. Secure saving is unavailable for this project.';return Promise.resolve(false);}
     let snapshot:ChatQueueSnapshot,serialized:string;
-    try{snapshot=readChatQueueSnapshot({version:1,provider:this.provider,projectPath:project,rows:storedChatQueueRows(rows)},this.provider,project!);serialized=JSON.stringify(snapshot);}
+    try{snapshot=codec.readChatQueueSnapshot({version:1,provider:this.provider,projectPath:project,rows:storedChatQueueRows(rows)},this.provider,project!);serialized=JSON.stringify(snapshot);}
     catch{this.failure='Queued messages exceed secure storage limits. All text is retained here; edit or remove a row before restarting.';return Promise.resolve(false);}
     if(serialized===this.saved&&serialized===this.attempted)return Promise.resolve(true);
     if(serialized===this.attempted&&!explicit)return this.chain;

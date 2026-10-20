@@ -87,3 +87,29 @@ test('queue accepts valid emoji exactly at its UTF-8 byte limit and rejects one 
   assert.equal(readChatQueueSnapshot(snapshot([stored(1,{text})])).rows[0]!.text,text);
   assert.throws(()=>readChatQueueSnapshot(snapshot([stored(1,{text:text+'a'})])),/Queued messages could not be saved securely/);
 });
+
+test('queue recovery is optional at boot and a missing codec cannot read or overwrite secure records',async()=>{
+  let loads=0,reads=0,writes=0,changes=0;
+  const journal=new ChatQueueJournal(async()=>{loads++;throw Error('Synthetic queue module unavailable');});
+  await journal.attach(null,provider,()=>assert.fail('no queue bridge'),()=>{changes++;});
+  assert.equal(loads,0,'ordinary chat boot does not load the queue schema');
+  assert.equal(journal.available(project),false);
+  await journal.attach({version:1,read:async()=>{reads++;return{available:true,projectPath:project,rows:[]};},save:async()=>{writes++;return{saved:true};}},provider,()=>assert.fail('no recovered data'),()=>{changes++;});
+  assert.equal(loads,1);assert.equal(reads,0);assert.equal(journal.available(project),false);
+  assert.match(journal.notice()!,/Existing records were kept/);
+  assert.equal(await journal.save([row()],project,true),false);assert.equal(writes,0);assert.equal(changes,2);
+});
+
+test('a late queue codec cannot read a retired bridge or replace a newer project recovery',async()=>{
+  const codec={readChatQueueSnapshot,readChatQueueRead};
+  let resolveCodec!:(value:typeof codec)=>void,loads=0,oldReads=0,newReads=0;
+  const delayed=new Promise<typeof codec>(resolve=>{resolveCodec=resolve;});
+  const journal=new ChatQueueJournal(()=>++loads===1?delayed:Promise.resolve(codec));
+  const first=journal.attach({version:1,read:async()=>{oldReads++;return{available:true,projectPath:project,rows:[stored()]};},save:async()=>({saved:true})},provider,()=>assert.fail('retired recovery'),()=>assert.fail('retired callback'));
+  const newer=project+'-new',writes:ChatQueueSnapshot[]=[],restored:string[]=[];
+  await journal.attach({version:1,read:async()=>{newReads++;return{available:true,projectPath:newer,rows:[]};},save:async value=>{writes.push(value);return{saved:true};}},provider,(_rows,path)=>restored.push(path),()=>{});
+  resolveCodec(codec);await first;
+  assert.equal(oldReads,0);assert.equal(newReads,1);assert.deepEqual(restored,[newer]);
+  assert.equal(journal.projectPath,newer);assert.equal(journal.available(project),false);assert.equal(journal.available(newer),true);
+  assert.equal(await journal.save([row()],newer),true);assert.equal(writes[0]!.projectPath,newer);
+});
