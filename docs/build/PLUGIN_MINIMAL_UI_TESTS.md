@@ -1,5 +1,8 @@
 # Minimal plugin UI fixture tests
 
+This is the historical October 13 fixture report. Current saved-key recovery and
+underscore-key migration are documented in [PLUGIN_KEY_RECOVERY.md](PLUGIN_KEY_RECOVERY.md).
+
 2026-10-13. Tests are finalized and frozen against Parent's minimal Main patch.
 Owned edits are limited to `plugin/fixtures/MockPlugin.luau`,
 `tests/plugin/runtime.test.mjs`, `tests/plugin/package.test.mjs`, and this report.

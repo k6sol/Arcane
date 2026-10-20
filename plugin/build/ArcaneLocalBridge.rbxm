@@ -45,8 +45,12 @@ local function loadedArtifactHash(): string?
 	return if ok then value else nil
 end
 local artifactHash = loadedArtifactHash()
-local KEY_SETTING = "Arcane.LocalApiKey.v1"
-local STATE_SETTING = "Arcane.LastConnection.v1"
+-- Periods in Plugin setting keys can corrupt its JSON store. Read old names only to migrate.
+local KEY_SETTING = "Arcane_LocalApiKey_v2"
+local STATE_SETTING = "Arcane_LastConnection_v2"
+local LEGACY_KEY_SETTING = "Arcane.LocalApiKey.v1"
+local LEGACY_STATE_SETTING = "Arcane.LastConnection.v1"
+local SETTING_ATTEMPTS = 3
 local savedKey: string? = nil
 local lastKnownConnected = false
 -- Legacy connected=false records describe transient health, not user intent.
@@ -54,24 +58,94 @@ local lastKnownConnected = false
 local autoConnect = true
 local storedOptOut = false
 local storageFailed = false
-local keyRead, previousKey = pcall(function() return plugin:GetSetting(KEY_SETTING) end)
-if keyRead and type(previousKey) == "string" then
-	local valid = pcall(function() V.keyOrigin(previousKey) end)
-	if valid then savedKey = previousKey end
-end
-previousKey = nil
-local stateRead, previousState = pcall(function() return plugin:GetSetting(STATE_SETTING) end)
-if stateRead and type(previousState) == "table" and getmetatable(previousState) == nil then
+local settingsRevision, settingsRetired = 0, false
+local startupPending = true
+local pendingWrites: {[string]: any} = {}
+local storageProblems: {[string]: boolean} = {}
+local stateNeedsWrite = false
+local function validState(value: any): boolean
+	if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
 	local count = 0
-	for _ in pairs(previousState) do count += 1 end
-	if (count == 1 or (count == 2 and type(previousState.autoConnect) == "boolean"))
-		and type(previousState.connected) == "boolean" then
-		lastKnownConnected = previousState.connected
-		autoConnect = previousState.autoConnect ~= false
-		storedOptOut = not autoConnect
-	end
+	for _ in pairs(value) do count += 1 end
+	return (count == 1 or (count == 2 and type(value.autoConnect) == "boolean")) and type(value.connected) == "boolean"
 end
-previousState = nil
+local function validSetting(name: string, value: any): boolean
+	if name == KEY_SETTING then return type(value) == "string" and (value == "" or pcall(function() V.keyOrigin(value) end)) end
+	return name == STATE_SETTING and validState(value)
+end
+local function readOwnedSetting(name: string): (boolean, any)
+	assert(name == KEY_SETTING or name == STATE_SETTING or name == LEGACY_KEY_SETTING or name == LEGACY_STATE_SETTING, "Unexpected Arcane setting.")
+	return pcall(function() return plugin:GetSetting(name) end)
+end
+local function writeOwnedSetting(name: string, value: any): boolean
+	assert((name == KEY_SETTING or name == STATE_SETTING) and validSetting(name, value), "Unexpected Arcane setting write.")
+	local ok = pcall(function() plugin:SetSetting(name, value) end)
+	if not ok then return false end
+	local read, actual = readOwnedSetting(name)
+	return read and V.equal(actual, value)
+end
+local function storageProblem(name: string, failed: boolean): ()
+	storageProblems[name] = if failed then true else nil
+	storageFailed = next(storageProblems) ~= nil
+end
+local function attemptWrite(name: string, job: any): ()
+	if settingsRetired or job.revision ~= settingsRevision or pendingWrites[name] ~= job then return end
+	job.attempts += 1
+	local stored = writeOwnedSetting(name, job.value)
+	storageProblem(name, not stored)
+	if stored or job.attempts >= SETTING_ATTEMPTS then pendingWrites[name] = nil; job.value = nil end
+end
+local function persistSetting(name: string, value: any): ()
+	if settingsRetired then return end
+	local previous = pendingWrites[name]
+	if previous and previous.revision == settingsRevision and V.equal(previous.value, value) then return end
+	local job = {value = value, attempts = 0, revision = settingsRevision}
+	pendingWrites[name] = job
+	attemptWrite(name, job) -- No yields; only a failed round trip is retried by the existing worker.
+end
+local keyRead: any = {name = KEY_SETTING, legacy = LEGACY_KEY_SETTING, attempts = 0, done = false}
+local stateRead: any = {name = STATE_SETTING, legacy = LEGACY_STATE_SETTING, attempts = 0, done = false}
+local function observeSetting(job: any): ()
+	if job.done then return end
+	job.attempts += 1
+	local ok, value = readOwnedSetting(job.name)
+	if ok and value ~= nil then
+		-- An empty key is an authoritative deletion tombstone. Malformed canonical data
+		-- also blocks fallback; an older credential must never replace either one.
+		job.done, job.failed = true, not validSetting(job.name, value)
+		if not job.failed then job.value = value end
+	else
+		local legacyOk, legacy = readOwnedSetting(job.legacy)
+		if legacyOk and validSetting(job.name, legacy) then job.legacyValue = legacy end
+		if job.attempts >= SETTING_ATTEMPTS then
+			job.done, job.failed = true, not ok or not legacyOk
+			if not job.failed then job.value, job.migrate = job.legacyValue, job.legacyValue ~= nil end
+		end
+	end
+	if job.done then storageProblem(job.name, job.failed == true); job.legacyValue = nil end
+end
+local function adoptSettings(): ()
+	assert(keyRead.done and stateRead.done, "Saved key and connection preference resolve together.")
+	startupPending = false
+	savedKey = if not keyRead.failed and type(keyRead.value) == "string" and keyRead.value ~= "" then keyRead.value else nil
+	local previousState = stateRead.value
+	autoConnect = not stateRead.failed
+	if validState(previousState) then
+		lastKnownConnected, autoConnect = previousState.connected, previousState.autoConnect ~= false
+	end
+	storedOptOut = not autoConnect
+end
+local function retireSettings(): ()
+	settingsRevision += 1
+	startupPending = false
+	if pendingWrites[STATE_SETTING] or storageProblems[STATE_SETTING] then stateNeedsWrite = true end
+	for _, job in pairs(pendingWrites) do job.value = nil end
+	pendingWrites = {}
+	keyRead.value, keyRead.legacyValue, stateRead.value, stateRead.legacyValue = nil, nil, nil, nil
+end
+observeSetting(keyRead)
+observeSetting(stateRead)
+if keyRead.done and stateRead.done then adoptSettings() end
 local toolbar = plugin:CreateToolbar("Arcane")
 local button = toolbar:CreateButton("ArcaneBridge", "Open Arcane", "", "Arcane")
 button.ClickableWhenViewportHidden = true
@@ -351,6 +425,7 @@ local function statusView(): (string, string, Color3)
 		local line = if executing then "Working on a request from Arcane."
 			elseif not editMode then "Paused while playtesting."
 			elseif writable then "Ready. Arcane can build in this place." else "Ready with read-only access."
+		if storageFailed then return "Connected to " .. placeName(), "Connected for this session. Reconnect to retry saving it before closing Studio.", colors.amber end
 		return "Connected to " .. placeName(), line, colors.green
 	end
 	if pairingStage == "approval" then return "Waiting for Arcane", "Click Approve in the Arcane window to finish.", colors.amber end
@@ -358,6 +433,7 @@ local function statusView(): (string, string, Color3)
 	if phase == "update" then return "Update required", "Update the Studio plugin from Arcane, then restart Studio.", colors.amber end
 	if phase == "reconciliation" then return "Reconciliation needed", "Review the last change in Arcane, then click Reconnect.", colors.red end
 	if keyFailed then return "Not connected", hint, colors.red end
+	if storageFailed then return "Saved connection needs attention", "Reconnect to retry saving your connection. Keep Studio open until it is saved.", colors.amber end
 	local typed = keyInput.Text
 	if typed ~= "" and typed ~= savedKey then
 		if arcaneCode(typed) then return "Code entry", "Click Connect to pair with Arcane.", colors.red end
@@ -421,18 +497,20 @@ local function rememberState(connected: boolean, allowed: boolean?): ()
 	-- Key edits/rejections already remove saved auth. Persist an opt-out only
 	-- when a valid saved key remains (an explicit transport disconnect).
 	local optOut = not autoConnect and savedKey ~= nil
-	if lastKnownConnected == connected and storedOptOut == optOut then return end
+	if lastKnownConnected == connected and storedOptOut == optOut and not stateNeedsWrite then return end
 	local record: any = {connected = connected}
 	if optOut then record.autoConnect = false end
-	local ok = pcall(function() plugin:SetSetting(STATE_SETTING, record) end)
-	if ok then lastKnownConnected, storedOptOut = connected, optOut else storageFailed = true end
+	-- Track the latest intent even while its bounded persistence retry is pending.
+	lastKnownConnected, storedOptOut = connected, optOut
+	stateNeedsWrite = false
+	persistSetting(STATE_SETTING, record)
 end
 local function rejectKey(): ()
 	-- A rejected key must not become a persistent reconnect trap. Clearing this
 	-- owned setting never revokes a key at the daemon or touches provider logins.
+	retireSettings()
 	keyFailed, savedKey, hint = true, nil, "Enter a new API key"
-	local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
-	if not ok then storageFailed = true end
+	persistSetting(KEY_SETTING, "")
 	rememberState(false, false)
 	connectButton.Text = "Failed"
 	connectButton.BackgroundColor3, stroke.Color = colors.red, colors.red
@@ -442,10 +520,11 @@ local function invalidateInput(): boolean
 	if keyInput.Text == inputText then return false end
 	inputText = keyInput.Text
 	keyFailed, hint, pairingStage = false, DEFAULT_HINT, nil
-	if savedKey ~= nil then
+	local hadSavedKey = startupPending or savedKey ~= nil or (type(keyRead.value) == "string" and keyRead.value ~= "") or (type(keyRead.legacyValue) == "string" and keyRead.legacyValue ~= "")
+	retireSettings()
+	if hadSavedKey then
 		savedKey = nil
-		local ok = pcall(function() plugin:SetSetting(KEY_SETTING, "") end)
-		if not ok then storageFailed = true end
+		persistSetting(KEY_SETTING, "")
 	end
 	rememberState(false)
 	-- Advance the transport generation on every edit, before another click.
@@ -499,9 +578,10 @@ end
 transport.onPaired = function(apiKey: any): ()
 	local valid = pcall(function() V.keyOrigin(apiKey) end)
 	if not valid then return end
+	retireSettings()
 	keyFailed, hint, pairingStage = false, DEFAULT_HINT, nil
-	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, apiKey) end)
-	savedKey, storageFailed = apiKey, not stored
+	persistSetting(KEY_SETTING, apiKey)
+	savedKey = apiKey
 	inputText = apiKey -- Programmatic fill is not a new user edit.
 	keyInput.Text = apiKey
 	advancedOpen = false
@@ -584,8 +664,8 @@ table.insert(connections, connectButton.Activated:Connect(function()
 	end
 	keyFailed, hint = false, DEFAULT_HINT
 	local value = entered :: string
-	local stored = pcall(function() plugin:SetSetting(KEY_SETTING, value) end)
-	savedKey, storageFailed = value, not stored
+	persistSetting(KEY_SETTING, value)
+	savedKey = value
 	connectButton.Text, connectButton.BackgroundColor3 = "Reconnect", colors.red
 	advancedOpen = false
 	refreshHint()
@@ -594,6 +674,8 @@ table.insert(connections, connectButton.Activated:Connect(function()
 	entered, value = nil, ""
 end))
 table.insert(connections, plugin.Unloading:Connect(function()
+	settingsRetired = true
+	retireSettings()
 	savedKey = nil
 	pairingStage = nil
 	clearInput()
@@ -603,6 +685,36 @@ table.insert(connections, plugin.Unloading:Connect(function()
 	widget:Destroy()
 	toolbar:Destroy()
 end))
+-- Settings retries share the transport's one bounded worker. They never wait,
+-- issue HTTP, restore a session, or survive an edit/unload revision.
+local cycle = transport.cycle
+transport.cycle = function(client: any): number
+	if not settingsRetired and not client.stopped then
+		invalidateInput() -- A deferred edit must retire startup reads before they can refill the field.
+		for name, job in pairs(pendingWrites) do attemptWrite(name, job) end
+		if startupPending then
+			observeSetting(keyRead)
+			observeSetting(stateRead)
+			if keyRead.done and stateRead.done then
+				adoptSettings()
+				if keyRead.migrate then persistSetting(KEY_SETTING, keyRead.value) end
+				if stateRead.migrate then persistSetting(STATE_SETTING, stateRead.value) end
+				keyRead.value, stateRead.value = nil, nil
+				if savedKey then
+					inputText, keyInput.Text = savedKey, savedKey
+					refreshHint()
+					connectButton.Text = buttonText()
+					if autoConnect then
+						local ok = pcall(function() client:requestConnect(savedKey, true) end)
+						if not ok then rememberState(false) end
+					end
+				end
+			end
+		end
+		render()
+	end
+	return cycle(client)
+end
 -- Queue safe recovery from any saved key unless the user explicitly opted out.
 -- Cached health never proves a connection. Status precedes authentication; no
 -- old session token, command, receipt or grant is restored in a new lifetime.

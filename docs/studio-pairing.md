@@ -8,7 +8,7 @@ Connecting Roblox Studio to Arcane takes three steps: a click in Arcane, the cod
 
 If Arcane is not waiting, the plugin shows `Arcane is not waiting for Studio…`. Click **Connect Studio** in Arcane and try again. If the code is wrong, or another program answered instead of Arcane, the plugin shows `That code does not match the Arcane window that answered…` and sends nothing else.
 
-The plugin makes no network request when it loads, while it sits idle, or when you open or close it from the toolbar. Only a **Connect** click with a code starts an attempt. A **Connect** click with an empty field only asks for the code.
+After the first pairing, the plugin remembers its local key and reconnects automatically when Studio reopens. Opening or closing the toolbar panel does not disconnect it. A fresh installation makes no pairing request until you click **Connect** with a code; an empty field only asks for that code.
 
 When pairing succeeds, Arcane shows the place that connected (`Connected to <place> (place <id>). Not you? Revoke it.`).
 
@@ -24,12 +24,18 @@ The API key flow still works as a fallback. Choose **Use API key** or **Generate
 | Plugin proves the code | Plugin → daemon `POST /v1/plugin/pairing/claim` `{ticket, clientNonce, proof, identity, capabilities}` | `proof = HMAC-SHA256(code, "arcane-pair-v2\|plugin\|" + ticket + "\|" + nonce)`. A wrong proof, a missing challenge or an invalid identity burns the offer. The first valid claim records the place and returns `{state: "awaiting-approval"}`. No key exists yet. |
 | Approve | Arcane UI → daemon `POST /v1/studio/pairing-offer/decide` `{offerId, approve}` (control token only) | Arcane shows the asking place's name and ID. **Approve** marks the request approved. **Deny** cancels the offer. |
 | Issue | Plugin repeats the same claim every 2 seconds | While the user decides, the identical claim (same nonce, proof and pinned identity) gets `awaiting-approval` back. A changed identity burns the offer. After Approve, the next claim burns the ticket, issues a normal long-lived Arcane key for the offer's grants and opens a session. Both go back to the plugin once. |
-| Persist | Plugin | The key is saved in the plugin's own `Arcane.LocalApiKey.v1` setting, exactly like a pasted key. The typed code is cleared from the field at once and never saved. |
+| Persist | Plugin | The key is saved in the plugin's own `Arcane_LocalApiKey_v2` setting, exactly like a pasted key. Writes are checked by reading them back, with bounded retries on the existing worker. The typed code is cleared from the field at once and never saved. |
 
 Pairing survives restarts because it reuses the existing key recovery:
 
 - **Arcane restarts:** each project keeps its saved port, so the key stays valid. The plugin's status-first recovery reconnects after the daemon revokes old sessions at startup.
 - **Studio restarts:** the plugin reads the saved key and reconnects automatically.
+
+Existing keys migrate from the older dotted setting names to underscore names.
+An empty current key is a deliberate removal and cannot restore an older key.
+Temporary settings read failures get bounded retries before migration; storage
+failures show an amber notice. These checks retain the original session identity
+and command fences. See [plugin key recovery](build/PLUGIN_KEY_RECOVERY.md).
 
 ## Threat model
 
@@ -53,7 +59,7 @@ Pairing survives restarts because it reuses the existing key recovery:
 
   The challenge and claim routes also refuse a foreign `Origin`.
 - **Secrets stay out of the UI and logs.** The renderer sees only the code, the asking place, and after the issue the place name and ID plus the key ID. Event records carry no code, ticket, proof or key. The installer treats ticket-shaped text as a credential and never writes one into a plugin file.
-- **User presence in Studio.** The plugin never polls discovery. Each **Connect** click with a code makes at most one discovery read and one challenge, then repeats only the same claim until it is approved, denied or expired. Nothing is requested on load, while idle or from the toolbar.
+- **User presence in Studio.** The plugin never polls discovery. Each **Connect** click with a code makes at most one discovery read and one challenge, then repeats only the same claim until it is approved, denied or expired. A saved key can recover its own connection automatically; the toolbar does not initiate pairing.
 - **After-the-fact check.** Arcane shows which place connected and offers **Revoke**. Revoking the key also revokes its sessions.
 
 **Residual risk.**

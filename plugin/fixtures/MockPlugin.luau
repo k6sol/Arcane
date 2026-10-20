@@ -53,7 +53,8 @@ Instance.new = function(className: string): any
 	return instance
 end
 local plugin: any = {Unloading = signal()}
-fixture.settingNames = table.freeze({apiKey = "Arcane.LocalApiKey.v1", lastConnection = "Arcane.LastConnection.v1"})
+fixture.settingNames = table.freeze({apiKey = "Arcane_LocalApiKey_v2", lastConnection = "Arcane_LastConnection_v2",
+	legacyApiKey = "Arcane.LocalApiKey.v1", legacyLastConnection = "Arcane.LastConnection.v1"})
 fixture.pluginSettings = fixture.pluginSettings or {}
 fixture.getCalls, fixture.setCalls = {}, {}
 local function settingCopy(value: any): any
@@ -66,12 +67,19 @@ function plugin:GetSetting(name: string): any
 	table.insert(fixture.getCalls, name)
 	local fault = fixture.getSettingError or (fixture.getSettingFaults and fixture.getSettingFaults[name])
 	if fault then error(fault, 0) end
+	local sequence = fixture.getSettingSequences and fixture.getSettingSequences[name]
+	if sequence and #sequence > 0 then return settingCopy(table.remove(sequence, 1).value) end
+	local nils = fixture.getSettingNilCounts and fixture.getSettingNilCounts[name]
+	if nils and nils > 0 then fixture.getSettingNilCounts[name] -= 1; return nil end
 	return settingCopy(fixture.pluginSettings[name])
 end
 function plugin:SetSetting(name: string, value: any): ()
 	table.insert(fixture.setCalls, {key = name, value = settingCopy(value)})
 	local fault = fixture.setSettingError or (fixture.setSettingFaults and fixture.setSettingFaults[name])
 	if fault then error(fault, 0) end
+	if fixture.rejectDottedWrites and string.find(name, ".", 1, true) then return end
+	local drops = fixture.setSettingDropCounts and fixture.setSettingDropCounts[name]
+	if drops and drops > 0 then fixture.setSettingDropCounts[name] -= 1; return end
 	fixture.pluginSettings[name] = settingCopy(value)
 end
 function plugin:CreateToolbar(name: string): any

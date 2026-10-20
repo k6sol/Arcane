@@ -11,8 +11,8 @@ import { PLUGIN_SOURCES, renderPlugin } from '../../scripts/build-plugin.mjs';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const LOCAL_KEY_SETTING = 'Arcane.LocalApiKey.v1';
-const LAST_CONNECTION_SETTING = 'Arcane.LastConnection.v1';
+const LOCAL_KEY_SETTING = 'Arcane_LocalApiKey_v2';
+const LAST_CONNECTION_SETTING = 'Arcane_LastConnection_v2';
 
 // Adapt the standalone fixture in memory: Color3 channels are float32 and a
 // BasePart.Color setter stores RGB8. This models the supplied native probe;
@@ -158,7 +158,7 @@ task.wait = function(seconds: number): () assert(seconds == 0 or (seconds >= 2 a
 local function cycle(): () local ok, err = coroutine.resume(worker); assert(ok, tostring(err)) end
 local function enter(value: any): () keyInput.Text = value; keyInput:GetPropertyChangedSignal("Text"):Fire() end
 local function storageBoundaries(): ()
-  for _, name in ipairs(fixture.getCalls) do assert(name == keySetting or name == lastSetting, "only Arcane-owned settings are read") end
+  for _, name in ipairs(fixture.getCalls) do assert(name == keySetting or name == lastSetting or name == fixture.settingNames.legacyApiKey or name == fixture.settingNames.legacyLastConnection, "only the four Arcane-owned settings are read") end
   assert(#fixture.getCalls >= 2, "both owned settings are read")
   for _, call in ipairs(fixture.setCalls) do
     if call.key == keySetting then
@@ -269,7 +269,7 @@ fixture.pluginSettings = {
 }
 `;
 
-async function runLuauFixture({ setup = '', checks, core = false, format = 'generated', editingCase, reconnectCase }) {
+async function runLuauFixture({ setup = '', checks, core = false, format = 'generated', editingCase, reconnectCase, settingsCase }) {
   const outDir = await mkdtemp(path.join(tmpdir(), 'arcane-plugin-luau-ui-'));
   try {
     const sources = await Promise.all(PLUGIN_SOURCES.map(async ([, , filename]) =>
@@ -280,7 +280,7 @@ async function runLuauFixture({ setup = '', checks, core = false, format = 'gene
     const compiled = spawnSync(compile, ['--null', bundlePath], { encoding: 'utf8', timeout: 10000 });
     assert.ifError(compiled.error);
     assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
-    const [prelude, gui, logic, editing, reconnect] = await Promise.all([
+    const [prelude, gui, logic, editing, reconnect, settings] = await Promise.all([
       readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8'),
       // Adapt only the GUI double's old identity assertion to the compact widget.
       readFile(path.join(repository, 'plugin/fixtures/MockPlugin.luau'), 'utf8')
@@ -288,6 +288,7 @@ async function runLuauFixture({ setup = '', checks, core = false, format = 'gene
       core ? readFile(path.join(repository, 'plugin/fixtures/Logic.spec.luau'), 'utf8') : Promise.resolve(''),
       editingCase ? readFile(path.join(repository, 'plugin/fixtures/KeyInput.spec.luau'), 'utf8') : Promise.resolve(''),
       reconnectCase ? readFile(path.join(repository, 'plugin/fixtures/Reconnect.spec.luau'), 'utf8') : Promise.resolve(''),
+      settingsCase ? readFile(path.join(repository, 'plugin/fixtures/Settings.spec.luau'), 'utf8') : Promise.resolve(''),
     ]);
     let instrumented;
     if (format === 'source') {
@@ -311,7 +312,7 @@ local script: any = {Parent = {}}
       instrumented += '\nfixture.reloadMain = __arcaneMain\n';
     }
     const harness = path.join(outDir, 'ui-harness.luau');
-    await writeFile(harness, prelude + '\n' + unrelatedSettings + setup + '\n' + gui + '\n' + colorEngineFixture + '\n' + instrumented + '\n' + uiFixture + checks + (editingCase ? `\nfixture.keyInputCase = "${editingCase}"\n${editing}\n` : '') + (reconnectCase ? `\nfixture.reconnectCase = "${reconnectCase}"\n${reconnect}\n` : '') + `
+    await writeFile(harness, prelude + '\n' + unrelatedSettings + setup + '\n' + gui + '\n' + colorEngineFixture + '\n' + instrumented + '\n' + uiFixture + checks + (editingCase ? `\nfixture.keyInputCase = "${editingCase}"\n${editing}\n` : '') + (reconnectCase ? `\nfixture.reconnectCase = "${reconnectCase}"\n${reconnect}\n` : '') + (settingsCase ? `\nfixture.settingsCase = "${settingsCase}"\n${settings}\n` : '') + `
 fixtureTransport.new = originalTransportNew
 print = fixturePrint
 ` + logic + '\nprint("Arcane minimal UI fixture passed")\n');
@@ -329,7 +330,7 @@ print = fixturePrint
 }
 
 test('all production/fixture Luau sources compile with the official compiler', { skip: !compile && 'Set ARCANE_LUAU_BIN to an official Luau runtime; no compiler is silently installed.' }, async () => {
-  const filenames = [...PLUGIN_SOURCES.map(([, , name]) => `plugin/src/${name}`), 'plugin/fixtures/MockEngine.luau', 'plugin/fixtures/MockPlugin.luau', 'plugin/fixtures/Logic.spec.luau', 'plugin/fixtures/KeyInput.spec.luau'];
+  const filenames = [...PLUGIN_SOURCES.map(([, , name]) => `plugin/src/${name}`), 'plugin/fixtures/MockEngine.luau', 'plugin/fixtures/MockPlugin.luau', 'plugin/fixtures/Logic.spec.luau', 'plugin/fixtures/KeyInput.spec.luau', 'plugin/fixtures/Settings.spec.luau'];
   for (const filename of filenames) {
     const result = spawnSync(compile, ['--null', path.join(repository, filename)], { encoding: 'utf8', timeout: 10000 });
     assert.ifError(result.error);
@@ -458,7 +459,7 @@ test('generated Luau bundle compiles and executes cold Main, reconnects, cached 
   await runLuauFixture({ core: true, checks: `
 assert(fixture.toolbar.name == "Arcane" and fixture.widget.Title == "Arcane", "original Main initializes widget")
 assert(keyInput.Text == "" and keyInput.PlaceholderText == "6-digit code from Arcane" and control.Text == "Connect", "cold start offers only Connect")
-assert(#fixture.getCalls == 2, "mount reads exactly the two owned keys")
+assert(#fixture.getCalls == 4, "cold mount reads only the two canonical and two legacy owned settings")
 idleMount()
 enter(key)
 assert(keyInput.Text == key and keyInput.TextTransparency == 0 and control.BackgroundColor3 ~= green, "typing visibly edits the current key without claiming a connection")
@@ -644,7 +645,7 @@ fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = ${connected}
       checks: `
 assert(keyInput.Text == key and keyInput.PlaceholderText == "6-digit code from Arcane" and control.Text == "Reconnect", "saved key appears as raw editable textbox text")
 assert(control.BackgroundColor3 == Color3.fromRGB(255, 51, 64), "cached true or false is red until current ACK")
-assert(#fixture.getCalls == 2, "reload reads exactly the two owned keys")
+assert(#fixture.getCalls == ${connected ? 3 : 2}, "reload reads the two canonical settings and verifies any health reset write")
   assert(client.recovery ~= nil and client.desiredPair == nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == ${connected ? 1 : 0}, "saved key queues status recovery and clears cached connected state")
   assert(fixture.pluginSettings[lastSetting].connected == false, "restart truth stays disconnected until the new exchange ACK")
   ack(); cycle()
@@ -691,12 +692,13 @@ enter(key); clickConnect(); ack(); unload()
 
 for (const format of ['source', 'generated']) {
   test(`${format} pinned Luau VM recovery observes status, exact key, hidden panel and lifecycle fences`, { skip: (!runtime || !compile) && 'Pinned standalone Luau tools are not configured; no Studio or runtime is installed.' }, async t => {
-    const saved = `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)\n`;
+    const savedKey = `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)\n`;
+    const saved = savedKey + `fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false}\n`;
     const cases = [
       ['hidden connection'], ['explicit disconnect'], ['loss during play'],
       ['receipt never crosses session'], ['unsafe receipt'], ['receipt conflict'], ['wrong lost session'], ['late revoked poll'],
       ['unknown handshake active'], ['unknown handshake absent'],
-      ['bootstrap absent history', saved], ['bootstrap play', saved + 'fixture.edit = false\n'],
+      ['bootstrap absent history', savedKey], ['bootstrap play', saved + 'fixture.edit = false\n'],
       ['saved opt-out', saved + `fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false, autoConnect = false}\n`],
       ['status network bound', saved],
       ...[400, 401, 403, 404, 405].map(code => ['status unsupported', saved + `fixture.reconnectCode = ${code}\n`, String(code)]),
@@ -856,10 +858,13 @@ test('settings read/write faults do not leak credentials, broaden persistence or
 fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = true}
 fixture.getSettingFaults = {["${setting}"] = "settings fault unrelated-provider-secret"}`,
       checks: `
-${setting === LOCAL_KEY_SETTING ? 'idleMount()' : 'assert(client.recovery ~= nil and fixture.requests == 0, "failed health read still queues recovery from the independently valid key")'}; noSecretText()
+cycle(); cycle(); noSecretText()
+assert(client.recovery == nil and fixture.requests == 0, "unresolved key or opt-out never authenticates automatically")
 assert(control.BackgroundColor3 ~= green, "failed settings reads never authenticate a credential")
-${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "6-digit code from Arcane", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "6-digit code from Arcane" and keyInput.Text == key, "status read failure does not discard an independently valid local key")'}
-enter(key); clickConnect(); ack(); unload()
+${setting === LOCAL_KEY_SETTING ? 'assert(control.Text == "Connect" and keyInput.PlaceholderText == "6-digit code from Arcane", "failed key read has no fallback to another credential")' : 'assert(control.Text == "Reconnect" and keyInput.PlaceholderText == "6-digit code from Arcane" and keyInput.Text == key, "status read failure retains an independently valid local key for explicit connection")'}
+enter(key); clickConnect(); cycle()
+assert(client.pair ~= nil and control.Text == "Connected", "explicit connection remains usable despite unavailable storage readback")
+unload()
 `,
     });
   });
@@ -870,7 +875,7 @@ enter(key); clickConnect(); ack(); unload()
 idleMount(); enter(key); clickConnect(); cycle()
 assert(client.pair and not client.blocked and control.BackgroundColor3 == green and control.Text == "Connected", "current official-Luau fixture ACK remains live when local persistence fails")
 assert(fixture.pluginSettings[keySetting] == nil and fixture.pluginSettings[lastSetting] == nil, "failed writes cannot invent saved settings")
-assert(#fixture.setCalls == 2, "only owned key and primitive live status writes are attempted")
+assert(#fixture.setCalls == 3, "the owned key gets one bounded worker retry and the live status gets one write")
 clickConnect(); cycle()
 assert(connectCount == 2 and disconnectCount == 1 and #fixture.workers == 1, "current valid intent can reconnect through the same worker despite failed storage")
 unload()
@@ -934,6 +939,31 @@ unload()
 ` });
   });
 });
+
+for (const format of ['source', 'generated']) {
+  const key='"arcane_local_v1_45871_" .. string.rep("a", 64)',other='"arcane_local_v1_45872_" .. string.rep("b", 64)';
+  const legacy=`fixture.pluginSettings["Arcane.LocalApiKey.v1"] = ${key}\nfixture.pluginSettings["Arcane.LastConnection.v1"] = {connected = false}\n`;
+  const canonical=`fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = ${key}\nfixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false}\n`;
+  const cases=[
+    ['safe namespace',''],
+    ['legacy migration',legacy+'fixture.getSettingSequences = {["Arcane.LocalApiKey.v1"] = {{value = '+key+'}, {}, {}}, ["Arcane.LastConnection.v1"] = {{value = {connected = true}}, {}, {}}}\n'],
+    ['legacy opt-out',legacy+'fixture.pluginSettings["Arcane.LastConnection.v1"] = {connected = false, autoConnect = false}\nfixture.getSettingNilCounts = {["Arcane.LastConnection.v1"] = 1}\n'],
+    ['canonical wins',legacy+canonical+`fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = ${other}\n`],
+    ['transient canonical nil',legacy+canonical+`fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = ${other}\nfixture.getSettingNilCounts = {["${LOCAL_KEY_SETTING}"] = 2}\n`],
+    ['tombstone',legacy+canonical+`fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = ""\nfixture.getSettingNilCounts = {["${LOCAL_KEY_SETTING}"] = 2}\n`],
+    ['malformed canonical',legacy+canonical+`fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "malformed-owned-setting"\n`],
+    ['pending state opt-out',legacy+canonical+`fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false, autoConnect = false}\nfixture.getSettingNilCounts = {["${LAST_CONNECTION_SETTING}"] = 2}\n`],
+    ['dropped write',''],['nil readback',''],['exhausted write',''],['pending edit',''],['pending unload',''],
+    ['startup deferred edit',legacy],
+    ['startup hidden nil edit',legacy+'fixture.getSettingNilCounts = {["Arcane.LocalApiKey.v1"] = 3}\n'],
+    ['startup unload',legacy],
+    ['dirty opt-out clear',canonical+`fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false, autoConnect = false}\n`],
+    ['state read exhaustion',canonical+`fixture.getSettingFaults = {["${LAST_CONNECTION_SETTING}"] = "unavailable settings fixture"}\n`],
+    ['code edit while loading',''],
+  ];
+  for(const [settingsCase,setup] of cases)test(`${format} persistent settings: ${settingsCase}`, { skip: !runtime || !compile }, () =>
+    runLuauFixture({format,setup,checks:'',settingsCase}));
+}
 
 test('mock plugin settings are isolated deep copies with observable read/write faults', { skip: !runtime }, async () => {
   const outDir = await mkdtemp(path.join(tmpdir(), 'arcane-plugin-settings-'));

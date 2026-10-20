@@ -247,21 +247,22 @@ test('packaged source confines asset APIs to reviewed bindings and excludes arbi
   assert.doesNotMatch(allSource, /:(?:GetAsync|PostAsync)\(/);
   const main = byFile['Main.server.luau'];
   assert.doesNotMatch(files.filter(file => file.filename !== 'Main.server.luau').map(file => file.source).join('\n'), /SetSetting|GetSetting/);
-  // The user explicitly authorized these two own-plugin settings. Any new
-  // setting name or call shape requires a corresponding reviewed test change.
-  const namespaces = Object.fromEntries([...main.matchAll(/local\s+([A-Z_]+)\s*=\s*"(Arcane\.[^"]+)"/g)].map(match => [match[1], match[2]]));
-  assert.deepEqual(namespaces, { KEY_SETTING: 'Arcane.LocalApiKey.v1', STATE_SETTING: 'Arcane.LastConnection.v1' });
-  const calls = [...main.matchAll(/plugin:(GetSetting|SetSetting)\(\s*([A-Z_]+)/g)].map(match => [match[1], namespaces[match[2]]]);
-  assert.deepEqual(calls, [
-    ['GetSetting', 'Arcane.LocalApiKey.v1'], ['GetSetting', 'Arcane.LastConnection.v1'],
-    ['SetSetting', 'Arcane.LastConnection.v1'], ['SetSetting', 'Arcane.LocalApiKey.v1'],
-    ['SetSetting', 'Arcane.LocalApiKey.v1'],
-    // One-click pairing saves the daemon-issued key under the same owned setting (docs/studio-pairing.md).
-    ['SetSetting', 'Arcane.LocalApiKey.v1'],
-    ['SetSetting', 'Arcane.LocalApiKey.v1'],
-  ]);
-  assert.equal((main.match(/\b(?:GetSetting|SetSetting)\b/g) ?? []).length, calls.length, 'No alias or dynamic setting access escapes the namespace checks.');
-  assert.match(main, /local record: any = \{connected = connected\}[\s\S]*if optOut then record\.autoConnect = false end[\s\S]*SetSetting\(STATE_SETTING, record\)/);
+  // Current settings have safe JSON keys; the two historical names are read only.
+  // All actual API access stays inside exact-name admission helpers. The VM
+  // fixtures also audit every observed read/write during migration and retries.
+  const namespaces = Object.fromEntries([...main.matchAll(/local\s+([A-Z_]+)\s*=\s*"(Arcane[._][^"]+)"/g)].map(match => [match[1], match[2]]));
+  assert.deepEqual(namespaces, { KEY_SETTING: 'Arcane_LocalApiKey_v2', STATE_SETTING: 'Arcane_LastConnection_v2',
+    LEGACY_KEY_SETTING: 'Arcane.LocalApiKey.v1', LEGACY_STATE_SETTING: 'Arcane.LastConnection.v1' });
+  const readStart = main.indexOf('local function readOwnedSetting('), writeStart = main.indexOf('local function writeOwnedSetting('), helperEnd = main.indexOf('local function storageProblem(');
+  assert.ok(readStart >= 0 && writeStart > readStart && helperEnd > writeStart);
+  const readHelper = main.slice(readStart, writeStart), writeHelper = main.slice(writeStart, helperEnd);
+  assert.match(readHelper, /assert\(name == KEY_SETTING or name == STATE_SETTING or name == LEGACY_KEY_SETTING or name == LEGACY_STATE_SETTING,/);
+  assert.match(writeHelper, /assert\(\(name == KEY_SETTING or name == STATE_SETTING\) and validSetting\(name, value\),/);
+  assert.match(readHelper, /plugin:GetSetting\(name\)/);
+  assert.match(writeHelper, /plugin:SetSetting\(name, value\)/);
+  assert.match(writeHelper, /readOwnedSetting\(name\)[\s\S]*V\.equal\(actual, value\)/);
+  assert.equal((main.match(/\b(?:GetSetting|SetSetting)\b/g) ?? []).length, 2, 'No other setting API access escapes the admission helpers.');
+  assert.match(main, /local record: any = \{connected = connected\}[\s\S]*if optOut then record\.autoConnect = false end[\s\S]*persistSetting\(STATE_SETTING, record\)/);
   assert.match(main, /function rememberState\(connected: boolean, allowed: boolean\?\)/);
 });
 
@@ -280,7 +281,7 @@ test('panel visibility has no transport lifecycle path and saved health never ov
   assert.match(main, /widget:GetPropertyChangedSignal\("Enabled"\):Connect\(function\(\) button:SetActive\(widget\.Enabled\) end\)/);
   assert.match(main, /button\.Click:Connect\(function\(\) widget\.Enabled = not widget\.Enabled end\)/);
   assert.doesNotMatch(transport, /widget|\.Enabled/);
-  assert.match(main, /autoConnect = previousState\.autoConnect ~= false/);
+  assert.match(main, /lastKnownConnected, autoConnect = previousState\.connected, previousState\.autoConnect ~= false/);
   assert.match(main, /if savedKey ~= nil and autoConnect then/);
   assert.doesNotMatch(main, /savedKey ~= nil and lastKnownConnected/);
   assert.match(transport, /route == ROUTES\.poll or route == ROUTES\.result[\s\S]*StatusCode == 404 or response\.StatusCode == 410/);
@@ -449,9 +450,9 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.ok(click.indexOf('invalidateInput()') < click.indexOf('V.keyOrigin(entered)'));
   assert.match(click, /local entered = keyInput\.Text/);
   assert.doesNotMatch(click, /clearInput\(\)|else savedKey/);
-  assert.ok(click.indexOf('V.keyOrigin(entered)') < click.indexOf('plugin:SetSetting(KEY_SETTING, value)'));
-  assert.ok(click.indexOf('plugin:SetSetting(KEY_SETTING, value)') < click.indexOf('transport:requestConnect(value)'));
-  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 2, 'Only explicit input and saved-key recovery queue authentication.');
+  const validation = click.indexOf('V.keyOrigin(entered)'), persistence = click.indexOf('persistSetting(KEY_SETTING, value)'), connection = click.indexOf('transport:requestConnect(value)');
+  assert.ok(validation >= 0 && persistence > validation && connection > persistence);
+  assert.equal((main.match(/requestConnect\(/g) ?? []).length, 3, 'Only explicit input and immediate or deferred saved-key startup queue authentication.');
   assert.match(main, /if savedKey ~= nil and autoConnect then[\s\S]*transport:requestConnect\(savedKey, true\)/);
   const malformed = /if not valid then([\s\S]*?)\n\tend/.exec(click)?.[1];
   assert.ok(malformed);
@@ -459,17 +460,20 @@ test('explicit clicks preserve raw keys and save before connecting; text edits f
   assert.equal((main.match(/requestDisconnect\(/g) ?? []).length, 3, 'Text edits, invalid keys and locally refused connects fence old access; there is no Disconnect control.');
   const rejection = main.slice(main.indexOf('local function rejectKey()'), main.indexOf('local function invalidateInput()'));
   assert.match(rejection, /savedKey, hint = true, nil, "Enter a new API key"/);
-  assert.match(rejection, /plugin:SetSetting\(KEY_SETTING, ""\)/);
+  assert.match(rejection, /persistSetting\(KEY_SETTING, ""\)/);
   assert.match(rejection, /clearInput\(\)/, 'A current rejection clears the rejected text for replacement guidance.');
   const invalidation = main.slice(main.indexOf('local function invalidateInput()'), main.indexOf('transport = Transport.new'));
   assert.match(invalidation, /keyInput\.Text == inputText then return false/);
-  assert.match(invalidation, /savedKey = nil[\s\S]*SetSetting\(KEY_SETTING, ""\)[\s\S]*requestDisconnect\(\)/);
+  assert.match(invalidation, /savedKey = nil[\s\S]*persistSetting\(KEY_SETTING, ""\)[\s\S]*requestDisconnect\(\)/);
   assert.match(main, /if invalidateInput\(\) then return end[\s\S]*status\.state == "failed"/);
   assert.match(main, /local guard = transport\.guard[\s\S]*transport\.guard = function[\s\S]*invalidateInput\(\)[\s\S]*guard\(client, command, pair\)/, 'Deferred input still advances generation before the original editor callback guard.');
-  assert.match(main, /pcall\(function\(\) V\.keyOrigin\(previousKey\) end\)/);
-  assert.match(main, /previousKey = nil/);
-  assert.match(main, /count == 1 or[\s\S]*count == 2[\s\S]*type\(previousState\.autoConnect\) == "boolean"/);
-  const unload = main.slice(main.indexOf('plugin.Unloading:Connect(function()'), main.indexOf('-- Queue safe recovery'));
+  assert.match(main, /pcall\(function\(\) V\.keyOrigin\(value\) end\)/);
+  assert.match(main, /keyRead\.value, keyRead\.legacyValue, stateRead\.value, stateRead\.legacyValue = nil, nil, nil, nil/);
+  assert.match(main, /count == 1 or[\s\S]*count == 2[\s\S]*type\(value\.autoConnect\) == "boolean"/);
+  const unloadStart = main.indexOf('plugin.Unloading:Connect(function()'), unloadEnd = main.indexOf('\nend))', unloadStart);
+  assert.ok(unloadStart >= 0 && unloadEnd > unloadStart);
+  const unload = main.slice(unloadStart, unloadEnd);
+  assert.match(unload, /settingsRetired = true[\s\S]*retireSettings\(\)/);
   assert.match(unload, /savedKey = nil[\s\S]*clearInput\(\)[\s\S]*transport:stop\(\)/);
   assert.doesNotMatch(unload, /SetSetting|GetSetting|requestConnect|requestDisconnect/);
 });
@@ -499,6 +503,6 @@ test('two-sided pairing: typed Arcane code, credential-free discovery, Arcane pr
   assert.doesNotMatch(transport, /discoveryEnabled|nextDiscovery|DISCOVERY_SECONDS|discoveryRequested|onOffer/);
   assert.equal((transport.match(/self\.codePairing = \{/g) ?? []).length, 1);
   const paired = main.slice(main.indexOf('transport.onPaired = function'), main.indexOf('-- Studio errors/warnings'));
-  assert.ok(paired.indexOf('V.keyOrigin(apiKey)') < paired.indexOf('plugin:SetSetting(KEY_SETTING, apiKey)'));
+  assert.ok(paired.indexOf('V.keyOrigin(apiKey)') >= 0 && paired.indexOf('V.keyOrigin(apiKey)') < paired.indexOf('persistSetting(KEY_SETTING, apiKey)'));
   assert.match(main, /"Approve in Arcane\.\.\."/);
 });

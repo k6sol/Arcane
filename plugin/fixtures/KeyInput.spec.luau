@@ -39,6 +39,14 @@ local function reloadSavedKey(): ()
 		end
 	end
 	client = fixture.transports[#fixture.transports]
+	if state == nil then
+		assert(client.recovery == nil and fixture.requests == requests, "a reload without health history first resolves its bounded settings reads")
+		local wasEdit, bootstrap = fixture.edit, coroutine.create(fixture.workers[#fixture.workers])
+		fixture.edit = false
+		for _ = 1, 2 do local ok, err = coroutine.resume(bootstrap); assert(ok, tostring(err)) end
+		fixture.edit = wasEdit
+		assert(fixture.requests == requests, "the new lifetime resolves settings without sending HTTP while Edit is held")
+	end
 	assert(client ~= oldClient and client.clientSessionId ~= oldClient.clientSessionId and client.pair == nil
 		and (client.recovery ~= nil) == resume and client.pending == nil and client.highEpoch == 0 and next(client.cache) == nil,
 		"reloaded Main creates a fresh lifetime without any token, command or epoch")

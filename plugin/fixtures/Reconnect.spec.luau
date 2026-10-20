@@ -58,6 +58,14 @@ if mode == "hidden connection" then
 		and connectCount == 2 and client.pair ~= pair and pair.token == nil, "daemon restart recovers while the widget stays hidden")
 	unload()
 elseif mode == "bootstrap absent history" or mode == "bootstrap play" or mode == "saved opt-out" then
+	if mode == "bootstrap absent history" then
+		assert(keyInput.Text == "" and client.recovery == nil and fixture.requests == 0, "missing preference waits for bounded settings observations")
+		local wasEdit = fixture.edit
+		fixture.edit = false
+		cycle(); cycle()
+		assert(fixture.requests == 0, "settings resolution under held Edit readiness never authenticates")
+		fixture.edit = wasEdit
+	end
 	assert(keyInput.Text == key and control.BackgroundColor3 ~= green and fixture.requests == 0, "saved key is red and no HTTP occurs during mount")
 	if mode == "saved opt-out" then
 		assert(client.recovery == nil and client.desiredPair == nil, "explicit saved opt-out suppresses startup")
