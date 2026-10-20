@@ -67,7 +67,8 @@ test('eyebrows are removed, layouts and reusable classes exist, scrollbars are h
   assert.doesNotMatch(block, /queue-row__/, 'the guessed queue class names are gone');
   for (const state of ['paused', 'sending', 'rejected', 'unknown']) assert.ok(block.includes('data-queue-state=' + state), state);
   assert.match(block, /@media \(max-width:520px\)\{/);
-  assert.match(block, /@media \(max-width:1099px\)\{[\s\S]*?\.artifact-panel\{position:absolute/);
+  assert.match(css.slice(0, start), /@media\(max-width:1100px\) and \(min-width:761px\)\s*\{/, 'overlay covers the inclusive legacy preview breakpoint');
+  assert.match(block, /@media \(max-width:1100px\)\{[\s\S]*?\.artifact-panel\{position:absolute/);
   assert.match(block, /@media \(prefers-reduced-transparency:reduce\)/);
   assert.match(block, /\.arcane-app,\.arcane-app \*:not\(\.composer-model-popover,\.composer-model-popover \*\)\{scrollbar-width:none!important\}/);
   assert.match(block, /@media \(forced-colors:active\)\{\s*\.arcane-app,\.arcane-app \*:not\(\.composer-model-popover,\.composer-model-popover \*\)\{scrollbar-width:auto!important\}/);
