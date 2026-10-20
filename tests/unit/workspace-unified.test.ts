@@ -242,7 +242,7 @@ function fixture() {
     context, contextLabel, newChat, notice, search, untouched, get inputs() { return inputs; }, get secretDismissals() { return secretDismissals; }, get legacyScrolls() { return legacyScrolls; } };
 }
 
-test('tool switching keeps one native conversation and its exact draft, owns legacy navigation and leaves settings closed', () => {
+test('tool switching opens the matching controls while preserving the native conversation and draft', () => {
   const f = fixture(); f.composer.value = 'Unsent draft 🧩\nKeep its whitespace.  ';
   const original = f.composer.value; const events: string[] = [];
   f.doc.addEventListener('workspace:toolchange', e => events.push((e as CustomEvent<{tool: string}>).detail.tool));
@@ -252,7 +252,8 @@ test('tool switching keeps one native conversation and its exact draft, owns leg
     assert.equal(shell.activeTool, tool); assert.equal(f.stage.getAttribute('data-workspace-tool'), tool);
     assert.equal(f.toolButtons.get(tool)!.getAttribute('aria-pressed'), 'true');
     assert.equal(f.settings.hasAttribute('open'), false); assert.equal(f.inputs, 0); f.untouched();
-    assert.equal(f.drawer.open, false);
+    assert.equal(f.drawer.open, tool!=='all');
+    assert.equal(f.doc.activeElement?.id,tool==='blender'?'asset-heading':tool==='roblox'?'session-heading':'codex-composer');
   }
   assert.equal(f.legacyScrolls, 0); assert.deepEqual(events, ['blender', 'roblox', 'all', 'blender']);
   assert.ok(f.secretDismissals >= 4); shell.cleanup();
@@ -266,7 +267,7 @@ test('attachment clicks reach the chat hook without injecting context, submittin
   f.context.addEventListener('click', () => attachmentClicks++);
   f.composer.value = original;
   for (const tool of ['all', 'blender', 'roblox']) {
-    f.toolButtons.get(tool)!.click(); f.context.click();
+    f.toolButtons.get(tool)!.click(); if(f.drawer.open)f.drawer.close(); f.context.click();
     assert.equal(f.composer.value, original); assert.equal(f.inputs, 0);
     assert.equal(f.drawer.open, false); f.untouched();
   }
@@ -331,8 +332,8 @@ test('legacy tool draft controls still select presentation context without rewri
   for (const tool of ['blender', 'roblox', 'all']) {
     f.toolButtons.get(tool)!.click();
     assert.equal(shell.activeTool, tool); assert.equal(f.stage.getAttribute('data-workspace-tool'), tool);
-    assert.equal(f.composer.value, draft); assert.equal(f.doc.activeElement, f.composer);
-    assert.equal(f.inputs, 0); assert.equal(f.drawer.open, false); f.untouched();
+    assert.equal(f.composer.value, draft); assert.equal(f.doc.activeElement?.id,tool==='blender'?'asset-heading':tool==='roblox'?'session-heading':'codex-composer');
+    assert.equal(f.inputs, 0); assert.equal(f.drawer.open,tool!=='all'); f.untouched();
   }
   assert.deepEqual(events, [{ tool: 'blender' }, { tool: 'roblox' }, { tool: 'all' }]);
   assert.equal(f.legacyScrolls, 0); shell.cleanup();
@@ -370,7 +371,7 @@ test('search selects tool context in the same conversation without revealing adv
   assert.equal(results.querySelectorAll('button').length, 1);
   f.search.key('Enter'); assert.equal(shell.activeTool, 'blender');
   assert.equal(f.settings.hasAttribute('open'), false); assert.equal(f.composer.value, 'Retain draft');
-  assert.equal(f.drawer.open, false);
+  assert.equal(f.drawer.open, true);assert.equal(f.tools.hidden,false);assert.equal(f.advanced.hidden,true);
   assert.equal(results.hidden, true); f.untouched(); shell.cleanup();
 });
 
