@@ -76,6 +76,8 @@ async function fixture(t) {
     productFixture = productFixture.replace("from './" + name + ".js'", "from './" + name + ".ts'");
     await write(name + '.ts', source);
   }
+  // This metadata-only product fixture has no parent diagnostics channel or outbox.
+  await write('diagnostic-reporter.js', 'export function createDiagnosticReporter() { return Object.freeze({report:async()=>null,close(){}}); }');
   await write('product.fixture.ts', productFixture);
   await write('product-services.fixture.mjs', `
     import assert from 'node:assert/strict';

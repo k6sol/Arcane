@@ -566,6 +566,7 @@ test('regression: normal packaged asset state is accepted outside resources and 
   const options = await vm.runInNewContext('(async () => capture(' + constructor[1] + '))()', {
     capture: value => value, cwd: resources, runtimeRoot: userData, projectPath: 'C:\\Project', associations, stateOverride: directory,
     resourceOverride: resources, directory, join: win32.join, importHost: { hooks:importHooks },
+    diagnosticReporter:Object.freeze({report:async()=>null,close(){}}),
     modelReview:Object.freeze({assertApproved(){assert.fail('Path fixture must not approve a model.');},assertReference(){assert.fail('Path fixture must not inspect a decision.');}}),
   });
   assert.equal(options.studioImport, importHooks, 'Packaged assets use the same owned production host hooks.');
