@@ -3,7 +3,7 @@ Version 0.1.0 · 11 October 2026. Status: authored experimental skills and offli
 
 ## 1. What now exists
 
-The repository contains fifty original, portable `SKILL.md` entrypoints, thirteen genre references, a machine-readable registry, evaluation definitions and an offline validation/selection tool. These are actual files, not just feature names. They are not a running Studio plugin or model service.
+The repository contains sixty-two original, portable `SKILL.md` entrypoints (including seven genre kits), thirteen genre references, a machine-readable registry, evaluation definitions and an offline validation/selection tool. These are actual files, not just feature names. They are not a running Studio plugin or model service.
 
 The entries are intentionally concise. Each changes task-specific decisions, names failure boundaries and requires meaningful evidence. No community pack was bulk installed or copied. The source shortlist remains separate research; the custom files use the repository's MIT licence.
 
@@ -13,19 +13,22 @@ The entries are intentionally concise. Each changes task-specific decisions, nam
 |---|---|
 | Live context and edits | studio-context, safe-edits, studio-plugins, open-cloud |
 | Luau and multiplayer | luau-architecture, networking, remote-security, cross-server |
-| State and ownership | persistence, rounds, inventory, trading |
-| Mechanics | input-camera, physics, combat, npc, procedural-generation |
+| State and ownership | persistence, datastore-safety, rounds, inventory, trading |
+| Mechanics | gameplay-systems, input-camera, physics, combat, npc, procedural-generation |
 | Product design | game-design, economy, monetization, genre-adaptation, onboarding |
 | Player experience | gameplay-feel, interface, accessibility, localization, social-moderation |
-| World craft | level-design, art-direction, world-building |
+| World craft | level-design, art-direction, world-building, natural-scenes, architectural-features, photoreal |
 | Asset production | blender-props, characters, avatars, materials, rig-animation, asset-optimization, asset-integration |
 | Presentation | vfx, audio, cinematics |
 | Verification and operations | debugging, playtest-qa, performance, quality-review, release, analytics, live-ops |
 | Platform workflow | subscription-workflow, context-budget, project-director |
+| Genre kits | obby-kit, tycoon-kit, simulator-kit, horror-kit, arena-kit, racing-kit, rpg-kit |
+
+The genre kits are prescriptive whole-game blueprints: build order, tuning numbers, budgets and session-locked saves for one genre. Arcane's skill router loads a kit when the request names its genre or signature mechanics (for example "dropper", "checkpoint", "lap"), and the chat **Starters** name them directly. `interface` now builds ScreenGuis from a design system (tokens, UICorner/UIStroke/UIGradient components, scale layouts, hover/press tweens, contrast), and `vfx` gives exact ParticleEmitter presets (fire, smoke, sparks, magic, waterfall, dust, fireflies, leaves) with pooling budgets. `playtest-qa` includes the script check loop: apply the `luauAdvisories` from `script_update`, enable, run an approved playtest, read Studio Output since a cursor with `studio_output_read`, fix only your own scripts, at most three fixes.
 
 The genre profiles cover horror/survival, obby/platformer, tycoon, collection/simulator, shooter, melee/RPG, cozy/social, racing, strategy, party, puzzle/educational, roleplay and adventure/exploration. These are selective design starting points, not preset games or performance guarantees.
 
-Coverage grows in response to demonstrated tasks/failures. Fifty is the current authored count, not an assertion that every future engine feature is already handled. Avatar, policy, cloud and other changing requirements require current primary-source checks at use time.
+Coverage grows in response to demonstrated tasks/failures. Sixty-two is the current authored count, not an assertion that every future engine feature is already handled. Avatar, policy, cloud and other changing requirements require current primary-source checks at use time.
 
 ## 3. What makes them useful
 

@@ -11,14 +11,19 @@ license: MIT
 - Classes: Attachment, ParticleEmitter, Beam, Trail, PointLight, SpotLight, SurfaceLight, Highlight, Fire, Smoke, Sparkles, Decal, Texture. Every value is verified; the build is atomic and `receipt_restore` removes it.
 - fx values: NumberSequence as a number, evenly spaced numbers `[1.6,1.2,0.2]` or `[[t,v,envelope],...]` (times 0..1, max 20); ColorSequence as `["#ffd27a","#b2361a"]`; NumberRange as `[min,max]`; Vector2/3 arrays; enums by name (`Orientation: "VelocityParallel"`, `EmissionDirection: "Bottom"`, `Shape: "Sphere"`).
 - Beam/Trail: create two Attachment items first, then `Attachment0`/`Attachment1` = their keys (`scene_create`: Attachment refs).
-- Textures: only these built-ins, or an asset id the user gives or that already exists in the place. Never invent rbxassetid numbers; other URLs are refused.
+- Textures: only these built-ins, or an asset id the user gives or that already exists in the place. Never invent rbxassetid numbers; other URLs are refused. No fitting texture: plain particles (no Texture) with soft Transparency keys.
   `rbxasset://textures/particles/` + `fire_main.dds`, `fire_sparks_main.dds`, `smoke_main.dds`, `sparkles_main.dds`, `explosion01_smoke_main.dds`, `explosion01_core_main.dds`, `explosion01_shockwave_main.dds`, `forcefield_glow_main.dds`, `forcefield_vortex_main.dds`, `SquareParticle.png`.
 - Scripts only for runtime behaviour (bursts with `Emit(`, flicker, swing-only trails): `scene_create` a Script, `script_update`, then enable it with `script_read` + `script_set_enabled` once complete.
-- Budget: Rate x max Lifetime <= 200 per emitter, <= 1500 live particles in view, <= 8 lights with Shadows on screen, <= 31 Highlights. Effects are cosmetic only.
-- Mood, fog and post-processing live in `arcane-photoreal`.
+- Full builds (campfire, waterfall), bursts (explosion, heal, pickup), beam/trail table, post-processing per scene and budgets: `skills_get` ids ["arcane-vfx"], references ["arcane-vfx:recipes"], allowExperimental true ([recipes](references/recipes.md)).
+
+## Look professional
+- Layer every effect: a bright core (LightEmission 1, LightInfluence 0), a secondary (embers, sparks, glints) and a soft volume (smoke, mist, LightInfluence 1), plus one light for colour spill. ZOffset: smoke -1, core 0.5.
+- Fade in and out: Transparency starts and ends at 1 (or 0 to 1 for sparks); Size shrinks for fire and sparks, grows for smoke and mist. Never a constant Transparency.
+- `Rotation: [0,360]` and a small RotSpeed on soft particles so copies never look stamped.
+- Colour ramps go hot to cool (white-yellow, orange, red) for fire and bright to saturated for magic. Additive (LightEmission 1) stacks blow out: keep core Rate 40 or less and Size under 2.
+- Point sources emit from an Attachment 0.2-0.4 studs above the source; areas emit from a host part whose Size is the area. Emitter Shape follows its host part (Box = host Size).
 
 ## Emitter presets (fx values; Size/Transparency as time:value)
-Set `Rotation: [0,360]` on soft particles so copies never look stamped.
 | Effect | Texture | Rate | Lifetime | Speed | SpreadAngle | Size | Transparency | Color | Other |
 |---|---|---|---|---|---|---|---|---|---|
 | Fire core | fire_main | 40 | 0.6-1.1 | 3-5 | 8,8 | 0:1.6 0.5:1.2 1:0.2 | 0:1 0.15:0.35 0.7:0.55 1:1 | ffd27a ff8a2a b2361a | LightEmission 1, LightInfluence 0, Acceleration 0,4,0, Drag 1, RotSpeed -40..40 |
@@ -33,20 +38,18 @@ Set `Rotation: [0,360]` on soft particles so copies never look stamped.
 | Fireflies | sparkles_main | 3 | 6-9 | 0.3-0.8 | 180,180 | 0:0.1 0.5:0.22 1:0.1 | 0:1 0.2:0 0.4:0.6 0.6:0 0.8:0.5 1:1 | d8ff6a | Box host 60x8x60 at 2-6 studs, LightEmission 1, LightInfluence 0, Drag 1; night only |
 | Falling leaves | SquareParticle | 3 | 8-12 | 1-2 | 30,30 | 0:0.4 1:0.4 | 0:1 0.05:0 0.9:0 1:1 | c8742b 9a3b1d (or 6f8f3a) | Box host above canopy, EmissionDirection Bottom, Acceleration 0.6,-1.2,0.3, Drag 0.6, RotSpeed -90..90, Squash 0.6 |
 
-Emitter Shape follows its host part (Box = host Size). Waterfall body: a `terrain_generate` lake (or an `environment_apply` Water fill) as the pool; falling sheet as Glass parts (Transparency 0.35, #5aa7c8) behind the particles.
+Waterfall body: a `terrain_generate` lake (or an `environment_apply` Water fill) as the pool; falling sheet as Glass parts (Transparency 0.35, #5aa7c8) behind the particles.
 
 ## Beams, trails, lights, Highlight
-- Beam (laser/energy): Width0 = Width1 = 0.3, FaceCamera true, LightEmission 1, Segments 10, TextureMode Wrap, TextureSpeed 2. Light shaft: Width0 6, Width1 14, Transparency 0:0.85 1:1, warm colour, no texture.
-- Trail (sword swing): attachments 3 studs apart on the blade, Lifetime 0.18, WidthScale 0:1 1:0, Transparency 0:0.2 1:1, LightEmission 0.8, Enabled false until a script turns it on for the swing. Dash trail: Lifetime 0.35.
-- Torch/lantern PointLight: Range 12-16, Brightness 1.5-2, ffb46b, Shadows true; flicker from a client script with `base + math.noise(t * 3, seed) * 0.25`, <= 20 flickering lights.
-- Street lamp SpotLight: Face Bottom, Angle 70, Range 24, Brightness 2, ffd9a0, above a Neon bulb part. Sci-fi strip: SurfaceLight Range 10, Brightness 1, 4fd8ff on Neon trims. Range max 60.
-- Highlight (hover/interact): FillTransparency 0.85, OutlineTransparency 0, white OutlineColor, DepthMode Occluded. Reuse one Highlight; move its Adornee from a script.
-- Fire/Smoke/Sparkles are quick legacy effects; prefer the emitter presets for anything seen up close.
+- Beam laser: Width 0.3, FaceCamera true, LightEmission 1. Light shaft: Width0 6, Width1 14, Transparency 0:0.85 1:1. Trail swing: blade Attachments 3 studs apart, Lifetime 0.18, Enabled false until a script swings.
+- PointLight torch: Range 12-16, Brightness 1.5-2, ffb46b, Shadows true; flicker client-side `base + math.noise(t * 3, seed) * 0.25`. SpotLight street lamp: Face Bottom, Angle 70, Range 24, Brightness 2, ffd9a0. Range max 60.
+- Highlight: FillTransparency 0.85, OutlineTransparency 0, white, DepthMode Occluded; reuse one and move its Adornee.
+- Fire/Smoke/Sparkles are legacy; prefer the emitter presets up close.
+- Scene glow comes from Bloom: tune `environment_apply` bloom per the recipes table; moods in `arcane-photoreal`.
 
-## Lifecycle
-- Bursts: one pooled emitter with Rate 0; a script calls `Emit(n)`. Never create an emitter per hit.
-- Transient effects: disable, then destroy after the max Lifetime (`Debris:AddItem`). Disconnect flicker loops when the light is destroyed.
-- Gate continuous ambient effects (fireflies, leaves) by distance or zone on the client when there are more than 10 emitters.
+## Budgets and lifecycle
+- Rate x max Lifetime <= 200 per emitter, <= 1500 live particles in view (600 on phones), <= 4 emitters per effect, <= 8 shadowed lights on screen, <= 31 Highlights. Effects are cosmetic only.
+- Bursts: one pooled emitter with Rate 0; a script calls `Emit(n)`. Never create an emitter per hit. Transient: disable, then `Debris:AddItem` after max Lifetime; disconnect flicker loops on destroy. Gate ambient effects by zone on the client past 10 emitters.
 
 ## Verify
 Edit-mode `studio_viewport_capture` with `frame {ref, views}` shows lights, Beams and placement; particles animate at runtime, so confirm motion with `playtest_request` (capture). Check silhouette readability, no blown-out additive stacking, and that effects stop and clean up after interruption.

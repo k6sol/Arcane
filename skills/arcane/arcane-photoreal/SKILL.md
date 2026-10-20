@@ -46,6 +46,7 @@ Door 4 x 7.5; floor-to-floor 12-14; stair riser 0.75-1 with tread 1.5-2; railing
 - No identical neighbours: Size jitter 3-8%, yaw 2-5 degrees on props (never structure), tint 0.94-1.06.
 - Darken 10-15% at ground contact and wall bases; add moss and damp on the shaded side.
 - Sink rocks 20-40% into terrain; use `ground:true` in scatter. Nothing floats.
+- Stone landmarks: scene_build kits plinth `weathering` varies each piece's colour and adds moss and fragments; terrain plateau `base` rings blend the ground into it.
 - Clutter gathers in corners and along walls (litter, leaves, puddles), never evenly spread.
 - Break long straight edges with trim, chamfer wedges and broken or missing pieces every 12-20 studs.
 - One dominant key light. Practical lights are warmer (ffb46b-ffd2a1) than the cool sky fill.

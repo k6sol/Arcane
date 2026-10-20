@@ -7,13 +7,16 @@ import { loadRegistry } from '../../scripts/skill-pack.mjs';
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const catalogue = JSON.parse(await fs.readFile(new URL('./evaluations.json', import.meta.url), 'utf8'));
 
-test('behavior catalogue covers each authored skill exactly once without claiming runs', async () => {
+test('behavior catalogue covers every authored skill without claiming runs', async () => {
   const registry = await loadRegistry(ROOT);
   assert.equal(catalogue.definitionOnly, true);
   assert.equal(catalogue.runStatus, 'not-run');
   assert.deepEqual(catalogue.runs, []);
-  assert.equal(catalogue.cases.length, 55);
-  assert.deepEqual(catalogue.cases.map(c => c.primarySkill).sort(), registry.skills.map(s => s.id).sort());
+  assert.equal(catalogue.cases.length, 69);
+  // Every skill has a primary task; gameplay-code skills carry extra primary tasks for realistic briefs.
+  assert.deepEqual([...new Set(catalogue.cases.map(c => c.primarySkill))].sort(), registry.skills.map(s => s.id).sort());
+  for (const id of ['arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security'])
+    assert.ok(catalogue.cases.filter(c => c.primarySkill === id).length >= 2, id);
 });
 
 test('case identifiers and primary/guard skill references are well formed', async () => {
@@ -46,4 +49,24 @@ test('behaviors span genres and include negative/interrupt/recovery definitions'
   for (const id of ['guard-genre-leak', 'guard-quota-and-model-choice', 'guard-cancel-during-test', 'guard-uncertain-paid-upload']) {
     assert.ok(catalogue.guardCases.some(c => c.id === id));
   }
+});
+
+test('routing cases pin realistic gameplay-code briefs to declared skills and references', async () => {
+  const registry = await loadRegistry(ROOT), byId = new Map(registry.skills.map(s => [s.id, s]));
+  const routing = catalogue.routingCases;
+  assert.ok(Array.isArray(routing) && routing.length >= 10);
+  assert.equal(new Set(routing.map(r => r.id)).size, routing.length);
+  assert.equal(new Set(routing.map(r => r.request.toLowerCase())).size, routing.length);
+  for (const item of routing) {
+    assert.match(item.id, /^routing-[a-z0-9-]+$/);
+    assert.ok(item.request.length >= 15 && item.request.length <= 2000, item.id);
+    assert.ok(byId.has(item.firstSkill), item.id);
+    assert.ok(!item.alsoIncluded.includes(item.firstSkill) && item.alsoIncluded.every(id => byId.has(id)), item.id);
+    for (const reference of item.references) {
+      const [skill, name] = reference.split(':');
+      assert.ok(byId.get(skill)?.references.some(r => r.name === name), `${item.id}: ${reference}`);
+    }
+  }
+  for (const brief of ['round system', 'shop with datastore saving', 'sprint and stamina bar', 'checkpoint obby'])
+    assert.ok(routing.some(r => r.request.toLowerCase().includes(brief)), brief);
 });

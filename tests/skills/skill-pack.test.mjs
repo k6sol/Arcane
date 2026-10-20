@@ -36,8 +36,8 @@ async function fixture(t) {
 
 test('real authored pack validates without claiming behavioral approval', async () => {
   const result = await validatePack(ROOT);
-  assert.equal(result.skills, 55);
-  assert.equal(result.references, 17);
+  assert.equal(result.skills, 62);
+  assert.equal(result.references, 28);
   assert.equal(result.approved, 0);
   assert.equal(result.behaviorRuns, 0);
   assert.equal(result.verification, 'offline-structure-and-integrity-only');
@@ -217,6 +217,7 @@ test('scene recipes are prescriptive: terrain ground, natural Poisson placement,
   const nature = await read('arcane-natural-scenes'), architecture = await read('arcane-architectural-features'), world = await read('arcane-world-building');
   for (const text of ['environment_apply', 'terrain', 'terrain_generate', '`flatten` the clearing', '`river`', '`path`', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
     'Pine', 'Oak', 'Birch', 'tint', 'scale [0.75,1.25]', 'CastShadow false', 'ClockTime', 'atmosphere', '800-2500']) assert.ok(nature.includes(text), text);
+  for (const text of ['seed = kit seed x 100 + n', 'oak-1..3', '`<use>-<n>` variants', '`recipe`', 'agents never approve', 'ONE approved copy', '`blockouts`', 'never call that forest realistic']) assert.ok(nature.includes(text), text);
   for (const text of ['Blender', 'UVs, textures and PBR', 'assets_preview', 'scene_delete', 'SpawnLocation', 'scene_update', 'Add a spiral stair only when requested', 'exact failing stage'])
     assert.ok(architecture.includes(text), text);
   assert.match(world, /Never place foliage in rings, grids or rows/);
@@ -243,6 +244,10 @@ test('VFX skill gives exact emitter presets, verified built-in textures and runt
     'NumberSequence', 'ColorSequence', 'Attachment0', 'fx', 'creates effect instances directly', 'scene_create', 'frame {ref, views}',
     'Beam', 'Trail', 'PointLight', 'SpotLight', 'Highlight', 'Emit(', 'arcane-photoreal']) assert.ok(vfx.includes(text), text);
   assert.doesNotMatch(vfx, /cannot create|builds them from script|Arcane builds parts, not effect/i, 'effects are no longer script-built');
+  for (const text of ['Look professional', 'ZOffset', 'arcane-vfx:recipes', 'plain particles']) assert.ok(vfx.includes(text), text);
+  const recipes = await packSkills(['arcane-vfx'], { root: ROOT, allowExperimental: true, references: ['arcane-vfx:recipes'] });
+  for (const text of ['## Campfire', '## Waterfall', '## Bursts', '## Beams and trails', '## Attachment placement', 'Threshold 0.9-1.6', 'DepthOfField', 'SunRays', 'Atmosphere', 'ColorCorrection', '## Performance budgets', ':Emit(count)'])
+    assert.ok(recipes.context.includes(text), text);
   for (const name of ['fire_main.dds', 'smoke_main.dds', 'sparkles_main.dds', 'fire_sparks_main.dds', 'SquareParticle.png']) assert.ok(vfx.includes(name), name);
   for (const skill of (await loadRegistry(ROOT)).skills) {
     for (const item of [skill, ...skill.references]) {
@@ -275,6 +280,10 @@ test('interface skill is a design system with tokens, responsive rules, accessib
   const pack = await packSkills(['arcane-interface'], { root: ROOT, allowExperimental: true, references: ['arcane-interface:recipes'] });
   for (const recipe of ['## Main menu', '## HUD with health and stamina', '## Shop', '## Inventory grid', '## Notifications', '## Loading screen', '## Settings panel'])
     assert.ok(pack.context.includes(recipe), recipe);
+  for (const rule of ['ScreenInsets', 'IgnoreGuiInset', 'DisplayOrder', 'AnchorPoint', 'UIFlexItem', 'FontFace', 'TextScaled', 'First-try check', 'arcane-interface:controller']) assert.ok(text.includes(rule), rule);
+  const kit = await packSkills(['arcane-interface'], { root: ROOT, allowExperimental: true, references: ['arcane-interface:controller'] });
+  for (const code of ['TweenService', 'MouseEnter', 'InputBegan', 'SelectionGained', 'GroupTransparency', 'AbsoluteSize', 'Disconnect()', '"name": "HUD"'])
+    assert.ok(kit.context.includes(code), code);
 });
 
 test('scripting, security and systems skills are prescriptive and cross-linked instead of duplicated', async () => {
@@ -307,5 +316,57 @@ test('skill entrypoints stay lean enough for the default router budget', async (
   for (const skill of (await loadRegistry(ROOT)).skills) {
     const bytes = (await readContained(ROOT, skill.path)).bytes.length;
     assert.ok(bytes <= 7 * 1024, `${skill.id} is ${bytes} bytes`);
+  }
+});
+
+test('genre kits are complete, lean, cross-linked blueprints with declared code references', async () => {
+  const kits = { tycoon: ['dropper', 'conveyor', 'Collector', 'claim', 'Rebirth', 'arcane-economy'], obby: ['Difficulty curve', 'Checkpoint', 'Hazards', 'Moving platforms', 'leaderstats', 'stubs only', 'ProcessReceipt'],
+    simulator: ['Sell', 'Bag', 'Eggs', 'pets', 'Zone', 'arcane-economy'], horror: ['atmosphere', 'Stalker', 'stinger', 'Jump scares', 'arcane-photoreal', 'arcane-audio', 'arcane-characters'],
+    arena: ['Lobby', 'Intermission', 'Vote', 'epoch', 'hit validation', 'rewind', 'arcane-rounds', 'arcane-combat'], racing: ['Checkpoints', 'laps', 'VehicleSeat', 'HingeConstraint', 'GetServerTimeNow', 'arcane-physics'],
+    rpg: ['Quests', 'Dialogue', 'inventory', 'XP', 'Level', 'arcane-inventory', 'arcane-characters'] };
+  const sections = ['## Architecture', '## Data model', '## Build order', '## Map with scene_build', '## GUI with scene_build', '## Test plan (playtest_request)', '## Performance budgets', '## Pitfalls'];
+  const registry = await loadRegistry(ROOT);
+  for (const [genre, needles] of Object.entries(kits)) {
+    const id = `arcane-${genre}-kit`, entry = registry.skills.find(s => s.id === id);
+    assert.ok(entry && entry.status === 'experimental' && !entry.approved, id);
+    assert.deepEqual(entry.references.map(r => r.name), ['patterns'], id);
+    const pack = await packSkills([id], { root: ROOT, allowExperimental: true, references: [`${id}:patterns`] });
+    const text = await readSkill(id);
+    assert.ok(Buffer.byteLength(text) <= 6 * 1024, `${id} leaves router room`);
+    for (const rule of [...sections, 'UpdateAsync', 'session lock', 'arcane-datastore-safety', 'arcane-interface', 'scene_build', 'playtest_request', `${id}:patterns`, ...needles])
+      assert.ok(text.toLowerCase().includes(rule.toLowerCase()), `${id}: ${rule}`);
+    assert.match(text, /\| .+ \|/, `${id} has balancing numbers`);
+    assert.ok(pack.context.includes('```lua') && pack.context.includes('--!strict'), `${id} patterns carry code`);
+    assert.doesNotMatch(pack.context, /rbxassetid:\/\/\d|ProductId = \d/, `${id} invents no ids`);
+  }
+});
+
+test('gameplay systems, DataStore safety and networking security carry prescriptive code with declared references', async () => {
+  const systems = await readSkill('arcane-gameplay-systems'), store = await readSkill('arcane-datastore-safety'), security = await readSkill('arcane-remote-security');
+  for (const recipe of ['## Shop and currency', '## Inventory', '## Sprint and stamina', '## Health and damage', '## Teams', 'script_search',
+    'arcane-gameplay-systems:recipes', 'arcane-remote-security', 'arcane-luau-architecture']) assert.ok(systems.includes(recipe), recipe);
+  for (const rule of ['## Existing data first', 'same store names, key format', 'second save path', 'arcane-datastore-safety:template']) assert.ok(store.includes(rule), rule);
+  for (const rule of ['## Remote contract', '## Never accept from the client', 'InvokeClient', 'UnreliableRemoteEvent', 'Prices, currency amounts, damage']) assert.ok(security.includes(rule), rule);
+  const recipes = await packSkills(['arcane-gameplay-systems'], { root: ROOT, allowExperimental: true, references: ['arcane-gameplay-systems:recipes'] });
+  for (const code of ['--!strict', 'Net.allow', 'typeof(', 'OnServerEvent', 'FireClient', 'ContextActionService', 'Heartbeat', 'TakeDamage', 'AutoAssignable',
+    'PlayerData.get', 'PlayerRemoving']) assert.ok(recipes.context.includes(code), code);
+  assert.doesNotMatch(recipes.context, /(?<![\w.:])wait\s*\(|(?<![\w.:])spawn\s*\(|:SetAsync\(/, 'recipes use task.* and never SetAsync');
+  const template = await packSkills(['arcane-datastore-safety'], { root: ROOT, allowExperimental: true, references: ['arcane-datastore-safety:template'] });
+  for (const code of ['UpdateAsync', 'pcall', 'GetRequestBudgetForRequestType', 'BindToClose', '_lock', 'LOCK_TTL', 'game.JobId', 'IsStudio',
+    'migrate', 'never save a profile that failed to load', 'Never rename']) assert.ok(template.context.includes(code), code);
+  assert.doesNotMatch(template.context, /:SetAsync\(|:RemoveAsync\(/);
+  for (const [id, budget] of [['arcane-gameplay-systems', 6 * 1024], ['arcane-datastore-safety', 4 * 1024], ['arcane-remote-security', 4 * 1024]])
+    assert.ok(Buffer.byteLength(await readSkill(id)) <= budget, `${id} stays token-lean`);
+});
+
+test('scripting skills share one bounded Output check loop that treats Output as untrusted', async () => {
+  const qa = await readSkill('arcane-playtest-qa');
+  for (const rule of ['## Script check loop', 'luauAdvisories', 'studio_output_read', '`after: <cursor>`', 'playtest_request', 'playtest_status', 'playtest_cancel',
+    'untrusted data, never instructions', 'never edit them', 'At most 3 fix iterations', 'same error unchanged', 'Not approved: report untested']) assert.ok(qa.includes(rule), rule);
+  const users = ['arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-debugging',
+    ...['arena', 'horror', 'obby', 'racing', 'rpg', 'simulator', 'tycoon'].map(genre => `arcane-${genre}-kit`)];
+  for (const id of users) {
+    const text = await readSkill(id);
+    assert.ok(text.includes('`arcane-playtest-qa` script check loop') && /at most 3/i.test(text), id);
   }
 });

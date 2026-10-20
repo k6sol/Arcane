@@ -4,7 +4,7 @@ All sizes are Scale unless marked px. Each screen is one `scene_build` (containe
 
 ## Build shape (main menu example)
 ```json
-{"name": "MainMenu", "container": "ScreenGui", "screen": {"IgnoreGuiInset": true},
+{"name": "MainMenu", "container": "ScreenGui", "screen": {"DisplayOrder": 10},
  "prototypes": {"Button": {"ui": [
    {"name": "Button", "className": "TextButton", "ui": {"Size": [1, 0, 0, 48], "BackgroundColor3": "#242b3a", "AutoButtonColor": false,
      "TextColor3": "#f2f4f8", "TextSize": 22, "FontFace": {"family": "BuilderSans", "weight": "Bold"}}},
@@ -18,10 +18,10 @@ All sizes are Scale unless marked px. Each screen is one `scene_build` (containe
    {"in": "Root", "key": "Play", "use": "Button", "name": "PlayButton", "ui": {"Text": "Play", "LayoutOrder": 1, "BackgroundColor3": "#2563eb"}},
    {"in": "Root", "use": "Button", "name": "ShopButton", "ui": {"Text": "Shop", "LayoutOrder": 2}}]}
 ```
-Then one `script_update` for the behaviour (hover/press tweens on each button UIScale, `Activated` handlers, server-state binding).
+Then the behaviour: Motion module + UIController from `arcane-interface:controller` (hover/press tweens on each button UIScale), plus one screen module (`Activated` handlers, server-state binding).
 
 ## Main menu
-- ScreenGui `MainMenu`, IgnoreGuiInset true. Background: full-screen Frame bg colour (or a blurred camera shot behind a Black overlay at 0.45) plus a vertical UIGradient to 20% darker at the bottom.
+- ScreenGui `MainMenu` (DisplayOrder 10, default safe insets). Background in its own `MenuBackdrop` ScreenGui (IgnoreGuiInset true, ScreenInsets None, DisplayOrder 9): full-screen Frame bg colour (or a blurred camera shot behind a Black overlay at 0.45) plus a vertical UIGradient to 20% darker at the bottom.
 - `Root`: left column at Position 0.08, 0.5, AnchorPoint 0, 0.5, Size 0.32 x 0.6, UISizeConstraint Max 460x520.
 - Title label: display font, UITextSizeConstraint Max 72 Min 28, game name only.
 - Buttons in a UIListLayout (Padding 12 px): `PlayButton` (primary, 1.2x height), `ShopButton`, `SettingsButton`, `CreditsButton`. No Quit button: players leave through the Roblox menu.
@@ -42,7 +42,22 @@ Then one `script_update` for the behaviour (hover/press tweens on each button UI
 - Left: category tabs (UIListLayout vertical). Right: ScrollingFrame item grid, 3-4 columns.
 - Item card (surface2, radius 10, padding 10): icon 1:1, name (TextTruncate), price row (accent icon + number), button Buy/Owned/Equip.
 - Buy flow: button shows "..." and disables; `RemoteFunction` returns `{ ok, reason, balance }`; on deny show reason in a toast. Price comes from server definitions; the client sends only the item id.
-- Fixed catalogue: stamp a `Card` prototype per item. Server-driven catalogue: build one hidden `CardTemplate` (Visible false) and clone it at runtime.
+- Card prototype (stamp overrides reach only the root Frame; the shop module fills ItemName and Buy text from server definitions):
+```json
+{"Card": {"ui": [
+  {"name": "Card", "className": "Frame", "ui": {"BackgroundColor3": "#242b3a", "BorderSizePixel": 0}},
+  {"name": "Corner", "className": "UICorner", "ui": {"CornerRadius": 10}},
+  {"name": "Stroke", "className": "UIStroke", "ui": {"Color": "#2f3747", "Thickness": 1.5, "Transparency": 0.2}},
+  {"name": "Padding", "className": "UIPadding", "ui": {"PaddingTop": 10, "PaddingBottom": 10, "PaddingLeft": 10, "PaddingRight": 10}},
+  {"name": "List", "className": "UIListLayout", "ui": {"Padding": 6, "SortOrder": "LayoutOrder", "HorizontalAlignment": "Center"}},
+  {"name": "Icon", "className": "Frame", "ui": {"Size": [0.7, 0, 0.7, 0], "BackgroundColor3": "#1a1f2b", "LayoutOrder": 1}},
+  {"name": "IconRatio", "className": "UIAspectRatioConstraint", "in": "Icon", "ui": {"AspectRatio": 1}},
+  {"name": "ItemName", "className": "TextLabel", "ui": {"Size": [1, 0, 0, 22], "BackgroundTransparency": 1, "Text": "Item", "TextColor3": "#f2f4f8", "TextSize": 18, "TextTruncate": "AtEnd", "FontFace": {"family": "BuilderSans", "weight": "Medium"}, "LayoutOrder": 2}},
+  {"name": "Buy", "className": "TextButton", "ui": {"Size": [1, 0, 0, 44], "BackgroundColor3": "#2563eb", "AutoButtonColor": false, "Text": "0", "TextColor3": "#ffffff", "TextSize": 18, "FontFace": {"family": "BuilderSans", "weight": "Bold"}, "LayoutOrder": 3}},
+  {"name": "BuyCorner", "className": "UICorner", "in": "Buy", "ui": {"CornerRadius": 10}},
+  {"name": "BuyScale", "className": "UIScale", "in": "Buy"}]}}
+```
+- Fixed catalogue: stamp the `Card` prototype per item. Server-driven catalogue: build one hidden `CardTemplate` (Visible false) and clone it at runtime.
 - Robux products: `MarketplaceService:PromptProductPurchase`; grant only in server `ProcessReceipt` with idempotent receipts (`arcane-monetization`, `arcane-datastore-safety`).
 
 ## Inventory grid

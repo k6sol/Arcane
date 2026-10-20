@@ -117,8 +117,8 @@
     },
     {
       "id": "arcane-remote-security",
-      "title": "Remote validation and abuse resistance",
-      "description": "Review or implement server validation for Roblox remotes, prompts, purchases, damage and rewards; not a promise of exploit-free games.",
+      "title": "Networking security checklist",
+      "description": "Networking security checklist: design and validate Roblox remotes, prompts, purchases, damage and rewards with server authority, type checks and rate limits; not a promise of exploit-free games.",
       "category": "engineering",
       "keywords": [
         "security",
@@ -127,13 +127,15 @@
         "cheat",
         "validation",
         "remote",
+        "remoteevent",
         "abuse",
         "authority",
-        "rate-limit"
+        "rate-limit",
+        "networking-security"
       ],
-      "version": "0.2.0",
+      "version": "0.3.0",
       "path": "skills/arcane/arcane-remote-security/SKILL.md",
-      "sha256": "40aea8002f51a58618402b051cd66c63f38aa1ee39c9b79b90d3a4559af041b3",
+      "sha256": "a6afcad710c7fe808a3eb98c663e2b1db5b7672e4879d64eeaca3059a1799cfd",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -174,21 +176,29 @@
       "keywords": [
         "datastore",
         "persistence",
+        "save",
         "session-lock",
         "updateasync",
         "bindtoclose",
-        "budget"
+        "budget",
+        "existing-data"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-datastore-safety/SKILL.md",
-      "sha256": "acecbc0620ac2f938e9dd0789c5055217bb32547660cd860ef56f15fee914d90",
+      "sha256": "78c599c721543b8e9609cb51eab8777b464ed4ad051a991fe20d4557edc14b50",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
       "verificationCapabilities": [
         "code.analyse"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "template",
+          "path": "skills/arcane/arcane-datastore-safety/references/template.md",
+          "sha256": "1a14b652b5d7e78fdfeda228e45404a6879107fdcd73be4cd914ce7c25c5a83c"
+        }
+      ]
     },
     {
       "id": "arcane-cross-server",
@@ -241,21 +251,29 @@
     {
       "id": "arcane-gameplay-systems",
       "title": "Gameplay system recipes",
-      "description": "Concise server-authoritative recipes for common Roblox systems: checkpoints, round loop, leaderstats, doors and keys, NPC dialogue and pathfinding NPCs, built in batches and verified by playtest.",
+      "description": "Server-authoritative recipes for common Roblox systems: rounds, checkpoints, leaderstats, shop and currency, inventory, sprint and stamina, health and damage, teams, doors and keys, NPC dialogue and pathfinding NPCs.",
       "category": "engineering",
       "keywords": [
         "checkpoint",
         "leaderstats",
         "round",
+        "shop",
+        "currency",
+        "inventory",
+        "sprint",
+        "stamina",
+        "damage",
+        "health",
+        "teams",
         "door",
         "key",
         "dialogue",
         "pathfinding",
         "system"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-gameplay-systems/SKILL.md",
-      "sha256": "02249379682c912a7e577af101430f06d12d68f6380d1518459e49d68c64ebb0",
+      "sha256": "1f7a91cf23fe760a8d53a216292ce164fd4178bc44773453923778757e54910e",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -263,7 +281,13 @@
         "studio.write",
         "studio.test"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "recipes",
+          "path": "skills/arcane/arcane-gameplay-systems/references/recipes.md",
+          "sha256": "94d4c96b59bb422ce484adac3d7238fb4fcc82cba12742d3dd2554b9409feea2"
+        }
+      ]
     },
     {
       "id": "arcane-inventory",
@@ -453,7 +477,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-interface/SKILL.md",
-      "sha256": "d8c5f05932809ff4b4da4f856abc345aa0c4cf0b5f6a5a0a14abd0a2403a01a2",
+      "sha256": "d47220464da9140d3a0118c47ff08014250106b0cb211ef63b7de4c7218303a1",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -465,7 +489,12 @@
         {
           "name": "recipes",
           "path": "skills/arcane/arcane-interface/references/recipes.md",
-          "sha256": "cc5a117e82c454fd2ee37371c36160234fb8768eb14029c8e0cd4046d85d2a1d"
+          "sha256": "b03fd197f341d1e0e34218505b3a220cb19f9c381bfee601fbdae870e906f9f4"
+        },
+        {
+          "name": "controller",
+          "path": "skills/arcane/arcane-interface/references/controller.md",
+          "sha256": "915b5bf3b54081dde45e6ad82f6611a28032a3f57d1353a236eff0ac0c265c1c"
         }
       ]
     },
@@ -532,7 +561,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-debugging/SKILL.md",
-      "sha256": "7fddd9c1566db1111e9acac3aa4889b20599a6e1e9ee0551d40b15da0280403c",
+      "sha256": "8f4cda1a39f00032d4fbcfc3554e34ce1c198aa4f13d61a93db38b6ce99795ca",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -544,7 +573,7 @@
     {
       "id": "arcane-playtest-qa",
       "title": "Assertion-based gameplay QA",
-      "description": "Define and run Roblox feature/playflow tests using real inputs, state assertions, logs, captures and guaranteed teardown.",
+      "description": "Define and run Roblox feature/playflow tests and check your scripts work: real inputs, state assertions, Output errors since a cursor, at most 3 fixes and guaranteed teardown.",
       "category": "engineering",
       "keywords": [
         "qa",
@@ -556,7 +585,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-playtest-qa/SKILL.md",
-      "sha256": "7850a91cf4a7a98b19742ca46d1af2289db7685790202eb7bff1bbd660e4b2e9",
+      "sha256": "b325a73ce3fb0c4d62d795a079b4a96eecfcaeb1966df58a0a50f90a27f5686c",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -789,7 +818,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-vfx/SKILL.md",
-      "sha256": "eb3b1c7c71ffebf49b8f1d080706d3d79cba77fd3883912afc6ef064b2cb0d6d",
+      "sha256": "f97b0425b7a1e3c71504f94e28fa1aa579692f89837b0bc9eb34572ebf4c34b1",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -797,7 +826,13 @@
         "studio.capture",
         "studio.profile"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "recipes",
+          "path": "skills/arcane/arcane-vfx/references/recipes.md",
+          "sha256": "453128f3066af03b73eb0a69b8c31dba15bc17f5d10536dbcb40e271cec59adf"
+        }
+      ]
     },
     {
       "id": "arcane-audio",
@@ -1278,7 +1313,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-architectural-features/SKILL.md",
-      "sha256": "278ac0e839ae6db035817024e540d6d972bbaa742f32877e5b0b87bb0dd4d791",
+      "sha256": "5ce2b80ca3bf26aa72a8bc95a28de33eda0ce9fe5b0d6fc82c5030cfe493ca37",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1302,7 +1337,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-natural-scenes/SKILL.md",
-      "sha256": "382e2f759280218cac280f7a30e8947a8c547a3142f37c71a3f5ccff84112900",
+      "sha256": "6f554c7a49becd235d7a29dd85be96884505bc42b02534f4442265862669f6d7",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1330,7 +1365,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-photoreal/SKILL.md",
-      "sha256": "a501629531fbaea2b44ac18cbeb4266560f8aab1586ff7e4d6f790d38d7e8b84",
+      "sha256": "f146a17b8704d681de00f02e55dacdcf90cb199a114c53d9352c2a6b72c38a42",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1456,6 +1491,256 @@
         "studio.test"
       ],
       "references": []
+    },
+    {
+      "id": "arcane-tycoon-kit",
+      "title": "Tycoon genre kit",
+      "description": "Prescriptive tycoon genre kit: plot claiming, droppers, conveyors, collectors, ordered purchase buttons, upgrades, rebirth and session-locked DataStore saves, with build order, balancing numbers, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "tycoon",
+        "dropper",
+        "conveyor",
+        "collector",
+        "plot",
+        "rebirth",
+        "upgrade",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-tycoon-kit/SKILL.md",
+      "sha256": "fc5b6cf720a29e67536756e6e27ac70bda241e21ded2b2bc7d02db39bc6c8e8e",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-tycoon-kit/references/patterns.md",
+          "sha256": "6c6769a1d527c9b41549bf7d2359cdea55cf7f7016eb4f6cf948401579ce1e38"
+        }
+      ]
+    },
+    {
+      "id": "arcane-obby-kit",
+      "title": "Obby genre kit",
+      "description": "Prescriptive obby genre kit: stage design rules, difficulty curve, checkpoints, kill bricks, moving platforms, Stage leaderboard, saved progress and skip-stage product stubs, with build order, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "obby",
+        "obstacle",
+        "platformer",
+        "parkour",
+        "stage",
+        "checkpoint",
+        "kill-brick",
+        "moving-platform",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-obby-kit/SKILL.md",
+      "sha256": "1345266ae056c02e3ce1b65a9dda70abc4129688a69a916fa015e3b1138e39d5",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-obby-kit/references/patterns.md",
+          "sha256": "c9787d178683ea4bfa184cd711534ae89f3e267e1d61ecbfe36254a3e48408d1"
+        }
+      ]
+    },
+    {
+      "id": "arcane-simulator-kit",
+      "title": "Simulator genre kit",
+      "description": "Prescriptive simulator genre kit: collect-sell-upgrade loop, capped backpack, currency-gated zones, pets and eggs basics, rebirth and session-locked saves, with build order, balancing numbers, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "simulator",
+        "collect",
+        "sell",
+        "backpack",
+        "pet",
+        "pets",
+        "egg",
+        "eggs",
+        "zone",
+        "rebirth",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-simulator-kit/SKILL.md",
+      "sha256": "9a985dfdc230186d0286775409e60640f3972f9a67dcd95433fa4b200d51db0f",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-simulator-kit/references/patterns.md",
+          "sha256": "7743eda32f28ce634082da649588d058671cee42a5ae017c4371ae745863ffb2"
+        }
+      ]
+    },
+    {
+      "id": "arcane-horror-kit",
+      "title": "Horror genre kit",
+      "description": "Prescriptive horror genre kit: atmosphere and lighting moods, positional audio stingers, a stalker chase AI, jump-scare pacing, objectives and safe saves, with build order, tension numbers, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "horror",
+        "scary",
+        "spooky",
+        "jumpscare",
+        "jump-scare",
+        "stalker",
+        "chase",
+        "atmosphere",
+        "stinger",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-horror-kit/SKILL.md",
+      "sha256": "b960edad19f1c2dcc318e14f876a74a018a096bf2b00bfec2606c4c174cdc93b",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-horror-kit/references/patterns.md",
+          "sha256": "baebd2dcb124e29f084ed20ae346c5cc07a62c4b4f4382f78c7e9d16bb0d14a1"
+        }
+      ]
+    },
+    {
+      "id": "arcane-arena-kit",
+      "title": "Round-based arena and PvP kit",
+      "description": "Prescriptive round-based arena/PvP genre kit: lobby, intermission, map vote, rounds, win conditions and weapon basics with server-authoritative hit validation, plus stats saves, build order, balancing, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "arena",
+        "pvp",
+        "round",
+        "round-based",
+        "lobby",
+        "intermission",
+        "map-vote",
+        "weapon",
+        "hit-validation",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-arena-kit/SKILL.md",
+      "sha256": "5fabb66e058af01ce4fb08902bcef2336e53fe0f7a0065d07b90257475a12f6a",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-arena-kit/references/patterns.md",
+          "sha256": "16708a32b7fd0f49f09210f8f686d51cee3b36a6e935c41ec0da947aabae7fa0"
+        }
+      ]
+    },
+    {
+      "id": "arcane-racing-kit",
+      "title": "Racing genre kit",
+      "description": "Prescriptive racing genre kit: track building, ordered checkpoints and laps, vehicle setup basics, countdown, timing, best-lap saves and leaderboards, with build order, tuning numbers, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "racing",
+        "race",
+        "track",
+        "lap",
+        "laps",
+        "vehicle",
+        "kart",
+        "car",
+        "timing",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-racing-kit/SKILL.md",
+      "sha256": "39ee68ab3ac79c57be66bc3f617959da4a3cf6c3d626dcb163644016355a37c6",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-racing-kit/references/patterns.md",
+          "sha256": "9326f161cea98a9279c35470b559876d4721dc539904542884bf9ea40a225f2a"
+        }
+      ]
+    },
+    {
+      "id": "arcane-rpg-kit",
+      "title": "RPG and adventure genre kit",
+      "description": "Prescriptive RPG/adventure genre kit: quests, NPC dialogue, inventory, combat basics, XP and levels, enemy camps and session-locked saves, with build order, balancing curves, budgets and playtest plan.",
+      "category": "product",
+      "keywords": [
+        "rpg",
+        "adventure",
+        "quest",
+        "quests",
+        "dialogue",
+        "inventory",
+        "xp",
+        "level",
+        "leveling",
+        "genre",
+        "kit"
+      ],
+      "version": "0.1.0",
+      "path": "skills/arcane/arcane-rpg-kit/SKILL.md",
+      "sha256": "48e50a386eaa1ac18fc08f6fdffc872286fc83453d955dee19a3034d07c642b0",
+      "status": "experimental",
+      "approved": false,
+      "evaluationRuns": [],
+      "verificationCapabilities": [
+        "studio.write",
+        "studio.test"
+      ],
+      "references": [
+        {
+          "name": "patterns",
+          "path": "skills/arcane/arcane-rpg-kit/references/patterns.md",
+          "sha256": "f256a3effbea9c34fcbbd07ec1a1d0e146a065a6970f2dcd521d91e18f23012c"
+        }
+      ]
     }
   ]
 }

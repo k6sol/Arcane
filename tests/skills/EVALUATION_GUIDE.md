@@ -1,6 +1,6 @@
 # Arcane skill evaluation protocol
 
-Status: **definitions, not completed behavior runs**. `evaluations.json` contains 50 primary tasks and 10 guard tasks. Fixture descriptions are requirements, not installed places, Blender files, executable assertions or an evaluation runner. The Node tests check the pack/tooling and catalogue structure only.
+Status: **definitions, not completed behavior runs**. `evaluations.json` contains 69 primary tasks (every skill at least once; extra gameplay-code tasks for systems, DataStore and remote security), 10 guard tasks and 20 routing cases. Routing cases are pinned by `tests/unit/mcp-skill-router.test.ts`. Fixture descriptions are requirements, not installed places, Blender files, executable assertions or an evaluation runner. The Node tests check the pack/tooling and catalogue structure only.
 
 ## 1. Separate the gates
 

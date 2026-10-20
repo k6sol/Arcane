@@ -12,6 +12,13 @@ license: MIT
 - Studio writes to the real DataStores of the place's experience when "Enable Studio Access to API Services" is on. Warn about this before anything could write. Use a separate test experience or a key prefix such as "Test_" for experiments.
 - A failed load must never be saved over with defaults. Mark the profile failed, kick or retry, and do not save it.
 
+## Existing data first
+- Before writing any save code, `script_search` for `GetDataStore`, `GetOrderedDataStore`, `ProfileStore`, `ProfileService` and `DataStore2`. If a system exists, extend it: same store names, key format, scope and field names; add fields with defaults on read.
+- Never add a second save path for the same player data; two writers overwrite each other. Replace old save code only in the same change, keeping its keys.
+- A rename or restructure is a migration: read the old key, write the new shape only after the user asks, and keep the old key untouched as a backup.
+- Gameplay code reads and mutates the loaded profile through one module (`get` returns nil until loaded; refuse purchases and rewards until then).
+- Ready-made typed module (session lock, UpdateAsync, retries, budget, autosave, BindToClose, Studio off-switch): reference `arcane-datastore-safety:template`.
+
 ## Required patterns
 - **Wrap every call**
   - Put every GetAsync/UpdateAsync/SetAsync/RemoveAsync in pcall.
@@ -47,4 +54,5 @@ license: MIT
 - [ ] BindToClose waits for saves.
 - [ ] Studio API-access risk stated.
 - [ ] No key wipe or rename.
+- [ ] `arcane-playtest-qa` script check loop run (at most 3 fixes, own scripts only) once saving is approved.
 - [ ] Code is written disabled and never executed by Arcane without explicit consent.

@@ -14,4 +14,4 @@ Choose a small set of plausible causes proportional to the issue; an obvious syn
 Patch the cause within scope rather than rewriting the system to hide it. Inspect callers and adjacent states affected by the change. Preserve the first failure evidence and do not change the test's success condition to obtain a green result.
 
 ## Verification
-Rerun the original reproducer and relevant regression cases at the changed revision. Include cleanup, respawn or repeated use when the failure involves lifecycle. Stop a repair loop when the same attempt repeats without new evidence; return what was inspected, changed and still unknown.
+Script errors: run the `arcane-playtest-qa` script check loop (Output cursor, playtest, read `after`, fix only your scripts, at most 3 iterations, stop the run). Rerun the original reproducer and relevant regression cases at the changed revision. Include cleanup, respawn or repeated use when the failure involves lifecycle. Stop a repair loop when the same attempt repeats without new evidence; return what was inspected, changed and still unknown.
