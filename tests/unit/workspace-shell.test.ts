@@ -404,7 +404,7 @@ test('search ranks exact names, matches unordered keywords and accents, and choo
   f.untouched(); shell.cleanup();
 });
 
-test('discovery keeps tool contexts distinct and ignores unavailable targets and starter drafts', () => {
+test('tool navigation opens its controls, preserves the draft and keeps discovery scoped', () => {
   const f = fixture();
   const blender = f.add('button', '', f.sidebar, 'Blender');
   blender.setAttribute('data-workspace-target', 'codex-heading'); blender.setAttribute('data-workspace-tool', 'blender');
@@ -417,8 +417,14 @@ test('discovery keeps tool contexts distinct and ignores unavailable targets and
   f.search.input('');
   assert.equal(results.querySelectorAll('button').length, 7);
   assert.equal(results.querySelectorAll('button').filter(row => row.hasAttribute('data-workspace-tool')).length, 2);
+  f.composer.value = 'Keep my unsent build request';
   f.search.input('roblox'); f.search.key('Enter'); assert.equal(shell.activeTool, 'roblox');
+  assert.equal(f.doc.activeElement, f.targets.get('session-heading'));
   f.search.input('blender'); results.querySelector('button')!.click(); assert.equal(shell.activeTool, 'blender');
+  assert.equal(f.doc.activeElement, f.targets.get('asset-heading'));
+  f.composer.focus(); blender.click();
+  assert.equal(f.doc.activeElement, f.targets.get('asset-heading'), 'selecting the current tool reopens its controls');
+  assert.equal(f.composer.value, 'Keep my unsent build request');
   f.search.input('starter'); assert.equal(results.querySelectorAll('button').length, 0);
   f.search.input('queue'); assert.equal(results.querySelectorAll('button').length, 0);
   f.search.input('Assets'); f.targets.get('asset-heading')!.parentElement!.hidden = true;

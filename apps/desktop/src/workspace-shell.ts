@@ -31,8 +31,8 @@ export type WorkspaceTool = 'all' | 'blender' | 'roblox';
 export interface WorkspaceToolChange { tool: WorkspaceTool }
 const TOOL_PRESENTATION: Record<WorkspaceTool, { label: string; heading: string; description: string; settings: string }> = {
   all: { label: 'All tools', heading: 'Your workspace', description: 'Models and scenes.', settings: 'workspace-settings' },
-  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Models, materials, textures and animation.', settings: 'asset-heading' },
-  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Scenes, scripts and game systems.', settings: 'session-heading' },
+  blender: { label: 'Blender', heading: 'Blender workspace', description: 'Create models, unwrap UVs and author materials. Review the model in Preview before placing it in Studio.', settings: 'asset-heading' },
+  roblox: { label: 'Roblox Studio', heading: 'Roblox Studio workspace', description: 'Connect your place, inspect scenes and scripts, place approved assets and run playtests.', settings: 'session-heading' },
 };
 const workspaceTool = (value: string | null): WorkspaceTool | null =>
   value === 'all' || value === 'blender' || value === 'roblox' ? value : null;
@@ -173,7 +173,7 @@ export class WorkspaceShell {
         }
       } else if (drawer.open) this.closeSettings(false);
     }
-    // Only explicit navigation opens settings; startup and tool selection do not.
+    // Only an explicit navigation action opens settings; startup remains in chat.
     for (let ancestor: HTMLElement | null = target; ancestor; ancestor = ancestor.parentElement) {
       if (ancestor.tagName === 'DETAILS' && !ancestor.hasAttribute('open')) ancestor.setAttribute('open', '');
     }
@@ -380,7 +380,7 @@ export class WorkspaceShell {
       if (menuFocused) switcher.querySelector<HTMLElement>('summary')?.focus();
     }
     this.recordVisit('tool:' + tool);
-    if (tool === this.tool) return;
+    if (tool === this.tool) { this.openTool(tool); return; }
     this.tool = tool;
     this.renderTool();
     // Integration signal only: never create/resume a native thread or submit text.
@@ -388,6 +388,14 @@ export class WorkspaceShell {
     if (CustomEvent) this.doc.dispatchEvent(new CustomEvent<WorkspaceToolChange>('workspace:toolchange', {
       detail: { tool }, bubbles: false,
     }));
+    this.openTool(tool);
+  }
+
+  private openTool(tool: WorkspaceTool): void {
+    if (tool === 'all') { this.openComposer(); return; }
+    const context = TOOL_PRESENTATION[tool], target = this.doc.getElementById(context.settings);
+    if (target) this.focus(target, false);
+    this.notice(context.description);
   }
 
   private recordVisit(key: string): void {
