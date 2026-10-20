@@ -10,7 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createAssetService, type AssetService } from '../../apps/daemon/src/asset-service.js';
 import { createAssetConversationHost, type NativeAssetConversationHost } from '../../apps/daemon/src/asset-conversation-host.js';
-import { createNativeAssetRegistry, assertNativeAssetActor, type NativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
+import { createNativeAssetRegistry, assertNativeAssetActor, type NativeAssetActor, type NativeAssetIncarnation } from '../../apps/daemon/src/native-asset-authority.js';
 import { nativeAssetRoutes, parseNativeStudioImportResponse, NATIVE_STUDIO_IMPORT_RESPONSE_BYTES } from '../../apps/daemon/src/native-asset-routes.js';
 import {ArcaneError} from '../../packages/protocol/src/providers.js';
 import type {createStudioImportStagingController} from '../../apps/daemon/src/studio-import-staging-controller.js';
@@ -59,8 +59,9 @@ async function fixture(t: test.TestContext, configured = true) {
   const credential = incarnation.credential();
   incarnation.seal({ ...binding, ...CONVERSATION }); incarnation.grant(binding); incarnation.dispatched({ ...binding, operationId });
   let selections = 0, preparations = 0, lastActor: NativeAssetActor | undefined, baseline: StudioImportBaseline | null = null;
+  let selection=async():Promise<StudioImportSelection>=>{selections++;return SELECTION;};
   const service = await createAssetService({ cwd: projectPath, projectPath, outputRoot,
-    ...(configured ? { studioImport: { workAssociations: store, selectTarget: async () => { selections++; return SELECTION; }, loadObservedBaseline: async () => baseline } } : {}) });
+    ...(configured ? { studioImport: { workAssociations: store, selectTarget: () => selection(), loadObservedBaseline: async () => baseline } } : {}) });
   let prepare: AssetService['prepareStudioImport'] = service.prepareStudioImport.bind(service);
   const routed: AssetService = { ...service, async prepareStudioImport(id, actor) {
     preparations++; lastActor = actor; assertNativeAssetActor(actor, 'mutate'); return prepare(id, actor);
@@ -124,6 +125,11 @@ async function fixture(t: test.TestContext, configured = true) {
     setPrepare(fn: typeof prepare) { prepare = fn; }, setLookup(fn: typeof lookup) { lookup = fn; },
     setBaseline(value: StudioImportBaseline) { baseline = value; },
     counts: () => ({ preparations, selections, requests }), actor: () => lastActor,
+    holdSelection() {
+      const entered=gate(),release=gate();releases.push(release.release);
+      selection=async()=>{selections++;entered.release();await release.promise;return SELECTION;};
+      return {entered:entered.promise,release:release.release};
+    },
     holdPreparation() {
       const entered = gate(), release = gate(), original = prepare; releases.push(release.release);
       prepare = async (id, actor) => { const result = await original(id, actor); entered.release(); await release.promise; return result; };
@@ -324,7 +330,7 @@ test('native preparation serialization refuses accessors, proxies, non-JSON data
     { ...original, manifest: { ...original.manifest, engineVerification: 'accepted' } },
     { ...original, manifest: { ...original.manifest, revisionId: OTHER } },
     { ...original, manifest: { ...original.manifest, projectId: 'f'.repeat(64) } },
-    { ...original, manifest: { ...original.manifest, limitations: ['🌿'.repeat(NATIVE_STUDIO_IMPORT_RESPONSE_BYTES / 4)] } }]) {
+    { ...original, manifest: { ...original.manifest, limitations: ['Ã°Å¸Å’Â¿'.repeat(NATIVE_STUDIO_IMPORT_RESPONSE_BYTES / 4)] } }]) {
     f.setPrepare(async () => value as PreparedStudioImport); const reply = await f.http().result;
     assert.equal(reply.status, 503); assert.equal(reply.data.error, 'STUDIO_IMPORT_RESPONSE'); assert.equal(reply.data.prepared, undefined);
   }
@@ -415,4 +421,20 @@ test('native MCP rejects malformed/foreign/overbound wire responses with one POS
   }
   assert.ok(requests.every(r => r.method === 'POST' && r.path === PATH && r.origin === undefined));
   assert.ok(requests.every(r => JSON.stringify(r.body) === JSON.stringify({ jobId: JOB })));
+});
+
+async function leaseReleased(incarnation:NativeAssetIncarnation){
+  const end=Date.now()+2000;
+  while(!incarnation.status().released&&Date.now()<end)await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(incarnation.status().released,true,'The actual held callbacks must drain before release.');
+}
+for(const close of [false,true])test('underlying target callback remains leased after '+(close?'service close':'exact Stop')+' wins its response race',async t=>{
+  const f=await fixture(t),held=f.holdSelection(),actor=f.registry.capture(f.credential,'mutate');
+  const pending=f.service.prepareStudioImport(JOB,actor),refusal=assert.rejects(pending,refused(close?'CLOSED':'CANCELLED'));
+  await held.entered;
+  if(close)await f.service.close();else f.incarnation.cancelWork('incarnation');
+  await refusal;f.incarnation.retire();f.incarnation.transportClosed();
+  assert.equal(f.incarnation.status().released,false);assert.equal(f.counts().selections,1);
+  held.release();await leaseReleased(f.incarnation);assert.equal(f.counts().selections,1);
+  assert.equal(f.counts().preparations,0,'The late target cannot cause another request or accepted preparation.');
 });

@@ -10,7 +10,7 @@ import {
 } from '../../../packages/storage/src/conversation-work-store.js';
 import type { AssetStartAdmission } from './asset-service.js';
 import {
-  assertNativeAssetActor, nativeAssetActorScope, nativeAssetOperationSignal, type NativeAssetActor,
+  assertNativeAssetActor, nativeAssetActorScope, acquireNativeAssetWork, type NativeAssetActor,
 } from './native-asset-authority.js';
 
 export interface AssetConversationHostOptions {
@@ -169,11 +169,12 @@ export function createAssetConversationHost(options: AssetConversationHostOption
       const conversation = captured(actor, 'mutate'), request = assetRequest(input);
       page(conversation, { limit: 1 }); // Validate scope and borrowed storage before dispatch.
       if (!startNative) fail('NATIVE_UNAVAILABLE');
+      const work = acquireNativeAssetWork(actor, 'generation');
       let active = true, attempted = false, admitted = false, witnessed = false, uncertain = false;
       let id: string | null = null, association: 'bound' | 'unknown' = 'unknown';
       let admissionFailure: unknown;
       const admission: AssetStartAdmission = Object.freeze({
-        signal: nativeAssetOperationSignal(actor),
+        signal: work.signal, work,
         beforeCreate(): void {
           if (!active || attempted || witnessed) { uncertain = true; fail('ADMISSION'); }
           attempted = true;
@@ -205,7 +206,7 @@ export function createAssetConversationHost(options: AssetConversationHostOption
         // A callback rejection alone cannot rule out a lost creation acknowledgement.
         if (!witnessed && !admitted && admissionFailure !== undefined) throw admissionFailure;
         uncertain = true;
-      } finally { active = false; }
+      } finally { active = false; work.finish('closed'); }
       return { projectId, projectPath, jobId: id,
         association: uncertain ? 'unknown' : association, conversation: { ...conversation },
         creation: uncertain ? 'unknown' : 'created', retry: false };

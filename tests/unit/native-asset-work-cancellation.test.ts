@@ -277,3 +277,44 @@ test('saturated admission epochs cannot strand an already accepted controlled wo
   assert.equal(signal.aborted, true); assert.equal(incarnation.status().retired, true);
   assert.equal((await f.settled(started.jobId)).state, 'cancelled');
 });
+
+test('real accepted worker and input listener keep a closed transport leased through their actual completion',async t=>{
+  const f=await fixture(t),incarnation=f.registry.issue(),binding={connectionId:'leased-owned-connection',threadId:'leased-owned-thread'};
+  incarnation.seal({...binding,provider:'codex',sessionId:null});incarnation.grantNextIntent({...binding,sessionId:null});
+  incarnation.dispatched({...binding,operationId:'leased-owned-operation'});
+  const token=incarnation.credential(),actor=f.registry.capture(token,'mutate'),signal=nativeAssetOperationSignal(actor);
+  const reply=await f.host.startNative(actor,INPUT);assert.ok(reply.jobId);const jobId=reply.jobId;
+  await until(()=>f.workers.get(jobId)?.ready===true);
+  incarnation.ended('leased-owned-operation');incarnation.retire();incarnation.transportClosed();
+  assert.equal(incarnation.status().released,false);assert.equal(signal.aborted,false);assert.equal(f.workers.get(jobId)?.exited,false);
+  assert.equal(f.registry.recognizes(token),false);assert.throws(()=>f.registry.capture(token,'read'),{code:'NATIVE_ASSET_AUTHORITY'});
+  await writeFile(join(f.workers.get(jobId)!.directory,'finish-worker'),'finish');
+  assert.equal((await f.settled(jobId)).state,'succeeded');await until(()=>incarnation.status().released);
+  assert.equal(f.workers.get(jobId)?.exited,true);assert.equal(signal.aborted,false);
+  assert.deepEqual(f.associations.binding('asset-job',jobId)?.conversation,{provider:'codex',threadId:binding.threadId,sessionId:null});
+});
+
+test('real service releases a synchronously refused pipeline start before any worker exists',async t=>{
+  const f=await fixture(t),incarnation=f.registry.issue(),binding={connectionId:'no-allocation-connection',threadId:'no-allocation-thread'};
+  incarnation.seal({...binding,provider:'codex',sessionId:null});incarnation.grant(binding);incarnation.dispatched({...binding,operationId:'no-allocation-operation'});
+  const actor=f.registry.capture(incarnation.credential(),'mutate');let starts=0;
+  t.mock.method(AssetPipeline.prototype,'start',()=>{starts++;throw new AssetError('BUSY','Controlled refusal before allocation.');});
+  const response=await f.host.startNative(actor,INPUT);
+  assert.equal(response.creation,'unknown');assert.equal(response.jobId,null);assert.equal(response.retry,false);
+  assert.equal(starts,1);assert.equal(f.workers.size,0);assert.deepEqual(f.assets.jobs(),[]);
+  incarnation.retire();incarnation.transportClosed();assert.equal(incarnation.status().released,true);
+});
+test('real service retains unresolved pipeline ownership even after its actual completion promise settles',async t=>{
+  const f=await fixture(t),incarnation=f.registry.issue(),binding={connectionId:'unresolved-connection',threadId:'unresolved-thread'};
+  incarnation.seal({...binding,provider:'codex',sessionId:null});incarnation.grant(binding);incarnation.dispatched({...binding,operationId:'unresolved-operation'});
+  t.mock.method(AssetPipeline.prototype as unknown as {generate:Generate},'generate',async(jobId,directory,request)=>{
+    await mkdir(directory);const result:AssetJobResult={jobId,directory,state:'interrupted',manifestPath:null,
+      error:{code:'SUPERVISION_UNRESOLVED',message:'Synthetic unconfirmed worker closure; no native worker launched.'}};
+    await writeFile(join(directory,'job.json'),JSON.stringify({schemaVersion:1,...result,request,startedAt:new Date().toISOString()}));return result;
+  });
+  const response=await f.host.startNative(f.registry.capture(incarnation.credential(),'mutate'),INPUT);assert.ok(response.jobId);
+  const result=await f.settled(response.jobId);assert.equal(result.state,'interrupted');assert.equal(result.error?.code,'SUPERVISION_UNRESOLVED');
+  await f.assets.cancel(response.jobId);incarnation.retire();incarnation.transportClosed();
+  assert.equal(incarnation.status().released,false,'A settled promise and Stop request do not confirm missing worker closure.');
+  assert.equal(f.workers.size,0);assert.equal(f.associations.binding('asset-job',response.jobId)?.conversation.threadId,binding.threadId);
+});

@@ -18,7 +18,7 @@ import { artifactPath, noLinks, prepareOutputRoot, readRegularFile, regularFile 
 import { inspectPng, readJson, record, sha256 } from '../../../packages/asset-pipeline/src/validation.js';
 import { createStudioImportManifestAuthority, snapshotStudioImportSelection, STUDIO_IMPORT_LIMITS, type PreparedStudioImport } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImportHostOptions, type StudioImportPreparationAttempt } from './asset-import-adapter.js';
-import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor } from './native-asset-authority.js';
+import { assertNativeAssetActor, nativeAssetActorScope, acquireNativeAssetWork, assertNativeAssetWorkLease, type NativeAssetActor, type NativeAssetWorkLease } from './native-asset-authority.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
 import { createStudioImportTransfer, type StudioImportTransfer } from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
@@ -79,6 +79,8 @@ const RESOLUTION_MARKER = 'worker-resolution.json';
 export interface AssetStartAdmission {
   /** Volatile signal selected from the actual host operation, never input JSON. */
   readonly signal?: AbortSignal;
+  /** Private generation lifetime from the original native host; never input JSON. */
+  readonly work?: NativeAssetWorkLease;
   beforeCreate(): void;
   created(jobId: string): void;
 }
@@ -551,6 +553,8 @@ export async function createAssetService(options: AssetServiceOptions) {
     ensureOpen();
     if (!importHost) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Studio import host target/receipt selection has not been configured.');
     const requested = id(jobId);
+    const work = acquireNativeAssetWork(actor, 'preparation');
+    try {
     const end = Date.now() + ARTIFACT_DOWNLOAD_TIMEOUT_MS;
     let selected: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').StudioImportSelection | undefined;
     let review:AssetReviewImportGuard|undefined;
@@ -573,9 +577,10 @@ export async function createAssetService(options: AssetServiceOptions) {
     if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
     studioImportActive = true;
     // Bounds waits as well as reads; late host callbacks cannot expose a result.
-    const wait = async <T>(promise: T | Promise<T>,joinOnClose=false): Promise<T> => {
+    const wait = async <T>(start: () => T | Promise<T>,joinOnClose=false): Promise<T> => {
+      const promise = work.run(start);
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let onClose:(()=>void)|undefined;
+      let onClose:(()=>void)|undefined, onStop:(()=>void)|undefined;
       try {
         const waits:Promise<T>[]=[Promise.resolve(promise), new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new ArcaneError('STUDIO_IMPORT_TIMEOUT', 'Studio import preparation exceeded its 30 second deadline.')), Math.max(1, end - Date.now()));
@@ -584,25 +589,31 @@ export async function createAssetService(options: AssetServiceOptions) {
           onClose=()=>reject(new ArcaneError('CLOSED','Asset service is closed.'));
           if(lifetime.signal.aborted)onClose();else lifetime.signal.addEventListener('abort',onClose,{once:true});
         }));
+        // A preparation journal write that already began is still joined,
+        // including on Stop; its original immutable-write outcome is preserved.
+        if(!joinOnClose)waits.push(new Promise<never>((_resolve,reject)=>{
+          onStop=()=>reject(new ArcaneError('CANCELLED','The original asset work was stopped.'));
+          if(work.signal.aborted)onStop();else work.signal.addEventListener('abort',onStop,{once:true});
+        }));
         const result = await Promise.race(waits);
         check(); return result;
-      } finally { if (timer) clearTimeout(timer);if(onClose)lifetime.signal.removeEventListener('abort',onClose); }
+      } finally { if (timer) clearTimeout(timer);if(onClose)lifetime.signal.removeEventListener('abort',onClose);if(onStop)work.signal.removeEventListener('abort',onStop); }
     };
     const payloadFiles = new Map<string, Uint8Array>();
     const authority = createStudioImportManifestAuthority({ loadGeneratedFiles: async value => {
       if (value !== requested) throw new ArcaneError('STUDIO_IMPORT_SCOPE', 'Import job identity changed.');
       const scope = check();
       // Tighten import size BEFORE the service's existing complete manifest proof.
-      for (const name of ['asset.glb', 'collision.glb'] as const) await wait(regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
-      const manifest = await wait(readers.manifest(requested));
+      for (const name of ['asset.glb', 'collision.glb'] as const) await wait(() => regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
+      const manifest = await wait(() => readers.manifest(requested));
       if (isAdoptedGlbManifest(manifest)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB has preview-only provenance; engine import is unavailable.');
       if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
-      const selection = snapshotStudioImportSelection(await wait(importHost.selectTarget(scope, requested, actor, guard)));
+      const selection = snapshotStudioImportSelection(await wait(() => importHost.selectTarget(scope, requested, actor, guard)));
       selected = selection;
       check();
       const exports = new Map<'asset.glb' | 'collision.glb', Buffer>();
       for (const name of ['asset.glb', 'collision.glb'] as const) {
-        const result = await wait(readers.artifact(requested, name));
+        const result = await wait(() => readers.artifact(requested, name));
         const pinned = manifest.artifacts.find(a => a.path === name && a.role === 'export');
         if (!pinned || result.contentType !== 'model/gltf-binary' || pinned.bytes !== result.bytes.length || pinned.sha256 !== sha256(result.bytes)) throw new AssetError('HASH', 'Import exports changed since the pinned manifest.');
         exports.set(name, result.bytes);
@@ -610,22 +621,22 @@ export async function createAssetService(options: AssetServiceOptions) {
       }
       // Validate producer IDs BEFORE looking up previous mappings.
       const generated = adaptCompletedStudioImport(manifest, exports, scope.projectId, selection, null);
-      const baseline = importHost.loadObservedBaseline ? await wait(importHost.loadObservedBaseline(scope, generated.assetId, selection.target)) : null;
+      const baseline = importHost.loadObservedBaseline ? await wait(() => importHost.loadObservedBaseline!(scope, generated.assetId, selection.target)) : null;
       check();
       return { ...generated, baseline };
     } });
     try {
       // The returned review outlives this preparation's target capture and deadline.
       // reviewImport independently retains exact native actor/job/service checks.
-      if(includePayload)review=await reviewImport(requested,actor,undefined,()=>{});
-      const admission = await wait(authority.admit(requested));
+      if(includePayload)review=await work.run(() => reviewImport(requested,actor,undefined,()=>{}));
+      const admission = await wait(() => authority.admit(requested));
       check();
       const prepared = authority.prepare(admission);
       const payload = includePayload ? decodeStudioImportPayload(prepared, payloadFiles) : null;
       const transfer = payload ? createStudioImportTransfer(prepared, payload) : null;
       check();
       if (attempt && !importHost.recordPrepared) throw new ArcaneError('STUDIO_IMPORT_UNAVAILABLE', 'Preparation attempt persistence is required.');
-      if (importHost.recordPrepared) await wait(importHost.recordPrepared(originalScope, requested, prepared, actor, guard, attempt),true);
+      if (importHost.recordPrepared) await wait(() => importHost.recordPrepared!(originalScope, requested, prepared, actor, guard, attempt),true);
       check();
       if (includePayload) {
         if (!payload || !transfer || !review) throw new ArcaneError('STUDIO_IMPORT_PAYLOAD', 'Owned import payload was not prepared.');
@@ -638,6 +649,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       try { if (importHost.releaseTarget) synchronousAdmissionResult(importHost.releaseTarget(originalScope, requested)); }
       finally { studioImportActive = false; }
     }
+    } finally { work.finish('closed'); }
   }
 
   return {
@@ -828,6 +840,11 @@ export async function createAssetService(options: AssetServiceOptions) {
     },
     async start(input: AssetInput, admission?: AssetStartAdmission): Promise<AssetJobRecord> {
       ensureOpen();
+      const work = admission?.work;
+      if (work) {
+        assertNativeAssetWorkLease(work);
+        if (admission.signal !== work.signal) throw new ArcaneError('ADMISSION_WORK','Original asset work lifetime is required.');
+      }
       if (resolution || retentionOperation) throw new AssetError('BUSY', 'A worker status check or retained-history change is already running.');
       if (admitting) {
         // Preserve the durability barrier for waiting callers, then recheck closure before reporting busy.
@@ -871,10 +888,13 @@ export async function createAssetService(options: AssetServiceOptions) {
         ensureOpen();
         if (probeActive || active.size >= MAX_CONCURRENT_ASSET_JOBS || adoption) throw new AssetError('BUSY', 'Blender generation capacity is already reserved.');
         if (admission) synchronousAdmissionResult(admission.beforeCreate());
-        const handle = pipeline.start(originalInput, operation);
-        const job: AssetJobRecord = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
+        let handle!: AssetJob, job!: AssetJobRecord;
+        const supervise = () => {
+        handle = pipeline.start(originalInput, operation);
+        job = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
         entries.set(handle.id, { directory: handle.directory, job });
         const completion = handle.completion.then(async result => {
+          if (result.state === 'interrupted') work?.finish('unresolved');
           let state: AssetJobState = result.state, error = result.error;
           let manifestPath: string | null = null;
           if (result.state === 'succeeded' && result.manifestPath) {
@@ -887,10 +907,15 @@ export async function createAssetService(options: AssetServiceOptions) {
           const finishedAt = new Date().toISOString();
           Object.assign(job, { state, stage: 'complete', updatedAt: finishedAt, finishedAt, error, manifestPath, manifestAvailable: manifestPath !== null });
           await reportFailure(job);
-        }).catch(async() => { job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' };
+        }).catch(async() => { work?.finish('unresolved'); job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' };
           await reportFailure(job);
         })
           .finally(() => { active.delete(handle.id); persist(); });
+        return completion;
+        };
+        // Register the real pipeline and its listener-cleanup completion BEFORE
+        // allocation; a returned HTTP/admission result does not release it.
+        const completion = work ? work.run(supervise) : supervise();
         active.set(handle.id, { handle, completion });
         // Install supervision before host bookkeeping can throw. A created job is
         // never a safe pre-creation rejection, even if its witness callback fails.

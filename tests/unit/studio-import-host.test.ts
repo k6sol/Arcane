@@ -205,6 +205,7 @@ test('native controller stages owned bytes through durable bounded queue receipt
   assert.deepEqual(status.stage?.commands.map(c=>c.commandId),staged.commandIds);assert.equal(status.stage?.receipt?.engineVerification,'pending');
   assert.equal(status.stage?.imported,false);assert.equal(status.stage?.retry,false);
   await assert.rejects(f.stage(),refused('STUDIO_STAGE_EXISTS'));assert.deepEqual(f.counts(),before);
+  f.incarnation.retire();f.incarnation.transportClosed();assert.equal(f.incarnation.status().released,true,'Every packet has an actual terminal receipt and cleanup finished.');
 });
 
 test('production controller reconstructs the original sealed run once with exact bounded source metadata',async t=>{
@@ -222,6 +223,7 @@ test('production controller reconstructs the original sealed run once with exact
   const status=await f.reconstructionStatus();assert.equal(status.reconstruction?.state,'succeeded');
   assert.equal(status.reconstruction?.receiptScope,'historical-reconstruction');assert.equal(status.reconstruction?.currentResources,'unobserved');
   assert.equal(status.reconstruction?.retry,false);assert.equal(status.reconstruction?.imported,false);
+  f.incarnation.retire();f.incarnation.transportClosed();assert.equal(f.incarnation.status().released,true);
 });
 
 test('native HTTP and production client reach the real staging/reconstruction controller and private Store admission',async t=>{
@@ -258,6 +260,7 @@ test('actor retirement after dispatch retains unknown reconstruction and never a
   f.incarnation.grant({connectionId:'fixture-connection',threadId:conversation.threadId});
   f.resetController();await assert.rejects(f.reconstruct(f.newActor()),refused('STUDIO_RECONSTRUCT_EXISTS'));
   assert.equal(f.studio.commands().filter(c=>c.method==='asset.reconstruct').length,1);
+  f.incarnation.retire();f.incarnation.transportClosed();assert.equal(f.incarnation.status().released,false,'The delivered reconstruction remains unresolved.');
 });
 
 test('known successful reconstruction fact survives late native retirement without claiming current resources',async t=>{
@@ -271,6 +274,7 @@ test('known successful reconstruction fact survives late native retirement witho
   assert.equal(f.studio.readStageReconstruction(f.scope.projectId,JOB,staged.runId)?.command.state,'succeeded');
   const status=await f.reconstructionStatus();assert.equal(status.reconstruction?.receipt?.runId,staged.runId);
   assert.equal(status.reconstruction?.currentResources,'unobserved');assert.equal(status.reconstruction?.imported,false);
+  f.incarnation.retire();f.incarnation.transportClosed();assert.equal(f.incarnation.status().released,true,'An actual terminal receipt, not the retired actor, proves command closure.');
 });
 
 test('backend restart retains detached reconstruction facts but cannot allocate again from old pairing',async t=>{
@@ -432,6 +436,7 @@ test('retired same native capture stops a delivered packet and retains its unkno
   assert.equal(f.studio.poll(f.paired.sessionId, f.proof()).length, 0);
   const status=await f.status();assert.equal(status.stage?.phase,'needs_reconciliation');
   assert.equal(status.stage?.commands[0]?.commandId,(attempted as StudioCommand).id);assert.equal(status.stage?.receipt,null);
+  f.incarnation.retire();f.incarnation.transportClosed();assert.equal(f.incarnation.status().released,false,'Unknown dispatched packet ownership cannot be compacted.');
 });
 
 test('stage status needs exact current read actor/job binding and performs no target reads',async t=>{
@@ -517,4 +522,16 @@ test('host shutdown fences a pending context read without manufacturing a receip
   const pending = f.host.hooks.selectTarget(f.scope, JOB, f.actor, f.guard);
   await new Promise(resolve => setTimeout(resolve, 5)); f.host.close();
   await assert.rejects(Promise.resolve(pending), refused('STUDIO_IMPORT_SCOPE')); assert.deepEqual(f.counts(), { saved: 0, reads: 0 });
+});
+
+for(const partial of [false,true])test('context command '+(partial?'partial failure remains leased':'authenticated terminal failure closes its lease'),async t=>{
+  const f=await fixture(t);f.hold();
+  const pending=f.host.hooks.selectTarget(f.scope,JOB,f.actor,f.guard);
+  const refusal=assert.rejects(Promise.resolve(pending),refused('STUDIO_IMPORT_RECEIPT'));
+  const commands=f.studio.poll(f.paired.sessionId,f.proof());assert.equal(commands.length,1);const command=commands[0]!;
+  assert.equal(command.method,'scene.import_context');assert.equal(command.state,'dispatched');
+  f.studio.result({sessionId:command.sessionId,commandId:command.id,state:'failed',error:'Controlled context result.',...(partial?{result:{partial:true}}:{})});
+  await refusal;assert.equal(f.studio.command(command.id).state,partial?'needs_reconciliation':'failed');
+  f.incarnation.retire();f.incarnation.transportClosed();assert.equal(f.incarnation.status().released,!partial);
+  assert.equal(f.counts().saved,0);assert.equal(f.studio.commands().length,1);
 });

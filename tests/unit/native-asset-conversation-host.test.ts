@@ -82,7 +82,7 @@ function unknown(result: Awaited<ReturnType<ReturnType<typeof createAssetConvers
 }
 function job(jobId: string, padding = ''): AssetJobRecord {
   return { schemaVersion: 1, jobId, directory: 'synthetic/output/' + jobId, manifestPath: null,
-    request: normalizeRequest(INPUT), state: 'failed', stage: 'Retained café 🌿' + padding,
+    request: normalizeRequest(INPUT), state: 'failed', stage: 'Retained cafÃ© ðŸŒ¿' + padding,
     startedAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:01.000Z', events: [],
     manifestAvailable: false, error: { code: 'FIXTURE', message: 'Complete retained failure evidence.' } };
 }
@@ -383,7 +383,7 @@ test('native page hydrates complete captured records, counts orphans and ignores
 
 test('native page verifies its exact SQLite prefix cursor within the UTF-8 byte cap', t => {
   const f = fixture(t), actor = f.issue().actor;
-  const first = job('first', '🌿é\n"\\'.repeat(25000)), second = job('second', 'x'.repeat(300000));
+  const first = job('first', 'ðŸŒ¿Ã©\n"\\'.repeat(25000)), second = job('second', 'x'.repeat(300000));
   for (const id of ['first', 'orphan', 'second', 'later']) f.store.bind({ conversation: NATIVE, kind: 'asset-job', id });
   const calls: unknown[] = [], list = f.host.listNative.bind(f.host);
   f.host.listNative = (capture, query) => { calls.push(query); return list(capture, query); };
@@ -423,4 +423,22 @@ test('source wiring has no native-to-human adapter or untrusted authority option
   const nativePage = page.slice(page.indexOf('export function nativeAssetConversationJobPage'), page.indexOf('function capturedJobPage'));
   assert.match(nativePage, /host\.listNative\(actor, pagination\)/); assert.doesNotMatch(nativePage, /listHuman|bindingHuman/);
   assert.doesNotMatch(host, /nativeAuthority\??:|actorScope\??:/);
+});
+
+function workGate(){let release!:()=>void;const promise=new Promise<void>(accept=>{release=accept;});return {promise,release};}
+test('native start retains original work after its admission receipt until the accepted task actually settles',async t=>{
+  const f=fixture(t),owner=f.issue(),held=workGate();let task!:Promise<void>;
+  f.starter(async(_request,admission)=>{
+    assert.ok(admission.work);assert.equal(admission.signal,admission.work.signal);
+    admission.beforeCreate();admission.created('leased-native-job');task=admission.work.run(()=>held.promise);return 'leased-native-job';
+  });
+  const result=await f.host.startNative(owner.actor,INPUT);assert.equal(result.creation,'created');assert.equal(result.association,'bound');
+  owner.handle.ended(owner.operationId);owner.handle.retire();owner.handle.transportClosed();
+  assert.equal(owner.handle.status().released,false);assert.equal(f.store.binding('asset-job','leased-native-job')?.conversation.provider,'codex');
+  held.release();await task;assert.equal(owner.handle.status().released,true);assert.equal(f.genericStarts,0);
+});
+test('a failed delegated pre-allocation does not leak the caller lease or infer a successful creation',async t=>{
+  const f=fixture(t),owner=f.issue();f.starter(async()=>{throw Error('Controlled no-allocation failure.');});
+  unknown(await f.host.startNative(owner.actor,INPUT),null);assert.equal(f.allocations,0);assert.deepEqual(f.store.list(NATIVE,'asset-job').items,[]);
+  owner.handle.retire();owner.handle.transportClosed();assert.equal(owner.handle.status().released,true);assert.equal(f.genericStarts,0);
 });

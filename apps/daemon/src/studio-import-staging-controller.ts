@@ -10,7 +10,7 @@ import {createStudioImportTransfer} from '../../../packages/asset-pipeline/src/s
 import type {AssetService} from './asset-service.js';
 import {assertStudioImportJobScope} from './asset-import-adapter.js';
 import type {StudioImportHostOptions} from './asset-import-adapter.js';
-import {assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,type NativeAssetActor} from './native-asset-authority.js';
+import {assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,acquireNativeAssetWork,type NativeAssetActor} from './native-asset-authority.js';
 
 export interface StudioImportStagingConfiguration {
   projectPath: string;
@@ -48,6 +48,31 @@ export function createStudioImportStagingController(config: StudioImportStagingC
     || typeof host.releaseTarget !== 'function' || typeof host.beginPreparationAttempt !== 'function' || !/^[a-f0-9]{64}$/.test(pluginArtifactHash)) fail('STUDIO_STAGE_CONFIGURATION');
   const now = config.now ?? Date.now;
   let busy = false, closed = false;
+  // This owns lifetime only. Every original actor/review/target/packet fence below
+  // still decides admission. A timed-out or lost receipt never proves closure.
+  function commandWork(actor:NativeAssetActor,kind:'stage'|'reconstruction') {
+    const work=acquireNativeAssetWork(actor,kind);
+    const commands=new Map<string,Pick<StudioCommand,'id'|'requestId'|'sessionId'|'clientSessionId'|'method'|'leaseEpoch'>>();
+    let uncertain=false;
+    return {
+      run<T>(start:()=>T|Promise<T>):Promise<T>{return work.run(start);},
+      enqueue(start:()=>StudioCommand):StudioCommand {
+        uncertain=true;const command=start();
+        commands.set(command.id,{id:command.id,requestId:command.requestId,sessionId:command.sessionId,
+          clientSessionId:command.clientSessionId,method:command.method,leaseEpoch:command.leaseEpoch});
+        uncertain=false;return command;
+      },
+      finish(cleaned:boolean):void {
+        let complete=cleaned&&!uncertain;
+        try{for(const [id,identity]of commands){
+          const actual=studio.command(id);
+          if(Object.entries(identity).some(([key,value])=>actual[key as keyof StudioCommand]!==value)||
+            !['succeeded','failed','cancelled'].includes(actual.state))complete=false;
+        }}catch{complete=false;}
+        work.finish(complete?'closed':'unresolved');
+      },
+    };
+  }
   return Object.freeze({
     async status(jobId:string,actor:NativeAssetActor,guard:()=>void=()=>{}):Promise<NativeStageStatus> {
       const check=()=>{
@@ -97,12 +122,13 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           ||proof.playEpoch!==continuity.playEpoch||proof.placeId!==target.placeId||proof.universeId!==target.universeId
           ||proof.mode!=='Edit'||!proof.connected||!proof.continuitySupported||!Number.isFinite(Date.parse(proof.expiresAt))||Date.parse(proof.expiresAt)<=now())fail('STUDIO_STAGE_CONTINUITY');
       };
+      const work=commandWork(actor,'reconstruction');
       busy=true;let admitted=false;
       try {
-        const review=await assets.reviewImport(jobId,actor,run.intent.modelReview,guard);
+        const review=await work.run(()=>assets.reviewImport(jobId,actor,run.intent.modelReview!,guard));
         reviewCheck=()=>review.assertCurrent();boundary();
         // Observe the ORIGINAL target, never select/capture another live place.
-        const contextCommand=studio.enqueue({sessionId:target.sessionId,requestId:'reconstruct_context_'+randomUUID().replaceAll('-',''),method:'scene.import_context',args:{}});
+        const contextCommand=work.enqueue(()=>studio.enqueue({sessionId:target.sessionId,requestId:'reconstruct_context_'+randomUUID().replaceAll('-',''),method:'scene.import_context',args:{}}));
         const contextDeadline=Math.min(expires,now()+STUDIO_STAGING_LIMITS.packetDeadlineMs);
         while(true){
           boundary();const command=studio.command(contextCommand.id);
@@ -119,7 +145,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           await studio.waitForCommandResult(contextCommand.id,Math.min(25,Math.max(1,contextDeadline-now())));
         }
         boundary();admitted=true;
-        const queued=studio.enqueueStageReconstruction(scope.projectId,jobId,run.runId,boundary);
+        const queued=work.enqueue(()=>studio.enqueueStageReconstruction(scope.projectId,jobId,run.runId,boundary));
         while(true){
           boundary();const record=studio.readStageReconstruction(scope.projectId,jobId,run.runId);
           if(!record||record.command.id!==queued.id)fail('STUDIO_RECONSTRUCT_RECEIPT');
@@ -128,7 +154,9 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           await studio.waitForCommandResult(queued.id,Math.min(25,Math.max(1,expires-now())));
         }
       } finally {
-        try{if(admitted)studio.abandonStageReconstruction(scope.projectId,jobId,run.runId);}finally{busy=false;}
+        let cleaned=false;
+        try{if(admitted)studio.abandonStageReconstruction(scope.projectId,jobId,run.runId);cleaned=true;}
+        finally{busy=false;work.finish(cleaned);}
       }
     },
     async stage(jobId: string, actor: NativeAssetActor, guard: () => void = () => {}): Promise<StudioAssetStageReceipt & {status: 'staged'; imported: false; runId: string; commandIds: string[]}> {
@@ -143,6 +171,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         if(current[0]!.id===previous.intent.target.sessionId&&proof.clientLifetimeId===previous.intent.continuity.clientLifetimeId&&proof.playEpoch<=previous.intent.continuity.playEpoch)fail('STUDIO_STAGE_EXISTS');
       }
       assertNativeAssetStageOperationAvailable(actor, jobId);
+      const work=commandWork(actor,'stage');
       busy = true;
       const expires = now() + STUDIO_STAGING_LIMITS.totalDeadlineMs;
       let reviewCheck:(()=>void)|undefined;
@@ -156,13 +185,13 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       try {
         base();
         const preparationAttempt = host.beginPreparationAttempt!(scope,jobId,actor,base);
-        const data = await assets.prepareStudioImportPayload(jobId, actor, preparationAttempt);
+        const data = await work.run(()=>assets.prepareStudioImportPayload(jobId, actor, preparationAttempt));
         reviewCheck=()=>data.review.assertCurrent();base(); assertDecodedStudioImportPayload(data.payload);
         // Rebuild from process-branded immutable decoded chunks. Serialized
         // lookalikes and caller-mutated convenience buffers grant nothing.
         const transfer = createStudioImportTransfer(data.prepared, data.payload);
         if (!isDeepStrictEqual(transfer, data.transfer)) fail('STUDIO_STAGE_IDENTITY');
-        const selection = await host.selectTarget(scope, jobId, actor, base);
+        const selection = await work.run(()=>host.selectTarget(scope, jobId, actor, base));
         captured = true; base();
         const preparedSelection = snapshotStudioImportSelection({target: data.prepared.manifest.target,
           placement: data.prepared.manifest.placement, studsPerMeter: data.prepared.manifest.conversion.studsPerMeter});
@@ -208,7 +237,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         let last: StudioAssetStageReceipt | null = null, bytes = 0;
         for (const [ordinal, args] of argumentsList.entries()) {
           boundary();
-          const queued = studio.enqueueStagePacket(handle,ordinal,args,boundary);
+          const queued = work.enqueue(()=>studio.enqueueStagePacket(handle!,ordinal,args,boundary));
           commandIds.push(queued.id);
           const deadline = Math.min(expires, now() + STUDIO_STAGING_LIMITS.packetDeadlineMs);
           while (true) {
@@ -234,8 +263,11 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       } finally {
         // Cancel only an undispatched packet; a delivered unknown result is
         // retained in the durable queue for reconciliation, never replayed.
-        try { if (handle) studio.closeStageRun(handle); }
-        finally { try { if (captured) host.releaseTarget!(scope, jobId); } finally {busy = false;} }
+        let cleaned=false;
+        try { if (handle) studio.closeStageRun(handle); cleaned=true; }
+        finally { try { if (captured) host.releaseTarget!(scope, jobId); }
+          catch(error){cleaned=false;throw error;}
+          finally {busy = false;work.finish(cleaned);} }
       }
     },
     close() {closed = true;},

@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
-import { studioImportContextObservation, type StudioImportContextObservation, type StudioSession } from '../../../packages/protocol/src/studio.js';
+import { studioImportContextObservation, type StudioImportContextObservation, type StudioSession, type StudioCommand } from '../../../packages/protocol/src/studio.js';
 import { StudioStore } from '../../../packages/storage/src/studio-store.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { snapshotStudioImportSelection, type PreparedStudioImport, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { assertStudioImportJobScope, type StudioImportHostOptions } from './asset-import-adapter.js';
-import type { NativeAssetActor, NativeAssetScope } from './native-asset-authority.js';
+import { acquireNativeAssetWork, type NativeAssetActor, type NativeAssetScope } from './native-asset-authority.js';
 import type { StudioImportPreparationAttempt } from './asset-import-adapter.js';
 
 export interface ImportContextReceiptWitness {
@@ -92,7 +92,11 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
       return current;
     };
     boundary();
-    const queued = studio.enqueue({ sessionId, requestId: 'import-context-' + randomUUID(), method: 'scene.import_context', args: {} });
+    const work=acquireNativeAssetWork(actor,'preparation');
+    let queued:StudioCommand|undefined,attempted=false;
+    try {
+    attempted=true;
+    queued = studio.enqueue({ sessionId, requestId: 'import-context-' + randomUUID(), method: 'scene.import_context', args: {} });
     while (true) {
       const session = boundary(), command = studio.command(queued.id);
       if (command.sessionId !== sessionId || command.clientSessionId !== session.clientSessionId ||
@@ -105,6 +109,18 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
       if (['failed', 'cancelled', 'needs_reconciliation'].includes(command.state)) fail('STUDIO_IMPORT_RECEIPT');
       if (now() >= deadline) fail('STUDIO_IMPORT_CONTEXT_TIMEOUT');
       await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - now()))));
+    }
+    } finally {
+      let complete=!attempted;
+      if(queued)try{
+        const actual=studio.command(queued.id);
+        complete=actual.id===queued.id&&actual.requestId===queued.requestId&&actual.sessionId===queued.sessionId&&
+          actual.clientSessionId===queued.clientSessionId&&actual.method===queued.method&&actual.leaseEpoch===queued.leaseEpoch&&
+          ['succeeded','failed','cancelled'].includes(actual.state);
+      }catch{complete=false;}
+      // A lost enqueue ACK, timeout, stopped actor or unresolved delivered command
+      // remains owned. No background polling or inferred engine completion.
+      work.finish(complete?'closed':'unresolved');
     }
   }
   const hooks: StudioImportHostOptions = {
