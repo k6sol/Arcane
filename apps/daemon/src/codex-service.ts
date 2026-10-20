@@ -40,6 +40,8 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('grant-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), displayText:z.string().min(1).refine(value=>Buffer.byteLength(value)<=131072).optional(), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional(),references:imageReferences.optional() }),
+  z.strictObject({ ...common, action:z.literal('turn-steer'),threadId:identifier,expectedTurnId:identifier,
+    text:z.string().min(1).refine(value=>!value.includes('\0')&&Buffer.byteLength(value)<=131072) }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
   z.strictObject({ ...common, action: z.literal('task-stop'), threadId: identifier, taskId: uuid }),
   z.strictObject({ ...common, action: z.literal('task-focus'), threadId: identifier, taskId: uuid }),
@@ -116,7 +118,7 @@ export interface CodexProductState {
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
-export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'>>;
+export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'steerTurn'|'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'>>;
 export interface CodexServiceOptions {
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
@@ -300,7 +302,7 @@ export function createCodexService(options: CodexServiceOptions) {
   }
   const save = (record: CodexActionRecord) => {
     db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId);
-    if(record.action==='turn-start')submitted.finish(record.requestId,{turnId:record.turnId,model:record.model,effort:record.effort,
+    if(record.action==='turn-start'||record.action==='turn-steer')submitted.finish(record.requestId,{turnId:record.turnId,model:record.model,effort:record.effort,
       state:record.state,finishedAt:record.finishedAt,errorCode:record.errorCode});
   };
   const exactClient = (connectionId: string): CodexHostClient => {
@@ -336,6 +338,7 @@ export function createCodexService(options: CodexServiceOptions) {
       return {record:JSON.parse(prior.payload) as CodexActionRecord,replayed:true,state:state()};
     }
     if (count >= 4096) {
+      if(value.action==='turn-steer')throw new CodexClientError('JOURNAL_LIMIT','The steering journal is full. No amendment was dispatched; the original turn remains active.');
       // Exhaustion cannot leave a write-granted client running without stop controls.
       // Fence immediately, preserve existing request identities, and dispatch no
       // refused model action. Further work needs offline journal reconciliation.
@@ -349,7 +352,7 @@ export function createCodexService(options: CodexServiceOptions) {
       throw new CodexClientError('JOURNAL_LIMIT','The full native journal fenced the connection. Stop Arcane and archive its journal before reconnecting; old requests were not discarded or replayed.');
     }
     const record: CodexActionRecord = {requestId:value.requestId,action:value.action,connectionId:value.connectionId,state:'pending',errorCode:null,
-      threadId:'threadId' in value ? value.threadId:null,turnId:'turnId' in value ? value.turnId:null,
+      threadId:'threadId' in value ? value.threadId:null,turnId:value.action==='turn-steer'?value.expectedTurnId:'turnId' in value ? value.turnId:null,
       model:value.action==='select'?value.model:null,effort:value.action==='select'?value.effort:null,createdAt:new Date().toISOString(),finishedAt:null};
     if(value.action==='turn-start'&&value.references)record.references=referenceImageMetadata(value.references);
     try {
@@ -359,6 +362,9 @@ export function createCodexService(options: CodexServiceOptions) {
       if(value.action==='turn-start'&&thread?.configured&&thread.threadId===value.threadId)
         submitted.put(thread,{requestId:value.requestId,turnId:null,text:value.displayText??value.text,model:thread.selection.model,effort:thread.selection.effort,
           state:'pending',createdAt:record.createdAt,finishedAt:null,errorCode:null,contextIncluded:value.displayText!==undefined&&value.displayText!==value.text,transmittedBytes:Buffer.byteLength(value.text)});
+      if(value.action==='turn-steer'&&client?.snapshot().connectionId===value.connectionId&&thread?.configured&&thread.threadId===value.threadId&&thread.turnId===value.expectedTurnId)
+        submitted.put(thread,{kind:'steer',requestId:value.requestId,turnId:value.expectedTurnId,text:value.text,model:thread.selection.model,effort:thread.selection.effort,
+          state:'pending',createdAt:record.createdAt,finishedAt:null,errorCode:null,contextIncluded:false,transmittedBytes:Buffer.byteLength(value.text)});
       db.exec('COMMIT');
     } catch { try{db.exec('ROLLBACK');}catch{/* The original journal failure remains authoritative. */}
       await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
@@ -368,7 +374,7 @@ export function createCodexService(options: CodexServiceOptions) {
     let actionClient: CodexHostClient | null = null;
     let grantAssetsAfterCommit: (() => void) | null = null;
     let taskAfterCommit: string | null = null;
-    const operationMethod = ({ 'thread-start':'thread/start', 'thread-resume':'thread/resume', 'turn-start':'turn/start', 'turn-interrupt':'turn/interrupt' } as Record<string,string>)[value.action] ?? null;
+    const operationMethod = ({ 'thread-start':'thread/start', 'thread-resume':'thread/resume', 'turn-start':'turn/start', 'turn-steer':'turn/steer', 'turn-interrupt':'turn/interrupt' } as Record<string,string>)[value.action] ?? null;
     try {
       if(tasks?.configured()&&!tasks.available()&&!['disconnect','task-stop','turn-interrupt','revoke-writes','revoke-assets'].includes(value.action)&&!(value.action==='approval'&&value.decision!=='accept'))
         throw new CodexClientError('CLOSED','Managed task admission has been fenced. No new native work was sent.');
@@ -593,6 +599,21 @@ export function createCodexService(options: CodexServiceOptions) {
               }
               break;
             }
+            case 'turn-steer': {
+              const snapshot=selected.snapshot(),thread=snapshot.thread;
+              if(!snapshot.connected||!snapshot.ready||!thread?.configured||thread.threadId!==value.threadId||thread.turnId!==value.expectedTurnId||thread.turnStatus!=='inProgress'||
+                snapshot.operations.some(operation=>operation.state==='pending'||operation.state==='unknown'))
+                throw new CodexClientError('STATE','Steer only the exact active acknowledged native turn.');
+              if(!selected.steerTurn)throw new CodexClientError('STEER_UNSUPPORTED','This native client does not expose turn steering. No new turn was started.');
+              const sessionId=thread.sessionId,selection={...thread.selection};
+              const acknowledgement=await selected.steerTurn({initiatedBy:'human',threadId:value.threadId,expectedTurnId:value.expectedTurnId,text:value.text,clientUserMessageId:value.requestId});
+              const current=selected.snapshot(),active=current.thread;
+              if(client!==selected||generation!==epoch||current.connectionId!==value.connectionId||!current.connected||!current.ready||!active?.configured||
+                active.threadId!==value.threadId||active.sessionId!==sessionId||active.turnId!==value.expectedTurnId||active.turnStatus!=='inProgress'||
+                active.selection.model!==selection.model||active.selection.effort!==selection.effort||acknowledgement.turnId!==value.expectedTurnId)
+                throw new CodexClientError('STEER_SCOPE_CHANGED','The original native turn changed before the steering acknowledgement could be committed.',true);
+              record.turnId=acknowledgement.turnId;break;
+            }
             case 'turn-interrupt': {
               const snapshot=selected.snapshot(),thread=snapshot.thread;
               if (!snapshot.connected || !snapshot.ready || !thread?.configured || thread.threadId!==value.threadId ||
@@ -621,7 +642,7 @@ export function createCodexService(options: CodexServiceOptions) {
           }
           if (closed || generation !== epoch) throw new CodexClientError('STALE_CONNECTION','Native lifecycle changed while awaiting acknowledgement.',true);
           const snapshot = selected.snapshot(); const thread = snapshot.thread;
-          record.threadId = thread?.threadId ?? record.threadId; record.turnId = thread?.turnId ?? record.turnId;
+          if(value.action!=='turn-steer'){record.threadId = thread?.threadId ?? record.threadId; record.turnId = thread?.turnId ?? record.turnId;}
           record.model = snapshot.selection?.model ?? null; record.effort = snapshot.selection?.effort ?? null;
           if (value.action === 'thread-start' || value.action === 'thread-resume') {
             if (!thread?.configured || thread.writeGranted || !snapshot.connected || !snapshot.ready || !historyIdentifier.safeParse(thread.threadId).success || (thread.sessionId !== null && !historyIdentifier.safeParse(thread.sessionId).success)) throw new CodexClientError('HISTORY_SCOPE','Native acknowledgement lacks a valid read-only durable binding.',true);
@@ -640,9 +661,9 @@ export function createCodexService(options: CodexServiceOptions) {
       const pending = operationMethod ? snapshot?.operations.findLast(operation => operation.method===operationMethod && !existingOperations.has(operation.operationId) && operation.state==='unknown') : undefined;
       const uncertain = value.action !== 'history-load' && ((known && error.dispatched && error.code!=='REMOTE_REJECTED') || pending !== undefined);
       record.state = uncertain ? 'unknown':'rejected';
-      if (uncertain) retireAssets();
+      if (uncertain&&value.action!=='turn-steer') retireAssets();
       // Never borrow another action's unknown operation or overwrite refused scope.
-      if (uncertain) {
+      if (uncertain&&value.action!=='turn-steer') {
         record.threadId = pending?.threadId ?? snapshot?.thread?.threadId ?? record.threadId;
         record.turnId = pending?.turnId ?? snapshot?.thread?.turnId ?? record.turnId;
         record.model = snapshot?.selection?.model ?? record.model; record.effort = snapshot?.selection?.effort ?? record.effort;

@@ -29,6 +29,11 @@ export interface ConnectOptions {
   projectInstructions?: (cwd: string) => Promise<string> | string;
 }
 export interface HumanAction { initiatedBy: 'human' }
+/** Append human input to the exact existing turn; no policy/model/grant overrides. */
+export interface SteerTurnAction extends HumanAction {
+  threadId: string; expectedTurnId: string; text: string; clientUserMessageId: string;
+}
+export interface SteerTurnAck { turnId: string }
 /** Host-only continuation token. Session object identity, not this JSON shape,
  * binds one additional turn to the original human task and its local policy. */
 export interface NativeTaskContinuation { readonly kind: 'native-task-continuation' }
@@ -50,7 +55,7 @@ export interface Account {
 }
 export type OperationState = 'pending' | 'acknowledged' | 'rejected' | 'unknown' | 'not-sent';
 export interface Operation {
-  operationId: string; method: 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/interrupt';
+  operationId: string; method: 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/steer' | 'turn/interrupt';
   requestId: number | null; threadId: string | null; turnId: string | null;
   state: OperationState; errorCode: string | null;
 }
