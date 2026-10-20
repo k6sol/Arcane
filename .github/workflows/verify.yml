@@ -73,9 +73,6 @@ jobs:
       - name: Test offline skill contracts
         if: matrix.suite == 'release'
         run: node --test tests/skills/*.test.mjs
-      - name: Test release contracts
-        if: matrix.suite == 'release'
-        run: node --test --test-concurrency=1 tests/release/*.test.mjs
       - name: Verify desktop setup and model previews in Edge
         if: runner.os == 'Windows' && matrix.suite == 'release'
         shell: pwsh
@@ -93,10 +90,20 @@ jobs:
           node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js dist/tests/unit/welcome-tour.test.js dist/tests/unit/gui-revamp-layout-browser.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:ARCANE_VIEWER_BROWSER = $edgeExecutable
-          node --test --test-concurrency=1 tests/browser/asset-viewer-resize.test.mjs
+          node --test --test-concurrency=1 tests/browser/asset-viewer-renderer.test.mjs tests/browser/asset-viewer-resize.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:ARCANE_VIEWER_PRODUCT_EMIT = $env:ARCANE_UI_BUILD_DIR
+          $env:ARCANE_VIEWER_PRODUCT_BROWSER = $edgeExecutable
+          $env:ARCANE_VIEWER_PRODUCT_GPU = "1"
+          node --test --test-concurrency=1 tests/browser/asset-viewer-product.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 dist/tests/unit/claude-chat-ui.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 services/gateway/test/account-routes.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test release contracts
+        if: matrix.suite == 'release'
+        run: node --test --test-concurrency=1 tests/release/*.test.mjs
       - name: Build deterministic Studio plugin
         if: matrix.suite == 'release'
         run: npm run build:plugin
