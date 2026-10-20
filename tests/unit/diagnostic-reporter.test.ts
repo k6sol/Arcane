@@ -43,7 +43,7 @@ test('Codex action reports contain only a canonical operation UUID and fixed cla
   assert.match(result.eventId,/^[a-f0-9-]{36}$/);assert.equal(result.occurredAt,1792500000000);
   assert.equal(result.component,'chat');assert.equal(result.stage,'request-submit');assert.equal(result.code,'HOST_FAILURE');
   assert.deepEqual(result.context,{operationId:operationId.toLowerCase()});
-  assert.deepEqual(Object.keys(result).sort(),['code','component','context','eventId','occurredAt','reason','schemaVersion']);
+  assert.deepEqual(Object.keys(result).sort(),['code','component','context','eventId','occurredAt','reason','schemaVersion','stage']);
   assert.doesNotMatch(JSON.stringify(result),/private|fixture|source\.lua|account@|token=/);
   assert.throws(()=>codexActionFailureEvent('not-an-operation-uuid','connect','TIMEOUT'));
 });

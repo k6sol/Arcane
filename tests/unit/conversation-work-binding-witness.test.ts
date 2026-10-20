@@ -59,7 +59,7 @@ test('changed or removed exact binding never adopts another otherwise-valid stor
 });
 
 test('external schema and unrelated row corruption force full validation and fail closed', t => {
-  for (const [sql, code] of [["CREATE TABLE unexpected(payload TEXT) STRICT", 'CORRUPT'], ['PRAGMA user_version=2', 'MIGRATION'], ["INSERT INTO conversation_work_bindings VALUES(2,'asset-job','other','codex','invalid/path',NULL)", 'CORRUPT']] as const) {
+  for (const [sql, code] of [["CREATE TABLE unexpected(payload TEXT) STRICT", 'CORRUPT'], ['PRAGMA user_version=3', 'MIGRATION'], ["INSERT INTO conversation_work_bindings VALUES(2,'asset-job','other','codex','invalid/path',NULL)", 'CORRUPT']] as const) {
     const f = fixture(t), witness = f.store.captureBinding('asset-job', 'owned-job')!;
     f.change(sql); assert.throws(() => witness.assertCurrent(), denied(code));
   }

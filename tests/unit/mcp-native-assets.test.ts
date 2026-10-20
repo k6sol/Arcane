@@ -233,7 +233,7 @@ test('native MCP: wrong history schemas, overflows and foreign returned cursors 
   let payload: unknown = page();
   const f = await fixture(t, (_url, response) => send(response, 200, payload));
   for (const invalid of [genericPage(), { ...page(), projectId: 'bad' },
-    { ...page(), conversation: { ...SCOPE.conversation, provider: 'claude-code' } }, page([job()], 'b'.repeat(64) + ':1'),
+    { ...page(), conversation: { ...SCOPE.conversation, provider: 'unregistered-provider' } }, page([job()], 'b'.repeat(64) + ':1'),
     page([job(), job(OTHER_ID)]), { ...page(), jobs: [{ ...job(), ignored: 'x'.repeat(HISTORY_PAGE_BYTES) }] }]) {
     payload = invalid; const result = await call(f.client, 'assets_jobs', { limit: 1, detail: true });
     assert.equal(result.isError, true); assert.equal((result.structuredContent?.error as { code: string }).code, 'PROTOCOL');
