@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { CodexChat, CodexChatApi, type ChatAction, type ChatState } from '../../apps/desktop/src/codex-chat.js';
+import { CodexChat, CodexChatApi, type ChatAction, type ChatState,type ChatQueueRow } from '../../apps/desktop/src/codex-chat.js';
 
 class Element extends EventTarget {
   tagName=''; value=''; checked=false; disabled=false; hidden=false; open=false; type=''; className='';
@@ -140,4 +140,69 @@ test('an unresolved chat request shows its exact blocker and an explicit reviewe
   review=readiness.children.find(child=>child.textContent==='Acknowledge reviewed state')!;assert.equal(review.disabled,false);review.dispatchEvent(new Event('click'));
   assert.equal(f.doc.getElementById('codex-model').disabled,false);assert.equal(f.doc.getElementById('codex-submit').disabled,false);
   assert.equal(f.doc.getElementById('codex-composer').value,'Retained next draft');assert.equal(f.posts.length,0);
+});
+
+type QueueInternals={queue:ChatQueueRow[];queueGesture():string;queueAction(action:'steer'|'next'|'remove'|'edit'|'up'|'down',row:ChatQueueRow,gesture:string,text?:string):boolean;renderControls():void};
+const queueController=(f:Awaited<ReturnType<typeof fixture>>)=>f.chat as unknown as QueueInternals;
+const queueStore=()=>({version:1 as const,read:async()=>({available:true,projectPath:resolve('.'),rows:[]}),save:async()=>({saved:true as const})});
+const enter=(node:Element,extra:Record<string,unknown>={})=>node.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'Enter',isComposing:false,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,...extra}));
+
+test('Codex Enter queues visible prompts and explicit Steer uses the exact running turn without starting another',async t=>{
+  const f=await fixture(t);await f.chat.setQueuePersistence(queueStore());f.doc.getElementById('codex-composer').value='First';await f.controller.submitMessage();
+  const input=f.doc.getElementById('codex-composer');input.value='Guidance';enter(input);assert.equal(input.value,'Guidance','the original composer remains until its queue checkpoint succeeds');await settle();await settle();assert.deepEqual(f.chat.queued().map(row=>row.text),['Guidance']);assert.equal(input.value,'');assert.equal(f.posts.length,2);
+  const queue=queueController(f),item={...queue.queue[0]!};assert.equal(queue.queueAction('steer',item,queue.queueGesture()),true);await settle();await settle();
+  assert.deepEqual(f.posts.map(row=>row.action),['thread-start','turn-start','turn-steer']);const action=f.posts[2]!;assert.equal(action.action,'turn-steer');if(action.action==='turn-steer'){assert.equal(action.expectedTurnId,'latency-turn');assert.equal(action.threadId,'latency-thread');assert.equal(action.text,'Guidance');}
+  assert.deepEqual(f.chat.queued(),[]);assert.equal(f.state.snapshot!.thread!.turnId,'latency-turn');
+});
+test('Codex Send next waits for successful completion and leaves a separate composer draft intact',async t=>{
+  const f=await fixture(t);await f.chat.setQueuePersistence(queueStore());const input=f.doc.getElementById('codex-composer');input.value='First';await f.controller.submitMessage();
+  input.value='Second';enter(input);await settle();await settle();input.value='Third';enter(input);await settle();await settle();const queue=queueController(f),third={...queue.queue[1]!};
+  assert.equal(queue.queueAction('next',third,queue.queueGesture()),true);assert.equal(f.posts.length,2);input.value='Unsent draft';
+  f.state.snapshot!.thread!.turnStatus='completed';await f.chat.refresh();await settle();await settle();
+  assert.equal(f.posts.length,3);assert.equal(f.posts[2]!.action,'turn-start');if(f.posts[2]!.action==='turn-start')assert.equal(f.posts[2]!.text,'Third');assert.equal(input.value,'Unsent draft');assert.deepEqual(f.chat.queued().map(row=>row.text),['Second']);
+});
+test('Codex queue actions reject stale gestures and preserve the original text when checkpointing fails',async t=>{
+  const f=await fixture(t);let refuse=false;await f.chat.setQueuePersistence({...queueStore(),save:async()=>{if(refuse)throw Error('disk unavailable');return{saved:true as const};}});
+  const input=f.doc.getElementById('codex-composer');input.value='First';await f.controller.submitMessage();input.value='Original queued prompt';enter(input);await settle();await settle();
+  const queue=queueController(f),row={...queue.queue[0]!},gesture=queue.queueGesture();f.state.snapshot!.thread!.selection.effort='low';f.chat.yieldSurface(true);assert.equal(queue.queueAction('remove',row,gesture),false);f.chat.yieldSurface(false);
+  refuse=true;assert.equal(queue.queueAction('steer',{...queue.queue[0]!},queue.queueGesture()),true);await settle();await settle();assert.equal(f.posts.length,2);assert.equal(f.chat.queued()[0]!.text,'Original queued prompt');assert.equal(queue.queue[0]!.state,'paused');
+  const ime=input.value='IME text';enter(input,{isComposing:true});assert.equal(input.value,ime);assert.equal(f.chat.queued().length,1);enter(input,{shiftKey:true});assert.equal(input.value,ime);
+  refuse=false;assert.equal(queue.queueAction('steer',{...queue.queue[0]!},queue.queueGesture()),true);await settle();await settle();assert.equal(f.posts.length,3,'an explicit retry dispatches only after checkpoint saving succeeds');assert.deepEqual(f.chat.queued(),[]);assert.equal(input.value,ime);
+});
+
+test('Codex enqueue waits for secure saving, rejects repeated Enter and retains its composer after a lost save response',async t=>{
+  const f=await fixture(t);let release!:()=>void;const gate=new Promise<void>(done=>release=done);t.after(()=>release());let writes=0,fail=false,hold=false;
+  await f.chat.setQueuePersistence({...queueStore(),save:async()=>{writes++;if(hold)await gate;if(fail)throw Error('save acknowledgement lost');return{saved:true as const};}});
+  const input=f.doc.getElementById('codex-composer');input.value='First';await f.controller.submitMessage();input.value='Earlier queued prompt';enter(input);await settle();await settle();
+  const queue=queueController(f);assert.equal(queue.queueAction('edit',{...queue.queue[0]!},queue.queueGesture(),'Earlier queued prompt'),true);
+  hold=true;writes=0;input.value='Keep this exact draft  ';
+  enter(input);enter(input);assert.equal(input.value,'Keep this exact draft  ');assert.equal(f.chat.queued().length,2);assert.equal(f.posts.length,2);
+  const host=f.doc.getElementById('codex-chat-queue'),rows=host.children.filter(node=>node.className==='queue-row');
+  assert.equal(host.hidden,false);assert.equal(host.getAttribute('aria-busy'),'true');assert.deepEqual(rows.map(row=>row.children.find(node=>node.className==='queue-text')!.textContent),['Earlier queued prompt','Keep this exact draft']);
+  assert.equal(host.children.find(node=>node.className==='queue-busy-notice')!.textContent,'Saving queued messages…');
+  const descendants=(node:Element):Element[]=>[node,...node.children.flatMap(descendants)];
+  const buttons=rows.flatMap(descendants).filter(node=>['queue-steer','queue-remove','queue-menu-toggle','queue-edit','queue-up','queue-down','queue-next','queue-save','queue-cancel'].includes(node.className));
+  assert.equal(buttons.length,18);assert.ok(buttons.every(node=>node.disabled));
+  await settle();assert.equal(writes,1);fail=true;release();await settle();await settle();
+  assert.equal(input.value,'Keep this exact draft  ');assert.deepEqual(f.chat.queued().map(row=>row.text),['Earlier queued prompt']);assert.equal(f.posts.length,2);assert.equal(host.hidden,false);assert.equal(host.getAttribute('aria-busy'),'false');
+  f.state.snapshot!.thread!.turnStatus='completed';await f.chat.refresh();await f.controller.submitMessage();
+  assert.equal(f.posts.length,3,'a failed queue checkpoint does not block ordinary Send');
+  assert.equal(f.posts[2]!.action,'turn-start');if(f.posts[2]!.action==='turn-start')assert.equal(f.posts[2]!.text,'Keep this exact draft  ');
+});
+
+for(const change of ['edit','edit-back','model','provider','files','finished'] as const)test('Codex enqueue pauses after '+change+' during its checkpoint without clearing a current draft',async t=>{
+  const f=await fixture(t);let release!:()=>void;const gate=new Promise<void>(done=>release=done);t.after(()=>release());let revision=0,cleared=0;
+  await f.chat.setQueuePersistence({...queueStore(),save:async()=>{await gate;return{saved:true as const};}});
+  const input=f.doc.getElementById('codex-composer');input.value='First';await f.controller.submitMessage();
+  if(change==='files')f.chat.enableTextAttachments({prepareText:(message:string)=>message,prepareReferences:()=>[],selectionRevision:()=>revision,syncScope(){},clear(){cleared++;},stop(){},resume(){},cleanup(){}});
+  input.value='Queued original';enter(input);await settle();
+  if(change==='edit')input.value='Edited while saving';
+  if(change==='edit-back'){input.value='Temporary edit';input.dispatchEvent(new Event('input'));input.value='Queued original';input.dispatchEvent(new Event('input'));}
+  if(change==='model'){f.state.snapshot!.models[0]!.efforts.push('high');f.state.snapshot!.thread!.selection.effort='high';await f.chat.refresh();}
+  if(change==='provider'){f.chat.yieldSurface(true);input.value='Other provider draft';}
+  if(change==='files')revision++;
+  if(change==='finished'){f.state.snapshot!.thread!.turnStatus='completed';await f.chat.refresh();}
+  release();await settle();await settle();
+  assert.equal(input.value,change==='edit'?'Edited while saving':change==='provider'?'Other provider draft':'Queued original');
+  assert.equal(queueController(f).queue[0]!.state,'paused');assert.equal(f.posts.length,2);assert.equal(cleared,0);
 });

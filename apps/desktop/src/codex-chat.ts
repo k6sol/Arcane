@@ -7,6 +7,7 @@ import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsCon
 import type { ChatAttachmentsController } from './chat-attachments.js';
 import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.js';
 import type { SubmittedChatMessage, SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
+import {readChatQueueSnapshot,readChatQueueRead,type ChatQueueBridge,type ChatQueueProvider,type ChatQueueSnapshot,type StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
 export const CODEX_INPUT_BYTES = 131072;
@@ -18,7 +19,7 @@ const object = (value: unknown): value is Record<string, unknown> => typeof valu
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f]/.test(value);
 const integer = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-const ACTIONS = ['grant-assets','revoke-assets','connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-interrupt','task-stop','task-focus','approval','history-load'];
+const ACTIONS = ['grant-assets','revoke-assets','connect','disconnect','select','thread-start','thread-resume','grant-writes','revoke-writes','turn-start','turn-steer','turn-interrupt','task-stop','task-focus','approval','history-load'];
 const IDLE = ['idle','completed','failed','interrupted'];
 type ChatEvent = SessionEvent;
 export type ChatSnapshot = Omit<Snapshot, 'events'> & { events: ChatEvent[] };
@@ -136,7 +137,7 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
     if (Array.isArray(a.changes)) for (const c of a.changes) if (!object(c) || !text(c.path,4096) || !['add','delete','update'].includes(String(c.kind)) || !(c.movePath === null || text(c.movePath,4096)) || typeof c.diff !== 'string' || utf8(c.diff) > 65536) throw new Error('A full file preview exceeded its bound.');
   }
   for (const operation of value.operations) {
-    if (!dataObject(operation, ['operationId','method','requestId','threadId','turnId','state','errorCode']) || !text(operation.operationId) || !['thread/start','thread/resume','turn/start','turn/interrupt'].includes(String(operation.method)) ||
+    if (!dataObject(operation, ['operationId','method','requestId','threadId','turnId','state','errorCode']) || !text(operation.operationId) || !['thread/start','thread/resume','turn/start','turn/steer','turn/interrupt'].includes(String(operation.method)) ||
         !(operation.requestId===null||integer(operation.requestId)) || !['pending','acknowledged','rejected','unknown','not-sent'].includes(String(operation.state)) ||
         ['threadId','turnId','errorCode'].some(key=>!(operation[key]===null||text(operation[key])))) throw new Error('Invalid native operation lifecycle.');
   }
@@ -187,7 +188,7 @@ export function readCodexState(value: unknown): ChatState {
       !text(submitted.threadId)||!(submitted.sessionId===null||text(submitted.sessionId))||!integer(submitted.earlierCount)||!Array.isArray(submitted.messages)||submitted.messages.length>64||utf8(JSON.stringify(submitted.messages))>512*1024)
       throw new Error('Invalid submitted message transcript.');
     for(const row of submitted.messages) {
-      if(!dataObject(row,['requestId','turnId','text','model','effort','state','createdAt','finishedAt','errorCode','contextIncluded','transmittedBytes'])||!uuid(row.requestId)||ids.has(row.requestId)||typeof row.contextIncluded!=='boolean'||!integer(row.transmittedBytes)||(row.transmittedBytes as number)>CODEX_INPUT_BYTES||
+      if(!dataObject(row,['requestId','turnId','text','model','effort','state','createdAt','finishedAt','errorCode','contextIncluded','transmittedBytes',...(dataObject(row)&&Object.hasOwn(row,'kind')?['kind']:[])])||Object.hasOwn(row,'kind')&&row.kind!=='steer'||!uuid(row.requestId)||ids.has(row.requestId)||typeof row.contextIncluded!=='boolean'||!integer(row.transmittedBytes)||(row.transmittedBytes as number)>CODEX_INPUT_BYTES||
         !(row.turnId===null||text(row.turnId))||typeof row.text!=='string'||utf8(row.text)>CODEX_INPUT_BYTES||!(row.model===null||text(row.model))||!(row.effort===null||text(row.effort,64))||
         !['pending','acknowledged','rejected','unknown'].includes(String(row.state))||!text(row.createdAt,64)||!Number.isFinite(Date.parse(row.createdAt))||
         !(row.finishedAt===null||text(row.finishedAt,64)&&Number.isFinite(Date.parse(row.finishedAt)))||!(row.errorCode===null||text(row.errorCode)))throw new Error('Invalid submitted message receipt.');
@@ -240,7 +241,7 @@ export function readCodexState(value: unknown): ChatState {
 }
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
-  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-interrupt':['threadId','turnId'], 'task-stop':['threadId','taskId'], 'task-focus':['threadId','taskId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
+  const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-steer':['threadId','expectedTurnId','text'], 'turn-interrupt':['threadId','turnId'], 'task-stop':['threadId','taskId'], 'task-focus':['threadId','taskId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
   const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites','references','displayText']:action==='disconnect'?['preserveAssetWork']:[];
   const keys = [...accepted[action]!, ...optional.filter(key=>Object.hasOwn(fields,key))];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
@@ -263,10 +264,11 @@ export function prepareCodexAction(state: ChatState | null, action: string, fiel
   const s = state?.snapshot;
   if (action !== 'connect' && !s) throw new Error('An exact reported native connection is required.');
   if (action === 'select' && (!text(fields.model) || !text(fields.effort,64) || !s!.models.some(m => m.model === fields.model && m.efforts.includes(fields.effort as string)))) throw new Error('Choose an exact reported model and effort; there is no fallback.');
-  for (const key of ['threadId','turnId','handle']) if (key in fields && !text(fields[key])) throw new Error('Enter an exact bounded scope ID.');
+  for (const key of ['threadId','turnId','expectedTurnId','handle']) if (key in fields && !text(fields[key])) throw new Error('Enter an exact bounded scope ID.');
   if(action==='task-stop'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===s?.thread?.threadId&&task.sessionId===s.thread.sessionId&&fields.threadId===task.threadId)))throw new Error('Choose the exact owned task in this conversation.');
   if(action==='task-focus'&&(!uuid(fields.taskId)||!state?.chatTasks?.some(task=>task.taskId===fields.taskId&&task.threadId===fields.threadId&&task.retained===true&&state.nativeThreads?.some(saved=>saved.threadId===task.threadId&&saved.sessionId===task.sessionId))))throw new Error('Choose the exact retained task in a saved conversation.');
-  if (action === 'turn-start' && (typeof fields.text !== 'string' || !fields.text.trim() || utf8(fields.text) > CODEX_INPUT_BYTES)) throw new Error('Submit nonempty text of at most 128 KiB in UTF-8.');
+  if ((action === 'turn-start'||action==='turn-steer') && (typeof fields.text !== 'string' || !fields.text.trim() || utf8(fields.text) > CODEX_INPUT_BYTES)) throw new Error('Submit nonempty text of at most 128 KiB in UTF-8.');
+  if(action==='turn-steer'&&(!s?.thread?.configured||s.thread.turnStatus!=='inProgress'||fields.threadId!==s.thread.threadId||fields.expectedTurnId!==s.thread.turnId))throw new Error('Steering requires this conversation’s exact active turn.');
   if(action==='turn-start'&&Object.hasOwn(fields,'displayText')&&(typeof fields.displayText!=='string'||!fields.displayText.trim()||utf8(fields.displayText)>CODEX_INPUT_BYTES))throw new Error('The visible prompt exceeds its display limit.');
   if(action==='turn-start'&&Object.hasOwn(fields,'references')){
     const refs=fields.references;
@@ -530,7 +532,8 @@ export class CodexChatApi {
       const expected=expectedReferences![i]!;return image.name!==expected.name||image.bytes!==expected.bytes||image.width!==expected.width||image.height!==expected.height||image.sha256!==expected.sha256;
     })))throw new CodexHttpError('Image acknowledgement did not match the original reference bytes and order.',true);
     if(r.requestId!==input.requestId||r.action!==input.action||(input.action!=='connect'&&r.connectionId!==input.connectionId)||(input.action==='connect'&&r.state==='acknowledged'&&!uuid(r.connectionId)))throw new CodexHttpError('Native acknowledgement did not match the exact request.',true);
-    if ((input.action === 'grant-assets' || input.action === 'revoke-assets' || input.action === 'turn-start') && r.threadId !== input.threadId) throw new CodexHttpError('Native acknowledgement did not match the exact thread.', true);
+    if ((input.action === 'grant-assets' || input.action === 'revoke-assets' || input.action === 'turn-start'||input.action==='turn-steer') && r.threadId !== input.threadId) throw new CodexHttpError('Native acknowledgement did not match the exact thread.', true);
+    if(input.action==='turn-steer'&&r.turnId!==input.expectedTurnId)throw new CodexHttpError('Steering acknowledgement did not match the exact active turn.',true);
     const state=readCodexState(value.state);
     if(r.nextConnectionId){const snapshot=state.snapshot??state.lastSnapshot,binding=state.nativeThreads?.find(row=>row.threadId===r.threadId);
       if(!['turn-start','task-focus'].includes(input.action)||!('threadId'in input)||r.threadId!==input.threadId||!snapshot||snapshot.connectionId!==r.nextConnectionId||snapshot.thread?.threadId!==input.threadId||!binding||snapshot.thread.sessionId!==binding.sessionId)
@@ -539,22 +542,27 @@ export class CodexChatApi {
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
 }
-export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall; receipt?:SubmittedChatMessage; source?:'history'|'live'|'submission' }
+export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall; receipt?:SubmittedChatMessage; source?:'history'|'live'|'submission';steered?:true }
 /** Join local Send receipts to native turns, never by prompt text (identical consecutive prompts remain separate). */
 export function mergeSubmittedMessages(messages:readonly ChatMessage[],submitted:SubmittedChatTranscript|undefined):ChatMessage[] {
   const merged=messages.map(message=>({...message}));
+  const steeringIds=new Set(submitted?.messages.filter(receipt=>receipt.kind==='steer').map(receipt=>receipt.requestId));
   for(const receipt of submitted?.messages??[]) {
-    const byRequest=merged.findIndex(row=>row.role==='human'&&row.key===receipt.requestId);
-    const byTurn=receipt.state==='acknowledged'&&receipt.turnId!==null?merged.findIndex(row=>row.role==='human'&&row.threadId===submitted!.threadId&&row.key.split('\0')[1]===receipt.turnId):-1;
+    const byRequest=merged.findIndex(row=>row.role==='human'&&(row.key===receipt.requestId||row.receipt?.requestId===receipt.requestId));
+    const byTurn=receipt.state==='acknowledged'&&receipt.turnId!==null?merged.findIndex(row=>{
+      const ids=row.key.split('\0');return row.role==='human'&&row.threadId===submitted!.threadId&&ids.length===3&&ids[1]===receipt.turnId&&
+        (receipt.kind==='steer'?ids[2]===receipt.requestId:row.receipt?.kind!=='steer'&&!steeringIds.has(ids[2]!));
+    }):-1;
     const row:ChatMessage={key:receipt.requestId,role:'human',threadId:submitted!.threadId,scope:submitted!.threadId,text:receipt.text,
-      acknowledgement:'Native acknowledgement: '+receipt.state,receipt,source:'submission'};
+      acknowledgement:'Native acknowledgement: '+receipt.state,receipt,source:'submission',...(receipt.kind==='steer'?{steered:true as const}:{})};
     if(byTurn>=0) {
       const native=merged[byTurn]!;merged[byTurn]={...native,...row,key:native.key,scope:native.scope};
       if(byRequest>=0&&byRequest!==byTurn)merged.splice(byRequest,1);
     } else if(byRequest>=0)merged[byRequest]={...merged[byRequest]!,...row};
     else {
-      const first=receipt.turnId===null?-1:merged.findIndex(message=>message.threadId===submitted!.threadId&&message.key.split('\0')[1]===receipt.turnId);
-      if(first<0)merged.push(row);else merged.splice(first,0,row);
+      const matching=merged.flatMap((message,index)=>message.threadId===submitted!.threadId&&(message.receipt?.turnId??message.key.split('\0')[1])===receipt.turnId?[index]:[]);
+      const position=receipt.turnId===null||!matching.length?-1:receipt.kind==='steer'?matching.at(-1)!+1:matching[0]!;
+      if(position<0)merged.push(row);else merged.splice(position,0,row);
     }
   }
   return merged;
@@ -562,14 +570,15 @@ export function mergeSubmittedMessages(messages:readonly ChatMessage[],submitted
 /** Recorded facts for a message; absent provider metadata stays absent. */
 export function codexMessageDetails(message:ChatMessage,state:ChatState|null):string {
   const ids=message.key.split('\0'),turnId=message.receipt?.turnId??(ids.length===3?ids[1]:null),threadId=message.threadId??ids[0]??null;
-  const action=state?.actions.find(row=>row.action==='turn-start'&&(row.requestId===message.key||!!turnId&&row.threadId===threadId&&row.turnId===turnId));
+  const action=state?.actions.find(row=>(row.action==='turn-start'||row.action==='turn-steer')&&(row.requestId===message.receipt?.requestId||row.requestId===message.key||ids.length===3&&row.requestId===ids[2]))??
+    state?.actions.find(row=>row.action==='turn-start'&&!!turnId&&row.threadId===threadId&&row.turnId===turnId);
   const receipt=message.receipt??action;
   const terminal=state?.snapshot?.events.findLast(event=>event.type==='turn'&&event.threadId===threadId&&event.turnId===turnId);
   const failure=state?.snapshot?.events.findLast(event=>event.type==='error'&&event.threadId===threadId&&event.turnId===turnId);
   const status=message.role==='human'?receipt?.state??message.acknowledgement??'Recorded':terminal?.type==='turn'?terminal.status:'Recorded response';
   const reason=receipt?.errorCode??(failure?.type==='error'?failure.code:null);
   const fields:[string,string|number|null|undefined][]=[['Provider','Codex'],['Message',message.role==='human'?'Your prompt':message.role==='codex'?'Assistant response':'Tool result'],
-    ['Status',status],['Source',message.source==='submission'?'Saved Send receipt':message.source==='history'?'Saved public history':'Live conversation'],
+    ['Status',status],['Source',message.source==='submission'?message.receipt?.kind==='steer'?'Saved steering receipt':'Saved Send receipt':message.source==='history'?'Saved public history':'Live conversation'],
     ['Model',receipt?.model??'Not reported for this message'],['Reasoning',receipt?.effort??'Not reported for this message'],
     ['Submitted',receipt?.createdAt],['Acknowledged',receipt?.finishedAt],['Error code',reason],['Error details',reason?codexFailureHint(reason)||'The provider did not report a more detailed reason.':null],
     ['Text size',utf8(message.text)+' UTF-8 bytes'],['Transmitted text',message.receipt?.transmittedBytes===undefined?null:message.receipt.transmittedBytes+' UTF-8 bytes'],
@@ -2014,12 +2023,105 @@ export const COMPOSER_TIPS=Object.freeze([
   'Enter sends. Shift+Enter starts a new line.',
   'Type / for commands: /new, /clear-draft, /model and /help.',
   'Type @selection to refer to what is selected in Studio; the assistant reads it with selection_read.',
-  'While Claude is replying, press Enter to steer the reply now, or Alt+Enter to queue your next message for after it finishes.',
+  'While a reply is running, Enter queues your next message. Use a queued message’s Steer button to guide the current reply.',
   'Studio changes appear in a card after each reply. Restore writes a restore request you can review before sending.',
   'Be specific: name the style, scale and mood. Turn on Playtest to let the assistant check gameplay.',
 ]);
 /** The Settings › Guide page (studio.html) that /help links to. */
 export const COMPOSER_GUIDE_ID='settings-guide';
+export type ChatQueueState='queued'|'paused'|'sending'|'unknown'|'rejected';
+export interface ChatQueueRow {id:number;text:string;scope:string;state:ChatQueueState;notice:string|null;requestId?:string;target?:StoredChatQueueRow;dispatched?:boolean}
+export type ChatQueueAction='steer'|'remove'|'edit'|'up'|'down'|'next';
+export function chatQueueScope(provider:ChatQueueProvider,project:string,conversationId:string|null,sessionId:string|null,localId:string):string {
+  return JSON.stringify([provider,project,conversationId===null?'draft:'+localId:conversationId,sessionId]);
+}
+export function storedChatQueueRows(rows:readonly ChatQueueRow[]):StoredChatQueueRow[]{
+  return rows.map(row=>{
+    if(!row.target)throw new Error('This queued message has no saved conversation context.');
+    return {...row.target,id:row.id,text:row.text,requestId:row.requestId??row.target.requestId,
+      state:row.state==='unknown'||row.state==='sending'?'unknown':row.state==='rejected'?'rejected':'pending'};
+  });
+}
+/** One provider partition, serialized encrypted saves, and no authority to dispatch recovered text. */
+export class ChatQueueJournal {
+  projectPath:string|null=null;
+  private port:ChatQueueBridge|null=null;
+  private provider:ChatQueueProvider='codex';
+  private loading:Promise<void>|null=null;
+  private chain:Promise<boolean>=Promise.resolve(true);
+  private attempted='';private saved='';private epoch=0;private changed:()=>void=()=>{};
+  private failure:string|null=null;
+  attach(port:ChatQueueBridge|null,provider:ChatQueueProvider,restore:(rows:StoredChatQueueRow[],project:string)=>void,changed:()=>void):Promise<void>{
+    const epoch=++this.epoch;this.port=port;this.provider=provider;this.changed=changed;this.projectPath=null;this.attempted='';this.saved='';
+    this.failure=port?'Reading saved queued messages…':'Queued messages are retained in this window. Secure saving is unavailable.';
+    return this.loading=(async()=>{
+      try{
+        if(!port||port.version!==1)throw new Error();
+        const reply=readChatQueueRead(await port.read(provider),provider);if(epoch!==this.epoch)return;
+        if(!reply.available||!reply.projectPath)throw new Error();
+        this.projectPath=reply.projectPath;
+        this.saved=this.attempted=JSON.stringify(readChatQueueSnapshot({version:1,provider,projectPath:reply.projectPath,rows:reply.rows},provider));
+        this.failure=null;restore(reply.rows,reply.projectPath);
+      }catch{if(epoch===this.epoch)this.failure='Saved queued messages could not be read. Existing records were kept; this window cannot overwrite them.';}
+      finally{if(epoch===this.epoch){this.loading=null;changed();}}
+    })();
+  }
+  async ready():Promise<void>{if(this.loading)await this.loading;}
+  available(project:string|null):boolean{return !!this.port&&!!project&&project===this.projectPath&&!this.loading;}
+  notice():string|null{return this.failure;}
+  save(rows:readonly ChatQueueRow[],project:string|null,explicit=false):Promise<boolean>{
+    if(!this.available(project)){this.failure='Queued messages are retained in this window. Secure saving is unavailable for this project.';return Promise.resolve(false);}
+    let snapshot:ChatQueueSnapshot,serialized:string;
+    try{snapshot=readChatQueueSnapshot({version:1,provider:this.provider,projectPath:project,rows:storedChatQueueRows(rows)},this.provider,project!);serialized=JSON.stringify(snapshot);}
+    catch{this.failure='Queued messages exceed secure storage limits. All text is retained here; edit or remove a row before restarting.';return Promise.resolve(false);}
+    if(serialized===this.saved&&serialized===this.attempted)return Promise.resolve(true);
+    if(serialized===this.attempted&&!explicit)return this.chain;
+    this.attempted=serialized;this.failure='Saving queued messages…';const epoch=this.epoch,port=this.port!;
+    this.chain=this.chain.then(async()=>{
+      if(epoch!==this.epoch||project!==this.projectPath)return false;
+      try{const reply=await port.save(snapshot);if(epoch!==this.epoch||project!==this.projectPath||reply?.saved!==true)throw new Error();this.saved=serialized;if(this.attempted===serialized)this.failure=null;return true;}
+      catch{if(epoch===this.epoch)this.failure='Queued messages could not be saved. All text is retained in this window; try again before restarting.';return false;}
+      finally{if(epoch===this.epoch)this.changed();}
+    });return this.chain;
+  }
+}
+
+/** Shared presentation only; each native chat keeps its own scope and delivery guards. */
+export function renderChatQueueStrip(doc:Document,host:HTMLElement,items:readonly ChatQueueRow[],options:{
+  active:boolean;busy?:boolean;scope:string|null;gesture:string;canSteer:boolean;steerReason:string;canSendNext:boolean;
+  action:(action:ChatQueueAction,item:Readonly<ChatQueueRow>,text?:string)=>boolean|void;
+}):void {
+  const busy=options.busy===true;
+  host.className='queue-strip';host.setAttribute('role','list');host.setAttribute('aria-label','Queued messages');host.setAttribute('aria-busy',String(busy));host.hidden=!options.active||!items.length;
+  const signature=JSON.stringify([busy,options.scope,options.gesture,options.canSteer,options.steerReason,options.canSendNext,items]);
+  if(host.dataset.signature===signature)return;host.dataset.signature=signature;host.replaceChildren();
+  const make=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string)=>{const node=doc.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
+  if(busy){const notice=make('p','Saving queued messages…','queue-busy-notice');notice.setAttribute('role','status');host.append(notice);}
+  items.forEach((item,index)=>{
+    const captured={...item},row=make('div',undefined,'queue-row');row.dataset.queueId=String(item.id);row.dataset.queueState=item.state;row.setAttribute('role','listitem');
+    const icon=make('span','☷','queue-list-icon');icon.setAttribute('aria-hidden','true');
+    const preview=item.text.replace(/\s+/g,' '),text=make('span',preview.length>100?preview.slice(0,99)+'…':preview,'queue-text');text.title=item.text+(item.target?.modelId?'\nSaved model: '+item.target.modelId+(item.target.effort?' · '+item.target.effort:''):'');
+    const status=make('span',item.notice??({queued:'Queued',paused:'Paused',sending:'Sending…',unknown:'Delivery unknown',rejected:'Not sent'} as const)[item.state],'queue-status');status.setAttribute('role','status');
+    const sending=item.state==='sending',unknown=item.state==='unknown';
+    const button=(label:string,className:string,action:()=>void)=>{const node=make('button',label,className);node.type='button';node.disabled=busy;node.addEventListener('click',()=>{if(!busy)action();});return node;};
+    const steer=button('Steer','queue-steer',()=>{options.action('steer',captured);});steer.disabled=busy||sending||unknown||!options.canSteer;steer.title=unknown?'Review the recorded outcome before sending again.':options.steerReason;
+    const remove=button('×','queue-remove',()=>{options.action('remove',captured);});remove.disabled=busy||sending;remove.setAttribute('aria-label','Remove queued message '+(index+1));
+    const menu=make('div',undefined,'queue-menu');menu.hidden=true;menu.setAttribute('role','group');menu.setAttribute('aria-label','Queued message actions');
+    const toggle=button('…','queue-menu-toggle',()=>{menu.hidden=!menu.hidden;toggle.setAttribute('aria-expanded',String(!menu.hidden));});toggle.disabled=busy||sending;toggle.setAttribute('aria-label','Message actions');toggle.setAttribute('aria-expanded','false');
+    const editor=make('div',undefined,'queue-editor');editor.hidden=true;editor.setAttribute('role','group');editor.setAttribute('aria-label','Edit queued message');
+    const area=make('textarea',undefined,'queue-edit-input');area.value=item.text;area.disabled=busy;area.setAttribute('aria-label','Edit queued message');
+    const save=button('Save','queue-save',()=>{if(options.action('edit',captured,area.value)!==false)editor.hidden=true;});
+    const cancel=button('Cancel','queue-cancel',()=>{editor.hidden=true;toggle.focus();});
+    area.addEventListener('keydown',event=>{if(event.key==='Escape'&&!event.isComposing){event.preventDefault();editor.hidden=true;toggle.focus();}});editor.append(area,save,cancel);
+    const edit=button('Edit','queue-edit',()=>{menu.hidden=true;toggle.setAttribute('aria-expanded','false');editor.hidden=false;area.focus();});edit.disabled=busy||unknown;if(unknown)edit.title='Keep the original text while delivery is unresolved.';
+    const up=button('Move up','queue-up',()=>{options.action('up',captured);});up.disabled=busy||index===0;
+    const down=button('Move down','queue-down',()=>{options.action('down',captured);});down.disabled=busy||index===items.length-1;
+    const next=button('Send next','queue-next',()=>{options.action('next',captured);});next.disabled=busy||sending||unknown||!options.canSendNext;
+    if(unknown)next.title='Review the recorded outcome before sending again.';
+    menu.append(edit,up,down,next);row.append(icon,text,status,steer,remove,toggle,menu,editor);host.append(row);
+  });
+}
+
 type ComposerMenuItem={name:string;hint:string};
 class ComposerCommands {
   private mode:'slash'|'mention'|'help'|null=null;
@@ -2339,6 +2441,14 @@ export class CodexChat {
   private tabs: ChatTabs | null = null;
   private tabTransition = false;
   private preparingMessage = false;
+  private queue:ChatQueueRow[]=[];
+  private queueJournal=new ChatQueueJournal();
+  private queueSeq=0;
+  private queueEnqueue:ChatQueueRow|null=null;
+  private queueEnqueueContext:string|null=null;
+  private queueSending=false;
+  private queueSteering=false;
+  private queueRun:{scope:string;connectionId:string;turnId:string;selection:string}|null=null;
   private beforeMessageSubmit:BeforeMessageSubmit|null=null;
   private messageLifetime = 0;
   private restoredWorkflowDraft = false;
@@ -2468,7 +2578,7 @@ export class CodexChat {
    */
   yieldSurface(yielded:boolean):void {
     if(yielded===this.surfaceYielded)return;
-    if(yielded){this.closePicker();this.flushDraft();this.pendingSelection=null;this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
+    if(yielded){this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');this.closePicker();this.flushDraft();this.pendingSelection=null;this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
     else {this.surfaceYielded=false;this.el<HTMLTextAreaElement>('codex-composer').value=this.yieldedComposer;this.yieldedComposer='';this.messageSignature='';this.pickerSignature='';this.selectionSignature='';}
     this.render();
   }
@@ -2566,7 +2676,7 @@ export class CodexChat {
     return tab&&this.draftDirty&&tab.key===this.tabs?.active()?.key?{...tab,draft:this.value('codex-composer'),workflowDraft:!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft}:tab;
   }
   chatTabsView(): readonly ChatTabView[] { return this.safeView((this.tabs?.views()??[]).map(tab=>this.draftView(tab)!)); }
-  async readyForRuntimeRecovery():Promise<void> { if(this.tabs?.persistenceStatus()==='native-error')throw new Error('Saved chat drafts could not be read.'); }
+  async readyForRuntimeRecovery():Promise<void> { await this.queueJournal.ready();if(this.queue.length&&!this.queueJournal.available(this.queueProject()))throw new Error('Saved queued messages could not be read.');if(this.tabs?.persistenceStatus()==='native-error')throw new Error('Saved chat drafts could not be read.'); }
   async prepareForRuntimeRecovery():Promise<void> { await this.checkpointDrafts(false); }
   async prepareForRestart():Promise<void> { await this.checkpointDrafts(true); }
   private async checkpointDrafts(checkActivity:boolean):Promise<void> {
@@ -2574,7 +2684,7 @@ export class CodexChat {
       if(checkActivity&&(this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus)))throw new Error('Finish or stop the current chat before restarting.');
       if(!this.surfaceYielded&&this.attachments&&(this.attachments.prepareReferences().length||this.attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
     };
-    idle();this.flushDraft();this.tabs?.updatePresentation({});
+    idle();this.pauseQueue('Paused for restart. Choose Send next after reopening.');await this.queueJournal.ready();if(this.queue.length&&!await this.queueSave(true))throw new Error('Queued messages could not be saved. Keep this window open.');this.flushDraft();this.tabs?.updatePresentation({});
     // A settings acknowledgement must not trap an idle workspace with no unsent text.
     const hasDraft=()=>!this.surfaceYielded&&this.value('codex-composer').length>0||this.tabs?.views().some(tab=>tab.draft.length>0);
     if(!this.tabs?.active()||!hasDraft())return;
@@ -2598,7 +2708,7 @@ export class CodexChat {
   }
   /** Provider presentation preference only; Claude continues through native handoff. */
   setChatProviderPreference(provider:'codex'|'claude'):void {
-    if(provider!==this.providerPreference()){this.messageLifetime++;this.imageRequest?.abort();}
+    if(provider!==this.providerPreference()){this.pauseQueue('Paused after changing providers. Choose Send next to resume.');this.messageLifetime++;this.imageRequest?.abort();}
     this.flushDraft();this.tabs?.setProviderPreference(provider);this.renderControls();this.publishState();
   }
   private providerPreference():'codex'|'claude' {
@@ -2615,13 +2725,24 @@ export class CodexChat {
   subscribeStateChange(listener:()=>void):()=>void {this.stateListeners.add(listener);return()=>{this.stateListeners.delete(listener);};}
   subscribeTranscriptChange(listener:()=>void):()=>void{return this.subscribeStateChange(listener);}
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
+  setQueuePersistence(port:ChatQueueBridge|null):Promise<void>{
+    return this.queueJournal.attach(port,'codex',(rows,project)=>{
+      if(this.queue.length)return; // Never replace text entered while recovery was pending.
+      this.queue=rows.map<ChatQueueRow>(target=>({id:target.id,text:target.text,scope:chatQueueScope('codex',project,target.conversationId,target.sessionId,target.localId),
+        state:target.state==='unknown'?'unknown':target.state==='rejected'?'rejected':'paused',notice:target.attachmentState==='missing'?'Attachments must be restored before this message can be sent.':'Restored after restart. Review this chat and choose Send next.',...(target.requestId?{requestId:target.requestId}:{}),target}));
+      this.queueSeq=Math.max(this.queueSeq,...rows.map(row=>row.id));this.queueRun=null;
+    },()=>{if(!this.stopped)this.renderControls();});
+  }
+  private queueProject():string|null{return this.state?.projectPath??null;}
+  private queueSave(explicit=false):Promise<boolean>{return this.queueJournal.save(this.queue,this.queueProject(),explicit);}
+
   isDraftConversation():boolean {
     const tab=this.tabs?.active(),persistence=this.tabs?.persistenceStatus();
     return !this.stopped&&!!this.state?.projectPath&&persistence!=='native-loading'&&persistence!=='native-error'&&tab?.kind==='draft'&&tab.projectPath===this.state.projectPath;
   }
   showConversationNotice(message:string):void{this.text('codex-notice',message);}
   recordedTranscript():RecordedChatTranscript {
-    const active=this.tabs?.active(),thread=active?.kind==='native'?active:this.snapshot()?.thread;
+    const active=this.tabs?.active();if(active?.kind==='draft')return null;const thread=active?.kind==='native'?active:this.snapshot()?.thread;
     const submissions=this.state?.submittedMessages;
     return boundRecordedChatTranscript({provider:'codex',projectPath:this.state?.projectPath??null,conversationId:thread?.threadId??null,sessionId:thread?.sessionId??null,
       earlierCount:submissions&&submissions.threadId===thread?.threadId&&submissions.sessionId===thread?.sessionId?submissions.earlierCount:0,
@@ -2657,6 +2778,7 @@ export class CodexChat {
   private flushDraft():void {if(this.draftDirty)this.stashTabDraft();}
   private composerInput():void {
     if(this.stopped)return;
+    if(this.queueEnqueue)this.queueEnqueueContext=null;
     if(!this.value('codex-composer'))this.clearDraftOrigins();
     this.renderComposer();
     this.draftDirty=true;
@@ -3004,6 +3126,119 @@ export class CodexChat {
       !!snapshot.models.some(model => model.model === selection.model && model.efforts.includes(selection.effort));
   }
   private canStartThread() { return this.canStartConversation() && this.startPairReady(); }
+  private queueScope():string|null {
+    const active=this.tabs?.active(),thread=active?.kind==='native'?active:this.snapshot()?.thread;
+    return this.state?.projectPath&&thread?.threadId?chatQueueScope('codex',this.state.projectPath,thread.threadId,thread.sessionId??null,active?.localId??'native'):null;
+  }
+  private queueGesture():string{return JSON.stringify([this.generation,this.surfaceYielded,this.queueScope(),this.tabs?.active()?.key,this.snapshot()?.connectionId,this.snapshot()?.thread?.turnId,this.displaySelection()]);}
+  private queueTargetKnown():boolean {
+    const thread=this.snapshot()?.thread;return !this.stopped&&!this.surfaceYielded&&this.providerAllowsCodex()&&!this.tabTransition&&!!thread?.configured&&
+      ['starting','inProgress'].includes(thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state));
+  }
+  private queueCanWait():boolean {
+    const s=this.snapshot(),t=s?.thread;
+    return !this.surfaceYielded&&this.providerAllowsCodex()&&this.normal()&&!this.tabTransition&&!this.preparingMessage&&!!t?.configured&&!!t.turnId&&
+      ['starting','inProgress'].includes(t.turnStatus)&&(!this.tabs||this.tabs.bound(this.state))&&s?.account?.auth==='subscription'&&s.account.requiresOpenaiAuth;
+  }
+  private canSteerQueue(own=false):boolean {
+    const s=this.snapshot(),t=s?.thread;
+    return !this.queueEnqueue&&(!this.queueSteering||own)&&!this.queueSending&&this.queueCanWait()&&t?.turnStatus==='inProgress'&&!s?.operations.some(operation=>operation.state==='pending'||operation.state==='unknown')&&
+      !!this.state?.actions.some(action=>action.action==='turn-start'&&action.connectionId===s?.connectionId&&action.threadId===t.threadId&&action.turnId===t.turnId&&action.state==='acknowledged');
+  }
+  private armQueue():void {
+    const s=this.snapshot(),t=s?.thread,scope=this.queueScope();
+    this.queueRun=s&&t?.turnId&&scope?{scope,connectionId:s.connectionId,turnId:t.turnId,selection:JSON.stringify(this.displaySelection())}:null;
+  }
+  private pauseQueue(reason:string):void {this.queueRun=null;if(this.queueEnqueue)this.queueEnqueueContext=null;for(const row of this.queue)if(row.state==='queued'){row.state='paused';row.notice=reason;}}
+  /** Enter retains a plain prompt for this exact running conversation; attachments stay in the composer. */
+  enqueue():boolean {
+    if(this.queueEnqueue)return false;
+    if(!this.queueTargetKnown())return false;if(!this.queueJournal.available(this.queueProject())){this.text('codex-notice',this.queueJournal.notice()??'Wait for queued message recovery before adding another prompt.');return false;}const scope=this.queueScope(),draft=this.value('codex-composer'),message=draft.trim();if(!scope||!message)return false;
+    if(utf8(message)>CODEX_INPUT_BYTES){this.text('codex-notice','This queued message exceeds the input limit. Your draft is retained.');return false;}
+    try{if((this.attachments?.prepareText(draft)??draft)!==draft||this.attachments?.prepareReferences().length)throw Error('Attachments stay in the composer. Send them after this reply finishes.');}
+    catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be queued. Your draft is retained.');return false;}
+    if(this.workflowDraftOrigins.length||this.restoredWorkflowDraft){this.text('codex-notice','Review this workflow draft before sending it. The complete draft is retained.');return false;}
+    if(this.queue.length>=64||this.queue.filter(row=>row.scope===scope).length>=5){this.text('codex-notice','Up to 5 messages can wait in one chat. Remove one before adding another.');return false;}
+    const armed=this.queueCanWait(),selection=this.displaySelection(),thread=this.snapshot()!.thread!;
+    const target:StoredChatQueueRow={id:++this.queueSeq,localId:this.tabs?.active()?.localId??'native',conversationId:thread.threadId,sessionId:thread.sessionId??null,text:message,modelId:selection?.model??null,effort:selection?.effort??null,connectionId:this.snapshot()!.connectionId,requestId:null,createdAt:new Date().toISOString(),state:'pending',attachmentState:'none'};
+    const item:ChatQueueRow={id:target.id,text:message,scope,state:'paused',notice:'Saving queued message…',target};
+    const gesture=this.queueGesture(),attachmentRevision=this.attachments?.selectionRevision();
+    this.queue.push(item);this.queueEnqueue=item;this.queueEnqueueContext=gesture;
+    const saving=this.queueSave(true);this.renderControls();
+    void saving.then(saved=>{
+      if(this.queueEnqueue!==item)return;const sameContext=this.queueEnqueueContext===gesture;this.queueEnqueue=null;this.queueEnqueueContext=null;
+      if(!saved){
+        // The IPC reply can fail after bytes were saved. Any surviving disk row restores paused.
+        this.queue=this.queue.filter(row=>row!==item);
+        this.text('codex-notice','Saving the queued message could not be confirmed. Your original draft and files are retained.');
+      }else if(sameContext&&gesture===this.queueGesture()&&this.queueTargetKnown()&&this.value('codex-composer')===draft&&this.attachments?.selectionRevision()===attachmentRevision){
+        item.state=armed&&this.queueCanWait()?'queued':'paused';item.notice=item.state==='queued'?null:'Retained while the current request needs confirmation. Choose Send next after reviewing it.';
+        if(item.state==='queued')this.armQueue();this.setComposer('');this.stashTabDraft();
+      }else{
+        item.notice='Saved and paused because the draft or conversation changed. Your current draft is retained.';
+        this.pauseQueue('Paused while saving the queued message. Choose Send next to resume.');
+      }
+      if(!this.stopped)this.renderControls();
+    });return true;
+  }
+  queued():readonly {id:number;text:string}[]{return this.queue.filter(row=>row.scope===this.queueScope()).map(row=>({id:row.id,text:row.text}));}
+  private queueAction(action:ChatQueueAction,captured:Readonly<ChatQueueRow>,gesture:string,text?:string):boolean {
+    if(this.queueEnqueue||this.surfaceYielded||gesture!==this.queueGesture())return false;
+    const item=this.queue.find(row=>row.id===captured.id&&row.scope===captured.scope&&row.scope===this.queueScope()&&row.text===captured.text&&row.state===captured.state);
+    if(!item||item.state==='sending')return false;if((action==='steer'||action==='next')&&item.target?.attachmentState==='missing'){this.text('codex-notice','Restore this message’s attachments before sending it. Your text is retained.');return false;}const scoped=this.queue.filter(row=>row.scope===item.scope),index=scoped.indexOf(item);
+    if(action==='remove')this.queue=this.queue.filter(row=>row!==item);
+    else if(action==='edit'){
+      if(item.state==='unknown')return false;
+      if(typeof text!=='string'||!text.trim()||utf8(text)>CODEX_INPUT_BYTES){this.text('codex-notice','Enter a message within the chat input limit.');return false;}
+      item.text=text.trim();if(item.state!=='unknown'){item.state='paused';item.notice='Edited. Choose Send next to resume.';}
+    }else if(action==='up'||action==='down'){
+      const other=scoped[index+(action==='up'?-1:1)];if(!other)return false;const a=this.queue.indexOf(item),b=this.queue.indexOf(other);[this.queue[a],this.queue[b]]=[this.queue[b]!,this.queue[a]!];
+    }else if(action==='steer'){
+      if(item.state==='unknown'||!this.canSteerQueue())return false;void this.steerQueued(item);
+    }else if(action==='next'){
+      if(item.state==='unknown'||!this.messageTargetReady()&&!this.queueCanWait())return false;
+      const first=this.queue.indexOf(scoped[0]!);this.queue.splice(this.queue.indexOf(item),1);this.queue.splice(first,0,item);item.state='queued';item.notice=null;this.armQueue();
+      if(this.messageTargetReady())void this.drainQueue(item);
+    }
+    this.renderControls();return true;
+  }
+  private async steerQueued(item:ChatQueueRow):Promise<void> {
+    if(!this.canSteerQueue()||item.scope!==this.queueScope())return;const turn=this.snapshot()!.thread!;
+    this.queueSteering=true;item.state='sending';item.notice='Steering this reply…';this.renderControls();
+    const receipt=await this.dispatch('turn-steer',{threadId:turn.threadId,expectedTurnId:turn.turnId,text:item.text},false,item);
+    if(receipt?.state==='acknowledged')this.queue=this.queue.filter(row=>row!==item);
+    else {item.state=receipt?.state==='rejected'?'rejected':item.dispatched?'unknown':'paused';item.notice=receipt?.state==='rejected'?'Steering was not accepted. This message is retained.':item.dispatched?'Steering delivery is unknown. Review recorded state before sending again.':'Not sent. The conversation changed.';this.pauseQueue('Paused after an unconfirmed steering result.');}
+    this.queueSteering=false;this.renderControls();
+  }
+  private async drainQueue(item?:ChatQueueRow):Promise<void> {
+    if(this.queueEnqueue||this.queueSending||this.queueSteering||!this.messageTargetReady())return;const scope=this.queueScope(),head=item??this.queue.find(row=>row.scope===scope&&row.state==='queued');
+    if(!head||head.scope!==scope||head.state!=='queued')return;
+    this.queueRun=null;this.queueSending=true;head.state='sending';head.notice='Sending queued message…';this.renderControls();
+    const receipt=await this.submitMessage(head);
+    if(receipt?.state==='acknowledged'){
+      this.queue=this.queue.filter(row=>row!==head);if(this.queueScope()===scope&&this.queue.some(row=>row.scope===scope&&row.state==='queued'))this.armQueue();
+    }else{head.state=receipt?.state==='rejected'?'rejected':head.dispatched?'unknown':'paused';head.notice=receipt?.state==='rejected'?'This message was not accepted. Choose Send next when ready.':head.dispatched?'Message delivery is unknown. Review recorded state before sending again.':'Not sent. Review this conversation and choose Send next.';this.pauseQueue('Paused after an unconfirmed send.');}
+    this.queueSending=false;this.renderControls();
+  }
+  private renderQueue():void {
+    let host=this.doc.getElementById('codex-chat-queue');const form=this.doc.getElementById('codex-compose');
+    if(!host&&form){host=this.make('div',undefined,'queue-strip');host.id='codex-chat-queue';form.prepend(host);}if(!host)return;
+    const scope=this.queueScope(),s=this.snapshot(),turn=s?.thread,run=this.queueRun;
+    if(this.queueEnqueue&&this.queueEnqueueContext!==this.queueGesture())this.queueEnqueueContext=null;
+    if(run&&(run.scope!==scope||run.connectionId!==s?.connectionId||run.selection!==JSON.stringify(this.displaySelection())||this.surfaceYielded||this.stopped))this.pauseQueue('Conversation or model changed. Choose Send next to resume.');
+    for(const item of this.queue)if(item.scope===scope&&item.requestId&&item.state==='unknown'){
+      const receipt=this.state?.actions.find(record=>record.requestId===item.requestId&&record.threadId===item.target?.conversationId);if(receipt?.state==='acknowledged')this.queue=this.queue.filter(row=>row!==item);
+      else if(receipt?.state==='rejected'){item.state='rejected';item.notice='The recorded request was not accepted. Your text is retained.';}
+    }
+    if(this.queueRun&&turn&&['failed','interrupted','cancelling','unknown'].includes(turn.turnStatus))this.pauseQueue('The reply did not finish. Choose Send next to resume.');
+    if(this.queueJournal.available(this.queueProject()))void this.queueSave();
+    const gesture=this.queueGesture();renderChatQueueStrip(this.doc,host,this.queue.filter(row=>row.scope===scope),{active:!this.surfaceYielded,busy:!!this.queueEnqueue,scope,gesture,canSteer:this.canSteerQueue(),steerReason:this.canSteerQueue()?'Guide this exact active reply.':'Steering requires a settled send and the current active reply.',
+      canSendNext:this.messageTargetReady()||this.queueCanWait(),action:(action,item,text)=>this.queueAction(action,item,gesture,text)});
+    for(const old of Array.from(host.querySelectorAll('.queue-persistence-notice')))old.remove();
+    const saveNotice=this.queueJournal.notice();if(saveNotice&&this.queue.some(row=>row.scope===scope)){const note=this.make('p',saveNotice,'queue-persistence-notice');note.setAttribute('role','status');host.append(note);}
+    if(this.queueRun&&turn?.turnId===this.queueRun.turnId&&turn.turnStatus==='completed'&&this.messageTargetReady())queueMicrotask(()=>{if(this.queueRun&&this.queueRun.scope===this.queueScope()&&this.snapshot()?.thread?.turnId===this.queueRun.turnId&&this.snapshot()?.thread?.turnStatus==='completed')void this.drainQueue();});
+    else if(this.queueRun&&turn&&['failed','interrupted','cancelling','unknown'].includes(turn.turnStatus))this.pauseQueue('The reply did not finish. Choose Send next to resume.');
+  }
   /** A user Send gesture may set up its exact chat, never a background turn. */
   private messageTargetReady():boolean {
     const snapshot=this.snapshot();
@@ -3016,17 +3251,17 @@ export class CodexChat {
     if(this.tabs&&active?.kind==='draft'||!this.tabs&&!snapshot.thread)return this.canStartThread();
     return !!snapshot.thread?.configured&&IDLE.includes(snapshot.thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state));
   }
-  private async submitMessage():Promise<void> {
-    if(this.preparingMessage||!this.messageTargetReady()||this.draftNeedsReview())return;
+  private async submitMessage(queued?:ChatQueueRow):Promise<ChatActionRecord|undefined> {
+    if(this.queueEnqueue||this.preparingMessage||!queued&&(this.queueSending||this.queueSteering)||!this.messageTargetReady()||!queued&&this.draftNeedsReview())return;
     const draft=this.value('codex-composer');
     let message:string,references:readonly {readonly name:string;readonly dataUrl:string}[]=[];
-    try {message=this.attachments?.prepareText(draft)??draft;references=this.attachments?.prepareReferences()??[];}
+    try {message=queued?.text??this.attachments?.prepareText(draft)??draft;references=queued?[]:this.attachments?.prepareReferences()??[];}
     catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be prepared.');return;}
     if(!message.trim()||utf8(message)>CODEX_INPUT_BYTES)return;
     const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
     const referenceRevision=this.attachments?.selectionRevision(),referenceFields=references.length?{references}:{};
     const visibleMessage=message;
-    if(this.beforeMessageSubmit){
+    if(this.beforeMessageSubmit&&!queued){
       const fingerprint=JSON.stringify([this.generation,this.state?.projectPath,this.providerPreference(),this.tabs?.active()?.key,this.snapshot()?.thread?.threadId,this.snapshot()?.thread?.turnId,this.displaySelection()]);
       this.preparingMessage=true;this.renderControls();
       try {
@@ -3048,7 +3283,7 @@ export class CodexChat {
     }
     const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
     const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
-    if(bound&&!applyPreferred){await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});return;}
+    if(bound&&!applyPreferred)return await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})},false,queued);
     if(!selection)return;
     this.preparingMessage=true;this.renderControls();
     try {
@@ -3059,12 +3294,12 @@ export class CodexChat {
       if(!opened||this.stopped||lifetime!==this.messageLifetime||this.state?.projectPath!==project||!live?.configured||
         live.selection.model!==selection.model||live.selection.effort!==selection.effort||
         references.length&&(this.tabs?.active()?.localId!==source?.localId||this.attachments?.selectionRevision()!==referenceRevision)||
-        !this.messageTargetReady()||this.draftNeedsReview())return;
+        !this.messageTargetReady()||!queued&&this.draftNeedsReview())return;
       let current:string;
-      try {current=this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
+      try {current=queued?.text??this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
       catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
       if(this.value('codex-composer')!==draft||!references.length&&current!==visibleMessage){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
-      await this.dispatch('turn-start',{threadId:live.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})});
+      return await this.dispatch('turn-start',{threadId:live.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})},false,queued);
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
   /**
@@ -3384,13 +3619,14 @@ export class CodexChat {
       const key=event as KeyboardEvent;
       // While the "/" or "@" menu is open, Enter picks from it instead of sending.
       if(event.defaultPrevented||composerMenuOpen(this.doc))return;
-      if(key.key==='Enter'&&!key.shiftKey&&!key.altKey&&!key.ctrlKey&&!key.metaKey&&!key.isComposing&&key.keyCode!==229&&this.messageTargetReady()){
-        event.preventDefault();void this.submitMessage();
+      if(key.key==='Enter'&&!key.shiftKey&&!key.altKey&&!key.ctrlKey&&!key.metaKey&&!key.isComposing&&key.keyCode!==229){
+        if(this.queueTargetKnown()){event.preventDefault();this.enqueue();}
+        else if(this.messageTargetReady()){event.preventDefault();void this.submitMessage();}
       }
     });
     this.on('codex-draft-review-button','click',event=>{if(event.isTrusted)this.openDraftReview();});
     this.on('codex-compose','submit',e=>{
-      e.preventDefault();void this.submitMessage();
+      e.preventDefault();if(this.queueTargetKnown())this.enqueue();else void this.submitMessage();
     });
     this.on('codex-submit','click',()=>{
       const thread=this.snapshot()?.thread;
@@ -3408,6 +3644,7 @@ export class CodexChat {
     this.renderControls();await this.refresh();this.schedule();
   }
   stop() {
+    this.pauseQueue('Paused after the chat connection stopped. Choose Send next to resume.');
     this.usageController?.abort();this.usageController=undefined;this.usageNotice='';
     this.messageLifetime++;
     this.imageRequest?.abort();
@@ -3488,9 +3725,10 @@ export class CodexChat {
       return !this.state!.connecting&&!this.state!.closing&&!this.state!.busy&&((u.input.connectionId!==null&&u.input.connectionId!==this.snapshot()?.connectionId)||(u.input.action==='connect'&&!this.snapshot()));
     });
   }
-  private async dispatch(action:string,fields:Record<string,unknown>={},internal=false) {
+  private async dispatch(action:string,fields:Record<string,unknown>={},internal=false,queued?:ChatQueueRow) {
     if(this.stopped)return;
-    if(['turn-start','thread-start','thread-resume','select','grant-writes','grant-assets'].includes(action)&&!this.providerAllowsCodex())return;
+    if(queued&&(queued.scope!==this.queueScope()||queued.state!=='sending'))return;
+    if(['turn-start','turn-steer','thread-start','thread-resume','select','grant-writes','grant-assets'].includes(action)&&!this.providerAllowsCodex())return;
     if(this.tabTransition&&!internal&&!['disconnect','revoke-writes','revoke-assets','turn-interrupt','task-stop','approval'].includes(action))return;
     if(action==='thread-start'&&!internal) {
       if(!this.canStartThread())return;
@@ -3508,16 +3746,25 @@ export class CodexChat {
         this.selectionSignature='';this.closePicker(true);this.render();this.publishState();return;
       }
     }
-    if(this.tabs&&!internal&&['turn-start','grant-writes','grant-assets','select'].includes(action)&&!this.tabs.bound(this.state))return;
+    if(this.tabs&&!internal&&['turn-start','turn-steer','grant-writes','grant-assets','select'].includes(action)&&!this.tabs.bound(this.state))return;
     if(this.tabs&&!internal&&action==='thread-resume')return; // Only openSavedChat can resolve advisory browser IDs.
     if(action==='turn-start'&&(!this.snapshot()?.thread?.configured||!IDLE.includes(this.snapshot()!.thread!.turnStatus)))return;
+    if(action==='turn-steer'&&!this.canSteerQueue(!!queued))return;
     if ((action === 'grant-assets' || action === 'revoke-assets') && !this.assetEligible(action)) return;
     const safety=action==='revoke-assets'||action==='disconnect'||action==='revoke-writes'||action==='turn-interrupt'||action==='task-stop'||action==='approval'&&fields.decision!=='accept';
     if(this.state?.displayLimited&&!safety&&action!=='connect')return;
     if(!safety&&action!=='connect'&&!this.normal()&&!(action==='approval'&&!this.uncertain.size&&this.fresh))return;
     if(action==='connect'&&(!this.fresh||this.snapshot()||this.uncertain.size||this.pending.size||this.state?.connecting||this.state?.closing))return;
-    if(action==='turn-start'&&this.draftNeedsReview()){this.text('codex-notice','This workflow draft belongs to another conversation or model. Review it before submitting; your text has been preserved.');this.renderControls();return;}
+    if(action==='turn-start'&&!queued&&this.draftNeedsReview()){this.text('codex-notice','This workflow draft belongs to another conversation or model. Review it before submitting; your text has been preserved.');this.renderControls();return;}
     let input:ChatAction;try{input=prepareCodexAction(this.state,action,fields);}catch(error){this.text('codex-notice',String(error));return;}
+    if(queued){
+      const gesture=this.queueGesture();queued.requestId=input.requestId;queued.dispatched=false;
+      if(!await this.queueSave(true)){queued.state='paused';queued.notice='Not sent: secure saving failed. Your text is retained.';this.renderControls();return;}
+      if(gesture!==this.queueGesture()||queued.scope!==this.queueScope()||queued.state!=='sending'||!this.normal()||action==='turn-steer'&&!this.canSteerQueue(!!queued)||action==='turn-start'&&!this.messageTargetReady()){
+        queued.state='paused';queued.notice='Not sent: conversation changed while saving.';void this.queueSave();this.renderControls();return;
+      }
+      queued.dispatched=true;
+    }
     const cancelsImagePreparation=!internal&&(input.action==='disconnect'||(input.action==='revoke-assets'||input.action==='revoke-writes')&&input.threadId===this.snapshot()?.thread?.threadId);
     if(cancelsImagePreparation){this.imageRequest?.abort();if(this.preparingMessage)this.messageLifetime++;}
     if([...this.pending.values()].some(p=>p.action===input.action&&(input.action!=='approval'||'handle' in p&&p.handle===fields.handle)))return;
@@ -3528,7 +3775,7 @@ export class CodexChat {
     if(imageRequest)this.imageRequest=imageRequest;
     this.pending.set(input.requestId,input);this.text('codex-notice','Waiting for confirmation…');
     // Only a definitive rejection may hand the cleared text back; pending/unknown sends never do (no duplicate sends).
-    const sentDraft=input.action==='turn-start'?{text:this.value('codex-composer'),origins:structuredClone(this.workflowDraftOrigins),reviewed:this.reviewedDraftTarget,restored:this.restoredWorkflowDraft,tab:this.tabs?.active()?.key??null}:null;
+    const sentDraft=input.action==='turn-start'&&!queued?{text:this.value('codex-composer'),origins:structuredClone(this.workflowDraftOrigins),reviewed:this.reviewedDraftTarget,restored:this.restoredWorkflowDraft,tab:this.tabs?.active()?.key??null}:null;
     const restoreRejectedDraft=()=>{
       if(!sentDraft||!sentDraft.text||this.stopped||this.value('codex-composer')!==''||(this.tabs?.active()?.key??null)!==sentDraft.tab)return;
       this.setComposer(sentDraft.text);
@@ -3537,8 +3784,10 @@ export class CodexChat {
     };
     if(input.action==='turn-start'){
       try { this.feedbackHooks?.userMessage({key:this.feedbackKey(input.threadId),text:input.displayText??input.text,box:this.el('codex-messages'),anchor:null}); } catch { /* Learning is optional. */ }
-      this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.displayText??input.text,acknowledgement:'Awaiting native acknowledgement'});this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();
+      this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.displayText??input.text,acknowledgement:'Awaiting native acknowledgement'});
+      if(!queued){this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
     }
+    if(input.action==='turn-steer')this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,steered:true,acknowledgement:'Awaiting native acknowledgement'});
     this.render();this.publishState();
     let acknowledgedStateApplied=false;
     try {
@@ -3551,7 +3800,7 @@ export class CodexChat {
       const fenced=this.stopped||epoch!==this.generation||((input.action==='grant-assets'||input.action==='revoke-assets')&&assetScope!==this.assetScope())||(input.action!=='connect'&&input.action!=='disconnect'&&current!==input.connectionId&&!freshTask&&!focusedTask)||(input.action==='disconnect'&&!!current&&current!==input.connectionId)||(input.action==='connect'&&!!current&&current!==outcome.record.connectionId);
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;
         acknowledgedStateApplied=outcome.record.state==='acknowledged';
-        const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
+        const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-steer':'Steering message accepted by the active reply.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
         this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):(codexFailureHint(outcome.record.errorCode)?codexFailureHint(outcome.record.errorCode)+' ':'')+input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
       else if(outcome.record.state==='rejected')restoreRejectedDraft();
@@ -3656,8 +3905,10 @@ export class CodexChat {
       const {message}=spec,nodes:Node[]=[];let element:HTMLElement,change:ToolChange|null=null;
       if(message.role==='tool'){const tool=renderCodexToolArticle(this.doc,message,value=>this.api.safe(value));change=tool.change??null;element=tool.article;}
       else{
-        const card=element=this.make('article',undefined,'codex-message '+message.role);card.setAttribute('aria-label',message.role==='human'?'Your message':'Assistant message');
+        const steered=message.steered||message.receipt?.kind==='steer';
+        const card=element=this.make('article',undefined,'codex-message '+message.role+(steered?' steered':''));card.setAttribute('aria-label',steered?'Your steering message':message.role==='human'?'Your message':'Assistant message');
         card.setAttribute('data-role',message.role==='human'?'user':'assistant');
+        if(steered)card.append(this.make('p','Steered','message-steer-label'));
         // Only the reply being written is a live region; it is announced once it settles.
         if(spec.streaming){card.setAttribute('aria-busy','true');card.setAttribute('aria-live','polite');}
         card.append(message.role==='codex'?renderMessageText(this.doc,this.api.safe(message.text),options(spec.index)):this.make('pre',message.text,'message-text'));
@@ -3804,7 +4055,7 @@ export class CodexChat {
     }
   }
   private renderComposer():void {
-    if(this.surfaceYielded)return;
+    if(this.surfaceYielded){this.renderQueue();return;}
     const s=this.snapshot(),t=(!this.tabs||this.tabs.bound(this.state))?s?.thread:null;
     const normal=this.normal()&&!this.tabTransition,message=this.value('codex-composer'),size=utf8(message),draftBlocked=this.draftNeedsReview();
     const disabled=(id:string,value:boolean)=>{const button=this.el<HTMLButtonElement>(id);if(button.disabled!==value)button.disabled=value;};
@@ -3817,7 +4068,7 @@ export class CodexChat {
       path?.setAttribute('fill',active?'currentColor':'none');
     }
     const controls=submit.closest?.<HTMLElement>('.composer-controls');if(controls)controls.dataset.taskActive=String(active);
-    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'||input.action==='task-stop'):this.preparingMessage||!this.messageTargetReady()||!message.trim()||size>CODEX_INPUT_BYTES||draftBlocked);
+    disabled('codex-submit',active?!this.providerAllowsCodex()||!this.fresh||!t?.turnId||t.turnStatus==='cancelling'||[...this.pending.values()].some(input=>input.action==='turn-interrupt'||input.action==='task-stop'):!!this.queueEnqueue||this.preparingMessage||this.queueSending||this.queueSteering||!this.messageTargetReady()||!message.trim()||size>CODEX_INPUT_BYTES||draftBlocked);
     this.el('codex-draft-review').hidden=!draftBlocked;
     const notice=draftBlocked?this.restoredWorkflowDraft?'Restored draft. Review it for this conversation and model before sending.':'Workflow draft context changed. Your unsent text is preserved; review it for this conversation before sending.':'';
     if(this.el('codex-draft-review-notice').textContent!==notice)this.text('codex-draft-review-notice',notice);
@@ -3825,6 +4076,7 @@ export class CodexChat {
     this.text('codex-input-size',size+' / '+CODEX_INPUT_BYTES+' UTF-8 bytes · Submit starts a native turn.');
     this.el('codex-input-size').className=size>CODEX_INPUT_BYTES?'hint warning':'visually-hidden';
     disabled('codex-confirm-submit',!this.el<HTMLInputElement>('codex-confirm-check').checked||!this.confirmationValid());
+    this.renderQueue();
   }
   private openGrant() {
     if(!this.providerAllowsCodex())return;

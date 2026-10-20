@@ -365,6 +365,7 @@ export async function createConnectionLab(options: Options) {
           ['/arcane-dialog.js', [join(options.cwd, 'dist/apps/desktop/src/arcane-dialog.js'), 'text/javascript']],
           ['/chat-tabs.js', [join(options.cwd, 'dist/apps/desktop/src/chat-tabs.js'), 'text/javascript']],
           ['/conversation-library.js', [join(options.cwd, 'dist/apps/desktop/src/conversation-library.js'), 'text/javascript']],
+          ['/packages/protocol/src/chat-queue.js', [join(options.cwd, 'dist/packages/protocol/src/chat-queue.js'), 'text/javascript']],
           ['/shared-conversations.js', [join(options.cwd, 'dist/apps/desktop/src/shared-conversations.js'), 'text/javascript']],
           ['/chat-attachments.js', [join(options.cwd, 'dist/apps/desktop/src/chat-attachments.js'), 'text/javascript']],
           ['/task-usage.js', [join(options.cwd, 'dist/apps/desktop/src/task-usage.js'), 'text/javascript']],

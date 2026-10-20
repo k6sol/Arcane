@@ -55,6 +55,26 @@ function libraryPreferences(value, scope) {
   const activeId=nullableId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||Buffer.byteLength(JSON.stringify(result))>480*1024)fail();return result;
 }
+// Queue records contain unsubmitted text and advisory identifiers, never native execution authority.
+function queuePreferences(value, scope, provider) {
+  fields(value,['version','projectPath','provider','rows']);
+  const projectPath=text(value.projectPath,4096);
+  if(!projectPath.trim()||!samePath(projectPath,scope.projectPath)||value.version!==1||value.provider!==provider)fail();
+  const list=value.rows;
+  if(types.isProxy(list)||!Array.isArray(list)||Object.getPrototypeOf(list)!==Array.prototype||list.length>64||Reflect.ownKeys(list).length!==list.length+1)fail();
+  const ids=new Set(),counts=new Map(),rows=[];
+  const uuid=v=>v===null?null:typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)?v:fail();
+  for(let i=0;i<list.length;i++){
+    const d=Object.getOwnPropertyDescriptor(list,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))fail();
+    const r=fields(d.value,['id','localId','conversationId','sessionId','text','modelId','effort','connectionId','requestId','createdAt','state','attachmentState']);
+    if(!Number.isSafeInteger(r.id)||r.id<1||r.id>2147483647||ids.has(r.id))fail();ids.add(r.id);
+    const localId=text(r.localId,128,true),conversationId=nullableId(r.conversationId,256),sessionId=nullableId(r.sessionId,256),body=text(r.text,128*1024),modelId=presentationModel(r.modelId),effort=nullableId(r.effort,64),connectionId=uuid(r.connectionId),requestId=uuid(r.requestId),createdAt=text(r.createdAt,40);
+    if(!body.trim()||!Number.isFinite(Date.parse(createdAt))||!['pending','unknown','rejected'].includes(r.state)||!['none','missing'].includes(r.attachmentState))fail();
+    const key=JSON.stringify([conversationId===null?localId:conversationId,sessionId]),count=(counts.get(key)??0)+1;if(count>5)fail();counts.set(key,count);
+    rows.push({id:r.id,localId,conversationId,sessionId,text:body,modelId,effort,connectionId,requestId,createdAt,state:r.state,attachmentState:r.attachmentState});
+  }
+  const result={version:1,projectPath,provider,rows};if(Buffer.byteLength(JSON.stringify(result))>1024*1024)fail();return result;
+}
 function preferences(value, scope, claude = false) {
   fields(value, ['version', 'projectPath', 'provider', 'tabs', 'activeTabId']);
   // Advisory comparison only. Never derive a path, project identity or authority from renderer data.
@@ -132,29 +152,29 @@ function checkChain(chain) {
 function missing(full) {
   try { fs.lstatSync(full); return false; } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
 }
-function readBounded(fd) {
-  const bytes = Buffer.alloc(MAX_FILE_BYTES + 1); let length = 0;
+function readBounded(fd, limit = MAX_FILE_BYTES) {
+  const bytes = Buffer.alloc(limit + 1); let length = 0;
   while (length < bytes.length) {
     const count = fs.readSync(fd, bytes, length, bytes.length - length, length);
     if (!Number.isSafeInteger(count) || count < 0 || count > bytes.length - length) fail();
     if (!count) break;
     length += count;
   }
-  if (length > MAX_FILE_BYTES) fail();
+  if (length > limit) fail();
   return bytes.subarray(0, length);
 }
-function openPin(full) {
+function openPin(full, limit = MAX_FILE_BYTES) {
   const chain = checkedPath(full, 'file'), before = chain.at(-1).stat;
-  if (before.size > BigInt(MAX_FILE_BYTES)) fail();
+  if (before.size > BigInt(limit)) fail();
   const fd = fs.openSync(full, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
-    const pin = { full, fd, chain, before };
+    const pin = { full, fd, chain, before, limit };
     const bytes = checkPin(pin); pin.digest = hash(bytes);
     return { pin, bytes };
   } catch (error) { fs.closeSync(fd); throw error; }
 }
 function checkPin(pin) {
-  const first = fs.fstatSync(pin.fd, { bigint: true }), bytes = readBounded(pin.fd);
+  const first = fs.fstatSync(pin.fd, { bigint: true }), bytes = readBounded(pin.fd, pin.limit);
   const last = fs.fstatSync(pin.fd, { bigint: true }), current = checkChain(pin.chain).at(-1).stat;
   if (!sameFile(pin.before, first) || !sameFile(first, last) || !sameFile(last, current) ||
       BigInt(bytes.length) !== last.size || (pin.digest !== undefined && pin.digest !== hash(bytes))) fail();
@@ -162,10 +182,13 @@ function checkPin(pin) {
 }
 
 function createWorkspacePreferences({ safeStorage, getSession, enabled = true, record = 'workspace' }) {
-  if (!['workspace', 'claude', 'tools','library'].includes(record)) fail();
-  const recordFile = record==='library'?'conversation-library.v1.json':record === 'tools' ? 'tool-drafts.v1.json' : record === 'claude' ? 'claude-preferences.v1.json' : FILE;
-  const recordChannel = record==='library'?'arcane:conversation-library-':record === 'tools' ? 'arcane:tool-drafts-' : record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
+  if (!['workspace', 'claude', 'tools','library','queue-codex','queue-claude'].includes(record)) fail();
+  const queueProvider=record==='queue-codex'?'codex':record==='queue-claude'?'claude':null;
+  const plainLimit=queueProvider?1024*1024+1024:MAX_PLAIN_BYTES,fileLimit=queueProvider?2*1024*1024:MAX_FILE_BYTES;
+  const recordFile = queueProvider?'chat-queue.'+queueProvider+'.v1.json':record==='library'?'conversation-library.v1.json':record === 'tools' ? 'tool-drafts.v1.json' : record === 'claude' ? 'claude-preferences.v1.json' : FILE;
+  const recordChannel = queueProvider?'arcane:chat-queue-'+queueProvider+'-':record==='library'?'arcane:conversation-library-':record === 'tools' ? 'arcane:tool-drafts-' : record === 'claude' ? 'arcane:claude-preferences-' : 'arcane:workspace-preferences-';
   function recordPreferences(value, scope) {
+    if(queueProvider)return queuePreferences(value,scope,queueProvider);
     if(record==='library')return libraryPreferences(value,scope);
     if (record === 'tools') return toolDraftPreferences(value, scope);
     const parsed = preferences(value, scope, record === 'claude');
@@ -218,17 +241,17 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
     checkChain(snapshot.projectChain); checkChain(snapshot.stateChain);
     guard(scope, event); unlocked(snapshot);
     if (missing(snapshot.full)) return { ...snapshot, preferences: null, pin: null };
-    const { pin, bytes } = openPin(snapshot.full); snapshot.pin = pin;
+    const { pin, bytes } = openPin(snapshot.full, fileLimit); snapshot.pin = pin;
     try {
       const envelope = fields(JSON.parse(bytes.toString('utf8')), ['version', 'ciphertext']);
       if (envelope.version !== 1 || typeof envelope.ciphertext !== 'string' || !envelope.ciphertext ||
           !bytes.equals(Buffer.from(JSON.stringify(envelope) + '\n'))) fail();
       const encrypted = Buffer.from(envelope.ciphertext, 'base64');
-      if (!encrypted.length || encrypted.length > MAX_FILE_BYTES || encrypted.toString('base64') !== envelope.ciphertext) fail();
+      if (!encrypted.length || encrypted.length > fileLimit || encrypted.toString('base64') !== envelope.ciphertext) fail();
       guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot); if (!available()) fail();
       const plain = safeStorage.decryptString(encrypted);
       guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot); if (!available()) fail();
-      if (typeof plain !== 'string' || Buffer.byteLength(plain) > MAX_PLAIN_BYTES) fail();
+      if (typeof plain !== 'string' || Buffer.byteLength(plain) > plainLimit) fail();
       const decoded = payload(JSON.parse(plain), scope);
       if (JSON.stringify(decoded) !== plain) fail();
       return { ...snapshot, preferences: { ...decoded.preferences, projectPath: scope.projectPath } };
@@ -237,12 +260,12 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
   function persist(scope, event, snapshot, input) {
     // Presentation data and the host's project identity are sealed together.
     const plain = JSON.stringify(payload({ version: 1, projectId: scope.projectId, ...(record !== 'workspace' ? { record } : {}), preferences: input }, scope));
-    if (Buffer.byteLength(plain) > MAX_PLAIN_BYTES) fail();
+    if (Buffer.byteLength(plain) > plainLimit) fail();
     guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot); if (!available()) fail();
     const encrypted = safeStorage.encryptString(plain);
-    if (!Buffer.isBuffer(encrypted) || !encrypted.length || encrypted.length > MAX_FILE_BYTES) fail();
+    if (!Buffer.isBuffer(encrypted) || !encrypted.length || encrypted.length > fileLimit) fail();
     const bytes = Buffer.from(JSON.stringify({ version: 1, ciphertext: encrypted.toString('base64') }) + '\n');
-    if (bytes.length > MAX_FILE_BYTES) fail();
+    if (bytes.length > fileLimit) fail();
     persistBytes(scope, event, snapshot, bytes);
   }
   function persistBytes(scope, event, snapshot, bytes) {
@@ -267,7 +290,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
       }
       fs.fsyncSync(tempFd);
       const flushedStage = checkChain(tempChain);
-      if (!sameFile(flushedStage.at(-1).stat, fs.fstatSync(tempFd, { bigint: true })) || !readBounded(tempFd).equals(bytes)) fail();
+      if (!sameFile(flushedStage.at(-1).stat, fs.fstatSync(tempFd, { bigint: true })) || !readBounded(tempFd, fileLimit).equals(bytes)) fail();
       tempChain = flushedStage;
       if (!available()) fail(); guard(scope, event); checkSnapshot(snapshot);
       const lockStat = checkChain(lockChain).at(-1).stat;
@@ -288,7 +311,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
           !sameFile(lockChain.at(-1).stat, fs.fstatSync(lockFd, { bigint: true }))) fail();
       fs.renameSync(temp, snapshot.full); tempChain = undefined;
       savedIdentity = stagedStat;
-      const saved = openPin(snapshot.full);
+      const saved = openPin(snapshot.full, fileLimit);
       try {
         if (!sameNode(saved.pin.before, stagedStat) || !saved.bytes.equals(bytes)) fail();
         guard(scope, event); checkChain(snapshot.projectChain); checkChain(snapshot.stateChain); if (!available()) fail();
@@ -314,7 +337,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
     // A failed/foreign lock cleanup or a changed record must never produce a saved acknowledgement.
     guard(scope, event); checkChain(snapshot.projectChain); checkChain(snapshot.stateChain); unlocked(snapshot);
     if (!available()) fail();
-    const confirmed = openPin(snapshot.full);
+    const confirmed = openPin(snapshot.full, fileLimit);
     try {
       if (!sameNode(savedIdentity, confirmed.pin.before) || !confirmed.bytes.equals(bytes)) fail();
       guard(scope, event); checkChain(snapshot.projectChain); checkChain(snapshot.stateChain); unlocked(snapshot);
@@ -341,7 +364,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
           guard(scope, event); checkChain(chain); unlocked(snapshot);
           let saved = null, previousBytes = null;
           if (!missing(snapshot.full)) {
-            const opened = openPin(snapshot.full); snapshot.pin = opened.pin; previousBytes = opened.bytes;
+            const opened = openPin(snapshot.full, fileLimit); snapshot.pin = opened.pin; previousBytes = opened.bytes;
             if (previousBytes.length > 128) fail();
             saved = memory(JSON.parse(previousBytes.toString('utf8')));
             if (!previousBytes.equals(Buffer.from(JSON.stringify(saved) + '\n'))) fail();
@@ -371,7 +394,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
           const bytes = Buffer.from('{"version":1,"seen":true}\n');
           let seen = false;
           if (!missing(snapshot.full)) {
-            const opened = openPin(snapshot.full); snapshot.pin = opened.pin;
+            const opened = openPin(snapshot.full, fileLimit); snapshot.pin = opened.pin;
             if (!opened.bytes.equals(bytes)) fail();
             seen = true;
           }

@@ -1,3 +1,4 @@
+import type {ChatQueueBridge,ChatQueueSnapshot,StoredChatQueueRow} from '../../packages/protocol/src/chat-queue.js';
 import type {ClaudePreferenceBridge} from '../../apps/desktop/src/claude-preferences.js';
 /// <reference lib="dom" />
 import test from 'node:test';
@@ -100,9 +101,10 @@ function surface() {
   el('codex-messages').clientHeight = 300;
   return { doc, root, el };
 }
-function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | null = memory(), activate = true, preferences?:ClaudePreferenceBridge) {
+function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | null = memory(), activate = true, preferences?:ClaudePreferenceBridge,queuePort:ChatQueueBridge=memoryQueue()) {
   const { doc, root, el } = surface();
   const chat = new ClaudeChat(doc as unknown as Document, { bridge, storage,...(preferences?{preferences}:{}) });
+  void chat.setQueuePersistence(queuePort);
   if (activate) chat.activate();
   const input = el('codex-composer'), messages = el('codex-messages');
   const type = (text: string) => { input.value = text; input.dispatchEvent(new Event('input')); };
@@ -111,6 +113,9 @@ function mount(bridge: unknown, storage: Pick<Storage, 'getItem' | 'setItem'> | 
   const saved = () => el('claude-saved-chats').querySelectorAll('button').filter(node => node.dataset.conversationId);
   const remove = () => el('claude-saved-chats').querySelector('.claude-chat-delete');
   return { chat, doc, root, el, input, messages, submit: el('codex-submit'), form: el('codex-compose'), notice: el('claude-chat-notice'), trigger: el('codex-model-trigger'), type, bubbles, tabs, saved, remove };
+}
+function memoryQueue(rows:StoredChatQueueRow[]=[]):ChatQueueBridge&{writes:ChatQueueSnapshot[];refuse:boolean}{
+  const port={version:1 as const,writes:[] as ChatQueueSnapshot[],refuse:false,read:async()=>({available:true,projectPath:'C:\\Project',rows:structuredClone(rows)}),save:async(value:ChatQueueSnapshot)=>{if(port.refuse)throw Error('save refused');port.writes.push(structuredClone(value));return{saved:true as const};}};return port;
 }
 function memory() { const data = new Map<string, string>(); return { data, getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v); } }; }
 const signedIn = { installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'claude-haiku-4-5-20251001'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', message: null,
@@ -876,6 +881,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
       send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-lobby' }; },
       stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.claude = claude;
     const sync = () => {
       if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); }
@@ -889,7 +895,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -974,6 +980,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
       send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-1' }; },
       stop: async () => true, remove: async () => true, onEvent: () => () => {} });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.claude = claude;
     linkChatProviders({ codex: chat, claude, provider: setup });
     startWorkspaceShell(document);
@@ -986,7 +993,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: state() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -1100,6 +1107,7 @@ test('Edge: usage-limit notice offers the other provider in both directions and 
       send: async request => { f.calls.push(request); return { turnId: 'turn-1', conversationId: 'conv-1' }; },
       stop: async () => true, remove: async () => true, onEvent: fn => { f.listener = fn; return () => {}; } });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.emit = event => f.listener(event);
     linkChatProviders({ codex: chat, claude, provider: setup });
     startWorkspaceShell(document);
@@ -1117,7 +1125,7 @@ test('Edge: usage-limit notice offers the other provider in both directions and 
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: state() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -1199,6 +1207,7 @@ test('Edge: switching between signed-in ChatGPT and Claude never shows the sign-
       send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-1' }; },
       stop: async () => true, remove: async () => true, onEvent: fn => { f.listener = fn; return () => {}; } });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.emit = event => f.listener(event);
     linkChatProviders({ codex: chat, claude, provider: setup });
     startWorkspaceShell(document);
@@ -1213,7 +1222,7 @@ test('Edge: switching between signed-in ChatGPT and Claude never shows the sign-
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -1456,79 +1465,43 @@ test('a reply that fails mid-turn offers Retry message: it re-sends only on clic
   assert.equal(retries().length, 0);
 });
 
-test('Claude queue: Enter during a reply queues a removable chip; it sends after success and returns to the draft on failure, Stop or a usage limit', async t => {
-  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
-  const chips = () => f.el('claude-chat-queue').querySelectorAll('.composer-queue-chip').map(node => node.querySelector('.composer-queue-text')!.textContent);
-  f.type('First'); key(f.input, 'Enter'); await tick();
-  f.type('Second'); key(f.input, 'Enter'); f.type('Third'); key(f.input, 'Enter'); f.type('Dropped'); key(f.input, 'Enter');
-  assert.equal(sends(b).length, 1, 'nothing extra is sent while the reply runs');
-  assert.deepEqual(chips(), ['Second', 'Third', 'Dropped']); assert.equal(f.el('claude-chat-queue').hidden, false); assert.equal(f.input.value, '');
-  assert.match(f.notice.textContent, /3 messages queued/); assert.equal(f.submit.getAttribute('aria-label'), 'Stop task', 'Stop still works');
-  click(f.el('claude-chat-queue').querySelectorAll('.composer-queue-remove')[2]!);
-  assert.deepEqual(chips(), ['Second', 'Third']);
-  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
-  assert.deepEqual(sends(b).map((row: any) => row.text), ['First', 'Second'], 'only the next message is sent');
-  assert.deepEqual(chips(), ['Third']); assert.deepEqual(f.bubbles().filter(row => row.role === 'user').map(row => row.text), ['First', 'Second']);
-  f.type('Unsent draft');
-  b.emit({ type: 'done', ok: false, error: 'Claude stopped before finishing.', usage: null }); await tick();
-  assert.equal(sends(b).length, 2, 'a failed reply never sends the queue');
-  assert.equal(f.input.value, 'Unsent draft\n\nThird'); assert.equal(f.el('claude-chat-queue').hidden, true);
-  assert.equal(f.notice.textContent, CLAUDE_CHAT_QUEUE_RETURNED_TEXT);
-  // Stop: the queue returns too.
-  f.type(''); f.type('Fourth'); key(f.input, 'Enter'); await tick(); f.type('Fifth'); key(f.input, 'Enter');
-  click(f.submit); await tick(); assert.equal(b.calls.filter(call => call[0] === 'stop').length, 1);
-  b.emit({ type: 'done', ok: false, error: null, usage: null }); await tick();
-  assert.equal(sends(b).length, 3); assert.equal(f.input.value, 'Fifth');
-  // Usage limit: the unanswered prompt and the queue both come back; nothing is resent.
-  f.type(''); f.type('Sixth'); key(f.input, 'Enter'); await tick(); f.type('Seventh'); key(f.input, 'Enter');
-  b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usageLimit: { resetsAt: null }, usage: null }); await tick();
-  assert.equal(sends(b).length, 4); assert.equal(f.input.value, 'Sixth\n\nSeventh');
+test('Claude queue: Enter retains visible rows; edit, reorder, remove and Send next affect only the shown chat',async t=>{
+  const b=fakeBridge(),port=memoryQueue(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();
+  const rows=()=>f.el('claude-chat-queue').querySelectorAll('.queue-row'),texts=()=>rows().map(node=>node.querySelector('.queue-text')!.textContent);
+  f.type('First');key(f.input,'Enter');await tick();
+  f.type('Second');key(f.input,'Enter');assert.equal(f.input.value,'Second');await tick();await tick();f.type('Third');key(f.input,'Enter');await tick();await tick();f.type('Remove me');key(f.input,'Enter');await tick();await tick();
+  assert.deepEqual(texts(),['Second','Third','Remove me']);assert.equal(sends(b).length,1);assert.equal(rows()[0]!.querySelector('.queue-list-icon')!.getAttribute('aria-hidden'),'true');
+  click(rows()[2]!.querySelector('.queue-remove')!);assert.deepEqual(texts(),['Second','Third']);
+  click(rows()[1]!.querySelector('.queue-menu-toggle')!);click(rows()[1]!.querySelector('.queue-up')!);assert.deepEqual(texts(),['Third','Second']);
+  click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-edit')!);const editor=rows()[0]!.querySelector('.queue-edit-input')!;editor.value='Edited third';click(rows()[0]!.querySelector('.queue-save')!);
+  assert.deepEqual(texts(),['Edited third','Second']);assert.equal(rows()[0]!.dataset.queueState,'paused');
+  click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-next')!);assert.equal(sends(b).length,1,'Send next never starts a concurrent reply');
+  f.type('Unsent composer draft');b.emit({type:'done',ok:true,error:null,usage:null});await tick();await tick();
+  assert.deepEqual(sends(b).map((row:any)=>row.text),['First','Edited third']);assert.equal(f.input.value,'Unsent composer draft');assert.deepEqual(texts(),['Second']);
+  b.emit({type:'done',ok:false,error:'Reply failed',usage:null});await tick();
+  assert.equal(sends(b).length,2);assert.equal(rows()[0]!.dataset.queueState,'paused');assert.equal(f.input.value,'Unsent composer draft');
+  await f.chat.prepareForRuntimeRecovery();assert.equal(port.writes.at(-1)!.rows[0]!.text,'Second');
 });
 
-test('Claude steer: Enter during a reply steers it inline, twice quickly; Alt+Enter queues; an ending reply queues the steer instead', async t => {
-  const steers: unknown[] = []; let steerReply: () => Promise<unknown> = async () => ({ messageId: randomUUID() });
-  const b = fakeBridge({ steer: (request: unknown) => { steers.push(request); return steerReply(); } });
-  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
-  const chips = () => f.el('claude-chat-queue').querySelectorAll('.composer-queue-chip').map(node => node.querySelector('.composer-queue-text')!.textContent);
-  const steered = () => f.messages.querySelectorAll('.steered');
-  assert.equal(f.chat.canSteer(), false, 'nothing to steer before a reply runs');
-  f.type('Build a red door'); key(f.input, 'Enter'); await tick();
-  assert.equal(f.chat.canSteer(), true);
-  assert.match(f.notice.textContent, /is working… Enter to steer · Alt\+Enter to queue\.$/);
-  assert.equal((f.input as unknown as { placeholder: string }).placeholder, CLAUDE_CHAT_STEER_HINT, 'the empty composer names both keys');
-  b.emit({ type: 'tool', message: { id: 'tool-1', role: 'tool', text: 'scene_create', at: '', tool: { name: 'scene_create', status: 'started' } } }); await tick();
-  // Enter while the tool call runs (it may be waiting on an approval or a capture): the reply is steered, not queued.
-  f.type('Make it blue'); const enter = key(f.input, 'Enter'); assert.equal(enter.defaultPrevented, true); await tick(); await tick();
-  assert.deepEqual(steers, [{ turnId: 'turn-1', text: 'Make it blue' }]);
-  assert.equal(sends(b).length, 1, 'steering never starts a second reply'); assert.deepEqual(chips(), []); assert.equal(f.input.value, '');
-  const line = steered()[0]!;
-  assert.equal(line.getAttribute('data-role'), 'user'); assert.equal(line.getAttribute('aria-label'), 'Your steering message');
-  assert.equal(line.dataset.steerState, 'sent'); assert.equal(line.querySelector('.message-steer-label')!.textContent, 'Steered');
-  assert.equal(line.querySelector('.message-text')!.textContent, 'Make it blue'); assert.equal(line.querySelector('.chat-message-edit'), null, 'a steered line is not editable');
-  // Twice quickly: both go to the running reply in order.
-  f.type('Taller'); key(f.input, 'Enter'); f.type('And wider'); key(f.input, 'Enter'); await tick(); await tick();
-  assert.deepEqual(steers.map(row => (row as { text: string }).text), ['Make it blue', 'Taller', 'And wider']); assert.equal(steered().length, 3);
-  // Alt+Enter queues for after the reply instead.
-  f.type('After this, add a handle'); const alt = key(f.input, 'Enter', false, true); assert.equal(alt.defaultPrevented, true); await tick();
-  assert.deepEqual(chips(), ['After this, add a handle']); assert.equal(steers.length, 3);
-  // The tool line keeps updating in place after the steering lines.
-  b.emit({ type: 'tool', message: { id: 'tool-1', role: 'tool', text: 'scene_create', at: '', tool: { name: 'scene_create', status: 'finished' } } }); await tick();
-  assert.equal(f.messages.querySelectorAll('[data-role=tool]').length, 1);
-  // The reply was already ending (or hit its limit): the host says no, so the line goes and the text waits in the queue.
-  steerReply = async () => false;
-  f.type('One more thing'); key(f.input, 'Enter'); await tick(); await tick();
-  assert.deepEqual(chips(), ['After this, add a handle', 'One more thing']); assert.equal(f.notice.textContent, CLAUDE_CHAT_STEER_QUEUED_TEXT);
-  assert.equal(steered().length, 3, 'the undelivered line is removed');
-  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
-  assert.deepEqual(sends(b).map(row => (row as { text: string }).text), ['Build a red door', 'After this, add a handle'], 'the queue continues after the reply');
-  // A bridge failure puts the text back in the message box; Stop ends steering.
-  steerReply = async () => { throw new Error('Claude chat is unavailable.'); };
-  f.type('Broken'); key(f.input, 'Enter'); await tick(); await tick();
-  assert.equal(f.input.value, 'Broken'); assert.match(f.notice.textContent, /could not take this message now/);
-  click(f.submit); await tick();
-  assert.equal(f.chat.canSteer(), false, 'a stopping reply takes no guidance');
-  b.emit({ type: 'done', ok: false, error: null, usage: null }); await tick();
-  assert.equal(f.chat.canSteer(), false); assert.notEqual((f.input as unknown as { placeholder: string }).placeholder, CLAUDE_CHAT_STEER_HINT);
+test('Claude explicit Steer joins the exact running reply; refused and unknown messages remain visible without replay',async t=>{
+  const steers:unknown[]=[];let result:unknown={messageId:'steer-accepted'};
+  const b=fakeBridge({steer:async(request:unknown)=>{steers.push(request);if(result instanceof Error)throw result;return result;}}),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();
+  const rows=()=>f.el('claude-chat-queue').querySelectorAll('.queue-row');
+  f.type('First');key(f.input,'Enter');await tick();f.type('Make it blue');key(f.input,'Enter');await tick();await tick();assert.equal(steers.length,0,'Enter only queues');
+  click(rows()[0]!.querySelector('.queue-steer')!);await tick();await tick();assert.deepEqual(steers,[{turnId:'turn-1',text:'Make it blue'}]);assert.equal(sends(b).length,1);assert.equal(rows().length,0);assert.equal(f.messages.querySelector('.steered .message-text')!.textContent,'Make it blue');
+  result=false;f.type('Refused guidance');key(f.input,'Enter');await tick();await tick();click(rows()[0]!.querySelector('.queue-steer')!);await tick();await tick();assert.equal(rows()[0]!.dataset.queueState,'rejected');
+  result=new Error('transport lost');f.type('Uncertain guidance');key(f.input,'Enter');await tick();await tick();click(rows()[1]!.querySelector('.queue-steer')!);await tick();await tick();assert.equal(rows()[1]!.dataset.queueState,'unknown');assert.equal(rows()[1]!.querySelector('.queue-next')!.disabled,true);assert.equal(rows()[1]!.querySelector('.queue-edit')!.disabled,true);
+  b.emit({type:'done',ok:true,error:null,usage:null});await tick();assert.equal(sends(b).length,1);assert.equal(steers.length,3);assert.deepEqual(f.chat.queued().map(row=>row.text),['Refused guidance','Uncertain guidance']);
+});
+
+test('Claude queue recovery pauses saved rows; failed checkpoints and mid-gesture provider changes never deliver them',async t=>{
+  const target:StoredChatQueueRow={id:4,localId:'previous-tab',conversationId:'conv-new',sessionId:null,text:'Retained after update',modelId:'sonnet',effort:'high',connectionId:null,requestId:null,createdAt:'2026-10-20T12:00:00.000Z',state:'pending',attachmentState:'none'};
+  const port=memoryQueue([target]),b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();await f.chat.open('conv-new');await tick();
+  const rows=()=>f.el('claude-chat-queue').querySelectorAll('.queue-row');assert.equal(rows()[0]!.dataset.queueState,'paused');assert.equal(sends(b).length,0);
+  port.refuse=true;click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-next')!);await tick();await tick();assert.equal(sends(b).length,0);assert.match(rows()[0]!.textContent,/secure saving failed/);
+  port.refuse=false;let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve);const original=port.save;port.save=async value=>{await gate;return original(value);};
+  click(rows()[0]!.querySelector('.queue-menu-toggle')!);click(rows()[0]!.querySelector('.queue-next')!);f.chat.deactivate();f.input.value='Other provider draft';release();await tick();await tick();assert.equal(sends(b).length,0);assert.equal(f.input.value,'Other provider draft');
+  f.chat.activate();assert.equal(f.chat.queued()[0]!.text,target.text);
 });
 
 test('Claude steer: a delayed failure after a provider switch restores only its own draft', async t => {
@@ -1845,6 +1818,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
       send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-spawn' }; },
       stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.claude = claude;
     setup.subscribeChatSurface(() => { if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); } else { claude.deactivate(); chat.yieldSurface(false); } });
     startWorkspaceShell(document);
@@ -1854,7 +1828,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -1894,7 +1868,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     // Queue two messages while the reply runs.
     await composer.fill('Now make the platform glow'); await composer.press('Enter');
     await composer.fill('Then add a checkpoint'); await composer.press('Enter');
-    assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Now make the platform glow', 'Then add a checkpoint']);
+    assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Now make the platform glow', 'Then add a checkpoint']);
     await page.locator('#codex-messages .tool-activity').nth(4).scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(shots, 'activity-running-' + scheme + '.png') });
     await page.evaluate(() => {
@@ -1906,7 +1880,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     await page.locator('#codex-messages .chat-change-card').waitFor();
     await page.waitForFunction(() => (window as any).fx.calls.length === 2);
     assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Now make the platform glow', 'the next queued message is sent after success');
-    assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Then add a checkpoint']);
+    assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Then add a checkpoint']);
     assert.equal(await page.locator('#codex-messages .chat-change-summary').innerText(), '1 created · 1 script edited');
     assert.equal(await page.locator('#claude-usage-meter').isVisible(), true);
     assert.equal(await page.locator('#claude-usage-meter .usage-meter-count').innerText(), '19.9k');
@@ -1978,6 +1952,7 @@ test('Edge: Claude edit and rewind with the undo option, plan approval and optio
       send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-lobby', messageId: '00000000-0000-4000-8000-00000000010' + f.calls.length }; },
       stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.claude = claude;
     setup.subscribeChatSurface(() => { if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); } else { claude.deactivate(); chat.yieldSurface(false); } });
     startWorkspaceShell(document);
@@ -1987,7 +1962,7 @@ test('Edge: Claude edit and rewind with the undo option, plan approval and optio
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -2023,7 +1998,7 @@ test('Edge: Claude edit and rewind with the undo option, plan approval and optio
     assert.deepEqual(await page.evaluate(() => (window as any).fx.rewinds), [{ conversationId: 'conv-lobby', messageId: '00000000-0000-4000-8000-000000000003' }]);
     assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 0, 'the restore request waits for the user');
     assert.deepEqual(await page.locator('#codex-messages .codex-message .message-text').allInnerTexts(), ['Make a lobby with a spawn point', 'The lobby and spawn point are ready.']);
-    assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Add a blue door to the lobby']);
+    assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Add a blue door to the lobby']);
     await page.screenshot({ path: join(shots, 'rewind-undo-prefill-' + scheme + '.png') });
     // The user sends the restore request; the edited message follows after that reply finishes.
     await page.locator('#codex-composer').press('Enter');
@@ -2265,15 +2240,15 @@ test('native Claude model choice carries into new chats when browser storage is 
 
 test('runtime recovery preserves raw composer text and queued messages without replaying a turn',async t=>{
  for(const interrupted of[false,true]){
- const native=nativeClaudePreferences(),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ const native=nativeClaudePreferences(),backend=fakeBridge(),port=memoryQueue(),f=mount(backend.bridge,memory(),true,native.bridge,port);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
  f.type('Start the original task');key(f.input,'Enter');await tick();await tick();f.type('Queued follow-up');key(f.input,'Enter');await tick();
  assert.equal(f.chat.queued().length,1);const draft='  Keep raw composer text\n\n  ';f.type(draft);const before=sends(backend).length;
  if(interrupted){backend.emit({type:'done',ok:false,error:'Local services stopped.',usage:null});await tick();}
- await f.chat.prepareForRuntimeRecovery();assert.equal(f.input.value,draft+'\n\nQueued follow-up');assert.equal(f.chat.queued().length,0);assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,f.input.value);assert.equal(sends(backend).length,before);
+ await f.chat.prepareForRuntimeRecovery();assert.equal(f.input.value,draft);assert.deepEqual(f.chat.queued().map(row=>row.text),['Queued follow-up']);assert.equal(port.writes.at(-1)!.rows[0]!.text,'Queued follow-up');assert.equal(port.writes.at(-1)!.rows[0]!.state,'pending');assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);assert.equal(sends(backend).length,before);
  }
 });
 
-test('Edge: Enter steers a running Claude reply inline and the build progress group continues; Alt+Enter queues', { skip: !browserModule, timeout: 60000 }, async t => {
+test('Edge: Enter queues and explicit Steer guides a running Claude reply while build progress continues', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/steer/shots');
   await mkdir(shots, { recursive: true });
   const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
@@ -2294,6 +2269,7 @@ test('Edge: Enter steers a running Claude reply inline and the build progress gr
       steer: async request => { f.steers.push(request); return f.steerReply === 'ok' ? { messageId: crypto.randomUUID() } : false; },
       stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
     const claude = new ClaudeChat(document, { bridge, storage: null });
+    await claude.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:'browser-fixture',rows:[]}),save:async()=>({saved:true})});
     f.claude = claude;
     const sync = () => {
       if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); }
@@ -2307,7 +2283,7 @@ test('Edge: Enter steers a running Claude reply inline and the build progress gr
     if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
     if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
     const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
-      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+      : url === '/packages/protocol/src/chat-queue.js' ? join(build,'packages/protocol/src/chat-queue.js') : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
     if (!file) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
     response.end(await readFile(resolve(file)));
@@ -2331,10 +2307,12 @@ test('Edge: Enter steers a running Claude reply inline and the build progress gr
     message: { id, role: 'tool', text: name, at: new Date().toISOString(), tool: { name, status } } }), [id, name, status]);
   await tool('t1', 'scene_create', 'started'); await tool('t1', 'scene_create', 'finished'); await tool('t2', 'scene_update', 'started');
   await page.locator('#codex-messages .build-progress').waitFor();
-  assert.equal(await composer.getAttribute('placeholder'), 'Enter to steer · Alt+Enter to queue');
-  assert.match(await page.locator('#claude-chat-notice').innerText(), /Enter to steer · Alt\+Enter to queue/);
-  // Enter while a step runs: steered into the reply, shown inline, nothing new sent.
+  assert.equal(await composer.getAttribute('placeholder'), CLAUDE_CHAT_STEER_HINT);
+  assert.match(await page.locator('#claude-chat-notice').innerText(), /Enter to queue/);
+  // Enter while a step runs only queues; the explicit Steer button guides that reply.
   await composer.fill('Make it blue instead'); await composer.press('Enter');
+  assert.equal(await page.evaluate(() => (window as any).fx.steers.length),0);
+  await page.locator('#claude-chat-queue .queue-steer').click();
   await page.waitForFunction(() => (window as any).fx.steers.length === 1);
   const line = page.locator('#codex-messages .codex-message.steered');
   await line.waitFor();
@@ -2348,22 +2326,89 @@ test('Edge: Enter steers a running Claude reply inline and the build progress gr
   await page.waitForFunction(() => document.querySelectorAll('#codex-messages .build-progress .codex-message.tool').length === 3);
   assert.equal(await page.locator('#codex-messages .build-progress').count(), 1);
   assert.equal(await page.locator('#codex-messages .build-progress').getAttribute('data-live'), 'true');
-  // Alt+Enter queues for after the reply instead.
-  await composer.fill('Then add a handle'); await composer.press('Alt+Enter');
-  await page.locator('#claude-chat-queue .composer-queue-chip').waitFor();
-  assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Then add a handle']);
+  // Another Enter queues the following message without steering it.
+  await composer.fill('Then add a handle'); await composer.press('Enter');
+  await page.locator('#claude-chat-queue .queue-row').waitFor();
+  assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Then add a handle']);
   assert.equal(await page.evaluate(() => (window as any).fx.steers.length), 1);
   await page.screenshot({ path: join(shots, 'claude-steer.png') });
-  // A reply that was already ending queues the steering message instead.
+  // A refused explicit steer stays in its original queue row and never retries automatically.
   await page.evaluate(() => { (window as any).fx.steerReply = 'ended'; });
   await composer.fill('Also a window'); await composer.press('Enter');
-  await page.waitForFunction(() => document.querySelectorAll('#claude-chat-queue .composer-queue-chip').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#claude-chat-queue .queue-row').length === 2);
+  await page.locator('#claude-chat-queue .queue-steer').nth(1).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#claude-chat-queue .queue-row[data-queue-state=\"rejected\"]').length===1);
+  await page.locator('#claude-chat-queue .queue-menu-toggle').first().click();
+  await page.locator('#claude-chat-queue .queue-next').first().click();
   assert.equal(await page.locator('#codex-messages .codex-message.steered').count(), 1);
   await tool('t3', 'scene_update', 'finished');
   await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-steer', type: 'done', ok: true, error: null, usage: null }));
   await page.waitForFunction(() => (window as any).fx.calls.length === 2);
   assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Then add a handle', 'the queue continues after the reply');
   assert.deepEqual(errors, []);
+});
+
+test('Claude enqueue preserves the composer until its checkpoint succeeds and repeated Enter cannot duplicate it',async t=>{
+  const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);let attempts=0,hold=false;
+  port.save=async value=>{attempts++;if(hold)await gate;return save(value);};
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Earlier queued prompt');key(f.input,'Enter');await tick();await tick();
+  hold=true;attempts=0;f.type('Queued original  ');key(f.input,'Enter');key(f.input,'Enter');
+  assert.equal(f.input.value,'Queued original  ');assert.equal(f.chat.queued().length,2);await tick();assert.equal(attempts,1);assert.equal(sends(b).length,1);
+  const host=f.el('claude-chat-queue'),rows=host.querySelectorAll('.queue-row');assert.equal(host.hidden,false);assert.equal(host.getAttribute('aria-busy'),'true');
+  assert.deepEqual(rows.map(row=>row.querySelector('.queue-text')!.textContent),['Earlier queued prompt','Queued original']);assert.equal(host.querySelector('.queue-busy-notice')!.textContent,'Saving queued messages…');
+  for(const row of rows)for(const name of ['steer','remove','menu-toggle','edit','up','down','next','save','cancel'])assert.equal(row.querySelector('.queue-'+name)!.disabled,true,name+' stays disabled while saving');
+  release();await tick();await tick();assert.equal(f.input.value,'');assert.deepEqual(f.chat.queued().map(row=>row.text),['Earlier queued prompt','Queued original']);assert.equal(port.writes.at(-1)!.rows.length,2);assert.equal(port.writes.at(-1)!.rows[1]!.state,'pending');assert.equal(host.hidden,false);assert.equal(host.getAttribute('aria-busy'),'false');
+});
+
+test('Claude lost enqueue save acknowledgement retains its draft, removes the provisional duplicate and never replays restored text',async t=>{
+  const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);
+  port.save=async value=>{await gate;await save(value);throw Error('acknowledgement lost after bytes were saved');};
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Keep this raw draft  ');key(f.input,'Enter');release();await tick();await tick();
+  assert.equal(f.input.value,'Keep this raw draft  ');assert.deepEqual(f.chat.queued(),[]);assert.equal(sends(b).length,1);
+  const retained=port.writes.find(value=>value.rows.length);assert.ok(retained);const restoredBackend=fakeBridge(),restored=mount(restoredBackend.bridge,memory(),true,undefined,memoryQueue(retained.rows));t.after(()=>restored.chat.stop());await restored.chat.refresh();await restored.chat.open('conv-new');await tick();
+  assert.deepEqual(restored.chat.queued().map(row=>row.text),['Keep this raw draft']);assert.equal(restored.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');assert.equal(sends(restoredBackend).length,0);
+  b.emit({type:'done',ok:true,error:null,usage:null});await tick();f.type('Ordinary Send');await f.chat.send();assert.equal(sends(b).length,2,'failed queue saving does not block ordinary Send');
+});
+
+for(const change of ['edit','edit-back','model','chat','provider','finished'] as const)test('Claude enqueue pauses after '+change+' during its checkpoint and preserves current drafts',async t=>{
+  const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);port.save=async value=>{await gate;return save(value);};
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Queued original');key(f.input,'Enter');await tick();
+  if(change==='edit')f.type('Edited while saving');
+  if(change==='edit-back'){f.type('Temporary edit');f.type('Queued original');}
+  if(change==='model')(f.chat as unknown as {chooseModel(model:string):void}).chooseModel('opus');
+  if(change==='chat'){f.chat.newChat();f.type('New chat draft');}
+  if(change==='provider'){f.chat.deactivate();f.input.value='Other provider draft';}
+  if(change==='finished')b.emit({type:'done',ok:true,error:null,usage:null});
+  release();await tick();await tick();
+  assert.equal(f.input.value,change==='edit'?'Edited while saving':change==='chat'?'New chat draft':change==='provider'?'Other provider draft':'Queued original');
+  const queue=(f.chat as unknown as {queue:{state:string;text:string}[]}).queue;assert.equal(queue[0]!.state,'paused');assert.equal(queue[0]!.text,'Queued original');assert.equal(sends(b).length,1);
+});
+
+test('Claude Stop stays available during an enqueue checkpoint and retains its pending row without sending it',async t=>{
+  const port=memoryQueue(),save=port.save;let release!:()=>void;const gate=new Promise<void>(done=>release=done);port.save=async value=>{await gate;return save(value);};
+  const b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>{release();f.chat.stop();});await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('After Stop');key(f.input,'Enter');
+  assert.equal(f.submit.disabled,false);assert.equal(f.submit.getAttribute('aria-label'),'Stop task');click(f.submit);await tick();assert.equal(b.calls.filter(row=>row[0]==='stop').length,1);
+  b.emit({type:'done',ok:false,error:null,usage:null});release();await tick();await tick();
+  assert.equal(sends(b).length,1);assert.equal(f.input.value,'After Stop');assert.deepEqual(f.chat.queued().map(row=>row.text),['After Stop']);assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');
+});
+
+test('Claude usage limits retain the unanswered draft and separately persisted pending rows without replay',async t=>{
+  const port=memoryQueue(),b=fakeBridge(),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();
+  f.type('Unanswered prompt');key(f.input,'Enter');await tick();f.type('Follow-up after reset');key(f.input,'Enter');await tick();await tick();
+  b.emit({type:'done',ok:false,error:'Claude usage limit reached. This message was not answered; try again after the limit resets.',usageLimit:{resetsAt:null},usage:null});await tick();
+  assert.equal(sends(b).length,1);assert.equal(f.input.value,'Unanswered prompt');assert.deepEqual(f.chat.queued().map(row=>row.text),['Follow-up after reset']);assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');
+  await f.chat.prepareForRuntimeRecovery();assert.equal(port.writes.at(-1)!.rows[0]!.text,'Follow-up after reset');assert.equal(f.input.value,'Unanswered prompt');assert.equal(sends(b).length,1);
+});
+
+test('Claude checkpoint refusal leaves a row retryable but no native dispatch occurs until secure saving succeeds',async t=>{
+  let steers=0;const port=memoryQueue(),b=fakeBridge({steer:async()=>{steers++;return{messageId:'accepted-once'};}}),f=mount(b.bridge,memory(),true,undefined,port);t.after(()=>f.chat.stop());await f.chat.refresh();
+  f.type('First');key(f.input,'Enter');await tick();f.type('Queued guidance');key(f.input,'Enter');await tick();await tick();
+  port.refuse=true;click(f.el('claude-chat-queue').querySelector('.queue-steer')!);await tick();await tick();assert.equal(steers,0);assert.equal(f.el('claude-chat-queue').querySelector('.queue-row')!.dataset.queueState,'paused');assert.deepEqual(f.chat.queued().map(row=>row.text),['Queued guidance']);
+  port.refuse=false;click(f.el('claude-chat-queue').querySelector('.queue-steer')!);await tick();await tick();assert.equal(steers,1);assert.deepEqual(f.chat.queued(),[]);assert.equal(sends(b).length,1);
 });
 
 test('durability: sending during a late history load retains the prompt and streamed reply once',async t=>{

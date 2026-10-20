@@ -16,6 +16,7 @@ import { startStarterGallery } from './starter-gallery.js';
 import { startWelcomeTour } from './welcome-tour.js';
 import { ClaudeChat, linkChatProviders, setChatFeedbackHooks } from './claude-chat.js';
 import { SharedConversations } from './shared-conversations.js';
+import type { ChatQueueBridge } from '../../../packages/protocol/src/chat-queue.js';
 import { startNativeHandoff } from './native-handoff.js';
 import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
@@ -2238,6 +2239,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // Both providers share one chat surface (tabs, transcript, composer and model picker). While provider setup reports
   // the Claude surface, Codex pauses drawing there (its state is never destroyed) and the Claude chat renders instead.
   const claudeChat = document.getElementById('codex-compose') ? new ClaudeChat(document) : null;
+  const chatQueue = (window as unknown as {arcaneDesktop?:{chatQueue?:ChatQueueBridge}}).arcaneDesktop?.chatQueue ?? null;
+  // Each provider recovers its own encrypted text before admitting queued work.
+  // The controllers await these reads during restart; direct Send stays responsive.
+  void Promise.all([codexChat.setQueuePersistence(chatQueue), claudeChat?.setQueuePersistence(chatQueue)]);
   let claudeChatStopped = false;
   let sharedConversations:SharedConversations|null=null;
   // The composer model list shows ChatGPT and Claude models; picking the other provider's model switches provider

@@ -6,9 +6,10 @@
 import {
   closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderColumns, describeToolActivity, fillModelColumns, firstModelRow, installComposerCommands, loopPickerFocus, modelListEntry,
   modelListMove, parseToolDetail, patchMessageText, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderEarlierButton, renderMessageText, renderToolActivity,
-  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,boundRecordedChatTranscript,publicChatText,
+  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,boundRecordedChatTranscript,publicChatText,renderChatQueueStrip,ChatQueueJournal,chatQueueScope,
 } from './codex-chat.js';
-import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
+import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange,ChatQueueRow,ChatQueueAction } from './codex-chat.js';
+import type {ChatQueueBridge,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
 import { ClaudePreferenceStore, claudePreferenceBridge, type ClaudePreferenceBridge, type ClaudePreferenceSnapshot } from './claude-preferences.js';
 import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, restoreChatSwitchFocus } from './chat-tabs.js';
@@ -278,8 +279,8 @@ export function usageMeterText(usage: ClaudeConversationUsage, display: TaskUsag
 /** Per-conversation usage totals kept on this device (bounded). */
 export const CLAUDE_CHAT_USAGE_KEY = 'arcane.claude-chat.usage.v1';
 const USAGE_ROWS = 200;
-/** The composer hint while a reply that can be steered runs (Enter steers, Alt+Enter queues). */
-export const CLAUDE_CHAT_STEER_HINT = 'Enter to steer · Alt+Enter to queue';
+/** Steering is an explicit queue-row action; Enter keeps the next prompt pending. */
+export const CLAUDE_CHAT_STEER_HINT = 'Enter to queue · Use Steer on a queued message';
 /** Shown when a steering message arrived as the reply ended: it waits in the queue instead. */
 export const CLAUDE_CHAT_STEER_QUEUED_TEXT = 'The reply was already finishing, so your message is queued and sent next.';
 /** At most this many messages wait in the queue while a reply runs. */
@@ -383,8 +384,15 @@ export class ClaudeChat {
   /** Studio changes reported by the visible turn's tools; shown as one card when the turn ends. */
   private turnChanges: ToolChange[] = [];
   /** Messages typed while a reply runs; sent one by one after each reply finishes successfully. */
-  private queue: { id: number; text: string; tabKey: string }[] = [];
+  private queue: (ChatQueueRow&{tabKey:string})[] = [];
+  private queueJournal=new ChatQueueJournal();
+  private queueAfterDraftSendScope:string|null=null;
   private queueSeq = 0;
+  private queueEnqueue:ChatQueueRow|null=null;
+  private queueAfterTurn:Turn|null=null;
+  private queueSending=false;
+  private queueSteering=false;
+  private queueChoice:string|null=null;
   private usage = new Map<string, ClaudeConversationUsage>();
   private confirmingDelete = false;
   private deleting = new Set<string>();
@@ -455,6 +463,18 @@ export class ClaudeChat {
   isActive(): boolean { return this.active; }
   activeConversation(): string | null { return this.activeTab()?.conversationId ?? null; }
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
+  setQueuePersistence(port:ChatQueueBridge|null):Promise<void>{
+    if(this.profile.provider!=='claude')return Promise.resolve();
+    return this.queueJournal.attach(port,'claude',(rows,project)=>{
+      if(this.queue.length)return;
+      this.queue=rows.map<ChatQueueRow&{tabKey:string}>(target=>({id:target.id,text:target.text,tabKey:target.localId,scope:chatQueueScope('claude',project,target.conversationId,target.sessionId,target.localId),
+        state:target.state==='unknown'?'unknown':target.state==='rejected'?'rejected':'paused',notice:target.attachmentState==='missing'?'Attachments must be restored before this message can be sent.':'Restored after restart. Review this chat and choose Send next.',...(target.requestId?{requestId:target.requestId}:{}),target}));
+      this.queueSeq=Math.max(this.queueSeq,...rows.map(row=>row.id));this.queueAfterTurn=null;this.queueChoice=null;
+    },()=>{if(!this.nativeDisposed)this.render();});
+  }
+  private queueProject():string|null{return this.preferenceStore?.projectPath??this.queueJournal.projectPath;}
+  private queueSave(explicit=false):Promise<boolean>{return this.queueJournal.save(this.queue,this.queueProject(),explicit);}
+
   isDraftConversation():boolean {
     const tab=this.activeTab();return !this.nativeDisposed&&!this.nativeHydrating&&!this.loading&&!!tab&&tab.conversationId===null&&this.turn?.tabKey!==tab.key;
   }
@@ -577,6 +597,7 @@ export class ClaudeChat {
   /** Returns the shared surface to Codex, keeping Claude tabs, drafts and any running turn. */
   deactivate(): void {
     if (!this.active) return;
+    this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');
     const tab = this.activeTab(), input = this.input();
     if (tab && input) tab.draft = input.value;
     this.queueNativePreferences();
@@ -785,6 +806,7 @@ export class ClaudeChat {
   closeTab(key: string): void {
     const index = this.tabs.findIndex(tab => tab.key === key);
     if (index < 0 || this.turn && this.turn.turnId === null && this.turn.tabKey === key) return;
+    if(this.queue.some(item=>item.tabKey===key)){this.notice='This chat has queued messages. Remove them before closing its tab.';this.render();return;}
     this.saveDraft();
     this.tabs.splice(index, 1);this.restoreDeferredPreferences();
     if (!this.tabs.length) this.createTab(null);
@@ -792,15 +814,15 @@ export class ClaudeChat {
     else { this.persistTabs(); this.render(); }
   }
 
-  /** Enter or Send: sends now; while a reply runs it steers that reply (or queues it when the reply cannot be steered). */
+  /** Enter queues during a reply. Steering always requires the explicit row action. */
   submit(): void {
     if (this.rewinding) return;
-    if (this.turn) { if (this.canSteer()) void this.steer(); else this.enqueue(); } else void this.send();
+    if (this.turn) this.enqueue(); else void this.send();
   }
   /** The visible running reply takes steering messages: the bridge supports it and the reply has started and is not stopping. */
   canSteer(): boolean {
     const turn = this.turn;
-    return this.active && !!turn && typeof this.bridge?.steer === 'function' && turn.turnId !== null && !turn.stopping && this.turnOwnsActiveTab() && this.ready();
+    return this.active && !this.queueEnqueue&&!this.queueSteering&&!!turn && typeof this.bridge?.steer === 'function' && turn.turnId !== null && !turn.stopping && this.turnOwnsActiveTab() && this.ready();
   }
   /** While a steerable reply runs, the empty composer says what Enter and Alt+Enter do; the shared placeholder returns after. */
   private steerHint(on: boolean): void {
@@ -813,94 +835,152 @@ export class ClaudeChat {
    * progress group keeps going); Claude reads it after the step it is running. A reply that was already ending gets it
    * queued instead, so nothing is lost and nothing runs twice. Attachments wait for the next message.
    */
-  async steer(): Promise<boolean> {
+  async steer(queued?:ChatQueueRow): Promise<boolean> {
     const bridge = this.bridge, input = this.input(), tab = this.activeTab(), turn = this.turn;
     if (!this.active || !bridge?.steer || !input || !tab || !turn?.turnId || !this.canSteer()) return false;
-    const message = input.value.trim();
+    const item=queued?this.queueItem(queued):null;if(queued&&!item)return false;
+    const message = (item?.text??input.value).trim();
     if (!message) return false;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for ' + this.profile.name + '. Shorten it to 100,000 characters.'; this.render(); return false; }
-    let pending: unknown = null; try { pending = this.takeAttachments(message); } catch { pending = true; }
+    let pending: unknown = null; if(!item)try { pending = this.takeAttachments(message); } catch { pending = true; }
     if (pending) { this.notice = CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT; this.render(); return false; }
-    input.value = ''; tab.draft = ''; this.notice = '';
+    if(item){
+      if(item.target?.attachmentState==='missing'){this.notice='Restore this message’s attachments before sending it.';this.render();return false;}
+      const gesture=this.queueGesture();item.state='sending';item.notice='Saving steering message…';this.queueSteering=true;this.render();
+      const saved=await this.queueSave(true);this.queueSteering=false;
+      if(!saved||gesture!==this.queueGesture()||this.turn!==turn||!this.canSteer()){
+        item.state='paused';item.notice=saved?'Not sent: the conversation changed while saving.':'Not sent: secure saving failed. Your text is retained.';this.render();return false;
+      }
+      item.dispatched=true;item.notice='Steering this reply…';
+    }else{input.value = ''; tab.draft = '';}
+    this.notice = '';
     const echo: ClaudeChatMessage = { id: '', role: 'user', text: message, at: new Date().toISOString(), steered: true };
     const article = this.appendMessage(echo, true), epoch = this.viewEpoch;
     article.dataset.steerState = 'sending';
-    this.render();
+    this.queueSteering=true;this.render();
     let reply: unknown = null, failed = false;
     try { reply = await bridge.steer({ turnId: turn.turnId, text: message }); } catch { failed = true; }
+    this.queueSteering=false;
     const id = text(record(reply)?.messageId, 256), shown = this.active && epoch === this.viewEpoch;
     if (id) {
       echo.id = id;
       if (shown) article.dataset.steerState = 'sent';
-      this.render(); return true;
+      if(item)this.queue=this.queue.filter(row=>row!==item);
+      this.render();if(turn.delivery.state==='completed')this.drainQueue(turn);return true;
     }
-    // Not delivered: the transcript line goes away and the text waits in the queue (reply still running) or the draft.
+    // A refused or unknown steering result never starts another turn or retries this text.
     if (shown) { article.remove(); this.shown = this.shown.filter(item => item !== echo); }
-    if (!failed && this.turn === turn && this.queue.length < CLAUDE_CHAT_QUEUE_LIMIT) {
-      this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key }); this.notice = CLAUDE_CHAT_STEER_QUEUED_TEXT;
-    } else if (!failed && !this.turn && this.tabs.includes(tab) && tab.key === this.activeKey && !input.value.trim() && this.canSend()) {
-      // The reply finished meanwhile: the message simply starts the next one.
-      input.value = message; tab.draft = message; this.render(); void this.send(); return false;
-    } else {
+    if(item){
+      item.state=!failed&&reply===false?'rejected':'unknown';item.notice=item.state==='rejected'?'Steering was not accepted. This message is still queued.':'Steering delivery is unknown. Review the recorded reply before sending again.';
+      this.pauseQueue('Paused after an unconfirmed steering result.');this.notice=item.notice;
+    }else{
       const ownsComposer = this.active && tab.key === this.activeKey;
       const current = ownsComposer ? input.value : tab.draft, next = current.trim() ? current + '\n\n' + message : message;
       tab.draft = next; if (ownsComposer) input.value = next;
       this.preferenceEdits++; this.queueNativePreferences();
-      this.notice = this.profile.name + ' could not take this message now. It is back in the message box.';
+      this.notice = !failed&&reply===false?'This reply did not accept the steering message. Your text is back in the message box.':'Steering delivery is unknown. Your text is retained; review the recorded reply before sending again.';
     }
     this.render(); return false;
   }
 
   /** Queues the composer text to send after the running reply finishes successfully. */
   enqueue(): boolean {
+    if(this.queueEnqueue)return false;
     const input = this.input(), tab = this.activeTab();
-    if (!this.active || !input || !tab || !this.turn || !this.ready()) return false;
-    const message = input.value.trim();
+    if (!this.active || !input || !tab || !this.turn || !this.turnOwnsActiveTab()||!this.ready()) return false;
+    if(this.profile.provider==='claude'&&!this.queueJournal.available(this.queueProject())){this.notice=this.queueJournal.notice()??'Wait for queued message recovery before adding another prompt.';this.render();return false;}
+    const draft=input.value,message = draft.trim();
     if (!message) return false;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for ' + this.profile.name + '. Shorten it to 100,000 characters.'; this.render(); return false; }
     let pending: unknown = null; try { pending = this.takeAttachments(message); } catch { pending = true; }
     if (pending) { this.notice = CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT; this.render(); return false; }
-    if (this.queue.length >= CLAUDE_CHAT_QUEUE_LIMIT) { this.notice = 'Up to ' + CLAUDE_CHAT_QUEUE_LIMIT + ' messages can wait. Remove one or wait for the reply.'; this.render(); return false; }
-    this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key });
-    input.value = ''; tab.draft = '';
-    this.notice = '';
-    this.render();
-    return true;
+    if (!this.turn.turnId){this.notice='Wait for the current message acknowledgement before queueing another prompt. Your text is retained.';this.render();return false;}
+    if (!this.pushQueued(message,tab))return false;
+    const item=this.queue.at(-1)!;
+    if(this.profile.provider!=='claude'){
+      item.notice='Queued in this window only.';this.armQueue(this.turn);input.value='';tab.draft='';this.notice='';this.render();return true;
+    }
+    const turn=this.turn!,gesture=this.queueGesture(),draftRevision=this.preferenceEdits,attachmentRevision=this.attachments.controller()?.selectionRevision();
+    item.state='paused';item.notice='Saving queued message…';this.queueEnqueue=item;
+    const saving=this.queueSave(true);this.render();
+    void saving.then(saved=>{
+      if(this.queueEnqueue!==item)return;this.queueEnqueue=null;
+      if(!saved){
+        // The IPC reply can fail after bytes were saved. Any surviving disk row restores paused.
+        this.queue=this.queue.filter(row=>row!==item);this.notice='Saving the queued message could not be confirmed. Your original draft and files are retained.';
+      }else if(gesture===this.queueGesture()&&draftRevision===this.preferenceEdits&&this.turn===turn&&!turn.stopping&&this.active&&this.input()===input&&input.value===draft&&this.attachments.controller()?.selectionRevision()===attachmentRevision){
+        item.state='queued';item.notice=null;this.armQueue(turn);input.value='';tab.draft='';this.notice='';
+      }else{
+        item.notice='Saved and paused because the draft or conversation changed. Your current draft is retained.';
+        this.pauseQueue('Paused while saving the queued message. Choose Send next to resume.');
+      }
+      this.render();
+    });return true;
   }
   /** Queued messages (presentation and tests). */
-  queued(): readonly { id: number; text: string }[] { return this.queue.map(item => ({ id: item.id, text: item.text })); }
+  queued(): readonly { id: number; text: string }[] { const scope=this.queueScope();return this.queue.filter(item=>item.scope===scope).map(item => ({ id: item.id, text: item.text })); }
   /** Removes one queued message without sending it. */
   dequeue(id: number): void {
+    if(this.queueEnqueue)return;
     const before = this.queue.length;
-    this.queue = this.queue.filter(item => item.id !== id);
+    this.queue = this.queue.filter(item => item.id !== id||item.scope!==this.queueScope()||item.state==='sending');
     if (this.queue.length !== before) this.render();
   }
-  /** The reply did not finish: every queued message goes back to its chat's draft. Nothing is sent. */
+  /** Unsubmitted rows stay separate from drafts and require an explicit resume after failure. */
   private returnQueue(): void {
-    if (!this.queue.length) return;
-    const input = this.input();
-    for (const item of this.queue.splice(0)) {
-      const tab = this.tabs.find(row => row.key === item.tabKey); if (!tab) continue;
-      const shown = this.active && tab.key === this.activeKey && input;
-      const current = shown ? input!.value : tab.draft;
-      const next = current ? current + '\n\n' + item.text : item.text;
-      tab.draft = next; if (shown) input!.value = next;
-    }
-    this.notice = CLAUDE_CHAT_QUEUE_RETURNED_TEXT;
+    if(!this.queue.length)return;this.pauseQueue('Paused because the reply did not finish. Choose Send next when ready.');
+    this.notice='Queued messages are retained above the composer. Choose Send next to resume.';
   }
-  /** After a successful reply: sends the next queued message when its chat is the one shown; otherwise returns it. */
-  private drainQueue(): void {
-    const head = this.queue[0];
-    if (!head || this.turn) return;
-    if (!this.active || head.tabKey !== this.activeKey || !this.canSend()) { this.returnQueue(); this.render(); return; }
-    this.queue.shift();
-    void this.send(head.text);
+  /** Only the exact successful reply armed by a queue gesture can advance its own queue. */
+  private drainQueue(finished?:Turn,manual=false): void {
+    if(this.queueEnqueue||this.queueSending||this.queueSteering||this.turn||!this.active||!this.canSend()||!manual&&(!finished||this.queueAfterTurn!==finished))return;
+    const scope=this.queueScope(),head=this.queue.find(item=>item.scope===scope&&item.state==='queued');if(!head)return;
+    if(finished&&(finished.tabKey!==head.tabKey||finished.conversationId!==this.activeTab()?.conversationId)){this.pauseQueue('Conversation changed. Choose Send next to resume.');return;}
+    this.queueAfterTurn=null;this.queueSending=true;head.state='sending';head.notice='Sending queued message…';this.render();
+    void this.send(head.text,head).then(accepted=>{
+      if(accepted){this.queue=this.queue.filter(item=>item!==head);if(this.active&&this.queueScope()===scope&&this.queue.some(item=>item.scope===scope&&item.state==='queued'))this.armQueue(accepted);}
+      else if(head.state==='sending'){head.state='paused';head.notice='Not sent. Review this conversation and choose Send next.';this.pauseQueue('Paused after the queued message could not start.');}
+      this.queueSending=false;this.render();
+      if(accepted?.delivery.state==='completed')this.drainQueue(accepted);
+    });
+  }
+
+  private queueScope(tab=this.activeTab()):string|null {const project=this.queueProject();return tab&&project&&this.profile.provider==='claude'?chatQueueScope('claude',project,tab.conversationId,null,tab.key):tab&&this.profile.provider!=='claude'?JSON.stringify([this.profile.provider,tab.key,tab.conversationId]):null;}
+  private queueGesture():string{return JSON.stringify([this.active,this.viewEpoch,this.queueScope(),this.activeTab()?.model,this.activeTab()?.effort,this.turn?.turnId,this.turn?.stopping]);}
+  private queueItem(captured:Readonly<ChatQueueRow>):(ChatQueueRow&{tabKey:string})|null{return this.queue.find(item=>item.id===captured.id&&item.scope===this.queueScope()&&item.scope===captured.scope&&item.text===captured.text&&item.state===captured.state)??null;}
+  private pushQueued(text:string,tab:Tab):boolean {
+    const scope=this.queueScope(tab);if(!scope)return false;
+    if(this.queue.length>=64||this.queue.filter(item=>item.scope===scope).length>=CLAUDE_CHAT_QUEUE_LIMIT){this.notice='Up to '+CLAUDE_CHAT_QUEUE_LIMIT+' messages can wait in one chat. Remove one before adding another.';this.render();return false;}
+    const target:StoredChatQueueRow={id:++this.queueSeq,localId:tab.key,conversationId:tab.conversationId,sessionId:null,text,modelId:tab.model||null,effort:tab.effort||null,connectionId:null,requestId:null,createdAt:new Date().toISOString(),state:'pending',attachmentState:'none'};
+    this.queue.push({id:target.id,text,tabKey:tab.key,scope,state:'queued',notice:null,target});return true;
+  }
+  private queueSelection():string{return JSON.stringify([this.queueScope(),this.activeTab()?.model,this.activeTab()?.effort]);}
+  private armQueue(turn:Turn|null):void{this.queueAfterTurn=turn;this.queueChoice=this.queueSelection();}
+  private pauseQueue(reason:string):void {this.queueAfterDraftSendScope=null;this.queueAfterTurn=null;this.queueChoice=null;for(const item of this.queue)if(item.state==='queued'){item.state='paused';item.notice=reason;}}
+  private queueAction(action:ChatQueueAction,captured:Readonly<ChatQueueRow>,gesture:string,text?:string):boolean {
+    if(this.queueEnqueue||!this.active||gesture!==this.queueGesture())return false;const item=this.queueItem(captured);if(!item||item.state==='sending')return false;
+    if((action==='steer'||action==='next')&&item.target?.attachmentState==='missing'){this.notice='Restore this message’s attachments before sending it. Your text is retained.';this.render();return false;}
+    const scoped=this.queue.filter(row=>row.scope===item.scope),index=scoped.indexOf(item);
+    if(action==='remove')this.dequeue(item.id);
+    else if(action==='edit'){
+      if(item.state==='unknown')return false;
+      if(typeof text!=='string'||!text.trim()||text.length>MAX_INPUT){this.notice='Enter a message within the chat input limit.';this.render();return false;}
+      item.text=text.trim();if(item.state!=='unknown'){item.state='paused';item.notice='Edited. Choose Send next to resume.';}
+    }else if(action==='steer'){if(item.state==='unknown'||!this.canSteer())return false;void this.steer(item);}
+    else if(action==='up'||action==='down'){
+      const other=scoped[index+(action==='up'?-1:1)];if(!other)return false;const a=this.queue.indexOf(item),b=this.queue.indexOf(other);[this.queue[a],this.queue[b]]=[this.queue[b]!,this.queue[a]!];
+    }else if(action==='next'){
+      if(item.state==='unknown'||!this.ready()||this.rewinding)return false;
+      const first=this.queue.indexOf(scoped[0]!);this.queue.splice(this.queue.indexOf(item),1);this.queue.splice(first,0,item);item.state='queued';item.notice=null;item.tabKey=this.activeTab()!.key;
+      this.armQueue(this.turnOwnsActiveTab()?this.turn:null);if(!this.turn)this.drainQueue(undefined,true);
+    }
+    this.render();return true;
   }
 
   /** Sends the composer text, or one queued message (which leaves the composer untouched). */
   private sendPreparationFingerprint():string{return JSON.stringify([this.viewEpoch,this.preferenceStore?.projectPath,this.activeKey,this.activeTab()?.conversationId,this.activeTab()?.model,this.activeTab()?.effort,this.turn?.turnId]);}
-  async send(queued?: string): Promise<void> {
-    if(this.nativeHydrating)return;
+  async send(queued?: string,queuedEntry?:ChatQueueRow): Promise<Turn|undefined> {
+    if(this.queueEnqueue||this.nativeHydrating)return;
     const bridge = this.bridge, input = this.input(), tab = this.activeTab();
     if (!this.active || !bridge || !input || !tab || !this.canSend() || this.turn || this.rewinding||this.preparingSend) return;
     const message = (queued ?? input.value).trim();
@@ -925,6 +1005,15 @@ export class ClaudeChat {
       }catch(error){this.notice=error instanceof Error?error.message:'Conversation context could not be prepared. Your draft is retained.';this.render();return;}
       finally{this.preparingSend=false;this.renderControls();}
     }
+    if(queuedEntry){
+      if(queuedEntry.scope!==this.queueScope()||queuedEntry.state!=='sending'||queuedEntry.target?.attachmentState==='missing')return;
+      const fingerprint=this.sendPreparationFingerprint();this.preparingSend=true;
+      const saved=this.profile.provider==='claude'?await this.queueSave(true):true;this.preparingSend=false;
+      if(!saved||!this.active||fingerprint!==this.sendPreparationFingerprint()||this.turn||this.rewinding||!this.canSend()){
+        queuedEntry.state='paused';queuedEntry.notice=saved?'Not sent: the conversation changed while saving.':'Not sent: secure saving failed. Your text is retained.';this.render();return;
+      }
+      queuedEntry.dispatched=true;
+    }
     const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
     const delivery:ClaudeMessageDelivery={model,effort,turnId:null,startedAt:new Date().toISOString(),finishedAt:null,state:'sending',error:null,contextIncluded:sent!==visibleSent,transmittedBytes:new TextEncoder().encode(sent).length};
     const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message, retry: images.length ? null : visibleSent,delivery };
@@ -944,7 +1033,8 @@ export class ClaudeChat {
       this.turn = null; this.buffered = [];
       const visible = this.active && epoch === this.viewEpoch;
       if (visible) this.appendMessage({ id: '', role: 'error', text: failure, at: '' }, true);
-      if (queued !== undefined) this.queue.unshift({ id: ++this.queueSeq, text: message, tabKey: tab.key });
+      if(queuedEntry){queuedEntry.state='unknown';queuedEntry.notice='Message delivery is unconfirmed. Review the recorded conversation before sending again.';}
+      else if (queued !== undefined) this.pushQueued(message,tab);
       else {const current=visible?input.value:tab.draft;const restored=current.trim()?current+'\n\n'+message:message;tab.draft=restored;if(visible)input.value=restored;this.preferenceEdits++;this.queueNativePreferences();}
       this.returnQueue();
       this.render(); return;
@@ -965,9 +1055,11 @@ export class ClaudeChat {
       this.conversations.unshift({ conversationId: nextConversation, title: message.split('\n')[0]!.slice(0, 80), updatedAt: new Date().toISOString(), model, effort });
     }
     this.persistTabs();
+    if(this.queueAfterDraftSendScope===this.queueScope()){this.queueAfterDraftSendScope=null;this.armQueue(turn);}
     const pending = this.buffered.splice(0);
     this.render();
     for (const event of pending) this.onEvent(event);
+    return turn;
   }
 
   async stopTurn(): Promise<void> {
@@ -1019,6 +1111,7 @@ export class ClaudeChat {
 
   private async showTab(key: string,prepared?:Record<string,unknown>): Promise<void> {
     const tab = this.tabs.find(row => row.key === key); if (!tab) return;
+    if(key!==this.activeKey)this.pauseQueue('Paused after changing chats. Choose Send next to resume.');
     this.rememberMessages();
     this.activeKey = key; this.confirmingDelete = false; this.persistTabs();
     if (!this.active) { this.render(); return; }
@@ -1153,7 +1246,7 @@ export class ClaudeChat {
         this.addUsage(turn.conversationId, reply);
         if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
         // The queue continues only after a reply that finished; a failure, Stop or usage limit returns it to the draft.
-        if (ok) this.drainQueue(); else this.returnQueue();
+        if (ok) this.drainQueue(turn); else this.returnQueue();
         try { this.replyFinished(); } catch { /* Presentation only. */ }
         this.render();
         void this.reloadList().then(() => this.render());
@@ -1360,7 +1453,7 @@ export class ClaudeChat {
     if (!this.active || !tab || !message || message.length > MAX_INPUT || this.rewinding) return false;
     if (this.turn) {
       if (!this.turnOwnsActiveTab() || this.turn.turnId === null || this.queue.length >= CLAUDE_CHAT_QUEUE_LIMIT || !this.ready()) return false;
-      this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key }); this.render();
+      if(!this.pushQueued(message,tab))return false;this.armQueue(this.turn);this.render();
       return true;
     }
     if (!this.canSend()) return false;
@@ -1459,7 +1552,7 @@ export class ClaudeChat {
     if (!this.active || this.activeKey !== tab.key) return;
     if (changes.length) {
       prefillComposer(this.doc, restoreRequestText(changes));
-      this.queue.push({ id: ++this.queueSeq, text: edited, tabKey: tab.key });
+      if(this.pushQueued(edited,tab))this.queueAfterDraftSendScope=this.queueScope();else{const input=this.input();if(input){input.value+='\n\nEdited message to continue with after restoring:\n'+edited;tab.draft=input.value;}}
       this.notice = CLAUDE_CHAT_EDIT_UNDO_TEXT; this.render();
       return;
     }
@@ -1799,10 +1892,11 @@ export class ClaudeChat {
     while(this.nativeDeferred.length&&this.tabs.length<CLAUDE_CHAT_TAB_LIMIT)this.tabs.push(this.nativeDeferred.shift()!);
     if(!this.nativeDeferred.length&&this.notice?.startsWith('Close a chat tab to load'))this.notice='';
   }
-  async readyForRuntimeRecovery():Promise<void> { if(this.nativeReading)await this.nativeReading;if(this.preferenceStore?.error())throw new Error('Saved chat drafts could not be read.'); }
+  async readyForRuntimeRecovery():Promise<void> { await this.queueJournal.ready();if(this.queue.length&&this.profile.provider==='claude'&&!this.queueJournal.available(this.queueProject()))throw new Error('Saved queued messages could not be read.');if(this.nativeReading)await this.nativeReading;if(this.preferenceStore?.error())throw new Error('Saved chat drafts could not be read.'); }
   async prepareForRuntimeRecovery():Promise<void> {
     if(this.active){const attachments=this.attachments.controller();if(attachments&&(attachments.prepareReferences().length||attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');}
     this.returnQueue();
+    await this.queueJournal.ready();if(this.queue.length&&this.profile.provider==='claude'&&!await this.queueSave(true))throw new Error('Queued messages could not be saved. Keep this window open.');
     if(this.nativeReading)await this.nativeReading;
     if(this.preferenceStore&&!this.preferenceStore.available())await this.loadNativePreferences();
     this.saveDraft();this.persistTabs();
@@ -1919,7 +2013,7 @@ export class ClaudeChat {
         const path = submit.querySelector?.('svg path'); path?.setAttribute('d', stopMode ? STOP_PATH : SEND_PATH); path?.setAttribute('fill', stopMode ? 'currentColor' : 'none');
       }
       const controls = submit.closest?.<HTMLElement>('.composer-controls'); if (controls) controls.dataset.taskActive = String(stopMode);
-      submit.disabled = this.nativeHydrating||this.preparingSend|| (stopMode ? !turn?.turnId || turn.stopping : !this.canSend() || !!turn || this.rewinding || !(input?.value.trim()));
+      submit.disabled = this.nativeHydrating||this.preparingSend|| (stopMode ? !turn?.turnId || turn.stopping : !!this.queueEnqueue || !this.canSend() || !!turn || this.rewinding || !(input?.value.trim()));
     }
     const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create) create.disabled = !!turn && turn.turnId === null;
   }
@@ -1948,25 +2042,18 @@ export class ClaudeChat {
     let host = this.el(QUEUE_ID);
     const form = this.el('codex-compose');
     if (!host && form) {
-      host = this.make('div', undefined, 'composer-queue'); host.id = QUEUE_ID;
+      host = this.make('div', undefined, 'queue-strip'); host.id = QUEUE_ID;
       host.setAttribute('role', 'list'); host.setAttribute('aria-label', 'Queued messages');
       form.prepend(host);
     }
     if (!host) return;
-    const items = this.queue.filter(item => item.tabKey === this.activeKey);
-    host.hidden = !this.active || !items.length;
-    const signature = JSON.stringify(items.map(item => item.id));
-    if (host.dataset.signature === signature) return;
-    host.dataset.signature = signature; host.replaceChildren();
-    items.forEach((item, index) => {
-      const chip = this.make('span', undefined, 'composer-queue-chip'); chip.setAttribute('role', 'listitem'); chip.title = item.text;
-      const preview = item.text.replace(/\s+/g, ' ');
-      chip.append(this.make('span', 'Queued ' + (index + 1), 'composer-queue-label'), this.make('span', preview.length > 60 ? preview.slice(0, 59) + '…' : preview, 'composer-queue-text'));
-      const remove = this.make('button', '×', 'composer-queue-remove'); remove.type = 'button';
-      remove.setAttribute('aria-label', 'Remove queued message ' + (index + 1) + ': ' + preview.slice(0, 80));
-      remove.addEventListener('click', () => { if (this.active) { this.dequeue(item.id); this.input()?.focus({ preventScroll: true }); } });
-      chip.append(remove); host!.append(chip);
-    });
+    if(this.queueAfterTurn&&this.queueChoice!==this.queueSelection())this.pauseQueue('Model or conversation changed. Choose Send next to resume.');
+    if(this.profile.provider==='claude'&&this.queueJournal.available(this.queueProject()))void this.queueSave();
+    const scope=this.queueScope(),gesture=this.queueGesture(),items=this.queue.filter(item=>item.scope===scope);
+    renderChatQueueStrip(this.doc,host,items,{active:this.active,busy:!!this.queueEnqueue,scope,gesture,canSteer:this.canSteer(),steerReason:this.canSteer()?'Guide the current reply with this message.':'Steering is available only for this chat’s active reply.',
+      canSendNext:this.ready()&&!this.rewinding&&!this.queueSteering&&!this.queueSending&&(!this.turn||this.turnOwnsActiveTab()),action:(action,item,text)=>this.queueAction(action,item,gesture,text)});
+    for(const old of Array.from(host.querySelectorAll('.queue-persistence-notice')))old.remove();
+    const saveNotice=this.profile.provider==='claude'?this.queueJournal.notice():null;if(saveNotice&&items.length){const note=this.make('p',saveNotice,'queue-persistence-notice');note.setAttribute('role','status');host.append(note);}
   }
 
   /** Small ring + count of tokens this conversation used (from finished replies' usage), with a tooltip. */

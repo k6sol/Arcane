@@ -113,7 +113,7 @@ function encryptedTestDouble() {
   };
 }
 
-function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false, includeTools = false, includeLibrary=false } = {}) {
+function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(), smoke = false, platform = 'win32', projectPath = 'C:\\Project', origin: fixtureOrigin = origin, includeClaude = false, includeTools = false, includeLibrary=false,includeQueues=false } = {}) {
   const userRoot = 'C:\\Owned', projectId = hash(projectPath.toLowerCase());
   const stateRoot = win32.join(userRoot, 'runtime', 'projects', projectId), handlers = new Map(), ipcCalls = [];
   disk.ensure(projectPath); disk.ensure(stateRoot);
@@ -144,7 +144,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
   });
   // Execute the actual main-owned session accessor and actual installIpc, not a substitute gate.
-  vm.runInContext('let workspacePreferences, claudePreferences, toolDrafts, conversationLibrary, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
+  vm.runInContext('let workspacePreferences, claudePreferences, toolDrafts, conversationLibrary, codexQueuePreferences, claudeQueuePreferences, runtimeRecovery=null, closing=false, switching=false; let {window,origin,userRoot,token,projectSession}=initial;\n' +
     'globalThis.setState = next => {' + ['closing', 'switching', 'window', 'origin', 'userRoot', 'token', 'projectSession']
       .map(name => `if(Object.hasOwn(next,'${name}')) ${name}=next.${name};`).join('') + '};\n' +
     mainSource.slice(begin, end), mainContext, { filename: 'workspace-preferences-main-wiring.cjs' });
@@ -165,6 +165,12 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     const endLibrary=mainSource.indexOf('conversationLibrary.installIpc(ipcMain);',beginLibrary)+'conversationLibrary.installIpc(ipcMain);'.length;
     assert.ok(beginLibrary>0&&endLibrary>beginLibrary);
     vm.runInContext(mainSource.slice(beginLibrary,endLibrary),mainContext,{filename:'conversation-library-main-wiring.cjs'});
+  }
+  if(includeQueues)for(const name of ['codexQueuePreferences','claudeQueuePreferences']){
+    const begin=mainSource.indexOf(name+" = require('./workspace-preferences.cjs').createWorkspacePreferences(");
+    const end=mainSource.indexOf(name+'.installIpc(ipcMain);',begin)+(name+'.installIpc(ipcMain);').length;
+    assert.ok(begin>0&&end>begin,'Production fixed queue partition wiring exists: '+name);
+    vm.runInContext(mainSource.slice(begin,end),mainContext,{filename:name+'-main-wiring.cjs'});
   }
   let exposed, activeEvent = event, invokeError, replyOverride;
   const preloadContext = vm.createContext({ TextEncoder, require(name) {
@@ -203,6 +209,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
       preloadContext.serializedArgs = JSON.stringify(args);
       return exposed.toolDrafts[action](...vm.runInContext('JSON.parse(serializedArgs)', preloadContext));
     },
+    queue(action,...args){preloadContext.serializedArgs=JSON.stringify(args);return exposed.chatQueue[action](...vm.runInContext('JSON.parse(serializedArgs)',preloadContext));},
     library(action,...args){preloadContext.serializedArgs=JSON.stringify(args);return exposed.conversationLibrary[action](...vm.runInContext('JSON.parse(serializedArgs)',preloadContext));},
     rawTools(action, ...args) {
       hostContext.serialized = JSON.stringify(args);
@@ -833,4 +840,36 @@ test('independent tool and chat records can checkpoint together without sharing 
   assert.deepEqual(json((await f.tools('read')).preferences), toolSnapshot());
   assert.deepEqual(json((await f.call('read')).preferences), snapshot()); assert.deepEqual(json((await f.claude('read')).preferences), claudeSnapshot());
   assert.equal(f.disk.descriptors.size, 0);
+});
+
+const queueRow=(id=1,values={})=>({id,localId:'native-'+id,conversationId:'conversation-'+id,sessionId:null,text:'Keep this private queued prompt '+id,modelId:'gpt-6.1-sol',effort:'low',connectionId:null,requestId:null,createdAt:'2026-10-20T12:00:00.000Z',state:'pending',attachmentState:'none',...values});
+const queueSnapshot=(provider='codex',rows=[queueRow()])=>({version:1,projectPath:'C:\\Project',provider,rows});
+test('provider queue records survive reopening encrypted and independent of each other and workspace drafts',async()=>{
+  const f=fixture({includeQueues:true}),codex=queueSnapshot(),claude=queueSnapshot('claude',[queueRow(2,{state:'unknown'})]);
+  assert.equal(Object.isFrozen(f.exposed.chatQueue),true);assert.deepEqual(json(await f.queue('read','codex')),{available:true,projectPath:'C:\\Project',rows:[]});
+  await f.queue('save',codex);await f.queue('save',claude);
+  for(const provider of ['codex','claude'])assert.equal(f.disk.node(win32.join(f.stateRoot,'chat-queue.'+provider+'.v1.json')).bytes.includes(Buffer.from('private queued prompt')),false);
+  const reopened=fixture({includeQueues:true,disk:f.disk,safeStorage:f.safeStorage});
+  assert.deepEqual(json((await reopened.queue('read','codex')).rows),codex.rows);assert.deepEqual(json((await reopened.queue('read','claude')).rows),claude.rows);
+  assert.equal((await reopened.call('read')).preferences,null);
+});
+test('queue bridge rejects foreign context, authority fields, getters, duplicates and invalid identifiers without changing sealed text',async()=>{
+  const f=fixture({includeQueues:true}),value=queueSnapshot();await f.queue('save',value);
+  for(const invalid of [{...value,projectPath:'C:\\Other'},{...value,filename:'other.json'},{...value,rows:[queueRow(1,{grant:'writes'})]},{...value,rows:[queueRow(),queueRow()]},{...value,rows:[queueRow(1,{requestId:'not-a-request'})]},{...value,rows:[queueRow(1,{text:' '})]}])await assert.rejects(f.queue('save',invalid),ERROR);
+  const ownGetter=f.preloadValue("({version:1,projectPath:'C:\\Project',provider:'codex',get rows(){throw Error('getter must not run')}})");await assert.rejects(f.exposed.chatQueue.save(ownGetter),ERROR);
+  assert.deepEqual(json((await f.queue('read','codex')).rows),value.rows);assert.equal(f.disk.descriptors.size,0);
+});
+test('queue-only size budget saves five large prompts while existing presentation limits stay unchanged',async()=>{
+  const f=fixture({includeQueues:true}),rows=Array.from({length:5},(_,i)=>queueRow(i+1,{text:'x'.repeat(125*1024),conversationId:'same-chat'}));
+  await f.queue('save',queueSnapshot('codex',rows));assert.equal((await f.queue('read','codex')).rows.length,5);
+  await assert.rejects(f.queue('save',queueSnapshot('codex',[...rows,queueRow(6,{conversationId:'same-chat'})])),ERROR);
+  await assert.rejects(f.queue('save',queueSnapshot('codex',Array.from({length:9},(_,i)=>queueRow(i+1,{text:'x'.repeat(125*1024)})))),ERROR);
+  await assert.rejects(f.call('save',snapshot({tabs:Array.from({length:5},(_,i)=>tab(i+1,{draft:'x'.repeat(125*1024)}))})),ERROR);
+  assert.deepEqual(json((await f.queue('read','codex')).rows),rows);
+});
+test('queue saves require encryption and exact active frame; failed saves retain the last record',async()=>{
+  const disabled=fixture({includeQueues:true,smoke:true});assert.deepEqual(json(await disabled.queue('read','codex')),{available:false,projectPath:null,rows:[]});await assert.rejects(disabled.queue('save',queueSnapshot()),ERROR);assert.equal(disabled.disk.writes.length,0);
+  const f=fixture({includeQueues:true});await f.queue('save',queueSnapshot());f.safeStorage.setAvailable(false);await assert.rejects(f.queue('save',queueSnapshot('codex',[queueRow(2)])),ERROR);f.safeStorage.setAvailable(true);
+  const old=f.event;f.setEvent({...old,senderFrame:{url:origin+'/studio'}});await assert.rejects(f.queue('read','codex'),ERROR);f.setEvent(old);
+  assert.deepEqual(json((await f.queue('read','codex')).rows),queueSnapshot().rows);
 });

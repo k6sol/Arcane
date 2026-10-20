@@ -373,10 +373,13 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'billing', 'claudeChat', 'claudePreferences', 'codeVerification', 'conversationLibrary', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'billing', 'chatQueue', 'claudeChat', 'claudePreferences', 'codeVerification', 'conversationLibrary', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
   assert.equal(Object.isFrozen(exposed.conversationLibrary), true);
   assert.deepEqual(Object.keys(exposed.conversationLibrary).sort(), ['read', 'save', 'version']);
   assert.equal(exposed.conversationLibrary.version, 1);
+  assert.equal(Object.isFrozen(exposed.chatQueue), true);
+  assert.deepEqual(Object.keys(exposed.chatQueue).sort(), ['read', 'save', 'version']);
+  assert.equal(exposed.chatQueue.version, 1);
   assert.equal(Object.isFrozen(exposed.runtimeRecovery), true);
   assert.deepEqual(Object.keys(exposed.runtimeRecovery).sort(), ['acknowledge','onCheckpoint','onState','ready','retry','status','version']);
   assert.equal(Object.isFrozen(exposed.billing), true);

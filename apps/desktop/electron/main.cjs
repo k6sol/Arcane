@@ -26,6 +26,7 @@ let nativeHandoff;
 let studioKeyVault;
 let workspacePreferences;
 let conversationLibrary;
+let codexQueuePreferences, claudeQueuePreferences;
 let claudePreferences;
 let toolDrafts;
 let runtimeRecovery;
@@ -741,6 +742,16 @@ else {
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };
       } });
       conversationLibrary.installIpc(ipcMain);
+      codexQueuePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'queue-codex', getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      codexQueuePreferences.installIpc(ipcMain);
+      claudeQueuePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'queue-claude', getSession: () => {
+        if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
+        return { ...projectSession, window, origin, userRoot, epoch: projectSession };
+      } });
+      claudeQueuePreferences.installIpc(ipcMain);
       claudePreferences = require('./workspace-preferences.cjs').createWorkspacePreferences({ safeStorage, enabled: !smoke, record: 'claude', getSession: () => {
         if (closing || switching || !window || !projectSession || !origin || !token || !userRoot) return runtimeRecovery?.preferences() ?? null;
         return { ...projectSession, window, origin, userRoot, epoch: projectSession };

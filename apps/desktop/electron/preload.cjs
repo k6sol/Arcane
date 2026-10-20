@@ -226,6 +226,43 @@ function librarySnapshot(value, scope) {
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||new TextEncoder().encode(JSON.stringify(result)).byteLength>480*1024)workspacePreferenceError();return result;
 }
 
+// Queue records contain unsubmitted text and advisory identifiers, never native execution authority.
+function chatQueueSnapshot(value, scope, provider) {
+  workspacePreferenceFields(value,['version','projectPath','provider','rows']);
+  const projectPath=workspacePreferenceText(value.projectPath,4096);
+  if(!projectPath.trim()||projectPath!==scope.projectPath||value.version!==1||value.provider!==provider)workspacePreferenceError();
+  const list=value.rows;
+  if(!Array.isArray(list)||Object.getPrototypeOf(list)!==Array.prototype||list.length>64||Reflect.ownKeys(list).length!==list.length+1)workspacePreferenceError();
+  const ids=new Set(),counts=new Map(),rows=[];
+  const uuid=v=>v===null?null:typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)?v:workspacePreferenceError();
+  for(let i=0;i<list.length;i++){
+    const d=Object.getOwnPropertyDescriptor(list,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))workspacePreferenceError();
+    const r=workspacePreferenceFields(d.value,['id','localId','conversationId','sessionId','text','modelId','effort','connectionId','requestId','createdAt','state','attachmentState']);
+    if(!Number.isSafeInteger(r.id)||r.id<1||r.id>2147483647||ids.has(r.id))workspacePreferenceError();ids.add(r.id);
+    const localId=workspacePreferenceText(r.localId,128,true),conversationId=workspacePreferenceId(r.conversationId,256),sessionId=workspacePreferenceId(r.sessionId,256),body=workspacePreferenceText(r.text,128*1024),modelId=claudePreferenceModel(r.modelId),effort=workspacePreferenceId(r.effort,64),connectionId=uuid(r.connectionId),requestId=uuid(r.requestId),createdAt=workspacePreferenceText(r.createdAt,40);
+    if(!body.trim()||!Number.isFinite(Date.parse(createdAt))||!['pending','unknown','rejected'].includes(r.state)||!['none','missing'].includes(r.attachmentState))workspacePreferenceError();
+    const key=JSON.stringify([conversationId===null?localId:conversationId,sessionId]),count=(counts.get(key)??0)+1;if(count>5)workspacePreferenceError();counts.set(key,count);
+    rows.push({id:r.id,localId,conversationId,sessionId,text:body,modelId,effort,connectionId,requestId,createdAt,state:r.state,attachmentState:r.attachmentState});
+  }
+  const result={version:1,projectPath,provider,rows};if(new TextEncoder().encode(JSON.stringify(result)).byteLength>1024*1024)workspacePreferenceError();return result;
+}
+
+const chatQueueInvoke=async(action,args)=>{
+  try{
+    if(args.length!==1)workspacePreferenceError();
+    if(action==='save')workspacePreferenceFields(args[0],['version','projectPath','provider','rows']);
+    const provider=action==='read'?args[0]:args[0].provider;if(provider!=='codex'&&provider!=='claude')workspacePreferenceError();
+    const input=action==='save'?chatQueueSnapshot(args[0],{projectPath:args[0]?.projectPath},provider):null;
+    const reply=await ipcRenderer.invoke('arcane:chat-queue-'+provider+'-'+action,...(input?[input]:[]));
+    if(action==='save'){workspacePreferenceFields(reply,['saved']);if(reply.saved!==true)workspacePreferenceError();return{saved:true};}
+    workspacePreferenceFields(reply,['available','projectPath','preferences']);
+    if(typeof reply.available!=='boolean'||(reply.available?typeof reply.projectPath!=='string'||!reply.projectPath:reply.projectPath!==null||reply.preferences!==null))workspacePreferenceError();
+    const snapshot=reply.preferences===null?null:chatQueueSnapshot(reply.preferences,{projectPath:reply.projectPath},provider);
+    return{available:reply.available,projectPath:reply.projectPath,rows:snapshot?.rows??[]};
+  }catch{workspacePreferenceError();}
+};
+const chatQueue=Object.freeze({version:1,read:(...args)=>chatQueueInvoke('read',args),save:(...args)=>chatQueueInvoke('save',args)});
+
 const conversationLibraryInvoke = async (action,args) => {
   try {
     if(action==='read'?args.length!==0:args.length!==1)workspacePreferenceError();
@@ -845,4 +882,4 @@ const runtimeRecovery = Object.freeze({ version: 1,
   onState: listener => recoveryListen('arcane:runtime-recovery-state', listener),
   onCheckpoint: listener => recoveryListen('arcane:runtime-recovery-checkpoint', listener, true),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, chatQueue, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
