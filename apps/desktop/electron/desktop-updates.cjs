@@ -40,6 +40,7 @@ async function readInstalledRelease(installRoot, productRoot) {
 
 function createDesktopUpdates(options) {
   const enabled = options.enabled !== false;
+  const development = options.development === true;
   let checking = null, verified = null, restarting = false;
   const unavailable = () => ({ version: 1, state: 'unavailable', buildId: null, message: UNAVAILABLE });
   const verify = options.verifyBundle ?? (async directory => {
@@ -48,6 +49,9 @@ function createDesktopUpdates(options) {
   });
   async function target() {
     const release = await readInstalledRelease(options.installRoot, options.productRoot);
+    // The trusted host can hand a development window to a fully verified installation.
+    // Development sources have no bundle manifest; status/restart still verify the target.
+    if (development) return { release, current: false };
     const running = hash(await checkedBytes(join(options.currentDirectory, 'windows-manifest.json'), 8 * 1024 * 1024));
     return { release, current: release.manifestSha256 === running };
   }

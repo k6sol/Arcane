@@ -681,7 +681,8 @@ else {
             buttons: ['Cancel', request.confirmLabel], defaultId: 0, cancelId: 0, noLink: true });
           return choice.response === 1 && !closing && !switching && window === owner;
         } }).installIpc(ipcMain, { trusted: rendererEvent });
-      require('./desktop-updates.cjs').createDesktopUpdates({ enabled: !smoke && app.isPackaged && !!process.env.LOCALAPPDATA,
+      require('./desktop-updates.cjs').createDesktopUpdates({ enabled: !smoke && !!process.env.LOCALAPPDATA,
+        development: !app.isPackaged,
         installRoot: join(process.env.LOCALAPPDATA ?? app.getPath('userData'), 'Arcane', 'Desktop'),
         currentDirectory: resolve(app.getPath('exe'), '..'),
         productRoot: app.isPackaged ? join(process.resourcesPath, 'product') : resolve(__dirname, '../../..'),
